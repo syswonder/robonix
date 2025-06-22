@@ -1,0 +1,6 @@
+name: "ping"
+version: "1.0.0"
+author: "syswonder"
+start_on_boot: false
+startup_command: "ping baidu.com"
+description: "This is an ping example"
