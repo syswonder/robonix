@@ -1,12 +1,10 @@
 # Memory
 
-Memory 模块提供支持具身智能运行时记忆管理，包括：
+Stores information across and during tasks. Can include:
 
-## 能力支持：
+- JIT prompts
+- World model fragments (object location, room map)
+- Short-term memory (task context, intermediate results)
+- Long-term skill usage patterns
 
-- 短期任务上下文缓存
-- JIT prompt 构造与维护
-- 世界模型片段存取（如物体位置、房间结构）
-- 可更新的知识库或记忆池
-
-该模块支持 Brain 的推理基础与历史关联性能力。
+Memory enables contextual reasoning, personalization, and short-term task coherence.

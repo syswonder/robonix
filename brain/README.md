@@ -1,13 +1,18 @@
 # Brain
 
-本目录负责系统的核心智能决策，包括任务解析、调度控制、LLM/VLM 推理及对 Memory 的读写操作。
+Central runtime of the embodied system. Responsible for:
 
-## 功能模块：
+- Interpreting commands
+- Task decomposition into Skills
+- Planning under Cost constraints
+- Reading/writing from Memory
+- Calling LLM/VLM for reasoning
 
-- 指令解析与任务分解（调用大模型）
-- Skill 编排与调度控制
-- 与 Memory 和 Cost 模块交互
-- 适配不同推理后端（Ollama, DeepSeek, ChatGLM…）
+## 🧠 Includes:
 
-Brain 是系统的“中控”，体现具身智能的主动性。
+- World model abstraction
+- Model interfaces (e.g., via Ollama or DeepSeek)
+- Prompt construction (JIT / dynamic)
+- Skill orchestration logic
 
+This is the decision-making and planning center of the system.

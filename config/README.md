@@ -1,11 +1,11 @@
 # Config
 
-本目录存放系统运行相关的静态配置文件，包括：
+Contains global configuration files:
 
-- 各模块参数（模型路径、阈值等）
-- 网络与通信配置
-- 任务模板与默认参数
-- 设备标定数据
+- Hardware mappings
+- OTA (over-the-air) update settings
+- Default thresholds
+- Launch-time parameters
+- Device calibration data
 
-配置文件应支持 YAML / JSON 格式，便于跨模块调用。
-
+All modules should support runtime reconfiguration where applicable.

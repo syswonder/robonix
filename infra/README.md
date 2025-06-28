@@ -1,12 +1,13 @@
 # Infra
 
-本目录为系统基础设施层，支撑整个具身系统的通信、配置与部署流程。
+Provides middleware support for system-wide communication.
 
-## 内容包括：
+## Features:
 
-- DDS/rclrpc 通信框架配置
-- OTA 升级与远程控制机制
-- 启动初始化脚本与服务扫描器
-- 配置文件统一加载与分发模块
+- ROS 2 interfaces: Topics, Services, Actions
+- rclrpc / DDS integration
+- Message routing and introspection
+- Topic bridge and gateway tools
+- Stream interfaces (for continuous media data)
 
-Infra 是系统稳定运行的底座组件。
+Supports modular deployment and scalable multi-node interaction.

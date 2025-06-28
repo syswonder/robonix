@@ -1,10 +1,13 @@
 # Skill
 
-本目录定义具身智能的具体行为技能，通常由多个 Capability 按事件流或状态机方式组合而成。
+Skill modules represent high-level actions built from multiple capabilities. These can be implemented as event flows, finite-state machines, or lightweight agent behaviors.
 
-## 示例技能：
+## 🧠 Examples
 
-- `hello_spin_greet`: 原地旋转 -> 视觉检测人形 -> 播报 "Hello World"
-- `pick_cup`: 定位杯子 -> 导航接近 -> 抓取动作
+- `hello_spin_greet`: Rotate → Detect human → Speak greeting
+- `pick_cup`: Visual locate → Navigate → Grasp object
+- `make_bed`: Multi-step sequence with planning and feedback
 
-每个 Skill 是一个任务模板，可被 Brain 调度执行。
+## 🔁 Lifecycle
+
+Skills are invoked by the Brain and may be re-entrant, interruptible, and stateful. Skills may also self-adapt based on task history via Memory or Cost inputs.

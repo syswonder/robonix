@@ -1,12 +1,9 @@
 # Cost
 
-该目录实现对行为或任务的代价建模，用于辅助 Brain 的行动选择、策略更新。
+This module evaluates the cost or utility of actions, tasks, or states. It provides:
 
-## 常见代价模型：
+- Intrinsic cost models
+- Worldview prompts (e.g., safety, efficiency, user preferences)
+- Behavioral shaping for Brain’s reasoning path
 
-- 时间开销
-- 能源消耗
-- 任务失败概率
-- 用户喜好/反馈打分
-
-Cost 模块为系统增加目标导向性和价值选择能力。
+Cost acts as a guidance system to align behavior with constraints and goals.

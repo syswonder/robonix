@@ -1,12 +1,21 @@
 # Capability
 
-本目录包含具身智能的“最小可调用单位”，对上层 Brain 提供标准 API 接口。每个能力单元应独立封装，支持并发调用。
+Standard capability units callable by the intelligence layer (e.g., via MCP or `brain`). Each capability wraps an isolated function and should include the following structure:
 
-## 示例能力：
+## ✅ Typical Capabilities
 
-- 语音识别 / 播报
-- 视觉识别 / 物体跟踪
-- 本地导航 / 路径规划
-- 抓取控制 / 力控执行
+- `audio_speak`: Text-to-Speech
+- `mic_listen`: Audio input/command
+- `nav2_walk`: Navigation command interface
+- `yolo_look`: Visual detection interface
+- `grasper`: Robotic arm control
+- `internet`: External info retrieval
 
-Capability 是 Skill 的构建基元，是调度器可直接调用的基础服务。
+## 📁 Directory Structure
+
+capability/
+└── nav2_walk/
+├── api/ # Provides: init(), start(), soft_config(), act(), sense(), emergency(), standby(), shutdown()
+├── description/ # Framework configuration, e.g., auto-start, parameters
+├── src/ # Implementation logic
+└── README.md # Developer manual

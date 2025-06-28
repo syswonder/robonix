@@ -1,12 +1,9 @@
 # Driver
 
-本目录用于实现将物理硬件转换为系统软件可用的抽象数据流，确保跨平台、高性能、低延迟传输。
+The hardware abstraction layer, responsible for transforming physical device interfaces into software-accessible data streams. Supports high-performance, low-latency communication via:
 
-## 支持能力：
+- **ROS 2 Topics** (standard interface)
+- **Zero-copy IPC** (shared memory, DMA-BUF)
+- **Sensor abstraction** (e.g., RGB/Depth cameras, IMU, Lidar, CAN devices)
 
-- 使用 ROS Topic（标准化消息接口）
-- DMA-BUF 零拷贝图像传输
-- Zero-copy IPC 与共享内存机制
-- 驱动初始化、异常恢复处理
-
-Driver 层屏蔽硬件细节，为 Capability 层提供标准输入。
+This layer enables upper modules to ignore hardware details and focus on functional logic.
