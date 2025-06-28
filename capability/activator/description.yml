@@ -1,0 +1,6 @@
+name: "activater"
+version: "1.0.0"
+author: "syswonder"
+start_on_boot: true
+startup_command: "sleep 25 && bash activate.sh"
+description: "to activate map and amcl"
