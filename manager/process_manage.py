@@ -1,4 +1,4 @@
-from cap_parser import *
+from capability import *
 import os
 import yaml
 import subprocess
@@ -31,7 +31,7 @@ class CapabilityProcess:
             return False
 
         # Construct the process working directory
-        process_cwd = os.path.join(self.project_root, "capability", self.capability_node.directory_name)
+        process_cwd = self.capability_node.cwd
         if not os.path.exists(process_cwd):
             print(f"Error: Process working directory '{process_cwd}' does not exist for '{self.capability_node.name}'.")
             return False
@@ -136,7 +136,7 @@ class CapabilityManager:
         print("\n--- Available Capabilities ---")
         for cap_id, cap_node in self.available_capabilities.items():
             status = "Running" if cap_id in self.running_processes and self.running_processes[cap_id].is_running() else "Stopped"
-            print(f"- [{status}] {cap_node.name} (dir: {cap_node.directory_name}, version: {cap_node.version}, start_on_boot: {cap_node.start_on_boot})")
+            print(f"- [{status}] {cap_node.name} (dir: {cap_node.cwd}, version: {cap_node.version}, start_on_boot: {cap_node.start_on_boot})")
             if cap_node.startup_command:
                 print(f"  Command: '{cap_node.startup_command}'")
             else:
@@ -186,6 +186,7 @@ class CapabilityManager:
             self.stop_capability(cap_id)
         print("All running capabilities stopped.")
 
+    # TODO: implement specific output for different streams (stdout, stderr, etc.)
     def print_capability_output(self, capability_name: str, stream="stdout"):
         """Print the most recent output from the specified capability."""
         process_wrapper = self.running_processes.get(capability_name)
@@ -217,7 +218,7 @@ if __name__ == "__main__":
     #     ├── example_cap/          <-- Capability directory (name will be read from description.yml)
     #     │   └── description.yml
     #     │   └── test_script.py    (a Python script that endlessly prints to stdout/stderr)
-    #     └── ping/                 <-- Example capability (name from description.yml might be "PingTool")
+    #     └── ping/                 <-- Example capability (name from description.yml might be "ping")
     #         └── description.yml
     #         └── ping_script.sh    (a shell script that endlessly pings)
 
@@ -228,7 +229,7 @@ if __name__ == "__main__":
 
     # 1. Start a specific capability (assuming 'ping' is its recorded name from description.yml)
     print("\n--- Starting a 'ping' capability explicitly ---")
-    manager.start_capability("PingTool") # Use the 'name' field from description.yml
+    manager.start_capability("ping") # Use the 'name' field from description.yml
     
     # 2. Boot up all capabilities marked `start_on_boot`
     manager.boot()
@@ -242,13 +243,13 @@ if __name__ == "__main__":
     time.sleep(5) # Wait for some output to accumulate
 
     # 3. Print output from specific capabilities
-    print("\n--- Printing output for 'ExampleCapability' and 'PingTool' ---")
-    manager.print_capability_output("ExampleCapability")
-    manager.print_capability_output("PingTool")
+    print("\n--- Printing output for 'example' and 'ping' ---")
+    manager.print_capability_output("example")
+    manager.print_capability_output("ping")
 
     # 4. Stop a specific capability
-    print("\n--- Stopping 'ExampleCapability' ---")
-    manager.stop_capability("ExampleCapability")
+    print("\n--- Stopping 'example' ---")
+    manager.stop_capability("example")
     time.sleep(1) # Give it a moment to stop
 
     # 5. Stop all remaining running capabilities

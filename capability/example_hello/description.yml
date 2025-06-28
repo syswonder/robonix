@@ -1,6 +1,8 @@
-name: "example"
+name: "hello"
 version: "1.0.0"
 author: "syswonder"
 start_on_boot: true
 startup_command: "python3 src/hello.py"
-description: "This is an example capability"
+description: "This is an hello example capability"
+label: capability
+dependencies: []

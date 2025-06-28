@@ -27,7 +27,7 @@
 │       ├── api
 │       ├── config
 │       ├── description.yml
-│       ├── README.md
+│       └── README.md
 ├── config
 ├── cost
 ├── driver
@@ -66,6 +66,13 @@
 * **infra:** Middleware communication layer for DDS/rclrpc, providing multiple inter-node communication mechanisms such as topics, services, actions, and streams.
 
 ---
+
+## Setup
+
+```bash
+git clone https://github.com/syswonder/deepembody.git
+cd deepembody
+```
 
 ## Startup
 

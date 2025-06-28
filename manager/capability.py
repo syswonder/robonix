@@ -1,29 +1,25 @@
 import os
+from node import BaseNode
 import yaml # 导入 pyyaml 库
 
-class CapabilityNode:
-    def __init__(self, directory_name: str, name: str, version: str, author: str, startup_on_boot: bool, startup_command: str):
+class CapabilityNode(BaseNode):
+    def __init__(self, directory_path: str, name: str, version: str, author: str, startup_on_boot: bool, startup_command: str):
         """
         Args:
-            directory_name (str): The name of the capability directory.
+            directory_path (str): The name of the capability directory.
             name (str): The name of the capability.
             version (str): The version of the capability.
             author (str): The author of the capability.
             startup_on_boot (bool): Whether the capability should start on boot.
             startup_command (str): The command to start the capability.
         """
-        self.directory_name = directory_name
-        self.name = name
-        self.version = version
-        self.author = author
-        self.start_on_boot = startup_on_boot
-        self.startup_command = startup_command
+        super().__init__(directory_path, name, version, author, startup_on_boot, startup_command)
 
     def __str__(self):
-        return f"CapabilityNode(directory_name='{self.directory_name}', name='{self.name}', version='{self.version}', author='{self.author}', start_on_boot='{self.start_on_boot}', startup_command='{self.startup_command}')"
+        return f"CapabilityNode(cwd='{self.cwd}', name='{self.name}', version='{self.version}', author='{self.author}', start_on_boot='{self.start_on_boot}', startup_command='{self.startup_command}')"
     
     def __repr__(self):
-        return f"CapNode({self.name}_{self.version}, directory_name='{self.directory_name}')"
+        return f"CapabilityNode({self.name}_{self.version}, cwd='{self.cwd}')"
 
 
 def get_capability_details(project_root_path: str) -> list[CapabilityNode]:
@@ -41,25 +37,25 @@ def get_capability_details(project_root_path: str) -> list[CapabilityNode]:
               or no valid description.yml files are found.
     """
     capability_dir_path = os.path.join(project_root_path, "capability")
-    all_capability_details = []
+    all_base_details = []
 
     if not os.path.exists(capability_dir_path):
-        print(f"Error: The 'capability' directory was not found at '{capability_dir_path}'")
+        print(f"Error: The 'base' directory was not found at '{capability_dir_path}'")
         return []
     if not os.path.isdir(capability_dir_path):
         print(f"Error: '{capability_dir_path}' exists but is not a directory.")
         return []
 
     try:
-        # List all entries in the 'capability' directory
+        # List all entries in the 'base' directory
         all_entries = os.listdir(capability_dir_path)
 
         for entry in all_entries:
-            sub_dir_path = os.path.join(capability_dir_path, entry)
+            node_dir_path = os.path.join(capability_dir_path, entry)
 
             # Check if the entry is a directory
-            if os.path.isdir(sub_dir_path):
-                description_file_path = os.path.join(sub_dir_path, "description.yml")
+            if os.path.isdir(node_dir_path):
+                description_file_path = os.path.join(node_dir_path, "description.yml")
 
                 # Check if description.yml exists in the subdirectory
                 if os.path.exists(description_file_path) and os.path.isfile(description_file_path):
@@ -69,24 +65,15 @@ def get_capability_details(project_root_path: str) -> list[CapabilityNode]:
                         with open(description_file_path, 'r', encoding='utf-8') as f:
                             data = yaml.safe_load(f)
 
-                            # Extract desired fields, with default None if not found
-                            # capability_info = {
-                            #     "directory_name": entry, # 记录目录名作为标识
-                            #     "name": data.get("name"),
-                            #     "version": data.get("version"),
-                            #     "author": data.get("author"),
-                            #     "start_on_boot": data.get("start_on_boot", False),
-                            #     "startup_command": data.get("startup_command")
-                            # }
-                            capability_info = CapabilityNode(
-                                directory_name=entry,
+                            base_info = CapabilityNode(
+                                directory_path=node_dir_path,
                                 name=data.get("name"),
                                 version=data.get("version"),
                                 author=data.get("author"),
                                 startup_on_boot=data.get("start_on_boot", False),
                                 startup_command=data.get("startup_command")
                             )
-                            all_capability_details.append(capability_info)
+                            all_base_details.append(base_info)
 
                     except yaml.YAMLError as e:
                         print(f"Error parsing YAML file '{description_file_path}': {e}")
@@ -101,7 +88,7 @@ def get_capability_details(project_root_path: str) -> list[CapabilityNode]:
         print(f"An error occurred while accessing '{capability_dir_path}': {e}")
         return []
 
-    return all_capability_details
+    return all_base_details
 
 if __name__ == "__main__":
     project_root_path = "./"
