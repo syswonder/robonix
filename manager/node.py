@@ -64,14 +64,14 @@ def get_node_details(target_path: str) -> list[BaseNode]:
 
                 # Check if description.yml exists in the subdirectory
                 if os.path.exists(description_file_path) and os.path.isfile(description_file_path):
-                    print(f"Found description.yml in: {entry}")
+                    print(f"Found description.yml in: {sub_dir_path}")
                     try:
                         # Read and parse the YAML file
                         with open(description_file_path, 'r', encoding='utf-8') as f:
                             data = yaml.safe_load(f)
 
                             base_info = BaseNode(
-                                cwd=entry,
+                                cwd=sub_dir_path,
                                 name=data.get("name"),
                                 version=data.get("version"),
                                 author=data.get("author"),
