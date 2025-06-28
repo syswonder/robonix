@@ -2,6 +2,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# ros2
+log/
+build/
+install/
+
 # additions
 temp/
 .vscode/
