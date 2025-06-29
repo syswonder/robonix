@@ -1,0 +1,3 @@
+source install/setup.bash
+
+ros2 launch pointcloud_to_laserscan sample_pointcloud_to_laserscan_launch.py

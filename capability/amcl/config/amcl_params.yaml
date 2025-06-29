@@ -1,0 +1,16 @@
+amcl:
+  ros__parameters:
+    use_sim_time: false
+    tf_broadcast: true
+    scan_topic: /scanner/scan
+    min_particles: 300
+    max_particles: 2000
+    odom_frame_id: "odom"
+    base_frame_id: "base_link"
+    global_frame_id: "map"
+    laser_max_range: -1.0
+    laser_min_range: -1.0
+    update_min_d: 0.025
+    update_min_a: 0.025
+    resample_interval: 1
+    set_initial_pose: true
