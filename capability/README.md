@@ -13,9 +13,11 @@ Standard capability units callable by the intelligence layer (e.g., via MCP or `
 
 ## 📁 Directory Structure
 
+```plaintext
 capability/
 └── nav2_walk/
-├── api/ # Provides: init(), start(), soft_config(), act(), sense(), emergency(), standby(), shutdown()
-├── description/ # Framework configuration, e.g., auto-start, parameters
-├── src/ # Implementation logic
-└── README.md # Developer manual
+    ├── api/          # Provides: init(), start(), soft_config(), act(), sense(), emergency(), standby(), shutdown()
+    ├── description/  # Framework configuration, e.g., auto-start, parameters
+    ├── src/          # Implementation logic
+    └── README.md     # Developer manual
+```
