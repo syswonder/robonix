@@ -1,0 +1,1 @@
+ps aux | grep 'ros' | grep -v grep | grep -v ros2cli|awk '{print $2}' |  xargs sudo kill -9

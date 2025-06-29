@@ -1,0 +1,6 @@
+name: "p2ls"
+version: "1.0.0"
+author: "syswonder"
+start_on_boot: true
+startup_command: "bash run.sh"
+description: "This is a pointcloud_to_laserscan runtime"
