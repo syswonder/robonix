@@ -1,0 +1,6 @@
+name: "asr_node"
+version: "1.0.0"
+author: "syswonder"
+start_on_boot: true
+startup_command: "bash run.sh"
+description: "Whisper-based ROS 2 node that records short audio snippets, transcribes them (Whisper/Xunfei), detects wake-word keywords, publishes recognized commands on the “voice_command” topic, and invokes the PlayText TTS service for spoken feedback."

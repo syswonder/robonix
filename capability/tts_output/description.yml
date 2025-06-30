@@ -1,0 +1,6 @@
+name: "tts_output"
+version: "1.0.0"
+author: "syswonder"
+start_on_boot: true
+startup_command: "bash run.sh"
+description: "Edge-TTS–powered ROS 2 node that exposes a “play_tts” service to produce synchronous or asynchronous speech playback."
