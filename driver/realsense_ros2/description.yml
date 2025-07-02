@@ -1,0 +1,6 @@
+name: "realsense_ros2"
+version: "1.0.0"
+author: "syswonder"
+start_on_boot: true
+startup_command: "bash run.sh"
+description: "Official ROS2 wrapper for Intel RealSense cameras"
