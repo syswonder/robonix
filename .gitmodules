@@ -1,0 +1,3 @@
+[submodule "driver/realsense_ros2/src/realsense-ros"]
+	path = driver/realsense_ros2/src/realsense-ros
+	url = https://github.com/IntelRealSense/realsense-ros.git
