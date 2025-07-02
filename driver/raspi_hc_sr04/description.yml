@@ -1,0 +1,6 @@
+name: "raspi_hc_sr04"
+version: "1.0.0"
+author: "wheatfox"
+start_on_boot: false
+startup_command: "bash run.sh"
+description: "The ROS2 driver for using HC-SR04 ultrasonic sensor on Raspberry Pi"

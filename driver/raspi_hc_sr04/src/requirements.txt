@@ -1,0 +1,3 @@
+PyYAML==6.0.2
+rpi_gpio==0.7.1
+setuptools==59.6.0
