@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <transport_descriptors>
+        <transport_descriptor>
+            <transport_id>TailscaleTransport</transport_id>
+            <type>UDPv4</type>
+        </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="TailscaleSimple" is_default_profile="true">
+        <rtps>
+            <name>raspi</name>
+            <userTransports>
+                <transport_id>TailscaleTransport</transport_id>
+            </userTransports>
+            <useBuiltinTransports>true</useBuiltinTransports>
+
+            <builtin>
+                <metatrafficUnicastLocatorList>
+                    <locator>
+                        <udpv4>
+                            <address>100.89.243.72</address> <!-- raspi4b-ubuntu -->
+                            <port>7400</port>
+                        </udpv4>
+                    </locator>
+                    <locator>
+                        <udpv4>
+                            <address>100.117.99.116</address> <!-- dedsec-amd0 -->
+                            <port>7400</port>
+                        </udpv4>
+                    </locator>
+                </metatrafficUnicastLocatorList>
+
+                <initialPeersList>
+                    <locator>
+                        <udpv4>
+                            <address>100.117.99.116</address>
+                            <port>7400</port>
+                        </udpv4>
+                    </locator>
+                </initialPeersList>
+
+                <avoid_builtin_multicast>true</avoid_builtin_multicast>
+            </builtin>
+        </rtps>
+    </participant>
+</profiles>
