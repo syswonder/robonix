@@ -1,0 +1,9 @@
+position: 
+  "capability:acml_pos": ["get_pos"]
+  "capability:test_pos": ["get_pos"]
+  "any": ["get_pos"]
+move : 
+  "capability:navigation2": ["set_gaol"]
+  "capability:simple_vel": ["simple_go"]
+  "any": ["set_gaol"]
+  "any": ["simple_go"]
