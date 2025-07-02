@@ -61,7 +61,7 @@ class ProcessNode:
             print(f"Error starting node '{self.node_node.name}': {e}")
             return False
 
-    def stop(self, timeout=15):
+    def stop(self, timeout=3):
         """Stop the process associated with the node."""
         if self.process and self.process.poll() is None:  # poll() is None means the process is still running
             print(f"Stopping node '{self.node_node.name}' (PID: {self.process.pid})...")
@@ -88,7 +88,7 @@ class ProcessNode:
 
     def get_output(self):
         """Retrieve the most recent output line."""
-        rlist, _, _ = select.select([self.master_fd], [], [], 0)  # 0-second timeout, return immediately
+        rlist, _, _ = select.select([self.master_fd], [], [], 1)  # 0-second timeout, return immediately
         if rlist:
             try:
                 data = os.read(self.master_fd, self.max_output)
