@@ -3,7 +3,8 @@ import node
 import sys
 from loguru import logger
 from cmdline import CLI
-
+import depend
+from eaios_decorators import package_init
 logger.remove()
 logger.add(
     sys.stderr,
@@ -15,11 +16,11 @@ logger.add(
 )
 
 if __name__ == "__main__":
-
+    node_list = node.get_node_details("config/include.yaml")
+    depend.check_depend("config/include.yaml")
     manager = process_manage.RuntimeManager(
-        node.get_node_details("./driver/") + node.get_node_details("./capability/")
+        node_list
     )
-
     try:
         manager.boot()
 
