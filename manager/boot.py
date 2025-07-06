@@ -21,6 +21,7 @@ if __name__ == "__main__":
     manager = process_manage.RuntimeManager(
         node_list
     )
+    package_init("config/include.yaml")
     try:
         manager.boot()
 
