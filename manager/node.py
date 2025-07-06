@@ -1,5 +1,6 @@
 import os
-import yaml # 导入 pyyaml 库
+import yaml
+from loguru import logger
 from constant import BASE_PATH
 
 class BaseNode:
@@ -43,7 +44,7 @@ def get_node(entry,sub_dir_path) -> BaseNode:
 
         # Check if description.yml exists in the subdirectory
         if os.path.exists(description_file_path) and os.path.isfile(description_file_path):
-            print(f"Found description.yml in: {sub_dir_path}")
+            logger.info(f"Found description.yml in: {sub_dir_path}")
             try:
                 # Read and parse the YAML file
                 with open(description_file_path, 'r', encoding='utf-8') as f:
@@ -59,13 +60,13 @@ def get_node(entry,sub_dir_path) -> BaseNode:
                     )
                     return base_info
             except yaml.YAMLError as e:
-                print(f"Error parsing YAML file '{description_file_path}': {e}")
+                logger.error(f"Error parsing YAML file '{description_file_path}': {e}")
             except Exception as e:
-                print(f"An unexpected error occurred while processing '{description_file_path}': {e}")
+                logger.error(f"An unexpected error occurred while processing '{description_file_path}': {e}")
         else:
-            print(f"Warning: No description.yml found in '{entry}' or it's not a file. Skipping.")
+            logger.warning(f"No description.yml found in '{entry}' or it's not a file. Skipping.")
     else:
-        print(f"Skipping non-directory entry: {entry}") # 可以打印非目录项
+        logger.warning(f"Skipping non-directory entry: {entry}")
     return None
 
 
@@ -85,19 +86,21 @@ def get_node_details(config_path: str) -> list[BaseNode]:
     """
     config_path = os.path.join(BASE_PATH, config_path)
     if not os.path.exists(config_path):
-        print(f"Error: The configuration file '{config_path}' does not exist.")
+        logger.error(f"Error: The configuration file '{config_path}' does not exist.")
         return []
     config = {}
+
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
     all_base_details = []
+    
     for base,entrys in config.items():
         base_dir_path = os.path.join(BASE_PATH, base)
         if not os.path.exists(base_dir_path):
-            print(f"Error: The 'base' directory was not found at '{base_dir_path}'")
+            logger.error(f"Error: The 'base' directory was not found at '{base_dir_path}'")
             return []
         if not os.path.isdir(base_dir_path):
-            print(f"Error: '{base_dir_path}' exists but is not a directory.")
+            logger.error(f"Error: '{base_dir_path}' exists but is not a directory.")
             return []
 
         try:
@@ -105,18 +108,14 @@ def get_node_details(config_path: str) -> list[BaseNode]:
 
             for entry in entrys:
                 sub_dir_path = os.path.join(base_dir_path, entry)
-
-                print(f"Checking: {entry}")
-
-                # Get node details for each entry
+                logger.info(f"Checking: {entry}")
                 base_info = get_node(entry, sub_dir_path)
                 if base_info:
                     all_base_details.append(base_info)
                 else:
-                    print(f"No valid BaseNode found for entry: {entry}")
-                
+                    logger.warning(f"No valid BaseNode found for entry: {entry}")
         except Exception as e:
-            print(f"An error occurred while accessing '{base_dir_path}': {e}")
+            logger.error(f"An error occurred while accessing '{base_dir_path}': {e}")
             return []
 
     return all_base_details
@@ -126,4 +125,3 @@ if __name__ == "__main__":
     project_root_path = sys.argv[1]
     all_base_details = get_node_details(project_root_path)
     logger.info(all_base_details)
-

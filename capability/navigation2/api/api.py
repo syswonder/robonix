@@ -25,7 +25,7 @@ class NavWithUltrasonicSafety(Node):
         # # 发送目标
         # self.send_goal(x, y, yaw)
 
-    def send_goal(self, x, y, yaw):
+    def set_goal(self, x, y, yaw):
         goal_pose = PoseStamped()
         goal_pose.header.frame_id = 'map'
         goal_pose.header.stamp = self.navigator.get_clock().now().to_msg()
@@ -73,7 +73,7 @@ def set_goal(x, y, yaw) -> str:
         y: 目标点Y坐标
         yaw: 目标点偏航角
     """
-    rclpy.init()
+    # rclpy.init()
     res = nv_controller.set_goal(x,y,yaw)
     func_status = f"Service set_gaol response: {res}"
     rclpy.shutdown()
