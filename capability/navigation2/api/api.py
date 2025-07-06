@@ -10,7 +10,7 @@ from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from sensor_msgs.msg import Range
 import sys
 
-mcp = FastMCP("navigation2")
+from DeepEmbody.manager.eaios_decorators import eaios
 
 class NavWithUltrasonicSafety(Node):
     def __init__(self,safety_threshold=0.5):
@@ -62,9 +62,10 @@ class NavWithUltrasonicSafety(Node):
             self.navigator.cancelTask()
             self.cancelled = True
 
+rclpy.init()
 nv_controller = NavWithUltrasonicSafety()
 
-@mcp.tool()
+@eaios.api
 def set_goal(x, y, yaw) -> str:
     """设置导航目标点
     Args:
@@ -78,7 +79,7 @@ def set_goal(x, y, yaw) -> str:
     rclpy.shutdown()
     return func_status
 
-@mcp.tool()
+@eaios.api
 def stop_goal() -> str:
     """停止当前导航目标
     Args:

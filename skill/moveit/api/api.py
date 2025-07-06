@@ -10,15 +10,13 @@ from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from sensor_msgs.msg import Range
 import sys
 
-from dependency.load_dep import import_from_first_available
+from DeepEmbody.manager.eaios_decorators import eaios
 
-mcp = FastMCP("navigation2")
-#TODO dep
-dep = import_from_first_available("dependency/depend.yaml")
 #TODO memory
 mamory = {}
 
-@mcp.tool()
+@eaios.api
+@eaios.caller
 def move_to_goal(goal_name:str) -> str:
     """通过预存名称移动到指定位置
     Args:
@@ -27,10 +25,12 @@ def move_to_goal(goal_name:str) -> str:
         移动操作的结果状态字符串
     """
     if goal_name in memory.keys():
-        return move_to_goal(memory[goal_name])
+        return move_to_ab_pos(memory[goal_name])
     else:
         return f"Service setmove_to_goal_gaol response: {False}, message: goal not in memory"
-@mcp.tool()
+
+@eaios.api
+@eaios.caller
 def move_to_ab_pos(x, y, yaw) -> str:
     """移动到绝对坐标位置
     Args:
@@ -41,10 +41,10 @@ def move_to_ab_pos(x, y, yaw) -> str:
         移动操作的结果状态字符串
     """
     #TODO how read dep
-    if dep["move"][1] == "set_gaol":
+    if "set_goal" in dep["move"][1].keys():
         set_goal = dep["move"][1]["set_goal"]
-        return set_gaol(x,y,yaw)
-    if dep["move"][1] == "simple_go":
+        return set_goal(x,y,yaw)
+    if "simple_go" in dep["move"][1].keys():
         simple_go = dep["move"][1]["simple_go"]
         pos = get_pos()
         while pos.x != x or pos.y != y or pos.yaw != yaw:
@@ -54,7 +54,8 @@ def move_to_ab_pos(x, y, yaw) -> str:
                 return f"Service move_to_goal response: {False}, message: TimeOut"
     return f"Service move_to_goal response: {True}, message: None"
 
-@mcp.tool()
+@eaios.api
+@eaios.caller
 def move_to_rel_pos(dx,dy,dyaw) -> str:
     """相对当前位置移动指定偏移量
     Args:
@@ -64,11 +65,11 @@ def move_to_rel_pos(dx,dy,dyaw) -> str:
     Returns:
         移动操作的结果状态字符串
     """
-    if dep["move"][1] == "set_gaol":
+    if "set_goal" in dep["move"][1].keys():
         set_goal = dep["move"][1]["set_goal"]
         pos = get_pos()
-        return set_gaol(pos.x + dx,pos.y + dy,pos.yaw + dyaw)
-    if dep["move"][1] == "simple_go":
+        return set_goal(pos.x + dx,pos.y + dy,pos.yaw + dyaw)
+    if "simple_go" in dep["move"][1].keys():
         simple_go = dep["move"][1]["simple_go"]
         pos = get_pos()
         return simple_go(dx,dy,dyaw)
