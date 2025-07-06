@@ -3,12 +3,16 @@ import importlib
 import functools
 import ast
 from mcp.server.fastmcp import FastMCP
+import yaml
+import sys
+if os.path.abspath(os.path.dirname(__file__)) not in sys.path:
+    sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 from constant import BASE_SKILL_PATH, INIT_FILE, BASE_PATH
 mcp = FastMCP("eaios")
 # from mcp import tool
 
-import sys
-if BASE_PATH not in sys.path:
+
+if os.path.dirname(BASE_PATH) not in sys.path:
     sys.path.append(os.path.dirname(BASE_PATH))
 
 # 使用模块属性作为全局注册表
@@ -59,7 +63,6 @@ def update_import_and_all(func_name: str, full_module_path: str):
             new_lines.insert(1, f"__all__ = {sorted_repr([func_name])}")
 
         f.seek(0)
-        print("lhw debug write","\n".join(new_lines) + "\n")
         f.write("\n".join(new_lines) + "\n")
         f.truncate()
 

@@ -1,11 +1,3 @@
-brain:
-  - test_brian
-skill:
-  - moveit
-capability:
-  - acml
-  - map_server
-  - navigation2
 driver:
   - piontcloud_to_laserscan
   - ranger_ros2
@@ -13,5 +5,15 @@ driver:
   - realsense_ros2
   - static_tf
   - unilidar_L2
+capability:
+  - amcl
+  - map_server
+  - navigation2
+  - activator
+skill:
+  - moveit
+brain:
+  - test_brian
+
 
 

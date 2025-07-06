@@ -10,6 +10,11 @@ from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from sensor_msgs.msg import Range
 import sys
 
+import sys
+root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if root_dir not in sys.path:
+    sys.path.append(root_dir)
+
 from DeepEmbody.manager.eaios_decorators import eaios
 
 #TODO memory
@@ -41,18 +46,7 @@ def move_to_ab_pos(x, y, yaw) -> str:
         移动操作的结果状态字符串
     """
     #TODO how read dep
-    if "set_goal" in dep["move"][1].keys():
-        set_goal = dep["move"][1]["set_goal"]
-        return set_goal(x,y,yaw)
-    if "simple_go" in dep["move"][1].keys():
-        simple_go = dep["move"][1]["simple_go"]
-        pos = get_pos()
-        while pos.x != x or pos.y != y or pos.yaw != yaw:
-            simple_go(x-pos.x,y-pos.y,yaw-pos.yaw)
-            #TODO
-            if timeout:
-                return f"Service move_to_goal response: {False}, message: TimeOut"
-    return f"Service move_to_goal response: {True}, message: None"
+    return set_goal(x,y,yaw)
 
 @eaios.api
 @eaios.caller
@@ -65,15 +59,9 @@ def move_to_rel_pos(dx,dy,dyaw) -> str:
     Returns:
         移动操作的结果状态字符串
     """
-    if "set_goal" in dep["move"][1].keys():
-        set_goal = dep["move"][1]["set_goal"]
-        pos = get_pos()
-        return set_goal(pos.x + dx,pos.y + dy,pos.yaw + dyaw)
-    if "simple_go" in dep["move"][1].keys():
-        simple_go = dep["move"][1]["simple_go"]
-        pos = get_pos()
-        return simple_go(dx,dy,dyaw)
-    return f"Service move_to_goal response: {True}, message: None"
+    set_goal = dep["move"][1]["set_goal"]
+    pos = get_pos()
+    return set_goal(pos.x + dx,pos.y + dy,pos.yaw + dyaw)
 
 def test():
     rclpy.init()
@@ -98,7 +86,7 @@ def test():
     node.destroy_node()
     rclpy.shutdown()
 
-
+#315曹老师办公室 28.3 0.1 0
 if __name__ == "__main__":
     # 初始化并运行 server
-    mcp.run(transport='stdio')
+    move_to_ab_pos(28.3, 0.1, 0)
