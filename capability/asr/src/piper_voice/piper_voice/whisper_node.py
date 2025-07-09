@@ -110,10 +110,9 @@ class WhisperNode(Node):
         return result["text"]
 
 def main(args=None):
-    
-    # rclpy.init(args=args)
-    # try:
-    #     rclpy.spin(WhisperNode())
-    # except KeyboardInterrupt:
-    #     pass
-    # rclpy.shutdown()
+    rclpy.init(args=args)
+    try:
+        rclpy.spin(WhisperNode())
+    except KeyboardInterrupt:
+        pass
+    rclpy.shutdown()
