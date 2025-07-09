@@ -175,7 +175,7 @@ class WhisperNode(Node):
             self.get_logger().info('等待 TTS 服务...')
         # 启动循环监听
         self.request = PlayText.Request()
-        # self.loop()
+        self.loop()
         
     def listen(self):
         self.get_logger().info("🎙️ 正在录音 3 秒...")
