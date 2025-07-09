@@ -25,6 +25,48 @@ class BaseNode:
     def __repr__(self):
         return f"BaseNode({self.name}_{self.version}, cwd='{self.cwd}')"
 
+def get_node(entry,sub_dir_path) -> BaseNode:
+    """
+    Helper function to create a BaseNode object from a directory entry and its description.yml file.
+
+    Args:
+        entry (str): The name of the directory entry.
+        sub_dir_path (str): The path to the subdirectory containing the description.yml file.
+
+    Returns:
+        BaseNode: An instance of BaseNode with details extracted from the description.yml file.
+    """
+    # Check if the entry is a directory
+    if os.path.isdir(sub_dir_path):
+        description_file_path = os.path.join(sub_dir_path, "description.yml")
+
+        # Check if description.yml exists in the subdirectory
+        if os.path.exists(description_file_path) and os.path.isfile(description_file_path):
+            print(f"Found description.yml in: {sub_dir_path}")
+            try:
+                # Read and parse the YAML file
+                with open(description_file_path, 'r', encoding='utf-8') as f:
+                    data = yaml.safe_load(f)
+
+                    base_info = BaseNode(
+                        cwd=sub_dir_path,
+                        name=data.get("name"),
+                        version=data.get("version"),
+                        author=data.get("author"),
+                        startup_on_boot=data.get("start_on_boot", False),
+                        startup_command=data.get("startup_command",None)
+                    )
+                    return base_info
+            except yaml.YAMLError as e:
+                print(f"Error parsing YAML file '{description_file_path}': {e}")
+            except Exception as e:
+                print(f"An unexpected error occurred while processing '{description_file_path}': {e}")
+        else:
+            print(f"Warning: No description.yml found in '{entry}' or it's not a file. Skipping.")
+    else:
+        print(f"Skipping non-directory entry: {entry}") # 可以打印非目录项
+    return None
+
 
 def get_node_details(target_path: str) -> list[BaseNode]:
     """
@@ -57,38 +99,11 @@ def get_node_details(target_path: str) -> list[BaseNode]:
         for entry in all_entries:
             sub_dir_path = os.path.join(base_dir_path, entry)
             print(f"Checking: {entry}")
-
-            # Check if the entry is a directory
-            if os.path.isdir(sub_dir_path):
-                description_file_path = os.path.join(sub_dir_path, "description.yml")
-
-                # Check if description.yml exists in the subdirectory
-                if os.path.exists(description_file_path) and os.path.isfile(description_file_path):
-                    print(f"Found description.yml in: {sub_dir_path}")
-                    try:
-                        # Read and parse the YAML file
-                        with open(description_file_path, 'r', encoding='utf-8') as f:
-                            data = yaml.safe_load(f)
-
-                            base_info = BaseNode(
-                                cwd=sub_dir_path,
-                                name=data.get("name"),
-                                version=data.get("version"),
-                                author=data.get("author"),
-                                startup_on_boot=data.get("start_on_boot", False),
-                                startup_command=data.get("startup_command")
-                            )
-                            all_base_details.append(base_info)
-
-                    except yaml.YAMLError as e:
-                        print(f"Error parsing YAML file '{description_file_path}': {e}")
-                    except Exception as e:
-                        print(f"An unexpected error occurred while processing '{description_file_path}': {e}")
-                else:
-                    print(f"Warning: No description.yml found in '{entry}' or it's not a file. Skipping.")
+            base_info = get_node(entry, sub_dir_path)
+            if base_info:
+                all_base_details.append(base_info)
             else:
-                print(f"Skipping non-directory entry: {entry}") # 可以打印非目录项
-
+                print(f"No valid BaseNode found for entry: {entry}")
     except Exception as e:
         print(f"An error occurred while accessing '{base_dir_path}': {e}")
         return []
