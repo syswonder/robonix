@@ -106,7 +106,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     def pressure_detected():
-        print(f"🎯 Pressure detected at {time.time():.6f}")
+        print(f"Pressure detected at {time.time():.6f}")
 
     driver = BM01Driver(callback=pressure_detected, debounce_ms=5)
 

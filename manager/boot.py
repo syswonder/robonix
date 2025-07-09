@@ -4,15 +4,14 @@ import sys
 from loguru import logger
 from cmdline import CLI
 
-# Configure loguru with Linux-style formatting
-logger.remove()  # Remove default handler
+logger.remove()
 logger.add(
     sys.stderr,
     format="[{elapsed} {name}] {message}",
     level="INFO",
     colorize=True,
     backtrace=True,
-    diagnose=True
+    diagnose=True,
 )
 
 if __name__ == "__main__":
