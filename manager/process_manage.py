@@ -5,6 +5,7 @@ import threading
 import pty
 import select
 import signal
+from loguru import logger
 
 # NodeProcess class
 class ProcessNode:
@@ -21,18 +22,18 @@ class ProcessNode:
     def start(self):
         """Start the process associated with the node."""
         if self.process and self.process.poll() is None:
-            print(f"Node '{self.node_node.name}' is already running.")
+            logger.info(f"Node '{self.node_node.name}' is already running.")
             return True
 
         command = self.node_node.startup_command
         if not command:
-            print(f"Error: No startup command defined for '{self.node_node.name}'.")
+            logger.error(f"Error: No startup command defined for '{self.node_node.name}'.")
             return False
 
         # Construct the process working directory
         process_cwd = self.node_node.cwd
         if not os.path.exists(process_cwd):
-            print(f"Error: Process working directory '{process_cwd}' does not exist for '{self.node_node.name}'.")
+            logger.error(f"Error: Process working directory '{process_cwd}' does not exist for '{self.node_node.name}'.")
             return False
 
         try:
@@ -52,39 +53,39 @@ class ProcessNode:
             )
             
             self._running = True
-            print(f"Started node '{self.node_node.name}' with PID: {self.process.pid} from '{process_cwd}'.")
+            logger.info(f"Started node '{self.node_node.name}' with PID: {self.process.pid} from '{process_cwd}'.")
             return True
         except FileNotFoundError:
-            print(f"Error: Command '{command.split()[0]}' not found for '{self.node_node.name}'.")
+            logger.error(f"Error: Command '{command.split()[0]}' not found for '{self.node_node.name}'.")
             return False
         except Exception as e:
-            print(f"Error starting node '{self.node_node.name}': {e}")
+            logger.error(f"Error starting node '{self.node_node.name}': {e}")
             return False
 
     def stop(self, timeout=3):
         """Stop the process associated with the node."""
         if self.process and self.process.poll() is None:  # poll() is None means the process is still running
-            print(f"Stopping node '{self.node_node.name}' (PID: {self.process.pid})...")
+            logger.info(f"Stopping node '{self.node_node.name}' (PID: {self.process.pid})...")
             try:
                 self._running = False  # Notify the reading thread to exit
                 self.process.send_signal(sig=signal.SIGINT)  # Send SIGTERM
                 self.process.wait(timeout=timeout)  # Wait for graceful shutdown
 
                 if self.process.poll() is None:  # If the process hasn't terminated
-                    print(f"Node '{self.node_node.name}' did not terminate gracefully, killing it.")
+                    logger.warning(f"Node '{self.node_node.name}' did not terminate gracefully, killing it.")
                     self.process.kill()  # Send SIGKILL to forcefully terminate
                     self.process.wait()  # Ensure the process is completely terminated
-                print(f"Node '{self.node_node.name}' stopped.")
+                logger.info(f"Node '{self.node_node.name}' stopped.")
             except subprocess.TimeoutExpired:
-                print(f"Timeout expired while stopping '{self.node_node.name}', killing it.")
+                logger.warning(f"Timeout expired while stopping '{self.node_node.name}', killing it.")
                 self.process.kill()
                 self.process.wait()
             except Exception as e:
-                print(f"Error stopping node '{self.node_node.name}': {e}")
+                logger.error(f"Error stopping node '{self.node_node.name}': {e}")
             finally:
                 self.process = None  # Clean up the process object
         else:
-            print(f"Node '{self.node_node.name}' is not running.")
+            logger.warning(f"Node '{self.node_node.name}' is not running.")
 
     def get_output(self):
         """Retrieve the most recent output line."""
@@ -114,11 +115,11 @@ class RuntimeManager:
         }
         # Store all currently running NodeProcess instances
         self.running_processes: dict[str, ProcessNode] = {}
-        print(f"Initialized NodeManager. Found {len(self.available_nodes)} nodes.")
+        logger.info(f"Initialized NodeManager. Found {len(self.available_nodes)} nodes.")
 
     def __del__(self):
         """When the manager object is destroyed, stop all active processes."""
-        print("NodeManager is being destroyed. Stopping all running nodes...")
+        logger.info("NodeManager is being destroyed. Stopping all running nodes...")
         self.stop_all_nodes()
 
     def get_node_node(self, node_name: str) -> BaseNode | None:
@@ -128,7 +129,7 @@ class RuntimeManager:
     def print_available_nodes(self):
         """Print all available nodes and their info."""
         if not self.available_nodes:
-            print("No nodes found.")
+            logger.warning("No nodes found.")
             return
 
         print("\n--- Available nodes ---")
@@ -144,20 +145,20 @@ class RuntimeManager:
         """Start a node by ID."""
         node = self.available_nodes.get(node_name)
         if not node:
-            print(f"Error: Node '{node_name}' not found.")
+            logger.error(f"Error: Node '{node_name}' not found.")
             return False
 
         if node.name in self.running_processes and self.running_processes[node.name].is_running():
-            print(f"Node '{node.name}' is already running.")
+            logger.info(f"Node '{node.name}' is already running.")
             return True
 
-        print(f"Attempting to start node: {node.name}")
+        logger.info(f"Attempting to start node: {node.name}")
         process_wrapper = ProcessNode(node)
         if process_wrapper.start():
             self.running_processes[node.name] = process_wrapper
             return True
         else:
-            print(f"Failed to start node: {node.name}")
+            logger.error(f"Failed to start node: {node.name}")
             return False
 
     def boot(self):
@@ -174,7 +175,7 @@ class RuntimeManager:
             del self.running_processes[node_name]  # Remove from manager
             return True
         else:
-            print(f"Node '{node_name}' is not running.")
+            logger.warning(f"Node '{node_name}' is not running.")
             return False
 
     def stop_all_nodes(self):
@@ -182,7 +183,7 @@ class RuntimeManager:
         to_stop = list(self.running_processes.keys())  # Create a copy since the dictionary will be modified
         for node_id in to_stop:
             self.stop_node(node_id)
-        print("All running nodes stopped.")
+        logger.info("All running nodes stopped.")
 
     # TODO: implement specific output for different streams (stdout, stderr, etc.)
     def print_node_output(self, node_name: str, stream="stdout"):
@@ -195,7 +196,7 @@ class RuntimeManager:
                     break
                 print(output)
         else:
-            print(f"Node '{node_name}' is not running, so no output to display.")
+            logger.warning(f"Node '{node_name}' is not running, so no output to display.")
 
     def get_all_running_PIDs(self):
         """Get the PIDs of all currently running nodes."""
@@ -211,7 +212,7 @@ if __name__ == "__main__":
     # Please adjust `target_path` to your actual project root.
     # For demonstration, use current working directory as project root.
     target_path = os.getcwd() 
-    print(f"Assumed project root path: {target_path}")
+    logger.info(f"Assumed project root path: {target_path}")
 
     # For testing, ensure your project root has the following structure:
     # {target_path}/
@@ -229,38 +230,38 @@ if __name__ == "__main__":
     # == Demonstrating Start, Stop, and Output Retrieval ==
 
     # 1. Start a specific node (assuming 'ping' is its recorded name from description.yml)
-    print("\n--- Starting a 'ping' node explicitly ---")
+    logger.info("\n--- Starting a 'ping' node explicitly ---")
     manager.start_node("ping") # Use the 'name' field from description.yml
     
     # 2. Boot up all nodes marked `start_on_boot`
     manager.boot()
 
-    print("\n--- Current running PIDs after initial start/boot ---")
+    logger.info("\n--- Current running PIDs after initial start/boot ---")
     pids = manager.get_all_running_PIDs()
-    print(f"Running PIDs: {pids}")
+    logger.info(f"Running PIDs: {pids}")
 
     manager.print_available_nodes()
 
     time.sleep(5) # Wait for some output to accumulate
 
     # 3. Print output from specific nodes
-    print("\n--- Printing output for 'example' and 'ping' ---")
+    logger.info("\n--- Printing output for 'example' and 'ping' ---")
     manager.print_node_output("example")
     manager.print_node_output("ping")
 
     # 4. Stop a specific node
-    print("\n--- Stopping 'example' ---")
+    logger.info("\n--- Stopping 'example' ---")
     manager.stop_node("example")
     time.sleep(1) # Give it a moment to stop
 
     # 5. Stop all remaining running nodes
-    print("\n--- Stopping all remaining nodes ---")
+    logger.info("\n--- Stopping all remaining nodes ---")
     manager.stop_all_nodes()
 
     # 6. Verify no PIDs are running
     pids = manager.get_all_running_PIDs()
-    print(f"Running PIDs after stopping all: {pids}")
+    logger.info(f"Running PIDs after stopping all: {pids}")
 
-    print("\nScript finished. The NodeManager's __del__ method will clean up any remaining processes.")
+    logger.info("\nScript finished. The NodeManager's __del__ method will clean up any remaining processes.")
     # Explicitly deleting the manager (optional, __del__ is usually called on program exit)
     # del manager
