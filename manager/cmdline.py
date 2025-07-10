@@ -6,7 +6,7 @@ import sys
 import os
 import atexit
 from typing import List, Dict, Any, Optional, Callable
-
+import traceback
 
 class Colors:
     RED = "\033[91m"
@@ -34,7 +34,7 @@ def print_green(text, bold=False, end="\n"):
     _color_print(text, Colors.GREEN, bold, end)
 
 
-def print(text, bold=False, end="\n"):
+def print_yellow(text, bold=False, end="\n"):
     _color_print(text, Colors.YELLOW, bold, end)
 
 
@@ -380,6 +380,7 @@ class CLI:
                         break
                 except Exception as e:
                     print_red(f"Error executing command '{command_name}': {e}")
+                    print_red(traceback.format_exc())
 
             except KeyboardInterrupt:
                 print_red("\nUse 'exit' to quit the application.")
