@@ -1,0 +1,12 @@
+# Goal
+float64 target_rotation        # joint6 旋转角度（单位：弧度）
+float64 grip_width             # joint7 开合宽度（单位：米）
+
+---
+# Result
+bool success
+string message
+
+---
+# Feedback
+string status
