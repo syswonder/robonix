@@ -3,7 +3,7 @@ from typing import Optional
 from contextlib import AsyncExitStack
 
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp.client.sse import sse_client
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -72,51 +72,60 @@ def tool_calls_format(tool_calls_str: str):
     return tool_calls
 
 
+sse_server_1_url = "http://127.0.0.1:8000/sse"
+sse_server_2_url = "http://127.0.0.1:8001/sse"
+
+server_url_array = [sse_server_1_url, sse_server_2_url]
+
 class MCPClient:
     def __init__(self):
         # Initialize session and client objects
         self.session: Optional[ClientSession] = None
         self.exit_stack = AsyncExitStack()
+        self.available_tools = []
+        self.tool_session_map = {}
         self.client = OpenAI(
             base_url="https://api.deepseek.com",
             api_key="sk-ca097724a54a4a6e860f97e82a8dd2d5",
         )
 
-    async def connect_to_server(self, server_script_path: str):
+    async def connect_to_server(self):
         """Connect to an MCP server
         
         Args:
             server_script_path: Path to the server script (.py)
         """
-        server_params = StdioServerParameters(
-            command="python",
-            args=[server_script_path],
-            env=os.environ.copy()
-        )
+        available_tools = []
+        tool_session_map: Dict[str, ClientSession] = {}
+        for server_url in server_url_array:
+            read, write = await self.exit_stack.enter_async_context(sse_client(url=server_url))
+            # TODO : add connect error handler
+            session: ClientSession = await self.exit_stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+        
+            # List available tools
+            response = await session.list_tools()
+            tools = response.tools
+            for tool in tools:
+                if tool.name in tool_session_map:
+                    print(f"Tool: {tool.name}, exist")
+                else :
+                    available_tools.append(tool)
+                    tool_session_map[tool.name] = session
+                    print(f"Tool: {tool.name}, Description: {tool.description}")
+        self.available_tools = available_tools
+        self.tool_session_map = tool_session_map
+            
 
-        stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
-        self.stdio, self.write = stdio_transport
-        self.session = await self.exit_stack.enter_async_context(ClientSession(self.stdio, self.write))
-        
-        await self.session.initialize()
-        
-        # List available tools
-        response = await self.session.list_tools()
-        tools = response.tools
-        for tool in tools:
-            print(f"Tool: {tool.name}, Description: {tool.description}")
-        
-
-    
     async def process_query(self, query: str) -> str:
 
         # get available tools from server
-        response = await self.session.list_tools()
         available_tools = [{ 
             "name": tool.name,
             "description": tool.description,
             "input_schema": tool.inputSchema
-        } for tool in response.tools]
+        } for tool in self.available_tools]
+
         
         # current query tools
         query_prompt = system_prompt_en
@@ -166,7 +175,7 @@ class MCPClient:
 
                 # eg : result = await self.session.call_tool("get_alerts", {"state": "CA"})
                 # eg : result = await self.session.call_tool("get_forecast", {"latitude": 37.7749, "longitude": -122.4194})
-                result = await self.session.call_tool(tool_name, tool_args)
+                result = await self.tool_session_map[tool_name].call_tool(tool_name, tool_args)
                 
                 tool_results.append({
                     "call": tool_name,
@@ -204,27 +213,19 @@ class MCPClient:
         """Run an interactive chat loop"""
         print("\nMCP Client Started!")
         print("Type your queries or 'quit' to exit.")
-        
-        try:
-            print("debug test one query with no input")
-            query = "统计10次统计hello node节点的状态，第5次时修改hello的名称为ROS2，第11次时关闭hello node节点"
-            response = await self.process_query(query)
-            print("\n" + response)
-        except Exception as e:
-            print(f"\nError: {str(e)}")
 
-        return 
-        
         while True:
             try:
                 query = input("\nQuery: ").strip()
+                # query = "统计10次统计hello node节点的状态，第5次时修改hello的名称为ROS2，第11次时关闭hello node节点"
 
                 if query.lower() == 'quit':
                     break
                 print("get query:", query)
                 response = await self.process_query(query)
                 print("\n" + response)
-
+                
+                # return # test
             except Exception as e:
                 print(f"\nError: {str(e)}")
     
@@ -232,17 +233,10 @@ class MCPClient:
         """Clean up resources"""
         await self.exit_stack.aclose()
 
-async def main():
-
-    load_dotenv(dotenv_path="./brain/config")  # load environment variables from .env
-
-    if len(sys.argv) < 2:
-        print("Usage: python client.py <path_to_server_script>")
-        sys.exit(1)
-        
+async def main():        
     client = MCPClient()
     try:
-        await client.connect_to_server(sys.argv[1])
+        await client.connect_to_server()
         await client.chat_loop()
     finally:
         await client.cleanup()
