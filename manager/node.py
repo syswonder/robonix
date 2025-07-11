@@ -1,5 +1,6 @@
 import os
-import yaml # 导入 pyyaml 库
+import yaml
+from loguru import logger
 
 class BaseNode:
     def __init__(self, cwd: str, name: str, version: str, author: str, startup_on_boot: bool, startup_command: str):
@@ -25,6 +26,48 @@ class BaseNode:
     def __repr__(self):
         return f"BaseNode({self.name}_{self.version}, cwd='{self.cwd}')"
 
+def get_node(entry,sub_dir_path) -> BaseNode:
+    """
+    Helper function to create a BaseNode object from a directory entry and its description.yml file.
+
+    Args:
+        entry (str): The name of the directory entry.
+        sub_dir_path (str): The path to the subdirectory containing the description.yml file.
+
+    Returns:
+        BaseNode: An instance of BaseNode with details extracted from the description.yml file.
+    """
+    # Check if the entry is a directory
+    if os.path.isdir(sub_dir_path):
+        description_file_path = os.path.join(sub_dir_path, "description.yml")
+
+        # Check if description.yml exists in the subdirectory
+        if os.path.exists(description_file_path) and os.path.isfile(description_file_path):
+            logger.info(f"Found description.yml in: {sub_dir_path}")
+            try:
+                # Read and parse the YAML file
+                with open(description_file_path, 'r', encoding='utf-8') as f:
+                    data = yaml.safe_load(f)
+
+                    base_info = BaseNode(
+                        cwd=sub_dir_path,
+                        name=data.get("name"),
+                        version=data.get("version"),
+                        author=data.get("author"),
+                        startup_on_boot=data.get("start_on_boot", False),
+                        startup_command=data.get("startup_command",None)
+                    )
+                    return base_info
+            except yaml.YAMLError as e:
+                logger.error(f"Error parsing YAML file '{description_file_path}': {e}")
+            except Exception as e:
+                logger.error(f"An unexpected error occurred while processing '{description_file_path}': {e}")
+        else:
+            logger.warning(f"No description.yml found in '{entry}' or it's not a file. Skipping.")
+    else:
+        logger.warning(f"Skipping non-directory entry: {entry}")
+    return None
+
 
 def get_node_details(target_path: str) -> list[BaseNode]:
     """
@@ -44,10 +87,10 @@ def get_node_details(target_path: str) -> list[BaseNode]:
     all_base_details = []
 
     if not os.path.exists(base_dir_path):
-        print(f"Error: The 'base' directory was not found at '{base_dir_path}'")
+        logger.error(f"Error: The 'base' directory was not found at '{base_dir_path}'")
         return []
     if not os.path.isdir(base_dir_path):
-        print(f"Error: '{base_dir_path}' exists but is not a directory.")
+        logger.error(f"Error: '{base_dir_path}' exists but is not a directory.")
         return []
 
     try:
@@ -56,41 +99,14 @@ def get_node_details(target_path: str) -> list[BaseNode]:
 
         for entry in all_entries:
             sub_dir_path = os.path.join(base_dir_path, entry)
-            print(f"Checking: {entry}")
-
-            # Check if the entry is a directory
-            if os.path.isdir(sub_dir_path):
-                description_file_path = os.path.join(sub_dir_path, "description.yml")
-
-                # Check if description.yml exists in the subdirectory
-                if os.path.exists(description_file_path) and os.path.isfile(description_file_path):
-                    print(f"Found description.yml in: {sub_dir_path}")
-                    try:
-                        # Read and parse the YAML file
-                        with open(description_file_path, 'r', encoding='utf-8') as f:
-                            data = yaml.safe_load(f)
-
-                            base_info = BaseNode(
-                                cwd=sub_dir_path,
-                                name=data.get("name"),
-                                version=data.get("version"),
-                                author=data.get("author"),
-                                startup_on_boot=data.get("start_on_boot", False),
-                                startup_command=data.get("startup_command")
-                            )
-                            all_base_details.append(base_info)
-
-                    except yaml.YAMLError as e:
-                        print(f"Error parsing YAML file '{description_file_path}': {e}")
-                    except Exception as e:
-                        print(f"An unexpected error occurred while processing '{description_file_path}': {e}")
-                else:
-                    print(f"Warning: No description.yml found in '{entry}' or it's not a file. Skipping.")
+            logger.info(f"Checking: {entry}")
+            base_info = get_node(entry, sub_dir_path)
+            if base_info:
+                all_base_details.append(base_info)
             else:
-                print(f"Skipping non-directory entry: {entry}") # 可以打印非目录项
-
+                logger.warning(f"No valid BaseNode found for entry: {entry}")
     except Exception as e:
-        print(f"An error occurred while accessing '{base_dir_path}': {e}")
+        logger.error(f"An error occurred while accessing '{base_dir_path}': {e}")
         return []
 
     return all_base_details
@@ -99,5 +115,5 @@ if __name__ == "__main__":
     import sys
     project_root_path = sys.argv[1]
     all_base_details = get_node_details(project_root_path)
-    print(all_base_details)
+    logger.info(all_base_details)
 

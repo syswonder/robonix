@@ -1,0 +1,6 @@
+name: "raspi_bm01"
+version: "1.0.0"
+author: "wheatfox"
+start_on_boot: false
+startup_command: "bash run.sh"
+description: "The ROS2 driver for using BM01 pressure sensor on Raspberry Pi"

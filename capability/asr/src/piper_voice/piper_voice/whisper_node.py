@@ -245,6 +245,7 @@ class WhisperNode(Node):
         result = self.model.transcribe(filename, language="zh")
         return result["text"]
 
+
 def main(args=None):    
     rclpy.init(args=args)
     try:
