@@ -1,0 +1,32 @@
+BM01 pressure sensor driver for Raspberry Pi
+
+input voltage should be 5V, and the analog output is 0-4V
+
+the digital output will be 1 when the pressure is greater than a threshold, and 0 when the pressure is less than the threshold.
+
+Wiring:
+GND -> GND
+VCC -> 5V
+DO -> GPIO 20
+
+ros2 topic echo /pressure_detected
+
+➜  DeepEmbody git:(main) ✗ ros2 topic echo /pressure_detected
+data: false
+---
+data: true
+---
+data: false
+---
+data: true
+---
+data: false
+---
+data: true
+---
+data: false
+---
+data: true
+...
+
+wheatfox <wheatfox17@icloud.com>
