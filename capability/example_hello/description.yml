@@ -1,0 +1,6 @@
+name: "example"
+version: "1.0.0"
+author: "syswonder"
+start_on_boot: true
+startup_command: "python3 hello_src.py"
+description: "This is an example capability"
