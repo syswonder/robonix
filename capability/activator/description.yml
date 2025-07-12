@@ -1,4 +1,4 @@
-name: "activater"
+name: "activator"
 version: "1.0.0"
 author: "syswonder"
 start_on_boot: true
