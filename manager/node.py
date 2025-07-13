@@ -1,6 +1,7 @@
 import os
 import yaml
 from loguru import logger
+from constant import BASE_PATH
 
 class BaseNode:
     def __init__(self, cwd: str, name: str, version: str, author: str, startup_on_boot: bool, startup_command: str):
@@ -69,7 +70,7 @@ def get_node(entry,sub_dir_path) -> BaseNode:
     return None
 
 
-def get_node_details(target_path: str) -> list[BaseNode]:
+def get_node_details(config_path: str) -> list[BaseNode]:
     """
     Retrieves details (name, version, author, startup_command) from description.yml
     for each direct subdirectory within the 'base' folder.
@@ -83,31 +84,39 @@ def get_node_details(target_path: str) -> list[BaseNode]:
               from its description.yml. Returns an empty list if no 'base' directory
               or no valid description.yml files are found.
     """
-    base_dir_path = target_path
+    config_path = os.path.join(BASE_PATH, config_path)
+    if not os.path.exists(config_path):
+        logger.error(f"Error: The configuration file '{config_path}' does not exist.")
+        return []
+    config = {}
+
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
     all_base_details = []
+    
+    for base,entrys in config.items():
+        base_dir_path = os.path.join(BASE_PATH, base)
+        if not os.path.exists(base_dir_path):
+            logger.error(f"Error: The 'base' directory was not found at '{base_dir_path}'")
+            return []
+        if not os.path.isdir(base_dir_path):
+            logger.error(f"Error: '{base_dir_path}' exists but is not a directory.")
+            return []
 
-    if not os.path.exists(base_dir_path):
-        logger.error(f"Error: The 'base' directory was not found at '{base_dir_path}'")
-        return []
-    if not os.path.isdir(base_dir_path):
-        logger.error(f"Error: '{base_dir_path}' exists but is not a directory.")
-        return []
+        try:
+            # List all entries in the 'base' directory
 
-    try:
-        # List all entries in the 'base' directory
-        all_entries = os.listdir(base_dir_path)
-
-        for entry in all_entries:
-            sub_dir_path = os.path.join(base_dir_path, entry)
-            logger.info(f"Checking: {entry}")
-            base_info = get_node(entry, sub_dir_path)
-            if base_info:
-                all_base_details.append(base_info)
-            else:
-                logger.warning(f"No valid BaseNode found for entry: {entry}")
-    except Exception as e:
-        logger.error(f"An error occurred while accessing '{base_dir_path}': {e}")
-        return []
+            for entry in entrys:
+                sub_dir_path = os.path.join(base_dir_path, entry)
+                logger.info(f"Checking: {entry}")
+                base_info = get_node(entry, sub_dir_path)
+                if base_info:
+                    all_base_details.append(base_info)
+                else:
+                    logger.warning(f"No valid BaseNode found for entry: {entry}")
+        except Exception as e:
+            logger.error(f"An error occurred while accessing '{base_dir_path}': {e}")
+            return []
 
     return all_base_details
 
@@ -116,4 +125,3 @@ if __name__ == "__main__":
     project_root_path = sys.argv[1]
     all_base_details = get_node_details(project_root_path)
     logger.info(all_base_details)
-
