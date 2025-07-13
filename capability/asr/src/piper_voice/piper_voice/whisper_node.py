@@ -171,8 +171,6 @@ class WhisperNode(Node):
         self.publisher = self.create_publisher(String, 'voice_command', 10)
         # self.tts_pub = self.create_publisher(String, '·', 10)
         self.client = self.create_client(PlayText, 'play_tts')
-        while not self.client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('等待 TTS 服务...')
         # 启动循环监听
         self.request = PlayText.Request()
         self.loop()
@@ -185,6 +183,8 @@ class WhisperNode(Node):
         
     def loop(self):
         while rclpy.ok():
+            if not self.client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().info('等待 TTS 服务...')
             self.get_logger().info("🎙️ 正在录音 3 秒...")
             self.record_audio(TEMP_AUDIO_FILE, duration=3)
             text = self.transcribe_audio(TEMP_AUDIO_FILE).strip()
