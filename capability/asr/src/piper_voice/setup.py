@@ -21,7 +21,6 @@ setup(
     entry_points={
         'console_scripts': [
         'whisper_node = piper_voice.whisper_node:main',
-        'tts_output = piper_voice.tts_output:main',
         ],
     },
 )

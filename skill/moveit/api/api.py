@@ -30,6 +30,7 @@ def move_to_goal(goal_name:str) -> str:
         return move_to_goal(memory[goal_name])
     else:
         return f"Service setmove_to_goal_gaol response: {False}, message: goal not in memory"
+
 @mcp.tool()
 def move_to_ab_pos(x, y, yaw) -> str:
     """移动到绝对坐标位置

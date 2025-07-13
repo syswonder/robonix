@@ -1,4 +1,0 @@
-float64 rotation  # joint6 的角度，单位 rad
-float64 width     # joint7 的开合宽度，单位 m（或你的实际控制单位）
----
-bool success
