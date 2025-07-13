@@ -66,6 +66,10 @@ rclpy.init()
 nv_controller = NavWithUltrasonicSafety()
 
 @eaios.api
+def nv_test():
+    pass
+
+@eaios.api
 def set_goal(x, y, yaw) -> str:
     """设置导航目标点
     Args:
