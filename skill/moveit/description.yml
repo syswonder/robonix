@@ -4,3 +4,9 @@ author: "syswonder"
 start_on_boot: true
 startup_command: "bash run.sh"
 description: "move to curtain position or goal"
+feature:
+  - "move_to_goal"
+  - "move_to_ab_pos"
+  - "move_to_rel_pos"
+depend:
+  - set_goal
