@@ -93,10 +93,10 @@ if __name__ == "__main__":
     try:
         manager.boot()
 
-        cmdline(manager)
+        # cmdline(manager)
 
-        # cli = CLI(manager)
-        # cli.run()
+        cli = CLI(manager)
+        cli.run()
 
     except KeyboardInterrupt:
         logger.info("Exiting...")
