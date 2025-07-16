@@ -21,9 +21,6 @@ agilex_ranger = create_computing_entity("agilex_ranger")
 room1.add_child(agilex_ranger)
 print(f"ID = {agilex_ranger.entity_id}, path = {agilex_ranger.get_absolute_path()}")
 
-graph = DynamicGraph(root)
-graph.start()
-
 while True:
     print(".")
     time.sleep(1)
