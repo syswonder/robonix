@@ -14,3 +14,4 @@ temp/
 #log
 log.txt
 
+.DS_Store
