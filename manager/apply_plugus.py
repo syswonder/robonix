@@ -9,7 +9,6 @@ from constant import BASE_PATH,BASE_CAP_PATH
 import sys
 if BASE_CAP_PATH not in sys.path:
     sys.path.append(BASE_CAP_PATH)
-print("lhw debug sys path",sys.path)
 
 def configure_api_module(dir_path):
     """
@@ -80,7 +79,6 @@ def configure_api_module(dir_path):
     plugins_dir = dir_path / "plugins"
     imports = {}
 
-    print("lhw debug plugin",plugin)
     plugin_path = plugins_dir / plugin
 
     if not plugin_path.exists():

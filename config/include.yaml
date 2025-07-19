@@ -13,6 +13,7 @@ capability:
   - vision
 skill:
   - moveit
+  - test_skill
 brain:
   - test_brian
 
