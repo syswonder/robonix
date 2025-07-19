@@ -5,6 +5,5 @@ start_on_boot: true
 startup_command: "bash run.sh"
 description: ""
 level: "capability"
-depend: 
-- "scanner"
-- "map"
+feature:
+- "get_goal"

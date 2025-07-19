@@ -11,9 +11,11 @@ from sensor_msgs.msg import Range
 import sys
 
 import sys
-root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 if root_dir not in sys.path:
     sys.path.append(root_dir)
+
+print(root_dir)
 
 from DeepEmbody.manager.eaios_decorators import eaios
 

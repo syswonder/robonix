@@ -8,9 +8,6 @@ import sys
 if os.path.abspath(os.path.dirname(__file__)) not in sys.path:
     sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 from constant import BASE_SKILL_PATH, INIT_FILE, BASE_PATH
-mcp = FastMCP("eaios")
-# from mcp import tool
-
 
 if os.path.dirname(BASE_PATH) not in sys.path:
     sys.path.append(os.path.dirname(BASE_PATH))
@@ -89,9 +86,19 @@ class FunctionRegistry:
 
 
 class eaios:
+    mcp = FastMCP(
+        name="eaios",
+        host="127.0.0.1",
+        port=8001,
+        sse_path="/sse",
+        message_path="/messages/"
+    )
+    FUNCTION_REGISTRY = {}
     @staticmethod
     def api(func):
-        func = mcp.tool()(func)
+        print("eaios.__module__ =", eaios.__module__)
+        print("eaios class id =", id(eaios))
+        func = eaios.mcp.tool()(func)
 
         full_mod = func.__module__
         print("full mod",full_mod)
@@ -100,6 +107,20 @@ class eaios:
         registry.add_function(func.__name__, full_mod)
         # print(f"[DEBUG] API 添加后: _registered_funcs = {_registered_funcs}, ID={id(_registered_funcs)}")
         return func
+
+    @staticmethod
+    def plugin(cap,name):
+        def decorator(func):
+            eaios.FUNCTION_REGISTRY[cap + ":" + name] = func
+            return func
+        return decorator
+
+    def get_plugin(cap,name):
+        plugin_name = cap + ":" + name
+        # auto raise KeyError
+        # if plugin_name not in eaios.FUNCTION_REGISTRY.keys():
+        #     raise 
+        return eaios.FUNCTION_REGISTRY[plugin_name]
 
     @staticmethod
     def finalize():
@@ -117,8 +138,8 @@ class eaios:
         - base_dir: 绝对路径，对应 base_package 的目录
         """
         for root, dirs, files in os.walk(base_dir):
-            for file in files:
-                if file == "api.py":
+            if "capability" in root and "plugins" in root:
+                for file in files:
                     full_path = os.path.join(root, file)
                     rel_path = os.path.relpath(full_path, base_dir)  # e.g., 'x/y/z.py'
                     module_parts = rel_path[:-3].replace(os.sep, ".")  # remove .py
@@ -129,6 +150,19 @@ class eaios:
                         importlib.import_module(module_path)
                     except Exception as e:
                         print(f"[eaios] Failed to import {module_path}: {e}")
+            else:
+                for file in files:
+                    if file == "api.py":
+                        full_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(full_path, base_dir)  # e.g., 'x/y/z.py'
+                        module_parts = rel_path[:-3].replace(os.sep, ".")  # remove .py
+                        module_path = f"{base_package}.{module_parts}"
+                        print(module_path)
+
+                        try:
+                            importlib.import_module(module_path)
+                        except Exception as e:
+                            print(f"[eaios] Failed to import {module_path}: {e}")
 
     @staticmethod
     def caller(func):
@@ -138,7 +172,14 @@ class eaios:
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            # if os.path.abspath(os.path.dirname(__file__)) not in sys.path:
+            #     sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+            print("[DEBUG] __file__:", __file__)
+            print("[DEBUG] cwd:", os.getcwd())
+            print("[DEBUG] sys.path:",sys.path)
             skill_module = importlib.import_module("DeepEmbody.skill")  # 必须是模块路径
+            print(id(skill_module),skill_module.__file__)
+            print(eaios.FUNCTION_REGISTRY)
             for name in getattr(skill_module, "__all__", []):
                 func.__globals__[name] = getattr(skill_module, name)
             return func(*args, **kwargs)
@@ -186,12 +227,68 @@ def package_init(config_path: str):
     registry = FunctionRegistry()
     print(f"[eaios] Package initialized with {registry.gen_lens()} functions registered.")
 
+import rclpy
+from rclpy.node import Node
+from std_srvs.srv import Trigger, SetBool
+
+class NodeController(Node):
+    def __init__(self):
+        super().__init__('node_controller')
+
+
+    def call_service(self, service_name, request):
+        if service_name == "get_count":
+            client = self.create_client(Trigger, service_name)
+        elif service_name == "modify_name":
+            client = self.create_client(Trigger, service_name)
+        elif service_name == "shutdown_node":
+            client = self.create_client(Trigger, service_name)
+        
+        # 调用服务
+        if not client.wait_for_service(timeout_sec=10.0):
+            self.get_logger().error(f'Service {service_name} not available')
+            return None
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self, future)
+        if future.result() is not None:
+            self.get_logger().info(f'Service {service_name} called successfully')
+            return future.result()
+        else:
+            self.get_logger().error(f'Service {service_name} call failed')
+            return None
+# from mcp import tool
+print(id(eaios.mcp))
+print("eaios.__module__ =", eaios.__module__)
+print("eaios class id =", id(eaios))
+@eaios.mcp.tool()
+def api_change_hello(name: str) -> str:
+    """修改hello的对象
+    Args:
+        name: 新的hello名称
+    """
+    # rclpy.init()
+    # node = NodeController()
+    # req = Trigger.Request()
+    # res = node.call_service('modify_name', req)
+    # func_status = f"Service modify_name response: {res.success}, message: {res.message}"
+    # node.destroy_node()
+    # rclpy.shutdown()
+    # return func_status
+    return ""
+
+def mcp_start():
+    eaios.mcp.run(transport="sse")
+
 if __name__ == "__main__":
     import yaml, argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config/include.yaml")
     args = parser.parse_args()
     package_init(args.config)
-    registry = FunctionRegistry()
-    print(f"[eaios] Finalized with {registry.gen_lens()} functions registered.")
-    mcp.run(transport='stdio')
+    with open("test.txt","w") as f:
+        import time
+        f.write(str(time.time()))
+        registry = FunctionRegistry()
+        print(f"[eaios] Finalized with {registry.gen_lens()} functions registered.")
+        print(eaios.FUNCTION_REGISTRY)
+        # mcp_start()
