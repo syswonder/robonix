@@ -8,13 +8,12 @@ from eaios_decorators import package_init
 logger.remove()
 logger.add(
     sys.stderr,
-    format="[{elapsed} {name}] {message}",
+    format="[{elapsed} <green>{name}</green>] {message}",
     level="INFO",
     colorize=True,
     backtrace=True,
     diagnose=True,
 )
-
 class Colors:
     RED = '\033[91m'
     GREEN = '\033[92m'
