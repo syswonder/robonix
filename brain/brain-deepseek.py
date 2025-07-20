@@ -120,7 +120,7 @@ class ClinetNodeController(Node):
         return response
 
 class MCPClient:
-    def __init__(self):
+    def __init__(self, api_key = None):
         # Initialize session and client objects
         self.session: Optional[ClientSession] = None
         self.exit_stack = AsyncExitStack()
@@ -128,7 +128,7 @@ class MCPClient:
         self.tool_session_map = {}
         self.client = OpenAI(
             base_url="https://api.deepseek.com",
-            api_key="sk-ca097724a54a4a6e860f97e82a8dd2d5",
+            api_key=api_key,
         )
 
     async def connect_to_server(self):
@@ -275,8 +275,9 @@ class MCPClient:
         await self.exit_stack.aclose()
 
 async def main():
-    client = MCPClient()
-
+    # Load environment variables from .env file
+    load_dotenv()
+    client = MCPClient(api_key=os.getenv("API_KEY"))
     # 启动进程并获取 PID
     process = subprocess.Popen(
         ["python3", "capability/example_hello/api/cap_server.py"],
