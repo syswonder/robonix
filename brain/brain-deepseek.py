@@ -1,16 +1,20 @@
 import asyncio
-from typing import Optional
-from contextlib import AsyncExitStack
-
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.sse import sse_client
-
-from anthropic import Anthropic
-from dotenv import load_dotenv
-from openai import OpenAI
 import os
 import time
 import subprocess
+
+import rclpy
+from rclpy.node import Node
+from typing import Optional
+from contextlib import AsyncExitStack
+
+from std_srvs.srv import SetBool, Trigger
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.sse import sse_client
+from anthropic import Anthropic
+from dotenv import load_dotenv
+from openai import OpenAI
+
 
 sse_server_1_url = "http://127.0.0.1:8000/sse"
 # sse_server_2_url = "http://127.0.0.1:8001/sse"
@@ -72,18 +76,47 @@ def tool_calls_format(tool_calls_str: str):
             })
     return tool_calls
 
-# ros2 topic to get information
+# TODO:ros2 topic to get information
 class ClinetNodeController(Node):
     def __init__(self):
         super().__init__("client_node_controller")
         self.get_logger().info("Client Node Controller initialized")
+        self.client = None
+        # init server process
+        self.process = None
 
-    async def call_service(self, service_name: str, request):
-        client = self.create_client(Trigger, service_name)
-        while not client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info(f"Service {service_name} not available, waiting...")
-        future = client.call_async(request)
-        response = await future
+        # init ROS2 Topic to get information for query
+        self.topic_subscriber = self.create_subscription(
+            String,
+            'brain-query',
+            self.call_service,
+            10
+        )
+
+    async def init_client(self):
+        self.client = MCPClient()
+        # init server process
+        self.process = subprocess.Popen(
+            ["python3", "capability/example_hello/api/cap_server.py"],
+        )
+        print(f"server PID: {process.pid}")
+        time.sleep(2)  # wait for server to start
+        try:
+            await self.client.connect_to_server()
+            # await self.client.chat_loop()
+        finally:
+            await self.shutdown_node()
+
+    async def shutdown_node(self):
+        """Shutdown the node and clean up resources"""
+        self.get_logger().info("Shutting down client node...")
+        await self.client.cleanup()
+        self.process.terminate() # Terminate the server process
+        self.process.wait()  # Wait for the process to terminate
+        self.destroy_node()
+
+    async def call_service(self, service_name: str, query : str):
+        response = await self.client.process_query(query)
         return response
 
 class MCPClient:
@@ -217,14 +250,14 @@ class MCPClient:
         
         return "\n".join(final_text)
 
-    async def chat_loop(self, query):
+    async def chat_loop(self):
         """Run an interactive chat loop"""
         print("\nMCP Client Started!")
         print("Type your queries or 'quit' to exit.")
 
         while True:
             try:
-                # query = input("\nQuery: ").strip()
+                query = input("\nQuery: ").strip()
                 # query = "统计10次统计hello node节点的状态，第5次时修改hello的名称为ROS2，第11次时关闭hello node节点"
 
                 if query.lower() == 'quit':
@@ -241,7 +274,7 @@ class MCPClient:
         """Clean up resources"""
         await self.exit_stack.aclose()
 
-async def main():        
+async def main():
     client = MCPClient()
 
     # 启动进程并获取 PID
