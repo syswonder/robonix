@@ -2,18 +2,12 @@
 # -*- coding: utf-8 -*-
 import os
 from mcp.server.fastmcp import FastMCP
-
 import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger, SetBool
 import sys
 import time
 
-mcp = FastMCP(name="demo_hello",
-                host="127.0.0.1",
-                port=8001,
-                sse_path="/sse",
-                message_path="/messages/")
 
 class NodeController(Node):
     def __init__(self):
@@ -41,7 +35,26 @@ class NodeController(Node):
             self.get_logger().error(f'Service {service_name} call failed')
             return None
 
-@mcp.tool()
+def get_hello_tools():
+    hello_tools = [
+        {
+            "fn": api_get_hello_status,
+            "name": "api_get_hello_status",
+            "description":"check hello status; Args: None"
+        },
+        {
+            "fn": api_change_hello,
+            "name": "api_change_hello",
+            "description": "change hello object; Args: name: new hello name"
+        },
+        {
+            "fn": api_close_hello,
+            "name": "api_close_hello",
+            "description": "close hello node object; Args: None"
+        }
+    ]
+    return hello_tools
+
 def api_get_hello_status() -> str:
     """统计hello的状态
     Args:
@@ -56,7 +69,6 @@ def api_get_hello_status() -> str:
     rclpy.shutdown()
     return func_status
 
-@mcp.tool()
 def api_change_hello(name: str) -> str:
     """修改hello的对象
     Args:
@@ -71,7 +83,6 @@ def api_change_hello(name: str) -> str:
     rclpy.shutdown()
     return func_status
 
-@mcp.tool()
 def api_close_hello() -> str:
     """关闭hello的node对象
     Args:
@@ -114,10 +125,27 @@ def test():
     node.destroy_node()
     rclpy.shutdown()
 
-
 if __name__ == "__main__":
+    mcp = FastMCP(name="demo_hello",
+                host="127.0.0.1",
+                port=8001,
+                sse_path="/sse",
+                message_path="/messages/")
+
+    # init @mcp.tool()
+    tools_list = []
+    tools_list.append(get_hello_tools())
+
+    for tools in tools_list:
+        for tool in tools:
+            mcp.add_tool(
+                fn=tool["fn"],
+                name=tool["name"],
+                description=tool["description"]
+            )
+
     # 初始化并运行 server
     mcp.run(transport="sse")
 
-    # test()
+    test()
 

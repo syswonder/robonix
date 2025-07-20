@@ -10,9 +10,12 @@ from dotenv import load_dotenv
 from openai import OpenAI
 import os
 import time
+import subprocess
 
+sse_server_1_url = "http://127.0.0.1:8000/sse"
+# sse_server_2_url = "http://127.0.0.1:8001/sse"
 
-
+server_url_array = [sse_server_1_url]
 
 system_prompt_en = '''
     as a helpful assistant, you will answer user queries and use tools to get information.
@@ -26,7 +29,6 @@ system_prompt_en = '''
 
     the tools you can use are:
 '''
-
 # judge whether the message contains a tool call
 def judge_tool_call(content):
     content_split = content.split("\n")
@@ -34,7 +36,6 @@ def judge_tool_call(content):
         if "[FC]" in i:
             return True
     return False
-    
 
 def tool_calls_format(tool_calls_str: str):
     '''
@@ -71,11 +72,19 @@ def tool_calls_format(tool_calls_str: str):
             })
     return tool_calls
 
+# ros2 topic to get information
+class ClinetNodeController(Node):
+    def __init__(self):
+        super().__init__("client_node_controller")
+        self.get_logger().info("Client Node Controller initialized")
 
-sse_server_1_url = "http://127.0.0.1:8000/sse"
-sse_server_2_url = "http://127.0.0.1:8001/sse"
-
-server_url_array = [sse_server_1_url, sse_server_2_url]
+    async def call_service(self, service_name: str, request):
+        client = self.create_client(Trigger, service_name)
+        while not client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info(f"Service {service_name} not available, waiting...")
+        future = client.call_async(request)
+        response = await future
+        return response
 
 class MCPClient:
     def __init__(self):
@@ -115,7 +124,6 @@ class MCPClient:
                     print(f"Tool: {tool.name}, Description: {tool.description}")
         self.available_tools = available_tools
         self.tool_session_map = tool_session_map
-            
 
     async def process_query(self, query: str) -> str:
 
@@ -209,14 +217,14 @@ class MCPClient:
         
         return "\n".join(final_text)
 
-    async def chat_loop(self):
+    async def chat_loop(self, query):
         """Run an interactive chat loop"""
         print("\nMCP Client Started!")
         print("Type your queries or 'quit' to exit.")
 
         while True:
             try:
-                query = input("\nQuery: ").strip()
+                # query = input("\nQuery: ").strip()
                 # query = "统计10次统计hello node节点的状态，第5次时修改hello的名称为ROS2，第11次时关闭hello node节点"
 
                 if query.lower() == 'quit':
@@ -235,11 +243,23 @@ class MCPClient:
 
 async def main():        
     client = MCPClient()
+
+    # 启动进程并获取 PID
+    process = subprocess.Popen(
+        ["python3", "capability/example_hello/api/cap_server.py"],
+    )
+    print(f"server PID: {process.pid}")
+
+    time.sleep(2)  # wait for server to start
+
     try:
         await client.connect_to_server()
         await client.chat_loop()
     finally:
         await client.cleanup()
+        # Terminate the server process
+        process.terminate()
+        process.wait()  # Wait for the process to terminate
 
 if __name__ == "__main__":
     import sys
