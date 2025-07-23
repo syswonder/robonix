@@ -1,0 +1,16 @@
+simulators
+==========
+
+genesis
+=======
+
+please first install pytorch and genesis according to 
+
+1. https://genesis-world.readthedocs.io/en/latest/user_guide/index.html
+2. https://github.com/Genesis-Embodied-AI/Genesis
+
+sudo apt-get install libglfw3 libglfw3-dev
+
+installing the raytracing backend (C++) needs some dev packages and please follow the instructions to compile it
+
+wheatfox <wheatfox17@icloud.com>
