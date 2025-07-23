@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package robotcontrol;
+
+service RobotControl {
+  rpc Move (MoveRequest) returns (MoveReply);
+  rpc Rotate (RotateRequest) returns (MoveReply);
+  rpc Stop (StopRequest) returns (MoveReply);
+  rpc GetPose (GetPoseRequest) returns (PoseReply);
+  rpc MoveTo (MoveToRequest) returns (MoveReply); // Move forward/backward and laterally
+}
+
+message MoveRequest {
+  double distance = 1; // Forward/backward distance, positive for forward, negative for backward
+}
+
+message RotateRequest {
+  double angle = 1; // Relative rotation angle, positive for left, negative for right, in radians
+  double target_yaw_deg = 2; // (Optional) Absolute target yaw angle in degrees. If set, rotate to this yaw.
+}
+
+message StopRequest {}
+
+message MoveReply {
+  string status = 1;
+}
+
+message GetPoseRequest {}
+
+message PoseReply {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+  double yaw = 4; // Yaw angle in degrees
+}
+
+message MoveToRequest {
+  double forward = 1; // Forward/backward distance, positive for forward, negative for backward (meters)
+  double lateral = 2; // Left/right distance, positive for left, negative for right (meters)
+}
