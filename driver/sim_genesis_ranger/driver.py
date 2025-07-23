@@ -1,3 +1,7 @@
+import sys
+sys.path.append(".")
+sys.path.append("./simulator/genesis")
+
 import grpc
 import robot_control_pb2 as robot_control_pb2
 import robot_control_pb2_grpc as robot_control_pb2_grpc
