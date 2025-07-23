@@ -2,6 +2,7 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 import uuid
+from .primitive_spec import PRIMITIVE_SPECS  # 导入标准原语规范
 
 
 class EntityType(Enum):
@@ -22,23 +23,6 @@ class RelationType(Enum):
 
 
 @dataclass
-class Geometry:
-    type: str = "point"
-    dimensions: Dict[str, float] = field(default_factory=dict)
-    mesh_path: Optional[str] = None
-
-
-@dataclass
-class Position:
-    x: float = 0.0
-    y: float = 0.0
-    z: float = 0.0
-    roll: float = 0.0
-    pitch: float = 0.0
-    yaw: float = 0.0
-
-
-@dataclass
 class EntityMetadata:
     name: str = ""
     description: str = ""
@@ -52,16 +36,12 @@ class Entity:
         entity_id: str,
         entity_type: EntityType,
         entity_name: str,
-        position: Optional[Position] = None,
-        geometry: Optional[Geometry] = None,
         metadata: Optional[EntityMetadata] = None,
     ):
 
         self.entity_id = entity_id
         self.entity_type = entity_type
         self.entity_name = entity_name
-        self.position = position or Position()
-        self.geometry = geometry or Geometry()
         self.metadata = metadata or EntityMetadata()
 
         self.relations: Dict[str, List["Entity"]] = {
@@ -69,6 +49,7 @@ class Entity:
         }
 
         self.primitives: List[str] = []
+        self.primitive_bindings: Dict[str, callable] = {}  # 绑定的原语函数
 
         self.is_active = True
         self.created_at = None
@@ -101,10 +82,14 @@ class Entity:
         return self.relations[relation_type.value].copy()
 
     def add_parent(self, parent_entity: "Entity") -> None:
+        if parent_entity == self:
+            raise ValueError("Entity cannot be its own parent")
         self.add_relation(RelationType.PARENT_OF, parent_entity)
         parent_entity.add_relation(RelationType.CHILD_OF, self)
 
     def add_child(self, child_entity: "Entity") -> None:
+        if child_entity == self:
+            raise ValueError("Entity cannot be its own child")
         self.add_relation(RelationType.CHILD_OF, child_entity)
         child_entity.add_relation(RelationType.PARENT_OF, self)
 
@@ -138,6 +123,75 @@ class Entity:
                 path = f"{parent.get_absolute_path()}/{path}"
         return path
 
+    def get_entity_by_path(self, path: str) -> Optional["Entity"]:
+        """
+        Find and return the entity at the given path relative to this entity.
+        Path is a string of entity names separated by '/', e.g. 'room1/book1'.
+        Returns the target Entity if found, otherwise None.
+        """
+        # Remove leading/trailing slashes and split
+        path_split = [p for p in path.strip("/").split("/") if p]
+        if not path_split:
+            return self  # path is empty or just '/', return self
+
+        current = self
+        for name in path_split:
+            children = current.get_children()
+            found = False
+            for child in children:
+                if child.entity_name == name:
+                    current = child
+                    found = True
+                    break
+            if not found:
+                return None  # Path does not exist
+        return current
+
+    def bind_primitive(self, primitive_name: str, func: callable) -> None:
+        """
+        Bind a function to a primitive name for this entity.
+        """
+        if primitive_name not in PRIMITIVE_SPECS:
+            raise ValueError(
+                f"Primitive '{primitive_name}' is not a standard primitive.")
+        self.primitive_bindings[primitive_name] = func
+        self.add_primitive(primitive_name)
+
+    def _check_primitive_args(self, primitive_name: str, kwargs: dict):
+        """
+        Check if the arguments match the primitive spec.
+        """
+        spec = PRIMITIVE_SPECS[primitive_name]
+        expected_args = spec["args"]
+        if set(kwargs.keys()) != set(expected_args):
+            raise ValueError(
+                f"Arguments for '{primitive_name}' must be {expected_args}, got {list(kwargs.keys())}")
+
+    def _check_primitive_returns(self, primitive_name: str, result: dict):
+        """
+        Check if the return value matches the primitive spec.
+        """
+        spec = PRIMITIVE_SPECS[primitive_name]
+        expected_returns = spec["returns"]
+        if set(result.keys()) != set(expected_returns.keys()):
+            raise ValueError(
+                f"Return value for '{primitive_name}' must have keys {list(expected_returns.keys())}, got {list(result.keys())}")
+        for k, v in expected_returns.items():
+            if not isinstance(result[k], v):
+                raise TypeError(
+                    f"Return value for '{primitive_name}' key '{k}' must be {v}, got {type(result[k])}")
+
+    def __getattr__(self, name):
+        if name in self.primitive_bindings:
+            def wrapper(**kwargs):
+                self._check_primitive_args(name, kwargs)
+                result = self.primitive_bindings[name](**kwargs)
+                self._check_primitive_returns(name, result)
+                return result
+            return wrapper
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}', or this primitive is not bound, available primitives: {self.primitives}")
+
 
 class Room(Entity):
 
@@ -145,16 +199,12 @@ class Room(Entity):
         self,
         room_id: str,
         room_name: str,
-        position: Optional[Position] = None,
-        geometry: Optional[Geometry] = None,
         metadata: Optional[EntityMetadata] = None,
     ):
         super().__init__(
             entity_id=room_id,
             entity_type=EntityType.ROOM,
             entity_name=room_name,
-            position=position,
-            geometry=geometry,
             metadata=metadata,
         )
 

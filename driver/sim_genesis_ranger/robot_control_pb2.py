@@ -1,1 +1,0 @@
-../../simulator/genesis/robot_control_pb2.py
