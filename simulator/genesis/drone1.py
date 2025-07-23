@@ -111,8 +111,10 @@ def run_sim(scene, drone, controller):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=True, help="Enable visualization (default: True)")
-    parser.add_argument("-m", "--mac", action="store_true", default=False, help="Running on MacOS (default: False)")
+    parser.add_argument("-v", "--vis", action="store_true",
+                        default=True, help="Enable visualization (default: True)")
+    parser.add_argument("-m", "--mac", action="store_true",
+                        default=False, help="Running on MacOS (default: False)")
     args = parser.parse_args()
 
     # Initialize Genesis
@@ -144,7 +146,7 @@ def main():
         ),
     )
 
-    scene.profiling_options.show_FPS=False
+    scene.profiling_options.show_FPS = False
     scene.viewer.follow_entity(drone)
 
     # Build scene
@@ -163,12 +165,14 @@ def main():
     print("Initial hover RPM:", controller.thrust)
 
     # Start keyboard listener
-    listener = keyboard.Listener(on_press=controller.on_press, on_release=controller.on_release)
+    listener = keyboard.Listener(
+        on_press=controller.on_press, on_release=controller.on_release)
     listener.start()
 
     if args.mac:
         # Run simulation in another thread
-        sim_thread = threading.Thread(target=run_sim, args=(scene, drone, controller))
+        sim_thread = threading.Thread(
+            target=run_sim, args=(scene, drone, controller))
         sim_thread.start()
 
         if args.vis:
