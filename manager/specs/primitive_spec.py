@@ -3,7 +3,7 @@
 
 from enum import Enum
 
-EAIOS_PRIMITIVE_NO_ARGS = None
+EAIOS_TYPE_NONE = None
 
 
 class EAIOS_IMAGE_FORMAT(Enum):
@@ -14,10 +14,12 @@ class EAIOS_IMAGE_FORMAT(Enum):
     WEBP = "webp"
 
 
-EAIOS_XYZ = {"x": float, "y": float, "z": float}
+# types are defined as python dicts, and used when calling entity's binded primitives
+
+EAIOS_TYPE_XYZ = {"x": float, "y": float, "z": float}
 
 # TODO: add recursive type check in entity
-EAIOS_IMAGE = {
+EAIOS_TYPE_IMAGE = {
     "image_raw": bytes,
     "metadata": {
         "width": int,
@@ -28,15 +30,15 @@ EAIOS_IMAGE = {
 
 PRIMITIVE_SPECS = {
     "getpos": {
-        "args": EAIOS_PRIMITIVE_NO_ARGS,
-        "returns": EAIOS_XYZ,
+        "args": EAIOS_TYPE_NONE,
+        "returns": EAIOS_TYPE_XYZ,
     },
     "move": {
-        "args": EAIOS_XYZ,
+        "args": EAIOS_TYPE_XYZ,
         "returns": {"success": bool},
     },
     "capture": {
-        "args": EAIOS_PRIMITIVE_NO_ARGS,
-        "returns": EAIOS_IMAGE,
+        "args": EAIOS_TYPE_NONE,
+        "returns": EAIOS_TYPE_IMAGE,
     },
 }
