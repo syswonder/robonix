@@ -2,7 +2,13 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 import uuid
-from .primitive_spec import PRIMITIVE_SPECS  # 导入标准原语规范
+from rich.traceback import install
+from manager.specs.primitive_spec import PRIMITIVE_SPECS
+from ..log import logger
+
+def format_primitive_error(primitive_name: str, error_type: str, details: str) -> str:
+    """Format primitive errors in a user-friendly way."""
+    return f"{error_type}: {details} (primitive: {primitive_name})"
 
 
 class EntityType(Enum):
@@ -49,7 +55,7 @@ class Entity:
         }
 
         self.primitives: List[str] = []
-        self.primitive_bindings: Dict[str, callable] = {}  # 绑定的原语函数
+        self.primitive_bindings: Dict[str, callable] = {}
 
         self.is_active = True
         self.created_at = None
@@ -153,44 +159,125 @@ class Entity:
         """
         if primitive_name not in PRIMITIVE_SPECS:
             raise ValueError(
-                f"Primitive '{primitive_name}' is not a standard primitive.")
+                f"Primitive '{primitive_name}' is not a standard primitive."
+            )
         self.primitive_bindings[primitive_name] = func
         self.add_primitive(primitive_name)
 
     def _check_primitive_args(self, primitive_name: str, kwargs: dict):
         """
         Check if the arguments match the primitive spec.
+        Attempts to cast arguments to expected types with warnings before raising errors.
         """
+        # Log arguments with their types
+        arg_info = {k: f"{v} ({type(v).__name__})" for k, v in kwargs.items()}
+        logger.debug(f"checking arguments for primitive '{primitive_name}': {arg_info}")
+
         spec = PRIMITIVE_SPECS[primitive_name]
         expected_args = spec["args"]
-        if set(kwargs.keys()) != set(expected_args):
-            raise ValueError(
-                f"Arguments for '{primitive_name}' must be {expected_args}, got {list(kwargs.keys())}")
+
+        # Handle case where expected_args is None (no arguments required)
+        if expected_args is None:
+            if kwargs:
+                error_msg = f"Primitive '{primitive_name}' expects no arguments, got {list(kwargs.keys())}"
+                logger.error(f"argument validation failed: {error_msg}")
+                raise ValueError(error_msg) from None
+            logger.debug(
+                f"argument validation passed for primitive '{primitive_name}' (no arguments required)"
+            )
+            return
+
+        # Handle case where expected_args is a dict (arguments with types required)
+        if set(kwargs.keys()) != set(expected_args.keys()):
+            error_msg = f"Arguments for '{primitive_name}' must be {list(expected_args.keys())}, got {list(kwargs.keys())}"
+            logger.error(f"argument validation failed: {error_msg}")
+            raise ValueError(error_msg) from None
+
+        # Check argument types and attempt casting if needed
+        for arg_name, expected_type in expected_args.items():
+            if not isinstance(kwargs[arg_name], expected_type):
+                # Try to cast the argument to the expected type
+                try:
+                    original_value = kwargs[arg_name]
+                    original_type = type(original_value).__name__
+                    
+                    # Handle common numeric type conversions
+                    if expected_type == float and isinstance(original_value, (int, str)):
+                        kwargs[arg_name] = float(original_value)
+                    elif expected_type == int and isinstance(original_value, (float, str)):
+                        kwargs[arg_name] = int(original_value)
+                    elif expected_type == bool and isinstance(original_value, (int, str)):
+                        kwargs[arg_name] = bool(original_value)
+                    elif expected_type == str and isinstance(original_value, (int, float, bool)):
+                        kwargs[arg_name] = str(original_value)
+                    else:
+                        # For other types, try direct casting
+                        kwargs[arg_name] = expected_type(original_value)
+                    
+                    # Log warning about the cast
+                    logger.warning(
+                        f"Type cast for primitive '{primitive_name}' argument '{arg_name}': "
+                        f"{original_type} -> {expected_type.__name__} ({original_value} -> {kwargs[arg_name]})"
+                    )
+                    
+                except (ValueError, TypeError) as cast_error:
+                    # If casting fails, raise the original type error
+                    expected_type_name = expected_type.__name__
+                    actual_type_name = type(kwargs[arg_name]).__name__
+                    error_msg = f"Argument '{arg_name}' for '{primitive_name}' must be {expected_type_name}, got {actual_type_name}"
+                    logger.error(f"type validation failed: {error_msg}")
+                    # Create a custom exception with cleaner message
+                    raise TypeError(error_msg) from None
+
+        logger.debug(f"argument validation passed for primitive '{primitive_name}'")
 
     def _check_primitive_returns(self, primitive_name: str, result: dict):
         """
         Check if the return value matches the primitive spec.
         """
+        logger.debug(
+            f"checking return value for primitive '{primitive_name}': {result}"
+        )
+
         spec = PRIMITIVE_SPECS[primitive_name]
         expected_returns = spec["returns"]
+
         if set(result.keys()) != set(expected_returns.keys()):
-            raise ValueError(
-                f"Return value for '{primitive_name}' must have keys {list(expected_returns.keys())}, got {list(result.keys())}")
+            error_msg = f"Return value for '{primitive_name}' must be {list(expected_returns.keys())}, got {list(result.keys())}"
+            logger.error(f"return value validation failed: {error_msg}")
+            raise ValueError(error_msg) from None
+
         for k, v in expected_returns.items():
             if not isinstance(result[k], v):
-                raise TypeError(
-                    f"Return value for '{primitive_name}' key '{k}' must be {v}, got {type(result[k])}")
+                expected_type_name = v.__name__
+                actual_type_name = type(result[k]).__name__
+                error_msg = f"Return value for '{primitive_name}' key '{k}' must be {expected_type_name}, got {actual_type_name}"
+                logger.error(f"return type validation failed: {error_msg}")
+                raise TypeError(error_msg) from None
+
+        logger.debug(f"return value validation passed for primitive '{primitive_name}'")
 
     def __getattr__(self, name):
         if name in self.primitive_bindings:
+
             def wrapper(**kwargs):
-                self._check_primitive_args(name, kwargs)
-                result = self.primitive_bindings[name](**kwargs)
-                self._check_primitive_returns(name, result)
-                return result
+                logger.info(f"calling primitive {name} with kwargs {kwargs}")
+                try:
+                    self._check_primitive_args(name, kwargs)
+                    result = self.primitive_bindings[name](**kwargs)
+                    self._check_primitive_returns(name, result)
+                    return result
+                except (ValueError, TypeError) as e:
+                    logger.error(f"primitive '{name}' execution failed: {str(e)}")
+                    # Create a custom exception with better formatting
+                    error_msg = format_primitive_error(name, type(e).__name__, str(e))
+                    custom_exc = type(e)(error_msg)
+                    raise custom_exc from None
+
             return wrapper
         raise AttributeError(
-            f"'{type(self).__name__}' object has no attribute '{name}', or this primitive is not bound, available primitives: {self.primitives}")
+            f"'{type(self).__name__}' object has no attribute '{name}', or this primitive is not bound, available primitives: {self.primitives}"
+        )
 
 
 class Room(Entity):

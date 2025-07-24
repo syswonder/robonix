@@ -55,12 +55,14 @@ def sim_run_flow():
     book1 = root.get_entity_by_path("room/book1")
     ranger = root.get_entity_by_path("room/ranger")
     plant_pot = root.get_entity_by_path("room/plant_pot")
-    print(f"book1 = {book1.get_absolute_path()}, ranger = {ranger.get_absolute_path()}")
+    print(f"book1 at entity_path {book1.get_absolute_path()}, ranger at entity_path {ranger.get_absolute_path()}")
 
     book1_pos = book1.getpos()
     print(f"book1_pos = {book1_pos}")
-    print(f"ranger = {ranger}")
-    ranger.move(x=book1_pos["x"], y=book1_pos["y"] + 0.5, z=book1_pos["z"])
+    
+    # ranger.move(x=book1_pos["x"], y=book1_pos["y"] + 0.5, z=book1_pos["z"])
+    # ranger.move(x=0, y=0, z=0)
+    ranger.move(x="hello", y=0.2, z={"hello1": "world2"})
 
     print(f"finished moving to book1, ranger now at {ranger.getpos()}")
 
