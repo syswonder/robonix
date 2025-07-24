@@ -5,8 +5,7 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 import uuid
-from rich.traceback import install
-from manager.specs.primitive_spec import PRIMITIVE_SPECS
+from ..specs.primitive_spec import PRIMITIVE_SPECS
 from ..log import logger
 
 
