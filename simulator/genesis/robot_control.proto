@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Copyright (c) 2025, wheatfox <wheatfox17@icloud.com>
 syntax = "proto3";
 
 package robotcontrol;
@@ -7,38 +9,27 @@ service RobotControl {
   rpc Rotate(RotateRequest) returns (MoveReply);
   rpc Stop(StopRequest) returns (MoveReply);
   rpc GetPose(GetPoseRequest) returns (PoseReply);
-  rpc MoveTo(MoveToRequest)
-      returns (MoveReply); // Move forward/backward and laterally
+  rpc MoveTo(MoveToRequest) returns (MoveReply);
 }
 
-message MoveRequest {
-  double distance = 1; // Forward/backward distance, positive for forward,
-                       // negative for backward
-}
+message MoveRequest { double distance = 1; }
 
 message RotateRequest {
-  double angle = 1; // Relative rotation angle, positive for left, negative for
-                    // right, in radians
-  double target_yaw_deg = 2; // (Optional) Absolute target yaw angle in degrees.
-                             // If set, rotate to this yaw.
+  double angle = 1;
+  double target_yaw_deg = 2;
 }
 
 message StopRequest {}
-
 message MoveReply { string status = 1; }
-
 message GetPoseRequest {}
-
 message PoseReply {
   double x = 1;
   double y = 2;
   double z = 3;
-  double yaw = 4; // Yaw angle in degrees
+  double yaw = 4; // degrees
 }
 
 message MoveToRequest {
-  double forward = 1; // Forward/backward distance, positive for forward,
-                      // negative for backward (meters)
-  double lateral =
-      2; // Left/right distance, positive for left, negative for right (meters)
+  double forward = 1;
+  double lateral = 2;
 }
