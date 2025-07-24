@@ -1,10 +1,9 @@
-# primitive_spec.py
-# This file defines the standard primitive specifications for Entity.
-# Each primitive has its argument list and return value specification.
+# SPDX-License-Identifier: MulanPSL-2.0
+# Copyright (c) 2025, wheatfox <wheatfox17@icloud.com>
 
 from enum import Enum
 
-NO_ARGS = None
+EAIOS_PRIMITIVE_NO_ARGS = None
 
 
 class EAIOS_IMAGE_FORMAT(Enum):
@@ -17,7 +16,7 @@ class EAIOS_IMAGE_FORMAT(Enum):
 
 PRIMITIVE_SPECS = {
     "getpos": {
-        "args": NO_ARGS,
+        "args": EAIOS_PRIMITIVE_NO_ARGS,
         "returns": {"x": float, "y": float, "z": float},
     },
     "move": {
@@ -25,7 +24,7 @@ PRIMITIVE_SPECS = {
         "returns": {"success": bool},
     },
     "capture": {
-        "args": NO_ARGS,
+        "args": EAIOS_PRIMITIVE_NO_ARGS,
         "returns": {
             "image_raw": bytes,
             "metadata": {
