@@ -285,6 +285,9 @@ class Entity:
         )
 
     def __getattr__(self, name):
+        # https://www.sefidian.com/2021/06/06/python-__getattr__-and-__getattribute__-magic-methods/
+        # getattr is called when an attribute is not found in the object, while __getattribute__ is called no matter found or not
+        # we use getattr to "bind" primitives to the entity - wheatfox
         if name in self.primitive_bindings:
 
             def wrapper(**kwargs):

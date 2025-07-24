@@ -39,16 +39,17 @@ def sim_gen_graph():
 
     plant_pot.bind_primitive("getpos", lambda: {"x": 2.0, "y": -2.0, "z": 0.2})
 
-    # Bind move primitive to ranger, calls move_to_point from driver
     def move_impl(x, y, z):
-        # Only x, y are used for movement, z is ignored
-        move_to_point(x, y)
+        move_to_point(x, y)  # THIS IS A FUNCTION FROM DRIVER !
         return {"success": True}
 
     ranger.bind_primitive("move", move_impl)
 
     def __get_pose_impl():
-        x, y, z = get_pose()
+        x, y, z = get_pose()  # THIS IS A FUNCTION FROM DRIVER !
+        assert isinstance(x, float)
+        assert isinstance(y, float)
+        assert isinstance(z, float)
         return {"x": x, "y": y, "z": z}
 
     ranger.bind_primitive("getpos", __get_pose_impl)
