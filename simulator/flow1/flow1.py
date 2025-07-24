@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+# Copyright (c) 2025, wheatfox <wheatfox17@icloud.com>
+
 import sys
 
 sys.path.append(".")

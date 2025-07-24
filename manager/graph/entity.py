@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+# Copyright (c) 2025, wheatfox <wheatfox17@icloud.com>
+
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
@@ -172,7 +175,9 @@ class Entity:
         """
         # Log arguments with their types
         arg_info = {k: f"{v} ({type(v).__name__})" for k, v in kwargs.items()}
-        logger.debug(f"[{self.get_absolute_path()}] checking arguments for primitive '{primitive_name}': {arg_info}")
+        logger.debug(
+            f"[{self.get_absolute_path()}] checking arguments for primitive '{primitive_name}': {arg_info}"
+        )
 
         spec = PRIMITIVE_SPECS[primitive_name]
         expected_args = spec["args"]
@@ -181,7 +186,9 @@ class Entity:
         if expected_args is None:
             if kwargs:
                 error_msg = f"Primitive '{primitive_name}' expects no arguments, got {list(kwargs.keys())}"
-                logger.error(f"[{self.get_absolute_path()}] argument validation failed: {error_msg}")
+                logger.error(
+                    f"[{self.get_absolute_path()}] argument validation failed: {error_msg}"
+                )
                 raise ValueError(error_msg) from None
             logger.debug(
                 f"[{self.get_absolute_path()}] argument validation passed for primitive '{primitive_name}' (no arguments required)"
@@ -191,7 +198,9 @@ class Entity:
         # Handle case where expected_args is a dict (arguments with types required)
         if set(kwargs.keys()) != set(expected_args.keys()):
             error_msg = f"Arguments for '{primitive_name}' must be {list(expected_args.keys())}, got {list(kwargs.keys())}"
-            logger.error(f"[{self.get_absolute_path()}] argument validation failed: {error_msg}")
+            logger.error(
+                f"[{self.get_absolute_path()}] argument validation failed: {error_msg}"
+            )
             raise ValueError(error_msg) from None
 
         # Check argument types and attempt casting if needed
@@ -234,11 +243,15 @@ class Entity:
                     expected_type_name = expected_type.__name__
                     actual_type_name = type(kwargs[arg_name]).__name__
                     error_msg = f"Argument '{arg_name}' for '{primitive_name}' must be {expected_type_name}, got {actual_type_name}"
-                    logger.error(f"[{self.get_absolute_path()}] type validation failed: {error_msg}")
+                    logger.error(
+                        f"[{self.get_absolute_path()}] type validation failed: {error_msg}"
+                    )
                     # Create a custom exception with cleaner message
                     raise TypeError(error_msg) from None
 
-        logger.debug(f"[{self.get_absolute_path()}] argument validation passed for primitive '{primitive_name}'")
+        logger.debug(
+            f"[{self.get_absolute_path()}] argument validation passed for primitive '{primitive_name}'"
+        )
 
     def _check_primitive_returns(self, primitive_name: str, result: dict):
         """
@@ -253,7 +266,9 @@ class Entity:
 
         if set(result.keys()) != set(expected_returns.keys()):
             error_msg = f"Return value for '{primitive_name}' must be {list(expected_returns.keys())}, got {list(result.keys())}"
-            logger.error(f"[{self.get_absolute_path()}] return value validation failed: {error_msg}")
+            logger.error(
+                f"[{self.get_absolute_path()}] return value validation failed: {error_msg}"
+            )
             raise ValueError(error_msg) from None
 
         for k, v in expected_returns.items():
@@ -261,10 +276,14 @@ class Entity:
                 expected_type_name = v.__name__
                 actual_type_name = type(result[k]).__name__
                 error_msg = f"Return value for '{primitive_name}' key '{k}' must be {expected_type_name}, got {actual_type_name}"
-                logger.error(f"[{self.get_absolute_path()}] return type validation failed: {error_msg}")
+                logger.error(
+                    f"[{self.get_absolute_path()}] return type validation failed: {error_msg}"
+                )
                 raise TypeError(error_msg) from None
 
-        logger.debug(f"[{self.get_absolute_path()}] return value validation passed for primitive '{primitive_name}'")
+        logger.debug(
+            f"[{self.get_absolute_path()}] return value validation passed for primitive '{primitive_name}'"
+        )
 
     def __getattr__(self, name):
         if name in self.primitive_bindings:
@@ -279,7 +298,9 @@ class Entity:
                     self._check_primitive_returns(name, result)
                     return result
                 except (ValueError, TypeError) as e:
-                    logger.error(f"[{self.get_absolute_path()}] primitive '{name}' execution failed: {str(e)}")
+                    logger.error(
+                        f"[{self.get_absolute_path()}] primitive '{name}' execution failed: {str(e)}"
+                    )
                     # Create a custom exception with better formatting
                     error_msg = format_primitive_error(name, type(e).__name__, str(e))
                     custom_exc = type(e)(error_msg)

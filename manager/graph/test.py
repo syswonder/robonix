@@ -1,5 +1,7 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+# Copyright (c) 2025, wheatfox <wheatfox17@icloud.com>
+
 from entity import *
-from dynamic_graph import *
 import time
 
 root: Room = create_root_room()
