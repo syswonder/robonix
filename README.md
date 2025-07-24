@@ -80,4 +80,10 @@ cd deepembody
 python3 ./manager/boot.py
 ```
 
+## Python
+
+```bash
+pip install rich loguru mcp grpcio grpcio-tools
+```
+
 ---
