@@ -14,7 +14,7 @@ class EAIOS_LOG_LEVEL(Enum):
 LOG_LEVEL = EAIOS_LOG_LEVEL.DEBUG
 
 # stacktrace
-install(show_locals=True, width=120, word_wrap=True, extra_lines=3)
+install(show_locals=False, width=120, word_wrap=True, extra_lines=3)
 
 logger.remove()
 logger.add(
