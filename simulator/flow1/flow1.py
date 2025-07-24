@@ -1,9 +1,11 @@
 import sys
+
 sys.path.append(".")
 sys.path.append("./simulator/genesis")
 
 from manager.graph.entity import *
 from driver.sim_genesis_ranger.driver import move_to_point
+from driver.sim_genesis_ranger.driver import get_pose
 
 root = None
 
@@ -28,37 +30,67 @@ def sim_gen_graph():
     # Bind getpos primitive to book1, always returns fixed position
     book1.bind_primitive("getpos", lambda: {"x": -2.2, "y": 1.8, "z": 0.1})
 
+    plant_pot: Entity = create_generic_entity("plant_pot")
+    room.add_child(plant_pot)
+    print(f"ID = {plant_pot.entity_id}, path = {plant_pot.get_absolute_path()}")
+
+    plant_pot.bind_primitive("getpos", lambda: {"x": 2.0, "y": -2.0, "z": 0.2})
+
     # Bind move primitive to ranger, calls move_to_point from driver
     def move_impl(x, y, z):
         # Only x, y are used for movement, z is ignored
         move_to_point(x, y)
         return {"success": True}
+
     ranger.bind_primitive("move", move_impl)
+
+    def __get_pose_impl():
+        x, y, z = get_pose()
+        return {"x": x, "y": y, "z": z}
+
+    ranger.bind_primitive("getpos", __get_pose_impl)
 
 
 def sim_run_flow():
     book1 = root.get_entity_by_path("room/book1")
     ranger = root.get_entity_by_path("room/ranger")
-    print(
-        f"book1 = {book1.get_absolute_path()}, ranger = {ranger.get_absolute_path()}")
+    plant_pot = root.get_entity_by_path("room/plant_pot")
+    print(f"book1 = {book1.get_absolute_path()}, ranger = {ranger.get_absolute_path()}")
 
     book1_pos = book1.getpos()
     print(f"book1_pos = {book1_pos}")
     print(f"ranger = {ranger}")
-    ranger.move(x=book1_pos["x"], y=book1_pos["y"], z=book1_pos["z"])
-    
-    # create a virtual entity at the origin point
+    ranger.move(x=book1_pos["x"], y=book1_pos["y"] + 0.5, z=book1_pos["z"])
+
+    print(f"finished moving to book1, ranger now at {ranger.getpos()}")
+
     virtual_waypoint1 = create_generic_entity("virtual_waypoint1")
-    virtual_waypoint1.bind_primitive("getpos", lambda: {"x": 0.0, "y": 0.0, "z": 0.0})
+    virtual_waypoint1.bind_primitive("getpos", lambda: {"x": 1.0, "y": 0.0, "z": 0.0})
     root.get_entity_by_path("room").add_child(virtual_waypoint1)
     print(f"virtual_waypoint1 = {virtual_waypoint1.get_absolute_path()}")
-    
-    ranger.move(x=virtual_waypoint1.getpos()["x"], y=virtual_waypoint1.getpos()["y"], z=virtual_waypoint1.getpos()["z"])
+
+    ranger.move(
+        x=virtual_waypoint1.getpos()["x"],
+        y=virtual_waypoint1.getpos()["y"],
+        z=virtual_waypoint1.getpos()["z"],
+    )
+
+    print(f"finished moving to waypoint, ranger now at {ranger.getpos()}")
+
+    ranger.move(
+        x=plant_pot.getpos()["x"] + 0.5,
+        y=plant_pot.getpos()["y"],
+        z=plant_pot.getpos()["z"],
+    )
+
+    print(f"finished moving to plant_pot, ranger now at {ranger.getpos()}")
+
 
 def main():
     sim_gen_graph()
     sim_run_flow()
     print("flow1 done")
+
 
 if __name__ == "__main__":
     main()
