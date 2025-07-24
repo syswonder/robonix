@@ -13,4 +13,11 @@ sudo apt-get install libglfw3 libglfw3-dev
 
 installing the raytracing backend (C++) needs some dev packages and please follow the instructions to compile it
 
+run:
+
+please run the python script relative to the root of the project!
+
+python simulator/genesis/robot1.py
+python simulator/flow1/flow1.py
+
 wheatfox <wheatfox17@icloud.com>
