@@ -6,6 +6,7 @@ from rich.traceback import install
 from manager.specs.primitive_spec import PRIMITIVE_SPECS
 from ..log import logger
 
+
 def format_primitive_error(primitive_name: str, error_type: str, details: str) -> str:
     """Format primitive errors in a user-friendly way."""
     return f"{error_type}: {details} (primitive: {primitive_name})"
@@ -171,7 +172,7 @@ class Entity:
         """
         # Log arguments with their types
         arg_info = {k: f"{v} ({type(v).__name__})" for k, v in kwargs.items()}
-        logger.debug(f"checking arguments for primitive '{primitive_name}': {arg_info}")
+        logger.debug(f"[{self.get_absolute_path()}] checking arguments for primitive '{primitive_name}': {arg_info}")
 
         spec = PRIMITIVE_SPECS[primitive_name]
         expected_args = spec["args"]
@@ -180,17 +181,17 @@ class Entity:
         if expected_args is None:
             if kwargs:
                 error_msg = f"Primitive '{primitive_name}' expects no arguments, got {list(kwargs.keys())}"
-                logger.error(f"argument validation failed: {error_msg}")
+                logger.error(f"[{self.get_absolute_path()}] argument validation failed: {error_msg}")
                 raise ValueError(error_msg) from None
             logger.debug(
-                f"argument validation passed for primitive '{primitive_name}' (no arguments required)"
+                f"[{self.get_absolute_path()}] argument validation passed for primitive '{primitive_name}' (no arguments required)"
             )
             return
 
         # Handle case where expected_args is a dict (arguments with types required)
         if set(kwargs.keys()) != set(expected_args.keys()):
             error_msg = f"Arguments for '{primitive_name}' must be {list(expected_args.keys())}, got {list(kwargs.keys())}"
-            logger.error(f"argument validation failed: {error_msg}")
+            logger.error(f"[{self.get_absolute_path()}] argument validation failed: {error_msg}")
             raise ValueError(error_msg) from None
 
         # Check argument types and attempt casting if needed
@@ -200,43 +201,51 @@ class Entity:
                 try:
                     original_value = kwargs[arg_name]
                     original_type = type(original_value).__name__
-                    
+
                     # Handle common numeric type conversions
-                    if expected_type == float and isinstance(original_value, (int, str)):
+                    if expected_type == float and isinstance(
+                        original_value, (int, str)
+                    ):
                         kwargs[arg_name] = float(original_value)
-                    elif expected_type == int and isinstance(original_value, (float, str)):
+                    elif expected_type == int and isinstance(
+                        original_value, (float, str)
+                    ):
                         kwargs[arg_name] = int(original_value)
-                    elif expected_type == bool and isinstance(original_value, (int, str)):
+                    elif expected_type == bool and isinstance(
+                        original_value, (int, str)
+                    ):
                         kwargs[arg_name] = bool(original_value)
-                    elif expected_type == str and isinstance(original_value, (int, float, bool)):
+                    elif expected_type == str and isinstance(
+                        original_value, (int, float, bool)
+                    ):
                         kwargs[arg_name] = str(original_value)
                     else:
                         # For other types, try direct casting
                         kwargs[arg_name] = expected_type(original_value)
-                    
+
                     # Log warning about the cast
                     logger.warning(
                         f"Type cast for primitive '{primitive_name}' argument '{arg_name}': "
                         f"{original_type} -> {expected_type.__name__} ({original_value} -> {kwargs[arg_name]})"
                     )
-                    
+
                 except (ValueError, TypeError) as cast_error:
                     # If casting fails, raise the original type error
                     expected_type_name = expected_type.__name__
                     actual_type_name = type(kwargs[arg_name]).__name__
                     error_msg = f"Argument '{arg_name}' for '{primitive_name}' must be {expected_type_name}, got {actual_type_name}"
-                    logger.error(f"type validation failed: {error_msg}")
+                    logger.error(f"[{self.get_absolute_path()}] type validation failed: {error_msg}")
                     # Create a custom exception with cleaner message
                     raise TypeError(error_msg) from None
 
-        logger.debug(f"argument validation passed for primitive '{primitive_name}'")
+        logger.debug(f"[{self.get_absolute_path()}] argument validation passed for primitive '{primitive_name}'")
 
     def _check_primitive_returns(self, primitive_name: str, result: dict):
         """
         Check if the return value matches the primitive spec.
         """
         logger.debug(
-            f"checking return value for primitive '{primitive_name}': {result}"
+            f"[{self.get_absolute_path()}] checking return value for primitive '{primitive_name}': {result}"
         )
 
         spec = PRIMITIVE_SPECS[primitive_name]
@@ -244,7 +253,7 @@ class Entity:
 
         if set(result.keys()) != set(expected_returns.keys()):
             error_msg = f"Return value for '{primitive_name}' must be {list(expected_returns.keys())}, got {list(result.keys())}"
-            logger.error(f"return value validation failed: {error_msg}")
+            logger.error(f"[{self.get_absolute_path()}] return value validation failed: {error_msg}")
             raise ValueError(error_msg) from None
 
         for k, v in expected_returns.items():
@@ -252,23 +261,25 @@ class Entity:
                 expected_type_name = v.__name__
                 actual_type_name = type(result[k]).__name__
                 error_msg = f"Return value for '{primitive_name}' key '{k}' must be {expected_type_name}, got {actual_type_name}"
-                logger.error(f"return type validation failed: {error_msg}")
+                logger.error(f"[{self.get_absolute_path()}] return type validation failed: {error_msg}")
                 raise TypeError(error_msg) from None
 
-        logger.debug(f"return value validation passed for primitive '{primitive_name}'")
+        logger.debug(f"[{self.get_absolute_path()}] return value validation passed for primitive '{primitive_name}'")
 
     def __getattr__(self, name):
         if name in self.primitive_bindings:
 
             def wrapper(**kwargs):
-                logger.info(f"calling primitive {name} with kwargs {kwargs}")
+                logger.info(
+                    f"[{self.get_absolute_path()}] calling primitive {name} with kwargs {kwargs}"
+                )
                 try:
                     self._check_primitive_args(name, kwargs)
                     result = self.primitive_bindings[name](**kwargs)
                     self._check_primitive_returns(name, result)
                     return result
                 except (ValueError, TypeError) as e:
-                    logger.error(f"primitive '{name}' execution failed: {str(e)}")
+                    logger.error(f"[{self.get_absolute_path()}] primitive '{name}' execution failed: {str(e)}")
                     # Create a custom exception with better formatting
                     error_msg = format_primitive_error(name, type(e).__name__, str(e))
                     custom_exc = type(e)(error_msg)
@@ -276,7 +287,7 @@ class Entity:
 
             return wrapper
         raise AttributeError(
-            f"'{type(self).__name__}' object has no attribute '{name}', or this primitive is not bound, available primitives: {self.primitives}"
+            f"'{type(self).__name__}' object has no attribute '{name}', or this primitive is not bound, available primitives for {self.get_absolute_path()}: {self.primitives}"
         )
 
 
