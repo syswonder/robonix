@@ -2,7 +2,7 @@
 # Copyright (c) 2025, wheatfox <wheatfox17@icloud.com>
 
 from enum import Enum
-from typing import List
+from typing import Any, Dict, List
 
 EOS_TYPE_None = None
 
@@ -54,6 +54,16 @@ EntityPathAndRequired = {
 # for fields other than input and output, the above rules are not applied! - wheatfox 2025.7.25
 
 # also noted that EOS_SPEC is <Dict>, EOS_TYPE is <class>
+
+"""
+"skill_name": {
+    "description": <str>,
+    "type": <str>
+    "input": <Dict[str, Any]>, // Any is Class or Dict
+    "output": <Dict[str, Any]>,
+    "dependencies": <List[str]>, // List of skill names, use [] for no dependencies
+}
+"""
 
 EOS_SKILL_SPECS = {
     # naming rules: [c/s]_<category>_<name>
