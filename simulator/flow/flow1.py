@@ -66,7 +66,7 @@ def sim_run_flow():
     book1_pos = book1.c_space_getpos()
     print(f"book1_pos = {book1_pos}")
 
-    ranger.move(x=book1_pos["x"], y=book1_pos["y"] + 0.5, z=book1_pos["z"])
+    ranger.c_space_move(x=book1_pos["x"], y=book1_pos["y"] + 0.5, z=book1_pos["z"])
     # ranger.move(x=0, y=0, z=0)
     # ranger.move(x="hello", y=0.2, z={"hello1": "world2"})
 
@@ -81,7 +81,7 @@ def sim_run_flow():
 
     virtual_waypoint1_pos = virtual_waypoint1.c_space_getpos()
 
-    ranger.move(
+    ranger.c_space_move(
         x=virtual_waypoint1_pos["x"],
         y=virtual_waypoint1_pos["y"],
         z=virtual_waypoint1_pos["z"],
@@ -90,7 +90,7 @@ def sim_run_flow():
     print(f"finished moving to waypoint, ranger now at {ranger.c_space_getpos()}")
 
     plant_pot_pos = plant_pot.c_space_getpos()
-    ranger.move(
+    ranger.c_space_move(
         x=plant_pot_pos["x"] + 0.5,
         y=plant_pot_pos["y"],
         z=plant_pot_pos["z"],
