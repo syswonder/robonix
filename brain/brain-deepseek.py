@@ -1,18 +1,25 @@
 import asyncio
+import os
+import time
+import subprocess
+
+import rclpy
+from rclpy.node import Node
 from typing import Optional
 from contextlib import AsyncExitStack
 
+from std_srvs.srv import SetBool, Trigger
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
-
 from anthropic import Anthropic
 from dotenv import load_dotenv
 from openai import OpenAI
-import os
-import time
 
 
+sse_server_1_url = "http://127.0.0.1:8000/sse"
+# sse_server_2_url = "http://127.0.0.1:8001/sse"
 
+server_url_array = [sse_server_1_url]
 
 system_prompt_en = '''
     as a helpful assistant, you will answer user queries and use tools to get information.
@@ -26,7 +33,6 @@ system_prompt_en = '''
 
     the tools you can use are:
 '''
-
 # judge whether the message contains a tool call
 def judge_tool_call(content):
     content_split = content.split("\n")
@@ -34,7 +40,6 @@ def judge_tool_call(content):
         if "[FC]" in i:
             return True
     return False
-    
 
 def tool_calls_format(tool_calls_str: str):
     '''
@@ -71,14 +76,51 @@ def tool_calls_format(tool_calls_str: str):
             })
     return tool_calls
 
+# TODO:ros2 topic to get information
+class ClinetNodeController(Node):
+    def __init__(self):
+        super().__init__("client_node_controller")
+        self.get_logger().info("Client Node Controller initialized")
+        self.client = None
+        # init server process
+        self.process = None
 
-sse_server_1_url = "http://127.0.0.1:8000/sse"
-sse_server_2_url = "http://127.0.0.1:8001/sse"
+        # init ROS2 Topic to get information for query
+        self.topic_subscriber = self.create_subscription(
+            String,
+            'brain-query',
+            self.call_service,
+            10
+        )
 
-server_url_array = [sse_server_1_url, sse_server_2_url]
+    async def init_client(self):
+        self.client = MCPClient()
+        # init server process
+        self.process = subprocess.Popen(
+            ["python3", "capability/example_hello/api/cap_server.py"],
+        )
+        print(f"server PID: {process.pid}")
+        time.sleep(2)  # wait for server to start
+        try:
+            await self.client.connect_to_server()
+            # await self.client.chat_loop()
+        finally:
+            await self.shutdown_node()
+
+    async def shutdown_node(self):
+        """Shutdown the node and clean up resources"""
+        self.get_logger().info("Shutting down client node...")
+        await self.client.cleanup()
+        self.process.terminate() # Terminate the server process
+        self.process.wait()  # Wait for the process to terminate
+        self.destroy_node()
+
+    async def call_service(self, service_name: str, query : str):
+        response = await self.client.process_query(query)
+        return response
 
 class MCPClient:
-    def __init__(self):
+    def __init__(self, api_key = None):
         # Initialize session and client objects
         self.session: Optional[ClientSession] = None
         self.exit_stack = AsyncExitStack()
@@ -86,7 +128,7 @@ class MCPClient:
         self.tool_session_map = {}
         self.client = OpenAI(
             base_url="https://api.deepseek.com",
-            api_key="sk-ca097724a54a4a6e860f97e82a8dd2d5",
+            api_key=api_key,
         )
 
     async def connect_to_server(self):
@@ -115,7 +157,6 @@ class MCPClient:
                     print(f"Tool: {tool.name}, Description: {tool.description}")
         self.available_tools = available_tools
         self.tool_session_map = tool_session_map
-            
 
     async def process_query(self, query: str) -> str:
 
@@ -233,13 +274,26 @@ class MCPClient:
         """Clean up resources"""
         await self.exit_stack.aclose()
 
-async def main():        
-    client = MCPClient()
+async def main():
+    # Load environment variables from .env file
+    load_dotenv()
+    client = MCPClient(api_key=os.getenv("API_KEY"))
+    # 启动进程并获取 PID
+    process = subprocess.Popen(
+        ["python3", "capability/example_hello/api/cap_server.py"],
+    )
+    print(f"server PID: {process.pid}")
+
+    time.sleep(2)  # wait for server to start
+
     try:
         await client.connect_to_server()
         await client.chat_loop()
     finally:
         await client.cleanup()
+        # Terminate the server process
+        process.terminate()
+        process.wait()  # Wait for the process to terminate
 
 if __name__ == "__main__":
     import sys
