@@ -2,9 +2,10 @@
 # Copyright (c) 2025, wheatfox <wheatfox17@icloud.com>
 
 import sys
+
 sys.path.append(".")
 
-from manager.graph.entity import *
+from uapi.graph.entity import *
 
 root = None
 
@@ -26,13 +27,13 @@ def sim_gen_graph():
     room.add_child(book1)
     print(f"ID = {book1.entity_id}, path = {book1.get_absolute_path()}")
 
-    book1.bind_skill("getpos", lambda: {"x": -2.2, "y": 1.8, "z": 0.1})
+    book1.bind_skill("c_space_getpos", lambda: {"x": -2.2, "y": 1.8, "z": 0.1})
 
     plant_pot: Entity = create_generic_entity("plant_pot")
     room.add_child(plant_pot)
     print(f"ID = {plant_pot.entity_id}, path = {plant_pot.get_absolute_path()}")
 
-    plant_pot.bind_skill("getpos", lambda: {"x": 2.0, "y": -2.0, "z": 0.2})
+    plant_pot.bind_skill("c_space_getpos", lambda: {"x": 2.0, "y": -2.0, "z": 0.2})
 
 
 def sim_run_flow():
@@ -43,7 +44,7 @@ def sim_run_flow():
         f"book1 at entity_path {book1.get_absolute_path()}, ranger at entity_path {ranger.get_absolute_path()}"
     )
 
-    book1_pos = book1.getpos()
+    book1_pos = book1.c_space_getpos()
     print(f"book1_pos = {book1_pos}")
 
 
