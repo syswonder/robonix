@@ -31,19 +31,19 @@ def sim_gen_graph():
     print(f"ID = {book1.entity_id}, path = {book1.get_absolute_path()}")
 
     # Bind getpos primitive to book1, always returns fixed position
-    book1.bind_primitive("getpos", lambda: {"x": -2.2, "y": 1.8, "z": 0.1})
+    book1.bind_skill("getpos", lambda: {"x": -2.2, "y": 1.8, "z": 0.1})
 
     plant_pot: Entity = create_generic_entity("plant_pot")
     room.add_child(plant_pot)
     print(f"ID = {plant_pot.entity_id}, path = {plant_pot.get_absolute_path()}")
 
-    plant_pot.bind_primitive("getpos", lambda: {"x": 2.0, "y": -2.0, "z": 0.2})
+    plant_pot.bind_skill("getpos", lambda: {"x": 2.0, "y": -2.0, "z": 0.2})
 
     def move_impl(x, y, z):
         move_to_point(x, y)  # THIS IS A FUNCTION FROM DRIVER !
         return {"success": True}
 
-    ranger.bind_primitive("move", move_impl)
+    ranger.bind_skill("move", move_impl)
 
     def __get_pose_impl():
         x, y, z = get_pose()  # THIS IS A FUNCTION FROM DRIVER !
@@ -52,7 +52,7 @@ def sim_gen_graph():
         assert isinstance(z, float)
         return {"x": x, "y": y, "z": z}
 
-    ranger.bind_primitive("getpos", __get_pose_impl)
+    ranger.bind_skill("getpos", __get_pose_impl)
 
 
 def sim_run_flow():
@@ -73,7 +73,7 @@ def sim_run_flow():
     print(f"finished moving to book1, ranger now at {ranger.getpos()}")
 
     virtual_waypoint1 = create_generic_entity("virtual_waypoint1")
-    virtual_waypoint1.bind_primitive("getpos", lambda: {"x": 1.0, "y": 0.0, "z": 0.0})
+    virtual_waypoint1.bind_skill("getpos", lambda: {"x": 1.0, "y": 0.0, "z": 0.0})
     root.get_entity_by_path("room").add_child(virtual_waypoint1)
     print(f"virtual_waypoint1 = {virtual_waypoint1.get_absolute_path()}")
 

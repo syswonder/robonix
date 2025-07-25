@@ -5,7 +5,7 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 import uuid
-from ..specs.primitive_spec import PRIMITIVE_SPECS
+from ..specs.skill_specs import EOS_SKILL_SPECS
 from ..log import logger
 
 
@@ -156,11 +156,11 @@ class Entity:
                 return None  # Path does not exist
         return current
 
-    def bind_primitive(self, primitive_name: str, func: callable) -> None:
+    def bind_skill(self, primitive_name: str, func: callable) -> None:
         """
         Bind a function to a primitive name for this entity.
         """
-        if primitive_name not in PRIMITIVE_SPECS:
+        if primitive_name not in EOS_SKILL_SPECS:
             raise ValueError(
                 f"Primitive '{primitive_name}' is not a standard primitive."
             )
@@ -178,7 +178,7 @@ class Entity:
             f"[{self.get_absolute_path()}] checking arguments for primitive '{primitive_name}': {arg_info}"
         )
 
-        spec = PRIMITIVE_SPECS[primitive_name]
+        spec = EOS_SKILL_SPECS[primitive_name]
         expected_args = spec["args"]
 
         # Handle case where expected_args is None (no arguments required)
@@ -260,7 +260,7 @@ class Entity:
             f"[{self.get_absolute_path()}] checking return value for primitive '{primitive_name}': {result}"
         )
 
-        spec = PRIMITIVE_SPECS[primitive_name]
+        spec = EOS_SKILL_SPECS[primitive_name]
         expected_returns = spec["returns"]
 
         if set(result.keys()) != set(expected_returns.keys()):

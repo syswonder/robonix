@@ -3,10 +3,10 @@
 
 from enum import Enum
 
-EAIOS_TYPE_NONE = None
+EOS_None = None
 
 
-class EAIOS_IMAGE_FORMAT(Enum):
+class EOS_ImageFormat(Enum):
     JPEG = "jpeg"
     PNG = "png"
     BMP = "bmp"
@@ -14,31 +14,36 @@ class EAIOS_IMAGE_FORMAT(Enum):
     WEBP = "webp"
 
 
-# types are defined as python dicts, and used when calling entity's binded primitives
+class EOS_CameraType(Enum):
+    RGB = "rgb"
+    DEPTH = "depth"
+    INFRARED = "infrared"
 
-EAIOS_TYPE_XYZ = {"x": float, "y": float, "z": float}
+
+EOS_PosXYZ = {"x": float, "y": float, "z": float}
 
 # TODO: add recursive type check in entity
-EAIOS_TYPE_IMAGE = {
+EOS_Image = {
     "image_raw": bytes,
     "metadata": {
         "width": int,
         "height": int,
-        "format": EAIOS_IMAGE_FORMAT,
+        "format": EOS_ImageFormat,
+        "camera_type": EOS_CameraType,
     },
 }
 
-PRIMITIVE_SPECS = {
+EOS_SKILL_SPECS = {
     "getpos": {
-        "args": EAIOS_TYPE_NONE,
-        "returns": EAIOS_TYPE_XYZ,
+        "args": EOS_None,
+        "returns": EOS_PosXYZ,
     },
     "move": {
-        "args": EAIOS_TYPE_XYZ,
+        "args": EOS_PosXYZ,
         "returns": {"success": bool},
     },
     "capture": {
-        "args": EAIOS_TYPE_NONE,
-        "returns": EAIOS_TYPE_IMAGE,
+        "args": EOS_None,
+        "returns": EOS_Image,
     },
 }
