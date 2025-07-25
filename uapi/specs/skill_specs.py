@@ -90,6 +90,8 @@ EOS_SKILL_SPECS = {
                 EntityPathAndRequired,
                 EntityPath,
             ],  # Use EntityPath (str)，and EntityPathAndRequired is a wrapper of EntityPath (str) with required skills, or just EntityPath (str) without skill checks
+            # e.g. robot1.s_space_move2entity(target_entity={entity="/room1/book1",required="c_space_getpos"}, distance=0.5)
+            # e.g. robot1.s_space_move2entity(target_entity="/room1/book1", distance=0.5)
             "distance": float,
         },
         "output": {"success": bool},
