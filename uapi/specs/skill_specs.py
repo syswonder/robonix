@@ -4,6 +4,7 @@
 from enum import Enum
 from typing import List, Tuple, Dict, Any
 from dataclasses import dataclass
+import datetime
 
 # documentation:
 # For input and output fields, the argument and return values are standardized to dict or class.
@@ -46,7 +47,8 @@ class EOS_SkillType(Enum):
     SKILL = "skill"
 
 
-EOS_TYPE_PosXYZ = {"x": float, "y": float, "z": float}
+class EOS_TYPE_Datetime:
+    timestamp: datetime.datetime
 
 
 # TODO: add recursive type check in entity
@@ -157,9 +159,7 @@ class EOS_TYPE_DetectedObject:
 
 @dataclass
 class EOS_TYPE_MaskMap:
-    mask: bytes  # e.g. PNG mask
-    width: int
-    height: int
+    mask: EOS_TYPE_Image
 
 
 @dataclass
@@ -199,20 +199,20 @@ EntityPathAndRequired = {
 }
 
 EOS_SKILL_SPECS = {
-    # naming rules: [c/s]_<category>_<name>
+    # naming rules: [c/s]_<name>
     # c: capability, s: skill
     # dependencies: list of skill that THIS entity should bind before using this skill
     "c_space_getpos": {
         "description": "Get the position of the entity",
         "type": EOS_SkillType.CAPABILITY,
         "input": None,
-        "output": EOS_TYPE_PosXYZ,
+        "output": {"x": float, "y": float, "z": float},
         "dependencies": [],
     },
     "c_space_move": {
         "description": "Move the entity to the given position",
         "type": EOS_SkillType.CAPABILITY,
-        "input": EOS_TYPE_PosXYZ,
+        "input": {"x": float, "y": float, "z": float},
         "output": {"success": bool},
         "dependencies": [],
     },
@@ -387,7 +387,7 @@ EOS_SKILL_SPECS = {
         "description": "Get current timestamp.",
         "type": EOS_SkillType.CAPABILITY,
         "input": None,
-        "output": {"timestamp": float},
+        "output": {"timestamp": EOS_TYPE_Datetime},
         "dependencies": [],
     },
     # --- Lidar Capabilities ---
@@ -462,127 +462,78 @@ EOS_SKILL_SPECS = {
         "output": {"label": str},
         "dependencies": [],
     },
-    # --- Map and State Capabilities ---
-    "c_map_localize": {
-        "description": "SLAM localize.",
-        "type": EOS_SkillType.CAPABILITY,
-        "input": None,
-        "output": EOS_TYPE_Pose2D,
-        "dependencies": [],
-    },
-    "c_tf_lookup": {
-        "description": "Transform lookup between frames.",
-        "type": EOS_SkillType.CAPABILITY,
-        "input": {"from": str, "to": str},
-        "output": EOS_TYPE_Transform,
-        "dependencies": [],
-    },
-    "c_map_update": {
-        "description": "Update map features.",
-        "type": EOS_SkillType.CAPABILITY,
-        "input": {"feature": EOS_TYPE_FeatureList},
-        "output": {"success": bool},
-        "dependencies": [],
-    },
-    "c_grid_map_get": {
-        "description": "Get current local grid map.",
-        "type": EOS_SkillType.CAPABILITY,
-        "input": None,
-        "output": EOS_TYPE_GridMap,
-        "dependencies": [],
-    },
-    "c_goal_reached": {
-        "description": "Check if goal is reached.",
-        "type": EOS_SkillType.CAPABILITY,
-        "input": {"goal": EOS_TYPE_Pose2D},
-        "output": {"reached": bool},
-        "dependencies": [],
-    },
-    "c_insert_semantic_map": {
-        "description": "Insert object and position into semantic map.",
-        "type": EOS_SkillType.CAPABILITY,
-        "input": {"name": str, "position": EOS_TYPE_Pose2D},
-        "output": {"success": bool},
-        "dependencies": [],
-    },
-    "c_query_semantic_map_by_name": {
-        "description": "Query object position by name in semantic map.",
-        "type": EOS_SkillType.CAPABILITY,
-        "input": {"name": str},
-        "output": EOS_TYPE_Pose2D,
-        "dependencies": [],
-    },
-    "c_query_semantic_map_by_position": {
-        "description": "Query object name by position in semantic map.",
-        "type": EOS_SkillType.CAPABILITY,
-        "input": {"position": EOS_TYPE_Pose2D},
-        "output": {"name": str},
-        "dependencies": [],
-    },
-    "c_update_semantic_map": {
-        "description": "Update object position in semantic map (overwrite if exists).",
-        "type": EOS_SkillType.CAPABILITY,
-        "input": {"name": str, "position": EOS_TYPE_Pose2D},
-        "output": {"success": bool},
-        "dependencies": [],
-    },
-    "c_delete_semantic_map": {
-        "description": "Delete object from semantic map (delete all if name is empty).",
-        "type": EOS_SkillType.CAPABILITY,
-        "input": {"name": str},
-        "output": {"success": bool},
-        "dependencies": [],
-    },
-    # --- System Service Capabilities ---
-    "c_file_read": {
-        "description": "Read file content as bytes.",
-        "type": EOS_SkillType.CAPABILITY,
-        "input": {"path": str},
-        "output": {"data": bytes},
-        "dependencies": [],
-    },
-    "c_file_write": {
-        "description": "Write bytes to file.",
-        "type": EOS_SkillType.CAPABILITY,
-        "input": {"path": str, "data": bytes},
-        "output": {"success": bool},
-        "dependencies": [],
-    },
-    "c_sql_exec": {
-        "description": "Execute SQL query.",
-        "type": EOS_SkillType.CAPABILITY,
-        "input": {"query": str},
-        "output": {"rows": List[Dict[str, Any]]},
-        "dependencies": [],
-    },
-    "c_kv_set": {
-        "description": "Set key-value pair.",
-        "type": EOS_SkillType.CAPABILITY,
-        "input": {"key": str, "val": Any},
-        "output": {"success": bool},
-        "dependencies": [],
-    },
-    "c_kv_get": {
-        "description": "Get value by key.",
-        "type": EOS_SkillType.CAPABILITY,
-        "input": {"key": str},
-        "output": {"val": Any},
-        "dependencies": [],
-    },
-    "c_json_parse": {
-        "description": "Parse JSON string to dict.",
-        "type": EOS_SkillType.CAPABILITY,
-        "input": {"json_str": str},
-        "output": {"dict": Dict[str, Any]},
-        "dependencies": [],
-    },
-    "c_md5_hash": {
-        "description": "Calculate MD5 hash of data.",
-        "type": EOS_SkillType.CAPABILITY,
-        "input": {"data": bytes},
-        "output": {"hash": str},
-        "dependencies": [],
-    },
+    # # --- Map and State Capabilities ---
+    # TODO: map skills should be co-designed with Entity Graph system - wheatfox
+    # "c_map_localize": {
+    #     "description": "SLAM localize.",
+    #     "type": EOS_SkillType.CAPABILITY,
+    #     "input": None,
+    #     "output": EOS_TYPE_Pose2D,
+    #     "dependencies": [],
+    # },
+    # "c_tf_lookup": {
+    #     "description": "Transform lookup between frames.",
+    #     "type": EOS_SkillType.CAPABILITY,
+    #     "input": {"from": str, "to": str},
+    #     "output": EOS_TYPE_Transform,
+    #     "dependencies": [],
+    # },
+    # "c_map_update": {
+    #     "description": "Update map features.",
+    #     "type": EOS_SkillType.CAPABILITY,
+    #     "input": {"feature": EOS_TYPE_FeatureList},
+    #     "output": {"success": bool},
+    #     "dependencies": [],
+    # },
+    # "c_grid_map_get": {
+    #     "description": "Get current local grid map.",
+    #     "type": EOS_SkillType.CAPABILITY,
+    #     "input": None,
+    #     "output": EOS_TYPE_GridMap,
+    #     "dependencies": [],
+    # },
+    # "c_goal_reached": {
+    #     "description": "Check if goal is reached.",
+    #     "type": EOS_SkillType.CAPABILITY,
+    #     "input": {"goal": EOS_TYPE_Pose2D},
+    #     "output": {"reached": bool},
+    #     "dependencies": [],
+    # },
+    # "c_insert_semantic_map": {
+    #     "description": "Insert object and position into semantic map.",
+    #     "type": EOS_SkillType.CAPABILITY,
+    #     "input": {"name": str, "position": EOS_TYPE_Pose2D},
+    #     "output": {"success": bool},
+    #     "dependencies": [],
+    # },
+    # "c_query_semantic_map_by_name": {
+    #     "description": "Query object position by name in semantic map.",
+    #     "type": EOS_SkillType.CAPABILITY,
+    #     "input": {"name": str},
+    #     "output": EOS_TYPE_Pose2D,
+    #     "dependencies": [],
+    # },
+    # "c_query_semantic_map_by_position": {
+    #     "description": "Query object name by position in semantic map.",
+    #     "type": EOS_SkillType.CAPABILITY,
+    #     "input": {"position": EOS_TYPE_Pose2D},
+    #     "output": {"name": str},
+    #     "dependencies": [],
+    # },
+    # "c_update_semantic_map": {
+    #     "description": "Update object position in semantic map (overwrite if exists).",
+    #     "type": EOS_SkillType.CAPABILITY,
+    #     "input": {"name": str, "position": EOS_TYPE_Pose2D},
+    #     "output": {"success": bool},
+    #     "dependencies": [],
+    # },
+    # "c_delete_semantic_map": {
+    #     "description": "Delete object from semantic map (delete all if name is empty).",
+    #     "type": EOS_SkillType.CAPABILITY,
+    #     "input": {"name": str},
+    #     "output": {"success": bool},
+    #     "dependencies": [],
+    # },
     # --- Manipulator and Actuator Capabilities ---
     "c_joint_move": {
         "description": "Move single joint to angle.",
