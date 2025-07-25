@@ -5,8 +5,8 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 import uuid
-from ..specs.skill_specs import EOS_SKILL_SPECS
-from ..log import logger
+from uapi.specs.skill_specs import EOS_SKILL_SPECS
+from uapi.log import logger
 
 
 def format_primitive_error(primitive_name: str, error_type: str, details: str) -> str:
@@ -179,10 +179,10 @@ class Entity:
         )
 
         spec = EOS_SKILL_SPECS[primitive_name]
-        expected_args = spec["args"]
+        expected_input = spec["input"]
 
         # Handle case where expected_args is None (no arguments required)
-        if expected_args is None:
+        if expected_input is None:
             if kwargs:
                 error_msg = f"Primitive '{primitive_name}' expects no arguments, got {list(kwargs.keys())}"
                 logger.error(
@@ -195,15 +195,15 @@ class Entity:
             return
 
         # Handle case where expected_args is a dict (arguments with types required)
-        if set(kwargs.keys()) != set(expected_args.keys()):
-            error_msg = f"Arguments for '{primitive_name}' must be {list(expected_args.keys())}, got {list(kwargs.keys())}"
+        if set(kwargs.keys()) != set(expected_input.keys()):
+            error_msg = f"Arguments for '{primitive_name}' must be {list(expected_input.keys())}, got {list(kwargs.keys())}"
             logger.error(
                 f"[{self.get_absolute_path()}] argument validation failed: {error_msg}"
             )
             raise ValueError(error_msg) from None
 
         # Check argument types and attempt casting if needed
-        for arg_name, expected_type in expected_args.items():
+        for arg_name, expected_type in expected_input.items():
             if not isinstance(kwargs[arg_name], expected_type):
                 # Try to cast the argument to the expected type
                 try:
@@ -261,16 +261,16 @@ class Entity:
         )
 
         spec = EOS_SKILL_SPECS[primitive_name]
-        expected_returns = spec["returns"]
+        expected_output = spec["output"]
 
-        if set(result.keys()) != set(expected_returns.keys()):
-            error_msg = f"Return value for '{primitive_name}' must be {list(expected_returns.keys())}, got {list(result.keys())}"
+        if set(result.keys()) != set(expected_output.keys()):
+            error_msg = f"Return value for '{primitive_name}' must be {list(expected_output.keys())}, got {list(result.keys())}"
             logger.error(
                 f"[{self.get_absolute_path()}] return value validation failed: {error_msg}"
             )
             raise ValueError(error_msg) from None
 
-        for k, v in expected_returns.items():
+        for k, v in expected_output.items():
             if not isinstance(result[k], v):
                 expected_type_name = v.__name__
                 actual_type_name = type(result[k]).__name__

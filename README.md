@@ -82,8 +82,10 @@ python3 ./manager/boot.py
 
 ## Python
 
+for userspace programming and simulation, you need to install the following packages:
+
 ```bash
-pip install rich loguru mcp grpcio grpcio-tools
+pip install rich loguru mcp grpcio grpcio-tools pyyaml
 ```
 
 ---

@@ -6,7 +6,7 @@ import sys
 sys.path.append(".")
 sys.path.append("./simulator/genesis")
 
-from manager.graph.entity import *
+from uapi.graph.entity import *
 from driver.sim_genesis_ranger.driver import move_to_point
 from driver.sim_genesis_ranger.driver import get_pose
 
@@ -31,19 +31,19 @@ def sim_gen_graph():
     print(f"ID = {book1.entity_id}, path = {book1.get_absolute_path()}")
 
     # Bind getpos primitive to book1, always returns fixed position
-    book1.bind_skill("getpos", lambda: {"x": -2.2, "y": 1.8, "z": 0.1})
+    book1.bind_skill("c_space_getpos", lambda: {"x": -2.2, "y": 1.8, "z": 0.1})
 
     plant_pot: Entity = create_generic_entity("plant_pot")
     room.add_child(plant_pot)
     print(f"ID = {plant_pot.entity_id}, path = {plant_pot.get_absolute_path()}")
 
-    plant_pot.bind_skill("getpos", lambda: {"x": 2.0, "y": -2.0, "z": 0.2})
+    plant_pot.bind_skill("c_space_getpos", lambda: {"x": 2.0, "y": -2.0, "z": 0.2})
 
     def move_impl(x, y, z):
         move_to_point(x, y)  # THIS IS A FUNCTION FROM DRIVER !
         return {"success": True}
 
-    ranger.bind_skill("move", move_impl)
+    ranger.bind_skill("c_space_move", move_impl)
 
     def __get_pose_impl():
         x, y, z = get_pose()  # THIS IS A FUNCTION FROM DRIVER !
@@ -52,7 +52,7 @@ def sim_gen_graph():
         assert isinstance(z, float)
         return {"x": x, "y": y, "z": z}
 
-    ranger.bind_skill("getpos", __get_pose_impl)
+    ranger.bind_skill("c_space_getpos", __get_pose_impl)
 
 
 def sim_run_flow():
@@ -63,21 +63,23 @@ def sim_run_flow():
         f"book1 at entity_path {book1.get_absolute_path()}, ranger at entity_path {ranger.get_absolute_path()}"
     )
 
-    book1_pos = book1.getpos()
+    book1_pos = book1.c_space_getpos()
     print(f"book1_pos = {book1_pos}")
 
     ranger.move(x=book1_pos["x"], y=book1_pos["y"] + 0.5, z=book1_pos["z"])
     # ranger.move(x=0, y=0, z=0)
     # ranger.move(x="hello", y=0.2, z={"hello1": "world2"})
 
-    print(f"finished moving to book1, ranger now at {ranger.getpos()}")
+    print(f"finished moving to book1, ranger now at {ranger.c_space_getpos()}")
 
     virtual_waypoint1 = create_generic_entity("virtual_waypoint1")
-    virtual_waypoint1.bind_skill("getpos", lambda: {"x": 1.0, "y": 0.0, "z": 0.0})
+    virtual_waypoint1.bind_skill(
+        "c_space_getpos", lambda: {"x": 1.0, "y": 0.0, "z": 0.0}
+    )
     root.get_entity_by_path("room").add_child(virtual_waypoint1)
     print(f"virtual_waypoint1 = {virtual_waypoint1.get_absolute_path()}")
 
-    virtual_waypoint1_pos = virtual_waypoint1.getpos()
+    virtual_waypoint1_pos = virtual_waypoint1.c_space_getpos()
 
     ranger.move(
         x=virtual_waypoint1_pos["x"],
@@ -85,16 +87,16 @@ def sim_run_flow():
         z=virtual_waypoint1_pos["z"],
     )
 
-    print(f"finished moving to waypoint, ranger now at {ranger.getpos()}")
+    print(f"finished moving to waypoint, ranger now at {ranger.c_space_getpos()}")
 
-    plant_pot_pos = plant_pot.getpos()
+    plant_pot_pos = plant_pot.c_space_getpos()
     ranger.move(
         x=plant_pot_pos["x"] + 0.5,
         y=plant_pot_pos["y"],
         z=plant_pot_pos["z"],
     )
 
-    print(f"finished moving to plant_pot, ranger now at {ranger.getpos()}")
+    print(f"finished moving to plant_pot, ranger now at {ranger.c_space_getpos()}")
 
 
 def main():

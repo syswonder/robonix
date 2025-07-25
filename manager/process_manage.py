@@ -5,7 +5,7 @@ import threading
 import pty
 import select
 import signal
-from loguru import logger
+from log import logger
 
 # NodeProcess class
 class ProcessNode:
