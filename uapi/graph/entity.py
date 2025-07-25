@@ -7,6 +7,7 @@ from enum import Enum
 import uuid
 from uapi.specs.skill_specs import EOS_SKILL_SPECS
 from uapi.log import logger
+import dataclasses
 
 
 def format_primitive_error(primitive_name: str, error_type: str, details: str) -> str:
@@ -167,10 +168,90 @@ class Entity:
         self.primitive_bindings[primitive_name] = func
         self.add_primitive(primitive_name)
 
+    def _is_type_match(self, value, expected_type):
+        """
+        Helper to check if value matches expected_type, where expected_type can be:
+        - a type (e.g., str, int)
+        - a dict (for dict structure)
+        - a list of types/specs (for alternatives)
+        - a dataclass
+        - an Enum
+        """
+        import dataclasses
+        from enum import Enum
+        from typing import List
+
+        # If expected_type is a list, treat as alternatives
+        if isinstance(expected_type, list):
+            for alt in expected_type:
+                if self._is_type_match(value, alt):
+                    return True
+            return False
+        # If expected_type is a dict, value must be dict and match keys/types
+        if isinstance(expected_type, dict):
+            if not isinstance(value, dict):
+                return False
+            if set(value.keys()) != set(expected_type.keys()):
+                return False
+            for k in expected_type:
+                if not self._is_type_match(value[k], expected_type[k]):
+                    return False
+            return True
+        # If expected_type is a dataclass
+        if dataclasses.is_dataclass(expected_type):
+            return isinstance(value, expected_type)
+        # If expected_type is an Enum
+        if isinstance(expected_type, type) and issubclass(expected_type, Enum):
+            return isinstance(value, expected_type)
+        # Fallback: direct isinstance
+        return isinstance(value, expected_type)
+
+    def _try_cast(self, value, expected_type):
+        """
+        Try to cast value to expected_type if possible, else return value as is.
+        """
+        from enum import Enum
+        import dataclasses
+
+        # If expected_type is a list, try each alternative
+        if isinstance(expected_type, list):
+            for alt in expected_type:
+                try:
+                    return self._try_cast(value, alt)
+                except Exception:
+                    continue
+            raise TypeError(
+                f"Value {value!r} does not match any alternative type {expected_type}"
+            )
+        # If expected_type is a dict, try to cast each field
+        if isinstance(expected_type, dict):
+            if not isinstance(value, dict):
+                raise TypeError(
+                    f"Expected dict for {expected_type}, got {type(value).__name__}"
+                )
+            return {
+                k: self._try_cast(value[k], expected_type[k]) for k in expected_type
+            }
+        # If expected_type is a dataclass, skip casting (user must provide correct type)
+        if dataclasses.is_dataclass(expected_type):
+            if not isinstance(value, expected_type):
+                raise TypeError(
+                    f"Expected dataclass {expected_type}, got {type(value).__name__}"
+                )
+            return value
+        # If expected_type is an Enum, try to cast
+        if isinstance(expected_type, type) and issubclass(expected_type, Enum):
+            if isinstance(value, expected_type):
+                return value
+            return expected_type(value)
+        # Fallback: try direct cast
+        return expected_type(value)
+
     def _check_primitive_args(self, primitive_name: str, kwargs: dict):
         """
         Check if the arguments match the primitive spec.
         Attempts to cast arguments to expected types with warnings before raising errors.
+        Now supports multiple alternative types for arguments (e.g., list of types/specs).
         """
         # Log arguments with their types
         arg_info = {k: f"{v} ({type(v).__name__})" for k, v in kwargs.items()}
@@ -204,57 +285,30 @@ class Entity:
 
         # Check argument types and attempt casting if needed
         for arg_name, expected_type in expected_input.items():
-            if not isinstance(kwargs[arg_name], expected_type):
-                # Try to cast the argument to the expected type
+            if not self._is_type_match(kwargs[arg_name], expected_type):
+                # Try to cast the argument to one of the expected types
                 try:
                     original_value = kwargs[arg_name]
                     original_type = type(original_value).__name__
-
-                    # Handle common numeric type conversions
-                    if expected_type == float and isinstance(
-                        original_value, (int, str)
-                    ):
-                        kwargs[arg_name] = float(original_value)
-                    elif expected_type == int and isinstance(
-                        original_value, (float, str)
-                    ):
-                        kwargs[arg_name] = int(original_value)
-                    elif expected_type == bool and isinstance(
-                        original_value, (int, str)
-                    ):
-                        kwargs[arg_name] = bool(original_value)
-                    elif expected_type == str and isinstance(
-                        original_value, (int, float, bool)
-                    ):
-                        kwargs[arg_name] = str(original_value)
-                    else:
-                        # For other types, try direct casting
-                        kwargs[arg_name] = expected_type(original_value)
-
-                    # Log warning about the cast
+                    kwargs[arg_name] = self._try_cast(original_value, expected_type)
                     logger.warning(
                         f"Type cast for primitive '{primitive_name}' argument '{arg_name}': "
-                        f"{original_type} -> {expected_type.__name__} ({original_value} -> {kwargs[arg_name]})"
+                        f"{original_type} -> {type(kwargs[arg_name]).__name__} ({original_value} -> {kwargs[arg_name]})"
                     )
-
                 except (ValueError, TypeError) as cast_error:
-                    # If casting fails, raise the original type error
-                    expected_type_name = expected_type.__name__
-                    actual_type_name = type(kwargs[arg_name]).__name__
-                    error_msg = f"Argument '{arg_name}' for '{primitive_name}' must be {expected_type_name}, got {actual_type_name}"
+                    error_msg = f"Argument '{arg_name}' for '{primitive_name}' must be {expected_type}, got {type(kwargs[arg_name]).__name__}"
                     logger.error(
                         f"[{self.get_absolute_path()}] type validation failed: {error_msg}"
                     )
-                    # Create a custom exception with cleaner message
                     raise TypeError(error_msg) from None
 
         logger.debug(
             f"[{self.get_absolute_path()}] argument validation passed for primitive '{primitive_name}'"
         )
 
-    def _check_primitive_returns(self, primitive_name: str, result: dict):
+    def _check_primitive_returns(self, primitive_name: str, result):
         """
-        Check if the return value matches the primitive spec.
+        Check if the return value matches the primitive spec, supporting dataclass, dict, list, and enum recursively.
         """
         logger.debug(
             f"[{self.get_absolute_path()}] checking return value for primitive '{primitive_name}': {result}"
@@ -263,22 +317,45 @@ class Entity:
         spec = EOS_SKILL_SPECS[primitive_name]
         expected_output = spec["output"]
 
-        if set(result.keys()) != set(expected_output.keys()):
-            error_msg = f"Return value for '{primitive_name}' must be {list(expected_output.keys())}, got {list(result.keys())}"
-            logger.error(
-                f"[{self.get_absolute_path()}] return value validation failed: {error_msg}"
-            )
-            raise ValueError(error_msg) from None
+        def recursive_type_check(value, expected_type):
+            # Handle dataclass
+            if dataclasses.is_dataclass(expected_type):
+                if not isinstance(value, expected_type):
+                    return False
+                for field in dataclasses.fields(expected_type):
+                    v = getattr(value, field.name)
+                    t = field.type
+                    if not recursive_type_check(v, t):
+                        return False
+                return True
+            # Handle dict
+            if isinstance(expected_type, dict):
+                if not isinstance(value, dict):
+                    return False
+                if set(value.keys()) != set(expected_type.keys()):
+                    return False
+                for k in expected_type:
+                    if not recursive_type_check(value[k], expected_type[k]):
+                        return False
+                return True
+            # Handle list/tuple (only check type, not length)
+            if getattr(expected_type, "__origin__", None) in (list, List):
+                if not isinstance(value, list):
+                    return False
+                elem_type = expected_type.__args__[0]
+                return all(recursive_type_check(v, elem_type) for v in value)
+            # Handle enum
+            if isinstance(expected_type, type) and issubclass(expected_type, Enum):
+                return isinstance(value, expected_type)
+            # Fallback: direct isinstance
+            return isinstance(value, expected_type)
 
-        for k, v in expected_output.items():
-            if not isinstance(result[k], v):
-                expected_type_name = v.__name__
-                actual_type_name = type(result[k]).__name__
-                error_msg = f"Return value for '{primitive_name}' key '{k}' must be {expected_type_name}, got {actual_type_name}"
-                logger.error(
-                    f"[{self.get_absolute_path()}] return type validation failed: {error_msg}"
-                )
-                raise TypeError(error_msg) from None
+        if not recursive_type_check(result, expected_output):
+            error_msg = f"Return value for '{primitive_name}' does not match expected type {expected_output}"
+            logger.error(
+                f"[{self.get_absolute_path()}] return type validation failed: {error_msg}"
+            )
+            raise TypeError(error_msg) from None
 
         logger.debug(
             f"[{self.get_absolute_path()}] return value validation passed for primitive '{primitive_name}'"
