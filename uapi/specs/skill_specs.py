@@ -2,9 +2,29 @@
 # Copyright (c) 2025, wheatfox <wheatfox17@icloud.com>
 
 from enum import Enum
-from typing import Any, Dict, List
+from typing import List
+from dataclasses import dataclass
 
-EOS_TYPE_None = None
+# documentation:
+# For input and output fields, the argument and return values are standardized to dict or class.
+# - For simple types, use {<str>: <class>} (e.g., {"x": float, "y": float, "z": float})
+# - For complex types, define a dataclass/class (e.g., EOS_SPEC_Image) and use the class directly as the value.
+# The TYPE here is the actual Python type symbol, like str, int, float, or a dataclass/class.
+# For fields other than input and output, the above rules are not applied!
+# Example:
+#   { "input": None, "output": EOS_SPEC_Image }
+#   { "input": {"target": str, "distance": float}, "output": {"success": bool} }
+# This enables strict type checking, including for nested/complex structures.
+# Also noted that EOS_SPEC is <class> for complex types, not just <Dict>.
+# - wheatfox 2025.7.25
+
+# "skill_name": {
+#     "description": <str>,
+#     "type": <str>
+#     "input": <Dict[str, Any]>, // Any is Class or Dict
+#     "output": <Dict[str, Any]>,
+#     "dependencies": <List[str]>, // List of skill names, use [] for no dependencies
+# }
 
 
 class EOS_TYPE_ImageFormat(Enum):
@@ -26,18 +46,39 @@ class EOS_SkillType(Enum):
     SKILL = "skill"
 
 
-EOS_SPEC_PosXYZ = {"x": float, "y": float, "z": float}
+EOS_TYPE_PosXYZ = {"x": float, "y": float, "z": float}
+
 
 # TODO: add recursive type check in entity
-EOS_SPEC_Image = {
-    "image_raw": bytes,
-    "metadata": {
-        "width": int,
-        "height": int,
-        "format": EOS_TYPE_ImageFormat,
-        "camera_type": EOS_TYPE_CameraType,
-    },
-}
+@dataclass
+class EOS_TYPE_ImageMetadata:
+    width: int
+    height: int
+    format: EOS_TYPE_ImageFormat
+    camera_type: EOS_TYPE_CameraType
+
+    def __str__(self):
+        from rich.pretty import pretty_repr
+
+        return pretty_repr(self)
+
+
+@dataclass
+class EOS_TYPE_Image:
+    image_raw: bytes
+    metadata: EOS_TYPE_ImageMetadata
+
+    def __str__(self):
+        from rich.pretty import pretty_repr
+
+        meta_str = pretty_repr(self.metadata)
+        if self.image_raw is not None:
+            preview = self.image_raw[:8]
+            preview_str = f"bytes[{len(self.image_raw)}]: {preview!r}..."
+        else:
+            preview_str = "None"
+        return f"EOS_Image(\n  image_raw={preview_str},\n  metadata={meta_str}\n)"
+
 
 EntityPath = str  # Represents the path of an entity.
 
@@ -46,25 +87,6 @@ EntityPathAndRequired = {
     "required": List[str],
 }
 
-# documentation:
-# for input and output fields, the argument and return values are standardized to dict
-# the key is the NAME of the argument or return value, and the value is the TYPE of the argument or return value
-# the TYPE here is the actually python type symbol, like str, int, float (which is actually a CLASS) so:
-# { <str>: <class>/<Dict> } where Dict support complex data types like Image
-# for fields other than input and output, the above rules are not applied! - wheatfox 2025.7.25
-
-# also noted that EOS_SPEC is <Dict>, EOS_TYPE is <class>
-
-"""
-"skill_name": {
-    "description": <str>,
-    "type": <str>
-    "input": <Dict[str, Any]>, // Any is Class or Dict
-    "output": <Dict[str, Any]>,
-    "dependencies": <List[str]>, // List of skill names, use [] for no dependencies
-}
-"""
-
 EOS_SKILL_SPECS = {
     # naming rules: [c/s]_<category>_<name>
     # c: capability, s: skill
@@ -72,14 +94,14 @@ EOS_SKILL_SPECS = {
     "c_space_getpos": {
         "description": "Get the position of the entity",
         "type": EOS_SkillType.CAPABILITY,
-        "input": EOS_TYPE_None,
-        "output": EOS_SPEC_PosXYZ,
+        "input": None,
+        "output": EOS_TYPE_PosXYZ,
         "dependencies": [],
     },
     "c_space_move": {
         "description": "Move the entity to the given position",
         "type": EOS_SkillType.CAPABILITY,
-        "input": EOS_SPEC_PosXYZ,
+        "input": EOS_TYPE_PosXYZ,
         "output": {"success": bool},
         "dependencies": [],
     },
@@ -87,8 +109,8 @@ EOS_SKILL_SPECS = {
         # cap_camera_rgb, cap_camera_depth, cap_camera_ir
         "description": "Capture an image, should be implemented on camera or something",
         "type": EOS_SkillType.CAPABILITY,
-        "input": EOS_TYPE_None,
-        "output": EOS_SPEC_Image,
+        "input": None,
+        "output": EOS_TYPE_Image,  # Use the dataclass
         "dependencies": [],
     },
     "s_space_move2entity": {
