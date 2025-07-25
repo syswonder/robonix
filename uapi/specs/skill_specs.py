@@ -4,10 +4,10 @@
 from enum import Enum
 from typing import List
 
-EOS_None = None
+EOS_TYPE_None = None
 
 
-class EOS_ImageFormat(Enum):
+class EOS_TYPE_ImageFormat(Enum):
     JPEG = "jpeg"
     PNG = "png"
     BMP = "bmp"
@@ -15,7 +15,7 @@ class EOS_ImageFormat(Enum):
     WEBP = "webp"
 
 
-class EOS_CameraType(Enum):
+class EOS_TYPE_CameraType(Enum):
     RGB = "rgb"
     DEPTH = "depth"
     INFRARED = "infrared"
@@ -26,16 +26,16 @@ class EOS_SkillType(Enum):
     SKILL = "skill"
 
 
-EOS_PosXYZ = {"x": float, "y": float, "z": float}
+EOS_SPEC_PosXYZ = {"x": float, "y": float, "z": float}
 
 # TODO: add recursive type check in entity
-EOS_Image = {
+EOS_SPEC_Image = {
     "image_raw": bytes,
     "metadata": {
         "width": int,
         "height": int,
-        "format": EOS_ImageFormat,
-        "camera_type": EOS_CameraType,
+        "format": EOS_TYPE_ImageFormat,
+        "camera_type": EOS_TYPE_CameraType,
     },
 }
 
@@ -50,8 +50,10 @@ EntityPathAndRequired = {
 # for input and output fields, the argument and return values are standardized to dict
 # the key is the NAME of the argument or return value, and the value is the TYPE of the argument or return value
 # the TYPE here is the actually python type symbol, like str, int, float (which is actually a CLASS) so:
-# { <str>: <class> }
+# { <str>: <class>/<Dict> } where Dict support complex data types like Image
 # for fields other than input and output, the above rules are not applied! - wheatfox 2025.7.25
+
+# also noted that EOS_SPEC is <Dict>, EOS_TYPE is <class>
 
 EOS_SKILL_SPECS = {
     # naming rules: [c/s]_<category>_<name>
@@ -60,14 +62,14 @@ EOS_SKILL_SPECS = {
     "c_space_getpos": {
         "description": "Get the position of the entity",
         "type": EOS_SkillType.CAPABILITY,
-        "input": EOS_None,
-        "output": EOS_PosXYZ,
+        "input": EOS_TYPE_None,
+        "output": EOS_SPEC_PosXYZ,
         "dependencies": [],
     },
     "c_space_move": {
         "description": "Move the entity to the given position",
         "type": EOS_SkillType.CAPABILITY,
-        "input": EOS_PosXYZ,
+        "input": EOS_SPEC_PosXYZ,
         "output": {"success": bool},
         "dependencies": [],
     },
@@ -75,8 +77,8 @@ EOS_SKILL_SPECS = {
         # cap_camera_rgb, cap_camera_depth, cap_camera_ir
         "description": "Capture an image, should be implemented on camera or something",
         "type": EOS_SkillType.CAPABILITY,
-        "input": EOS_None,
-        "output": EOS_Image,
+        "input": EOS_TYPE_None,
+        "output": EOS_SPEC_Image,
         "dependencies": [],
     },
     "s_space_move2entity": {
