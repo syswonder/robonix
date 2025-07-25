@@ -5,28 +5,44 @@
 # G.add_nodes_from([3], time="2pm", label="node3")
 # print(G.nodes[1])
 # print(list(G.nodes(data=True)))
-
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
 import networkx as nx
 import numpy as np
 from typing import List, Optional, Dict
 from dataclasses import dataclass
 import itertools
+from enum import IntEnum
+
+class NodeType(IntEnum):
+    SHORT_TERM = 0   # 短期
+    LONG_TERM  = 1   # 长期
+    FIXED      = 2   # 固定节点-不允许删除
+
+class NodeClass(IntEnum):
+    SPACE   = 0      # 空间
+    TIME    = 1      # 时间-子节点有序
+    CONTEXT = 2      # 情景
 
 @dataclass
 class MemoryNode:
     # 结构化记忆节点
     node_id: int
-    node_type: int  # 0:短期, 1:长期
-    node_class: int      # 0:空间, 1:时间-子节点有序, 2:情景
+    node_type: NodeType  # 0:短期, 1:长期
+    node_class: NodeClass      # 0:空间, 1:时间-子节点有序, 2:情景
     name: str = "" # 节点名称
     summary: str = ""   # 节点及其下一级子节点摘要-GPT总结/ A 有 a1 a2 a3
     parent_id: int = -1  # 父节点ID
-    timestamp: float = "" # 时间戳-短期记忆用于遗忘
     weight: float = 1.0 # 节点权重 小于 0为错误节点？
     has_child: bool = False # 是否有子节点
     # child_ids: List[int] = None  # 子节点ID列表 - 以图为准
     parents_cnt: int = 0  # 父节点数量
     # embedding: np.ndarray  # 单独找个图存储
+
+    # timestamp: float = "" # 时间戳-短期记忆用于遗忘
+    # x: float = 0.0  # 可选-空间节点坐标
+    # y: float = 0.0  # 可选-空间节点坐标
+    # z: float = 0.0  # 可选-空间节点坐标
 
 class MemoryGraph:
     # 带语义检索的混合记忆图谱
@@ -35,6 +51,7 @@ class MemoryGraph:
         # self.map_type = map_type # 0:短期, 1:长期
         self._id_counters = itertools.count(id_start)  # 短期ID从0开始 长期ID从1000开始
         self.max_id = max_id  # 最大ID限制
+        self.time_threshold = 3600  # 短期记忆遗忘时间阈值，单位秒（1小时）
         # 辅助索引结构
         self._node_map = {} # 节点映射
 
@@ -45,7 +62,7 @@ class MemoryGraph:
             # 短期记忆
             current_time = np.datetime64('now')
             for node_id, node in list(self._node_map[0].items()):
-                if (current_time - node.timestamp) > np.timedelta64(1, 'h'):
+                if (current_time - node.timestamp) > self.time_threshold:
                     self.delete_node(node_id)
             return True
         else:
@@ -63,13 +80,14 @@ class MemoryGraph:
         
         return next_id
 
-    def add_node(self, node_type: int, node_class: int,
+    def add_node(self, node_type: NodeType, node_class: NodeClass,
                     name: str, summary: str,
                     parent_id: int = -1,
                     timestamp: float = -1.0, weight: float = 1.0,
-                    has_child: bool = False, ordered: bool = False) -> int:
+                    has_child: bool = False, ordered: bool = False,
+                    x: float = 0.0, y: float = 0.0, z: float = 0.0) -> int:
         # 添加节点到图
-        if node_type not in [0, 1]:
+        if node_type not in [0, 1, 2]:
             raise ValueError("node_type must be 0 (short-term) or 1 (long-term)")
         if node_class not in [0, 1, 2]:
             raise ValueError("node_class must be 0 (spatial), 1 (temporal-ordered), or 2 (contextual)")
@@ -81,7 +99,6 @@ class MemoryGraph:
             name=name,
             summary=summary,
             parent_id=parent_id,
-            timestamp=timestamp,
             weight=weight,
             has_child=has_child,
             parents_cnt=1
@@ -89,6 +106,18 @@ class MemoryGraph:
 
         # 添加到图中
         self.G.add_node(node_id, **node.__dict__)
+        if node_class == NodeClass.TIME and node_type == NodeType.SHORT_TERM :
+            # 如果是短期时间节点，设置为有序
+            self.G.nodes[node_id]['timestamp'] = timestamp
+
+        if node_class == NodeClass.SPACE:
+            # 如果是空间节点，设置坐标
+            self.G.nodes[node_id]['x'] = x
+            self.G.nodes[node_id]['y'] = y
+            self.G.nodes[node_id]['z'] = z
+
+
+
         # 更新辅助索引
         self._node_map[node_id] = node
         # 更新父节点子节点
@@ -145,11 +174,7 @@ class MemoryGraph:
         # 更新图中的边关系
         self.G.add_edge(parent_id, child_node.node_id)
 
-
-
-
-# TODO
-
+    # TODO 更新基础信息+图中信息
     def update_node(self, node_id: int, **kwargs):
         # 更新节点属性
 
@@ -163,12 +188,19 @@ class MemoryGraph:
                     if k not in ['children', 'node_id']}
             self.G.nodes[node_id].update(attrs)
 
-
+    # 基础信息
     def get_node(self, node_id: int) -> Optional[MemoryNode]:
         # 查询节点
         if node_id in self._node_map:
             return self._node_map[node_id]
         return None
+
+    # 获取G图中的信息
+    def get_graph_node(self, node_id: int) -> Dict:
+        # 获取图中节点信息
+        if node_id in self.G.nodes:
+            return self.G.nodes[node_id]
+        return {}
 
     def find_nodes(self, **filters) -> Dict[int, MemoryNode]:
         # 多条件查询节点
@@ -179,24 +211,70 @@ class MemoryGraph:
                 results[nid] = node
         return results
 
+    def load_from_file(self, file_path: str):
+        # 从文件加载图谱数据
+        # TODO 实现从文件加载图谱数据的逻辑
+        pass
+    
+    def save_to_file(self, file_path: str):
+        # 保存图谱数据到文件
+        # TODO 实现保存图谱数据到文件的逻辑
+        pass
+
+    # 将图谱转换为可视化图片保存
+    def visualize(self, file_path: str):
+
+        font_path = '/usr/share/fonts/opentype/noto//NotoSansCJK-Regular.ttc'   # 按需修改
+        my_font = fm.FontProperties(fname=font_path, size=10)
+        # 可视化图谱并保存为图片,将图的名称该为'name'字段
+        pos = nx.spring_layout(self.G)
+        plt.figure(figsize=(12, 8))
+        nx.draw(self.G, pos,
+                with_labels=False, node_size=700,
+                node_color='lightblue',
+                font_size=10, font_color='black', font_weight='bold', font_family=my_font.get_name(),
+                arrows=True)
+        # labels = {node: f"{data['name']}\n{data['summary']}" for node, data in self.G.nodes(data=True)}
+        labels = {node: f"{data['name']}" for node, data in self.G.nodes(data=True)}
+        nx.draw_networkx_labels(self.G, pos, labels=labels, font_size=8, font_color='black')
+        plt.title("Memory Graph Visualization")
+
+        plt.savefig(file_path)
+        plt.close()
+
 # 使用示例
 if __name__ == "__main__":
     mg = MemoryGraph()
     
-    # 添加短期节点
-    # node1 = mg.add_node("Current Location", node2=0, weight=0.8)
-    # node2 = mg.add_node("Target Object", node2=1, has_child=True, ordered=True)
-    node1_id = mg.add_node(0, 0, "Current Location", "Current location of the agent")
-    node2_id = mg.add_node(0, 1, "Target Object", "Object to interact with", parent_id=node1_id, has_child=True, ordered=True)
-    
-    # 添加长期节点
-    node3_id = mg.add_node(1, 0, "Storage Area", "Area where objects are stored")
-    node4_id = mg.add_node(1, 2, "Event Log", "Log of past events", parent_id=node3_id)
-    
-    # 建立关联
-    mg.add_child(node1_id, node2_id)
-    mg.add_child(node3_id, node4_id)
-    mg.add_child(node2_id, node4_id)
+    # 添加节点 
+    # 建立情景节点
+    # {"id": "e1", "event": "打开冰箱"},
+    # {"id": "e2", "event": "取出牛奶"},
+    # {"id": "e3", "event": "倒入杯子"},
+    # {"id": "e4", "event": "加热牛奶"},
+
+    node1_id = mg.add_node(NodeType.FIXED, NodeClass.CONTEXT, "embody ai assiant", "as an embody ai assisant")
+    node2_id = mg.add_node(NodeType.LONG_TERM, NodeClass.CONTEXT, "skill:get milk", "倒牛奶流程有", parent_id=node1_id, has_child=True, ordered=True)
+    node3_id = mg.add_node(NodeType.LONG_TERM, NodeClass.SPACE, "location:kitchen", "厨房里有冰箱，水杯", parent_id=node1_id, x= 1.0, y=1.0, z=1.0)
+    node4_id = mg.add_node(NodeType.LONG_TERM, NodeClass.TIME, "open fridge", "打开冰箱", parent_id=node2_id, has_child=True, ordered=True)
+    node5_id = mg.add_node(NodeType.LONG_TERM, NodeClass.TIME, "get milk", "取出牛奶", parent_id=node2_id, has_child=True, ordered=True)
+    node6_id = mg.add_node(NodeType.LONG_TERM, NodeClass.TIME, "drop bottle", "倒入杯子", parent_id=node2_id, has_child=True, ordered=True)
+    node7_id = mg.add_node(NodeType.LONG_TERM, NodeClass.TIME, "heat milk", "加热牛奶", parent_id=node2_id, has_child=True, ordered=True)
+    node8_id = mg.add_node(NodeType.LONG_TERM, NodeClass.SPACE, "fridge", "冰箱里有牛奶", parent_id=node3_id, x=1.0, y=2.0, z=1.0)
+    node9_id = mg.add_node(NodeType.LONG_TERM, NodeClass.SPACE, "bottle", "水杯在桌子上", parent_id=node3_id, x=2.0, y=3.0, z=1.0)
+    node10_id = mg.add_node(NodeType.LONG_TERM, NodeClass.SPACE, "milk", "牛奶在冰箱里", parent_id=node8_id, x=1.0, y=2.0, z=3.0)
+
+
+    # 建立时空关联关联
+    mg.add_child(node4_id, node8_id)  # 打开冰箱 -> 冰箱
+    mg.add_child(node5_id, node10_id)  # 取出牛奶
+    mg.add_child(node6_id, node9_id)  # 倒入杯子
+    mg.add_child(node7_id, node9_id)  # 加热牛奶 -> 水杯
+
+
+
+
+
 
 
     # 查询示例
@@ -205,8 +283,11 @@ if __name__ == "__main__":
         print(f"Node ID: {node_id}, Name: {node.name}, Summary: {node.summary}, Type: {node.node_type}, Class: {node.node_class}")
     print("\nNode 1 details:", mg.get_node(node1_id).__dict__)
     print("Node 2 details:", mg.get_node(node2_id).__dict__)
+    print("Node 3 details:", mg.get_node(node3_id).__dict__)
+    print("Graph Node 3 details:", mg.get_graph_node(node3_id))
 
+    # 可视化
+    mg.visualize("memory_graph.png")
 
     # 更新节点
-
 
