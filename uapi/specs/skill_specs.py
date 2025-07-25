@@ -2,6 +2,7 @@
 # Copyright (c) 2025, wheatfox <wheatfox17@icloud.com>
 
 from enum import Enum
+from typing import List
 
 EOS_None = None
 
@@ -40,6 +41,18 @@ EOS_Image = {
 
 EntityPath = str  # Represents the path of an entity.
 
+EntityPathAndRequired = {
+    "entity": EntityPath,
+    "required": List[str],
+}
+
+# documentation:
+# for input and output fields, the argument and return values are standardized to dict
+# the key is the NAME of the argument or return value, and the value is the TYPE of the argument or return value
+# the TYPE here is the actually python type symbol, like str, int, float (which is actually a CLASS) so:
+# { <str>: <class> }
+# for fields other than input and output, the above rules are not applied! - wheatfox 2025.7.25
+
 EOS_SKILL_SPECS = {
     # naming rules: [c/s]_<category>_<name>
     # c: capability, s: skill
@@ -70,7 +83,11 @@ EOS_SKILL_SPECS = {
         "description": "Move the entity to vicinity of another entity",
         "type": EOS_SkillType.SKILL,
         "input": {
-            "target_entity": EntityPath,  # Use EntityPath (str)
+            # TODO: use list to support multiple options for passing target_entity (with different Types)
+            "target_entity": [
+                EntityPathAndRequired,
+                EntityPath,
+            ],  # Use EntityPath (str)，and EntityPathAndRequired is a wrapper of EntityPath (str) with required skills, or just EntityPath (str) without skill checks
             "distance": float,
         },
         "output": {"success": bool},
