@@ -5,6 +5,7 @@ import ast
 from mcp.server.fastmcp import FastMCP
 import yaml
 import sys
+import inspect
 if os.path.abspath(os.path.dirname(__file__)) not in sys.path:
     sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 from constant import BASE_SKILL_PATH, INIT_FILE, BASE_PATH
@@ -111,12 +112,17 @@ class eaios:
     @staticmethod
     def plugin(cap,name):
         def decorator(func):
-            eaios.FUNCTION_REGISTRY[cap + ":" + name] = func
+            eaios.FUNCTION_REGISTRY[cap + ":" + name + ":" + func.__name__] = func
             return func
         return decorator
 
-    def get_plugin(cap,name):
-        plugin_name = cap + ":" + name
+    def get_plugin(cap,name,func_name = None):
+        if func_name == None:
+            current = inspect.currentframe()
+            caller = current.f_back
+            caller_func_name = caller.f_code.co_name if caller else None
+
+        plugin_name = cap + ":" + name + ":" + func_name
         # auto raise KeyError
         # if plugin_name not in eaios.FUNCTION_REGISTRY.keys():
         #     raise 
