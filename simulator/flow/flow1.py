@@ -47,7 +47,7 @@ def sim_gen_graph():
     ranger.bind_skill("c_space_move", move_impl)
 
     def __get_pose_impl():
-        x, y, z = get_pose()  # THIS IS A FUNCTION FROM DRIVER !
+        x, y, z, yaw = get_pose()  # THIS IS A FUNCTION FROM DRIVER !
         assert isinstance(x, float)
         assert isinstance(y, float)
         assert isinstance(z, float)
