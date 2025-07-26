@@ -54,14 +54,14 @@ def get_pose():
     global channel, stub
     try:
         response = stub.GetPose(robot_control_pb2.GetPoseRequest())
-        return response.x, response.y, response.yaw
+        return response.x, response.y, response.z, response.yaw
     except RpcError as e:
         print(f"[driver] failed to get pose: {e}")
         print("[driver] attempting to reconnect to server...")
         try:
             channel, stub = wait_for_server(max_retries=5, retry_interval=1.0)
             response = stub.GetPose(robot_control_pb2.GetPoseRequest())
-            return response.x, response.y, response.yaw
+            return response.x, response.y, response.z, response.yaw
         except Exception as reconnect_error:
             print(f"[driver] reconnection failed: {reconnect_error}")
             raise
@@ -71,7 +71,7 @@ def rotate_to_yaw(target_yaw_deg, tolerance=2.0):
     global channel, stub
     while True:
         try:
-            _, _, current_yaw = get_pose()
+            _, _, _, current_yaw = get_pose()
             diff = (target_yaw_deg - current_yaw + 180) % 360 - 180
             if abs(diff) < tolerance:
                 stub.Stop(robot_control_pb2.StopRequest())
@@ -108,7 +108,7 @@ def move_forward(distance):
 
 def move_to_point(target_x, target_y):
     try:
-        x, y, yaw = get_pose()
+        x, y, z, yaw = get_pose()
         dx = target_x - x
         dy = target_y - y
         distance = math.hypot(dx, dy)

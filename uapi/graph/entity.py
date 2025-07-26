@@ -368,7 +368,7 @@ class Entity:
         if name in self.primitive_bindings:
 
             def wrapper(**kwargs):
-                logger.info(
+                logger.debug(
                     f"[{self.get_absolute_path()}] calling primitive {name} with kwargs {kwargs}"
                 )
                 try:
