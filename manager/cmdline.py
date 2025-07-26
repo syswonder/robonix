@@ -296,9 +296,9 @@ class CLI:
         """Get ROS info"""
         return (
             "ROS_DISTRO: "
-            + os.getenv("ROS_DISTRO")
+            + (os.getenv("ROS_DISTRO") or "N/A")
             + ", ROS_VERSION: "
-            + os.getenv("ROS_VERSION")
+            + (os.getenv("ROS_VERSION") or "N/A")
         )
 
     def run(self):

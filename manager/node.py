@@ -1,6 +1,6 @@
 import os
 import yaml
-from loguru import logger
+from log import logger
 from constant import BASE_PATH
 
 class BaseNode:
