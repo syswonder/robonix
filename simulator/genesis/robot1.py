@@ -312,6 +312,13 @@ def serve_grpc(car, keyboard_device, port=50051):
     return server
 
 
+def get_sim_asset(path):
+    this_file_dir = os.path.dirname(os.path.abspath(__file__))
+    target_file = os.path.join(this_file_dir, "assets", path)
+    logger.info(f"get_sim_asset: {target_file}")
+    return target_file
+
+
 def main():
 
     gs.init(backend=gs.gpu)
@@ -319,8 +326,12 @@ def main():
     global GLOBAL_SCENE
     GLOBAL_SCENE = gs.Scene(
         show_viewer=True,
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=(0, 0, -9.81),
+        ),
         viewer_options=gs.options.ViewerOptions(
-            res=(1280, 720),
+            res=(1366, 768),
             camera_pos=(-4.0, 2.5, 3.0),
             camera_lookat=(0.0, 0.0, 0.5),
             camera_fov=45,
@@ -355,58 +366,105 @@ def main():
     # Create floor
     floor = GLOBAL_SCENE.add_entity(
         gs.morphs.Plane(pos=(0.0, 0.0, 0.0)),
-        surface=gs.surfaces.Rough(color=(0.8, 0.7, 0.6)),
+        surface=gs.surfaces.Rough(
+            roughness=0.5,
+            diffuse_texture=gs.textures.ImageTexture(
+                image_path=get_sim_asset(
+                    "texture_tiles_0024/tiles_0024_color_1k.jpg")
+            ),
+            normal_texture=gs.textures.ImageTexture(
+                image_path=get_sim_asset(
+                    "texture_tiles_0024/tiles_0024_normal_opengl_1k.png")
+            ),
+        )
     )
 
     # Create room walls
     room_wall_north = GLOBAL_SCENE.add_entity(
-        gs.morphs.Box(pos=(0.0, 4.0, 0.5), size=(8.0, 0.2, 1.0), fixed=True),
+        gs.morphs.Box(pos=(0.0, 4.0, -0.1), size=(8.0, 0.2, 3.0), fixed=True),
         surface=gs.surfaces.Smooth(color=(0.9, 0.9, 0.9)),
     )
     room_wall_south = GLOBAL_SCENE.add_entity(
-        gs.morphs.Box(pos=(0.0, -4.0, 0.5), size=(8.0, 0.2, 1.0), fixed=True),
+        gs.morphs.Box(pos=(0.0, -4.0, -0.1), size=(8.0, 0.2, 3.0), fixed=True),
         surface=gs.surfaces.Smooth(color=(0.9, 0.9, 0.9)),
     )
     room_wall_east = GLOBAL_SCENE.add_entity(
-        gs.morphs.Box(pos=(4.0, 0.0, 0.5), size=(0.2, 8.0, 1.0), fixed=True),
+        gs.morphs.Box(pos=(4.0, 0.0, -0.1), size=(0.2, 8.0, 3.0), fixed=True),
         surface=gs.surfaces.Smooth(color=(0.9, 0.9, 0.9)),
     )
     room_wall_west = GLOBAL_SCENE.add_entity(
-        gs.morphs.Box(pos=(-4.0, 0.0, 0.5), size=(0.2, 8.0, 1.0), fixed=True),
+        gs.morphs.Box(pos=(-4.0, 0.0, -0.1), size=(0.2, 8.0, 3.0), fixed=True),
         surface=gs.surfaces.Smooth(color=(0.9, 0.9, 0.9)),
     )
 
     # Create the car (box)
+    # car = GLOBAL_SCENE.add_entity(
+    #     gs.morphs.Box(pos=(0.0, 0.0, 0.15), size=(0.3, 0.5, 0.3), fixed=False),
+    #     surface=gs.surfaces.Iron(color=(0.2, 0.2, 0.8)),
+    # )
+
     car = GLOBAL_SCENE.add_entity(
-        gs.morphs.Box(pos=(0.0, 0.0, 0.15), size=(0.3, 0.5, 0.3), fixed=False),
-        surface=gs.surfaces.Iron(color=(0.2, 0.2, 0.8)),
+        morph=gs.morphs.URDF(file="urdf/go2/urdf/go2.urdf", pos=(-1, 0.0, 0.5)),
     )
 
     GLOBAL_SCENE.viewer.follow_entity(car)
 
-    # Add furniture and decorations (unchanged)
-    table = GLOBAL_SCENE.add_entity(
-        gs.morphs.Box(pos=(-2.0, 2.0, 0.05), size=(1.2, 0.8, 0.1), fixed=True),
-        surface=gs.surfaces.Rough(color=(0.4, 0.2, 0.1)),
+    # # Add furniture and decorations (unchanged)
+    # table = GLOBAL_SCENE.add_entity(
+    #     gs.morphs.Box(pos=(-2.0, 2.0, 0.05), size=(1.2, 0.8, 0.1), fixed=True),
+    #     surface=gs.surfaces.Rough(color=(0.4, 0.2, 0.1)),
+    # )
+    # chair = GLOBAL_SCENE.add_entity(
+    #     gs.morphs.Box(pos=(-2.0, 1.0, 0.4), size=(0.5, 0.5, 0.8), fixed=True),
+    #     surface=gs.surfaces.Rough(color=(0.6, 0.4, 0.2)),
+    # )
+    # plant_pot = GLOBAL_SCENE.add_entity(
+    #     gs.morphs.Cylinder(pos=(2.0, -2.0, 0.2), height=0.4,
+    #                        radius=0.3, fixed=True),
+    #     surface=gs.surfaces.Rough(color=(0.6, 0.4, 0.2)),
+    # )
+    # book1 = GLOBAL_SCENE.add_entity(
+    #     gs.morphs.Box(pos=(-2.2, 1.8, 0.1),
+    #                   size=(0.15, 0.2, 0.05), fixed=True),
+    #     surface=gs.surfaces.Rough(color=(0.8, 0.2, 0.2)),
+    # )
+    # book2 = GLOBAL_SCENE.add_entity(
+    #     gs.morphs.Box(pos=(-1.8, 1.8, 0.1),
+    #                   size=(0.15, 0.2, 0.05), fixed=True),
+    #     surface=gs.surfaces.Rough(color=(0.2, 0.6, 0.8)),
+    # )
+
+    # add 3D models
+    ########################## materials ##########################
+    mat_elastic = gs.materials.PBD.Elastic()
+
+    ########################## entities ##########################
+    dragon = GLOBAL_SCENE.add_entity(
+        material=mat_elastic,
+        morph=gs.morphs.Mesh(
+            file="meshes/dragon/dragon.obj",
+            scale=0.007,
+            pos=(0, 0, 0.8),
+        ),
+        surface=gs.surfaces.Default(
+            # vis_mode='recon',
+        ),
     )
+
     chair = GLOBAL_SCENE.add_entity(
-        gs.morphs.Box(pos=(-2.0, 1.0, 0.4), size=(0.5, 0.5, 0.8), fixed=True),
-        surface=gs.surfaces.Rough(color=(0.6, 0.4, 0.2)),
-    )
-    plant_pot = GLOBAL_SCENE.add_entity(
-        gs.morphs.Cylinder(pos=(2.0, -2.0, 0.2), height=0.4,
-                           radius=0.3, fixed=True),
-        surface=gs.surfaces.Rough(color=(0.6, 0.4, 0.2)),
-    )
-    book1 = GLOBAL_SCENE.add_entity(
-        gs.morphs.Box(pos=(-2.2, 1.8, 0.1),
-                      size=(0.15, 0.2, 0.05), fixed=True),
-        surface=gs.surfaces.Rough(color=(0.8, 0.2, 0.2)),
-    )
-    book2 = GLOBAL_SCENE.add_entity(
-        gs.morphs.Box(pos=(-1.8, 1.8, 0.1),
-                      size=(0.15, 0.2, 0.05), fixed=True),
-        surface=gs.surfaces.Rough(color=(0.2, 0.6, 0.8)),
+        morph=gs.morphs.Mesh(
+            file=get_sim_asset("chair1/MAD_QUEEN_CHAIR.obj"),
+            scale=0.007,
+            pos=(0, 0, 0.8),
+        ),
+        surface=gs.surfaces.Default(
+            diffuse_texture=gs.textures.ImageTexture(
+                image_path=get_sim_asset("chair1/MAD_QUEEN_CHAIR/3_1_2_d.jpg"),
+            ),
+            roughness_texture=gs.textures.ImageTexture(
+                image_path=get_sim_asset("chair1/MAD_QUEEN_CHAIR/14_2_8_r.jpg"),
+            ),
+        ),
     )
 
     GLOBAL_SCENE.build()
