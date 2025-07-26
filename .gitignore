@@ -15,3 +15,5 @@ temp/
 log.txt
 
 .DS_Store
+
+.cursor/
