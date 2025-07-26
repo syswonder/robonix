@@ -33,7 +33,7 @@ def s_detect_objs(camera_name: str) -> dict:
         if np_color_image is None:
             return {}
         # Load YOLO model
-        yolo = YOLOE("../models/yoloe-11l-seg-pf.pt")
+        yolo = YOLOE("./models/yoloe-11l-seg-pf.pt")
         # Run YOLO detection
         results = yolo(source=np_color_image, device="cuda:0")
         detection = results[0]

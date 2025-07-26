@@ -17,3 +17,5 @@ log.txt
 .DS_Store
 
 .cursor/
+.cursorrules
+*.pt
