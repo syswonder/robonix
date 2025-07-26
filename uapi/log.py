@@ -40,7 +40,7 @@ def set_log_level(level):
         raise TypeError("level must be EAIOS_LOG_LEVEL or str")
     logger.add(
         sys.stderr,
-        format="[{elapsed} <green>{name}</green> <level>{level}</level>] <level>{message}</level>",
+        format="[{elapsed} <green>{name}</green> <level>{level}</level>] {message}",
         level=log_level_value,
         colorize=True,
         backtrace=True,
@@ -52,7 +52,7 @@ def set_log_level(level):
 logger.remove()
 logger.add(
     sys.stderr,
-    format="[{elapsed} <green>{name}</green> <level>{level}</level>] <level>{message}</level>",
+    format="[{elapsed} <green>{name}</green> <level>{level}</level>] {message}",
     level=LOG_LEVEL.value,
     colorize=True,
     backtrace=True,
