@@ -97,7 +97,9 @@ def sim_run_flow():
         z=plant_pot_pos["z"],
     )
 
-    logger.info(f"finished moving to plant_pot, ranger now at {ranger.c_space_getpos()}")
+    logger.info(
+        f"finished moving to plant_pot, ranger now at {ranger.c_space_getpos()}"
+    )
 
 
 def main():
