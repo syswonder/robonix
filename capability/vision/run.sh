@@ -1,4 +1,3 @@
 source /opt/ros/humble/setup.bash
-source ./install/setup.bash
 
-ros2 launch piper_vision yolo_vlm_launch.py
+ros2 run tf2_ros static_transform_publisher   0.3 0 0.1   -1.5708 0 -1.5708   base_link camera_link
