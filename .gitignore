@@ -19,3 +19,4 @@ log.txt
 .cursor/
 .cursorrules
 *.pt
+.env

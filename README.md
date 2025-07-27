@@ -80,4 +80,13 @@ cd deepembody
 python3 ./manager/boot.py
 ```
 
----
+## Flow Programming and Simulation
+
+for user flow programming and simulation, you need to install the following packages:
+
+```bash
+pip install rich loguru mcp pyyaml # basic packages for uapi and manager
+pip install grpcio grpcio-tools genesis-world pynput # if you want to use genesis simulator
+```
+
+run `python3 ./simulator/genesis/robot1.py` to start the genesis simulator, then run `python3 ./simulator/flow/flow1.py` to start the flow.

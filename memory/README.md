@@ -8,3 +8,4 @@ Stores information across and during tasks. Can include:
 - Long-term skill usage patterns
 
 Memory enables contextual reasoning, personalization, and short-term task coherence.
+

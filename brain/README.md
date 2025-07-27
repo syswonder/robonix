@@ -17,23 +17,15 @@ Central runtime of the embodied system. Responsible for:
 
 This is the decision-making and planning center of the system.
 
+requirements.txt contains dependencies for the brain module.(as a example)
 
+add .env file in /brain directory with the following content:
 
-
-
-
-
-
-
-
-
-
+```plaintext
+API_KEY=sk-xxx
+```
 
 Test CMD as follow :
-
-
-配置好环境后（可运行requirements.txt见文件夹中）
-先运行server端 + ros2节点端
 
 ```SHELL
 python  path/to/brain-deepseek.py
