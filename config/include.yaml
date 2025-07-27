@@ -10,6 +10,7 @@ capability:
   - map_server
   - navigation2
   - activator
+  - vision
 skill:
   - moveit
 brain:

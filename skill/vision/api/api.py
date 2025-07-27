@@ -1,7 +1,7 @@
 import numpy as np
 from ultralytics import YOLOE
 import traceback
-
+import os
 # Import capability functions
 from capability.vision.api.api import c_camera_dep_rgb, c_camera_info, c_tf_transform
 from manager.eaios_decorators import eaios
@@ -33,7 +33,11 @@ def s_detect_objs(camera_name: str) -> dict:
         if np_color_image is None:
             return {}
         # Load YOLO model
-        yolo = YOLOE("./models/yoloe-11l-seg-pf.pt")
+        # Get the directory where this script is located
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # Construct path to model file relative to script location
+        model_path = os.path.join(script_dir, "..", "models", "yoloe-11l-seg-pf.pt")
+        yolo = YOLOE(model_path)
         # Run YOLO detection
         results = yolo(source=np_color_image, device="cuda:0")
         detection = results[0]
