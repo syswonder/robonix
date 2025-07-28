@@ -1,4 +1,5 @@
 from uapi.runtime.provider import SkillProvider
+from typing import List
 
 
 class Registry:
@@ -14,3 +15,6 @@ class Registry:
             if provider.name == name:
                 return provider
         return None
+
+    def __str__(self):
+        return f"Registry(providers={self.providers})"

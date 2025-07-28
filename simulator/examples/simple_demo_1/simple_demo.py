@@ -23,14 +23,21 @@ def init_skill_providers(runtime: Runtime):
         skills=[
             "c_space_getpos",
             "c_space_move",
-            "c_image_capture",
+        ],
+    )
+
+    graph_skill_provider = SkillProvider(
+        name="graph_skill_provider",
+        IP="127.0.0.1",
+        skills=[
+            "s_generate_entity_graph",
         ],
     )
 
     runtime.registry.add_provider(local_provider)
-    logger.info(
-        f"added skill provider: {local_provider.name} with skills: {local_provider.skills}"
-    )
+    runtime.registry.add_provider(graph_skill_provider)
+
+    logger.info(f"added skill providers: {runtime.registry}")
 
 
 def init_entity_graph_manually(runtime: Runtime):
