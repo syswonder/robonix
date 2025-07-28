@@ -216,7 +216,7 @@ EOS_SKILL_SPECS = {
         "output": {"success": bool},
         "dependencies": [],
     },
-    "c_image_caputre": {
+    "c_image_capture": {
         # cap_camera_rgb, cap_camera_depth, cap_camera_ir
         "description": "Capture an image, should be implemented on camera or something",
         "type": EOS_SkillType.CAPABILITY,
