@@ -3,6 +3,8 @@ import threading
 import inspect
 from typing import Dict, List, Callable, Any
 from uapi.log import logger
+import os
+from datetime import datetime
 
 
 class EOS_TYPE_FlowResult(Enum):
@@ -55,10 +57,6 @@ def set_runtime(runtime):
 
 
 def flow_print(message: str, level: str = "INFO"):
-    import inspect
-    import threading
-    import os
-    from datetime import datetime
 
     frame = inspect.currentframe()
     caller_frame = frame.f_back

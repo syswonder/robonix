@@ -16,7 +16,7 @@ from uapi.runtime.flow import set_runtime
 from uapi.log import logger
 
 
-def initialize_skill_providers(runtime: Runtime):
+def init_skill_providers(runtime: Runtime):
     local_provider = SkillProvider(
         name="local_provider",
         IP="127.0.0.1",
@@ -33,7 +33,7 @@ def initialize_skill_providers(runtime: Runtime):
     )
 
 
-def initialize_entity_graph_manually(runtime: Runtime):
+def init_entity_graph_manually(runtime: Runtime):
     root_room = create_root_room()
 
     entity_a = create_controllable_entity("A")
@@ -59,13 +59,13 @@ def initialize_entity_graph_manually(runtime: Runtime):
 
     runtime.set_graph(root_room)
 
-    logger.info("initialized entity graph:")
+    logger.info("initd entity graph:")
     logger.info(f"  root room: {root_room.get_absolute_path()}")
     logger.info(f"  entity A: {entity_a.get_absolute_path()}")
     logger.info(f"  entity B: {entity_b.get_absolute_path()}")
 
 
-def initialize_entity_graph_from_yolo(runtime: Runtime):
+def init_entity_graph_from_yolo(runtime: Runtime):
     pass
 
 
@@ -76,7 +76,7 @@ def main():
         type=str,
         default="manual",
         choices=["manual", "auto"],
-        help="Mode to initialize entity graph",
+        help="Mode to init entity graph",
     )
     args = parser.parse_args()
 
@@ -84,11 +84,11 @@ def main():
 
     runtime = Runtime()
 
-    initialize_skill_providers(runtime)
+    init_skill_providers(runtime)
     if args.mode == "manual":
-        initialize_entity_graph_manually(runtime)
+        init_entity_graph_manually(runtime)
     elif args.mode == "auto":
-        initialize_entity_graph_from_yolo(runtime)
+        init_entity_graph_from_yolo(runtime)
     else:
         raise ValueError(f"invalid mode: {args.mode}")
 
