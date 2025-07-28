@@ -19,31 +19,31 @@ def configure_api_module(dir_path):
     # 确保路径是Path对象
     dir_path = Path(dir_path).resolve()
     
-    # 1. 从description.yaml读取name字段
-    description_path = dir_path / "description.yaml"
+    # 1. 从description.yml读取name字段
+    description_path = dir_path / "description.yml"
     if not description_path.exists():
-        raise FileNotFoundError(f"description.yaml not found at {description_path}")
+        raise FileNotFoundError(f"description.yml not found at {description_path}")
     
     with open(description_path, 'r', encoding='utf-8') as f:
         description_data = yaml.safe_load(f)
     
     name = description_data.get('name')
     if not name:
-        raise ValueError("'name' field not found in description.yaml")
+        raise ValueError("'name' field not found in description.yml")
     
-    # 2. 从ROOT_DIR/config/plugin.yaml读取plugins
+    # 2. 从ROOT_DIR/config/plugin.yml读取plugins
     root_dir = dir_path.parent.parent  # 假设ROOT_DIR是dir_path的祖父目录
-    plugins_config_path = root_dir / "config" / "plugins.yaml"
+    plugins_config_path = root_dir / "config" / "plugins.yml"
     
     if not plugins_config_path.exists():
-        raise FileNotFoundError(f"plugin.yaml not found at {plugins_config_path}")
+        raise FileNotFoundError(f"plugin.yml not found at {plugins_config_path}")
     
     with open(plugins_config_path, 'r', encoding='utf-8') as f:
         plugins_data = yaml.safe_load(f)
     
     plugin = plugins_data.get(name)
     if not plugin:
-        raise ValueError(f"No plugin found for '{name}' in plugin.yaml")
+        raise ValueError(f"No plugin found for '{name}' in plugin.yml")
     
     print(f"Configuring API for '{name}' with plugin: {plugin}")
     

@@ -7,7 +7,7 @@ if root_dir not in sys.path:
 from DeepEmbody.manager.eaios_decorators import eaios, package_init,FunctionRegistry,mcp_start
 
 import yaml
-package_init("config/include.yaml")
+package_init("config/include.yml")
 with open("test.txt","w") as f:
     import time
     f.write(str(time.time()))

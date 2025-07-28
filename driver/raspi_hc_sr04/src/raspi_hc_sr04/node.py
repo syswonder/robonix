@@ -17,7 +17,7 @@ class HCSR04Node(Node):
 
         # Load sensor configurations from YAML file in the same directory
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        config_path = os.path.join(current_dir, "sensors.yaml")
+        config_path = os.path.join(current_dir, "sensors.yml")
 
         try:
             with open(config_path, "r") as f:
