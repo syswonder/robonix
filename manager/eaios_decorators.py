@@ -1,3 +1,4 @@
+import asyncio
 import os
 import importlib
 import functools
@@ -120,7 +121,7 @@ class eaios:
         if func_name == None:
             current = inspect.currentframe()
             caller = current.f_back
-            caller_func_name = caller.f_code.co_name if caller else None
+            func_name = caller.f_code.co_name if caller else None
 
         plugin_name = cap + ":" + name + ":" + func_name
         # auto raise KeyError
@@ -144,6 +145,8 @@ class eaios:
         - base_dir: 绝对路径，对应 base_package 的目录
         """
         for root, dirs, files in os.walk(base_dir):
+            if "__pycache__" in root: 
+                continue
             if "capability" in root and "plugins" in root:
                 for file in files:
                     full_path = os.path.join(root, file)
@@ -223,6 +226,7 @@ def package_init(config_path: str):
             continue
         for entry in entrys:
             entry_dir = os.path.join(BASE_PATH, base, entry)
+            print("[DEBUG] entry_dir:", entry_dir)
             if not os.path.exists(entry_dir):
                 print(f"[eaios] Error: The '{entry_dir}' directory was not found at '{base}'")
                 continue
@@ -282,8 +286,10 @@ def api_change_hello(name: str) -> str:
     # return func_status
     return ""
 
-def mcp_start():
-    eaios.mcp.run(transport="sse")
+async def mcp_start():
+    """异步启动MCP服务器"""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, eaios.mcp.run, "sse")
 
 if __name__ == "__main__":
     import yaml, argparse
