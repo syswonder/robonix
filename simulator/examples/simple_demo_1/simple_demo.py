@@ -101,7 +101,7 @@ def main():
 
     set_runtime(runtime)
 
-    flow_program_path = os.path.join(os.path.dirname(__file__), "flow.py")
+    flow_program_path = os.path.join(os.path.dirname(__file__), "simple.flow")
     logger.info(f"loading flow program from: {flow_program_path}")
 
     try:
