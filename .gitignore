@@ -20,3 +20,6 @@ log.txt
 .cursorrules
 *.pt
 .env
+
+#generated
+skill/__init__.py

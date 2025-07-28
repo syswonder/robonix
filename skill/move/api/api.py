@@ -88,8 +88,8 @@ def test():
     
     node.destroy_node()
     rclpy.shutdown()
-
+    
 #315曹老师办公室 28.3 0.1 0
 if __name__ == "__main__":
     # 初始化并运行 server
-    move_to_ab_pos(28.3, 0.1, 0)
+    move_to_ab_pos(-11.7,-6.8,0)

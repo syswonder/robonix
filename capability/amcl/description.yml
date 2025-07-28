@@ -6,4 +6,4 @@ startup_command: "bash run.sh"
 description: ""
 level: "capability"
 feature:
-- "get_goal"
+- "get_pos"

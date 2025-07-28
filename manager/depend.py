@@ -7,8 +7,8 @@ def scan_dir(base_path, feature_set, feature_sources, all_dependencies):
     if not os.path.exists(base_path):
         print(f"[WARN] {base_path} not existe, skipping.")
     for root, dirs, files in os.walk(base_path):
-        if "description.yaml" in files:
-            desc_path = os.path.join(root, "description.yaml")
+        if "description.yml" in files:
+            desc_path = os.path.join(root, "description.yml")
             print(desc_path)
             try:
                 with open(desc_path, "r", encoding="utf-8") as f:
@@ -34,7 +34,7 @@ def scan_dir(base_path, feature_set, feature_sources, all_dependencies):
 
 def check_depend(config_path):
     """
-    遍历 cap/ 和 skill/ 所有子目录中的 description.yaml 文件，收集 feature 和 dependency。
+    遍历 cap/ 和 skill/ 所有子目录中的 description.yml 文件，收集 feature 和 dependency。
     - 检查重复 feature
     - 检查 dependency 是否在 feature 列表中
     """
@@ -83,7 +83,7 @@ def check_depend(config_path):
 
 if __name__ == "__main__":
 
-    config_path = os.path.join(BASE_PATH, "config", "include.yaml")
+    config_path = os.path.join(BASE_PATH, "config", "include.yml")
     features, dependencies = check_depend(config_path)
     print(f"Features: {features}")
     print(f"Dependencies: {dependencies}")

@@ -28,6 +28,7 @@ class BaseNode:
         return f"BaseNode({self.name}_{self.version}, cwd='{self.cwd}')"
 
 def get_node(entry,sub_dir_path) -> BaseNode:
+    print(f"Checking entry: {entry} in path: {sub_dir_path} for description.yml")
     """
     Helper function to create a BaseNode object from a directory entry and its description.yml file.
 
@@ -59,7 +60,7 @@ def get_node(entry,sub_dir_path) -> BaseNode:
                         startup_command=data.get("startup_command",None)
                     )
                     return base_info
-            except yaml.YAMLError as e:
+            except yaml.ymlError as e:
                 logger.error(f"Error parsing YAML file '{description_file_path}': {e}")
             except Exception as e:
                 logger.error(f"An unexpected error occurred while processing '{description_file_path}': {e}")

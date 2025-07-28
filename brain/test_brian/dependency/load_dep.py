@@ -77,7 +77,7 @@ def import_from_first_available(yaml_path,target_globals=None):
 # 使用示例
 if __name__ == "__main__":
     try:
-        load_dict = import_from_first_available("dep.yaml")
+        load_dict = import_from_first_available("dep.yml")
         print(globals().keys())
         print(load_dict)
         # 此处可以访问导入模块的内容

@@ -16,7 +16,7 @@ ament_python_install_package(${PROJECT_NAME})
 
 # Install configuration files
 install(FILES
-  sensors.yaml
+  sensors.yml
   DESTINATION share/${PROJECT_NAME}
 )
 

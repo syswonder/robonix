@@ -7,7 +7,7 @@ if os.path.dirname(BASE_PATH) not in sys.path:
 from DeepEmbody.manager.eaios_decorators import package_init, mcp_start,eaios
 import DeepEmbody.skill 
 
-package_init("config/include.yaml")
+package_init("config/include.yml")
 print(eaios.FUNCTION_REGISTRY)
 
 @eaios.caller

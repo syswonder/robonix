@@ -91,7 +91,7 @@ class MCPClient:
         self.tool_session_map = {}
         self.client = OpenAI(
             base_url="https://api.deepseek.com",
-            api_key="sk-a93a0c965ad5490ea147db69300fd565",
+            api_key="your keys",
         )
 
     async def connect_to_server(self):
