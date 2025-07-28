@@ -7,6 +7,7 @@ import importlib.util
 import os
 import inspect
 from typing import List, Dict
+import sys
 
 
 class Runtime:
@@ -27,9 +28,18 @@ class Runtime:
         if not os.path.exists(program_path):
             raise FileNotFoundError(f"program file not found: {program_path}")
 
-        spec = importlib.util.spec_from_file_location("program", program_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # Read the flow file content
+        with open(program_path, 'r', encoding='utf-8') as f:
+            code = f.read()
+
+        # Create a new module
+        module = type(sys.modules[__name__])(f"program_{os.path.basename(program_path)}")
+        
+        # Set __file__ attribute so flow_print can determine the correct log directory
+        module.__file__ = os.path.abspath(program_path)
+        
+        # Execute the code in the module's namespace
+        exec(code, module.__dict__)
 
         flow_functions = get_flow_functions(module)
         flow_names = [func.__name__ for func in flow_functions]
