@@ -255,7 +255,7 @@ EOS_SKILL_SPECS = {
         "output": (
             Any,  # opencv image
             Any,  # opencv image
-        ),  # use Any to skip type check, but this is just a workaround for development, don't use it in production!!! - wheatfox
+        ),  # use Any to skip type check, but this is just a workaround for development, finally all specs should have determined types - wheatfox
         "dependencies": [],
     },
     "c_camera_info": {
