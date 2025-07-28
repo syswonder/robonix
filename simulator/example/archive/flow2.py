@@ -67,7 +67,7 @@ def sim_gen_graph():
             ),
         )
 
-    book1.bind_skill("c_image_caputre", mock_image_capture)
+    book1.bind_skill("c_image_capture", mock_image_capture)
 
     plant_pot: Entity = create_generic_entity("plant_pot")
     room.add_child(plant_pot)
@@ -87,8 +87,8 @@ def sim_run_flow():
     book1_pos = book1.c_space_getpos()
     logger.info(f"book1_pos = {book1_pos}")
 
-    # Call the c_image_caputre skill and print the result
-    book1_image = book1.c_image_caputre()
+    # Call the c_image_capture skill and print the result
+    book1_image = book1.c_image_capture()
     logger.info(f"book1_image = {book1_image}")
 
 

@@ -21,6 +21,8 @@ LOG_LEVEL = EAIOS_LOG_LEVEL.INFO
 install(show_locals=False, width=120, word_wrap=True, extra_lines=3)
 
 
+FORMAT = "[<level>{level}</level> {elapsed} <green>{module}:{line} {name}</green>] {message}"
+
 def set_log_level(level):
     """
     Dynamically set the log level. 'level' can be an EAIOS_LOG_LEVEL enum value or a string (e.g., "DEBUG").
@@ -40,7 +42,7 @@ def set_log_level(level):
         raise TypeError("level must be EAIOS_LOG_LEVEL or str")
     logger.add(
         sys.stderr,
-        format="[<level>{level}</level> {elapsed} <green>{name}</green>] {message}",
+        format=FORMAT,
         level=log_level_value,
         colorize=True,
         backtrace=True,
@@ -52,7 +54,7 @@ def set_log_level(level):
 logger.remove()
 logger.add(
     sys.stderr,
-    format="[<level>{level}</level> {elapsed} <green>{name}</green>] {message}",
+    format=FORMAT,
     level=LOG_LEVEL.value,
     colorize=True,
     backtrace=True,
