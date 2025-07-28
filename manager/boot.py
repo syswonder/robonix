@@ -1,3 +1,5 @@
+import asyncio
+import signal
 import process_manage
 import node
 from log import logger
@@ -86,19 +88,63 @@ def cmdline(manager: process_manage.RuntimeManager):
             break
         else:
             print_red(f"Error: Unknown command: {cmd}")
-
-if __name__ == "__main__":
-    node_list = node.get_node_details("config/include.yaml")
-    depend.check_depend("config/include.yaml")
-    manager = process_manage.RuntimeManager(node_list)
-    package_init("config/include.yaml")
-    mcp_start()
+        
+async def main():
+    
+    manager.boot()
     try:
-        manager.boot()
+        mcp_task = asyncio.create_task(mcp_start())
+        # cmdline(manager)
+
         cli = CLI(manager)
-        cli.run()
+        input_task = asyncio.create_task(cli.run())
+        
+        # 等待任意任务完成
+        done, pending = await asyncio.wait(
+            [mcp_task, input_task],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+
+        # 取消所有仍在运行的任务
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
 
     except KeyboardInterrupt:
         logger.info("Exiting...")
     finally:
         manager.stop_all_nodes()
+
+
+if __name__ == "__main__":
+    node_list = node.get_node_details("config/include.yml")
+    depend.check_depend("config/include.yml")
+    manager = process_manage.RuntimeManager(
+        node_list
+    )
+    package_init("config/include.yml")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    # Unix-like系统的信号处理
+    for signame in ('SIGINT', 'SIGTERM'):
+        try:
+            loop.add_signal_handler(
+                getattr(signal, signame),
+                lambda: asyncio.create_task(shutdown(signame)))
+        except NotImplementedError:
+            # 如果平台不支持信号处理，使用备选方案
+            pass
+
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        print("\nReceived KeyboardInterrupt, shutting down...")
+    finally:
+        # 清理资源
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()

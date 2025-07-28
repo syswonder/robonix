@@ -246,7 +246,7 @@ async def main():
         await client.chat_loop()
     finally:
         await client.cleanup()
-
+# 自动售货机 -11.7 -6.8 0
 if __name__ == "__main__":
     import sys
     asyncio.run(main())
