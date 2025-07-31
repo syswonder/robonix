@@ -21,5 +21,3 @@ log.txt
 *.pt
 .env
 
-#generated
-skill/__init__.py

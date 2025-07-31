@@ -1,5 +1,6 @@
 import asyncio
 import signal
+import argparse
 import process_manage
 import node
 from log import logger
@@ -121,12 +122,15 @@ async def main():
 
 
 if __name__ == "__main__":
-    node_list = node.get_node_details("config/include.yml")
-    depend.check_depend("config/include.yml")
+    parser = argparse.ArgumentParser(description='eaios boot and args')
+    parser.add_argument("--config", type=str, required=True, help="Path to the configuration file")
+    args = parser.parse_args()
+    node_list = node.get_node_details(args.config)
+    depend.check_depend(args.config)
     manager = process_manage.RuntimeManager(
         node_list
     )
-    package_init("config/include.yml")
+    package_init(args.config)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
