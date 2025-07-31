@@ -7,7 +7,7 @@ if root_dir not in sys.path:
 print("[DEBUG] skill root_dir:", root_dir)
 from DeepEmbody.manager.eaios_decorators import package_init, mcp_start,eaios
 
-package_init("config/include.yml")
+package_init("config/include/ranger_test.yml")
 print(eaios.FUNCTION_REGISTRY)
 
 @eaios.caller

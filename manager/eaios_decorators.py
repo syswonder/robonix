@@ -291,6 +291,7 @@ async def mcp_start():
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, eaios.mcp.run, "sse")
 
+# Example usage
 if __name__ == "__main__":
     import yaml, argparse
     parser = argparse.ArgumentParser()

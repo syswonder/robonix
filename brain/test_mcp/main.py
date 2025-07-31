@@ -20,18 +20,9 @@ from DeepEmbody.manager.eaios_decorators import package_init, mcp_start,eaios
 
 
 
-system_prompt_en = '''
-    as a helpful assistant, you will answer user queries and use tools to get information.
-    you will use the tools provided by the server to get information.
-    if you need to call tools, you will return the function call in the format:
-    {
-        [FC]:funcname1(para1=argu1);
-        [FC]:funcname2(para1=argu1, para2=argu2);
-    }
-    you will not call the tools directly, but return the function call in the format above.
-
-    the tools you can use are:
-'''
+system_prompt_en = ""
+with open("sys_prompt.txt", "r") as f:
+    system_prompt_en = f.read().strip()
 
 # judge whether the message contains a tool call
 def judge_tool_call(content):
