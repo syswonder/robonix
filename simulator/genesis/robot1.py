@@ -68,11 +68,31 @@ def print_car_position(car, last_pos, last_yaw):
     return pos, yaw_deg_rounded
 
 
-def camera_update_loop(camera, stop_event, scene_lock):
+def camera_update_loop(camera, car, stop_event, scene_lock):
     """Camera update thread that runs every 0.5 seconds"""
     while not stop_event.is_set():
         try:
             with scene_lock:
+                # Update camera position to follow car
+                car_pos = car.get_pos()
+                car_x, car_y, car_z = float(car_pos[0]), float(car_pos[1]), float(car_pos[2])
+                car_yaw = getattr(car, "_my_yaw", 0.0)
+                
+                # Calculate camera position at car front (0.25 units forward from car center)
+                camera_offset_x = 0.25 * np.cos(car_yaw)
+                camera_offset_y = 0.25 * np.sin(car_yaw)
+                camera_x = car_x + camera_offset_x
+                camera_y = car_y + camera_offset_y
+                camera_z = car_z + 0.15  # Slightly above car center
+                
+                # Calculate lookat point (forward direction)
+                lookat_x = camera_x + np.cos(car_yaw)
+                lookat_y = camera_y + np.sin(car_yaw)
+                lookat_z = camera_z
+                
+                # Update camera position and orientation
+                camera.set_pose(pos=(camera_x, camera_y, camera_z), lookat=(lookat_x, lookat_y, lookat_z))
+                
                 rgb, depth, segmentation, normal = camera.render(depth=True, segmentation=True, normal=True)
             cv2.imshow("rgb", rgb)
             if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -92,7 +112,7 @@ def control_car_loop(
     stop_event = threading.Event()
     
     if camera is not None:
-        camera_thread = threading.Thread(target=camera_update_loop, args=(camera, stop_event, scene_lock))
+        camera_thread = threading.Thread(target=camera_update_loop, args=(camera, car, stop_event, scene_lock))
         camera_thread.daemon = True
         camera_thread.start()
 
@@ -401,9 +421,9 @@ def main():
 
     cam = GLOBAL_SCENE.add_camera(
         res    = (800, 600),
-        pos    = (3.5, 0.0, 2.5),
-        lookat = (0, 0, 0.5),
-        fov    = 30,
+        pos    = (0.25, 0.0, 0.15),  # Initial position at car front
+        lookat = (1.0, 0.0, 0.15),   # Look forward
+        fov    = 60,                 # Wider FOV for better view
         GUI    = False
     )
 
