@@ -12,6 +12,8 @@ import numpy as np
 import genesis as gs
 import sys
 import os
+import cv2
+import time
 
 # Add the project root to Python path to import uapi
 PROJECT_ROOT = os.path.dirname(os.path.dirname(
@@ -66,9 +68,33 @@ def print_car_position(car, last_pos, last_yaw):
     return pos, yaw_deg_rounded
 
 
+def camera_update_loop(camera, stop_event, scene_lock):
+    """Camera update thread that runs every 0.5 seconds"""
+    while not stop_event.is_set():
+        try:
+            with scene_lock:
+                rgb, depth, segmentation, normal = camera.render(depth=True, segmentation=True, normal=True)
+            cv2.imshow("rgb", rgb)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                stop_event.set()
+                break
+        except Exception as e:
+            logger.error(f"Camera update error: {e}")
+        
+        time.sleep(0.5)  # Update every 0.5 seconds
+
+
 def control_car_loop(
-    car, keyboard_device, dt, max_speed, max_rot_speed, accel=3.0, rot_accel=5.0
+    car, keyboard_device, dt, max_speed, max_rot_speed, accel=3.0, rot_accel=5.0, camera=None, scene_lock=None
 ):
+    # Start camera thread if camera is provided
+    camera_thread = None
+    stop_event = threading.Event()
+    
+    if camera is not None:
+        camera_thread = threading.Thread(target=camera_update_loop, args=(camera, stop_event, scene_lock))
+        camera_thread.daemon = True
+        camera_thread.start()
 
     if not hasattr(car, "_my_yaw"):
         car._my_yaw = 0.0
@@ -84,130 +110,139 @@ def control_car_loop(
     move_to_vy = 0.0
     move_to_active = False
 
-    while True:
-        keys = keyboard_device.get_keys()
-        target_vx = 0.0
-        target_vy = 0.0
-        target_wz = 0.0
-        if keyboard.Key.up in keys:
-            target_vx += max_speed
-        if keyboard.Key.down in keys:
-            target_vx -= max_speed
-        if keyboard.Key.left in keys:
-            target_vy -= max_speed
-        if keyboard.Key.right in keys:
-            target_vy += max_speed
-        if keyboard.KeyCode.from_char("[") in keys:
-            target_wz += max_rot_speed
-        if keyboard.KeyCode.from_char("]") in keys:
-            target_wz -= max_rot_speed
-        if keyboard.Key.esc in keys:
-            logger.info("Exiting simulation.")
-            keyboard_device.stop()
-            break
-        keyboard_active = any([target_vx != 0, target_vy != 0, target_wz != 0])
-        if (
-            hasattr(car, "_move_to_target")
-            and car._move_to_target.get("active", False)
-            and not keyboard_active
-        ):
-            move_to_active = True
-            target = car._move_to_target
-            if target["start_time"] is None:
-                target["start_time"] = 0.0
+    try:
+        while True:
+            keys = keyboard_device.get_keys()
+            target_vx = 0.0
+            target_vy = 0.0
+            target_wz = 0.0
+            if keyboard.Key.up in keys:
+                target_vx += max_speed
+            if keyboard.Key.down in keys:
+                target_vx -= max_speed
+            if keyboard.Key.left in keys:
+                target_vy -= max_speed
+            if keyboard.Key.right in keys:
+                target_vy += max_speed
+            if keyboard.KeyCode.from_char("[") in keys:
+                target_wz += max_rot_speed
+            if keyboard.KeyCode.from_char("]") in keys:
+                target_wz -= max_rot_speed
+            if keyboard.Key.esc in keys:
+                logger.info("Exiting simulation.")
+                keyboard_device.stop()
+                break
+            keyboard_active = any([target_vx != 0, target_vy != 0, target_wz != 0])
+            if (
+                hasattr(car, "_move_to_target")
+                and car._move_to_target.get("active", False)
+                and not keyboard_active
+            ):
+                move_to_active = True
+                target = car._move_to_target
+                if target["start_time"] is None:
+                    target["start_time"] = 0.0
+                else:
+                    target["start_time"] += dt
+                qpos = car.get_qpos()
+                if hasattr(qpos, "cpu"):
+                    qpos = qpos.cpu().numpy()
+                curr_x, curr_y, _ = qpos[:3]
+                target_x = target["target_x"]
+                target_y = target["target_y"]
+                rem_x = target_x - curr_x
+                rem_y = target_y - curr_y
+                rem_dist = np.hypot(rem_x, rem_y)
+                if rem_dist < target["tolerance"]:
+                    move_to_vx = 0.0
+                    move_to_vy = 0.0
+                    move_to_active = False
+                    car._move_to_target["active"] = False
+                    logger.info(
+                        f"MoveTo completed: reached target within {target['tolerance']:.3f}m"
+                    )
+                else:
+                    if rem_dist > 1e-6:
+                        dir_x = rem_x / rem_dist
+                        dir_y = rem_y / rem_dist
+                    else:
+                        dir_x = dir_y = 0.0
+                    current_speed = np.hypot(move_to_vx, move_to_vy)
+                    stopping_dist = (
+                        (current_speed**2) / (2 * target["decel"])
+                        if target["decel"] > 0
+                        else 0.0
+                    )
+                    if rem_dist > stopping_dist + 0.1:
+                        target_speed = min(
+                            current_speed + target["accel"] *
+                            dt, target["max_speed"]
+                        )
+                    else:
+                        # Decelerate
+                        target_speed = max(
+                            current_speed - target["decel"] * dt, 0.0)
+                    move_to_vx = dir_x * target_speed
+                    move_to_vy = dir_y * target_speed
             else:
-                target["start_time"] += dt
+                move_to_active = False
+                move_to_vx = 0.0
+                move_to_vy = 0.0
+                if keyboard_active and hasattr(car, "_move_to_target"):
+                    car._move_to_target["active"] = False
+                    logger.info("MoveTo interrupted by keyboard input")
+
+                def approach(current, target, a):
+                    if current < target:
+                        return min(current + a * dt, target)
+                    elif current > target:
+                        return max(current - a * dt, target)
+                    else:
+                        return current
+                vx = approach(vx, target_vx, accel)
+                vy = approach(vy, target_vy, accel)
+                wz = approach(wz, target_wz, rot_accel)
             qpos = car.get_qpos()
             if hasattr(qpos, "cpu"):
                 qpos = qpos.cpu().numpy()
-            curr_x, curr_y, _ = qpos[:3]
-            target_x = target["target_x"]
-            target_y = target["target_y"]
-            rem_x = target_x - curr_x
-            rem_y = target_y - curr_y
-            rem_dist = np.hypot(rem_x, rem_y)
-            if rem_dist < target["tolerance"]:
-                move_to_vx = 0.0
-                move_to_vy = 0.0
-                move_to_active = False
-                car._move_to_target["active"] = False
-                logger.info(
-                    f"MoveTo completed: reached target within {target['tolerance']:.3f}m"
-                )
+            x, y, z = qpos[:3]
+            if move_to_active:
+                dx = move_to_vx * dt
+                dy = move_to_vy * dt
+                dtheta = 0.0
             else:
-                if rem_dist > 1e-6:
-                    dir_x = rem_x / rem_dist
-                    dir_y = rem_y / rem_dist
-                else:
-                    dir_x = dir_y = 0.0
-                current_speed = np.hypot(move_to_vx, move_to_vy)
-                stopping_dist = (
-                    (current_speed**2) / (2 * target["decel"])
-                    if target["decel"] > 0
-                    else 0.0
-                )
-                if rem_dist > stopping_dist + 0.1:
-                    target_speed = min(
-                        current_speed + target["accel"] *
-                        dt, target["max_speed"]
-                    )
-                else:
-                    # Decelerate
-                    target_speed = max(
-                        current_speed - target["decel"] * dt, 0.0)
-                move_to_vx = dir_x * target_speed
-                move_to_vy = dir_y * target_speed
-        else:
-            move_to_active = False
-            move_to_vx = 0.0
-            move_to_vy = 0.0
-            if keyboard_active and hasattr(car, "_move_to_target"):
-                car._move_to_target["active"] = False
-                logger.info("MoveTo interrupted by keyboard input")
+                dx = vx * np.sin(car._my_yaw) * dt + vy * np.cos(car._my_yaw) * dt
+                dy = vx * np.cos(car._my_yaw) * dt - vy * np.sin(car._my_yaw) * dt
+                dtheta = wz * dt
 
-            def approach(current, target, a):
-                if current < target:
-                    return min(current + a * dt, target)
-                elif current > target:
-                    return max(current - a * dt, target)
-                else:
-                    return current
-            vx = approach(vx, target_vx, accel)
-            vy = approach(vy, target_vy, accel)
-            wz = approach(wz, target_wz, rot_accel)
-        qpos = car.get_qpos()
-        if hasattr(qpos, "cpu"):
-            qpos = qpos.cpu().numpy()
-        x, y, z = qpos[:3]
-        if move_to_active:
-            dx = move_to_vx * dt
-            dy = move_to_vy * dt
-            dtheta = 0.0
-        else:
-            dx = vx * np.sin(car._my_yaw) * dt + vy * np.cos(car._my_yaw) * dt
-            dy = vx * np.cos(car._my_yaw) * dt - vy * np.sin(car._my_yaw) * dt
-            dtheta = wz * dt
+            qpos_new = qpos.copy()
+            qpos_new[0] = x + dx
+            qpos_new[1] = y + dy
+            car.set_qpos(qpos_new)
 
-        qpos_new = qpos.copy()
-        qpos_new[0] = x + dx
-        qpos_new[1] = y + dy
-        car.set_qpos(qpos_new)
+            car._my_yaw -= dtheta
+            quat = R.from_euler("x", car._my_yaw).as_quat()
+            car.set_quat(quat)
 
-        car._my_yaw -= dtheta
-        quat = R.from_euler("x", car._my_yaw).as_quat()
-        car.set_quat(quat)
+            last_pos, last_yaw = print_car_position(car, last_pos, last_yaw)
 
-        last_pos, last_yaw = print_car_position(car, last_pos, last_yaw)
-
-        global GLOBAL_SCENE
-        GLOBAL_SCENE.step()
+            with scene_lock:
+                global GLOBAL_SCENE
+                GLOBAL_SCENE.step()
+    finally:
+        # Stop camera thread
+        if camera_thread is not None:
+            stop_event.set()
+            camera_thread.join(timeout=1.0)
+            cv2.destroyAllWindows()
 
 
 class RobotControlService(robot_control_pb2_grpc.RobotControlServicer):
-    def __init__(self, car, keyboard_device):
+    def __init__(self, car, keyboard_device, scene_lock):
         self.car = car
         self.keyboard_device = keyboard_device
         self._lock = threading.Lock()
+        self._scene_lock = scene_lock
 
     def Move(self, request, context):
         # Move the car forward or backward by simulating key press
@@ -253,8 +288,9 @@ class RobotControlService(robot_control_pb2_grpc.RobotControlServicer):
             self.car._my_yaw = yaw
             quat = R.from_euler("x", yaw).as_quat()
             self.car.set_quat(quat)
-            global GLOBAL_SCENE
-            GLOBAL_SCENE.step()
+            with self._scene_lock:
+                global GLOBAL_SCENE
+                GLOBAL_SCENE.step()
             time.sleep(dt)
         return robot_control_pb2.MoveReply(status="ok")
 
@@ -301,10 +337,10 @@ class RobotControlService(robot_control_pb2_grpc.RobotControlServicer):
         return robot_control_pb2.MoveReply(status="ok")
 
 
-def serve_grpc(car, keyboard_device, port=50051):
+def serve_grpc(car, keyboard_device, scene_lock, port=50051):
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
     robot_control_pb2_grpc.add_RobotControlServicer_to_server(
-        RobotControlService(car, keyboard_device), server
+        RobotControlService(car, keyboard_device, scene_lock), server
     )
     server.add_insecure_port(f"[::]:{port}")
     logger.info(f"[gRPC] RobotControl server started on port {port}")
@@ -345,23 +381,31 @@ def main():
             plane_reflection=True,
             ambient_light=(0.3, 0.3, 0.3),
         ),
-        renderer=gs.renderers.RayTracer(
-            env_surface=gs.surfaces.Emission(
-                emissive_texture=gs.textures.ImageTexture(
-                    image_path="textures/indoor_bright.png",
-                ),
-            ),
-            env_radius=12.0,
-            env_euler=(0, 0, 180),
-            lights=[
-                {"pos": (0.0, 0.0, 6.0), "radius": 1.5,
-                 "color": (8.0, 8.0, 8.0)},
-            ],
-        )
-        # renderer=gs.renderers.Rasterizer(),
+        # renderer=gs.renderers.RayTracer(
+        #     env_surface=gs.surfaces.Emission(
+        #         emissive_texture=gs.textures.ImageTexture(
+        #             image_path="textures/indoor_bright.png",
+        #         ),
+        #     ),
+        #     env_radius=12.0,
+        #     env_euler=(0, 0, 180),
+        #     lights=[
+        #         {"pos": (0.0, 0.0, 6.0), "radius": 1.5,
+        #          "color": (8.0, 8.0, 8.0)},
+        #     ],
+        # )
+        renderer=gs.renderers.Rasterizer(),
     )
 
     GLOBAL_SCENE.profiling_options.show_FPS = False
+
+    cam = GLOBAL_SCENE.add_camera(
+        res    = (800, 600),
+        pos    = (3.5, 0.0, 2.5),
+        lookat = (0, 0, 0.5),
+        fov    = 30,
+        GUI    = False
+    )
 
     # Create floor
     floor = GLOBAL_SCENE.add_entity(
@@ -398,14 +442,14 @@ def main():
     )
 
     # Create the car (box)
-    # car = GLOBAL_SCENE.add_entity(
-    #     gs.morphs.Box(pos=(0.0, 0.0, 0.15), size=(0.3, 0.5, 0.3), fixed=False),
-    #     surface=gs.surfaces.Iron(color=(0.2, 0.2, 0.8)),
-    # )
-
     car = GLOBAL_SCENE.add_entity(
-        morph=gs.morphs.URDF(file="urdf/go2/urdf/go2.urdf", pos=(-1, 0.0, 0.5)),
+        gs.morphs.Box(pos=(0.0, 0.0, 0.15), size=(0.3, 0.5, 0.3), fixed=False),
+        surface=gs.surfaces.Iron(color=(0.2, 0.2, 0.8)),
     )
+
+    # car = GLOBAL_SCENE.add_entity(
+    #     morph=gs.morphs.URDF(file="urdf/go2/urdf/go2.urdf", pos=(-1, 0.0, 0.5)),
+    # )
 
     GLOBAL_SCENE.viewer.follow_entity(car)
 
@@ -440,11 +484,11 @@ def main():
 
     ########################## entities ##########################
     dragon = GLOBAL_SCENE.add_entity(
-        material=mat_elastic,
+        # material=mat_elastic,
         morph=gs.morphs.Mesh(
             file="meshes/dragon/dragon.obj",
             scale=0.007,
-            pos=(0, 0, 0.8),
+            pos=(1, 1, 0.8),
         ),
         surface=gs.surfaces.Default(
             # vis_mode='recon',
@@ -455,7 +499,7 @@ def main():
         morph=gs.morphs.Mesh(
             file=get_sim_asset("chair1/MAD_QUEEN_CHAIR.obj"),
             scale=0.007,
-            pos=(0, 0, 0.8),
+            pos=(-1, -1, 0.8),
         ),
         surface=gs.surfaces.Default(
             diffuse_texture=gs.textures.ImageTexture(
@@ -468,6 +512,7 @@ def main():
     )
 
     GLOBAL_SCENE.build()
+    # rgb, depth, segmentation, normal = cam.render(depth=True, segmentation=True, normal=True)
 
     # Keyboard control setup
     keyboard_device = KeyboardDevice()
@@ -485,9 +530,12 @@ def main():
     logger.info("]: Rotate right")
     logger.info("ESC: Quit")
 
-    grpc_server = serve_grpc(car, keyboard_device)
+    # Create shared scene lock
+    scene_lock = threading.Lock()
+    
+    grpc_server = serve_grpc(car, keyboard_device, scene_lock)
     try:
-        control_car_loop(car, keyboard_device, dt, speed, rot_speed)
+        control_car_loop(car, keyboard_device, dt, speed, rot_speed, camera=cam, scene_lock=scene_lock)
     finally:
         grpc_server.stop(0)
 
