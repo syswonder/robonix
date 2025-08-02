@@ -10,6 +10,8 @@ service RobotControl {
   rpc Stop(StopRequest) returns (MoveReply);
   rpc GetPose(GetPoseRequest) returns (PoseReply);
   rpc MoveTo(MoveToRequest) returns (MoveReply);
+  rpc GetRGBImage(GetImageRequest) returns (RGBImageReply);
+  rpc GetDepthImage(GetImageRequest) returns (DepthImageReply);
 }
 
 message MoveRequest { double distance = 1; }
@@ -32,4 +34,26 @@ message PoseReply {
 message MoveToRequest {
   double forward = 1;
   double lateral = 2;
+}
+
+message GetImageRequest {
+  int32 width = 1;  // optional: specify desired image width
+  int32 height = 2; // optional: specify desired image height
+}
+
+message RGBImageReply {
+  bytes image_data = 1;  // JPEG or PNG encoded RGB image
+  int32 width = 2;
+  int32 height = 3;
+  string format = 4;     // "jpeg" or "png"
+  int64 timestamp = 5;   // Unix timestamp in milliseconds
+}
+
+message DepthImageReply {
+  bytes depth_data = 1;  // Raw depth data (float32 array)
+  int32 width = 2;
+  int32 height = 3;
+  float min_depth = 4;   // Minimum depth value in meters
+  float max_depth = 5;   // Maximum depth value in meters
+  int64 timestamp = 6;   // Unix timestamp in milliseconds
 }

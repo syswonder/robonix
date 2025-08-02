@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x13robot_control.proto\x12\x0crobotcontrol\"\x1f\n\x0bMoveRequest\x12\x10\n\x08\x64istance\x18\x01 \x01(\x01\"6\n\rRotateRequest\x12\r\n\x05\x61ngle\x18\x01 \x01(\x01\x12\x16\n\x0etarget_yaw_deg\x18\x02 \x01(\x01\"\r\n\x0bStopRequest\"\x1b\n\tMoveReply\x12\x0e\n\x06status\x18\x01 \x01(\t\"\x10\n\x0eGetPoseRequest\"9\n\tPoseReply\x12\t\n\x01x\x18\x01 \x01(\x01\x12\t\n\x01y\x18\x02 \x01(\x01\x12\t\n\x01z\x18\x03 \x01(\x01\x12\x0b\n\x03yaw\x18\x04 \x01(\x01\"1\n\rMoveToRequest\x12\x0f\n\x07\x66orward\x18\x01 \x01(\x01\x12\x0f\n\x07lateral\x18\x02 \x01(\x01\x32\xc8\x02\n\x0cRobotControl\x12:\n\x04Move\x12\x19.robotcontrol.MoveRequest\x1a\x17.robotcontrol.MoveReply\x12>\n\x06Rotate\x12\x1b.robotcontrol.RotateRequest\x1a\x17.robotcontrol.MoveReply\x12:\n\x04Stop\x12\x19.robotcontrol.StopRequest\x1a\x17.robotcontrol.MoveReply\x12@\n\x07GetPose\x12\x1c.robotcontrol.GetPoseRequest\x1a\x17.robotcontrol.PoseReply\x12>\n\x06MoveTo\x12\x1b.robotcontrol.MoveToRequest\x1a\x17.robotcontrol.MoveReplyb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x13robot_control.proto\x12\x0crobotcontrol\"\x1f\n\x0bMoveRequest\x12\x10\n\x08\x64istance\x18\x01 \x01(\x01\"6\n\rRotateRequest\x12\r\n\x05\x61ngle\x18\x01 \x01(\x01\x12\x16\n\x0etarget_yaw_deg\x18\x02 \x01(\x01\"\r\n\x0bStopRequest\"\x1b\n\tMoveReply\x12\x0e\n\x06status\x18\x01 \x01(\t\"\x10\n\x0eGetPoseRequest\"9\n\tPoseReply\x12\t\n\x01x\x18\x01 \x01(\x01\x12\t\n\x01y\x18\x02 \x01(\x01\x12\t\n\x01z\x18\x03 \x01(\x01\x12\x0b\n\x03yaw\x18\x04 \x01(\x01\"1\n\rMoveToRequest\x12\x0f\n\x07\x66orward\x18\x01 \x01(\x01\x12\x0f\n\x07lateral\x18\x02 \x01(\x01\"0\n\x0fGetImageRequest\x12\r\n\x05width\x18\x01 \x01(\x05\x12\x0e\n\x06height\x18\x02 \x01(\x05\"e\n\rRGBImageReply\x12\x12\n\nimage_data\x18\x01 \x01(\x0c\x12\r\n\x05width\x18\x02 \x01(\x05\x12\x0e\n\x06height\x18\x03 \x01(\x05\x12\x0e\n\x06\x66ormat\x18\x04 \x01(\t\x12\x11\n\ttimestamp\x18\x05 \x01(\x03\"}\n\x0f\x44\x65pthImageReply\x12\x12\n\ndepth_data\x18\x01 \x01(\x0c\x12\r\n\x05width\x18\x02 \x01(\x05\x12\x0e\n\x06height\x18\x03 \x01(\x05\x12\x11\n\tmin_depth\x18\x04 \x01(\x02\x12\x11\n\tmax_depth\x18\x05 \x01(\x02\x12\x11\n\ttimestamp\x18\x06 \x01(\x03\x32\xe2\x03\n\x0cRobotControl\x12:\n\x04Move\x12\x19.robotcontrol.MoveRequest\x1a\x17.robotcontrol.MoveReply\x12>\n\x06Rotate\x12\x1b.robotcontrol.RotateRequest\x1a\x17.robotcontrol.MoveReply\x12:\n\x04Stop\x12\x19.robotcontrol.StopRequest\x1a\x17.robotcontrol.MoveReply\x12@\n\x07GetPose\x12\x1c.robotcontrol.GetPoseRequest\x1a\x17.robotcontrol.PoseReply\x12>\n\x06MoveTo\x12\x1b.robotcontrol.MoveToRequest\x1a\x17.robotcontrol.MoveReply\x12I\n\x0bGetRGBImage\x12\x1d.robotcontrol.GetImageRequest\x1a\x1b.robotcontrol.RGBImageReply\x12M\n\rGetDepthImage\x12\x1d.robotcontrol.GetImageRequest\x1a\x1d.robotcontrol.DepthImageReplyb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -45,6 +45,12 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_POSEREPLY']._serialized_end=245
   _globals['_MOVETOREQUEST']._serialized_start=247
   _globals['_MOVETOREQUEST']._serialized_end=296
-  _globals['_ROBOTCONTROL']._serialized_start=299
-  _globals['_ROBOTCONTROL']._serialized_end=627
+  _globals['_GETIMAGEREQUEST']._serialized_start=298
+  _globals['_GETIMAGEREQUEST']._serialized_end=346
+  _globals['_RGBIMAGEREPLY']._serialized_start=348
+  _globals['_RGBIMAGEREPLY']._serialized_end=449
+  _globals['_DEPTHIMAGEREPLY']._serialized_start=451
+  _globals['_DEPTHIMAGEREPLY']._serialized_end=576
+  _globals['_ROBOTCONTROL']._serialized_start=579
+  _globals['_ROBOTCONTROL']._serialized_end=1061
 # @@protoc_insertion_point(module_scope)
