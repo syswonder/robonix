@@ -316,11 +316,12 @@ def control_car_loop(
 
 
 class RobotControlService(robot_control_pb2_grpc.RobotControlServicer):
-    def __init__(self, car, keyboard_device, scene_lock):
+    def __init__(self, car, keyboard_device, scene_lock, camera=None):
         self.car = car
         self.keyboard_device = keyboard_device
         self._lock = threading.Lock()
         self._scene_lock = scene_lock
+        self._camera = camera
 
     def Move(self, request, context):
         # Move the car forward or backward by simulating key press
@@ -414,11 +415,147 @@ class RobotControlService(robot_control_pb2_grpc.RobotControlServicer):
 
         return robot_control_pb2.MoveReply(status="ok")
 
+    def GetRGBImage(self, request, context):
+        """Get RGB image from the robot camera"""
+        try:
+            with self._scene_lock:
+                global GLOBAL_SCENE
+                if GLOBAL_SCENE is None:
+                    return robot_control_pb2.RGBImageReply(
+                        image_data=b"",
+                        width=0,
+                        height=0,
+                        format="jpeg",
+                        timestamp=int(time.time() * 1000),
+                    )
 
-def serve_grpc(car, keyboard_device, scene_lock, port=50051):
+                # Use the camera passed to the service, or find one in the scene
+                camera = self._camera
+                if camera is None:
+                    for entity in GLOBAL_SCENE.entities:
+                        if hasattr(entity, "render") and callable(
+                            getattr(entity, "render")
+                        ):
+                            camera = entity
+                            break
+
+                if camera is None:
+                    # Create a temporary camera if none exists
+                    camera = GLOBAL_SCENE.add_camera(
+                        res=(
+                            request.width if request.width > 0 else 800,
+                            request.height if request.height > 0 else 600,
+                        ),
+                        pos=(0.3, 0.0, 0.2),
+                        lookat=(1.0, 0.0, 0.2),
+                        fov=60,
+                        GUI=False,
+                    )
+
+                # Render RGB image
+                rgb, _, _, _ = camera.render(depth=True, segmentation=True, normal=True)
+
+                # Convert to JPEG format
+                import cv2
+
+                # Convert RGB to BGR for OpenCV
+                rgb_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+                # Encode as JPEG
+                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
+                _, jpeg_data = cv2.imencode(".jpg", rgb_bgr, encode_param)
+
+                return robot_control_pb2.RGBImageReply(
+                    image_data=jpeg_data.tobytes(),
+                    width=rgb.shape[1],
+                    height=rgb.shape[0],
+                    format="jpeg",
+                    timestamp=int(time.time() * 1000),
+                )
+
+        except Exception as e:
+            logger.error(f"Error getting RGB image: {e}")
+            return robot_control_pb2.RGBImageReply(
+                image_data=b"",
+                width=0,
+                height=0,
+                format="jpeg",
+                timestamp=int(time.time() * 1000),
+            )
+
+    def GetDepthImage(self, request, context):
+        """Get depth image from the robot camera"""
+        try:
+            with self._scene_lock:
+                global GLOBAL_SCENE
+                if GLOBAL_SCENE is None:
+                    return robot_control_pb2.DepthImageReply(
+                        depth_data=b"",
+                        width=0,
+                        height=0,
+                        min_depth=0.0,
+                        max_depth=0.0,
+                        timestamp=int(time.time() * 1000),
+                    )
+
+                # Use the camera passed to the service, or find one in the scene
+                camera = self._camera
+                if camera is None:
+                    for entity in GLOBAL_SCENE.entities:
+                        if hasattr(entity, "render") and callable(
+                            getattr(entity, "render")
+                        ):
+                            camera = entity
+                            break
+
+                if camera is None:
+                    # Create a temporary camera if none exists
+                    camera = GLOBAL_SCENE.add_camera(
+                        res=(
+                            request.width if request.width > 0 else 800,
+                            request.height if request.height > 0 else 600,
+                        ),
+                        pos=(0.3, 0.0, 0.2),
+                        lookat=(1.0, 0.0, 0.2),
+                        fov=60,
+                        GUI=False,
+                    )
+
+                # Render depth image
+                _, depth, _, _ = camera.render(
+                    depth=True, segmentation=True, normal=True
+                )
+
+                # Convert depth to float32 array and get min/max values
+                depth_float32 = depth.astype(np.float32)
+                min_depth = float(np.min(depth_float32))
+                max_depth = float(np.max(depth_float32))
+
+                return robot_control_pb2.DepthImageReply(
+                    depth_data=depth_float32.tobytes(),
+                    width=depth.shape[1],
+                    height=depth.shape[0],
+                    min_depth=min_depth,
+                    max_depth=max_depth,
+                    timestamp=int(time.time() * 1000),
+                )
+
+        except Exception as e:
+            logger.error(f"Error getting depth image: {e}")
+            return robot_control_pb2.DepthImageReply(
+                depth_data=b"",
+                width=0,
+                height=0,
+                min_depth=0.0,
+                max_depth=0.0,
+                timestamp=int(time.time() * 1000),
+            )
+
+
+def serve_grpc(car, keyboard_device, scene_lock, camera=None, port=50051):
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
     robot_control_pb2_grpc.add_RobotControlServicer_to_server(
-        RobotControlService(car, keyboard_device, scene_lock), server
+        RobotControlService(car, keyboard_device, scene_lock, camera), server
     )
     server.add_insecure_port(f"[::]:{port}")
     logger.info(f"[gRPC] RobotControl server started on port {port}")
@@ -623,7 +760,7 @@ def main():
     # Create shared scene lock
     scene_lock = threading.Lock()
 
-    grpc_server = serve_grpc(car, keyboard_device, scene_lock)
+    grpc_server = serve_grpc(car, keyboard_device, scene_lock, cam)
     try:
         control_car_loop(
             car,
