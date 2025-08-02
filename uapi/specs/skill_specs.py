@@ -241,29 +241,51 @@ EOS_SKILL_SPECS = {
         "dependencies": ["c_space_move", "c_space_getpos"],
     },
     "c_camera_rgb": {
-        # according to capability/vision/api/api.py:c_camera_rgb
+        # according to capability/sim_vision/api/api.py:c_camera_rgb
         "description": "Get the RGB image from the specified camera",
         "type": EOS_SkillType.CAPABILITY,
-        "input": {"camera_name": str},
-        "output": Any,  # opencv image
+        "input": {"camera_name": str, "timeout_sec": float},
+        "output": Any,  # opencv image (numpy array)
+        "dependencies": [],
     },
     "c_camera_dep_rgb": {
-        # according to capability/vision/api/api.py:c_camera_dep_rgb
-        "description": "Get the RGB image from the specified camera",
+        # according to capability/sim_vision/api/api.py:c_camera_dep_rgb
+        "description": "Get the RGB and depth images from the specified camera",
         "type": EOS_SkillType.CAPABILITY,
-        "input": {"camera_name": str},
-        "output": (
-            Any,  # opencv image
-            Any,  # opencv image
-        ),  # use Any to skip type check, but this is just a workaround for development, finally all specs should have determined types - wheatfox
+        "input": {"camera_name": str, "timeout_sec": float},
+        "output": Tuple[Any, Any],  # tuple with rgb and depth images
         "dependencies": [],
     },
     "c_camera_info": {
-        # according to capability/vision/api/api.py:c_camera_info
+        # according to capability/sim_vision/api/api.py:c_camera_info
         "description": "Get the camera info of the specified camera",
         "type": EOS_SkillType.CAPABILITY,
-        "input": {"camera_name": str},
+        "input": {"camera_name": str, "timeout_sec": float},
         "output": Dict[str, Any],
+        "dependencies": [],
+    },
+    "c_save_rgb_image": {
+        # according to capability/sim_vision/api/api.py:c_save_rgb_image
+        "description": "Capture and save RGB image to file",
+        "type": EOS_SkillType.CAPABILITY,
+        "input": {"filename": str, "camera_name": str, "width": int, "height": int},
+        "output": {"success": bool},
+        "dependencies": [],
+    },
+    "c_save_depth_image": {
+        # according to capability/sim_vision/api/api.py:c_save_depth_image
+        "description": "Capture and save depth image to file",
+        "type": EOS_SkillType.CAPABILITY,
+        "input": {"filename": str, "camera_name": str, "width": int, "height": int},
+        "output": {"success": bool},
+        "dependencies": [],
+    },
+    "c_get_robot_pose": {
+        # according to capability/sim_vision/api/api.py:c_get_robot_pose
+        "description": "Get the current pose of the robot",
+        "type": EOS_SkillType.CAPABILITY,
+        "input": {"timeout_sec": float},
+        "output": {"x": float, "y": float, "z": float, "yaw": float},
         "dependencies": [],
     },
     "c_tf_transform": {

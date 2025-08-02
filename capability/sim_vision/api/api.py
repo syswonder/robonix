@@ -152,11 +152,11 @@ def c_save_rgb_image(filename, camera_name="robot_camera", width=None, height=No
     try:
         # Call driver function directly
         driver_save_rgb_image(filename, width=width, height=height)
-        return True
+        return {"success": True}
 
     except Exception as e:
         print(f"[sim_vision] Error saving RGB image: {e}")
-        return False
+        return {"success": False}
 
 
 @eaios.api
@@ -174,11 +174,11 @@ def c_save_depth_image(filename, camera_name="robot_camera", width=None, height=
     try:
         # Call driver function directly
         driver_save_depth_image(filename, width=width, height=height)
-        return True
+        return {"success": True}
 
     except Exception as e:
         print(f"[sim_vision] Error saving depth image: {e}")
-        return False
+        return {"success": False}
 
 
 @eaios.api

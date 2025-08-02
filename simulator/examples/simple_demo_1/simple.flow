@@ -31,3 +31,126 @@ def simple_test_flow() -> EOS_TYPE_FlowResult:
     children = graph.get_children()
     flow_print(f"root children: {[child.get_absolute_path() for child in children]}")
     return EOS_TYPE_FlowResult.SUCCESS
+
+
+@flow
+def camera_test_flow() -> EOS_TYPE_FlowResult:
+    runtime = get_runtime()
+    graph = runtime.get_graph()
+    children = graph.get_children()
+
+    if not children:
+        flow_print("No entities found for camera testing")
+        return EOS_TYPE_FlowResult.FAILURE
+
+    # Use the first entity for camera testing
+    entity = children[0]
+    flow_print(f"Testing camera APIs with entity: {entity.get_absolute_path()}")
+
+    # Test robot pose
+    flow_print("Testing c_get_robot_pose...")
+    pose = entity.c_get_robot_pose(timeout_sec=5.0)
+    if pose is None:
+        flow_print("Failed to get robot pose")
+        return EOS_TYPE_FlowResult.FAILURE
+    flow_print(f"Robot pose: {pose}")
+
+    # Test camera info
+    flow_print("Testing c_camera_info...")
+    camera_info = entity.c_camera_info(camera_name="robot_camera", timeout_sec=5.0)
+    if camera_info is None:
+        flow_print("Failed to get camera info")
+        return EOS_TYPE_FlowResult.FAILURE
+    flow_print(f"Camera info: {camera_info}")
+
+    # Test RGB image capture
+    flow_print("Testing c_camera_rgb...")
+    rgb_image = entity.c_camera_rgb(camera_name="robot_camera", timeout_sec=5.0)
+    if rgb_image is None:
+        flow_print("Failed to get RGB image")
+        return EOS_TYPE_FlowResult.FAILURE
+    flow_print(f"RGB image shape: {rgb_image.shape}")
+
+    # Test RGBD image capture
+    flow_print("Testing c_camera_dep_rgb...")
+    rgb_image, depth_image = entity.c_camera_dep_rgb(
+        camera_name="robot_camera", timeout_sec=5.0
+    )
+    if rgb_image is None or depth_image is None:
+        flow_print("Failed to get RGBD images")
+        return EOS_TYPE_FlowResult.FAILURE
+    flow_print(f"RGB image shape: {rgb_image.shape}")
+    flow_print(f"Depth image shape: {depth_image.shape}")
+
+    # Test saving images
+    flow_print("Testing c_save_rgb_image...")
+    save_result = entity.c_save_rgb_image(
+        filename="./simulator/examples/simple_demo_1/test_rgb.jpg", camera_name="robot_camera", width=640, height=480
+    )
+    if not save_result["success"]:
+        flow_print("Failed to save RGB image")
+        return EOS_TYPE_FlowResult.FAILURE
+    flow_print("RGB image saved successfully")
+
+    flow_print("Testing c_save_depth_image...")
+    save_result = entity.c_save_depth_image(
+        filename="./simulator/examples/simple_demo_1/test_depth.npy", camera_name="robot_camera", width=640, height=480
+    )
+    if not save_result["success"]:
+        flow_print("Failed to save depth image")
+        return EOS_TYPE_FlowResult.FAILURE
+    flow_print("Depth image saved successfully")
+
+    flow_print("Camera test completed successfully!")
+    return EOS_TYPE_FlowResult.SUCCESS
+
+
+@flow
+def move_and_capture_flow(a: EntityPath, b: EntityPath) -> EOS_TYPE_FlowResult:
+    runtime = get_runtime()
+    A = runtime.get_graph().get_entity_by_path(a)
+    B = runtime.get_graph().get_entity_by_path(b)
+
+    if A is None:
+        flow_print(f"entity A not found at path: {a}")
+        return EOS_TYPE_FlowResult.FAILURE
+    if B is None:
+        flow_print(f"entity B not found at path: {b}")
+        return EOS_TYPE_FlowResult.FAILURE
+
+    # Get robot pose before movement
+    flow_print("Getting initial robot pose...")
+    initial_pose = A.c_get_robot_pose(timeout_sec=5.0)
+    if initial_pose is None:
+        flow_print("Failed to get initial robot pose")
+        return EOS_TYPE_FlowResult.FAILURE
+    flow_print(f"Initial pose: {initial_pose}")
+
+    # Capture initial images
+    flow_print("Capturing initial images...")
+    A.c_save_rgb_image(filename="./simulator/examples/simple_demo_1/initial_rgb.jpg", camera_name="robot_camera", width=640, height=480)
+    A.c_save_depth_image(filename="./simulator/examples/simple_demo_1/initial_depth.npy", camera_name="robot_camera", width=640, height=480)
+
+    # Move to target
+    b_pos = B.c_space_getpos()
+    flow_print(f"Moving to position: {b_pos}")
+    result = A.c_space_move(x=b_pos["x"], y=b_pos["y"], z=b_pos["z"])
+    if not result["success"]:
+        flow_print(f"Move failed: {result}")
+        return EOS_TYPE_FlowResult.FAILURE
+
+    # Get robot pose after movement
+    flow_print("Getting final robot pose...")
+    final_pose = A.c_get_robot_pose(timeout_sec=5.0)
+    if final_pose is None:
+        flow_print("Failed to get final robot pose")
+        return EOS_TYPE_FlowResult.FAILURE
+    flow_print(f"Final pose: {final_pose}")
+
+    # Capture final images
+    flow_print("Capturing final images...")
+    A.c_save_rgb_image(filename="./simulator/examples/simple_demo_1/final_rgb.jpg", camera_name="robot_camera", width=640, height=480)
+    A.c_save_depth_image(filename="./simulator/examples/simple_demo_1/final_depth.npy", camera_name="robot_camera", width=640, height=480)
+
+    flow_print("Move and capture flow completed successfully!")
+    return EOS_TYPE_FlowResult.SUCCESS
