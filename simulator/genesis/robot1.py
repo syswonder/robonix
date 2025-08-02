@@ -14,10 +14,13 @@ import sys
 import os
 import cv2
 import time
+import tkinter as tk
+import signal
 
 # Add the project root to Python path to import uapi
-PROJECT_ROOT = os.path.dirname(os.path.dirname(
-    os.path.dirname(os.path.abspath(__file__))))
+PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 sys.path.insert(0, PROJECT_ROOT)
 
 from uapi.log import logger
@@ -69,50 +72,94 @@ def print_car_position(car, last_pos, last_yaw):
 
 
 def camera_update_loop(camera, car, stop_event, scene_lock):
-    """Camera update thread that runs every 0.5 seconds"""
+    """Camera update thread that runs every 0.1 seconds for smooth following"""
+    # Get screen dimensions
+    root = tk.Tk()
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    root.destroy()
+
     while not stop_event.is_set():
         try:
             with scene_lock:
                 # Update camera position to follow car
                 car_pos = car.get_pos()
-                car_x, car_y, car_z = float(car_pos[0]), float(car_pos[1]), float(car_pos[2])
+                car_x, car_y, car_z = (
+                    float(car_pos[0]),
+                    float(car_pos[1]),
+                    float(car_pos[2]),
+                )
                 car_yaw = getattr(car, "_my_yaw", 0.0)
-                
-                # Calculate camera position at car front (0.25 units forward from car center)
-                camera_offset_x = 0.25 * np.cos(car_yaw)
-                camera_offset_y = 0.25 * np.sin(car_yaw)
+
+                # Calculate camera position at car front (0.3 units forward from car center)
+                # Use the same coordinate system as car movement
+                camera_offset_x = 0.3 * np.sin(car_yaw)
+                camera_offset_y = 0.3 * np.cos(car_yaw)
                 camera_x = car_x + camera_offset_x
                 camera_y = car_y + camera_offset_y
-                camera_z = car_z + 0.15  # Slightly above car center
-                
+                camera_z = car_z + 0.2  # Slightly above car center
+
                 # Calculate lookat point (forward direction)
-                lookat_x = camera_x + np.cos(car_yaw)
-                lookat_y = camera_y + np.sin(car_yaw)
+                lookat_x = camera_x + np.sin(car_yaw)
+                lookat_y = camera_y + np.cos(car_yaw)
                 lookat_z = camera_z
-                
+
                 # Update camera position and orientation
-                camera.set_pose(pos=(camera_x, camera_y, camera_z), lookat=(lookat_x, lookat_y, lookat_z))
-                
-                rgb, depth, segmentation, normal = camera.render(depth=True, segmentation=True, normal=True)
-            cv2.imshow("rgb", rgb)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+                camera.set_pose(
+                    pos=(camera_x, camera_y, camera_z),
+                    lookat=(lookat_x, lookat_y, lookat_z),
+                )
+
+                rgb, depth, segmentation, normal = camera.render(
+                    depth=True, segmentation=True, normal=True
+                )
+            # No horizontal flip - show original image
+            rgb_small = cv2.resize(rgb, (600, 450))
+            cv2.imshow("rgb", rgb_small)
+            cv2.moveWindow("rgb", screen_width - 600, 0)  # Position at top-right
+
+            # Display depth image
+            # Normalize depth values to 0-255 range for display
+            depth_normalized = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX)
+            depth_uint8 = depth_normalized.astype(np.uint8)
+            # Apply colormap for better visualization
+            depth_colored = cv2.applyColorMap(depth_uint8, cv2.COLORMAP_JET)
+            # No horizontal flip for depth image
+            depth_small = cv2.resize(depth_colored, (600, 450))
+            cv2.imshow("depth", depth_small)
+            cv2.moveWindow(
+                "depth", screen_width - 1200, 0
+            )  # Position at top-right, next to rgb
+            if cv2.waitKey(1) & 0xFF == ord("q"):
                 stop_event.set()
                 break
         except Exception as e:
             logger.error(f"Camera update error: {e}")
-        
-        time.sleep(0.5)  # Update every 0.5 seconds
+            # Close OpenCV windows on camera error
+            cv2.destroyAllWindows()
+
+        time.sleep(0.1)  # Update every 0.1 seconds for smoother following
 
 
 def control_car_loop(
-    car, keyboard_device, dt, max_speed, max_rot_speed, accel=3.0, rot_accel=5.0, camera=None, scene_lock=None
+    car,
+    keyboard_device,
+    dt,
+    max_speed,
+    max_rot_speed,
+    accel=3.0,
+    rot_accel=5.0,
+    camera=None,
+    scene_lock=None,
 ):
     # Start camera thread if camera is provided
     camera_thread = None
     stop_event = threading.Event()
-    
+
     if camera is not None:
-        camera_thread = threading.Thread(target=camera_update_loop, args=(camera, car, stop_event, scene_lock))
+        camera_thread = threading.Thread(
+            target=camera_update_loop, args=(camera, car, stop_event, scene_lock)
+        )
         camera_thread.daemon = True
         camera_thread.start()
 
@@ -195,13 +242,11 @@ def control_car_loop(
                     )
                     if rem_dist > stopping_dist + 0.1:
                         target_speed = min(
-                            current_speed + target["accel"] *
-                            dt, target["max_speed"]
+                            current_speed + target["accel"] * dt, target["max_speed"]
                         )
                     else:
                         # Decelerate
-                        target_speed = max(
-                            current_speed - target["decel"] * dt, 0.0)
+                        target_speed = max(current_speed - target["decel"] * dt, 0.0)
                     move_to_vx = dir_x * target_speed
                     move_to_vy = dir_y * target_speed
             else:
@@ -219,6 +264,7 @@ def control_car_loop(
                         return max(current - a * dt, target)
                     else:
                         return current
+
                 vx = approach(vx, target_vx, accel)
                 vy = approach(vy, target_vy, accel)
                 wz = approach(wz, target_wz, rot_accel)
@@ -248,13 +294,25 @@ def control_car_loop(
 
             with scene_lock:
                 global GLOBAL_SCENE
-                GLOBAL_SCENE.step()
+                try:
+                    GLOBAL_SCENE.step()
+                except Exception as e:
+                    logger.info(f"Viewer closed or scene step failed: {e}")
+                    break
     finally:
-        # Stop camera thread
+        # Stop camera thread and close all OpenCV windows
         if camera_thread is not None:
             stop_event.set()
-            camera_thread.join(timeout=1.0)
+            try:
+                camera_thread.join(timeout=1.0)
+            except Exception as e:
+                logger.warning(f"Camera thread join error: {e}")
+
+        try:
             cv2.destroyAllWindows()
+            logger.info("All OpenCV windows closed")
+        except Exception as e:
+            logger.warning(f"Error closing OpenCV windows: {e}")
 
 
 class RobotControlService(robot_control_pb2_grpc.RobotControlServicer):
@@ -375,7 +433,18 @@ def get_sim_asset(path):
     return target_file
 
 
+def signal_handler(signum, frame):
+    """Handle system signals for graceful shutdown"""
+    logger.info(f"Received signal {signum}, shutting down gracefully...")
+    sys.exit(0)
+
+
 def main():
+    global GLOBAL_SCENE
+
+    # Set up signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     gs.init(backend=gs.gpu)
 
@@ -395,10 +464,10 @@ def main():
         ),
         vis_options=gs.options.VisOptions(
             show_world_frame=True,
-            world_frame_size=2.0,
+            world_frame_size=1.0,
             show_link_frame=False,
             show_cameras=False,
-            plane_reflection=True,
+            plane_reflection=False,
             ambient_light=(0.3, 0.3, 0.3),
         ),
         # renderer=gs.renderers.RayTracer(
@@ -420,27 +489,28 @@ def main():
     GLOBAL_SCENE.profiling_options.show_FPS = False
 
     cam = GLOBAL_SCENE.add_camera(
-        res    = (800, 600),
-        pos    = (0.25, 0.0, 0.15),  # Initial position at car front
-        lookat = (1.0, 0.0, 0.15),   # Look forward
-        fov    = 60,                 # Wider FOV for better view
-        GUI    = False
+        res=(800, 600),
+        pos=(0.3, 0.0, 0.2),  # Initial position at car front
+        lookat=(1.0, 0.0, 0.2),  # Look forward
+        fov=60,  # Wider FOV for better view
+        GUI=False,
     )
 
     # Create floor
     floor = GLOBAL_SCENE.add_entity(
         gs.morphs.Plane(pos=(0.0, 0.0, 0.0)),
         surface=gs.surfaces.Rough(
-            roughness=0.5,
+            roughness=0.9,
             diffuse_texture=gs.textures.ImageTexture(
-                image_path=get_sim_asset(
-                    "texture_tiles_0024/tiles_0024_color_1k.jpg")
+                image_path=get_sim_asset("texture_tiles_0024/tiles_0024_color_1k.jpg")
             ),
             normal_texture=gs.textures.ImageTexture(
                 image_path=get_sim_asset(
-                    "texture_tiles_0024/tiles_0024_normal_opengl_1k.png")
+                    "texture_tiles_0024/tiles_0024_normal_opengl_1k.png"
+                )
             ),
-        )
+        ),
+        # surface=gs.surfaces.Default()
     )
 
     # Create room walls
@@ -552,12 +622,42 @@ def main():
 
     # Create shared scene lock
     scene_lock = threading.Lock()
-    
+
     grpc_server = serve_grpc(car, keyboard_device, scene_lock)
     try:
-        control_car_loop(car, keyboard_device, dt, speed, rot_speed, camera=cam, scene_lock=scene_lock)
+        control_car_loop(
+            car,
+            keyboard_device,
+            dt,
+            speed,
+            rot_speed,
+            camera=cam,
+            scene_lock=scene_lock,
+        )
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
     finally:
-        grpc_server.stop(0)
+        try:
+            grpc_server.stop(0)
+            logger.info("gRPC server stopped")
+        except Exception as e:
+            logger.warning(f"Error stopping gRPC server: {e}")
+
+        try:
+            keyboard_device.stop()
+            logger.info("Keyboard device stopped")
+        except Exception as e:
+            logger.warning(f"Error stopping keyboard device: {e}")
+
+        # Clean up Genesis resources
+        try:
+            if GLOBAL_SCENE is not None:
+                GLOBAL_SCENE = None
+            logger.info("Genesis scene cleaned up")
+        except Exception as e:
+            logger.warning(f"Error cleaning up Genesis scene: {e}")
 
 
 if __name__ == "__main__":
