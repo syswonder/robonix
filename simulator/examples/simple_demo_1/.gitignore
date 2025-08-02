@@ -1,1 +1,4 @@
 *.log
+*.jpg
+*.png
+*.npy

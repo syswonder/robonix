@@ -9,6 +9,9 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
+project_root_parent = Path(__file__).parent.parent.parent.parent.parent # DeepEmbody root
+sys.path.insert(0, str(project_root_parent))
+
 from uapi.runtime.runtime import Runtime
 from uapi.runtime.provider import SkillProvider
 from uapi.graph.entity import create_root_room, create_controllable_entity
@@ -23,6 +26,12 @@ def init_skill_providers(runtime: Runtime):
         skills=[
             "c_space_getpos",
             "c_space_move",
+            "c_camera_rgb",
+            "c_camera_dep_rgb",
+            "c_camera_info",
+            "c_save_rgb_image",
+            "c_save_depth_image",
+            "c_get_robot_pose",
         ],
     )
 
@@ -59,10 +68,34 @@ def init_entity_graph_manually(runtime: Runtime):
         time.sleep(2)
         return {"success": True}
 
+    # Import real camera APIs directly from skill module
+    from skill import (
+        c_camera_rgb,
+        c_camera_dep_rgb,
+        c_camera_info,
+        c_save_rgb_image,
+        c_save_depth_image,
+        c_get_robot_pose,
+    )
+
+    # Bind skills to entities
     entity_a.bind_skill("c_space_getpos", mock_getpos)
     entity_a.bind_skill("c_space_move", mock_move)
+    entity_a.bind_skill("c_camera_rgb", c_camera_rgb)
+    entity_a.bind_skill("c_camera_dep_rgb", c_camera_dep_rgb)
+    entity_a.bind_skill("c_camera_info", c_camera_info)
+    entity_a.bind_skill("c_save_rgb_image", c_save_rgb_image)
+    entity_a.bind_skill("c_save_depth_image", c_save_depth_image)
+    entity_a.bind_skill("c_get_robot_pose", c_get_robot_pose)
+
     entity_b.bind_skill("c_space_getpos", mock_getpos)
     entity_b.bind_skill("c_space_move", mock_move)
+    entity_b.bind_skill("c_camera_rgb", c_camera_rgb)
+    entity_b.bind_skill("c_camera_dep_rgb", c_camera_dep_rgb)
+    entity_b.bind_skill("c_camera_info", c_camera_info)
+    entity_b.bind_skill("c_save_rgb_image", c_save_rgb_image)
+    entity_b.bind_skill("c_save_depth_image", c_save_depth_image)
+    entity_b.bind_skill("c_get_robot_pose", c_get_robot_pose)
 
     runtime.set_graph(root_room)
 
@@ -110,6 +143,8 @@ def main():
 
         runtime.set_flow_args("move_a_to_b", a="/A", b="/B")
         runtime.set_flow_args("simple_test_flow")
+        runtime.set_flow_args("camera_test_flow")
+        runtime.set_flow_args("move_and_capture_flow", a="/A", b="/B")
 
         logger.info("starting all flows...")
         threads = runtime.start_all_flows()
