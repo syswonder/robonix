@@ -3,4 +3,5 @@ driver:
 capability:
   - sim_vision
 skill:
+  - sim_vision
 brain:
