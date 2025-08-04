@@ -141,10 +141,11 @@ def main():
         flow_names = runtime.load_program(flow_program_path)
         logger.info(f"loaded flow functions: {flow_names}")
 
-        runtime.set_flow_args("move_a_to_b", a="/A", b="/B")
-        runtime.set_flow_args("simple_test_flow")
-        runtime.set_flow_args("camera_test_flow")
-        runtime.set_flow_args("move_and_capture_flow", a="/A", b="/B")
+        if args.mode == "manual":
+            runtime.set_flow_args("move_a_to_b", a="/A", b="/B")
+            runtime.set_flow_args("move_and_capture_flow", a="/A", b="/B")
+        elif args.mode == "auto":
+            pass
 
         logger.info("starting all flows...")
         threads = runtime.start_all_flows()
