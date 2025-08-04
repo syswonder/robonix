@@ -600,7 +600,7 @@ def main():
             max_FPS=60,
         ),
         vis_options=gs.options.VisOptions(
-            show_world_frame=True,
+            show_world_frame=False,
             world_frame_size=1.0,
             show_link_frame=False,
             show_cameras=False,
@@ -670,7 +670,7 @@ def main():
 
     # Create the car (box)
     car = GLOBAL_SCENE.add_entity(
-        gs.morphs.Box(pos=(0.0, 0.0, 0.15), size=(0.3, 0.5, 0.3), fixed=False),
+        gs.morphs.Box(pos=(0.0, -2, 0.15), size=(0.3, 0.5, 0.3), fixed=False),
         surface=gs.surfaces.Iron(color=(0.2, 0.2, 0.8)),
     )
 
@@ -710,23 +710,23 @@ def main():
     mat_elastic = gs.materials.PBD.Elastic()
 
     ########################## entities ##########################
-    dragon = GLOBAL_SCENE.add_entity(
-        # material=mat_elastic,
-        morph=gs.morphs.Mesh(
-            file="meshes/dragon/dragon.obj",
-            scale=0.007,
-            pos=(1, 1, 0.8),
-        ),
-        surface=gs.surfaces.Default(
-            # vis_mode='recon',
-        ),
-    )
+    # dragon = GLOBAL_SCENE.add_entity(
+    #     # material=mat_elastic,
+    #     morph=gs.morphs.Mesh(
+    #         file="meshes/dragon/dragon.obj",
+    #         scale=0.007,
+    #         pos=(-0.3, 2, 0.8),
+    #     ),
+    #     surface=gs.surfaces.Default(
+    #         # vis_mode='recon',
+    #     ),
+    # )
 
     chair = GLOBAL_SCENE.add_entity(
         morph=gs.morphs.Mesh(
             file=get_sim_asset("chair1/MAD_QUEEN_CHAIR.obj"),
             scale=0.007,
-            pos=(-1, -1, 0.8),
+            pos=(0.3, 2, 0.8),
         ),
         surface=gs.surfaces.Default(
             diffuse_texture=gs.textures.ImageTexture(

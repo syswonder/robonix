@@ -5,6 +5,7 @@ import os
 import time
 import argparse
 from pathlib import Path
+import cv2
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
@@ -106,8 +107,25 @@ def init_entity_graph_manually(runtime: Runtime):
 
 
 def init_entity_graph_from_yolo(runtime: Runtime):
-    pass
-
+    root_room = create_root_room()
+    runtime.set_graph(root_room)
+    
+    robot = create_controllable_entity("robot")
+    root_room.add_child(robot)
+    
+    move_base = create_controllable_entity("move_base")
+    robot.add_child(move_base)
+    
+    camera = create_controllable_entity("camera")
+    robot.add_child(camera)
+    
+    from skill import s_detect_objs
+    camera.bind_skill("s_detect_objs", s_detect_objs)
+    
+    detect_objs = camera.s_detect_objs(camera_name="camera0")
+    logger.info(f"detected objects: {detect_objs}")
+    
+    
 
 def main():
     parser = argparse.ArgumentParser(description="Simple Demo 1")
