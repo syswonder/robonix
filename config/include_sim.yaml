@@ -1,0 +1,7 @@
+driver:
+  - sim_genesis_ranger
+capability:
+  - sim_vision
+skill:
+  - sim_vision
+brain:

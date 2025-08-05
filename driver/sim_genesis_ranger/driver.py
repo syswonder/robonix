@@ -11,7 +11,11 @@ import robot_control_pb2 as robot_control_pb2
 import robot_control_pb2_grpc as robot_control_pb2_grpc
 import math
 import time
+import numpy as np
 from grpc import RpcError
+import cv2
+import io
+from PIL import Image
 
 
 # gRPC client setup
@@ -123,15 +127,220 @@ def move_to_point(target_x, target_y):
         raise
 
 
+def get_rgb_image(width=None, height=None):
+    """
+    Get RGB image from the robot camera.
+
+    Args:
+        width (int, optional): Desired image width
+        height (int, optional): Desired image height
+
+    Returns:
+        tuple: (image_array, timestamp) where image_array is a numpy array with shape (H, W, 3)
+    """
+    global channel, stub
+    try:
+        request = robot_control_pb2.GetImageRequest()
+        if width is not None:
+            request.width = width
+        if height is not None:
+            request.height = height
+
+        response = stub.GetRGBImage(request)
+
+        # Convert bytes to numpy array
+        if response.format.lower() == "jpeg":
+            # Decode JPEG data
+            image_array = np.frombuffer(response.image_data, dtype=np.uint8)
+            image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+            # Convert BGR to RGB
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        elif response.format.lower() == "png":
+            # Decode PNG data
+            image = Image.open(io.BytesIO(response.image_data))
+            image = np.array(image)
+        else:
+            raise ValueError(f"Unsupported image format: {response.format}")
+
+        return image, response.timestamp
+
+    except RpcError as e:
+        print(f"[driver] failed to get RGB image: {e}")
+        print("[driver] attempting to reconnect to server...")
+        try:
+            channel, stub = wait_for_server(max_retries=5, retry_interval=1.0)
+            response = stub.GetRGBImage(request)
+
+            # Convert bytes to numpy array
+            if response.format.lower() == "jpeg":
+                image_array = np.frombuffer(response.image_data, dtype=np.uint8)
+                image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            elif response.format.lower() == "png":
+                image = Image.open(io.BytesIO(response.image_data))
+                image = np.array(image)
+            else:
+                raise ValueError(f"Unsupported image format: {response.format}")
+
+            return image, response.timestamp
+        except Exception as reconnect_error:
+            print(f"[driver] reconnection failed: {reconnect_error}")
+            raise
+
+
+def get_depth_image(width=None, height=None):
+    """
+    Get depth image from the robot camera.
+
+    Args:
+        width (int, optional): Desired image width
+        height (int, optional): Desired image height
+
+    Returns:
+        tuple: (depth_array, min_depth, max_depth, timestamp) where depth_array is a numpy array with shape (H, W)
+    """
+    global channel, stub
+    try:
+        request = robot_control_pb2.GetImageRequest()
+        if width is not None:
+            request.width = width
+        if height is not None:
+            request.height = height
+
+        response = stub.GetDepthImage(request)
+
+        # Convert bytes to numpy array (float32)
+        depth_array = np.frombuffer(response.depth_data, dtype=np.float32)
+        depth_array = depth_array.reshape(response.height, response.width)
+
+        return depth_array, response.min_depth, response.max_depth, response.timestamp
+
+    except RpcError as e:
+        print(f"[driver] failed to get depth image: {e}")
+        print("[driver] attempting to reconnect to server...")
+        try:
+            channel, stub = wait_for_server(max_retries=5, retry_interval=1.0)
+            response = stub.GetDepthImage(request)
+
+            # Convert bytes to numpy array (float32)
+            depth_array = np.frombuffer(response.depth_data, dtype=np.float32)
+            depth_array = depth_array.reshape(response.height, response.width)
+
+            return (
+                depth_array,
+                response.min_depth,
+                response.max_depth,
+                response.timestamp,
+            )
+        except Exception as reconnect_error:
+            print(f"[driver] reconnection failed: {reconnect_error}")
+            raise
+
+
+def save_rgb_image(filename, width=None, height=None):
+    """
+    Capture and save RGB image to file.
+
+    Args:
+        filename (str): Output filename (should include extension like .jpg or .png)
+        width (int, optional): Desired image width
+        height (int, optional): Desired image height
+    """
+    try:
+        image, timestamp = get_rgb_image(width, height)
+
+        # Determine format from filename extension
+        if filename.lower().endswith(".jpg") or filename.lower().endswith(".jpeg"):
+            # Convert RGB to BGR for OpenCV
+            image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(filename, image_bgr)
+        elif filename.lower().endswith(".png"):
+            # Convert RGB to BGR for OpenCV
+            image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(filename, image_bgr)
+        else:
+            # Default to JPEG
+            image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(filename, image_bgr)
+
+        print(f"[driver] RGB image saved to {filename} (timestamp: {timestamp})")
+
+    except Exception as e:
+        print(f"[driver] failed to save RGB image: {e}")
+        raise
+
+
+def save_depth_image(filename, width=None, height=None):
+    """
+    Capture and save depth image to file.
+
+    Args:
+        filename (str): Output filename (should include extension like .npy or .png)
+        width (int, optional): Desired image width
+        height (int, optional): Desired image height
+    """
+    try:
+        depth_array, min_depth, max_depth, timestamp = get_depth_image(width, height)
+
+        if filename.lower().endswith(".npy"):
+            # Save as numpy array
+            np.save(filename, depth_array)
+        elif filename.lower().endswith(".png"):
+            # Normalize depth to 0-255 range for visualization
+            depth_normalized = (
+                (depth_array - min_depth) / (max_depth - min_depth) * 255
+            ).astype(np.uint8)
+            cv2.imwrite(filename, depth_normalized)
+        else:
+            # Default to numpy array
+            np.save(filename, depth_array)
+
+        print(
+            f"[driver] Depth image saved to {filename} (timestamp: {timestamp}, depth range: {min_depth:.3f}-{max_depth:.3f}m)"
+        )
+
+    except Exception as e:
+        print(f"[driver] failed to save depth image: {e}")
+        raise
+
+
 if __name__ == "__main__":
-    # print("move to (1.0, 1.0)")
-    # move_to_point(1.0, 1.0)
-    # print("move to (2.5, 3.0)")
-    # move_to_point(2.5, 3.0)
-    # print("move to (1.5, 0.0)")
-    # move_to_point(1.5, 0.0)
-    # print("move to (0.0, 0.0)")
-    # move_to_point(0.0, 0.0)
-    # print("goodbye")
-    move_to_point(-2.2, 1.8)
-    move_to_point(0, 0)
+    # Example usage of image capture functionality
+    try:
+        print("[driver] Testing image capture functionality...")
+
+        # Capture and save RGB image
+        print("[driver] Capturing RGB image...")
+        save_rgb_image("robot_rgb.jpg", width=640, height=480)
+
+        # Capture and save depth image
+        print("[driver] Capturing depth image...")
+        save_depth_image("robot_depth.npy", width=640, height=480)
+        save_depth_image("robot_depth_vis.png", width=640, height=480)
+
+        # Get image data for processing
+        rgb_image, rgb_timestamp = get_rgb_image()
+        depth_image, min_depth, max_depth, depth_timestamp = get_depth_image()
+
+        print(f"[driver] RGB image shape: {rgb_image.shape}")
+        print(f"[driver] Depth image shape: {depth_image.shape}")
+        print(f"[driver] Depth range: {min_depth:.3f} - {max_depth:.3f} meters")
+
+        # Example movement with image capture
+        print("[driver] Moving to position and capturing images...")
+        move_to_point(1.0, 1.0)
+        save_rgb_image("position_1_rgb.jpg")
+        save_depth_image("position_1_depth.npy")
+
+        move_to_point(0, 0)
+        save_rgb_image("position_2_rgb.jpg")
+        save_depth_image("position_2_depth.npy")
+
+        print("[driver] Image capture test completed successfully!")
+
+    except Exception as e:
+        print(f"[driver] Error during image capture test: {e}")
+        # Fallback to original movement test
+        print("[driver] Falling back to movement test...")
+        move_to_point(-2.2, 1.8)
+        move_to_point(0, 0)
