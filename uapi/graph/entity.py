@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 # Copyright (c) 2025, wheatfox <wheatfox17@icloud.com>
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import uuid
@@ -318,6 +318,9 @@ class Entity:
         expected_output = spec["output"]
 
         def recursive_type_check(value, expected_type):
+            # Handle Any type - accept anything
+            if expected_type is Any:
+                return True
             # Handle dataclass
             if dataclasses.is_dataclass(expected_type):
                 if not isinstance(value, expected_type):
@@ -344,6 +347,25 @@ class Entity:
                     return False
                 elem_type = expected_type.__args__[0]
                 return all(recursive_type_check(v, elem_type) for v in value)
+            # Handle dict with subscripted generics (e.g., Dict[str, Any])
+            if getattr(expected_type, "__origin__", None) is dict:
+                if not isinstance(value, dict):
+                    return False
+                # For Dict[str, Any], we can't check the actual types at runtime
+                # So we just check that it's a dict
+                return True
+            # Handle tuple with subscripted generics (e.g., Tuple[float, float, float], Tuple[Any, Any])
+            if getattr(expected_type, "__origin__", None) is tuple:
+                if not isinstance(value, tuple):
+                    return False
+                # Check tuple length matches expected length
+                if len(value) != len(expected_type.__args__):
+                    return False
+                # Check each element of the tuple
+                for i, elem_type in enumerate(expected_type.__args__):
+                    if not recursive_type_check(value[i], elem_type):
+                        return False
+                return True
             # Handle enum
             if isinstance(expected_type, type) and issubclass(expected_type, Enum):
                 return isinstance(value, expected_type)

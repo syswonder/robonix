@@ -48,7 +48,12 @@ def update_import_and_all(func_name: str, full_module_path: str):
                     parsed = ast.parse(line)
                     assign = parsed.body[0]
                     if isinstance(assign, ast.Assign) and isinstance(assign.value, ast.List):
-                        all_list = [elt.s for elt in assign.value.elts]
+                        all_list = []
+                        for elt in assign.value.elts:
+                            if isinstance(elt, ast.Constant):
+                                all_list.append(elt.value)
+                            elif hasattr(elt, 's'):  # for compatibility
+                                all_list.append(elt.s)
                         if func_name not in all_list:
                             all_list.append(func_name)
                     found_all = True
@@ -167,6 +172,8 @@ def package_init(config_path: str):
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
     for base,entrys in config.items():
+        if entrys is None:
+            continue
         for entry in entrys:
             entry_dir = os.path.join(BASE_PATH, base, entry)
             if not os.path.exists(entry_dir):
@@ -180,7 +187,10 @@ def package_init(config_path: str):
     print(f"[eaios] Package initialized with {registry.gen_lens()} functions registered.")
 
 if __name__ == "__main__":
-    import yaml
-    package_init("config/include.yaml")
+    import yaml, argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="config/include.yaml")
+    args = parser.parse_args()
+    package_init(args.config)
     registry = FunctionRegistry()
     print(f"[eaios] Finalized with {registry.gen_lens()} functions registered.")
