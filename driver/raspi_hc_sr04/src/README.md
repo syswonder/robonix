@@ -32,7 +32,7 @@ TODO: 支持 colcon build，现在只支持上面这样的运行方式不支持 
 
 ## 查看数据
 
-一个节点名字叫 `ultrasonic`，里面有多个 topic，每个 topic 对应一个传感器（在 `sensors.yaml` 中配置）。
+一个节点名字叫 `ultrasonic`，里面有多个 topic，每个 topic 对应一个传感器（在 `sensors.yml` 中配置）。
 
 每个 topic 使用 ROS2（Humble）的 Range 消息类型，具体请参考 https://docs.ros.org/en/humble/p/sensor_msgs/msg/Range.html：
 
@@ -92,7 +92,7 @@ range: 0.09544999897480011
 
 ## 配置
 
-传感器配置通过 YAML 文件管理，位于 `raspi_hc_sr04/sensors.yaml`。配置示例请参考仓库内的 yaml 文件。
+传感器配置通过 YAML 文件管理，位于 `raspi_hc_sr04/sensors.yml`。配置示例请参考仓库内的 yaml 文件。
 
 每个传感器配置需要：
 - `name`: 传感器名称

@@ -1,4 +1,4 @@
-name: "moveit"
+name: "move"
 version: "1.0.0"
 author: "syswonder"
 start_on_boot: true

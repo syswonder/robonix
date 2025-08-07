@@ -12,7 +12,8 @@ capability:
   - activator
   - vision
 skill:
-  - moveit
+  - move
+  - test_skill
 brain:
   - test_brian
 
