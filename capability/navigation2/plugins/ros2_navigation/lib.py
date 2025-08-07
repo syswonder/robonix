@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 import os
 from mcp.server.fastmcp import FastMCP
 
@@ -62,77 +60,18 @@ class NavWithUltrasonicSafety(Node):
             self.navigator.cancelTask()
             self.cancelled = True
 
-@eaios.api
+rclpy.init()
+nv_controller = NavWithUltrasonicSafety()
+
+@eaios.plugin("navigation2","ros2_navigation")
 def nv_test():
-    import time
-    if int(time.time())%2 == 0:
-        func = eaios.get_plugin("navigation2","ros2_navigation")
-    else:
-        func = eaios.get_plugin("navigation2","simple_navigation")
-    # res = func()
-    print("lhe debug in cap test nv res", func, id(func))
-    # return res
-    return func()
+    print("nv test ros2_navigation")
+    return "nv test ros2_navigation"
 
-@eaios.api
+@eaios.plugin("navigation2","ros2_navigation")
 def set_goal(x, y, yaw) -> str:
-    """设置导航目标点
-    Args:
-        x: 目标点X坐标
-        y: 目标点Y坐标
-        yaw: 目标点偏航角
-    """
     # rclpy.init()
-    import yaml
-    plugin_name = "simple_navigation"
-    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "description.yml")
-    with open(config_path, "r") as f:
-        description_data = yaml.safe_load(f)
-        plugin_name = description_data.get("plugins", [])[0]  # 获取第一个插件名称
-    if plugin_name == "ros2_navigation":
-        func = eaios.get_plugin("navigation2","ros2_navigation")
-    else:
-        func = eaios.get_plugin("navigation2","simple_navigation")
-    res = func(x,y,yaw)
+    res = nv_controller.set_goal(x,y,yaw)
     func_status = f"Service set_gaol response: {res}"
+    # rclpy.shutdown()
     return func_status
-
-@eaios.api
-def stop_goal() -> str:
-    """停止当前导航目标
-    Args:
-        None
-    """
-    rclpy.init()
-    nv_controller.cancelled = True
-    func_status = f"Service stop response: {True}"
-    rclpy.shutdown()
-    return func_status
-
-def test():
-    rclpy.init()
-    node = NodeController()
-
-    # ros2 service list
-    # ros2 service type /get_count
-    # ros2 service call get_count std_srvs/srv/Trigger
-
-    req = Trigger.Request()
-    res = node.call_service('get_count', req)
-    print(f"Service get_count response: {res.success}, message: {res.message}")
-
-    req = Trigger.Request()
-    res = node.call_service('modify_name', req)
-    print(f"Service modify_name response: {res.success}, message: {res.message}")
-
-    req = Trigger.Request()
-    res = node.call_service('shutdown_node', req)
-    print(f"Service shutdown_node response: {res.success}, message: {res.message}")
-    
-    node.destroy_node()
-    rclpy.shutdown()
-
-
-if __name__ == "__main__":
-    # 初始化并运行 server
-    mcp.run(transport='stdio')

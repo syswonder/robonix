@@ -4,9 +4,12 @@ from collections import defaultdict
 from constant import BASE_PATH
 
 def scan_dir(base_path, feature_set, feature_sources, all_dependencies):
+    if not os.path.exists(base_path):
+        print(f"[WARN] {base_path} not existe, skipping.")
     for root, dirs, files in os.walk(base_path):
         if "description.yml" in files:
             desc_path = os.path.join(root, "description.yml")
+            print(desc_path)
             try:
                 with open(desc_path, "r", encoding="utf-8") as f:
                     data = yaml.safe_load(f)
@@ -42,6 +45,7 @@ def check_depend(config_path):
 
 
     config = {}
+    config_path = os.path.join(BASE_PATH, config_path)
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
     all_base_details = []
@@ -60,11 +64,9 @@ def check_depend(config_path):
             for entry in entrys:
                 sub_dir_path = os.path.join(base_dir_path, entry)
                 scan_dir(sub_dir_path, feature_set, feature_sources, all_dependencies)
-
         except Exception as e:
             print(f"[ERROR] An error occurred while accessing '{base_dir_path}': {e}")
             return []
-
     # Step 2: 检查所有依赖是否存在于 feature_set 中
     all_valid = True
     for entry_path, deps in all_dependencies.items():
@@ -79,9 +81,10 @@ def check_depend(config_path):
     print("[SUCCESS] All features and dependencies validated.")
     return feature_set, all_dependencies
 
+# Example usage
 if __name__ == "__main__":
 
-    config_path = os.path.join(BASE_PATH, "config", "include.yaml")
+    config_path = os.path.join(BASE_PATH, "config", "include/ranger_test.yml")
     features, dependencies = check_depend(config_path)
     print(f"Features: {features}")
     print(f"Dependencies: {dependencies}")

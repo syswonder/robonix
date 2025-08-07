@@ -11,9 +11,11 @@ from sensor_msgs.msg import Range
 import sys
 
 import sys
-root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 if root_dir not in sys.path:
     sys.path.append(root_dir)
+
+print(root_dir)
 
 from DeepEmbody.manager.eaios_decorators import eaios
 
@@ -86,8 +88,8 @@ def test():
     
     node.destroy_node()
     rclpy.shutdown()
-
+    
 #315曹老师办公室 28.3 0.1 0
 if __name__ == "__main__":
     # 初始化并运行 server
-    move_to_ab_pos(28.3, 0.1, 0)
+    move_to_ab_pos(-11.7,-6.8,0)

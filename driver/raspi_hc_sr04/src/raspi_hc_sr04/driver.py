@@ -86,7 +86,7 @@ class MultiHCSR04Driver:
         if sensor_configs is None:
             # Try to load from YAML file
             current_dir = os.path.dirname(os.path.abspath(__file__))
-            config_path = os.path.join(current_dir, "sensors.yaml")
+            config_path = os.path.join(current_dir, "sensors.yml")
             try:
                 with open(config_path, "r") as f:
                     config = yaml.safe_load(f)
