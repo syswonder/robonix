@@ -21,13 +21,21 @@ class CameraManager:
         self.camera = camera
         self.car = car
         self.scene_lock = scene_lock
-        self.output_dir = output_dir
+        
+        # Set output directory to be relative to robot1.py location
+        if not os.path.isabs(output_dir):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            self.output_dir = os.path.join(script_dir, output_dir)
+        else:
+            self.output_dir = output_dir
+            
         self.capture_interval = capture_interval  # capture interval (seconds)
         self.stop_event = threading.Event()
         self.camera_thread = None
         
         # Ensure output directory exists
-        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(self.output_dir, exist_ok=True)
+        logger.info(f"Camera output directory: {self.output_dir}")
         
         # Image counter
         self.image_counter = 0
@@ -107,9 +115,8 @@ class CameraManager:
             # Convert to BGR format for OpenCV saving
             rgb_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
             
-            # Generate filename
-            timestamp = int(time.time() * 1000)
-            filename = f"rgb_{self.image_counter:06d}_{timestamp}.jpg"
+            # Use fixed filename (overwrite mode)
+            filename = "rgb_current.jpg"
             filepath = os.path.join(self.output_dir, filename)
             
             # Save image
@@ -140,9 +147,8 @@ class CameraManager:
             # Apply colormap for better visualization
             depth_colored = cv2.applyColorMap(depth_uint8, cv2.COLORMAP_JET)
             
-            # Generate filename
-            timestamp = int(time.time() * 1000)
-            filename = f"depth_{self.image_counter:06d}_{timestamp}.png"
+            # Use fixed filename (overwrite mode)
+            filename = "depth_current.png"
             filepath = os.path.join(self.output_dir, filename)
             
             # Save image
