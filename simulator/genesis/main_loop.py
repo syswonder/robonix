@@ -4,7 +4,6 @@
 import threading
 import time
 
-# 尝试导入uapi.log，如果失败则使用标准logging
 try:
     from uapi.log import logger
 except ImportError:
@@ -23,28 +22,28 @@ class MainControlLoop:
         self.scene_lock = scene_lock
         self.camera_manager = camera_manager
         
-        # 控制参数
+        # Control parameters
         self.dt = 1.0 / 60.0  # 60 FPS
-        self.speed = 1.5  # 平移速度
-        self.rot_speed = 2.5  # 旋转速度
+        self.speed = 1.5  # Translation speed
+        self.rot_speed = 2.5  # Rotation speed
         
-        # 创建车辆控制器
+        # Create car controller
         self.car_controller = CarController(
             car, keyboard_device, self.dt, self.speed, self.rot_speed
         )
         
     def start_camera(self):
-        """启动相机管理器"""
+        """Start camera manager"""
         if self.camera_manager is not None:
             self.camera_manager.start_camera_thread()
             
     def stop_camera(self):
-        """停止相机管理器"""
+        """Stop camera manager"""
         if self.camera_manager is not None:
             self.camera_manager.stop_camera_thread()
             
     def run(self, scene_step_func):
-        """运行主控制循环"""
+        """Run main control loop"""
         logger.info("\nKeyboard Controls:")
         logger.info("Arrow Up/Down: Forward/Backward")
         logger.info("Arrow Left/Right: Left/Right")
@@ -54,12 +53,12 @@ class MainControlLoop:
         
         try:
             while True:
-                # 执行车辆控制步骤
+                # Execute car control step
                 if not self.car_controller.step():
                     logger.info("Exiting simulation.")
                     break
                     
-                # 场景步进
+                # Scene step
                 with self.scene_lock:
                     try:
                         scene_step_func()
@@ -67,7 +66,7 @@ class MainControlLoop:
                         logger.info(f"Viewer closed or scene step failed: {e}")
                         break
                         
-                # 控制循环频率
+                # Control loop frequency
                 time.sleep(self.dt)
                 
         except KeyboardInterrupt:
@@ -75,6 +74,6 @@ class MainControlLoop:
         except Exception as e:
             logger.error(f"Unexpected error: {e}")
         finally:
-            # 停止相机
+            # Stop camera
             self.stop_camera()
             logger.info("Main control loop stopped")
