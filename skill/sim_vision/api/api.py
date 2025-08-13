@@ -7,6 +7,9 @@ from ultralytics import YOLOE
 import cv2
 import random
 from datetime import datetime
+import math
+
+from skill.vision.api.vision import px2xy, remove_mask_outliers, get_mask_center_opencv
 
 def create_color_palette(n_colors):
     """Create a beautiful color palette for object detection"""
@@ -109,16 +112,114 @@ def s_detect_objs(camera_name: str) -> dict:
             x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
             color = colors[i % len(colors)]
             draw_rounded_rectangle(vis_image, x1, y1, x2, y2, color, thickness=3)
-            label = f"{name} ({conf:.2f})"
+            
+            # Enhanced object detection with depth information and coordinate transformation
+            try:
+                # Get mask center for depth estimation
+                mask_points = masks.xy[i].reshape(-1, 1, 2).astype(np.int32)
+                center_x, center_y = get_mask_center_opencv(mask_points)
+                single_selection_mask = np.array(masks.xy[i])
+                
+                # Improved depth computation using mask area
+                depths = []
+                valid_depth_count = 0
+                
+                # Sample points from the mask for depth estimation
+                sample_points = single_selection_mask[::max(1, len(single_selection_mask) // 50)]
+                
+                for point in sample_points:
+                    p_x = int(point[0])
+                    p_y = int(point[1])
+                    if 0 <= p_x < np_depth_image.shape[1] and 0 <= p_y < np_depth_image.shape[0]:
+                        depth = np_depth_image.item(p_y, p_x)
+                        # Filter out invalid depth values (0 or NaN)
+                        if depth > 0 and depth == depth:  # depth == depth checks for NaN
+                            depths.append(depth)
+                            valid_depth_count += 1
+                
+                # Use robust depth estimation - fix depth calculation
+                center_depth = 0
+                if valid_depth_count > 0:
+                    # Remove outliers and get median depth for stability
+                    filtered_depths = remove_mask_outliers(depths, lower_percentile=20, upper_percentile=80)
+                    if len(filtered_depths) > 0:
+                        # Use median depth for more robust estimation
+                        center_depth = np.median(filtered_depths)  # Keep in original units (mm)
+                    else:
+                        center_depth = np.median(depths)  # Keep in original units (mm)
+                else:
+                    # Fallback: try to get depth at center point
+                    if 0 <= center_x < np_depth_image.shape[1] and 0 <= center_y < np_depth_image.shape[0]:
+                        center_depth = np_depth_image[int(center_y), int(center_x)]
+                        if center_depth == 0 or center_depth != center_depth:  # Check for NaN
+                            center_depth = 0
+                
+                # Skip objects with invalid depth
+                if center_depth <= 0:
+                    logger.warning(f"skipping object {name} due to invalid depth: {center_depth}")
+                    detected_objects[name] = {
+                        'confidence': float(conf),
+                        'bbox': [x1, y1, x2, y2],
+                        'depth': None,
+                        'position': None,
+                        'camera_position': None
+                    }
+                    
+                    # All information will be combined in the label text (handled later)
+                    
+                    continue
+                
+                # Convert depth to meters for coordinate calculation
+                center_depth_m = center_depth / 1000.0
+                
+                # Convert pixel to camera coordinates using the computed depth
+                world_x, world_y = px2xy([center_x, center_y], camera_info["k"], camera_info["d"], center_depth_m)
+                
+                # Use c_tf_transform to convert to 'map' frame
+                map_x, map_y, map_z = c_tf_transform('camera_link', 'map', world_x, world_y, center_depth_m)
+                
+                # Store enhanced object information
+                detected_objects[name] = {
+                    'confidence': float(conf),
+                    'bbox': [x1, y1, x2, y2],
+                    'depth': float(center_depth_m),
+                    'position': (float(map_x), float(map_y), float(map_z)),
+                    'camera_position': (float(world_x), float(world_y), float(center_depth_m)),
+                    'pixel_center': (int(center_x), int(center_y))
+                }
+                
+                # All information will be combined in the label text (handled later)
+                
+                logger.info(f"object {name}: depth={center_depth_m:.3f}m, "
+                           f"camera_pos=({world_x:.3f}, {world_y:.3f}, {center_depth_m:.3f}), "
+                           f"map_pos=({map_x:.3f}, {map_y:.3f}, {map_z:.3f})")
+                
+            except Exception as e:
+                logger.error(f"error processing depth for object {name}: {e}")
+                # Fallback to basic detection without depth
+                detected_objects[name] = {
+                    'confidence': float(conf),
+                    'bbox': [x1, y1, x2, y2],
+                    'depth': None,
+                    'position': None,
+                    'camera_position': None
+                }
+                
+                # All information will be combined in the label text (handled later)
+            
+            # Create comprehensive label with all information
+            if detected_objects[name].get('depth') is not None:
+                # Object has valid depth and position
+                label = f"{name} ({conf:.2f}) | D:{detected_objects[name]['depth']:.2f}m | ({detected_objects[name]['position'][0]:.2f}, {detected_objects[name]['position'][1]:.2f})"
+            else:
+                # Object has no depth data
+                label = f"{name} ({conf:.2f}) | No Depth Data"
+            
             text_x = x1
             text_y = max(y1 - 10, 30)
             put_text_with_background(vis_image, label, (text_x, text_y), 
-                                   font_scale=0.7, thickness=2,
+                                   font_scale=0.5, thickness=1,
                                    bg_color=color, text_color=(255, 255, 255))
-            detected_objects[name] = {
-                'confidence': float(conf),
-                'bbox': [x1, y1, x2, y2]
-            }
         
         # Add timestamp at bottom right corner
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -146,7 +247,7 @@ def s_detect_objs(camera_name: str) -> dict:
         output_path = os.path.join(output_dir, output_filename)
         
         cv2.imwrite(output_path, vis_image)
-        logger.info(f"Detection visualization saved to: {output_path}")
+        logger.info(f"detection visualization saved to: {output_path}")
         
         return detected_objects
     except Exception as e:
