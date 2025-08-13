@@ -55,7 +55,7 @@ class MainControlLoop:
             while True:
                 # Execute car control step
                 if not self.car_controller.step():
-                    logger.info("Exiting simulation.")
+                    logger.info("exiting simulation.")
                     break
                     
                 # Scene step
@@ -63,17 +63,17 @@ class MainControlLoop:
                     try:
                         scene_step_func()
                     except Exception as e:
-                        logger.info(f"Viewer closed or scene step failed: {e}")
+                        logger.info(f"viewer closed or scene step failed: {e}")
                         break
                         
                 # Control loop frequency
                 time.sleep(self.dt)
                 
         except KeyboardInterrupt:
-            logger.info("Interrupted by user")
+            logger.info("interrupted by user")
         except Exception as e:
-            logger.error(f"Unexpected error: {e}")
+            logger.error(f"unexpected error: {e}")
         finally:
             # Stop camera
             self.stop_camera()
-            logger.info("Main control loop stopped")
+            logger.info("main control loop stopped")

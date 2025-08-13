@@ -45,7 +45,7 @@ class SceneManager:
         )
         
         self.scene.profiling_options.show_FPS = False
-        logger.info("Genesis scene created successfully")
+        logger.info("genesis scene created successfully")
         return self.scene
         
     def create_scene_with_camera(self):
@@ -88,7 +88,7 @@ class SceneManager:
             fov=fov,
             GUI=gui,
         )
-        logger.info(f"Camera added to scene at position {pos}")
+        logger.info(f"camera added to scene at position {pos}")
         return camera
         
     def add_floor(self):
@@ -110,7 +110,7 @@ class SceneManager:
                 ),
             ),
         )
-        logger.info("Floor added to scene")
+        logger.info("floor added to scene")
         return floor
         
     def add_room_walls(self):
@@ -148,7 +148,7 @@ class SceneManager:
         )
         walls.append(wall_west)
         
-        logger.info("Room walls added to scene")
+        logger.info("room walls added to scene")
         return walls
         
     def add_car(self, pos=(0.0, -2, 0.15), size=(0.3, 0.5, 0.3)):
@@ -160,7 +160,7 @@ class SceneManager:
             gs.morphs.Box(pos=pos, size=size, fixed=False),
             surface=gs.surfaces.Iron(color=(0.2, 0.2, 0.8)),
         )
-        logger.info(f"Car added to scene at position {pos}")
+        logger.info(f"car added to scene at position {pos}")
         return car
         
     def add_furniture(self):
@@ -188,7 +188,7 @@ class SceneManager:
         )
         furniture.append(chair)
         
-        logger.info("Furniture added to scene")
+        logger.info("furniture added to scene")
         return furniture
         
     def build_scene(self):
@@ -197,7 +197,7 @@ class SceneManager:
             raise RuntimeError("Scene not created yet")
             
         self.scene.build()
-        logger.info("Scene built successfully")
+        logger.info("scene built successfully")
         
     def follow_entity(self, entity):
         """Set view to follow entity"""
@@ -205,7 +205,7 @@ class SceneManager:
             raise RuntimeError("Scene or viewer not available")
             
         self.scene.viewer.follow_entity(entity)
-        logger.info(f"Viewer following entity: {entity}")
+        logger.info(f"viewer following entity: {entity}")
         
     def step(self):
         """Scene step"""
@@ -215,7 +215,7 @@ class SceneManager:
         try:
             self.scene.step()
         except Exception as e:
-            logger.info(f"Scene step failed: {e}")
+            logger.info(f"scene step failed: {e}")
             raise
             
     def _get_sim_asset(self, path):

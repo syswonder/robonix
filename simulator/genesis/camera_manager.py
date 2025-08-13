@@ -35,7 +35,7 @@ class CameraManager:
         
         # Ensure output directory exists
         os.makedirs(self.output_dir, exist_ok=True)
-        logger.info(f"Camera output directory: {self.output_dir}")
+        logger.info(f"camera output directory: {self.output_dir}")
         
         # Image counter
         self.image_counter = 0
@@ -47,8 +47,8 @@ class CameraManager:
         )
         self.camera_thread.daemon = True
         self.camera_thread.start()
-        logger.info(f"Camera thread started, saving images to {self.output_dir} every {self.capture_interval}s")
-        logger.info(f"Camera thread ID: {self.camera_thread.ident}, alive: {self.camera_thread.is_alive()}")
+        logger.info(f"camera thread started, saving images to {self.output_dir} every {self.capture_interval}s")
+        logger.info(f"camera thread ID: {self.camera_thread.ident}, alive: {self.camera_thread.is_alive()}")
         
     def stop_camera_thread(self):
         """Stop camera capture thread"""
@@ -56,9 +56,9 @@ class CameraManager:
         if self.camera_thread is not None:
             try:
                 self.camera_thread.join(timeout=2.0)
-                logger.info("Camera thread stopped")
+                logger.info("camera thread stopped")
             except Exception as e:
-                logger.warning(f"Camera thread join error: {e}")
+                logger.warning(f"camera thread join error: {e}")
                 
     def _camera_update_loop(self):
         """Camera update loop, periodically capture and save images"""
@@ -104,7 +104,7 @@ class CameraManager:
                     self._save_depth_image(depth)
                     
             except Exception as e:
-                logger.error(f"Camera update error: {e}")
+                logger.error(f"camera update error: {e}")
                 
             # Wait for specified interval
             time.sleep(self.capture_interval)
@@ -124,16 +124,16 @@ class CameraManager:
             
             if success:
                 self.image_counter += 1
-                logger.info(f"RGB image saved: {filepath}")
+                logger.info(f"rgb image saved: {filepath}")
                 
                 # Log every 10 images for testing
                 if self.image_counter % 10 == 0:
-                    logger.info(f"Saved {self.image_counter} RGB images total")
+                    logger.info(f"saved {self.image_counter} rgb images total")
             else:
-                logger.error(f"Failed to save RGB image: {filepath}")
+                logger.error(f"failed to save rgb image: {filepath}")
                 
         except Exception as e:
-            logger.error(f"Error saving RGB image: {e}")
+            logger.error(f"error saving rgb image: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
             
@@ -155,12 +155,12 @@ class CameraManager:
             success = cv2.imwrite(filepath, depth_colored)
             
             if success:
-                logger.info(f"Depth image saved: {filepath}")
+                logger.info(f"depth image saved: {filepath}")
             else:
-                logger.error(f"Failed to save depth image: {filepath}")
+                logger.error(f"failed to save depth image: {filepath}")
             
         except Exception as e:
-            logger.error(f"Error saving depth image: {e}")
+            logger.error(f"error saving depth image: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
             
@@ -184,7 +184,7 @@ class CameraManager:
                 return jpeg_data.tobytes(), rgb.shape[1], rgb.shape[0]
                 
         except Exception as e:
-            logger.error(f"Error getting RGB image: {e}")
+            logger.error(f"error getting rgb image: {e}")
             return b"", 0, 0
             
     def get_depth_image(self, width=800, height=600):
@@ -207,5 +207,5 @@ class CameraManager:
                 return depth_float32.tobytes(), depth.shape[1], depth.shape[0], min_depth, max_depth
                 
         except Exception as e:
-            logger.error(f"Error getting depth image: {e}")
+            logger.error(f"error getting depth image: {e}")
             return b"", 0, 0, 0.0, 0.0

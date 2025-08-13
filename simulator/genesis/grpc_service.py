@@ -152,7 +152,7 @@ class RobotControlService(robot_control_pb2_grpc.RobotControlServicer):
                 )
 
         except Exception as e:
-            logger.error(f"Error getting RGB image: {e}")
+            logger.error(f"error getting rgb image: {e}")
             return robot_control_pb2.RGBImageReply(
                 image_data=b"",
                 width=0,
@@ -190,7 +190,7 @@ class RobotControlService(robot_control_pb2_grpc.RobotControlServicer):
                 )
 
         except Exception as e:
-            logger.error(f"Error getting depth image: {e}")
+            logger.error(f"error getting depth image: {e}")
             return robot_control_pb2.DepthImageReply(
                 depth_data=b"",
                 width=0,

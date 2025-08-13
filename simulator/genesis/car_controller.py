@@ -101,7 +101,7 @@ class CarController:
                 self.move_to_vy = 0.0
                 self.move_to_active = False
                 self.car._move_to_target["active"] = False
-                logger.info(f"MoveTo completed: reached target within {target['tolerance']:.3f}m")
+                logger.info(f"move to completed: reached target within {target['tolerance']:.3f}m")
             else:
                 if rem_dist > 1e-6:
                     dir_x = rem_x / rem_dist
@@ -129,7 +129,7 @@ class CarController:
             
             if keyboard_active and hasattr(self.car, "_move_to_target"):
                 self.car._move_to_target["active"] = False
-                logger.info("MoveTo interrupted by keyboard input")
+                logger.info("move to interrupted by keyboard input")
                 
     def update_velocities(self):
         """Update velocities"""
