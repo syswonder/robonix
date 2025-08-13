@@ -157,8 +157,8 @@ def get_rgb_image(width=None, height=None):
             # Debug: Save received image and check colors
             try:
                 debug_filename = "rgb_received_debug.jpg"
-                cv2.imwrite(debug_filename, image)  # Save as BGR (OpenCV format)
-                print(f"[driver] Saved received image for debugging: {debug_filename}")
+                # cv2.imwrite(debug_filename, image)  # Save as BGR (OpenCV format)
+                # print(f"[driver] Saved received image for debugging: {debug_filename}")
                 
                 # Check center pixel colors
                 if image.size > 0:

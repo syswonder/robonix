@@ -10,7 +10,9 @@ import cv2
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-project_root_parent = Path(__file__).parent.parent.parent.parent.parent # DeepEmbody root
+project_root_parent = Path(
+    __file__
+).parent.parent.parent.parent.parent  # DeepEmbody root
 sys.path.insert(0, str(project_root_parent))
 
 from uapi.runtime.runtime import Runtime
@@ -36,16 +38,7 @@ def init_skill_providers(runtime: Runtime):
         ],
     )
 
-    graph_skill_provider = SkillProvider(
-        name="graph_skill_provider",
-        IP="127.0.0.1",
-        skills=[
-            "s_generate_entity_graph",
-        ],
-    )
-
     runtime.registry.add_provider(local_provider)
-    runtime.registry.add_provider(graph_skill_provider)
 
     logger.info(f"added skill providers: {runtime.registry}")
 
@@ -107,25 +100,73 @@ def init_entity_graph_manually(runtime: Runtime):
 
 
 def init_entity_graph_from_yolo(runtime: Runtime):
+    from skill import s_detect_objs, c_save_rgb_image, c_save_depth_image
+
     root_room = create_root_room()
     runtime.set_graph(root_room)
-    
+
     robot = create_controllable_entity("robot")
     root_room.add_child(robot)
-    
+
+    def robot_move_impl(x, y, z):
+        from driver.sim_genesis_ranger.driver import move_to_point
+
+        move_to_point(x, y)  # THIS IS A FUNCTION FROM DRIVER !
+        return {"success": True}
+
+    def robot_getpos_impl():
+        from driver.sim_genesis_ranger.driver import get_pose
+
+        x, y, z, yaw = get_pose()
+        return {"x": x, "y": y, "z": z}
+
+    robot.bind_skill("c_space_move", robot_move_impl)
+    robot.bind_skill("c_space_getpos", robot_getpos_impl)
+    robot.bind_skill("c_save_rgb_image", c_save_rgb_image)
+    robot.bind_skill("c_save_depth_image", c_save_depth_image)
+
     move_base = create_controllable_entity("move_base")
     robot.add_child(move_base)
-    
+
     camera = create_controllable_entity("camera")
     robot.add_child(camera)
-    
-    from skill import s_detect_objs
+
     camera.bind_skill("s_detect_objs", s_detect_objs)
-    
+
     detect_objs = camera.s_detect_objs(camera_name="camera0")
     logger.info(f"detected objects: {detect_objs}")
-    
-    
+    # detect_objs is a dict of {obj_name: obj_info}
+
+    global detected_entities
+    detected_entities = {}
+
+    global detected_entities_getpos_handler
+    detected_entities_getpos_handler = {}
+
+    for obj_name, obj_info in detect_objs.items():
+        obj_entity = create_controllable_entity(obj_name)
+        root_room.add_child(obj_entity)
+        detected_entities[obj_name] = obj_entity
+
+        x, y = obj_info["position"][0], obj_info["position"][1]
+        detected_entities_getpos_handler[obj_name] = lambda: {
+            "x": x,
+            "y": y,
+            "z": 0.0,
+        }
+        obj_entity.bind_skill(
+            "c_space_getpos", detected_entities_getpos_handler[obj_name]
+        )
+
+        logger.info(f"created entity for {obj_name}: {obj_entity.get_absolute_path()}")
+
+    logger.info("initd entity graph from YOLO detection:")
+    logger.info(f"  root room: {root_room.get_absolute_path()}")
+    logger.info(f"  robot: {robot.get_absolute_path()}")
+    logger.info(f"  detected entities: {list(detected_entities.keys())}")
+
+    return detected_entities
+
 
 def main():
     parser = argparse.ArgumentParser(description="Simple Demo 1")
@@ -146,7 +187,7 @@ def main():
     if args.mode == "manual":
         init_entity_graph_manually(runtime)
     elif args.mode == "auto":
-        init_entity_graph_from_yolo(runtime)
+        detected_entities = init_entity_graph_from_yolo(runtime)
     else:
         raise ValueError(f"invalid mode: {args.mode}")
 
@@ -160,10 +201,28 @@ def main():
         logger.info(f"loaded flow functions: {flow_names}")
 
         if args.mode == "manual":
-            runtime.set_flow_args("move_a_to_b", a="/A", b="/B")
+            # runtime.set_flow_args("move_a_to_b", a="/A", b="/B")
             runtime.set_flow_args("move_and_capture_flow", a="/A", b="/B")
         elif args.mode == "auto":
-            pass
+            # in auto mode, the entity graph is constructed using registered
+            # s_detect_objs skill, and we choose the first object detected as
+            # flow argument "b", and "a" fixed to "/robot". - wheatfox 2025.8.13
+            if detected_entities:
+                first_obj_name = list(detected_entities.keys())[0]
+                first_obj_path = f"/{first_obj_name}"
+                # runtime.set_flow_args("move_a_to_b", a="/robot", b=first_obj_path)
+                runtime.set_flow_args(
+                    "move_and_capture_flow", a="/robot", b=first_obj_path
+                )
+                logger.info(f"auto mode: set flow args for {first_obj_name}")
+                logger.info(f"  move_a_to_b: a=/robot, b={first_obj_path}")
+                logger.info(f"  move_and_capture_flow: a=/robot, b={first_obj_path}")
+            else:
+                logger.warning(
+                    "auto mode: no objects detected, using default robot paths"
+                )
+                runtime.set_flow_args("move_a_to_b", a="/robot", b="/robot")
+                runtime.set_flow_args("move_and_capture_flow", a="/robot", b="/robot")
 
         logger.info("starting all flows...")
         threads = runtime.start_all_flows()

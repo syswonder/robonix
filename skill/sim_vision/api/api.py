@@ -17,6 +17,7 @@ from skill.vision.api.vision import px2xy, remove_mask_outliers, get_mask_center
 
 set_log_level("debug")
 
+
 def create_color_palette(n_colors):
     colors = []
     for i in range(n_colors):
@@ -80,13 +81,19 @@ def s_detect_objs(camera_name: str) -> dict:
             return {}
 
         # Debug: Check the data types and shapes received
-        logger.debug(f"Received rgb_image type: {type(rgb_image)}, shape: {getattr(rgb_image, 'shape', 'N/A')}")
-        logger.debug(f"Received depth_image type: {type(depth_image)}, shape: {getattr(depth_image, 'shape', 'N/A')}")
-        
+        logger.debug(
+            f"received rgb_image type: {type(rgb_image)}, shape: {getattr(rgb_image, 'shape', 'N/A')}"
+        )
+        logger.debug(
+            f"received depth_image type: {type(depth_image)}, shape: {getattr(depth_image, 'shape', 'N/A')}"
+        )
+
         # Debug: Check if depth_image is already a numpy array
-        if hasattr(depth_image, 'dtype'):
+        if hasattr(depth_image, "dtype"):
             logger.debug(f"depth_image dtype: {depth_image.dtype}")
-            logger.debug(f"depth_image min: {np.min(depth_image)}, max: {np.max(depth_image)}")
+            logger.debug(
+                f"depth_image min: {np.min(depth_image)}, max: {np.max(depth_image)}"
+            )
             logger.debug(f"depth_image sample values: {depth_image[0:5, 0:5]}")
 
         camera_info = c_camera_info(camera_name)
@@ -96,52 +103,77 @@ def s_detect_objs(camera_name: str) -> dict:
 
         # Convert RGB image to numpy array (uint8 for RGB)
         np_color_image = np.array(rgb_image, dtype=np.uint8)
-        logger.debug(f"Converted RGB image shape: {np_color_image.shape}, dtype: {np_color_image.dtype}")
-        
+        logger.debug(
+            f"converted RGB image shape: {np_color_image.shape}, dtype: {np_color_image.dtype}"
+        )
+
         # Debug: Check RGB image color values
         if np_color_image.size > 0:
             # Check center pixel colors
-            center_y, center_x = np_color_image.shape[0] // 2, np_color_image.shape[1] // 2
+            center_y, center_x = (
+                np_color_image.shape[0] // 2,
+                np_color_image.shape[1] // 2,
+            )
             center_color = np_color_image[center_y, center_x]
-            logger.debug(f"Center pixel RGB values: R={center_color[0]}, G={center_color[1]}, B={center_color[2]}")
-            
+            logger.debug(
+                f"center pixel RGB values: R={center_color[0]}, G={center_color[1]}, B={center_color[2]}"
+            )
+
             # Check some sample pixels for color analysis
             sample_positions = [(100, 100), (200, 200), (300, 300)]
             for y, x in sample_positions:
                 if y < np_color_image.shape[0] and x < np_color_image.shape[1]:
                     color = np_color_image[y, x]
-                    logger.debug(f"Sample pixel at ({x}, {y}): R={color[0]}, G={color[1]}, B={color[2]}")
-            
+                    logger.debug(
+                        f"sample pixel at ({x}, {y}): R={color[0]}, G={color[1]}, B={color[2]}"
+                    )
+
             # Check overall color distribution
-            logger.debug(f"RGB image value ranges - R: [{np.min(np_color_image[:,:,0])}, {np.max(np_color_image[:,:,0])}]")
-            logger.debug(f"RGB image value ranges - G: [{np.min(np_color_image[:,:,1])}, {np.max(np_color_image[:,:,1])}]")
-            logger.debug(f"RGB image value ranges - B: [{np.min(np_color_image[:,:,2])}, {np.max(np_color_image[:,:,2])}]")
-            
+            logger.debug(
+                f"RGB image value ranges - R: [{np.min(np_color_image[:,:,0])}, {np.max(np_color_image[:,:,0])}]"
+            )
+            logger.debug(
+                f"RGB image value ranges - G: [{np.min(np_color_image[:,:,1])}, {np.max(np_color_image[:,:,1])}]"
+            )
+            logger.debug(
+                f"RGB image value ranges - B: [{np.min(np_color_image[:,:,2])}, {np.max(np_color_image[:,:,2])}]"
+            )
+
             # Save received image for debugging
             try:
-                debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_output")
-                os.makedirs(debug_dir, exist_ok=True)
+                debug_dir = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "debug_output"
+                )
+                # os.makedirs(debug_dir, exist_ok=True)
                 debug_filename = os.path.join(debug_dir, "rgb_received_skill.jpg")
                 # Convert RGB to BGR for OpenCV saving
                 image_bgr = cv2.cvtColor(np_color_image, cv2.COLOR_RGB2BGR)
                 # cv2.imwrite(debug_filename, image_bgr)
-                logger.debug(f"Saved received RGB image for debugging: {debug_filename}")
+                # logger.debug(f"saved received RGB image for debugging: {debug_filename}")
             except Exception as e:
-                logger.warning(f"Failed to save debug image: {e}")
-        
+                logger.warning(f"failed to save debug image: {e}")
+
         # Convert depth image to numpy array (float32 for depth in meters)
         # Note: depth_image should already be float32 from the driver, but ensure it's correct
-        if hasattr(depth_image, 'dtype') and depth_image.dtype == np.float32:
+        if hasattr(depth_image, "dtype") and depth_image.dtype == np.float32:
             np_depth_image = depth_image  # Already correct type
-            logger.debug(f"Depth image already float32, using as-is")
+            logger.debug(f"depth image already float32, using as-is")
         else:
             np_depth_image = np.array(depth_image, dtype=np.float32)
-            logger.debug(f"Converted depth image to float32, shape: {np_depth_image.shape}")
-        
+            logger.debug(
+                f"converted depth image to float32, shape: {np_depth_image.shape}"
+            )
+
         # Debug: Verify depth data range (should be in meters)
-        logger.debug(f"Final depth image - shape: {np_depth_image.shape}, dtype: {np_depth_image.dtype}")
-        logger.debug(f"Final depth image - min: {np.min(np_depth_image):.3f}m, max: {np.max(np_depth_image):.3f}m")
-        logger.debug(f"Final depth image - center pixel: {np_depth_image[np_depth_image.shape[0]//2, np_depth_image.shape[1]//2]:.3f}m")
+        logger.debug(
+            f"final depth image - shape: {np_depth_image.shape}, dtype: {np_depth_image.dtype}"
+        )
+        logger.debug(
+            f"final depth image - min: {np.min(np_depth_image):.3f}m, max: {np.max(np_depth_image):.3f}m"
+        )
+        logger.debug(
+            f"final depth image - center pixel: {np_depth_image[np_depth_image.shape[0]//2, np_depth_image.shape[1]//2]:.3f}m"
+        )
 
         if np_color_image is None:
             return {}
@@ -227,7 +259,9 @@ def s_detect_objs(camera_name: str) -> dict:
                             filtered_depths
                         )  # Keep in original units (meters)
                     else:
-                        center_depth = np.median(depths)  # Keep in original units (meters)
+                        center_depth = np.median(
+                            depths
+                        )  # Keep in original units (meters)
                 else:
                     # Fallback: try to get depth at center point
                     if (
