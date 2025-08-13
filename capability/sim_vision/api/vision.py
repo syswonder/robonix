@@ -25,7 +25,7 @@ class SimulatorCameraGetter:
 
     def __init__(self):
         self._lock = threading.Lock()
-        print("[sim_vision] Initialized camera getter using driver functions")
+        print("[sim_vision] initialized camera getter, this class type is " + str(type(self)))
 
     def _check_connection(self):
         """Check if driver is connected to simulator"""
@@ -34,7 +34,7 @@ class SimulatorCameraGetter:
             driver_get_pose()
             return True
         except Exception as e:
-            print(f"[sim_vision] Connection check failed: {e}")
+            print(f"[sim_vision] connection check failed: {e}")
             return False
 
 
@@ -63,7 +63,7 @@ class SimulatorRGBGetter(SimulatorCameraGetter):
                 return image
 
             except Exception as e:
-                print(f"[sim_vision] Error getting RGB image: {e}")
+                print(f"[sim_vision] error getting RGB image: {e}")
                 return None
 
 
@@ -98,7 +98,7 @@ class SimulatorRGBDGetter(SimulatorCameraGetter):
                 return rgb_image, depth_image
 
             except Exception as e:
-                print(f"[sim_vision] Error getting RGBD images: {e}")
+                print(f"[sim_vision] error getting RGBD images: {e}")
                 return None, None
 
 
@@ -168,5 +168,5 @@ class SimulatorCameraInfoGetter(SimulatorCameraGetter):
                 return camera_info
 
             except Exception as e:
-                print(f"[sim_vision] Error getting camera info: {e}")
+                print(f"[sim_vision] error getting camera info: {e}")
                 return None

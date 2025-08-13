@@ -1,7 +1,5 @@
 import sys
 import os
-import numpy as np
-import cv2
 import time
 import math
 
@@ -20,8 +18,6 @@ from .vision import (
 
 # Import driver functions directly
 from DeepEmbody.driver.sim_genesis_ranger.driver import (
-    get_rgb_image as driver_get_rgb_image,
-    get_depth_image as driver_get_depth_image,
     get_pose as driver_get_pose,
     save_rgb_image as driver_save_rgb_image,
     save_depth_image as driver_save_depth_image,
@@ -65,11 +61,11 @@ def c_camera_rgb(camera_name="robot_camera", timeout_sec=5.0):
                 return image
             time.sleep(0.1)
 
-        print(f"[sim_vision] Timeout getting RGB image after {timeout_sec} seconds")
+        print(f"[sim_vision] timeout getting RGB image after {timeout_sec} seconds")
         return None
 
     except Exception as e:
-        print(f"[sim_vision] Error in s_camera_rgb: {e}")
+        print(f"[sim_vision] error in s_camera_rgb: {e}")
         return None
 
 
@@ -93,11 +89,11 @@ def c_camera_dep_rgb(camera_name="robot_camera", timeout_sec=5.0):
                 return rgb_image, depth_image
             time.sleep(0.1)
 
-        print(f"[sim_vision] Timeout getting RGBD images after {timeout_sec} seconds")
+        print(f"[sim_vision] timeout getting RGBD images after {timeout_sec} seconds")
         return None, None
 
     except Exception as e:
-        print(f"[sim_vision] Error in s_camera_dep_rgb: {e}")
+        print(f"[sim_vision] error in s_camera_dep_rgb: {e}")
         return None, None
 
 
@@ -130,11 +126,11 @@ def c_camera_info(camera_name="robot_camera", timeout_sec=5.0) -> dict:
                 return camera_info
             time.sleep(0.1)
 
-        print(f"[sim_vision] Timeout getting camera info after {timeout_sec} seconds")
+        print(f"[sim_vision] timeout getting camera info after {timeout_sec} seconds")
         return None
 
     except Exception as e:
-        print(f"[sim_vision] Error in s_camera_info: {e}")
+        print(f"[sim_vision] error in s_camera_info: {e}")
         return None
 
 
@@ -148,7 +144,7 @@ def c_save_rgb_image(filename, camera_name="robot_camera", width=None, height=No
         width: Desired image width (optional)
         height: Desired image height (optional)
     Returns:
-        bool: True if successful, False otherwise
+        dict: {"success": True} if successful, {"success": False} otherwise
     """
     try:
         # Call driver function directly
@@ -156,7 +152,7 @@ def c_save_rgb_image(filename, camera_name="robot_camera", width=None, height=No
         return {"success": True}
 
     except Exception as e:
-        print(f"[sim_vision] Error saving RGB image: {e}")
+        print(f"[sim_vision] error saving RGB image: {e}")
         return {"success": False}
 
 
@@ -170,7 +166,7 @@ def c_save_depth_image(filename, camera_name="robot_camera", width=None, height=
         width: Desired image width (optional)
         height: Desired image height (optional)
     Returns:
-        bool: True if successful, False otherwise
+        dict: {"success": True} if successful, {"success": False} otherwise
     """
     try:
         # Call driver function directly
@@ -178,7 +174,7 @@ def c_save_depth_image(filename, camera_name="robot_camera", width=None, height=
         return {"success": True}
 
     except Exception as e:
-        print(f"[sim_vision] Error saving depth image: {e}")
+        print(f"[sim_vision] error saving depth image: {e}")
         return {"success": False}
 
 
@@ -198,14 +194,14 @@ def c_get_robot_pose(timeout_sec=5.0):
                 x, y, z, yaw = driver_get_pose()
                 return {"x": x, "y": y, "z": z, "yaw": yaw}
             except Exception as e:
-                print(f"[sim_vision] Error getting pose: {e}")
+                print(f"[sim_vision] error getting pose: {e}")
                 time.sleep(0.1)
 
-        print(f"[sim_vision] Timeout getting robot pose after {timeout_sec} seconds")
+        print(f"[sim_vision] timeout getting robot pose after {timeout_sec} seconds")
         return None
 
     except Exception as e:
-        print(f"[sim_vision] Error in s_get_robot_pose: {e}")
+        print(f"[sim_vision] error getting robot pose: {e}")
         return None
 
 
@@ -230,13 +226,15 @@ def c_tf_transform(from_frame: str, to_frame: str, x: float, y: float, z: float)
             # Get current robot pose
             robot_pose = c_get_robot_pose()
             if robot_pose is None:
-                print("[sim_vision] Failed to get robot pose for coordinate transformation")
+                print("[sim_vision] failed to get robot pose for coordinate transformation")
                 return x, y, z
             
             robot_x = robot_pose['x']
             robot_y = robot_pose['y']
             robot_z = robot_pose['z']
             robot_yaw = robot_pose['yaw']
+            
+            print(f"[sim_vision] robot pose: {robot_pose}")
             
             # Convert yaw from degrees to radians
             yaw_rad = math.radians(robot_yaw)
@@ -276,28 +274,28 @@ def c_tf_transform(from_frame: str, to_frame: str, x: float, y: float, z: float)
             return map_x, map_y, map_z
             
         else:
-            print(f"[sim_vision] Unsupported frame transformation: {from_frame} -> {to_frame}")
+            print(f"[sim_vision] unsupported frame transformation: {from_frame} -> {to_frame}")
             return x, y, z
             
     except Exception as e:
-        print(f"[sim_vision] Error in c_tf_transform: {e}")
+        print(f"[sim_vision] error in c_tf_transform: {e}")
         return x, y, z
 
 
 # Example usage functions
 def test_vision_api():
     """Test function to demonstrate the vision API usage"""
-    print("[sim_vision] Testing vision API...")
+    print("[sim_vision] testing vision API...")
 
     # Test RGB image capture
-    print("[sim_vision] Testing RGB image capture...")
+    print("[sim_vision] testing RGB image capture...")
     rgb_image = c_camera_rgb()
     if rgb_image is not None:
         print(f"[sim_vision] RGB image shape: {rgb_image.shape}")
         c_save_rgb_image("test_rgb.jpg")
 
     # Test RGBD image capture
-    print("[sim_vision] Testing RGBD image capture...")
+    print("[sim_vision] testing RGBD image capture...")
     rgb_image, depth_image = c_camera_dep_rgb()
     if rgb_image is not None and depth_image is not None:
         print(f"[sim_vision] RGB image shape: {rgb_image.shape}")
@@ -306,18 +304,18 @@ def test_vision_api():
         c_save_depth_image("test_depth_vis.png")
 
     # Test camera info
-    print("[sim_vision] Testing camera info...")
+    print("[sim_vision] testing camera info...")
     camera_info = c_camera_info()
     if camera_info is not None:
         print(f"[sim_vision] Camera info: {camera_info}")
 
     # Test robot pose
-    print("[sim_vision] Testing robot pose...")
+    print("[sim_vision] testing robot pose...")
     pose = c_get_robot_pose()
     if pose is not None:
-        print(f"[sim_vision] Robot pose: {pose}")
+        print(f"[sim_vision] robot pose: {pose}")
 
-    print("[sim_vision] Vision API test completed!")
+    print("[sim_vision] vision API test completed!")
 
 
 if __name__ == "__main__":
