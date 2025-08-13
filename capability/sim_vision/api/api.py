@@ -3,6 +3,7 @@ import os
 import numpy as np
 import cv2
 import time
+import math
 
 # Add the project root to Python path
 PROJECT_ROOT = os.path.dirname(
@@ -206,6 +207,81 @@ def c_get_robot_pose(timeout_sec=5.0):
     except Exception as e:
         print(f"[sim_vision] Error in s_get_robot_pose: {e}")
         return None
+
+
+@eaios.api
+def c_tf_transform(from_frame: str, to_frame: str, x: float, y: float, z: float) -> tuple:
+    """
+    Transform coordinates from one frame to another.
+    Currently supports transformation from 'camera_link' to 'map' frame.
+    
+    Args:
+        from_frame: Source frame name (e.g., 'camera_link')
+        to_frame: Target frame name (e.g., 'map')
+        x: X coordinate in source frame
+        y: Y coordinate in source frame  
+        z: Z coordinate in source frame
+        
+    Returns:
+        tuple: (x, y, z) coordinates in target frame
+    """
+    try:
+        if from_frame == 'camera_link' and to_frame == 'map':
+            # Get current robot pose
+            robot_pose = c_get_robot_pose()
+            if robot_pose is None:
+                print("[sim_vision] Failed to get robot pose for coordinate transformation")
+                return x, y, z
+            
+            robot_x = robot_pose['x']
+            robot_y = robot_pose['y']
+            robot_z = robot_pose['z']
+            robot_yaw = robot_pose['yaw']
+            
+            # Convert yaw from degrees to radians
+            yaw_rad = math.radians(robot_yaw)
+            
+            # Camera is fixed at the front of the robot
+            # Transform from camera coordinates to robot coordinates
+            # Camera coordinate system: x forward, y left, z up
+            # Robot coordinate system: x forward, y left, z up
+            # The camera is mounted at the front of the robot, so we need to add the camera offset
+            
+            # Camera offset from robot center (assuming camera is mounted at front)
+            camera_offset_x = 0.3  # 30cm forward from robot center
+            camera_offset_y = 0.0  # No lateral offset
+            camera_offset_z = 0.2  # 20cm above robot center
+            
+            # Apply camera offset to get camera position in robot frame
+            camera_x_in_robot = camera_offset_x
+            camera_y_in_robot = camera_offset_y
+            camera_z_in_robot = camera_offset_z
+            
+            # Transform from camera coordinates to robot coordinates
+            # The camera coordinates are already in the camera frame
+            # We just need to add the camera position in robot frame
+            robot_x_coord = x + camera_x_in_robot
+            robot_y_coord = y + camera_y_in_robot
+            robot_z_coord = z + camera_z_in_robot
+            
+            # Transform from robot coordinates to global map coordinates
+            # Apply rotation and translation
+            cos_yaw = math.cos(yaw_rad)
+            sin_yaw = math.sin(yaw_rad)
+            
+            map_x = robot_x + robot_x_coord * cos_yaw - robot_y_coord * sin_yaw
+            map_y = robot_y + robot_x_coord * sin_yaw + robot_y_coord * cos_yaw
+            map_z = robot_z + robot_z_coord
+            
+            return map_x, map_y, map_z
+            
+        else:
+            print(f"[sim_vision] Unsupported frame transformation: {from_frame} -> {to_frame}")
+            return x, y, z
+            
+    except Exception as e:
+        print(f"[sim_vision] Error in c_tf_transform: {e}")
+        return x, y, z
 
 
 # Example usage functions
