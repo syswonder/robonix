@@ -94,7 +94,7 @@ class eaios:
         func = mcp.tool()(func)
 
         full_mod = func.__module__
-        print("full mod",full_mod)
+        print("full mod",full_mod, "function name", func.__name__)
         # print(f"[DEBUG] API 开始: _registered_funcs = {_registered_funcs}, ID={id(_registered_funcs)}")
         registry = FunctionRegistry()
         registry.add_function(func.__name__, full_mod)
