@@ -149,11 +149,11 @@ def init_entity_graph_from_yolo(runtime: Runtime):
         detected_entities[obj_name] = obj_entity
 
         x, y = obj_info["position"][0], obj_info["position"][1]
-        detected_entities_getpos_handler[obj_name] = lambda: {
-            "x": x,
-            "y": y,
-            "z": 0.0,
-        }
+        # Fix closure issue by creating a proper function with default arguments
+        def create_getpos_handler(obj_x, obj_y):
+            return lambda: {"x": obj_x, "y": obj_y, "z": 0.0}
+        
+        detected_entities_getpos_handler[obj_name] = create_getpos_handler(x, y)
         obj_entity.bind_skill(
             "c_space_getpos", detected_entities_getpos_handler[obj_name]
         )
@@ -221,7 +221,7 @@ def main():
                 logger.warning(
                     "auto mode: no objects detected, using default robot paths"
                 )
-                runtime.set_flow_args("move_a_to_b", a="/robot", b="/robot")
+                # Use move_and_capture_flow instead of move_a_to_b
                 runtime.set_flow_args("move_and_capture_flow", a="/robot", b="/robot")
 
         logger.info("starting all flows...")
