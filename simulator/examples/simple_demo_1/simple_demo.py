@@ -100,6 +100,7 @@ def init_entity_graph_manually(runtime: Runtime):
 
 
 def init_entity_graph_from_yolo(runtime: Runtime):
+    logger.info("importing skills...")
     from skill import s_detect_objs, c_save_rgb_image, c_save_depth_image
 
     root_room = create_root_room()
