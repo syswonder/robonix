@@ -288,6 +288,20 @@ EOS_SKILL_SPECS = {
         "output": {"x": float, "y": float, "z": float, "yaw": float},
         "dependencies": [],
     },
+    "c_calculate_object_global_position": {
+        # according to capability/sim_vision/api/api.py:c_calculate_object_global_position
+        "description": "Calculate the global position of an object based on robot pose, pixel coordinates, depth and camera parameters",
+        "type": EOS_SkillType.CAPABILITY,
+        "input": {
+            "pixel_x": float,
+            "pixel_y": float,
+            "depth": float,
+            "camera_info": Dict[str, Any],
+            "robot_pose": {"x": float, "y": float, "z": float, "yaw": float},
+        },
+        "output": Tuple[float, float, float],  # (global_x, global_y, global_z) tuple
+        "dependencies": [],
+    },
     "c_tf_transform": {
         # according to capability/vision/api/api.py:c_tf_transform
         "description": "Transform the coordinates from the source frame to the target frame",
@@ -308,6 +322,6 @@ EOS_SKILL_SPECS = {
         "type": EOS_SkillType.SKILL,
         "input": {"camera_name": str},
         "output": Dict[str, Tuple[float, float, float]],
-        "dependencies": ["c_camera_dep_rgb", "c_camera_info", "c_tf_transform"],
+        "dependencies": ["c_camera_dep_rgb", "c_camera_info", "c_calculate_object_global_position", "c_get_robot_pose"],
     },
 }

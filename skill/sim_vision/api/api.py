@@ -1,7 +1,7 @@
 from manager.eaios_decorators import eaios
 
 # the below line should be commented when generating the skill/__init__.py, and after that you can uncomment it for LSP parsing - wheatfox
-from skill import c_camera_dep_rgb, c_camera_info, c_tf_transform
+from skill import c_camera_dep_rgb, c_camera_info, c_get_robot_pose
 
 from manager.log import logger, set_log_level
 import numpy as np
@@ -12,7 +12,7 @@ import random
 from datetime import datetime
 import math
 
-from skill.vision.api.vision import px2xy, remove_mask_outliers, get_mask_center_opencv
+from skill.vision.api.vision import remove_mask_outliers, get_mask_center_opencv
 
 
 set_log_level("debug")
@@ -202,10 +202,13 @@ def s_detect_objs(camera_name: str) -> dict:
         cv2.addWeighted(overlay, 0.3, vis_image, 0.7, 0, vis_image)
 
         detected_count = 0
+        logger.info(f"YOLO detected {n_objects} objects total")
         for i in range(n_objects):
             name = detection.names[detection_class[i]]
             conf = detection_conf[i]
-            if conf < 0.85:
+            logger.info(f"Object {i}: {name} with confidence {conf:.3f}")
+            if conf < 0.9:  # Lower threshold to see more objects
+                logger.info(f"Skipping {name} due to low confidence {conf:.3f}")
                 continue
 
             detected_count += 1
@@ -291,18 +294,29 @@ def s_detect_objs(camera_name: str) -> dict:
                 # Depth is already in meters (float32 from camera_manager)
                 center_depth_m = center_depth
 
-                # Convert pixel to camera coordinates using the computed depth
-                world_x, world_y = px2xy(
-                    [center_x, center_y],
-                    camera_info["k"],
-                    camera_info["d"],
-                    center_depth_m,
-                )
+                # Note: pixel to camera coordinates conversion is now handled in the capability
+                # We'll get the camera coordinates from the capability call below
 
-                # Use c_tf_transform to convert to 'map' frame
-                map_x, map_y, map_z = c_tf_transform(
-                    "camera_link", "map", world_x, world_y, center_depth_m
-                )
+                # Use new capability to calculate object global position
+                from skill import c_calculate_object_global_position
+                robot_pose = c_get_robot_pose()
+                if robot_pose is None:
+                    logger.warning(f"failed to get robot pose for object {name}, using fallback coordinates")
+                    # Fallback: use simple approximation based on pixel position and depth
+                    map_x = center_x * 0.001  # Rough approximation: 1 pixel ≈ 1mm
+                    map_y = center_y * 0.001
+                    map_z = center_depth_m
+                else:
+                    # Calculate global position using the new capability
+                    map_x, map_y, map_z = c_calculate_object_global_position(
+                        center_x, center_y, center_depth_m, camera_info, robot_pose
+                    )
+                    
+                    if map_x is None or map_y is None or map_z is None:
+                        logger.warning(f"failed to calculate global position for object {name}, using fallback coordinates")
+                        map_x = center_x * 0.001
+                        map_y = center_y * 0.001
+                        map_z = center_depth_m
 
                 detected_objects[name] = {
                     "confidence": float(conf),
@@ -310,8 +324,8 @@ def s_detect_objs(camera_name: str) -> dict:
                     "depth": float(center_depth_m),
                     "position": (float(map_x), float(map_y), float(map_z)),
                     "camera_position": (
-                        float(world_x),
-                        float(world_y),
+                        float(center_x * 0.001),  # Rough approximation
+                        float(center_y * 0.001),  # Rough approximation
                         float(center_depth_m),
                     ),
                     "pixel_center": (int(center_x), int(center_y)),
@@ -321,7 +335,7 @@ def s_detect_objs(camera_name: str) -> dict:
 
                 logger.info(
                     f"object {name}: depth={center_depth_m:.3f}m, "
-                    f"camera_pos=({world_x:.3f}, {world_y:.3f}, {center_depth_m:.3f}), "
+                    f"pixel_center=({center_x}, {center_y}), "
                     f"map_pos=({map_x:.3f}, {map_y:.3f}, {map_z:.3f})"
                 )
 

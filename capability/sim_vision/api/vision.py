@@ -121,47 +121,42 @@ class SimulatorCameraInfoGetter(SimulatorCameraGetter):
                     return None
 
                 # For simulator, we'll return default camera parameters
-                # These can be customized based on the actual camera setup in robot1.py
+                # Based on actual image size from logs: 600x800 (height x width)
+                # These parameters should match the actual camera setup
                 camera_info = {
                     "k": [
-                        800.0,
-                        0.0,
-                        400.0,  # fx, 0, cx
-                        0.0,
-                        800.0,
-                        300.0,  # 0, fy, cy
-                        0.0,
-                        0.0,
-                        1.0,
-                    ],  # 0, 0, 1
+                        800.0,  # fx - focal length x
+                        0.0,    # 0
+                        400.0,  # cx - principal point x (width/2 = 800/2 = 400)
+                        0.0,    # 0
+                        800.0,  # fy - focal length y  
+                        300.0,  # cy - principal point y (height/2 = 600/2 = 300)
+                        0.0,    # 0
+                        0.0,    # 0
+                        1.0,    # 1
+                    ],
                     "p": [
-                        800.0,
+                        800.0,  # fx, 0, cx, 0
                         0.0,
                         400.0,
-                        0.0,  # fx, 0, cx, 0
                         0.0,
+                        0.0,    # 0, fy, cy, 0
                         800.0,
                         300.0,
-                        0.0,  # 0, fy, cy, 0
                         0.0,
+                        0.0,    # 0, 0, 1, 0
                         0.0,
                         1.0,
                         0.0,
-                    ],  # 0, 0, 1, 0
+                    ],
                     "d": [0.0, 0.0, 0.0, 0.0, 0.0],  # No distortion
                     "r": [
-                        1.0,
-                        0.0,
-                        0.0,  # Identity rotation matrix
-                        0.0,
-                        1.0,
-                        0.0,
-                        0.0,
-                        0.0,
-                        1.0,
+                        1.0, 0.0, 0.0,  # Identity rotation matrix
+                        0.0, 1.0, 0.0,
+                        0.0, 0.0, 1.0,
                     ],
-                    "width": 800,
-                    "height": 600,
+                    "width": 800,   # Image width
+                    "height": 600,  # Image height
                     "roi": {"x_offset": 0, "y_offset": 0, "width": 800, "height": 600},
                 }
 
