@@ -2,27 +2,6 @@ from uapi.specs.skill_specs import EntityPath
 from uapi.runtime.flow import flow, EOS_TYPE_FlowResult, get_runtime, flow_print
 
 
-# @flow
-# def move_a_to_b(a: EntityPath, b: EntityPath) -> EOS_TYPE_FlowResult:
-#     runtime = get_runtime()
-#     A = runtime.get_graph().get_entity_by_path(a)
-#     B = runtime.get_graph().get_entity_by_path(b)
-#     if A is None:
-#         flow_print(f"entity A not found at path: {a}")
-#         return EOS_TYPE_FlowResult.FAILURE
-#     if B is None:
-#         flow_print(f"entity B not found at path: {b}")
-#         return EOS_TYPE_FlowResult.FAILURE
-#     b_pos = B.c_space_getpos()
-#     flow_print(f"entity B position: {b_pos}")
-#     result = A.c_space_move(x=b_pos["x"], y=b_pos["y"], z=b_pos["z"])
-#     flow_print(f"move result: {result}")
-#     if not result["success"]:
-#         flow_print(f"move failed: {result}")
-#         return EOS_TYPE_FlowResult.FAILURE
-#     return EOS_TYPE_FlowResult.SUCCESS
-
-
 @flow
 def move_and_capture_flow(a: EntityPath, b: EntityPath) -> EOS_TYPE_FlowResult:
     runtime = get_runtime()
