@@ -1,5 +1,0 @@
-name: "sim_vision"
-version: "1.0.0"
-author: "wheatfox"
-start_on_boot: false
-description: "The vision capability for simulator robot - directly calls driver functions" 

@@ -153,8 +153,39 @@ def get_rgb_image(width=None, height=None):
             # Decode JPEG data
             image_array = np.frombuffer(response.image_data, dtype=np.uint8)
             image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+            
+            # Debug: Save received image and check colors
+            try:
+                debug_filename = "rgb_received_debug.jpg"
+                # cv2.imwrite(debug_filename, image)  # Save as BGR (OpenCV format)
+                # print(f"[driver] Saved received image for debugging: {debug_filename}")
+                
+                # Check center pixel colors
+                if image.size > 0:
+                    center_y, center_x = image.shape[0] // 2, image.shape[1] // 2
+                    center_color = image[center_y, center_x]
+                    print(f"[driver] Received image center pixel BGR values: B={center_color[0]}, G={center_color[1]}, R={center_color[2]}")
+            except Exception as e:
+                print(f"[driver] Failed to save debug image: {e}")
+            
             # Convert BGR to RGB
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            
+            # Debug: Check converted RGB values
+            if image.size > 0:
+                center_y, center_x = image.shape[0] // 2, image.shape[1] // 2
+                center_color = image[center_y, center_x]
+                print(f"[driver] Converted image center pixel RGB values: R={center_color[0]}, G={center_color[1]}, B={center_color[2]}")
+                
+                # Save converted image for comparison
+                try:
+                    converted_filename = "rgb_converted_debug.jpg"
+                    # Convert back to BGR for saving
+                    image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                    # cv2.imwrite(converted_filename, image_bgr)
+                    print(f"[driver] Saved converted image for debugging: {converted_filename}")
+                except Exception as e:
+                    print(f"[driver] Failed to save converted debug image: {e}")
         elif response.format.lower() == "png":
             # Decode PNG data
             image = Image.open(io.BytesIO(response.image_data))
