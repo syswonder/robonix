@@ -4,7 +4,8 @@ driver:
   - raspi_hc_sr04
   - realsense_ros2
   - static_tf
-  - unilidar_L2
+  - mid360
+  # - unilidar_L2
 capability:
   - amcl
   - map_server
