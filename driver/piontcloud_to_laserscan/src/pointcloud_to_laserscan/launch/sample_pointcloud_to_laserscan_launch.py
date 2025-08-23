@@ -23,7 +23,7 @@ def generate_launch_description():
         remappings=[('cloud_in', [LaunchConfiguration(variable_name='scanner'), '/cloud']),
                     ('scan', [LaunchConfiguration(variable_name='scanner'), '/scan'])],
         parameters=[{
-            'target_frame': 'unilidar_lidar',
+            'target_frame': 'livox_frame',
             'transform_tolerance': 0.01,
             'min_height': 0.05,
             'max_height': 1.0,
