@@ -17,13 +17,10 @@ run:
 
 please run the python script relative to the root of the project!
 
-python simulator/genesis/robot1.py
-
-1) simple demo
-
 python simulator/genesis/robot1.py # to start the simulator and gRPC server
-python simulator/examples/simple_demo.py
 
-the flow is at simulator/examples/simple.flow
+demos are at simulator/examples:
+
+python simulator/examples/demo1/simple_demo.py --mode auto
 
 wheatfox <wheatfox17@icloud.com>
