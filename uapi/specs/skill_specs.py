@@ -202,21 +202,21 @@ EOS_SKILL_SPECS = {
     # naming rules: [c/s]_<name>
     # c: capability, s: skill
     # dependencies: list of skill that THIS entity should bind before using this skill
-    "c_space_getpos": {
+    "cap_space_getpos": {
         "description": "Get the position of the entity",
         "type": EOS_SkillType.CAPABILITY,
         "input": None,
         "output": {"x": float, "y": float, "z": float},
         "dependencies": [],
     },
-    "c_space_move": {
+    "cap_space_move": {
         "description": "Move the entity to the given position",
         "type": EOS_SkillType.CAPABILITY,
         "input": {"x": float, "y": float, "z": float},
         "output": {"success": bool},
         "dependencies": [],
     },
-    "c_image_capture": {
+    "cap_image_capture": {
         # cap_camera_rgb, cap_camera_depth, cap_camera_ir
         "description": "Capture an image, should be implemented on camera or something",
         "type": EOS_SkillType.CAPABILITY,
@@ -233,63 +233,63 @@ EOS_SKILL_SPECS = {
                 EntityPathAndRequired,
                 EntityPath,
             ],  # Use EntityPath (str)，and EntityPathAndRequired is a wrapper of EntityPath (str) with required skills, or just EntityPath (str) without skill checks
-            # e.g. robot1.s_space_move2entity(target_entity={entity="/room1/book1",required="c_space_getpos"}, distance=0.5)
+            # e.g. robot1.s_space_move2entity(target_entity={entity="/room1/book1",required="cap_space_getpos"}, distance=0.5)
             # e.g. robot1.s_space_move2entity(target_entity="/room1/book1", distance=0.5)
             "distance": float,
         },
         "output": {"success": bool},
-        "dependencies": ["c_space_move", "c_space_getpos"],
+        "dependencies": ["cap_space_move", "cap_space_getpos"],
     },
-    "c_camera_rgb": {
-        # according to capability/sim_vision/api/api.py:c_camera_rgb
+    "cap_camera_rgb": {
+        # according to capability/sim_vision/api/api.py:cap_camera_rgb
         "description": "Get the RGB image from the specified camera",
         "type": EOS_SkillType.CAPABILITY,
         "input": {"camera_name": str, "timeout_sec": float},
         "output": Any,  # opencv image (numpy array)
         "dependencies": [],
     },
-    "c_camera_dep_rgb": {
-        # according to capability/sim_vision/api/api.py:c_camera_dep_rgb
+    "cap_camera_dep_rgb": {
+        # according to capability/sim_vision/api/api.py:cap_camera_dep_rgb
         "description": "Get the RGB and depth images from the specified camera",
         "type": EOS_SkillType.CAPABILITY,
         "input": {"camera_name": str, "timeout_sec": float},
         "output": Tuple[Any, Any],  # tuple with rgb and depth images
         "dependencies": [],
     },
-    "c_camera_info": {
-        # according to capability/sim_vision/api/api.py:c_camera_info
+    "cap_camera_info": {
+        # according to capability/sim_vision/api/api.py:cap_camera_info
         "description": "Get the camera info of the specified camera",
         "type": EOS_SkillType.CAPABILITY,
         "input": {"camera_name": str, "timeout_sec": float},
         "output": Dict[str, Any],
         "dependencies": [],
     },
-    "c_save_rgb_image": {
-        # according to capability/sim_vision/api/api.py:c_save_rgb_image
+    "cap_save_rgb_image": {
+        # according to capability/sim_vision/api/api.py:cap_save_rgb_image
         "description": "Capture and save RGB image to file",
         "type": EOS_SkillType.CAPABILITY,
         "input": {"filename": str, "camera_name": str, "width": int, "height": int},
         "output": {"success": bool},
         "dependencies": [],
     },
-    "c_save_depth_image": {
-        # according to capability/sim_vision/api/api.py:c_save_depth_image
+    "cap_save_depth_image": {
+        # according to capability/sim_vision/api/api.py:cap_save_depth_image
         "description": "Capture and save depth image to file",
         "type": EOS_SkillType.CAPABILITY,
         "input": {"filename": str, "camera_name": str, "width": int, "height": int},
         "output": {"success": bool},
         "dependencies": [],
     },
-    "c_get_robot_pose": {
-        # according to capability/sim_vision/api/api.py:c_get_robot_pose
+    "cap_get_robot_pose": {
+        # according to capability/sim_vision/api/api.py:cap_get_robot_pose
         "description": "Get the current pose of the robot",
         "type": EOS_SkillType.CAPABILITY,
         "input": {"timeout_sec": float},
         "output": {"x": float, "y": float, "z": float, "yaw": float},
         "dependencies": [],
     },
-    "c_calculate_object_global_position": {
-        # according to capability/sim_vision/api/api.py:c_calculate_object_global_position
+    "cap_calculate_object_global_position": {
+        # according to capability/sim_vision/api/api.py:cap_calculate_object_global_position
         "description": "Calculate the global position of an object based on robot pose, pixel coordinates, depth and camera parameters",
         "type": EOS_SkillType.CAPABILITY,
         "input": {
@@ -302,8 +302,8 @@ EOS_SKILL_SPECS = {
         "output": Tuple[float, float, float],  # (global_x, global_y, global_z) tuple
         "dependencies": [],
     },
-    "c_tf_transform": {
-        # according to capability/vision/api/api.py:c_tf_transform
+    "cap_tf_transform": {
+        # according to capability/vision/api/api.py:cap_tf_transform
         "description": "Transform the coordinates from the source frame to the target frame",
         "type": EOS_SkillType.CAPABILITY,
         "input": {
@@ -322,6 +322,6 @@ EOS_SKILL_SPECS = {
         "type": EOS_SkillType.SKILL,
         "input": {"camera_name": str},
         "output": Dict[str, Tuple[float, float, float]],
-        "dependencies": ["c_camera_dep_rgb", "c_camera_info", "c_calculate_object_global_position", "c_get_robot_pose"],
+        "dependencies": ["cap_camera_dep_rgb", "cap_camera_info", "cap_calculate_object_global_position", "cap_get_robot_pose"],
     },
 }
