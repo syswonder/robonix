@@ -3,7 +3,7 @@ from ultralytics import YOLOE
 import traceback
 import os
 # Import capability functions
-from capability.vision.api.api import c_camera_dep_rgb, c_camera_info, c_tf_transform
+from capability.vision.api import c_camera_dep_rgb, c_camera_info, c_tf_transform
 from manager.eaios_decorators import eaios
 from .vision import px2xy, remove_mask_outliers, get_mask_center_opencv
 
