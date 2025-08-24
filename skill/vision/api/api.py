@@ -9,7 +9,7 @@ from .vision import px2xy, remove_mask_outliers, get_mask_center_opencv
 
 @eaios.api
 @eaios.caller
-def s_detect_objs(camera_name: str) -> dict:
+def skl_detect_objs(camera_name: str) -> dict:
     """
     Detect all objects in the current view of the specified camera and return their categories and coordinates (in the 'map' frame).
     Args:
@@ -83,6 +83,6 @@ def s_detect_objs(camera_name: str) -> dict:
             detected_objects[name] = (map_x, map_y, map_z)
         return detected_objects
     except Exception as e:
-        print(f"Error in s_detect_objs: {str(e)}")
+        print(f"Error in skl_detect_objs: {str(e)}")
         print(f"Traceback: {traceback.format_exc()}")
         return {}

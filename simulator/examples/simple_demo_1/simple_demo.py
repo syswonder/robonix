@@ -101,7 +101,7 @@ def init_entity_graph_manually(runtime: Runtime):
 
 def init_entity_graph_from_yolo(runtime: Runtime):
     logger.info("importing skills...")
-    from skill import s_detect_objs, cap_save_rgb_image, cap_save_depth_image
+    from skill import skl_detect_objs, cap_save_rgb_image, cap_save_depth_image
 
     root_room = create_root_room()
     runtime.set_graph(root_room)
@@ -132,9 +132,9 @@ def init_entity_graph_from_yolo(runtime: Runtime):
     camera = create_controllable_entity("camera")
     robot.add_child(camera)
 
-    camera.bind_skill("s_detect_objs", s_detect_objs)
+    camera.bind_skill("skl_detect_objs", skl_detect_objs)
 
-    detect_objs = camera.s_detect_objs(camera_name="camera0")
+    detect_objs = camera.skl_detect_objs(camera_name="camera0")
     logger.info(f"detected objects: {detect_objs}")
     # detect_objs is a dict of {obj_name: obj_info}
 
@@ -206,7 +206,7 @@ def main():
             runtime.set_flow_args("move_and_capture_flow", a="/A", b="/B")
         elif args.mode == "auto":
             # in auto mode, the entity graph is constructed using registered
-            # s_detect_objs skill, and we choose the first object detected as
+            # skl_detect_objs skill, and we choose the first object detected as
             # flow argument "b", and "a" fixed to "/robot". - wheatfox 2025.8.13
             if detected_entities:
                 first_obj_name = list(detected_entities.keys())[0]
