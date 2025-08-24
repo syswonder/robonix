@@ -17,7 +17,7 @@ def move_and_capture_flow(a: EntityPath, b: EntityPath) -> EOS_TYPE_FlowResult:
 
     # Get robot pose before movement
     flow_print("getting initial robot pose...")
-    initial_pose = A.c_space_getpos()
+    initial_pose = A.cap_space_getpos()
     if initial_pose is None:
         flow_print("failed to get initial robot pose")
         return EOS_TYPE_FlowResult.FAILURE
@@ -25,13 +25,13 @@ def move_and_capture_flow(a: EntityPath, b: EntityPath) -> EOS_TYPE_FlowResult:
 
     # Capture initial images
     flow_print("capturing initial images...")
-    A.c_save_rgb_image(
+    A.cap_save_rgb_image(
         filename="./simulator/examples/simple_demo_1/initial_rgb.jpg",
         camera_name="robot_camera",
         width=640,
         height=480,
     )
-    A.c_save_depth_image(
+    A.cap_save_depth_image(
         filename="./simulator/examples/simple_demo_1/initial_depth.npy",
         camera_name="robot_camera",
         width=640,
@@ -39,16 +39,16 @@ def move_and_capture_flow(a: EntityPath, b: EntityPath) -> EOS_TYPE_FlowResult:
     )
 
     # Move to target
-    b_pos = B.c_space_getpos()
+    b_pos = B.cap_space_getpos()
     flow_print(f"moving to position: {b_pos}")
-    result = A.c_space_move(x=b_pos["x"], y=b_pos["y"], z=b_pos["z"])
+    result = A.cap_space_move(x=b_pos["x"], y=b_pos["y"], z=b_pos["z"])
     if not result["success"]:
         flow_print(f"move failed: {result}")
         return EOS_TYPE_FlowResult.FAILURE
 
     # Get robot pose after movement
     flow_print("getting final robot pose...")
-    final_pose = A.c_space_getpos()
+    final_pose = A.cap_space_getpos()
     if final_pose is None:
         flow_print("failed to get final robot pose")
         return EOS_TYPE_FlowResult.FAILURE
@@ -56,13 +56,13 @@ def move_and_capture_flow(a: EntityPath, b: EntityPath) -> EOS_TYPE_FlowResult:
 
     # Capture final images
     flow_print("capturing final images...")
-    A.c_save_rgb_image(
+    A.cap_save_rgb_image(
         filename="./simulator/examples/simple_demo_1/final_rgb.jpg",
         camera_name="robot_camera",
         width=640,
         height=480,
     )
-    A.c_save_depth_image(
+    A.cap_save_depth_image(
         filename="./simulator/examples/simple_demo_1/final_depth.npy",
         camera_name="robot_camera",
         width=640,
