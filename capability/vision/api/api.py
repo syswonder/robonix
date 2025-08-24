@@ -17,7 +17,6 @@ def c_camera_rgb(camera_name, timeout_sec=5.0):
     Returns:
         Returns the image in OpenCV format if successful, or None if timeout occurs.
     """
-    rclpy.init()
     topic = f"/{camera_name}/camera/color/image_raw"
     node = CameraImageGetter(topic)
     end_time = node.get_clock().now().nanoseconds + int(timeout_sec * 1e9)
@@ -27,7 +26,6 @@ def c_camera_rgb(camera_name, timeout_sec=5.0):
             break
     result = node.image
     node.destroy_node()
-    rclpy.shutdown()
     return result
 
 @eaios.api
@@ -40,7 +38,6 @@ def c_camera_dep_rgb(camera_name, timeout_sec=5.0):
     Returns:
         Returns a tuple (rgb_image, depth_image) in OpenCV format if successful, or (None, None) if timeout occurs.
     """
-    rclpy.init()
     rgb_topic = f"/{camera_name}/camera/color/image_raw"
     depth_topic = f"/{camera_name}/camera/aligned_depth_to_color/image_raw"
     node = CameraRGBDGetter(rgb_topic, depth_topic)
@@ -51,7 +48,6 @@ def c_camera_dep_rgb(camera_name, timeout_sec=5.0):
             break
     result = (node.rgb_image, node.depth_image)
     node.destroy_node()
-    rclpy.shutdown()
     return result
 
 @eaios.api
@@ -73,7 +69,6 @@ def c_camera_info(camera_name, timeout_sec=5.0) -> dict:
         }
         Returns the camera info dictionary if successful, or None if timeout occurs.
     """
-    rclpy.init()
     topic = f"/{camera_name}/camera/color/camera_info"
     node = CameraInfoGetter(topic)
     end_time = node.get_clock().now().nanoseconds + int(timeout_sec * 1e9)
@@ -83,7 +78,6 @@ def c_camera_info(camera_name, timeout_sec=5.0) -> dict:
             break
     result = node.camera_info
     node.destroy_node()
-    rclpy.shutdown()
     return result
 
 @eaios.api
@@ -100,8 +94,6 @@ def c_tf_transform(source_frame, target_frame, x, y, z, timeout_sec=10.0) -> tup
     Returns:
         Returns a tuple (x, y, z) representing the transformed 3D coordinate in target frame, or (None, None, None) if transformation fails or timeout occurs.
     """
-    rclpy.init()
-    
     # Create a simple node for TF operations
     node = rclpy.create_node('tf_transform_node')
     
@@ -142,6 +134,5 @@ def c_tf_transform(source_frame, target_frame, x, y, z, timeout_sec=10.0) -> tup
     
     # Cleanup
     node.destroy_node()
-    rclpy.shutdown()
     
     return result
