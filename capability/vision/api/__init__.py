@@ -15,15 +15,15 @@ _ensure_rclpy_initialized()
 
 # Import all API functions to make them available when the package is imported
 from .api import (
-    c_camera_rgb,
-    c_camera_dep_rgb,
-    c_camera_info,
-    c_tf_transform
+    cap_camera_rgb,
+    cap_camera_dep_rgb,
+    cap_camera_info,
+    cap_tf_transform
 )
 
 __all__ = [
-    'c_camera_rgb',
-    'c_camera_dep_rgb', 
-    'c_camera_info',
-    'c_tf_transform'
+    'cap_camera_rgb',
+    'cap_camera_dep_rgb', 
+    'cap_camera_info',
+    'cap_tf_transform'
 ]
