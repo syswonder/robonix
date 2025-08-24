@@ -43,7 +43,7 @@ eaios = _get_eaios_decorator()
 
 
 @eaios.api
-def c_camera_rgb(camera_name="robot_camera", timeout_sec=5.0):
+def cap_camera_rgb(camera_name="robot_camera", timeout_sec=5.0):
     """
     Get the color image (OpenCV format) from the simulator camera using driver functions.
     Args:
@@ -71,7 +71,7 @@ def c_camera_rgb(camera_name="robot_camera", timeout_sec=5.0):
 
 
 @eaios.api
-def c_camera_dep_rgb(camera_name="robot_camera", timeout_sec=5.0):
+def cap_camera_dep_rgb(camera_name="robot_camera", timeout_sec=5.0):
     """
     Get the RGB and depth images (with the same timestamp) from the simulator camera using driver functions.
     Args:
@@ -99,7 +99,7 @@ def c_camera_dep_rgb(camera_name="robot_camera", timeout_sec=5.0):
 
 
 @eaios.api
-def c_camera_info(camera_name="robot_camera", timeout_sec=5.0) -> dict:
+def cap_camera_info(camera_name="robot_camera", timeout_sec=5.0) -> dict:
     """
     Get parameter matrix for the simulator camera.
     Args:
@@ -136,7 +136,7 @@ def c_camera_info(camera_name="robot_camera", timeout_sec=5.0) -> dict:
 
 
 @eaios.api
-def c_save_rgb_image(filename, camera_name="robot_camera", width=None, height=None):
+def cap_save_rgb_image(filename, camera_name="robot_camera", width=None, height=None):
     """
     Capture and save RGB image from simulator camera to file using driver functions.
     Args:
@@ -158,7 +158,7 @@ def c_save_rgb_image(filename, camera_name="robot_camera", width=None, height=No
 
 
 @eaios.api
-def c_save_depth_image(filename, camera_name="robot_camera", width=None, height=None):
+def cap_save_depth_image(filename, camera_name="robot_camera", width=None, height=None):
     """
     Capture and save depth image from simulator camera to file using driver functions.
     Args:
@@ -180,7 +180,7 @@ def c_save_depth_image(filename, camera_name="robot_camera", width=None, height=
 
 
 @eaios.api
-def c_get_robot_pose(timeout_sec=5.0):
+def cap_get_robot_pose(timeout_sec=5.0):
     """
     Get the current pose of the robot in the simulator using driver functions.
     Args:
@@ -207,7 +207,7 @@ def c_get_robot_pose(timeout_sec=5.0):
 
 
 @eaios.api
-def c_calculate_object_global_position(
+def cap_calculate_object_global_position(
     pixel_x: float, 
     pixel_y: float, 
     depth: float, 
@@ -352,29 +352,29 @@ def test_vision_api():
 
     # Test RGB image capture
     print("[sim_vision] testing RGB image capture...")
-    rgb_image = c_camera_rgb()
+    rgb_image = cap_camera_rgb()
     if rgb_image is not None:
         print(f"[sim_vision] RGB image shape: {rgb_image.shape}")
-        c_save_rgb_image("test_rgb.jpg")
+        cap_save_rgb_image("test_rgb.jpg")
 
     # Test RGBD image capture
     print("[sim_vision] testing RGBD image capture...")
-    rgb_image, depth_image = c_camera_dep_rgb()
+    rgb_image, depth_image = cap_camera_dep_rgb()
     if rgb_image is not None and depth_image is not None:
         print(f"[sim_vision] RGB image shape: {rgb_image.shape}")
         print(f"[sim_vision] Depth image shape: {depth_image.shape}")
-        c_save_depth_image("test_depth.npy")
-        c_save_depth_image("test_depth_vis.png")
+        cap_save_depth_image("test_depth.npy")
+        cap_save_depth_image("test_depth_vis.png")
 
     # Test camera info
     print("[sim_vision] testing camera info...")
-    camera_info = c_camera_info()
+    camera_info = cap_camera_info()
     if camera_info is not None:
         print(f"[sim_vision] Camera info: {camera_info}")
 
     # Test robot pose
     print("[sim_vision] testing robot pose...")
-    pose = c_get_robot_pose()
+    pose = cap_get_robot_pose()
     if pose is not None:
         print(f"[sim_vision] robot pose: {pose}")
 

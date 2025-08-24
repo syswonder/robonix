@@ -1,7 +1,7 @@
 from manager.eaios_decorators import eaios
 
 # the below line should be commented when generating the skill/__init__.py, and after that you can uncomment it for LSP parsing - wheatfox
-from skill import c_camera_dep_rgb, c_camera_info, c_get_robot_pose
+from skill import cap_camera_dep_rgb, cap_camera_info, cap_get_robot_pose
 
 from manager.log import logger, set_log_level
 import numpy as np
@@ -75,7 +75,7 @@ def put_text_with_background(
 def s_detect_objs(camera_name: str) -> dict:
     # this is used for simulation environment
     try:
-        rgb_image, depth_image = c_camera_dep_rgb(camera_name)
+        rgb_image, depth_image = cap_camera_dep_rgb(camera_name)
         if rgb_image is None or depth_image is None:
             logger.error("failed to get RGB and depth images")
             return {}
@@ -96,7 +96,7 @@ def s_detect_objs(camera_name: str) -> dict:
             )
             logger.debug(f"depth_image sample values: {depth_image[0:5, 0:5]}")
 
-        camera_info = c_camera_info(camera_name)
+        camera_info = cap_camera_info(camera_name)
         if camera_info is None:
             logger.error("failed to get camera info")
             return {}
@@ -298,8 +298,8 @@ def s_detect_objs(camera_name: str) -> dict:
                 # We'll get the camera coordinates from the capability call below
 
                 # Use new capability to calculate object global position
-                from skill import c_calculate_object_global_position
-                robot_pose = c_get_robot_pose()
+                from skill import cap_calculate_object_global_position
+                robot_pose = cap_get_robot_pose()
                 if robot_pose is None:
                     logger.warning(f"failed to get robot pose for object {name}, using fallback coordinates")
                     # Fallback: use simple approximation based on pixel position and depth
@@ -308,7 +308,7 @@ def s_detect_objs(camera_name: str) -> dict:
                     map_z = center_depth_m
                 else:
                     # Calculate global position using the new capability
-                    map_x, map_y, map_z = c_calculate_object_global_position(
+                    map_x, map_y, map_z = cap_calculate_object_global_position(
                         center_x, center_y, center_depth_m, camera_info, robot_pose
                     )
                     
