@@ -8,6 +8,7 @@ from cmdline import CLI
 import depend
 import os
 from constant import BASE_SKILL_PATH, INIT_FILE, BASE_PATH
+import sys
 
 if os.path.dirname(BASE_PATH) not in sys.path:
     sys.path.append(os.path.dirname(BASE_PATH))
