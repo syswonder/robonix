@@ -224,7 +224,7 @@ EOS_SKILL_SPECS = {
         "output": EOS_TYPE_Image,  # Use the dataclass
         "dependencies": [],
     },
-    "s_space_move2entity": {
+    "skl_space_move2entity": {
         "description": "Move the entity to vicinity of another entity",
         "type": EOS_SkillType.SKILL,
         "input": {
@@ -233,8 +233,8 @@ EOS_SKILL_SPECS = {
                 EntityPathAndRequired,
                 EntityPath,
             ],  # Use EntityPath (str)，and EntityPathAndRequired is a wrapper of EntityPath (str) with required skills, or just EntityPath (str) without skill checks
-            # e.g. robot1.s_space_move2entity(target_entity={entity="/room1/book1",required="cap_space_getpos"}, distance=0.5)
-            # e.g. robot1.s_space_move2entity(target_entity="/room1/book1", distance=0.5)
+            # e.g. robot1.skl_space_move2entity(target_entity={entity="/room1/book1",required="cap_space_getpos"}, distance=0.5)
+            # e.g. robot1.skl_space_move2entity(target_entity="/room1/book1", distance=0.5)
             "distance": float,
         },
         "output": {"success": bool},
@@ -316,8 +316,8 @@ EOS_SKILL_SPECS = {
         "output": Tuple[float, float, float],  # (x,y,z) tuple
         "dependencies": [],
     },
-    "s_detect_objs": {
-        # according to skill/vision/api/api.py:s_detect_objs
+    "skl_detect_objs": {
+        # according to skill/vision/api/api.py:skl_detect_objs
         "description": "Detect objects in the current view of the specified camera",
         "type": EOS_SkillType.SKILL,
         "input": {"camera_name": str},

@@ -50,7 +50,7 @@ def cap_camera_rgb(camera_name="robot_camera", timeout_sec=5.0):
         return None
 
     except Exception as e:
-        print(f"[sim_vision] error in s_camera_rgb: {e}")
+        print(f"[sim_vision] error in skl_camera_rgb: {e}")
         return None
 
 
@@ -78,7 +78,7 @@ def cap_camera_dep_rgb(camera_name="robot_camera", timeout_sec=5.0):
         return None, None
 
     except Exception as e:
-        print(f"[sim_vision] error in s_camera_dep_rgb: {e}")
+        print(f"[sim_vision] error in skl_camera_dep_rgb: {e}")
         return None, None
 
 
@@ -115,7 +115,7 @@ def cap_camera_info(camera_name="robot_camera", timeout_sec=5.0) -> dict:
         return None
 
     except Exception as e:
-        print(f"[sim_vision] error in s_camera_info: {e}")
+        print(f"[sim_vision] error in skl_camera_info: {e}")
         return None
 
 

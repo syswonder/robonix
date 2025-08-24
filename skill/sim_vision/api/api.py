@@ -72,7 +72,7 @@ def put_text_with_background(
 
 @eaios.api
 @eaios.caller
-def s_detect_objs(camera_name: str) -> dict:
+def skl_detect_objs(camera_name: str) -> dict:
     # this is used for simulation environment
     try:
         rgb_image, depth_image = cap_camera_dep_rgb(camera_name)
@@ -410,5 +410,5 @@ def s_detect_objs(camera_name: str) -> dict:
 
         return detected_objects
     except Exception as e:
-        logger.error(f"error in s_detect_objs: {e}")
+        logger.error(f"error in skl_detect_objs: {e}")
         return {}
