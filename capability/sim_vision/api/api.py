@@ -11,6 +11,8 @@ PROJECT_ROOT = os.path.dirname(
 sys.path.insert(0, PROJECT_ROOT)
 sys.path.append("./simulator/genesis")
 
+from manager.eaios_decorators import eaios
+
 from .vision import (
     SimulatorRGBGetter,
     SimulatorRGBDGetter,
@@ -23,24 +25,6 @@ from DeepEmbody.driver.sim_genesis_ranger.driver import (
     save_rgb_image as driver_save_rgb_image,
     save_depth_image as driver_save_depth_image,
 )
-
-
-def _get_eaios_decorator():
-    """Get the eaios decorator if available"""
-    try:
-        from manager.eaios_decorators import eaios
-
-        return eaios
-    except ImportError:
-        # Fallback decorator if eaios is not available
-        def fallback_decorator(func):
-            return func
-
-        return fallback_decorator
-
-
-eaios = _get_eaios_decorator()
-
 
 @eaios.api
 def c_camera_rgb(camera_name="robot_camera", timeout_sec=5.0):
