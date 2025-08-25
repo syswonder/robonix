@@ -27,14 +27,14 @@ def init_skill_providers(runtime: Runtime):
         name="local_provider",
         IP="127.0.0.1",
         skills=[
-            "c_space_getpos",
-            "c_space_move",
-            "c_camera_rgb",
-            "c_camera_dep_rgb",
-            "c_camera_info",
-            "c_save_rgb_image",
-            "c_save_depth_image",
-            "c_get_robot_pose",
+            "cap_space_getpos",
+            "cap_space_move",
+            "cap_camera_rgb",
+            "cap_camera_dep_rgb",
+            "cap_camera_info",
+            "cap_save_rgb_image",
+            "cap_save_depth_image",
+            "cap_get_robot_pose",
         ],
     )
 
@@ -53,43 +53,43 @@ def init_entity_graph_manually(runtime: Runtime):
     root_room.add_child(entity_b)
 
     def mock_getpos(**kwargs):
-        print("mock c_space_getpos called")
+        print("mock cap_space_getpos called")
         return {"x": 1.0, "y": 2.0, "z": 0.0}
 
     def mock_move(**kwargs):
         x, y, z = kwargs.get("x", 0), kwargs.get("y", 0), kwargs.get("z", 0)
-        print(f"mock c_space_move called with x={x}, y={y}, z={z}")
+        print(f"mock cap_space_move called with x={x}, y={y}, z={z}")
         time.sleep(2)
         return {"success": True}
 
     # Import real camera APIs directly from skill module
     from skill import (
-        c_camera_rgb,
-        c_camera_dep_rgb,
-        c_camera_info,
-        c_save_rgb_image,
-        c_save_depth_image,
-        c_get_robot_pose,
+        cap_camera_rgb,
+        cap_camera_dep_rgb,
+        cap_camera_info,
+        cap_save_rgb_image,
+        cap_save_depth_image,
+        cap_get_robot_pose,
     )
 
     # Bind skills to entities
-    entity_a.bind_skill("c_space_getpos", mock_getpos)
-    entity_a.bind_skill("c_space_move", mock_move)
-    entity_a.bind_skill("c_camera_rgb", c_camera_rgb)
-    entity_a.bind_skill("c_camera_dep_rgb", c_camera_dep_rgb)
-    entity_a.bind_skill("c_camera_info", c_camera_info)
-    entity_a.bind_skill("c_save_rgb_image", c_save_rgb_image)
-    entity_a.bind_skill("c_save_depth_image", c_save_depth_image)
-    entity_a.bind_skill("c_get_robot_pose", c_get_robot_pose)
+    entity_a.bind_skill("cap_space_getpos", mock_getpos)
+    entity_a.bind_skill("cap_space_move", mock_move)
+    entity_a.bind_skill("cap_camera_rgb", cap_camera_rgb)
+    entity_a.bind_skill("cap_camera_dep_rgb", cap_camera_dep_rgb)
+    entity_a.bind_skill("cap_camera_info", cap_camera_info)
+    entity_a.bind_skill("cap_save_rgb_image", cap_save_rgb_image)
+    entity_a.bind_skill("cap_save_depth_image", cap_save_depth_image)
+    entity_a.bind_skill("cap_get_robot_pose", cap_get_robot_pose)
 
-    entity_b.bind_skill("c_space_getpos", mock_getpos)
-    entity_b.bind_skill("c_space_move", mock_move)
-    entity_b.bind_skill("c_camera_rgb", c_camera_rgb)
-    entity_b.bind_skill("c_camera_dep_rgb", c_camera_dep_rgb)
-    entity_b.bind_skill("c_camera_info", c_camera_info)
-    entity_b.bind_skill("c_save_rgb_image", c_save_rgb_image)
-    entity_b.bind_skill("c_save_depth_image", c_save_depth_image)
-    entity_b.bind_skill("c_get_robot_pose", c_get_robot_pose)
+    entity_b.bind_skill("cap_space_getpos", mock_getpos)
+    entity_b.bind_skill("cap_space_move", mock_move)
+    entity_b.bind_skill("cap_camera_rgb", cap_camera_rgb)
+    entity_b.bind_skill("cap_camera_dep_rgb", cap_camera_dep_rgb)
+    entity_b.bind_skill("cap_camera_info", cap_camera_info)
+    entity_b.bind_skill("cap_save_rgb_image", cap_save_rgb_image)
+    entity_b.bind_skill("cap_save_depth_image", cap_save_depth_image)
+    entity_b.bind_skill("cap_get_robot_pose", cap_get_robot_pose)
 
     runtime.set_graph(root_room)
 
@@ -101,7 +101,7 @@ def init_entity_graph_manually(runtime: Runtime):
 
 def init_entity_graph_from_yolo(runtime: Runtime):
     logger.info("importing skills...")
-    from skill import s_detect_objs, c_save_rgb_image, c_save_depth_image
+    from skill import skl_detect_objs, cap_save_rgb_image, cap_save_depth_image
 
     root_room = create_root_room()
     runtime.set_graph(root_room)
@@ -121,10 +121,10 @@ def init_entity_graph_from_yolo(runtime: Runtime):
         x, y, z, yaw = get_pose()
         return {"x": x, "y": y, "z": z}
 
-    robot.bind_skill("c_space_move", robot_move_impl)
-    robot.bind_skill("c_space_getpos", robot_getpos_impl)
-    robot.bind_skill("c_save_rgb_image", c_save_rgb_image)
-    robot.bind_skill("c_save_depth_image", c_save_depth_image)
+    robot.bind_skill("cap_space_move", robot_move_impl)
+    robot.bind_skill("cap_space_getpos", robot_getpos_impl)
+    robot.bind_skill("cap_save_rgb_image", cap_save_rgb_image)
+    robot.bind_skill("cap_save_depth_image", cap_save_depth_image)
 
     move_base = create_controllable_entity("move_base")
     robot.add_child(move_base)
@@ -132,9 +132,9 @@ def init_entity_graph_from_yolo(runtime: Runtime):
     camera = create_controllable_entity("camera")
     robot.add_child(camera)
 
-    camera.bind_skill("s_detect_objs", s_detect_objs)
+    camera.bind_skill("skl_detect_objs", skl_detect_objs)
 
-    detect_objs = camera.s_detect_objs(camera_name="camera0")
+    detect_objs = camera.skl_detect_objs(camera_name="camera0")
     logger.info(f"detected objects: {detect_objs}")
     # detect_objs is a dict of {obj_name: obj_info}
 
@@ -156,7 +156,7 @@ def init_entity_graph_from_yolo(runtime: Runtime):
         
         detected_entities_getpos_handler[obj_name] = create_getpos_handler(x, y)
         obj_entity.bind_skill(
-            "c_space_getpos", detected_entities_getpos_handler[obj_name]
+            "cap_space_getpos", detected_entities_getpos_handler[obj_name]
         )
 
         logger.info(f"created entity for {obj_name}: {obj_entity.get_absolute_path()}")
@@ -206,7 +206,7 @@ def main():
             runtime.set_flow_args("move_and_capture_flow", a="/A", b="/B")
         elif args.mode == "auto":
             # in auto mode, the entity graph is constructed using registered
-            # s_detect_objs skill, and we choose the first object detected as
+            # skl_detect_objs skill, and we choose the first object detected as
             # flow argument "b", and "a" fixed to "/robot". - wheatfox 2025.8.13
             if detected_entities:
                 first_obj_name = list(detected_entities.keys())[0]

@@ -37,7 +37,7 @@ def sim_gen_graph():
     room.add_child(book1)
     logger.info(f"ID = {book1.entity_id}, path = {book1.get_absolute_path()}")
 
-    book1.bind_skill("c_space_getpos", lambda: {"x": -2.2, "y": 1.8, "z": 0.1})
+    book1.bind_skill("cap_space_getpos", lambda: {"x": -2.2, "y": 1.8, "z": 0.1})
 
     def mock_image_capture():
         # Generate a colorful rainbow gradient image for testing
@@ -67,13 +67,13 @@ def sim_gen_graph():
             ),
         )
 
-    book1.bind_skill("c_image_capture", mock_image_capture)
+    book1.bind_skill("cap_image_capture", mock_image_capture)
 
     plant_pot: Entity = create_generic_entity("plant_pot")
     room.add_child(plant_pot)
     logger.info(f"ID = {plant_pot.entity_id}, path = {plant_pot.get_absolute_path()}")
 
-    plant_pot.bind_skill("c_space_getpos", lambda: {"x": 2.0, "y": -2.0, "z": 0.2})
+    plant_pot.bind_skill("cap_space_getpos", lambda: {"x": 2.0, "y": -2.0, "z": 0.2})
 
 
 def sim_run_flow():
@@ -84,11 +84,11 @@ def sim_run_flow():
         f"book1 at entity_path {book1.get_absolute_path()}, ranger at entity_path {ranger.get_absolute_path()}"
     )
 
-    book1_pos = book1.c_space_getpos()
+    book1_pos = book1.cap_space_getpos()
     logger.info(f"book1_pos = {book1_pos}")
 
-    # Call the c_image_capture skill and print the result
-    book1_image = book1.c_image_capture()
+    # Call the cap_image_capture skill and print the result
+    book1_image = book1.cap_image_capture()
     logger.info(f"book1_image = {book1_image}")
 
 
