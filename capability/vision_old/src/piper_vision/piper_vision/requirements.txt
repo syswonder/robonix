@@ -1,4 +1,0 @@
-pydantic
-toc
-httpx
-volcengine-python-sdk

@@ -2,15 +2,15 @@ from typing import Dict, Tuple, Optional
 from manager.eaios_decorators import eaios
 from .map import semantic_map
 
-# Import the s_detect_objs skill for object detection
+# Import the skl_detect_objs skill for object detection
 try:
-    from skill.vision.api.api import s_detect_objs
+    from skill.vision.api.api import skl_detect_objs
 except ImportError:
-    print("Warning: s_detect_objs skill not found. s_update_map will not work properly.")
+    print("Warning: skl_detect_objs skill not found. skl_update_map will not work properly.")
 
 @eaios.api
 @eaios.caller
-def s_update_map() -> bool:
+def skl_update_map() -> bool:
     """
     当前视角下,识别所有物体,加入语义地图
     (Under the current view, identify all objects and add them to the semantic map)
@@ -19,8 +19,8 @@ def s_update_map() -> bool:
         bool: 是否成功 (whether successful)
     """
     try:
-        # Use s_detect_objs to get objects and their coordinates from camera
-        detected_objects = s_detect_objs("camera")
+        # Use skl_detect_objs to get objects and their coordinates from camera
+        detected_objects = skl_detect_objs("camera")
         
         if not detected_objects:
             print("No objects detected in current view")
@@ -39,12 +39,12 @@ def s_update_map() -> bool:
         return success_count > 0
         
     except Exception as e:
-        print(f"Error in s_update_map: {e}")
+        print(f"Error in skl_update_map: {e}")
         return False
 
 @eaios.api
 @eaios.caller
-def s_query_map_all() -> Dict[str, Tuple[float, float, float]]:
+def skl_query_map_all() -> Dict[str, Tuple[float, float, float]]:
     """
     查询语义地图所有物体
     (Query all objects in the semantic map)
@@ -57,12 +57,12 @@ def s_query_map_all() -> Dict[str, Tuple[float, float, float]]:
         print(f"Found {len(all_objects)} objects in semantic map")
         return all_objects
     except Exception as e:
-        print(f"Error in s_query_map_all: {e}")
+        print(f"Error in skl_query_map_all: {e}")
         return {}
 
 @eaios.api
 @eaios.caller
-def s_query_map(obj_name: str) -> Optional[Tuple[float, float, float]]:
+def skl_query_map(obj_name: str) -> Optional[Tuple[float, float, float]]:
     """
     查询语义地图指定物体
     (Query a specified object in the semantic map)
@@ -81,12 +81,12 @@ def s_query_map(obj_name: str) -> Optional[Tuple[float, float, float]]:
             print(f"Object '{obj_name}' not found in semantic map")
         return coordinates
     except Exception as e:
-        print(f"Error in s_query_map: {e}")
+        print(f"Error in skl_query_map: {e}")
         return None
 
 @eaios.api
 @eaios.caller
-def s_add_map_obj(obj_name: str, coordinates: Tuple[float, float, float]) -> bool:
+def skl_add_map_obj(obj_name: str, coordinates: Tuple[float, float, float]) -> bool:
     """
     手动向语义地图中增加物体
     (Manually add an object to the semantic map)
@@ -106,5 +106,5 @@ def s_add_map_obj(obj_name: str, coordinates: Tuple[float, float, float]) -> boo
             print(f"Failed to add object '{obj_name}' to semantic map")
         return success
     except Exception as e:
-        print(f"Error in s_add_map_obj: {e}")
+        print(f"Error in skl_add_map_obj: {e}")
         return False

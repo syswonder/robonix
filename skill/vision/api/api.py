@@ -3,13 +3,13 @@ from ultralytics import YOLOE
 import traceback
 import os
 # Import capability functions
-from capability.vision.api.api import c_camera_dep_rgb, c_camera_info, c_tf_transform
+from capability.vision.api import cap_camera_dep_rgb, cap_camera_info, cap_tf_transform
 from manager.eaios_decorators import eaios
 from .vision import px2xy, remove_mask_outliers, get_mask_center_opencv
 
 @eaios.api
 @eaios.caller
-def s_detect_objs(camera_name: str) -> dict:
+def skl_detect_objs(camera_name: str) -> dict:
     """
     Detect all objects in the current view of the specified camera and return their categories and coordinates (in the 'map' frame).
     Args:
@@ -19,12 +19,12 @@ def s_detect_objs(camera_name: str) -> dict:
     """
     try:
         # Get RGB and depth images
-        rgb_image, depth_image = c_camera_dep_rgb(camera_name)
+        rgb_image, depth_image = cap_camera_dep_rgb(camera_name)
         if rgb_image is None or depth_image is None:
             print("Failed to get RGB and depth images")
             return {}
         # Get camera parameters
-        camera_info = c_camera_info(camera_name)
+        camera_info = cap_camera_info(camera_name)
         if camera_info is None:
             print("Failed to get camera info")
             return {}
@@ -78,11 +78,11 @@ def s_detect_objs(camera_name: str) -> dict:
                 center_depth = avg_depth
             # Convert pixel to camera coordinates
             world_x, world_y = px2xy([center_x, center_y], camera_info["k"], camera_info["d"], center_depth)
-            # Use c_tf_transform to convert to 'map' frame
-            map_x, map_y, map_z = c_tf_transform('camera_link', 'map', world_x, world_y, center_depth)
+            # Use cap_tf_transform to convert to 'map' frame
+            map_x, map_y, map_z = cap_tf_transform('camera_link', 'map', world_x, world_y, center_depth)
             detected_objects[name] = (map_x, map_y, map_z)
         return detected_objects
     except Exception as e:
-        print(f"Error in s_detect_objs: {str(e)}")
+        print(f"Error in skl_detect_objs: {str(e)}")
         print(f"Traceback: {traceback.format_exc()}")
         return {}
