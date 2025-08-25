@@ -1,0 +1,70 @@
+diff --git a/config/MID360_config.json b/config/MID360_config.json
+index e3df5d1..ac4e780 100644
+--- a/config/MID360_config.json
++++ b/config/MID360_config.json
+@@ -11,13 +11,13 @@
+       "log_data_port": 56500
+     },
+     "host_net_info" : {
+-      "cmd_data_ip" : "192.168.1.5",
++      "cmd_data_ip" : "192.168.1.50",
+       "cmd_data_port": 56101,
+-      "push_msg_ip": "192.168.1.5",
++      "push_msg_ip": "192.168.1.50",
+       "push_msg_port": 56201,
+-      "point_data_ip": "192.168.1.5",
++      "point_data_ip": "192.168.1.50",
+       "point_data_port": 56301,
+-      "imu_data_ip" : "192.168.1.5",
++      "imu_data_ip" : "192.168.1.50",
+       "imu_data_port": 56401,
+       "log_data_ip" : "",
+       "log_data_port": 56501
+@@ -25,7 +25,7 @@
+   },
+   "lidar_configs" : [
+     {
+-      "ip" : "192.168.1.12",
++      "ip" : "192.168.1.161",
+       "pcl_data_type" : 1,
+       "pattern_mode" : 0,
+       "extrinsic_parameter" : {
+diff --git a/launch_ROS2/msg_HAP_launch.py b/launch_ROS2/msg_HAP_launch.py
+index 2ff3d66..221e88e 100644
+--- a/launch_ROS2/msg_HAP_launch.py
++++ b/launch_ROS2/msg_HAP_launch.py
+@@ -5,7 +5,7 @@ from launch_ros.actions import Node
+ import launch
+ 
+ ################### user configure parameters for ros2 start ###################
+-xfer_format   = 1    # 0-Pointcloud2(PointXYZRTL), 1-customized pointcloud format
++xfer_format   = 2    # 0-Pointcloud2(PointXYZRTL), 1-customized pointcloud format
+ multi_topic   = 0    # 0-All LiDARs share the same topic, 1-One LiDAR one topic
+ data_src      = 0    # 0-lidar, others-Invalid data src
+ publish_freq  = 10.0 # freqency of publish, 5.0, 10.0, 20.0, 50.0, etc.
+diff --git a/launch_ROS2/msg_MID360_launch.py b/launch_ROS2/msg_MID360_launch.py
+index 8492c49..d8f3b89 100644
+--- a/launch_ROS2/msg_MID360_launch.py
++++ b/launch_ROS2/msg_MID360_launch.py
+@@ -5,7 +5,7 @@ from launch_ros.actions import Node
+ import launch
+ 
+ ################### user configure parameters for ros2 start ###################
+-xfer_format   = 1    # 0-Pointcloud2(PointXYZRTL), 1-customized pointcloud format
++xfer_format   = 0    # 0-Pointcloud2(PointXYZRTL), 1-customized pointcloud format
+ multi_topic   = 0    # 0-All LiDARs share the same topic, 1-One LiDAR one topic
+ data_src      = 0    # 0-lidar, others-Invalid data src
+ publish_freq  = 10.0 # freqency of publish, 5.0, 10.0, 20.0, 50.0, etc.
+diff --git a/src/lddc.cpp b/src/lddc.cpp
+index 06195df..918df11 100644
+--- a/src/lddc.cpp
++++ b/src/lddc.cpp
+@@ -656,7 +656,7 @@ std::shared_ptr<rclcpp::PublisherBase> Lddc::GetCurrentPublisher(uint8_t handle)
+     return private_pub_[handle];
+   } else {
+     if (!global_pub_) {
+-      std::string topic_name("livox/lidar");
++      std::string topic_name("scanner/cloud");
+       queue_size = queue_size * 8; // shared queue size is 256, for all lidars
+       global_pub_ = CreatePublisher(transfer_format_, topic_name, queue_size);
+     }
