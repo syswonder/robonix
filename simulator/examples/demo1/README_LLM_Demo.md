@@ -20,13 +20,8 @@ pip install openai python-dotenv
 访问 [DeepSeek官网](https://platform.deepseek.com/) 获取API Key。
 
 ### 设置环境变量
-推荐使用设置脚本：
-```bash
-cd simulator/examples/demo1
-python setup_env.py
-```
 
-或者手动创建`.env`文件：
+手动创建`.env`文件：
 ```bash
 echo "DEEPSEEK_API_KEY=sk-your-api-key-here" > .env
 ```
