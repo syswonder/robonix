@@ -11,7 +11,7 @@ PROJECT_ROOT = os.path.dirname(
 sys.path.insert(0, PROJECT_ROOT)
 sys.path.append("./simulator/genesis")
 
-from manager.eaios_decorators import eaios
+from DeepEmbody.manager.eaios_decorators import eaios
 
 from .vision import (
     SimulatorRGBGetter,
