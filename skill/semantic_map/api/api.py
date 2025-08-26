@@ -1,16 +1,10 @@
 from typing import Dict, Tuple, Optional
-from manager.eaios_decorators import eaios
+from DeepEmbody.manager.eaios_decorators import eaios
 from .map import semantic_map
-
-# Import the skl_detect_objs skill for object detection
-try:
-    from skill.vision.api.api import skl_detect_objs
-except ImportError:
-    print("Warning: skl_detect_objs skill not found. skl_update_map will not work properly.")
 
 @eaios.api
 @eaios.caller
-def skl_update_map() -> bool:
+def skl_update_map(camera_name: str) -> bool:
     """
     当前视角下,识别所有物体,加入语义地图
     (Under the current view, identify all objects and add them to the semantic map)
@@ -20,7 +14,7 @@ def skl_update_map() -> bool:
     """
     try:
         # Use skl_detect_objs to get objects and their coordinates from camera
-        detected_objects = skl_detect_objs("camera")
+        detected_objects = skl_detect_objs(camera_name)
         
         if not detected_objects:
             print("No objects detected in current view")
