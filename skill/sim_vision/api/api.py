@@ -1,4 +1,4 @@
-from manager.eaios_decorators import eaios
+from DeepEmbody.manager.eaios_decorators import eaios
 
 # the below line should be commented when generating the skill/__init__.py, and after that you can uncomment it for LSP parsing - wheatfox
 from skill import cap_camera_dep_rgb, cap_camera_info, cap_get_robot_pose
