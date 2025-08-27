@@ -39,7 +39,7 @@ def test_semantic_map():
     print("\n4. Testing skl_update_map...")
     print("Note: This test requires camera access and skl_detect_objs skill to be available")
     try:
-        update_success = skl_update_map()
+        update_success = skl_update_map("camera")
         print(f"Update map result: {update_success}")
     except Exception as e:
         print(f"Update map failed (expected if camera not available): {e}")
