@@ -2,6 +2,18 @@
 
 wheatfox <wheatfox17@icloud.com>
 
+## 环境要求
+
+下面是针对 python 3.12 的安装命令，适用于运行 genesis 模拟器以及运行 example 程序，其中包括模拟器相关的 driver 所使用的包（如 gRPC）：
+
+```bash
+conda create -n genesis python=3.12
+
+# then install pytorch according to https://pytorch.org/get-started/locally/
+
+pip install rich loguru mcp pyyaml argparse grpcio grpcio-tools genesis-world pynput openai python-dotenv
+```
+
 ## 如何运行 genesis flow demo
 
 1. 先运行 `python simulator/genesis/robot1.py` 启动模拟器，等待出现渲染窗口
