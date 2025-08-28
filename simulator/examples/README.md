@@ -11,7 +11,7 @@ conda create -n genesis python=3.12
 
 # then install pytorch according to https://pytorch.org/get-started/locally/
 
-pip install rich loguru mcp pyyaml argparse grpcio grpcio-tools genesis-world pynput openai python-dotenv
+pip install rich loguru mcp pyyaml argparse grpcio grpcio-tools genesis-world pynput openai python-dotenv opencv-python
 ```
 
 ## 如何运行 genesis flow demo
