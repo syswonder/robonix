@@ -237,35 +237,40 @@ def package_init(config_path: str):
     registry = FunctionRegistry()
     print(f"[eaios] Package initialized with {registry.gen_lens()} functions registered.")
 
-import rclpy
-from rclpy.node import Node
-from std_srvs.srv import Trigger, SetBool
+try:
+    import rclpy
+    from rclpy.node import Node
+    from std_srvs.srv import Trigger, SetBool
 
-class NodeController(Node):
-    def __init__(self):
-        super().__init__('node_controller')
+    class NodeController(Node):
+        def __init__(self):
+            super().__init__('node_controller')
 
 
-    def call_service(self, service_name, request):
-        if service_name == "get_count":
-            client = self.create_client(Trigger, service_name)
-        elif service_name == "modify_name":
-            client = self.create_client(Trigger, service_name)
-        elif service_name == "shutdown_node":
-            client = self.create_client(Trigger, service_name)
-        
-        # 调用服务
-        if not client.wait_for_service(timeout_sec=10.0):
-            self.get_logger().error(f'Service {service_name} not available')
-            return None
-        future = client.call_async(request)
-        rclpy.spin_until_future_complete(self, future)
-        if future.result() is not None:
-            self.get_logger().info(f'Service {service_name} called successfully')
-            return future.result()
-        else:
-            self.get_logger().error(f'Service {service_name} call failed')
-            return None
+        def call_service(self, service_name, request):
+            if service_name == "get_count":
+                client = self.create_client(Trigger, service_name)
+            elif service_name == "modify_name":
+                client = self.create_client(Trigger, service_name)
+            elif service_name == "shutdown_node":
+                client = self.create_client(Trigger, service_name)
+            
+            # 调用服务
+            if not client.wait_for_service(timeout_sec=10.0):
+                self.get_logger().error(f'Service {service_name} not available')
+                return None
+            future = client.call_async(request)
+            rclpy.spin_until_future_complete(self, future)
+            if future.result() is not None:
+                self.get_logger().info(f'Service {service_name} called successfully')
+                return future.result()
+            else:
+                self.get_logger().error(f'Service {service_name} call failed')
+
+except ImportError:
+    print("warning: rclpy is not installed, so the NodeController is not available")
+    NodeController = None
+
 # from mcp import tool
 print(id(eaios.mcp))
 print("eaios.__module__ =", eaios.__module__)

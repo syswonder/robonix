@@ -69,6 +69,11 @@ class RobotControlStub(object):
                 request_serializer=robot__control__pb2.GetImageRequest.SerializeToString,
                 response_deserializer=robot__control__pb2.DepthImageReply.FromString,
                 _registered_method=True)
+        self.Reset = channel.unary_unary(
+                '/robotcontrol.RobotControl/Reset',
+                request_serializer=robot__control__pb2.ResetRequest.SerializeToString,
+                response_deserializer=robot__control__pb2.MoveReply.FromString,
+                _registered_method=True)
 
 
 class RobotControlServicer(object):
@@ -116,6 +121,12 @@ class RobotControlServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def Reset(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_RobotControlServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -153,6 +164,11 @@ def add_RobotControlServicer_to_server(servicer, server):
                     servicer.GetDepthImage,
                     request_deserializer=robot__control__pb2.GetImageRequest.FromString,
                     response_serializer=robot__control__pb2.DepthImageReply.SerializeToString,
+            ),
+            'Reset': grpc.unary_unary_rpc_method_handler(
+                    servicer.Reset,
+                    request_deserializer=robot__control__pb2.ResetRequest.FromString,
+                    response_serializer=robot__control__pb2.MoveReply.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -344,6 +360,33 @@ class RobotControl(object):
             '/robotcontrol.RobotControl/GetDepthImage',
             robot__control__pb2.GetImageRequest.SerializeToString,
             robot__control__pb2.DepthImageReply.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Reset(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/robotcontrol.RobotControl/Reset',
+            robot__control__pb2.ResetRequest.SerializeToString,
+            robot__control__pb2.MoveReply.FromString,
             options,
             channel_credentials,
             insecure,

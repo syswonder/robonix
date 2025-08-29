@@ -12,6 +12,7 @@ service RobotControl {
   rpc MoveTo(MoveToRequest) returns (MoveReply);
   rpc GetRGBImage(GetImageRequest) returns (RGBImageReply);
   rpc GetDepthImage(GetImageRequest) returns (DepthImageReply);
+  rpc Reset(ResetRequest) returns (MoveReply);
 }
 
 message MoveRequest { double distance = 1; }
@@ -40,6 +41,8 @@ message GetImageRequest {
   int32 width = 1;  // optional: specify desired image width
   int32 height = 2; // optional: specify desired image height
 }
+
+message ResetRequest {}
 
 message RGBImageReply {
   bytes image_data = 1;  // JPEG or PNG encoded RGB image

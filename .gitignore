@@ -21,4 +21,5 @@ log.txt
 *.pt
 .env
 
+test.txt
 path.sh
