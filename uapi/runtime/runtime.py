@@ -1,6 +1,6 @@
 from uapi.graph.entity import Entity
 from uapi.runtime.registry import Registry
-from uapi.runtime.flow import get_flow_functions
+from uapi.runtime.action import get_action_functions
 from uapi.log import logger
 import threading
 import importlib.util
@@ -14,9 +14,9 @@ class Runtime:
     def __init__(self):
         self.graph: Entity = None
         self.registry: Registry = Registry()
-        self.flow_threads: Dict[str, threading.Thread] = {}
-        self.flow_results: Dict[str, any] = {}
-        self._flow_args: Dict[str, dict] = {}
+        self.action_threads: Dict[str, threading.Thread] = {}
+        self.action_results: Dict[str, any] = {}
+        self._action_args: Dict[str, dict] = {}
 
     def set_graph(self, graph: Entity):
         self.graph = graph
@@ -28,84 +28,84 @@ class Runtime:
         if not os.path.exists(program_path):
             raise FileNotFoundError(f"program file not found: {program_path}")
 
-        # Read the flow file content
+        # Read the action file content
         with open(program_path, 'r', encoding='utf-8') as f:
             code = f.read()
 
         # Create a new module
         module = type(sys.modules[__name__])(f"program_{os.path.basename(program_path)}")
         
-        # Set __file__ attribute so flow_print can determine the correct log directory
+        # Set __file__ attribute so action_print can determine the correct log directory
         module.__file__ = os.path.abspath(program_path)
         
         # Execute the code in the module's namespace
         exec(code, module.__dict__)
 
-        flow_functions = get_flow_functions(module)
-        flow_names = [func.__name__ for func in flow_functions]
+        action_functions = get_action_functions(module)
+        action_names = [func.__name__ for func in action_functions]
 
-        logger.info(f"loaded program {program_path} with flow functions: {flow_names}")
+        logger.info(f"loaded program {program_path} with action functions: {action_names}")
 
         self._program_module = module
 
-        return flow_names
+        return action_names
 
-    def set_flow_args(self, flow_name: str, **kwargs):
-        self._flow_args[flow_name] = kwargs
+    def set_action_args(self, action_name: str, **kwargs):
+        self._action_args[action_name] = kwargs
 
-    def start_flow(self, flow_name: str):
-        args = self._flow_args.get(flow_name, {})
-        return self.execute_flow(flow_name, **args)
+    def start_action(self, action_name: str):
+        args = self._action_args.get(action_name, {})
+        return self.execute_action(action_name, **args)
 
-    def start_all_flows(self):
+    def start_all_actions(self):
         threads = []
-        for flow_name in self._flow_args:
-            threads.append(self.start_flow(flow_name))
+        for action_name in self._action_args:
+            threads.append(self.start_action(action_name))
         return threads
 
-    def execute_flow(self, flow_name: str, *args, **kwargs):
+    def execute_action(self, action_name: str, *args, **kwargs):
         if not hasattr(self, "_program_module"):
             raise RuntimeError("no program loaded. call load_program() first.")
 
-        if not hasattr(self._program_module, flow_name):
-            raise ValueError(f"flow function '{flow_name}' not found in loaded program")
+        if not hasattr(self._program_module, action_name):
+            raise ValueError(f"action function '{action_name}' not found in loaded program")
 
-        flow_func = getattr(self._program_module, flow_name)
-        if not hasattr(flow_func, "_is_flow"):
-            raise ValueError(f"function '{flow_name}' is not a flow function")
+        action_func = getattr(self._program_module, action_name)
+        if not hasattr(action_func, "_is_action"):
+            raise ValueError(f"function '{action_name}' is not a action function")
 
-        def flow_worker():
+        def action_worker():
             try:
-                result = flow_func(*args, **kwargs)
-                self.flow_results[flow_name] = result
+                result = action_func(*args, **kwargs)
+                self.action_results[action_name] = result
             except Exception as e:
-                self.flow_results[flow_name] = None
-                logger.error(f"flow {flow_name} failed: {str(e)}", exc_info=True)
+                self.action_results[action_name] = None
+                logger.error(f"action {action_name} failed: {str(e)}", exc_info=True)
 
-        thread = threading.Thread(target=flow_worker, name=f"flow_{flow_name}")
+        thread = threading.Thread(target=action_worker, name=f"action_{action_name}")
         thread.daemon = True
         thread.start()
 
-        self.flow_threads[flow_name] = thread
+        self.action_threads[action_name] = thread
 
         return thread
 
-    def wait_for_flow(self, flow_name: str, timeout: float = None):
-        if flow_name not in self.flow_threads:
-            raise ValueError(f"flow '{flow_name}' not found")
+    def wait_for_action(self, action_name: str, timeout: float = None):
+        if action_name not in self.action_threads:
+            raise ValueError(f"action '{action_name}' not found")
 
-        thread = self.flow_threads[flow_name]
+        thread = self.action_threads[action_name]
         thread.join(timeout=timeout)
-        return self.flow_results.get(flow_name)
+        return self.action_results.get(action_name)
 
-    def wait_for_all_flows(self, timeout: float = None):
-        for thread in self.flow_threads.values():
+    def wait_for_all_actions(self, timeout: float = None):
+        for thread in self.action_threads.values():
             thread.join(timeout=timeout)
 
-        return self.flow_results.copy()
+        return self.action_results.copy()
 
-    def get_flow_status(self) -> Dict[str, bool]:
+    def get_action_status(self) -> Dict[str, bool]:
         status = {}
-        for flow_name, thread in self.flow_threads.items():
-            status[flow_name] = not thread.is_alive()
+        for action_name, thread in self.action_threads.items():
+            status[action_name] = not thread.is_alive()
         return status

@@ -6,7 +6,7 @@
 
 ## 主要功能
 
-程序会自动使用YOLO检测场景中的物体并构建entity graph，然后接收用户的自然语言输入（如"让机器人走到椅子那边"），调用DeepSeek LLM生成相应的Python flow代码，最后自动执行这个flow完成任务。
+程序会自动使用YOLO检测场景中的物体并构建entity graph，然后接收用户的自然语言输入（如"让机器人走到椅子那边"），调用DeepSeek LLM生成相应的Python action代码，最后自动执行这个action完成任务。
 
 ## 安装依赖
 
@@ -36,4 +36,4 @@ python simulator/examples/demo1/llm_demo.py
 
 ## 工作流程
 
-程序启动后会自动检测场景并构建entity graph，然后等待用户输入需求。用户输入后，程序会调用LLM生成执行计划，显示任务描述和参数，询问是否执行。确认后程序会自动运行生成的flow代码。程序会在`llm_demo_debug/`目录下保存调试信息，包括LLM的完整响应和生成的flow代码。程序会将当前场景的entity graph结构、每个entity绑定的skill信息、flow语法示例等结构化信息传递给LLM。LLM基于这些信息分析用户需求，生成包含@flow装饰器的完整Python函数代码，并指定具体的参数值。生成的flow代码会被保存为临时文件，然后通过runtime加载执行。执行完成后自动清理临时文件。
+程序启动后会自动检测场景并构建entity graph，然后等待用户输入需求。用户输入后，程序会调用LLM生成执行计划，显示任务描述和参数，询问是否执行。确认后程序会自动运行生成的action代码。程序会在`llm_demo_debug/`目录下保存调试信息，包括LLM的完整响应和生成的action代码。程序会将当前场景的entity graph结构、每个entity绑定的skill信息、action语法示例等结构化信息传递给LLM。LLM基于这些信息分析用户需求，生成包含@action装饰器的完整Python函数代码，并指定具体的参数值。生成的action代码会被保存为临时文件，然后通过runtime加载执行。执行完成后自动清理临时文件。

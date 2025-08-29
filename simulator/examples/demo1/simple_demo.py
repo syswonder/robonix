@@ -18,7 +18,7 @@ sys.path.insert(0, str(project_root_parent))
 from uapi.runtime.runtime import Runtime
 from uapi.runtime.provider import SkillProvider
 from uapi.graph.entity import create_root_room, create_controllable_entity
-from uapi.runtime.flow import set_runtime
+from uapi.runtime.action import set_runtime
 from uapi.log import logger
 
 
@@ -194,46 +194,46 @@ def main():
 
     set_runtime(runtime)
 
-    flow_program_path = os.path.join(os.path.dirname(__file__), "simple.flow")
-    logger.info(f"loading flow program from: {flow_program_path}")
+    action_program_path = os.path.join(os.path.dirname(__file__), "simple.action")
+    logger.info(f"loading action program from: {action_program_path}")
 
     try:
-        flow_names = runtime.load_program(flow_program_path)
-        logger.info(f"loaded flow functions: {flow_names}")
+        action_names = runtime.load_program(action_program_path)
+        logger.info(f"loaded action functions: {action_names}")
 
         if args.mode == "manual":
-            # runtime.set_flow_args("move_a_to_b", a="/A", b="/B")
-            runtime.set_flow_args("move_and_capture_flow", a="/A", b="/B")
+            # runtime.set_action_args("move_a_to_b", a="/A", b="/B")
+            runtime.set_action_args("move_and_capture_action", a="/A", b="/B")
         elif args.mode == "auto":
             # in auto mode, the entity graph is constructed using registered
             # skl_detect_objs skill, and we choose the first object detected as
-            # flow argument "b", and "a" fixed to "/robot". - wheatfox 2025.8.13
+            # action argument "b", and "a" fixed to "/robot". - wheatfox 2025.8.13
             if detected_entities:
                 first_obj_name = list(detected_entities.keys())[0]
                 first_obj_path = f"/{first_obj_name}"
-                # runtime.set_flow_args("move_a_to_b", a="/robot", b=first_obj_path)
-                runtime.set_flow_args(
-                    "move_and_capture_flow", a="/robot", b=first_obj_path
+                # runtime.set_action_args("move_a_to_b", a="/robot", b=first_obj_path)
+                runtime.set_action_args(
+                    "move_and_capture_action", a="/robot", b=first_obj_path
                 )
-                logger.info(f"auto mode: set flow args for {first_obj_name}")
+                logger.info(f"auto mode: set action args for {first_obj_name}")
                 logger.info(f"  move_a_to_b: a=/robot, b={first_obj_path}")
-                logger.info(f"  move_and_capture_flow: a=/robot, b={first_obj_path}")
+                logger.info(f"  move_and_capture_action: a=/robot, b={first_obj_path}")
             else:
                 logger.warning(
                     "auto mode: no objects detected, using default robot paths"
                 )
-                # Use move_and_capture_flow instead of move_a_to_b
-                runtime.set_flow_args("move_and_capture_flow", a="/robot", b="/robot")
+                # Use move_and_capture_action instead of move_a_to_b
+                runtime.set_action_args("move_and_capture_action", a="/robot", b="/robot")
 
-        logger.info("starting all flows...")
-        threads = runtime.start_all_flows()
+        logger.info("starting all actions...")
+        threads = runtime.start_all_actions()
 
-        logger.info("waiting for all flows to complete...")
-        results = runtime.wait_for_all_flows(timeout=30.0)
+        logger.info("waiting for all actions to complete...")
+        results = runtime.wait_for_all_actions(timeout=30.0)
 
-        logger.info("flow execution results:")
-        for flow_name, result in results.items():
-            logger.info(f"  {flow_name}: {result}")
+        logger.info("action execution results:")
+        for action_name, result in results.items():
+            logger.info(f"  {action_name}: {result}")
 
     except Exception as e:
         logger.error(f"demo failed: {str(e)}", exc_info=True)
