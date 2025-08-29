@@ -7,6 +7,11 @@ wheatfox <wheatfox17@icloud.com>
 下面是针对 python 3.12 的安装命令，适用于运行 genesis 模拟器以及运行 example 程序，其中包括模拟器相关的 driver 所使用的包（如 gRPC）：
 
 ```bash
+
+# make sure you installed nvidia drivers and cuda toolkit
+sudo apt-get install freeglut3 freeglut3-dev mesa-utils
+export __GLX_VENDOR_LIBRARY_NAME=nvidia # 强制让 NVIDIA 显卡作为 OpenGL 的渲染后端，否则启动 genesis 会卡在 build visualizer
+
 conda create -n genesis python=3.12
 conda activate genesis
 
