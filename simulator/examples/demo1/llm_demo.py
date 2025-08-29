@@ -22,7 +22,7 @@ sys.path.insert(0, str(project_root_parent))
 from uapi.runtime.runtime import Runtime
 from uapi.runtime.provider import SkillProvider
 from uapi.graph.entity import create_root_room, create_controllable_entity
-from uapi.runtime.flow import set_runtime
+from uapi.runtime.action import set_runtime
 from uapi.log import logger
 
 
@@ -175,16 +175,16 @@ def load_skill_specs():
     return EOS_SKILL_SPECS
 
 
-def load_demo_flow_example():
-    """Load demo flow syntax and file format example"""
-    # Load flow example from the same directory as the running Python file
+def load_demo_action_example():
+    """Load demo action syntax and file format example"""
+    # Load action example from the same directory as the running Python file
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    flow_example_path = os.path.join(current_dir, "simple.flow")
-    with open(flow_example_path, 'r', encoding='utf-8') as f:
+    action_example_path = os.path.join(current_dir, "simple.action")
+    with open(action_example_path, 'r', encoding='utf-8') as f:
         return f.read()
 
 
-def create_llm_prompt(entity_graph_info: dict, skill_specs: dict, flow_example: str, user_request: str):
+def create_llm_prompt(entity_graph_info: dict, skill_specs: dict, action_example: str, user_request: str):
     """Create structured prompt to send to LLM"""
     
     # Build skill descriptions
@@ -223,7 +223,7 @@ def create_llm_prompt(entity_graph_info: dict, skill_specs: dict, flow_example: 
                         "type": str(skill_info["type"].value)
                     }
     
-    prompt = f"""You are a robot task planning expert. Based on the following information, generate a Python flow function for the user's natural language requirement.
+    prompt = f"""You are a robot task planning expert. Based on the following information, generate a Python action function for the user's natural language requirement.
 
 ## Current Scene Information
 
@@ -237,9 +237,9 @@ def create_llm_prompt(entity_graph_info: dict, skill_specs: dict, flow_example: 
 {json.dumps(skills_description, indent=2, ensure_ascii=False)}
 ```
 
-### Flow Syntax Example
+### Action Syntax Example
 ```python
-{flow_example}
+{action_example}
 ```
 
 ## User Requirement
@@ -247,9 +247,9 @@ def create_llm_prompt(entity_graph_info: dict, skill_specs: dict, flow_example: 
 
 ## Task Requirements
 1. Analyze user requirements and understand the specific task to be executed
-2. Design a reasonable execution flow based on available entities and skills
-3. Generate a complete Python flow function with a descriptive function name
-4. Specify flow function parameter values, including:
+2. Design a reasonable execution action based on available entities and skills
+3. Generate a complete Python action function with a descriptive function name
+4. Specify action function parameter values, including:
    - entity_path parameters: use actual paths like "/robot", "/chair", etc.
    - other parameters: use specific values or strings
 
@@ -258,8 +258,8 @@ Please output strictly in the following JSON format:
 
 ```json
 {{
-    "flow_code": "Complete Python flow function code with @flow decorator and function definition",
-    "flow_args": {{
+    "action_code": "Complete Python action function code with @action decorator and function definition",
+    "action_args": {{
         "parameter_name": "parameter_value",
         "parameter_name": "parameter_value"
     }},
@@ -268,11 +268,11 @@ Please output strictly in the following JSON format:
 ```
 
 Notes:
-- flow_code must be complete, executable Python code
-- Use @flow decorator
+- action_code must be complete, executable Python code
+- Use @action decorator
 - Function parameter type annotations should use EntityPath
-- Return value should use EOS_TYPE_FlowResult.SUCCESS or EOS_TYPE_FlowResult.FAILURE
-- Use flow_print() for log output
+- Return value should use EOS_TYPE_ActionResult.SUCCESS or EOS_TYPE_ActionResult.FAILURE
+- Use action_print() for log output
 - Ensure all used skills are actually bound to entities
 """
 
@@ -303,7 +303,7 @@ def call_deepseek_llm(prompt: str, api_key: str):
 
 
 def extract_llm_response(llm_response: str):
-    """Extract flow code and parameters from LLM response"""
+    """Extract action code and parameters from LLM response"""
     try:
         # Find JSON code block
         json_pattern = r'```json\s*\n(.*?)\n```'
@@ -313,11 +313,11 @@ def extract_llm_response(llm_response: str):
             json_str = json_match.group(1)
             parsed_response = json.loads(json_str)
             
-            flow_code = parsed_response.get("flow_code", "")
-            flow_args = parsed_response.get("flow_args", {})
+            action_code = parsed_response.get("action_code", "")
+            action_args = parsed_response.get("action_args", {})
             task_description = parsed_response.get("task_description", "")
             
-            return flow_code, flow_args, task_description
+            return action_code, action_args, task_description
         else:
             logger.error("No JSON format code block found in LLM response")
             return None, None, None
@@ -327,8 +327,8 @@ def extract_llm_response(llm_response: str):
         return None, None, None
 
 
-def save_debug_files(entity_graph_info: dict, skill_specs: dict, flow_example: str, 
-                    user_request: str, llm_response: str, flow_code: str, flow_args: dict):
+def save_debug_files(entity_graph_info: dict, skill_specs: dict, action_example: str, 
+                    user_request: str, llm_response: str, action_code: str, action_args: dict):
     """Save debug information to local files"""
     # Save files in the same directory as the running Python file
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -350,69 +350,69 @@ def save_debug_files(entity_graph_info: dict, skill_specs: dict, flow_example: s
     structured_data = {
         "entity_graph_info": entity_graph_info,
         "skill_specs": serializable_skill_specs,
-        "flow_example": flow_example,
+        "action_example": action_example,
         "user_request": user_request,
         "llm_response": llm_response,
-        "generated_flow_code": flow_code,
-        "flow_args": flow_args,
+        "generated_action_code": action_code,
+        "action_args": action_args,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
     }
     
     with open(os.path.join(debug_dir, "debug_data.json"), 'w', encoding='utf-8') as f:
         json.dump(structured_data, f, indent=2, ensure_ascii=False)
     
-    # Save generated flow code
-    if flow_code:
-        with open(os.path.join(debug_dir, "generated_flow.py"), 'w', encoding='utf-8') as f:
-            f.write(flow_code)
+    # Save generated action code
+    if action_code:
+        with open(os.path.join(debug_dir, "generated_action.py"), 'w', encoding='utf-8') as f:
+            f.write(action_code)
     
     logger.info(f"Debug information saved to: {debug_dir}")
 
 
-def execute_generated_flow(runtime: Runtime, flow_code: str, flow_args: dict):
-    """Execute LLM generated flow"""
+def execute_generated_action(runtime: Runtime, action_code: str, action_args: dict):
+    """Execute LLM generated action"""
     try:
-        # Create temporary flow file in the same directory as the running Python file
+        # Create temporary action file in the same directory as the running Python file
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        temp_flow_path = os.path.join(current_dir, "temp_generated_flow.py")
-        with open(temp_flow_path, 'w', encoding='utf-8') as f:
-            f.write(flow_code)
+        temp_action_path = os.path.join(current_dir, "tmp.action")
+        with open(temp_action_path, 'w', encoding='utf-8') as f:
+            f.write(action_code)
         
-        # Load flow program
-        flow_names = runtime.load_program(temp_flow_path)
-        logger.info(f"Loaded flow functions: {flow_names}")
+        # Load action program
+        action_names = runtime.load_program(temp_action_path)
+        logger.info(f"Loaded action functions: {action_names}")
         
-        if not flow_names:
-            logger.error("No executable flow function found")
+        if not action_names:
+            logger.error("No executable action function found")
             return False
         
-        # Get first flow function name
-        flow_name = flow_names[0]
+        # Get first action function name
+        action_name = action_names[0]
         
-        # Set flow arguments
-        runtime.set_flow_args(flow_name, **flow_args)
+        # Set action arguments
+        runtime.set_action_args(action_name, **action_args)
         
-        # Execute flow
-        logger.info(f"Starting flow execution: {flow_name}")
-        logger.info(f"Flow arguments: {flow_args}")
+        # Execute action
+        logger.info(f"Starting action execution: {action_name}")
+        logger.info(f"Action arguments: {action_args}")
         
-        # Start the specific flow
-        runtime.start_flow(flow_name)
+        # Start the specific action
+        runtime.start_action(action_name)
         
         # Wait for completion
-        results = runtime.wait_for_all_flows(timeout=30.0)
+        results = runtime.wait_for_all_actions(timeout=30.0)
         
-        logger.info("Flow execution results:")
+        logger.info("Action execution results:")
         for name, result in results.items():
             logger.info(f"  {name}: {result}")
         
         # Clean up temporary file
-        os.remove(temp_flow_path)
+        os.remove(temp_action_path)
         
         return True
         
     except Exception as e:
-        logger.error(f"Failed to execute generated flow: {str(e)}", exc_info=True)
+        logger.error(f"Failed to execute generated action: {str(e)}", exc_info=True)
         return False
 
 
@@ -441,7 +441,7 @@ def main():
     # Collect scene information
     entity_graph_info = collect_entity_graph_info(runtime, detected_entities)
     skill_specs = load_skill_specs()
-    flow_example = load_demo_flow_example()
+    action_example = load_demo_action_example()
     
     # Wait for user input
     print("\n" + "="*50)
@@ -493,7 +493,7 @@ def main():
         return 0
     
     # Create LLM prompt
-    prompt = create_llm_prompt(entity_graph_info, skill_specs, flow_example, user_request)
+    prompt = create_llm_prompt(entity_graph_info, skill_specs, action_example, user_request)
     
     # Save prompt to local file for debugging
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -515,27 +515,27 @@ def main():
         return 1
     
     # Parse LLM response
-    flow_code, flow_args, task_description = extract_llm_response(llm_response)
+    action_code, action_args, task_description = extract_llm_response(llm_response)
     
-    if not flow_code or not flow_args:
-        logger.error("Unable to extract flow code or parameters from LLM response")
+    if not action_code or not action_args:
+        logger.error("Unable to extract action code or parameters from LLM response")
         return 1
     
     # Save debug information
-    save_debug_files(entity_graph_info, skill_specs, flow_example, 
-                    user_request, llm_response, flow_code, flow_args)
+    save_debug_files(entity_graph_info, skill_specs, action_example, 
+                    user_request, llm_response, action_code, action_args)
     
     # Display task description
     print(f"\nTask planning result:")
     print(f"Task description: {task_description}")
-    print(f"Flow parameters: {flow_args}")
+    print(f"Action parameters: {action_args}")
     
     # Ask whether to execute
     execute = input("\nDo you want to execute this task? (y/n): ").strip().lower()
     
     if execute in ['y', 'yes']:
-        logger.info("Starting execution of LLM generated flow...")
-        success = execute_generated_flow(runtime, flow_code, flow_args)
+        logger.info("Starting execution of LLM generated action...")
+        success = execute_generated_action(runtime, action_code, action_args)
         
         if success:
             logger.info("Task execution completed!")

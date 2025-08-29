@@ -14,7 +14,7 @@ conda create -n genesis python=3.12
 pip install rich loguru mcp pyyaml argparse grpcio grpcio-tools genesis-world pynput openai python-dotenv opencv-python
 ```
 
-## 如何运行 genesis flow demo
+## 如何运行 genesis action demo
 
 1. 先运行 `python simulator/genesis/robot1.py` 启动模拟器，等待出现渲染窗口
 
@@ -29,4 +29,4 @@ wget https://huggingface.co/jameslahm/yoloe/resolve/main/yoloe-11l-seg-pf.pt
 
 4. 运行 `python simulator/examples/demo1/simple_demo.py --mode auto` 或 `--mode manual`，其中 auto 是用yolo辅助生成实体图
 
-auto 模式下小车目前会自动识别物体，并自动绑定 flow 参数，flow 会让小车移动到识别到的物体位置。
+auto 模式下小车目前会自动识别物体，并自动绑定 action 参数，action 会让小车移动到识别到的物体位置。
