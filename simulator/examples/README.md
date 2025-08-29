@@ -8,8 +8,9 @@ wheatfox <wheatfox17@icloud.com>
 
 ```bash
 conda create -n genesis python=3.12
+conda activate genesis
 
-# then install pytorch according to https://pytorch.org/get-started/locally/
+# -> then install pytorch according to https://pytorch.org/get-started/locally/ <-
 
 pip install rich loguru mcp pyyaml argparse grpcio grpcio-tools genesis-world pynput openai python-dotenv opencv-python
 ```
