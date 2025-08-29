@@ -66,7 +66,7 @@ class CarController:
             self.target_wz += self.max_rot_speed
         if keyboard.KeyCode.from_char("]") in keys:
             self.target_wz -= self.max_rot_speed
-        if keyboard.KeyCode.from_char("r") in keys or keyboard.KeyCode.from_char("R") in keys:
+        if keyboard.KeyCode.from_char("-") in keys:
             self.reset_car()
             
         return keyboard.Key.esc in keys
