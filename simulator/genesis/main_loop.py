@@ -49,7 +49,7 @@ class MainControlLoop:
         logger.info("Arrow Left/Right: Left/Right")
         logger.info("[: Rotate left")
         logger.info("]: Rotate right")
-        logger.info("R: Reset car to initial position")
+        logger.info("- (the hyphen key besides the 0 and + on the top right corner of the keyboard): Reset car to initial position")
         logger.info("ESC: Quit")
         
         try:
