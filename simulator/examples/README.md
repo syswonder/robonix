@@ -22,6 +22,8 @@ pip install rich loguru mcp pyyaml argparse grpcio grpcio-tools genesis-world py
 
 ## 如何运行 genesis action demo
 
+修改模拟器运行的 IP 地址，在 `driver/sim_genesis_ranger/driver.py` 中，将 `TARGET_SERVER_IP` 修改为模拟器运行的 IP 地址（远程服务器或本地）。
+
 1. 先运行 `python simulator/genesis/robot1.py` 启动模拟器，等待出现渲染窗口
 
 2. 运行 `python manager/eaios_decorators.py --config config/include_sim.yaml`，导出 `skill/__init__.py`
