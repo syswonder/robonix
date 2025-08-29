@@ -17,13 +17,17 @@ import cv2
 import io
 from PIL import Image
 
+TARGET_SERVER_IP = "127.0.0.1" # if you are running genesis simulator locally
+# TARGET_SERVER_IP = "100.71.152.94" # if you are running genesis simulator on a remote server
+
+TARGET_SERVER_PORT = 50051 # the default port for gRPC
 
 # gRPC client setup
 def wait_for_server(max_retries=30, retry_interval=2.0):
     print("[driver] waiting for server to start...")
     for attempt in range(max_retries):
         try:
-            channel = grpc.insecure_channel("localhost:50051")
+            channel = grpc.insecure_channel(f"{TARGET_SERVER_IP}:{TARGET_SERVER_PORT}")
             stub = robot_control_pb2_grpc.RobotControlStub(channel)
             # Try to call a simple RPC to test connection
             stub.GetPose(robot_control_pb2.GetPoseRequest())
@@ -34,12 +38,12 @@ def wait_for_server(max_retries=30, retry_interval=2.0):
         except RpcError as e:
             if attempt < max_retries - 1:
                 print(
-                    f"[driver] server not ready, retrying in {retry_interval} seconds... (Attempt {attempt + 1}/{max_retries})"
+                    f"[driver] server {TARGET_SERVER_IP}:{TARGET_SERVER_PORT} not ready, retrying in {retry_interval} seconds... (Attempt {attempt + 1}/{max_retries})"
                 )
                 time.sleep(retry_interval)
             else:
                 print(
-                    "[driver] server connection failed, please check if server is running"
+                    f"[driver] server {TARGET_SERVER_IP}:{TARGET_SERVER_PORT} connection failed, please check if server is running"
                 )
                 raise e
 
