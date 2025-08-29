@@ -1,0 +1,8 @@
+*.log
+*.jpg
+*.png
+*.npy
+
+llm_demo_debug
+
+llm_prompt.txt

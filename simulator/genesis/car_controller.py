@@ -66,6 +66,8 @@ class CarController:
             self.target_wz += self.max_rot_speed
         if keyboard.KeyCode.from_char("]") in keys:
             self.target_wz -= self.max_rot_speed
+        if keyboard.KeyCode.from_char("r") in keys or keyboard.KeyCode.from_char("R") in keys:
+            self.reset_car()
             
         return keyboard.Key.esc in keys
         
@@ -192,6 +194,43 @@ class CarController:
         self.last_pos = pos
         self.last_yaw = yaw_deg_rounded
         return pos, yaw_deg_rounded
+        
+    def reset_car(self):
+        """Reset car to initial position and orientation"""
+        if hasattr(self.car, "_initial_pos") and hasattr(self.car, "_initial_yaw"):
+            # Reset position
+            qpos = self.car.get_qpos()
+            if hasattr(qpos, "cpu"):
+                qpos = qpos.cpu().numpy()
+            qpos_new = qpos.copy()
+            qpos_new[0] = self.car._initial_pos[0]  # x
+            qpos_new[1] = self.car._initial_pos[1]  # y
+            qpos_new[2] = self.car._initial_pos[2]  # z
+            self.car.set_qpos(qpos_new)
+            
+            # Reset orientation
+            self.car._my_yaw = self.car._initial_yaw
+            quat = R.from_euler("x", self.car._my_yaw).as_quat()
+            self.car.set_quat(quat)
+            
+            # Reset velocities
+            self.vx = 0.0
+            self.vy = 0.0
+            self.wz = 0.0
+            self.target_vx = 0.0
+            self.target_vy = 0.0
+            self.target_wz = 0.0
+            
+            # Reset MoveTo state
+            self.move_to_active = False
+            self.move_to_vx = 0.0
+            self.move_to_vy = 0.0
+            if hasattr(self.car, "_move_to_target"):
+                self.car._move_to_target["active"] = False
+            
+            logger.info("Car reset to initial position and orientation")
+        else:
+            logger.warning("Car initial state not found, cannot reset")
         
     def step(self):
         """Execute a control step"""

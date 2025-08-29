@@ -160,6 +160,12 @@ class SceneManager:
             gs.morphs.Box(pos=pos, size=size, fixed=False),
             surface=gs.surfaces.Iron(color=(0.2, 0.2, 0.8)),
         )
+        
+        # Store initial state for reset functionality
+        car._initial_pos = pos
+        car._initial_yaw = 0.0
+        car._my_yaw = 0.0
+        
         logger.info(f"car added to scene at position {pos}")
         return car
         

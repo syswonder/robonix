@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 
 
-class EOS_TYPE_FlowResult(Enum):
+class EOS_TYPE_ActionResult(Enum):
     SUCCESS = 0
     FAILURE = 1
     ABORT = 2
@@ -25,30 +25,30 @@ def get_runtime():
     return __RUNTIME_INSTANCE__
 
 
-def flow(func: Callable) -> Callable:
+def action(func: Callable) -> Callable:
     def wrapper(*args, **kwargs):
         try:
             result = func(*args, **kwargs)
             return result
         except Exception as e:
             logger.error(
-                f"flow function {func.__name__} failed: {str(e)}", exc_info=True
+                f"action function {func.__name__} failed: {str(e)}", exc_info=True
             )
-            return EOS_TYPE_FlowResult.FAILURE
+            return EOS_TYPE_ActionResult.FAILURE
 
-    wrapper._is_flow = True
+    wrapper._is_action = True
     wrapper._original_func = func
     wrapper.__name__ = func.__name__
 
     return wrapper
 
 
-def get_flow_functions(module) -> List[Callable]:
-    flow_functions = []
+def get_action_functions(module) -> List[Callable]:
+    action_functions = []
     for name, obj in inspect.getmembers(module):
-        if inspect.isfunction(obj) and hasattr(obj, "_is_flow"):
-            flow_functions.append(obj)
-    return flow_functions
+        if inspect.isfunction(obj) and hasattr(obj, "_is_action"):
+            action_functions.append(obj)
+    return action_functions
 
 
 def set_runtime(runtime):
@@ -56,19 +56,19 @@ def set_runtime(runtime):
     __RUNTIME_INSTANCE__ = runtime
 
 
-def flow_print(message: str, level: str = "INFO"):
+def action_print(message: str, level: str = "INFO"):
 
     frame = inspect.currentframe()
     caller_frame = frame.f_back
 
-    flow_name = "unknown"
+    action_name = "unknown"
     if caller_frame:
         for frame_info in inspect.stack():
             func_name = frame_info.function
             if func_name in frame_info.frame.f_globals:
                 func_obj = frame_info.frame.f_globals[func_name]
-                if hasattr(func_obj, "_is_flow"):
-                    flow_name = func_name
+                if hasattr(func_obj, "_is_action"):
+                    action_name = func_name
                     break
 
     thread_id = threading.get_ident()
@@ -84,15 +84,15 @@ def flow_print(message: str, level: str = "INFO"):
         "CRITICAL": "\033[35m",  # Magenta
         "RESET": "\033[0m",  # Reset
         "WHITE": "\033[37m",  # White for message
-        "CYAN": "\033[36m",  # Cyan for timestamp and flow name
+        "CYAN": "\033[36m",  # Cyan for timestamp and action name
         "YELLOW": "\033[33m",  # Yellow for level
     }
 
     level_color = colors.get(level.upper(), colors["INFO"])
-    console_message = f"FLOW_LOG:{colors['CYAN']}[{timestamp}]{colors['RESET']}{level_color}[{level.upper()}]{colors['RESET']}{colors['CYAN']}[{flow_name}]{colors['RESET']} {colors['WHITE']}{message}{colors['RESET']}"
+    console_message = f"ACTION_LOG:{colors['CYAN']}[{timestamp}]{colors['RESET']}{level_color}[{level.upper()}]{colors['RESET']}{colors['CYAN']}[{action_name}]{colors['RESET']} {colors['WHITE']}{message}{colors['RESET']}"
 
     full_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-    file_message = f"[{full_timestamp}][{level.upper()}][{flow_name}][{thread_name}({thread_id})] {message}"
+    file_message = f"[{full_timestamp}][{level.upper()}][{action_name}][{thread_name}({thread_id})] {message}"
 
     # Print to console
     print(console_message)
@@ -107,28 +107,28 @@ def flow_print(message: str, level: str = "INFO"):
         else:
             log_dir = os.getcwd()
 
-        log_file = os.path.join(log_dir, f"{flow_name}.log")
+        log_file = os.path.join(log_dir, f"{action_name}.log")
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(file_message + "\n")
     except Exception as e:
         print(f"Warning: Could not write to log file: {e}")
 
 
-def flow_debug(message: str):
-    flow_print(message, "DEBUG")
+def action_debug(message: str):
+    action_print(message, "DEBUG")
 
 
-def flow_info(message: str):
-    flow_print(message, "INFO")
+def action_info(message: str):
+    action_print(message, "INFO")
 
 
-def flow_warning(message: str):
-    flow_print(message, "WARN")
+def action_warning(message: str):
+    action_print(message, "WARN")
 
 
-def flow_error(message: str):
-    flow_print(message, "ERROR")
+def action_error(message: str):
+    action_print(message, "ERROR")
 
 
-def flow_critical(message: str):
-    flow_print(message, "CRITICAL")
+def action_critical(message: str):
+    action_print(message, "CRITICAL")

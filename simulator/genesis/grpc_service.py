@@ -87,6 +87,42 @@ class RobotControlService(robot_control_pb2_grpc.RobotControlServicer):
             self.car._move_to_target["active"] = False
         return robot_control_pb2.MoveReply(status="stopped")
 
+    def Reset(self, request, context):
+        """Reset vehicle to initial position and orientation"""
+        try:
+            with self._scene_lock:
+                # Reset position
+                if hasattr(self.car, "_initial_pos"):
+                    qpos = self.car.get_qpos()
+                    if hasattr(qpos, "cpu"):
+                        qpos = qpos.cpu().numpy()
+                    qpos_new = qpos.copy()
+                    qpos_new[0] = self.car._initial_pos[0]  # x
+                    qpos_new[1] = self.car._initial_pos[1]  # y
+                    qpos_new[2] = self.car._initial_pos[2]  # z
+                    self.car.set_qpos(qpos_new)
+                    
+                    # Reset orientation
+                    self.car._my_yaw = 0.0
+                    quat = R.from_euler("x", 0.0).as_quat()
+                    self.car.set_quat(quat)
+                    
+                    # Clear any active keyboard input
+                    self.keyboard_device.pressed_keys.clear()
+                    
+                    # Clear MoveTo state if exists
+                    if hasattr(self.car, "_move_to_target"):
+                        self.car._move_to_target["active"] = False
+                        
+                    logger.info("Vehicle reset to initial position via gRPC")
+                    return robot_control_pb2.MoveReply(status="reset")
+                else:
+                    logger.warning("Vehicle initial state not found")
+                    return robot_control_pb2.MoveReply(status="error: no initial state")
+        except Exception as e:
+            logger.error(f"Reset failed: {e}")
+            return robot_control_pb2.MoveReply(status=f"error: {str(e)}")
+
     def GetPose(self, request, context):
         """Get vehicle pose"""
         car_x, car_y, car_z = self.car.get_pos()
