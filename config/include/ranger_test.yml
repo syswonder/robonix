@@ -1,5 +1,5 @@
 driver:
-  - piontcloud_to_laserscan
+  - pointcloud_to_laserscan
   - ranger_ros2
   - raspi_hc_sr04
   - realsense_ros2
