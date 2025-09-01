@@ -24,6 +24,7 @@ from DeepEmbody.uapi.log import logger
 def init_skill_providers(runtime: Runtime):
     # dump __all__ in DeepEmbody.skill to skills list
     from DeepEmbody.skill import __all__
+
     skills = __all__
     local_provider = SkillProvider(
         name="local_provider",
@@ -49,7 +50,6 @@ def init_entity_graph_manually(runtime: Runtime):
         print("mock cap_get_pose called")
         return (1.0, 2.0, 0.0)  # Return tuple (x, y, yaw) as per skill spec
 
-    
     from DeepEmbody.skill import debug_test_skill
 
     entity_a.bind_skill("cap_get_pose", mock_getpos)
@@ -66,9 +66,11 @@ def init_entity_graph_manually(runtime: Runtime):
 def init_entity_graph_from_yolo(runtime: Runtime):
     logger.info("importing skills...")
     from DeepEmbody.skill import (
-        skl_detect_objs,
-        cap_save_rgb_image,
-        cap_save_depth_image,
+        sim_skl_detect_objs,
+        sim_save_rgb_image,
+        sim_save_depth_image,
+        sim_camera_dep_rgb,
+        sim_camera_info,
     )
 
     root_room = create_root_room()
@@ -92,8 +94,8 @@ def init_entity_graph_from_yolo(runtime: Runtime):
     # Bind skills to robot entity using standard names
     robot.bind_skill("cap_space_move", robot_move_impl)
     robot.bind_skill("cap_space_getpos", robot_getpos_impl)
-    robot.bind_skill("cap_save_rgb_image", cap_save_rgb_image)
-    robot.bind_skill("cap_save_depth_image", cap_save_depth_image)
+    robot.bind_skill("cap_save_rgb_image", sim_save_rgb_image)
+    robot.bind_skill("cap_save_depth_image", sim_save_depth_image)
 
     move_base = create_controllable_entity("move_base")
     robot.add_child(move_base)
@@ -101,8 +103,12 @@ def init_entity_graph_from_yolo(runtime: Runtime):
     camera = create_controllable_entity("camera")
     robot.add_child(camera)
 
+    # Bind camera capabilities to camera entity
+    camera.bind_skill("cap_camera_dep_rgb", sim_camera_dep_rgb)
+    camera.bind_skill("cap_camera_info", sim_camera_info)
+
     # Bind the detection skill to camera entity
-    camera.bind_skill("skl_detect_objs", skl_detect_objs)
+    camera.bind_skill("skl_detect_objs", sim_skl_detect_objs)
 
     # Call the detection skill through the camera entity
     # This will automatically inject self_entity parameter
@@ -121,7 +127,11 @@ def init_entity_graph_from_yolo(runtime: Runtime):
         root_room.add_child(obj_entity)
         detected_entities[obj_name] = obj_entity
 
-        x, y = obj_info["position"][0], obj_info["position"][1]
+        if obj_info["position"] is None:
+            logger.warning(f"object {obj_name} has no position")
+            x, y = 0.0, 0.0
+        else:
+            x, y = obj_info["position"][0], obj_info["position"][1]
 
         # Fix closure issue by creating a proper function with default arguments
         def create_getpos_handler(obj_x, obj_y):
@@ -177,7 +187,7 @@ def main():
 
         if args.mode == "manual":
             runtime.set_action_args("debug_test_action", a="/A")
-            
+
         elif args.mode == "auto":
             # in auto mode, the entity graph is constructed using registered
             # skl_detect_objs skill, and we choose the first object detected as

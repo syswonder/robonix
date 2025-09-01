@@ -75,7 +75,7 @@ def put_text_with_background(
 
 
 @eaios.caller
-def skl_detect_objs(camera_name: str, self_entity=None) -> dict:
+def sim_skl_detect_objs(self_entity: Entity, camera_name: str) -> dict:
     # this is used for simulation environment
     try:
         # Use self_entity to call capabilities instead of importing them
