@@ -21,7 +21,7 @@ pip install mcp pyyaml argparse python-dotenv rich loguru
 
 # for ROS2 AMCL(Adaptive Monte Carlo Localization) and other stuffs :)
 pip install ultralytics transforms3d
-sudo apt install ros-$ROS_DISTRO-nav2-*
+sudo apt install ros-$ROS_DISTRO-nav2-* ros-$ROS_DISTRO-vision-msgs
 
 python manager/eaios_decorators.py --config config/include/ranger_test.yml
 ``` 
