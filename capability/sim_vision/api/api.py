@@ -191,7 +191,7 @@ def cap_get_robot_pose(timeout_sec=5.0):
 
 
 @eaios.api
-def cap_calculate_object_global_position(
+def cap_get_object_global_pos(
     pixel_x: float, 
     pixel_y: float, 
     depth: float, 

@@ -4,7 +4,7 @@
 
 如果是 ubuntu 22，请通过官方方法直接在系统 python 环境安装 ROS2 Humble
 
-如果不是 ubuntu 22，请使用虚拟机，请注意，此处的环境仅为保证 ROS2 相关的导入存在，如果需要实际控制 ranger，必须在小车的 Jeston Orin AGX 系统中运行。
+如果不是 ubuntu 22，请使用虚拟机安装环境，请注意，此处的环境仅为保证 ROS2 相关的导入存在，如果需要实际控制 ranger，必须在小车的 Jeston Orin AGX 系统中运行。
 
 ## 仅导出 skill 文件
 

@@ -298,7 +298,7 @@ def skl_detect_objs(camera_name: str) -> dict:
                 # We'll get the camera coordinates from the capability call below
 
                 # Use new capability to calculate object global position
-                from skill import cap_calculate_object_global_position
+                from skill import cap_get_object_global_pos
                 robot_pose = cap_get_robot_pose()
                 if robot_pose is None:
                     logger.warning(f"failed to get robot pose for object {name}, using fallback coordinates")
@@ -308,7 +308,7 @@ def skl_detect_objs(camera_name: str) -> dict:
                     map_z = center_depth_m
                 else:
                     # Calculate global position using the new capability
-                    map_x, map_y, map_z = cap_calculate_object_global_position(
+                    map_x, map_y, map_z = cap_get_object_global_pos(
                         center_x, center_y, center_depth_m, camera_info, robot_pose
                     )
                     
