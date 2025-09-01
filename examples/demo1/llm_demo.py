@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from uapi.log import logger
+from uapi import create_runtime_manager, set_runtime
 import sys
 import os
 import time
@@ -19,160 +21,27 @@ project_root_parent = Path(
 ).parent.parent.parent.parent.parent  # DeepEmbody root
 sys.path.insert(0, str(project_root_parent))
 
-from uapi.runtime.runtime import Runtime
-from uapi.runtime.provider import SkillProvider
-from uapi.graph.entity import create_root_room, create_controllable_entity
-from uapi.runtime.action import set_runtime
-from uapi.log import logger
-from uapi.specs.types import EOS_SkillType
 
+def init_skill_providers(manager):
+    """Initialize skill providers"""
+    from uapi.runtime.provider import SkillProvider
 
-def init_skill_providers(runtime: Runtime):
+    # dump __all__ in DeepEmbody.skill to skills list
+    try:
+        from DeepEmbody.skill import __all__
+        skills = __all__
+    except ImportError:
+        logger.warning("DeepEmbody.skill module not available")
+        skills = []
+
     local_provider = SkillProvider(
         name="local_provider",
         IP="127.0.0.1",
-        skills=[
-            "c_space_getpos",
-            "c_space_move",
-            "c_camera_rgb",
-            "c_camera_dep_rgb",
-            "c_camera_info",
-            "c_save_rgb_image",
-            "c_save_depth_image",
-            "c_get_robot_pose",
-        ],
+        skills=skills,
     )
 
-    runtime.registry.add_provider(local_provider)
-    logger.info(f"added skill providers: {runtime.registry}")
-
-
-def init_entity_graph_from_yolo(runtime: Runtime):
-    logger.info("importing skills...")
-    from skill import s_detect_objs, c_save_rgb_image, c_save_depth_image
-
-    root_room = create_root_room()
-    runtime.set_graph(root_room)
-
-    robot = create_controllable_entity("robot")
-    root_room.add_child(robot)
-
-    def robot_move_impl(x, y, z):
-        # from driver.sim_genesis_ranger.driver import move_to_point
-        # move_to_point(x, y)  # THIS IS A FUNCTION FROM DRIVER !
-        return {"success": True}
-
-    def robot_getpos_impl():
-        from driver.sim_genesis_ranger.driver import get_pose
-
-        x, y, z, yaw = get_pose()
-        return {"x": x, "y": y, "z": z}
-
-    robot.bind_skill("c_space_move", robot_move_impl)
-    robot.bind_skill("c_space_getpos", robot_getpos_impl)
-    robot.bind_skill("c_save_rgb_image", c_save_rgb_image)
-    robot.bind_skill("c_save_depth_image", c_save_depth_image)
-
-    move_base = create_controllable_entity("move_base")
-    robot.add_child(move_base)
-
-    camera = create_controllable_entity("camera")
-    robot.add_child(camera)
-
-    camera.bind_skill("s_detect_objs", s_detect_objs)
-
-    detect_objs = camera.s_detect_objs(camera_name="camera0")
-    logger.info(f"detected objects: {detect_objs}")
-    # detect_objs is a dict of {obj_name: obj_info}
-
-    global detected_entities
-    detected_entities = {}
-
-    global detected_entities_getpos_handler
-    detected_entities_getpos_handler = {}
-
-    for obj_name, obj_info in detect_objs.items():
-        obj_entity = create_controllable_entity(obj_name)
-        root_room.add_child(obj_entity)
-        detected_entities[obj_name] = obj_entity
-
-        x, y = obj_info["position"][0], obj_info["position"][1]
-
-        # Fix closure issue by creating a proper function with default arguments
-        def create_getpos_handler(obj_x, obj_y):
-            return lambda: {"x": obj_x, "y": obj_y, "z": 0.0}
-
-        detected_entities_getpos_handler[obj_name] = create_getpos_handler(x, y)
-        obj_entity.bind_skill(
-            "c_space_getpos", detected_entities_getpos_handler[obj_name]
-        )
-
-        logger.info(f"created entity for {obj_name}: {obj_entity.get_absolute_path()}")
-
-    logger.info("initd entity graph from YOLO detection:")
-    logger.info(f"  root room: {root_room.get_absolute_path()}")
-    logger.info(f"  robot: {robot.get_absolute_path()}")
-    logger.info(f"  detected entities: {list(detected_entities.keys())}")
-
-    return detected_entities
-
-
-def collect_entity_graph_info(runtime: Runtime, detected_entities: dict):
-    """Collect entity graph structure information and bound skills for each entity"""
-    graph_info = {"entities": {}, "skills": {}, "graph_structure": {}}
-
-    # Get all entity information
-    root_room = runtime.get_graph()
-
-    def collect_entity_info(entity, parent_path=""):
-        entity_path = entity.get_absolute_path()
-        entity_name = entity.entity_name
-
-        # Collect basic entity information
-        graph_info["entities"][entity_path] = {
-            "name": entity_name,
-            "parent": parent_path,
-            "children": [],
-        }
-
-        # Collect bound skill information
-        bound_skills = entity.primitives
-        graph_info["skills"][entity_path] = bound_skills
-
-        # Recursively process child entities
-        for child in entity.get_children():
-            child_path = child.get_absolute_path()
-            graph_info["entities"][entity_path]["children"].append(child_path)
-            collect_entity_info(child, entity_path)
-
-    collect_entity_info(root_room)
-
-    # Build hierarchical graph structure
-    def build_graph_structure(entity_path):
-        entity_info = graph_info["entities"][entity_path]
-        structure = {
-            "name": entity_info["name"],
-            "path": entity_path,
-            "skills": graph_info["skills"][entity_path],
-            "children": {},
-        }
-
-        for child_path in entity_info["children"]:
-            child_name = graph_info["entities"][child_path]["name"]
-            structure["children"][child_name] = build_graph_structure(child_path)
-
-        return structure
-
-    graph_info["graph_structure"] = build_graph_structure(root_room.get_absolute_path())
-
-    return graph_info
-
-
-def load_skill_specs():
-    """Load skill standard interface definitions"""
-    from uapi.specs.skill_specs import EOS_SKILL_SPECS
-
-    return EOS_SKILL_SPECS
+    manager.get_runtime().registry.add_provider(local_provider)
+    logger.info(f"Added skill providers: {manager.get_runtime().registry}")
 
 
 def load_demo_action_example():
@@ -184,52 +53,16 @@ def load_demo_action_example():
         return f.read()
 
 
-def create_llm_prompt(
-    entity_graph_info: dict, skill_specs: dict, action_example: str, user_request: str
-):
+def create_llm_prompt(scene_info: dict, action_example: str, user_request: str):
     """Create structured prompt to send to LLM"""
 
     # Build skill descriptions
     skills_description = {}
-    for entity_path, skills in entity_graph_info["skills"].items():
+    for entity_path, skills in scene_info["entity_graph"]["skills"].items():
         for skill_name in skills:
-            if skill_name in skill_specs:
-                skill_info = skill_specs[skill_name]
-                # Convert any non-serializable objects to strings
-                input_spec = skill_info["input"]
-                output_spec = skill_info["output"]
-
-                # Handle input/output that might be classes or complex types
-                if input_spec is not None and not isinstance(
-                    input_spec, (dict, list, str, int, float, bool)
-                ):
-                    input_spec = str(input_spec)
-                if output_spec is not None and not isinstance(
-                    output_spec, (dict, list, str, int, float, bool)
-                ):
-                    output_spec = str(output_spec)
-
-                # Ensure all values are JSON serializable
-                try:
-                    # Test JSON serialization of the skill info
-                    test_dict = {
-                        "description": skill_info["description"],
-                        "input": input_spec,
-                        "output": output_spec,
-                        "type": skill_info["type"].value,
-                    }
-                    json.dumps(
-                        test_dict
-                    )  # This will fail if any value is not serializable
-                    skills_description[f"{entity_path}.{skill_name}"] = test_dict
-                except (TypeError, ValueError):
-                    # Fallback: convert everything to strings for JSON compatibility
-                    skills_description[f"{entity_path}.{skill_name}"] = {
-                        "description": str(skill_info["description"]),
-                        "input": str(input_spec) if input_spec is not None else None,
-                        "output": str(output_spec) if output_spec is not None else None,
-                        "type": str(skill_info["type"].value),
-                    }
+            if skill_name in scene_info["skill_specs"]["skill_specs"]:
+                skill_info = scene_info["skill_specs"]["skill_specs"][skill_name]
+                skills_description[f"{entity_path}.{skill_name}"] = skill_info
 
     prompt = f"""You are a robot task planning expert. Based on the following information, generate a Python action function for the user's natural language requirement.
 
@@ -237,7 +70,7 @@ def create_llm_prompt(
 
 ### Entity Graph Structure
 ```json
-{json.dumps(entity_graph_info["graph_structure"], indent=2, ensure_ascii=False)}
+{json.dumps(scene_info["entity_graph"]["graph_structure"], indent=2, ensure_ascii=False)}
 ```
 
 ### Available Skills
@@ -338,45 +171,17 @@ def extract_llm_response(llm_response: str):
         return None, None, None
 
 
-def save_debug_files(
-    entity_graph_info: dict,
-    skill_specs: dict,
-    action_example: str,
-    user_request: str,
-    llm_response: str,
-    action_code: str,
-    action_args: dict,
-):
+def save_debug_files(scene_info: dict, action_example: str, user_request: str,
+                     llm_response: str, action_code: str, action_args: dict):
     """Save debug information to local files"""
     # Save files in the same directory as the running Python file
     current_dir = os.path.dirname(os.path.abspath(__file__))
     debug_dir = os.path.join(current_dir, "llm_demo_debug")
     os.makedirs(debug_dir, exist_ok=True)
 
-    # Convert skill_specs to JSON-serializable format
-    serializable_skill_specs = {}
-    for skill_name, skill_info in skill_specs.items():
-        skill_type = skill_info["type"].value
-        serializable_skill_specs[skill_name] = {
-            "description": str(skill_info["description"]),
-            "type": str(skill_type),  # Convert enum to string
-            "input": (
-                str(skill_info["input"]) if skill_info["input"] is not None else None
-            ),
-            "output": (
-                str(skill_info["output"]) if skill_info["output"] is not None else None
-            ),
-            "dependencies": (
-                skill_info.get("dependencies", [])
-                if skill_type == EOS_SkillType.SKILL
-                else []
-            ),
-        }
-
     # Save structured data
     structured_data = {
-        "entity_graph_info": entity_graph_info,
-        "skill_specs": serializable_skill_specs,
+        "scene_info": scene_info,
         "action_example": action_example,
         "user_request": user_request,
         "llm_response": llm_response,
@@ -398,7 +203,7 @@ def save_debug_files(
     logger.info(f"Debug information saved to: {debug_dir}")
 
 
-def execute_generated_action(runtime: Runtime, action_code: str, action_args: dict):
+def execute_generated_action(manager, action_code: str, action_args: dict):
     """Execute LLM generated action"""
     try:
         # Create temporary action file in the same directory as the running Python file
@@ -408,7 +213,7 @@ def execute_generated_action(runtime: Runtime, action_code: str, action_args: di
             f.write(action_code)
 
         # Load action program
-        action_names = runtime.load_program(temp_action_path)
+        action_names = manager.load_action_program(temp_action_path)
         logger.info(f"Loaded action functions: {action_names}")
 
         if not action_names:
@@ -418,22 +223,16 @@ def execute_generated_action(runtime: Runtime, action_code: str, action_args: di
         # Get first action function name
         action_name = action_names[0]
 
-        # Set action arguments
-        runtime.set_action_args(action_name, **action_args)
+        # Configure action arguments
+        manager.configure_action(action_name, **action_args)
 
         # Execute action
         logger.info(f"Starting action execution: {action_name}")
         logger.info(f"Action arguments: {action_args}")
 
-        # Start the specific action
-        runtime.start_action(action_name)
-
-        # Wait for completion
-        results = runtime.wait_for_all_actions(timeout=30.0)
-
-        logger.info("Action execution results:")
-        for name, result in results.items():
-            logger.info(f"  {name}: {result}")
+        # Execute the specific action
+        result = manager.execute_action(action_name, timeout=30.0)
+        logger.info(f"Action execution result: {result}")
 
         # Clean up temporary file
         os.remove(temp_action_path)
@@ -441,7 +240,8 @@ def execute_generated_action(runtime: Runtime, action_code: str, action_args: di
         return True
 
     except Exception as e:
-        logger.error(f"Failed to execute generated action: {str(e)}", exc_info=True)
+        logger.error(
+            f"Failed to execute generated action: {str(e)}", exc_info=True)
         return False
 
 
@@ -459,65 +259,20 @@ def main():
 
     logger.info("Starting LLM task planning demo")
 
-    # Initialize runtime
-    runtime = Runtime()
-    init_skill_providers(runtime)
+    # Initialize runtime manager
+    manager = create_runtime_manager()
+    init_skill_providers(manager)
 
-    # Build entity graph
-    detected_entities = init_entity_graph_from_yolo(runtime)
-    set_runtime(runtime)
+    # Build entity graph using YOLO detection
+    manager.build_entity_graph("yolo")
+    set_runtime(manager.get_runtime())
 
-    # Collect scene information
-    entity_graph_info = collect_entity_graph_info(runtime, detected_entities)
-    skill_specs = load_skill_specs()
+    # Export scene information
+    scene_info = manager.export_scene_info()
     action_example = load_demo_action_example()
 
-    # Wait for user input
-    print("\n" + "=" * 50)
-    print("Scene construction completed! Entity Graph Structure:")
-    print("=" * 50)
-
-    def print_entity_tree(entity, prefix="", is_last=True):
-        """Recursively print entity tree structure with skills"""
-        entity_path = entity.get_absolute_path()
-        entity_name = entity.entity_name
-
-        # ANSI color codes
-        RESET = "\033[0m"
-        BOLD = "\033[1m"
-        BLUE = "\033[94m"  # Entity name color
-        GREEN = "\033[92m"  # Skills color
-        YELLOW = "\033[93m"  # Path color
-        GRAY = "\033[90m"  # No skills color
-
-        # Print current entity with skills on the same line
-        connector = "└── " if is_last else "├── "
-        if entity.primitives:
-            skills_str = f" {GREEN}[skills: {', '.join(entity.primitives)}]{RESET}"
-        else:
-            skills_str = f" {GRAY}[no skills]{RESET}"
-
-        print(
-            f"{prefix}{connector}{BOLD}{BLUE}{entity_name}{RESET} {YELLOW}({entity_path}){RESET}{skills_str}"
-        )
-
-        # Recursively print children
-        children = entity.get_children()
-        for i, child in enumerate(children):
-            is_last_child = i == len(children) - 1
-            print_entity_tree(
-                child, prefix + ("    " if is_last else "│   "), is_last_child
-            )
-
-    # Print the complete entity tree
-    root_entity = runtime.get_graph()
-    print_entity_tree(root_entity)
-
-    print("=" * 50)
-    print("Detected objects from YOLO:")
-    for entity_name in detected_entities.keys():
-        print(f"  - {entity_name}")
-    print("=" * 50)
+    # Print entity tree structure
+    manager.print_entity_tree()
 
     user_request = input("\nPlease enter your command: ")
 
@@ -526,9 +281,7 @@ def main():
         return 0
 
     # Create LLM prompt
-    prompt = create_llm_prompt(
-        entity_graph_info, skill_specs, action_example, user_request
-    )
+    prompt = create_llm_prompt(scene_info, action_example, user_request)
 
     # Save prompt to local file for debugging
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -550,16 +303,17 @@ def main():
         return 1
 
     # Parse LLM response
-    action_code, action_args, task_description = extract_llm_response(llm_response)
+    action_code, action_args, task_description = extract_llm_response(
+        llm_response)
 
     if not action_code or not action_args:
-        logger.error("Unable to extract action code or parameters from LLM response")
+        logger.error(
+            "Unable to extract action code or parameters from LLM response")
         return 1
 
     # Save debug information
     save_debug_files(
-        entity_graph_info,
-        skill_specs,
+        scene_info,
         action_example,
         user_request,
         llm_response,
@@ -573,11 +327,12 @@ def main():
     print(f"Action parameters: {action_args}")
 
     # Ask whether to execute
-    execute = input("\nDo you want to execute this task? (y/n): ").strip().lower()
+    execute = input(
+        "\nDo you want to execute this task? (y/n): ").strip().lower()
 
     if execute in ["y", "yes"]:
         logger.info("Starting execution of LLM generated action...")
-        success = execute_generated_action(runtime, action_code, action_args)
+        success = execute_generated_action(manager, action_code, action_args)
 
         if success:
             logger.info("Task execution completed!")
