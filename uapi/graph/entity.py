@@ -1,3 +1,13 @@
+"""
+Entity Graph Module
+===================
+
+This module provides the entity graph system for DeepEmbody OS.
+It defines the Entity class which represents nodes in the hierarchical
+entity graph, along with skill management, primitive operations,
+and graph traversal functionality.
+"""
+
 # SPDX-License-Identifier: MulanPSL-2.0
 # Copyright (c) 2025, wheatfox <wheatfox17@icloud.com>
 

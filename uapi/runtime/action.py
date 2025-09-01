@@ -1,13 +1,23 @@
+"""
+Action Module
+=============
+
+This module provides the action system for DeepEmbody OS.
+It includes action decorators, execution control, runtime management,
+and result types for the action framework.
+"""
+
 from enum import Enum
 import threading
 import inspect
 from typing import Dict, List, Callable, Any
-from DeepEmbody.uapi.log import logger
+from ..log import logger
 import os
 from datetime import datetime
 
 
 class EOS_TYPE_ActionResult(Enum):
+    """Enumeration for action execution results."""
     SUCCESS = 0
     FAILURE = 1
     ABORT = 2

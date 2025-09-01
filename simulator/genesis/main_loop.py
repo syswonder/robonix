@@ -11,8 +11,8 @@ except ImportError:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger(__name__)
 
-from car_controller import CarController
-from camera_manager import CameraManager
+from .car_controller import CarController
+from .camera_manager import CameraManager
 
 
 class MainControlLoop:

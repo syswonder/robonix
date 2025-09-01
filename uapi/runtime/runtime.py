@@ -1,3 +1,12 @@
+"""
+Runtime Module
+==============
+
+This module provides the core runtime system for DeepEmbody OS.
+The Runtime class manages entity graphs, action programs, skill registries,
+and execution control for the entire system.
+"""
+
 from ..graph.entity import Entity
 from .registry import Registry
 from .action import get_action_functions
@@ -13,6 +22,16 @@ from datetime import datetime
 
 
 class Runtime:
+    """
+    Core runtime system for DeepEmbody OS.
+    
+    The Runtime class is responsible for:
+    - Managing entity graphs and their lifecycle
+    - Loading and executing action programs
+    - Coordinating skill providers through the registry
+    - Controlling concurrent action execution
+    - Providing hooks for system extensions
+    """
     def __init__(self):
         self.graph: Entity = None
         self.registry: Registry = Registry()

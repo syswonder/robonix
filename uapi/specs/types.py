@@ -1,3 +1,12 @@
+"""
+Types Module
+============
+
+This module defines common data types and enumerations used throughout
+the DeepEmbody OS system. It includes image formats, camera types,
+skill types, and various data structures for system operations.
+"""
+
 from enum import Enum
 from dataclasses import dataclass
 from typing import List, Tuple
