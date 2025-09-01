@@ -17,7 +17,7 @@ https://docs.ros.org/en/humble/Installation.html
 ```bash
 pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python opencv-contrib-python-headless
 pip install "numpy==1.26.*" # 由于 numpy 2 有一些兼容性问题，最好用 1.26 版本
-pip install mcp pyyaml argparse python-dotenv rich
+pip install mcp pyyaml argparse python-dotenv rich loguru
 
 # for ROS2 AMCL(Adaptive Monte Carlo Localization) and other stuffs :)
 pip install ultralytics transforms3d
