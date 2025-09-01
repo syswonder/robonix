@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 
-from uapi.log import logger
-from uapi import create_runtime_manager, set_runtime
 import sys
 import os
 import argparse
@@ -15,10 +13,12 @@ project_root_parent = Path(
 ).parent.parent.parent.parent.parent  # DeepEmbody root
 sys.path.insert(0, str(project_root_parent))
 
+from DeepEmbody.uapi.log import logger
+from DeepEmbody.uapi import create_runtime_manager, set_runtime
 
 def init_skill_providers(manager):
     """Initialize skill providers for ranger demo"""
-    from uapi.runtime.provider import SkillProvider
+    from DeepEmbody.uapi.runtime.provider import SkillProvider
 
     # dump __all__ in DeepEmbody.skill to skills list
     try:
@@ -41,7 +41,7 @@ def init_skill_providers(manager):
 def create_ranger_entity_builder():
     """Create a ranger-specific entity graph builder"""
     def builder(runtime, **kwargs):
-        from uapi.graph.entity import create_root_room, create_controllable_entity
+        from DeepEmbody.uapi.graph.entity import create_root_room, create_controllable_entity
 
         root_room = create_root_room()
         runtime.set_graph(root_room)
