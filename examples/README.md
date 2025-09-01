@@ -16,6 +16,7 @@ conda create -n genesis python=3.12
 conda activate genesis
 
 # -> then install pytorch according to https://pytorch.org/get-started/locally/ <-
+# pip3 install torch torchvision (for example, on linux CUDA 12.8)
 
 pip install rich loguru mcp pyyaml argparse grpcio grpcio-tools genesis-world pynput openai python-dotenv opencv-python
 ```
@@ -26,7 +27,7 @@ pip install rich loguru mcp pyyaml argparse grpcio grpcio-tools genesis-world py
 
 1. 先运行 `python simulator/genesis/robot1.py` 启动模拟器，等待出现渲染窗口
 
-2. 运行 `python manager/eaios_decorators.py --config config/include_sim.yaml`，导出 `skill/__init__.py`
+2. 运行 `python manager/eaios_decorators.py --config config/include/simulator.yaml`，导出 `skill/__init__.py`（如果要在物理小车上运行，请使用 `config/include/ranger_test.yaml`，并参见 [examples/demo2/README.md](/examples/demo2/README.md)）
 
 3. 下载并保存 yoloe 模型文件以供 `sim_vision` 相关 skill 使用：
 
@@ -35,6 +36,6 @@ cd skill/sim_vision/models
 wget https://huggingface.co/jameslahm/yoloe/resolve/main/yoloe-11l-seg-pf.pt
 ```
 
-4. 运行 `python simulator/examples/demo1/simple_demo.py --mode auto` 或 `--mode manual`，其中 auto 是用yolo辅助生成实体图
+4. 运行 `python examples/demo1/simple_demo.py --mode auto` 或 `--mode manual`，其中 auto 是用yolo辅助生成实体图
 
 auto 模式下小车目前会自动识别物体，并自动绑定 action 参数，action 会让小车移动到识别到的物体位置。
