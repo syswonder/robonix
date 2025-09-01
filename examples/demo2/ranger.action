@@ -1,2 +1,18 @@
 from uapi.specs.skill_specs import EntityPath
 from uapi.runtime.action import action, EOS_TYPE_ActionResult, get_runtime, action_print
+from typing import Tuple
+
+@action
+def test_ranger(ranger_path: EntityPath) -> EOS_TYPE_ActionResult:
+    runtime = get_runtime()
+    ranger = runtime.get_graph().get_entity_by_path(ranger_path)
+    
+    if ranger is None:
+        action_print(f"ranger not found at path: {ranger_path}")
+        return EOS_TYPE_ActionResult.FAILURE
+
+    x, y, yaw : Tuple[float, float, float] = ranger.cap_get_pose()
+
+    action_print(f"ranger pose: x={x}, y={y}, yaw={yaw}")
+    
+    return EOS_TYPE_ActionResult.SUCCESS
