@@ -5,7 +5,6 @@ import sys
 import os
 import signal
 import threading
-import time
 
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -58,7 +58,7 @@ Genesis 模拟器启动
 .. code-block:: bash
 
    # 在 DeepEmbody 根目录下启动 Genesis 模拟器
-   python simulator/genesis/robot1.py
+   python start_genesis.py
 
 等待模拟器启动完成，直到出现渲染窗口。
 
