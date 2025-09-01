@@ -44,6 +44,106 @@ def init_skill_providers(manager):
     logger.info(f"Added skill providers: {manager.get_runtime().registry}")
 
 
+def create_yolo_entity_builder():
+    """Create a YOLO-based entity graph builder"""
+    def builder(runtime, **kwargs):
+        logger.info("Building entity graph from YOLO detection...")
+
+        try:
+            from DeepEmbody.skill import (
+                sim_skl_detect_objs,
+                sim_save_rgb_image,
+                sim_save_depth_image,
+                sim_camera_dep_rgb,
+                sim_camera_info,
+                sim_get_robot_pose,
+            )
+        except ImportError:
+            logger.error("Required skills not available")
+            return
+
+        from DeepEmbody.uapi.graph.entity import create_root_room, create_controllable_entity
+
+        root_room = create_root_room()
+        runtime.set_graph(root_room)
+
+        robot = create_controllable_entity("robot")
+        root_room.add_child(robot)
+
+        def robot_move_impl(x, y, z):
+            try:
+                from DeepEmbody.driver.sim_genesis_ranger.driver import move_to_point
+                # move_to_point(x, y)  # Uncomment when driver is available
+                return {"success": True}
+            except ImportError:
+                logger.warning(
+                    "Driver module not available, using mock implementation")
+                return {"success": True}
+
+        def robot_getpos_impl():
+            try:
+                from DeepEmbody.driver.sim_genesis_ranger.driver import get_pose
+                x, y, z, yaw = get_pose()
+                return {"x": x, "y": y, "z": z}
+            except ImportError:
+                logger.warning(
+                    "Driver module not available, using mock implementation")
+                return {"x": 0.0, "y": 0.0, "z": 0.0}
+
+        # Bind skills to robot entity
+        robot.bind_skill("cap_space_move", robot_move_impl)
+        robot.bind_skill("cap_space_getpos", robot_getpos_impl)
+        robot.bind_skill("cap_save_rgb_image", sim_save_rgb_image)
+        robot.bind_skill("cap_save_depth_image", sim_save_depth_image)
+
+        move_base = create_controllable_entity("move_base")
+        robot.add_child(move_base)
+
+        camera = create_controllable_entity("camera")
+        robot.add_child(camera)
+
+        # Bind camera capabilities
+        camera.bind_skill("cap_camera_dep_rgb", sim_camera_dep_rgb)
+        camera.bind_skill("cap_camera_info", sim_camera_info)
+        camera.bind_skill("cap_get_robot_pose", sim_get_robot_pose)
+        camera.bind_skill("skl_detect_objs", sim_skl_detect_objs)
+
+        # Detect objects
+        detect_objs = camera.skl_detect_objs(camera_name="camera0")
+        logger.info(f"Detected objects: {detect_objs}")
+
+        detected_entities_getpos_handler = {}
+
+        for obj_name, obj_info in detect_objs.items():
+            obj_entity = create_controllable_entity(obj_name)
+            root_room.add_child(obj_entity)
+
+            if obj_info["position"] is None:
+                logger.warning(f"Object {obj_name} has no position")
+                x, y = 0.0, 0.0
+            else:
+                x, y = obj_info["position"][0], obj_info["position"][1]
+
+            def create_getpos_handler(obj_x, obj_y):
+                return lambda: {"x": obj_x, "y": obj_y, "z": 0.0}
+
+            detected_entities_getpos_handler[obj_name] = create_getpos_handler(
+                x, y)
+            obj_entity.bind_skill(
+                "cap_space_getpos", detected_entities_getpos_handler[obj_name]
+            )
+
+            logger.info(
+                f"Created entity for {obj_name}: {obj_entity.get_absolute_path()}")
+
+        logger.info("YOLO-based entity graph initialized:")
+        logger.info(f"  root room: {root_room.get_absolute_path()}")
+        logger.info(f"  robot: {robot.get_absolute_path()}")
+        logger.info(f"  detected entities: {list(detect_objs.keys())}")
+
+    return builder
+
+
 def load_demo_action_example():
     """Load demo action syntax and file format example"""
     # Load action example from the same directory as the running Python file
@@ -149,12 +249,13 @@ def call_deepseek_llm(prompt: str, api_key: str):
 def extract_llm_response(llm_response: str):
     """Extract action code and parameters from LLM response"""
     try:
-        # Find JSON code block
+        # Find JSON code block - updated regex to handle multi-line JSON properly
         json_pattern = r"```json\s*\n(.*?)\n```"
         json_match = re.search(json_pattern, llm_response, re.DOTALL)
 
         if json_match:
-            json_str = json_match.group(1)
+            json_str = json_match.group(1).strip()
+            logger.debug(f"Extracted JSON string: {json_str}")
             parsed_response = json.loads(json_str)
 
             action_code = parsed_response.get("action_code", "")
@@ -164,10 +265,12 @@ def extract_llm_response(llm_response: str):
             return action_code, action_args, task_description
         else:
             logger.error("No JSON format code block found in LLM response")
+            logger.debug(f"LLM response content: {llm_response}")
             return None, None, None
 
     except Exception as e:
         logger.error(f"Failed to parse LLM response: {str(e)}")
+        logger.debug(f"LLM response content: {llm_response}")
         return None, None, None
 
 
@@ -263,6 +366,9 @@ def main():
     manager = create_runtime_manager()
     init_skill_providers(manager)
 
+    # Register entity builders
+    manager.register_entity_builder("yolo", create_yolo_entity_builder())
+
     # Build entity graph using YOLO detection
     manager.build_entity_graph("yolo")
     set_runtime(manager.get_runtime())
@@ -303,14 +409,15 @@ def main():
         return 1
 
     # Parse LLM response
+
+    # save raw response to local file for debugging
+    with open(os.path.join(current_dir, "llm_response.txt"), "w", encoding="utf-8") as f:
+        f.write(llm_response)
+    logger.info(f"LLM response saved to: {os.path.join(current_dir, "llm_response.txt")}")
+
     action_code, action_args, task_description = extract_llm_response(
         llm_response)
-
-    if not action_code or not action_args:
-        logger.error(
-            "Unable to extract action code or parameters from LLM response")
-        return 1
-
+    
     # Save debug information
     save_debug_files(
         scene_info,
@@ -320,6 +427,12 @@ def main():
         action_code,
         action_args,
     )
+
+    if not action_code or action_args is None:
+        logger.error(
+            "Unable to extract action code or parameters from LLM response")
+        return 1
+
 
     # Display task description
     print(f"\nTask planning result:")

@@ -18,7 +18,7 @@ conda activate genesis
 # -> then install pytorch according to https://pytorch.org/get-started/locally/ <-
 # pip3 install torch torchvision (for example, on linux CUDA 12.8)
 
-pip install rich loguru mcp pyyaml argparse grpcio grpcio-tools genesis-world pynput openai python-dotenv opencv-python
+pip install rich loguru mcp pyyaml argparse grpcio grpcio-tools ultralytics genesis-world pynput openai python-dotenv opencv-python
 ```
 
 ## 如何运行 genesis action demo

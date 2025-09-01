@@ -86,6 +86,7 @@ def create_yolo_entity_builder():
                 sim_save_depth_image,
                 sim_camera_dep_rgb,
                 sim_camera_info,
+                sim_get_robot_pose,
             )
         except ImportError:
             logger.error("Required skills not available")
@@ -134,6 +135,7 @@ def create_yolo_entity_builder():
         # Bind camera capabilities
         camera.bind_skill("cap_camera_dep_rgb", sim_camera_dep_rgb)
         camera.bind_skill("cap_camera_info", sim_camera_info)
+        camera.bind_skill("cap_get_robot_pose", sim_get_robot_pose)
         camera.bind_skill("skl_detect_objs", sim_skl_detect_objs)
 
         # Detect objects
