@@ -22,11 +22,11 @@ except ImportError:
     )
     logger = logging.getLogger(__name__)
 
-from keyboard_device import KeyboardDevice
-from scene_manager import SceneManager
-from camera_manager import CameraManager
-from main_loop import MainControlLoop
-from grpc_service import serve_grpc
+from .keyboard_device import KeyboardDevice
+from .scene_manager import SceneManager
+from .camera_manager import CameraManager
+from .main_loop import MainControlLoop
+from .grpc_service import serve_grpc
 
 
 class RobotSimulator:

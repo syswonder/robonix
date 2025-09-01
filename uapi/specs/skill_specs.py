@@ -1,3 +1,17 @@
+"""
+Skill Specifications Module
+===========================
+
+This module defines the skill specifications for the DeepEmbody OS system.
+It contains the complete specification of all capabilities and skills available
+in the system, including their input/output types and dependencies.
+
+The specifications follow a standardized format where:
+- Capabilities are atomic operations provided by skill providers
+- Skills are composite operations that depend on one or more capabilities
+- Input/output types are strictly defined for type checking
+"""
+
 # SPDX-License-Identifier: MulanPSL-2.0
 # Copyright (c) 2025, wheatfox <wheatfox17@icloud.com>
 

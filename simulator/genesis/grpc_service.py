@@ -6,8 +6,8 @@ import time
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 from pynput import keyboard
-import robot_control_pb2_grpc as robot_control_pb2_grpc
-import robot_control_pb2 as robot_control_pb2
+from . import robot_control_pb2_grpc
+from . import robot_control_pb2
 
 # Try to import uapi.log, fallback to standard logging if failed
 try:
