@@ -1,7 +1,7 @@
-from uapi.graph.entity import Entity
-from uapi.runtime.registry import Registry
-from uapi.runtime.action import get_action_functions
-from uapi.log import logger
+from ..graph.entity import Entity
+from .registry import Registry
+from .action import get_action_functions
+from ..log import logger
 import threading
 import importlib.util
 import os
@@ -29,22 +29,26 @@ class Runtime:
             raise FileNotFoundError(f"program file not found: {program_path}")
 
         # Read the action file content
-        with open(program_path, 'r', encoding='utf-8') as f:
+        with open(program_path, "r", encoding="utf-8") as f:
             code = f.read()
 
         # Create a new module
-        module = type(sys.modules[__name__])(f"program_{os.path.basename(program_path)}")
-        
+        module = type(sys.modules[__name__])(
+            f"program_{os.path.basename(program_path)}"
+        )
+
         # Set __file__ attribute so action_print can determine the correct log directory
         module.__file__ = os.path.abspath(program_path)
-        
+
         # Execute the code in the module's namespace
         exec(code, module.__dict__)
 
         action_functions = get_action_functions(module)
         action_names = [func.__name__ for func in action_functions]
 
-        logger.info(f"loaded program {program_path} with action functions: {action_names}")
+        logger.info(
+            f"loaded program {program_path} with action functions: {action_names}"
+        )
 
         self._program_module = module
 
@@ -68,7 +72,9 @@ class Runtime:
             raise RuntimeError("no program loaded. call load_program() first.")
 
         if not hasattr(self._program_module, action_name):
-            raise ValueError(f"action function '{action_name}' not found in loaded program")
+            raise ValueError(
+                f"action function '{action_name}' not found in loaded program"
+            )
 
         action_func = getattr(self._program_module, action_name)
         if not hasattr(action_func, "_is_action"):
@@ -76,11 +82,19 @@ class Runtime:
 
         def action_worker():
             try:
+                # Set current entity context for skills and capabilities
+                # This allows them to access self_entity parameter
+                self._current_entity = self.graph
+
                 result = action_func(*args, **kwargs)
                 self.action_results[action_name] = result
             except Exception as e:
                 self.action_results[action_name] = None
-                logger.error(f"action {action_name} failed: {str(e)}", exc_info=True)
+                logger.error(f"action {action_name} failed: {str(e)} at {inspect.currentframe().f_back.f_code.co_name}", exc_info=True)
+            finally:
+                # Clean up current entity context
+                if hasattr(self, "_current_entity"):
+                    delattr(self, "_current_entity")
 
         thread = threading.Thread(target=action_worker, name=f"action_{action_name}")
         thread.daemon = True

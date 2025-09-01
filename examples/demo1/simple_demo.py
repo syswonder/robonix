@@ -5,7 +5,6 @@ import os
 import time
 import argparse
 from pathlib import Path
-import cv2
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
@@ -15,27 +14,21 @@ project_root_parent = Path(
 ).parent.parent.parent.parent.parent  # DeepEmbody root
 sys.path.insert(0, str(project_root_parent))
 
-from uapi.runtime.runtime import Runtime
-from uapi.runtime.provider import SkillProvider
-from uapi.graph.entity import create_root_room, create_controllable_entity
-from uapi.runtime.action import set_runtime
-from uapi.log import logger
+from DeepEmbody.uapi.runtime.runtime import Runtime
+from DeepEmbody.uapi.runtime.provider import SkillProvider
+from DeepEmbody.uapi.graph.entity import create_root_room, create_controllable_entity
+from DeepEmbody.uapi.runtime.action import set_runtime
+from DeepEmbody.uapi.log import logger
 
 
 def init_skill_providers(runtime: Runtime):
+    # dump __all__ in DeepEmbody.skill to skills list
+    from DeepEmbody.skill import __all__
+    skills = __all__
     local_provider = SkillProvider(
         name="local_provider",
         IP="127.0.0.1",
-        skills=[
-            "cap_space_getpos",
-            "cap_space_move",
-            "cap_camera_rgb",
-            "cap_camera_dep_rgb",
-            "cap_camera_info",
-            "cap_save_rgb_image",
-            "cap_save_depth_image",
-            "cap_get_robot_pose",
-        ],
+        skills=skills,
     )
 
     runtime.registry.add_provider(local_provider)
@@ -53,43 +46,14 @@ def init_entity_graph_manually(runtime: Runtime):
     root_room.add_child(entity_b)
 
     def mock_getpos(**kwargs):
-        print("mock cap_space_getpos called")
-        return {"x": 1.0, "y": 2.0, "z": 0.0}
+        print("mock cap_get_pose called")
+        return (1.0, 2.0, 0.0)  # Return tuple (x, y, yaw) as per skill spec
 
-    def mock_move(**kwargs):
-        x, y, z = kwargs.get("x", 0), kwargs.get("y", 0), kwargs.get("z", 0)
-        print(f"mock cap_space_move called with x={x}, y={y}, z={z}")
-        time.sleep(2)
-        return {"success": True}
+    
+    from DeepEmbody.skill import debug_test_skill
 
-    # Import real camera APIs directly from skill module
-    from skill import (
-        cap_camera_rgb,
-        cap_camera_dep_rgb,
-        cap_camera_info,
-        cap_save_rgb_image,
-        cap_save_depth_image,
-        cap_get_robot_pose,
-    )
-
-    # Bind skills to entities
-    entity_a.bind_skill("cap_space_getpos", mock_getpos)
-    entity_a.bind_skill("cap_space_move", mock_move)
-    entity_a.bind_skill("cap_camera_rgb", cap_camera_rgb)
-    entity_a.bind_skill("cap_camera_dep_rgb", cap_camera_dep_rgb)
-    entity_a.bind_skill("cap_camera_info", cap_camera_info)
-    entity_a.bind_skill("cap_save_rgb_image", cap_save_rgb_image)
-    entity_a.bind_skill("cap_save_depth_image", cap_save_depth_image)
-    entity_a.bind_skill("cap_get_robot_pose", cap_get_robot_pose)
-
-    entity_b.bind_skill("cap_space_getpos", mock_getpos)
-    entity_b.bind_skill("cap_space_move", mock_move)
-    entity_b.bind_skill("cap_camera_rgb", cap_camera_rgb)
-    entity_b.bind_skill("cap_camera_dep_rgb", cap_camera_dep_rgb)
-    entity_b.bind_skill("cap_camera_info", cap_camera_info)
-    entity_b.bind_skill("cap_save_rgb_image", cap_save_rgb_image)
-    entity_b.bind_skill("cap_save_depth_image", cap_save_depth_image)
-    entity_b.bind_skill("cap_get_robot_pose", cap_get_robot_pose)
+    entity_a.bind_skill("cap_get_pose", mock_getpos)
+    entity_a.bind_skill("skl_debug_test_skill", debug_test_skill)
 
     runtime.set_graph(root_room)
 
@@ -101,7 +65,11 @@ def init_entity_graph_manually(runtime: Runtime):
 
 def init_entity_graph_from_yolo(runtime: Runtime):
     logger.info("importing skills...")
-    from skill import skl_detect_objs, cap_save_rgb_image, cap_save_depth_image
+    from DeepEmbody.skill import (
+        skl_detect_objs,
+        cap_save_rgb_image,
+        cap_save_depth_image,
+    )
 
     root_room = create_root_room()
     runtime.set_graph(root_room)
@@ -110,17 +78,18 @@ def init_entity_graph_from_yolo(runtime: Runtime):
     root_room.add_child(robot)
 
     def robot_move_impl(x, y, z):
-        from driver.sim_genesis_ranger.driver import move_to_point
+        from DeepEmbody.driver.sim_genesis_ranger.driver import move_to_point
 
-        move_to_point(x, y)  # THIS IS A FUNCTION FROM DRIVER !
+        # move_to_point(x, y)  # THIS IS A FUNCTION FROM DRIVER !
         return {"success": True}
 
     def robot_getpos_impl():
-        from driver.sim_genesis_ranger.driver import get_pose
+        from DeepEmbody.driver.sim_genesis_ranger.driver import get_pose
 
         x, y, z, yaw = get_pose()
         return {"x": x, "y": y, "z": z}
 
+    # Bind skills to robot entity using standard names
     robot.bind_skill("cap_space_move", robot_move_impl)
     robot.bind_skill("cap_space_getpos", robot_getpos_impl)
     robot.bind_skill("cap_save_rgb_image", cap_save_rgb_image)
@@ -132,8 +101,11 @@ def init_entity_graph_from_yolo(runtime: Runtime):
     camera = create_controllable_entity("camera")
     robot.add_child(camera)
 
+    # Bind the detection skill to camera entity
     camera.bind_skill("skl_detect_objs", skl_detect_objs)
 
+    # Call the detection skill through the camera entity
+    # This will automatically inject self_entity parameter
     detect_objs = camera.skl_detect_objs(camera_name="camera0")
     logger.info(f"detected objects: {detect_objs}")
     # detect_objs is a dict of {obj_name: obj_info}
@@ -150,10 +122,11 @@ def init_entity_graph_from_yolo(runtime: Runtime):
         detected_entities[obj_name] = obj_entity
 
         x, y = obj_info["position"][0], obj_info["position"][1]
+
         # Fix closure issue by creating a proper function with default arguments
         def create_getpos_handler(obj_x, obj_y):
             return lambda: {"x": obj_x, "y": obj_y, "z": 0.0}
-        
+
         detected_entities_getpos_handler[obj_name] = create_getpos_handler(x, y)
         obj_entity.bind_skill(
             "cap_space_getpos", detected_entities_getpos_handler[obj_name]
@@ -185,6 +158,7 @@ def main():
     runtime = Runtime()
 
     init_skill_providers(runtime)
+    detected_entities = {}  # Initialize with empty dict
     if args.mode == "manual":
         init_entity_graph_manually(runtime)
     elif args.mode == "auto":
@@ -202,8 +176,8 @@ def main():
         logger.info(f"loaded action functions: {action_names}")
 
         if args.mode == "manual":
-            # runtime.set_action_args("move_a_to_b", a="/A", b="/B")
-            runtime.set_action_args("move_and_capture_action", a="/A", b="/B")
+            runtime.set_action_args("debug_test_action", a="/A")
+            
         elif args.mode == "auto":
             # in auto mode, the entity graph is constructed using registered
             # skl_detect_objs skill, and we choose the first object detected as
@@ -215,18 +189,19 @@ def main():
                 runtime.set_action_args(
                     "move_and_capture_action", a="/robot", b=first_obj_path
                 )
-                logger.info(f"auto mode: set action args for {first_obj_name}")
-                logger.info(f"  move_a_to_b: a=/robot, b={first_obj_path}")
-                logger.info(f"  move_and_capture_action: a=/robot, b={first_obj_path}")
             else:
                 logger.warning(
                     "auto mode: no objects detected, using default robot paths"
                 )
                 # Use move_and_capture_action instead of move_a_to_b
-                runtime.set_action_args("move_and_capture_action", a="/robot", b="/robot")
+                runtime.set_action_args(
+                    "move_and_capture_action", a="/robot", b="/robot"
+                )
 
-        logger.info("starting all actions...")
-        threads = runtime.start_all_actions()
+        if args.mode == "manual":
+            runtime.start_action("debug_test_action")
+        elif args.mode == "auto":
+            runtime.start_action("move_and_capture_action")
 
         logger.info("waiting for all actions to complete...")
         results = runtime.wait_for_all_actions(timeout=30.0)

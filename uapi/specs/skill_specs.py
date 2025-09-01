@@ -41,22 +41,22 @@ EOS_SKILL_SPECS = {
         "input": {"x": float, "y": float, "z": float},
         "output": {"success": bool},
     },
-    "skl_space_move2entity": {
-        "description": "Move the entity to vicinity of another entity",
-        "type": EOS_SkillType.SKILL,
-        "input": {
-            # TODO: use list to support multiple options for passing target_entity (with different Types)
-            "target_entity": [
-                EntityPathAndRequired,
-                EntityPath,
-            ],  # Use EntityPath (str)，and EntityPathAndRequired is a wrapper of EntityPath (str) with required skills, or just EntityPath (str) without skill checks
-            # e.g. robot1.skl_space_move2entity(target_entity={entity="/room1/book1",required="cap_space_getpos"}, distance=0.5)
-            # e.g. robot1.skl_space_move2entity(target_entity="/room1/book1", distance=0.5)
-            "distance": float,
-        },
-        "output": {"success": bool},
-        "dependencies": ["cap_space_move", "cap_space_getpos"],
-    },
+    # "skl_space_move2entity": {
+    #     "description": "Move the entity to vicinity of another entity",
+    #     "type": EOS_SkillType.SKILL,
+    #     "input": {
+    #         # TODO: use list to support multiple options for passing target_entity (with different Types)
+    #         "target_entity": [
+    #             EntityPathAndRequired,
+    #             EntityPath,
+    #         ],  # Use EntityPath (str)，and EntityPathAndRequired is a wrapper of EntityPath (str) with required skills, or just EntityPath (str) without skill checks
+    #         # e.g. robot1.skl_space_move2entity(target_entity={entity="/room1/book1",required="cap_space_getpos"}, distance=0.5)
+    #         # e.g. robot1.skl_space_move2entity(target_entity="/room1/book1", distance=0.5)
+    #         "distance": float,
+    #     },
+    #     "output": {"success": bool},
+    #     "dependencies": ["cap_space_move", "cap_space_getpos"],
+    # },
     "cap_camera_rgb": {
         "description": "Get the RGB image from the specified camera",
         "type": EOS_SkillType.CAPABILITY,
@@ -120,7 +120,7 @@ EOS_SKILL_SPECS = {
     "cap_get_pose": {
         "description": "Get the current pose of the robot",
         "type": EOS_SkillType.CAPABILITY,
-        "input": [None, float],  # no arg or timeout_sec(float)
+        "input": [None, {"timeout_sec": float}],  # no arg or timeout_sec(float), the list is for multiple alternative types - wheatfox
         "output": Tuple[float, float, float],  # (x,y,yaw) tuple
     },
     "cap_tf_transform": {
@@ -138,6 +138,12 @@ EOS_SKILL_SPECS = {
     ####################
     ###### SKILLS ######
     ####################
+    "skl_debug_test_skill": {
+        "description": "Test skill",
+        "type": EOS_SkillType.SKILL,
+        "input": {"input_val": int},
+        "output": float,
+    },
     "skl_detect_objs": {
         "description": "Detect objects in the current view of the specified camera",
         "type": EOS_SkillType.SKILL,
@@ -178,5 +184,4 @@ EOS_SKILL_SPECS = {
         "output": bool,
         "dependencies": ["skl_detect_objs"],
     },
-    
 }

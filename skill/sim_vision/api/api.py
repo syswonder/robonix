@@ -12,11 +12,15 @@ import random
 from datetime import datetime
 import math
 
-from skill.vision.api.vision import remove_mask_outliers, get_mask_center_opencv
-
+from DeepEmbody.skill.vision.api.vision import remove_mask_outliers, get_mask_center_opencv
+from DeepEmbody.uapi.graph.entity import Entity
 
 set_log_level("debug")
 
+@eaios.caller
+def debug_test_skill(self_entity: Entity, input_val: int) -> float:
+    x, y, yaw = self_entity.cap_get_pose(timeout_sec=1.0)
+    return 123.4
 
 def create_color_palette(n_colors):
     colors = []
@@ -70,12 +74,12 @@ def put_text_with_background(
     cv2.putText(img, text, (x, y), font, font_scale, text_color, thickness)
 
 
-@eaios.api
 @eaios.caller
-def skl_detect_objs(camera_name: str) -> dict:
+def skl_detect_objs(camera_name: str, self_entity=None) -> dict:
     # this is used for simulation environment
     try:
-        rgb_image, depth_image = cap_camera_dep_rgb(camera_name)
+        # Use self_entity to call capabilities instead of importing them
+        rgb_image, depth_image = self_entity.cap_camera_dep_rgb(camera_name=camera_name)
         if rgb_image is None or depth_image is None:
             logger.error("failed to get RGB and depth images")
             return {}
@@ -96,7 +100,7 @@ def skl_detect_objs(camera_name: str) -> dict:
             )
             logger.debug(f"depth_image sample values: {depth_image[0:5, 0:5]}")
 
-        camera_info = cap_camera_info(camera_name)
+        camera_info = self_entity.cap_camera_info(camera_name=camera_name)
         if camera_info is None:
             logger.error("failed to get camera info")
             return {}
@@ -298,8 +302,7 @@ def skl_detect_objs(camera_name: str) -> dict:
                 # We'll get the camera coordinates from the capability call below
 
                 # Use new capability to calculate object global position
-                from skill import cap_get_object_global_pos
-                robot_pose = cap_get_robot_pose()
+                robot_pose = self_entity.cap_get_robot_pose()
                 if robot_pose is None:
                     logger.warning(f"failed to get robot pose for object {name}, using fallback coordinates")
                     # Fallback: use simple approximation based on pixel position and depth
@@ -308,9 +311,23 @@ def skl_detect_objs(camera_name: str) -> dict:
                     map_z = center_depth_m
                 else:
                     # Calculate global position using the new capability
-                    map_x, map_y, map_z = cap_get_object_global_pos(
-                        center_x, center_y, center_depth_m, camera_info, robot_pose
-                    )
+                    # Note: cap_get_object_global_pos should be available as a capability
+                    # For now, we'll use a fallback approach
+                    try:
+                        # Try to call the capability if it exists
+                        map_x, map_y, map_z = self_entity.cap_get_object_global_pos(
+                            pixel_x=center_x, 
+                            pixel_y=center_y, 
+                            depth=center_depth_m, 
+                            camera_info=camera_info, 
+                            robot_pose=robot_pose
+                        )
+                    except AttributeError:
+                        # Fallback if capability doesn't exist
+                        logger.warning(f"cap_get_object_global_pos not available, using fallback coordinates")
+                        map_x = center_x * 0.001
+                        map_y = center_y * 0.001
+                        map_z = center_depth_m
                     
                     if map_x is None or map_y is None or map_z is None:
                         logger.warning(f"failed to calculate global position for object {name}, using fallback coordinates")

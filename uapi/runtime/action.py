@@ -2,7 +2,7 @@ from enum import Enum
 import threading
 import inspect
 from typing import Dict, List, Callable, Any
-from uapi.log import logger
+from DeepEmbody.uapi.log import logger
 import os
 from datetime import datetime
 
@@ -32,8 +32,17 @@ def action(func: Callable) -> Callable:
             return result
         except Exception as e:
             logger.error(
-                f"action function {func.__name__} failed: {str(e)}", exc_info=True
+                f"action function {func.__name__} failed: {str(e)} at {inspect.currentframe().f_back.f_code.co_name}, line {inspect.currentframe().f_back.f_lineno}", exc_info=True
             )
+            import traceback
+            
+            print(f"\n=== Stack Trace for {func.__name__} ============")
+            print(f"Error: {str(e)}")
+            print(f"Time: {datetime.now().strftime('%H:%M:%S')}")
+            print(f"Thread: {threading.current_thread().name}")
+            print()
+            print(traceback.format_exc())
+            print("=" * 50)
             return EOS_TYPE_ActionResult.FAILURE
 
     wrapper._is_action = True
