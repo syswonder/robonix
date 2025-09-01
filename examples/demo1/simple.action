@@ -24,23 +24,23 @@ def move_and_capture_action(a: EntityPath, b: EntityPath) -> EOS_TYPE_ActionResu
         return EOS_TYPE_ActionResult.FAILURE
 
     # Get robot pose before movement
-    action_print("getting initial robot pose...")
-    initial_pose = A.cap_space_getpos()
-    if initial_pose is None:
-        action_print("failed to get initial robot pose")
-        return EOS_TYPE_ActionResult.FAILURE
-    action_print(f"initial pose: {initial_pose}")
+    # action_print("getting initial robot pose...")
+    # initial_pose = A.cap_space_getpos()
+    # if initial_pose is None:
+    #     action_print("failed to get initial robot pose")
+    #     return EOS_TYPE_ActionResult.FAILURE
+    # action_print(f"initial pose: {initial_pose}")
 
     # Capture initial images
     action_print("capturing initial images...")
     A.cap_save_rgb_image(
-        filename="./simulator/examples/simple_demo_1/initial_rgb.jpg",
+        filename="./examples/demo1/initial_rgb.jpg",
         camera_name="robot_camera",
         width=640,
         height=480,
     )
     A.cap_save_depth_image(
-        filename="./simulator/examples/simple_demo_1/initial_depth.npy",
+        filename="./examples/demo1/initial_depth.npy",
         camera_name="robot_camera",
         width=640,
         height=480,
@@ -55,23 +55,23 @@ def move_and_capture_action(a: EntityPath, b: EntityPath) -> EOS_TYPE_ActionResu
         return EOS_TYPE_ActionResult.FAILURE
 
     # Get robot pose after movement
-    action_print("getting final robot pose...")
-    final_pose = A.cap_space_getpos()
-    if final_pose is None:
-        action_print("failed to get final robot pose")
-        return EOS_TYPE_ActionResult.FAILURE
-    action_print(f"final pose: {final_pose}")
+    # action_print("getting final robot pose...")
+    # final_pose = A.cap_space_getpos()
+    # if final_pose is None:
+    #     action_print("failed to get final robot pose")
+    #     return EOS_TYPE_ActionResult.FAILURE
+    # action_print(f"final pose: {final_pose}")
 
     # Capture final images
     action_print("capturing final images...")
     A.cap_save_rgb_image(
-        filename="./simulator/examples/simple_demo_1/final_rgb.jpg",
+        filename="./examples/demo1/final_rgb.jpg",
         camera_name="robot_camera",
         width=640,
         height=480,
     )
     A.cap_save_depth_image(
-        filename="./simulator/examples/simple_demo_1/final_depth.npy",
+        filename="./examples/demo1/final_depth.npy",
         camera_name="robot_camera",
         width=640,
         height=480,

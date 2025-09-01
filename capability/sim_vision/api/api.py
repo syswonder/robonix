@@ -27,7 +27,7 @@ from DeepEmbody.driver.sim_genesis_ranger.driver import (
 )
 
 @eaios.api
-def cap_camera_rgb(camera_name="robot_camera", timeout_sec=5.0):
+def sim_camera_rgb(self_entity=None, camera_name="robot_camera", timeout_sec=5.0):
     """
     Get the color image (OpenCV format) from the simulator camera using driver functions.
     Args:
@@ -55,7 +55,7 @@ def cap_camera_rgb(camera_name="robot_camera", timeout_sec=5.0):
 
 
 @eaios.api
-def cap_camera_dep_rgb(camera_name="robot_camera", timeout_sec=5.0):
+def sim_camera_dep_rgb(self_entity=None, camera_name="robot_camera", timeout_sec=5.0):
     """
     Get the RGB and depth images (with the same timestamp) from the simulator camera using driver functions.
     Args:
@@ -83,7 +83,7 @@ def cap_camera_dep_rgb(camera_name="robot_camera", timeout_sec=5.0):
 
 
 @eaios.api
-def cap_camera_info(camera_name="robot_camera", timeout_sec=5.0) -> dict:
+def sim_camera_info(self_entity=None, camera_name="robot_camera", timeout_sec=5.0) -> dict:
     """
     Get parameter matrix for the simulator camera.
     Args:
@@ -120,7 +120,7 @@ def cap_camera_info(camera_name="robot_camera", timeout_sec=5.0) -> dict:
 
 
 @eaios.api
-def cap_save_rgb_image(filename, camera_name="robot_camera", width=None, height=None):
+def sim_save_rgb_image(self_entity=None, filename=None, camera_name="robot_camera", width=None, height=None):
     """
     Capture and save RGB image from simulator camera to file using driver functions.
     Args:
@@ -142,7 +142,7 @@ def cap_save_rgb_image(filename, camera_name="robot_camera", width=None, height=
 
 
 @eaios.api
-def cap_save_depth_image(filename, camera_name="robot_camera", width=None, height=None):
+def sim_save_depth_image(self_entity=None, filename=None, camera_name="robot_camera", width=None, height=None):
     """
     Capture and save depth image from simulator camera to file using driver functions.
     Args:
@@ -164,7 +164,7 @@ def cap_save_depth_image(filename, camera_name="robot_camera", width=None, heigh
 
 
 @eaios.api
-def cap_get_robot_pose(timeout_sec=5.0):
+def sim_get_robot_pose(self_entity=None, timeout_sec=5.0):
     """
     Get the current pose of the robot in the simulator using driver functions.
     Args:
@@ -191,12 +191,13 @@ def cap_get_robot_pose(timeout_sec=5.0):
 
 
 @eaios.api
-def cap_get_object_global_pos(
-    pixel_x: float, 
-    pixel_y: float, 
-    depth: float, 
-    camera_info: dict,
-    robot_pose: dict
+def sim_get_object_global_pos(
+    self_entity=None,
+    pixel_x: float = None, 
+    pixel_y: float = None, 
+    depth: float = None, 
+    camera_info: dict = None,
+    robot_pose: dict = None
 ) -> tuple:
     """
     Calculate the global position of an object based on:
@@ -326,44 +327,3 @@ def _pixel_to_camera_coords(pixel_x: float, pixel_y: float, depth: float, K: lis
     except Exception as e:
         print(f"[sim_vision] error in _pixel_to_camera_coords: {e}")
         return 0.0, 0.0
-
-
-
-# Example usage functions
-def test_vision_api():
-    """Test function to demonstrate the vision API usage"""
-    print("[sim_vision] testing vision API...")
-
-    # Test RGB image capture
-    print("[sim_vision] testing RGB image capture...")
-    rgb_image = cap_camera_rgb()
-    if rgb_image is not None:
-        print(f"[sim_vision] RGB image shape: {rgb_image.shape}")
-        cap_save_rgb_image("test_rgb.jpg")
-
-    # Test RGBD image capture
-    print("[sim_vision] testing RGBD image capture...")
-    rgb_image, depth_image = cap_camera_dep_rgb()
-    if rgb_image is not None and depth_image is not None:
-        print(f"[sim_vision] RGB image shape: {rgb_image.shape}")
-        print(f"[sim_vision] Depth image shape: {depth_image.shape}")
-        cap_save_depth_image("test_depth.npy")
-        cap_save_depth_image("test_depth_vis.png")
-
-    # Test camera info
-    print("[sim_vision] testing camera info...")
-    camera_info = cap_camera_info()
-    if camera_info is not None:
-        print(f"[sim_vision] Camera info: {camera_info}")
-
-    # Test robot pose
-    print("[sim_vision] testing robot pose...")
-    pose = cap_get_robot_pose()
-    if pose is not None:
-        print(f"[sim_vision] robot pose: {pose}")
-
-    print("[sim_vision] vision API test completed!")
-
-
-if __name__ == "__main__":
-    test_vision_api()
