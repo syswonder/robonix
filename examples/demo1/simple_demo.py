@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 
+from uapi.log import logger
+from uapi import create_runtime_manager, set_runtime
 import sys
 import os
-import time
 import argparse
 from pathlib import Path
 
@@ -14,142 +15,161 @@ project_root_parent = Path(
 ).parent.parent.parent.parent.parent  # DeepEmbody root
 sys.path.insert(0, str(project_root_parent))
 
-from DeepEmbody.uapi.runtime.runtime import Runtime
-from DeepEmbody.uapi.runtime.provider import SkillProvider
-from DeepEmbody.uapi.graph.entity import create_root_room, create_controllable_entity
-from DeepEmbody.uapi.runtime.action import set_runtime
-from DeepEmbody.uapi.log import logger
 
+def init_skill_providers(manager):
+    """Initialize skill providers"""
+    from uapi.runtime.provider import SkillProvider
 
-def init_skill_providers(runtime: Runtime):
     # dump __all__ in DeepEmbody.skill to skills list
-    from DeepEmbody.skill import __all__
+    try:
+        from DeepEmbody.skill import __all__
+        skills = __all__
+    except ImportError:
+        logger.warning("DeepEmbody.skill module not available")
+        skills = []
 
-    skills = __all__
     local_provider = SkillProvider(
         name="local_provider",
         IP="127.0.0.1",
         skills=skills,
     )
 
-    runtime.registry.add_provider(local_provider)
-
-    logger.info(f"added skill providers: {runtime.registry}")
-
-
-def init_entity_graph_manually(runtime: Runtime):
-    root_room = create_root_room()
-
-    entity_a = create_controllable_entity("A")
-    root_room.add_child(entity_a)
-
-    entity_b = create_controllable_entity("B")
-    root_room.add_child(entity_b)
-
-    def mock_getpos(**kwargs):
-        print("mock cap_get_pose called")
-        return (1.0, 2.0, 0.0)  # Return tuple (x, y, yaw) as per skill spec
-
-    from DeepEmbody.skill import debug_test_skill
-
-    entity_a.bind_skill("cap_get_pose", mock_getpos)
-    entity_a.bind_skill("skl_debug_test_skill", debug_test_skill)
-
-    runtime.set_graph(root_room)
-
-    logger.info("initd entity graph:")
-    logger.info(f"  root room: {root_room.get_absolute_path()}")
-    logger.info(f"  entity A: {entity_a.get_absolute_path()}")
-    logger.info(f"  entity B: {entity_b.get_absolute_path()}")
+    manager.get_runtime().registry.add_provider(local_provider)
+    logger.info(f"Added skill providers: {manager.get_runtime().registry}")
 
 
-def init_entity_graph_from_yolo(runtime: Runtime):
-    logger.info("importing skills...")
-    from DeepEmbody.skill import (
-        sim_skl_detect_objs,
-        sim_save_rgb_image,
-        sim_save_depth_image,
-        sim_camera_dep_rgb,
-        sim_camera_info,
-    )
+def create_manual_entity_builder():
+    """Create a manual entity graph builder"""
+    def builder(runtime, **kwargs):
+        from uapi.graph.entity import create_root_room, create_controllable_entity
 
-    root_room = create_root_room()
-    runtime.set_graph(root_room)
+        root_room = create_root_room()
 
-    robot = create_controllable_entity("robot")
-    root_room.add_child(robot)
+        entity_a = create_controllable_entity("A")
+        root_room.add_child(entity_a)
 
-    def robot_move_impl(x, y, z):
-        from DeepEmbody.driver.sim_genesis_ranger.driver import move_to_point
+        entity_b = create_controllable_entity("B")
+        root_room.add_child(entity_b)
 
-        # move_to_point(x, y)  # THIS IS A FUNCTION FROM DRIVER !
-        return {"success": True}
+        # Bind mock skills
+        def mock_getpos(**kwargs):
+            logger.info("mock cap_get_pose called")
+            return (1.0, 2.0, 0.0)
 
-    def robot_getpos_impl():
-        from DeepEmbody.driver.sim_genesis_ranger.driver import get_pose
+        try:
+            from DeepEmbody.skill import debug_test_skill
+            entity_a.bind_skill("cap_get_pose", mock_getpos)
+            entity_a.bind_skill("skl_debug_test_skill", debug_test_skill)
+        except ImportError:
+            logger.warning(
+                "DeepEmbody.skill module not available, skipping skill binding")
 
-        x, y, z, yaw = get_pose()
-        return {"x": x, "y": y, "z": z}
+        runtime.set_graph(root_room)
 
-    # Bind skills to robot entity using standard names
-    robot.bind_skill("cap_space_move", robot_move_impl)
-    robot.bind_skill("cap_space_getpos", robot_getpos_impl)
-    robot.bind_skill("cap_save_rgb_image", sim_save_rgb_image)
-    robot.bind_skill("cap_save_depth_image", sim_save_depth_image)
+        logger.info("Manual entity graph initialized:")
+        logger.info(f"  root room: {root_room.get_absolute_path()}")
+        logger.info(f"  entity A: {entity_a.get_absolute_path()}")
+        logger.info(f"  entity B: {entity_b.get_absolute_path()}")
 
-    move_base = create_controllable_entity("move_base")
-    robot.add_child(move_base)
+    return builder
 
-    camera = create_controllable_entity("camera")
-    robot.add_child(camera)
 
-    # Bind camera capabilities to camera entity
-    camera.bind_skill("cap_camera_dep_rgb", sim_camera_dep_rgb)
-    camera.bind_skill("cap_camera_info", sim_camera_info)
+def create_yolo_entity_builder():
+    """Create a YOLO-based entity graph builder"""
+    def builder(runtime, **kwargs):
+        logger.info("Building entity graph from YOLO detection...")
 
-    # Bind the detection skill to camera entity
-    camera.bind_skill("skl_detect_objs", sim_skl_detect_objs)
+        try:
+            from DeepEmbody.skill import (
+                sim_skl_detect_objs,
+                sim_save_rgb_image,
+                sim_save_depth_image,
+                sim_camera_dep_rgb,
+                sim_camera_info,
+            )
+        except ImportError:
+            logger.error("Required skills not available")
+            return
 
-    # Call the detection skill through the camera entity
-    # This will automatically inject self_entity parameter
-    detect_objs = camera.skl_detect_objs(camera_name="camera0")
-    logger.info(f"detected objects: {detect_objs}")
-    # detect_objs is a dict of {obj_name: obj_info}
+        from uapi.graph.entity import create_root_room, create_controllable_entity
 
-    global detected_entities
-    detected_entities = {}
+        root_room = create_root_room()
+        runtime.set_graph(root_room)
 
-    global detected_entities_getpos_handler
-    detected_entities_getpos_handler = {}
+        robot = create_controllable_entity("robot")
+        root_room.add_child(robot)
 
-    for obj_name, obj_info in detect_objs.items():
-        obj_entity = create_controllable_entity(obj_name)
-        root_room.add_child(obj_entity)
-        detected_entities[obj_name] = obj_entity
+        def robot_move_impl(x, y, z):
+            try:
+                from DeepEmbody.driver.sim_genesis_ranger.driver import move_to_point
+                # move_to_point(x, y)  # Uncomment when driver is available
+                return {"success": True}
+            except ImportError:
+                logger.warning(
+                    "Driver module not available, using mock implementation")
+                return {"success": True}
 
-        if obj_info["position"] is None:
-            logger.warning(f"object {obj_name} has no position")
-            x, y = 0.0, 0.0
-        else:
-            x, y = obj_info["position"][0], obj_info["position"][1]
+        def robot_getpos_impl():
+            try:
+                from DeepEmbody.driver.sim_genesis_ranger.driver import get_pose
+                x, y, z, yaw = get_pose()
+                return {"x": x, "y": y, "z": z}
+            except ImportError:
+                logger.warning(
+                    "Driver module not available, using mock implementation")
+                return {"x": 0.0, "y": 0.0, "z": 0.0}
 
-        # Fix closure issue by creating a proper function with default arguments
-        def create_getpos_handler(obj_x, obj_y):
-            return lambda: {"x": obj_x, "y": obj_y, "z": 0.0}
+        # Bind skills to robot entity
+        robot.bind_skill("cap_space_move", robot_move_impl)
+        robot.bind_skill("cap_space_getpos", robot_getpos_impl)
+        robot.bind_skill("cap_save_rgb_image", sim_save_rgb_image)
+        robot.bind_skill("cap_save_depth_image", sim_save_depth_image)
 
-        detected_entities_getpos_handler[obj_name] = create_getpos_handler(x, y)
-        obj_entity.bind_skill(
-            "cap_space_getpos", detected_entities_getpos_handler[obj_name]
-        )
+        move_base = create_controllable_entity("move_base")
+        robot.add_child(move_base)
 
-        logger.info(f"created entity for {obj_name}: {obj_entity.get_absolute_path()}")
+        camera = create_controllable_entity("camera")
+        robot.add_child(camera)
 
-    logger.info("initd entity graph from YOLO detection:")
-    logger.info(f"  root room: {root_room.get_absolute_path()}")
-    logger.info(f"  robot: {robot.get_absolute_path()}")
-    logger.info(f"  detected entities: {list(detected_entities.keys())}")
+        # Bind camera capabilities
+        camera.bind_skill("cap_camera_dep_rgb", sim_camera_dep_rgb)
+        camera.bind_skill("cap_camera_info", sim_camera_info)
+        camera.bind_skill("skl_detect_objs", sim_skl_detect_objs)
 
-    return detected_entities
+        # Detect objects
+        detect_objs = camera.skl_detect_objs(camera_name="camera0")
+        logger.info(f"Detected objects: {detect_objs}")
+
+        detected_entities_getpos_handler = {}
+
+        for obj_name, obj_info in detect_objs.items():
+            obj_entity = create_controllable_entity(obj_name)
+            root_room.add_child(obj_entity)
+
+            if obj_info["position"] is None:
+                logger.warning(f"Object {obj_name} has no position")
+                x, y = 0.0, 0.0
+            else:
+                x, y = obj_info["position"][0], obj_info["position"][1]
+
+            def create_getpos_handler(obj_x, obj_y):
+                return lambda: {"x": obj_x, "y": obj_y, "z": 0.0}
+
+            detected_entities_getpos_handler[obj_name] = create_getpos_handler(
+                x, y)
+            obj_entity.bind_skill(
+                "cap_space_getpos", detected_entities_getpos_handler[obj_name]
+            )
+
+            logger.info(
+                f"Created entity for {obj_name}: {obj_entity.get_absolute_path()}")
+
+        logger.info("YOLO-based entity graph initialized:")
+        logger.info(f"  root room: {root_room.get_absolute_path()}")
+        logger.info(f"  robot: {robot.get_absolute_path()}")
+        logger.info(f"  detected entities: {list(detect_objs.keys())}")
+
+    return builder
 
 
 def main():
@@ -161,71 +181,68 @@ def main():
         choices=["manual", "auto"],
         help="Mode to init entity graph",
     )
+    parser.add_argument(
+        "--export-scene",
+        type=str,
+        help="Export scene information to JSON file",
+    )
     args = parser.parse_args()
 
-    logger.info("starting simple demo 1")
+    logger.info("Starting simple demo 1")
 
-    runtime = Runtime()
+    # Create runtime manager
+    manager = create_runtime_manager()
 
-    init_skill_providers(runtime)
-    detected_entities = {}  # Initialize with empty dict
-    if args.mode == "manual":
-        init_entity_graph_manually(runtime)
-    elif args.mode == "auto":
-        detected_entities = init_entity_graph_from_yolo(runtime)
-    else:
-        raise ValueError(f"invalid mode: {args.mode}")
+    # Register entity builders
+    manager.register_entity_builder("manual", create_manual_entity_builder())
+    manager.register_entity_builder("yolo", create_yolo_entity_builder())
 
-    set_runtime(runtime)
+    # Initialize skill providers
+    init_skill_providers(manager)
 
-    action_program_path = os.path.join(os.path.dirname(__file__), "simple.action")
-    logger.info(f"loading action program from: {action_program_path}")
+    # Build entity graph based on mode
+    manager.build_entity_graph(args.mode)
+
+    # Set runtime for action system
+    set_runtime(manager.get_runtime())
+
+    # Print entity tree structure
+    manager.print_entity_tree()
+
+    # Export scene information if requested
+    if args.export_scene:
+        scene_info = manager.export_scene_info(args.export_scene)
+        logger.info(f"Scene information exported to: {args.export_scene}")
+
+    # Load action program
+    action_program_path = os.path.join(
+        os.path.dirname(__file__), "simple.action")
+    logger.info(f"Loading action program from: {action_program_path}")
 
     try:
-        action_names = runtime.load_program(action_program_path)
-        logger.info(f"loaded action functions: {action_names}")
+        action_names = manager.load_action_program(action_program_path)
+        logger.info(f"Loaded action functions: {action_names}")
 
         if args.mode == "manual":
-            runtime.set_action_args("debug_test_action", a="/A")
-
+            manager.configure_action("debug_test_action", a="/A")
         elif args.mode == "auto":
-            # in auto mode, the entity graph is constructed using registered
-            # skl_detect_objs skill, and we choose the first object detected as
-            # action argument "b", and "a" fixed to "/robot". - wheatfox 2025.8.13
-            if detected_entities:
-                first_obj_name = list(detected_entities.keys())[0]
-                first_obj_path = f"/{first_obj_name}"
-                # runtime.set_action_args("move_a_to_b", a="/robot", b=first_obj_path)
-                runtime.set_action_args(
-                    "move_and_capture_action", a="/robot", b=first_obj_path
-                )
-            else:
-                logger.warning(
-                    "auto mode: no objects detected, using default robot paths"
-                )
-                # Use move_and_capture_action instead of move_a_to_b
-                runtime.set_action_args(
-                    "move_and_capture_action", a="/robot", b="/robot"
-                )
+            # In auto mode, use robot as both source and target for simplicity
+            manager.configure_action(
+                "move_and_capture_action", a="/robot", b="/robot"
+            )
 
+        # Execute action based on mode
         if args.mode == "manual":
-            runtime.start_action("debug_test_action")
+            manager.execute_action("debug_test_action")
         elif args.mode == "auto":
-            runtime.start_action("move_and_capture_action")
+            manager.execute_action("move_and_capture_action")
 
-        logger.info("waiting for all actions to complete...")
-        results = runtime.wait_for_all_actions(timeout=30.0)
-
-        logger.info("action execution results:")
-        for action_name, result in results.items():
-            logger.info(f"  {action_name}: {result}")
+        logger.info("Demo completed successfully")
+        return 0
 
     except Exception as e:
-        logger.error(f"demo failed: {str(e)}", exc_info=True)
+        logger.error(f"Demo failed: {str(e)}", exc_info=True)
         return 1
-
-    logger.info("demo completed successfully")
-    return 0
 
 
 if __name__ == "__main__":
