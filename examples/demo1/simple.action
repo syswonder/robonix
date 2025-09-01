@@ -1,6 +1,14 @@
-from uapi.specs.types import EntityPath
-from uapi.runtime.action import action, EOS_TYPE_ActionResult, get_runtime, action_print
+from DeepEmbody.uapi.specs.types import EntityPath
+from DeepEmbody.uapi.runtime.action import action, EOS_TYPE_ActionResult, get_runtime, action_print
 
+
+@action
+def debug_test_action(a: EntityPath) -> EOS_TYPE_ActionResult:
+    runtime = get_runtime()
+    A = runtime.get_graph().get_entity_by_path(a)
+    result = A.skl_debug_test_skill(input_val=1)
+    action_print(f"debug test action result: {result}")
+    return EOS_TYPE_ActionResult.SUCCESS
 
 @action
 def move_and_capture_action(a: EntityPath, b: EntityPath) -> EOS_TYPE_ActionResult:

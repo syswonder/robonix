@@ -27,7 +27,7 @@ pip install rich loguru mcp pyyaml argparse grpcio grpcio-tools genesis-world py
 
 1. 先运行 `python simulator/genesis/robot1.py` 启动模拟器，等待出现渲染窗口
 
-2. 运行 `python manager/eaios_decorators.py --config config/include/simulator.yaml`，导出 `skill/__init__.py`（如果要在物理小车上运行，请使用 `config/include/ranger_test.yaml`，并参见 [examples/demo2/README.md](/examples/demo2/README.md)）
+2. 运行 `python manager/eaios_decorators.py --config config/include/simulator.yml`，导出 `skill/__init__.py`（如果要在物理小车上运行，请使用 `config/include/ranger_test.yml`，并参见 [examples/demo2/README.md](/examples/demo2/README.md)）
 
 3. 下载并保存 yoloe 模型文件以供 `sim_vision` 相关 skill 使用：
 

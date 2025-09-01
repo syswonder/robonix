@@ -5,8 +5,8 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import uuid
-from uapi.specs.skill_specs import EOS_SKILL_SPECS
-from uapi.log import logger
+from ..specs.skill_specs import EOS_SKILL_SPECS
+from ..log import logger
 import dataclasses
 
 
@@ -275,32 +275,87 @@ class Entity:
             )
             return
 
-        # Handle case where expected_args is a dict (arguments with types required)
-        if set(kwargs.keys()) != set(expected_input.keys()):
-            error_msg = f"Arguments for '{primitive_name}' must be {list(expected_input.keys())}, got {list(kwargs.keys())}"
+        # Handle case where expected_input is a list (multiple alternative argument specs)
+        if isinstance(expected_input, list):
+            # Try each alternative spec until one matches
+            for i, alt_spec in enumerate(expected_input):
+                try:
+                    if alt_spec is None:
+                        # No arguments required
+                        if not kwargs:
+                            logger.debug(
+                                f"[{self.get_absolute_path()}] argument validation passed for primitive '{primitive_name}' (alternative {i+1}: no arguments required)"
+                            )
+                            return
+                        else:
+                            continue  # Try next alternative
+                    elif isinstance(alt_spec, dict):
+                        # Check if this alternative spec matches the provided arguments
+                        if set(kwargs.keys()) == set(alt_spec.keys()):
+                            # Check argument types and attempt casting if needed
+                            for arg_name, expected_type in alt_spec.items():
+                                if not self._is_type_match(kwargs[arg_name], expected_type):
+                                    # Try to cast the argument to one of the expected types
+                                    try:
+                                        original_value = kwargs[arg_name]
+                                        original_type = type(original_value).__name__
+                                        kwargs[arg_name] = self._try_cast(original_value, expected_type)
+                                        logger.warning(
+                                            f"Type cast for primitive '{primitive_name}' argument '{arg_name}' (alternative {i+1}): "
+                                            f"{original_type} -> {type(kwargs[arg_name]).__name__} ({original_value} -> {kwargs[arg_name]})"
+                                        )
+                                    except (ValueError, TypeError) as cast_error:
+                                        continue  # Try next alternative
+                            # If we get here, this alternative matched
+                            logger.debug(
+                                f"[{self.get_absolute_path()}] argument validation passed for primitive '{primitive_name}' (alternative {i+1})"
+                            )
+                            return
+                        else:
+                            continue  # Try next alternative
+                except Exception:
+                    continue  # Try next alternative
+            
+            # If we get here, no alternative matched
+            error_msg = f"Arguments for '{primitive_name}' must match one of the alternatives: {expected_input}, got {list(kwargs.keys())}"
             logger.error(
                 f"[{self.get_absolute_path()}] argument validation failed: {error_msg}"
             )
             raise ValueError(error_msg) from None
+        
+        # Handle case where expected_input is a dict (arguments with types required)
+        elif isinstance(expected_input, dict):
+            if set(kwargs.keys()) != set(expected_input.keys()):
+                error_msg = f"Arguments for '{primitive_name}' must be {list(expected_input.keys())}, got {list(kwargs.keys())}"
+                logger.error(
+                    f"[{self.get_absolute_path()}] argument validation failed: {error_msg}"
+                )
+                raise ValueError(error_msg) from None
 
-        # Check argument types and attempt casting if needed
-        for arg_name, expected_type in expected_input.items():
-            if not self._is_type_match(kwargs[arg_name], expected_type):
-                # Try to cast the argument to one of the expected types
-                try:
-                    original_value = kwargs[arg_name]
-                    original_type = type(original_value).__name__
-                    kwargs[arg_name] = self._try_cast(original_value, expected_type)
-                    logger.warning(
-                        f"Type cast for primitive '{primitive_name}' argument '{arg_name}': "
-                        f"{original_type} -> {type(kwargs[arg_name]).__name__} ({original_value} -> {kwargs[arg_name]})"
-                    )
-                except (ValueError, TypeError) as cast_error:
-                    error_msg = f"Argument '{arg_name}' for '{primitive_name}' must be {expected_type}, got {type(kwargs[arg_name]).__name__}"
-                    logger.error(
-                        f"[{self.get_absolute_path()}] type validation failed: {error_msg}"
-                    )
-                    raise TypeError(error_msg) from None
+            # Check argument types and attempt casting if needed
+            for arg_name, expected_type in expected_input.items():
+                if not self._is_type_match(kwargs[arg_name], expected_type):
+                    # Try to cast the argument to one of the expected types
+                    try:
+                        original_value = kwargs[arg_name]
+                        original_type = type(original_value).__name__
+                        kwargs[arg_name] = self._try_cast(original_value, expected_type)
+                        logger.warning(
+                            f"Type cast for primitive '{primitive_name}' argument '{arg_name}': "
+                            f"{original_type} -> {type(kwargs[arg_name]).__name__} ({original_value} -> {kwargs[arg_name]})"
+                        )
+                    except (ValueError, TypeError) as cast_error:
+                        error_msg = f"Argument '{arg_name}' for '{primitive_name}' must be {expected_type}, got {type(kwargs[arg_name]).__name__}"
+                        logger.error(
+                            f"[{self.get_absolute_path()}] type validation failed: {error_msg}"
+                        )
+                        raise TypeError(error_msg) from None
+        else:
+            error_msg = f"Invalid input spec type for '{primitive_name}': {type(expected_input)}"
+            logger.error(
+                f"[{self.get_absolute_path()}] argument validation failed: {error_msg}"
+            )
+            raise ValueError(error_msg) from None
 
         logger.debug(
             f"[{self.get_absolute_path()}] argument validation passed for primitive '{primitive_name}'"
@@ -394,9 +449,32 @@ class Entity:
                     f"[{self.get_absolute_path()}] calling primitive {name} with kwargs {kwargs}"
                 )
                 try:
-                    self._check_primitive_args(name, kwargs)
-                    result = self.primitive_bindings[name](**kwargs)
-                    self._check_primitive_returns(name, result)
+                    # Get the actual function from primitive_bindings
+                    func = self.primitive_bindings[name]
+                    
+                    # Check if the function expects self_entity as first positional argument
+                    import inspect
+                    sig = inspect.signature(func)
+                    params = list(sig.parameters.keys())
+                    
+                    if len(params) > 0 and params[0] == 'self_entity':
+                        # Function expects self_entity as first positional argument
+                        # Convert kwargs to positional args for the first parameter
+                        if 'self_entity' in kwargs:
+                            self_entity = kwargs.pop('self_entity')
+                        else:
+                            self_entity = self
+                        
+                        # Call the function with self_entity as first positional argument
+                        result = func(self_entity, **kwargs)
+                    else:
+                        # Function doesn't expect self_entity, use normal validation
+                        # Note: We don't inject self_entity here to avoid breaking existing capability signatures
+                        # self_entity injection should be handled at the decorator level for skills that need it
+                        self._check_primitive_args(name, kwargs)
+                        result = func(**kwargs)
+                        self._check_primitive_returns(name, result)
+                    
                     return result
                 except (ValueError, TypeError) as e:
                     logger.error(
@@ -408,6 +486,97 @@ class Entity:
                     raise custom_exc from None
 
             return wrapper
+        
+        # Support for skill and capability calling with self_entity.skl_xxx and self_entity.cap_xxx
+        # Note: The actual function names in skill/__init__.py may not start with cap_ or skl_
+        # They are bound to standard names through entity.bind_skill() method
+        if name.startswith('skl_') or name.startswith('cap_'):
+            def wrapper(**kwargs):
+                # Inject self_entity into the kwargs for skills and capabilities that support it
+                kwargs['self_entity'] = self
+                
+                # First, try to find the function in primitive bindings (standard names)
+                if name in self.primitive_bindings:
+                    logger.debug(
+                        f"[{self.get_absolute_path()}] calling primitive {name} with self_entity injection"
+                    )
+                    try:
+                        # For skills and capabilities that support self_entity, we need to handle it specially
+                        # Check if the function accepts self_entity parameter
+                        func = self.primitive_bindings[name]
+                        import inspect
+                        sig = inspect.signature(func)
+                        params = list(sig.parameters.keys())
+                        
+                        if len(params) > 0 and params[0] == 'self_entity':
+                            # Function expects self_entity as first positional argument
+                            self_entity = kwargs.pop('self_entity')
+                            result = func(self_entity, **kwargs)
+                        elif 'self_entity' in sig.parameters:
+                            # Function supports self_entity as keyword argument
+                            result = func(**kwargs)
+                        else:
+                            # Function doesn't support self_entity, remove it from kwargs
+                            kwargs.pop('self_entity', None)
+                            self._check_primitive_args(name, kwargs)
+                            result = func(**kwargs)
+                            self._check_primitive_returns(name, result)
+                        return result
+                    except (ValueError, TypeError) as e:
+                        logger.error(
+                            f"[{self.get_absolute_path()}] primitive '{name}' execution failed: {str(e)}"
+                        )
+                        error_msg = format_primitive_error(name, type(e).__name__, str(e))
+                        custom_exc = type(e)(error_msg)
+                        raise custom_exc from None
+                
+                # If not found in primitive bindings, try to find in skill module
+                # The actual function names in skill/__init__.py may not match the standard names
+                try:
+                    from skill import __all__
+                    import skill
+                    
+                    # Try to find the function by standard name first
+                    if name in __all__:
+                        func = getattr(skill, name)
+                        logger.debug(
+                            f"[{self.get_absolute_path()}] calling {name} from skill module with self_entity injection"
+                        )
+                        return func(**kwargs)
+                    
+                    # If not found by standard name, try to find by actual function name
+                    # This handles cases where the actual function doesn't start with cap_ or skl_
+                    for actual_func_name in __all__:
+                        # Check if this function is bound to the standard name
+                        # We can't easily determine this mapping, so we'll try calling
+                        # the function and see if it works
+                        try:
+                            func = getattr(skill, actual_func_name)
+                            # Try calling the function to see if it's the right one
+                            # This is a bit hacky but works for the current use case
+                            if hasattr(func, '_is_skill') or hasattr(func, '_is_capability'):
+                                logger.debug(
+                                    f"[{self.get_absolute_path()}] trying {actual_func_name} for {name}"
+                                )
+                                # We found a skill/capability function, but we can't easily
+                                # determine if it's the right one for this standard name
+                                # For now, we'll skip this approach and rely on proper binding
+                                pass
+                        except Exception:
+                            continue
+                            
+                except (ImportError, AttributeError) as e:
+                    logger.debug(f"[{self.get_absolute_path()}] {name} not found in skill module: {e}")
+                
+                # If not found, raise AttributeError
+                raise AttributeError(
+                    f"'{type(self).__name__}' object has no attribute '{name}', "
+                    f"and '{name}' is not available as a skill or capability. "
+                    f"Available primitives for {self.get_absolute_path()}: {self.primitives}"
+                )
+            
+            return wrapper
+        
         raise AttributeError(
             f"'{type(self).__name__}' object has no attribute '{name}', or this primitive is not bound, available primitives for {self.get_absolute_path()}: {self.primitives}"
         )
