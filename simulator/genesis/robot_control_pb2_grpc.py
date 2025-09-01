@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-import robot_control_pb2 as robot__control__pb2
+from . import robot_control_pb2 as robot__control__pb2
 
 GRPC_GENERATED_VERSION = '1.73.1'
 GRPC_VERSION = grpc.__version__
