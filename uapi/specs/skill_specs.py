@@ -30,12 +30,14 @@ EOS_SKILL_SPECS = {
     ###### CAPABILITIES ######
     ##########################
     "cap_space_getpos": {
+        # DEPRECATED !!!
         "description": "Get the position of the entity",
         "type": EOS_SkillType.CAPABILITY,
         "input": None,
         "output": {"x": float, "y": float, "z": float},
     },
     "cap_space_move": {
+        # DEPRECATED !!!
         "description": "Move the entity to the given position",
         "type": EOS_SkillType.CAPABILITY,
         "input": {"x": float, "y": float, "z": float},

@@ -302,13 +302,21 @@ class CLI:
             + (os.getenv("ROS_VERSION") or "N/A")
         )
 
+    def get_user_info(self):
+        """Get user info"""
+        try:
+            return "user: " + os.getlogin()
+        except Exception:
+            return "user: N/A"
+
+
     async def run(self):
         """Run command line interface"""
         print_cyan(
             "Welcome to DeepEmbody Shell (system time: "
             + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            + ", user: "
-            + os.getlogin()
+            + ", "
+            + self.get_user_info()
             + ", "
             + self.get_ros_info()
             + ")",

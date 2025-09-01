@@ -133,9 +133,16 @@ class RuntimeManager:
             return
 
         print("\n--- Available nodes ---")
+        def green_color(text):
+            return "\033[92m" + text + "\033[0m"
+        def red_color(text):
+            return "\033[91m" + text + "\033[0m"
+        def blue_bold_color(text):
+            return "\033[94m\033[1m" + text + "\033[0m"
+
         for node_id, node_node in self.available_nodes.items():
-            status = "Running" if node_id in self.running_processes and self.running_processes[node_id].is_running() else "Stopped"
-            print(f"- [{status}] {node_node.name} (dir: {node_node.cwd}, version: {node_node.version}, start_on_boot: {node_node.start_on_boot})")
+            status = green_color("Running") if node_id in self.running_processes and self.running_processes[node_id].is_running() else red_color("Stopped")
+            print(f"- [{status}] {blue_bold_color(node_node.name)} (dir: {node_node.cwd}, version: {node_node.version}, start_on_boot: {node_node.start_on_boot})", end="")
             if node_node.startup_command:
                 print(f"  Command: '{node_node.startup_command}'")
             else:
