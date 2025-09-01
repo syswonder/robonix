@@ -150,4 +150,33 @@ EOS_SKILL_SPECS = {
             "cap_get_robot_pose",
         ],
     },
+    "skl_move_to_goal": {
+        "description": "Move the robot to the goal",
+        "type": EOS_SkillType.SKILL,
+        "input": {"goal_name": str},
+        "output": str,
+        "dependencies": ["cap_set_goal"],
+    },
+    "skl_move_to_ab_pos": {
+        "description": "Move the robot to the absolute position",
+        "type": EOS_SkillType.SKILL,
+        "input": {"x": float, "y": float, "yaw": float},
+        "output": str,
+        "dependencies": ["cap_set_goal"],
+    },
+    "skl_move_to_rel_pos": {
+        "description": "Move the robot to the relative position",
+        "type": EOS_SkillType.SKILL,
+        "input": {"dx": float, "dy": float, "dyaw": float},
+        "output": str,
+        "dependencies": ["cap_set_goal", "cap_get_pos"],
+    },
+    "skl_update_map": {
+        "description": "Update the semantic map",
+        "type": EOS_SkillType.SKILL,
+        "input": {"camera_name": str},
+        "output": bool,
+        "dependencies": ["skl_detect_objs"],
+    },
+    
 }
