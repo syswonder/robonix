@@ -13,8 +13,9 @@ project_root_parent = Path(
 ).parent.parent.parent.parent.parent  # DeepEmbody root
 sys.path.insert(0, str(project_root_parent))
 
-from DeepEmbody.uapi.log import logger, set_log_level
+
 from DeepEmbody.uapi import create_runtime_manager, set_runtime
+from DeepEmbody.uapi.log import logger, set_log_level
 
 set_log_level("debug")
 
@@ -44,7 +45,7 @@ def create_ranger_entity_builder():
     """Create a ranger-specific entity graph builder"""
     def builder(runtime, **kwargs):
         from DeepEmbody.uapi.graph.entity import create_root_room, create_controllable_entity
-        from DeepEmbody.skill import get_pose, move_to_rel_pos
+        from DeepEmbody.skill import get_pose, move_to_rel_pos, simple_set_goal
 
         root_room = create_root_room()
         runtime.set_graph(root_room)
@@ -53,6 +54,7 @@ def create_ranger_entity_builder():
         root_room.add_child(ranger)
 
         ranger.bind_skill("cap_get_pose", get_pose)
+        ranger.bind_skill("cap_set_goal", simple_set_goal)
         ranger.bind_skill("skl_move_to_rel_pos", move_to_rel_pos)
 
         logger.info("Ranger entity graph initialized:")
@@ -72,7 +74,6 @@ def main():
     args = parser.parse_args()
 
     logger.info("Starting ranger demo")
-
 
     manager = create_runtime_manager()
     manager.register_entity_builder("ranger", create_ranger_entity_builder())

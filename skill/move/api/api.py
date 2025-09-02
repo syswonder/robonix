@@ -37,7 +37,7 @@ def move_to_goal(self_entity, goal_name:str) -> str:
     if goal_name in memory.keys():
         return move_to_ab_pos(self_entity, memory[goal_name])
     else:
-        return f"Service setmove_to_goal_gaol response: {False}, message: goal not in memory"
+        return f"Service setmove_to_goal_goal response: {False}, message: goal not in memory"
 
 
 @eaios.api

@@ -72,6 +72,6 @@ def nv_test():
 def set_goal(x, y, yaw) -> str:
     # rclpy.init()
     res = nv_controller.set_goal(x,y,yaw)
-    func_status = f"Service set_gaol response: {res}"
+    func_status = f"Service set_goal response: {res}"
     # rclpy.shutdown()
     return func_status
