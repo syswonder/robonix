@@ -61,7 +61,63 @@ autodoc_mock_imports = [
     'scipy.spatial',
     'scipy.spatial.transform',
     'robot_control_pb2_grpc',
-    'robot_control_pb2'
+    'robot_control_pb2',
+    'ultralytics',
+    'ultralytics.models',
+    'ultralytics.models.YOLOE',
+    'ultralytics.models.YOLO',
+    'ultralytics.models.FastSAM',
+    'ultralytics.models.SAM',
+    'ultralytics.models.RTDETR',
+    'ultralytics.models.NAS',
+    'ultralytics.models.YOLOWorld',
+    'ultralytics.engine',
+    'ultralytics.engine.model',
+    'ultralytics.engine.results',
+    'ultralytics.data',
+    'ultralytics.data.augment',
+    'ultralytics.data.base',
+    'ultralytics.data.utils',
+    'ultralytics.utils',
+    'ultralytics.utils.ops',
+    'ultralytics.utils.metrics',
+    'aioconsole',
+    'rclpy',
+    'rclpy.node',
+    'geometry_msgs',
+    'geometry_msgs.msg',
+    'nav2_simple_commander',
+    'nav2_simple_commander.robot_navigator',
+    'sensor_msgs',
+    'sensor_msgs.msg',
+    'std_srvs',
+    'std_srvs.srv',
+    'std_msgs',
+    'std_msgs.msg',
+    'mcp',
+    'mcp.server',
+    'mcp.server.fastmcp',
+    'RPi',
+    'RPi.GPIO',
+    'yaml',
+    'threading',
+    'time',
+    'signal',
+    'logging',
+    'argparse',
+    'asyncio',
+    'atexit',
+    'math',
+    'random',
+    'datetime',
+    'traceback',
+    'typing',
+    'typing.Dict',
+    'typing.Optional',
+    'typing.List',
+    'typing.Callable',
+    'typing.Tuple',
+    'typing.Union'
 ]
 
 # Napoleon settings
@@ -69,6 +125,18 @@ napoleon_google_docstring = True
 napoleon_numpy_docstring = True
 napoleon_include_init_with_doc = False
 napoleon_include_private_with_doc = False
+
+# Autodoc settings
+autodoc_default_options = {
+    'members': True,
+    'member-order': 'bysource',
+    'special-members': '__init__',
+    'undoc-members': True,
+    'exclude-members': '__weakref__'
+}
+
+# Suppress warnings for missing imports
+suppress_warnings = ['autodoc.import_object']
 
 # Source file settings
 source_suffix = {

@@ -1,7 +1,9 @@
 .. _skill_specs_table:
 
-DEOS Capability/Skill 调用规范表（2025.9月版）
+Capability/Skill 调用规范表
 ==============================================
+
+版本：2025年9月2日
 
 本文档展示了DeepEmbody OS系统中所有可用的能力(Capabilities)和技能(Skills)的完整规范。
 
