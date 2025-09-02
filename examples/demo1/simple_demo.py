@@ -197,7 +197,7 @@ def main():
 
     # Register entity builders
     manager.register_entity_builder("manual", create_manual_entity_builder())
-    manager.register_entity_builder("yolo", create_yolo_entity_builder())
+    manager.register_entity_builder("auto", create_yolo_entity_builder())
 
     # Initialize skill providers
     init_skill_providers(manager)
