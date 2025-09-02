@@ -1,4 +1,4 @@
-Simulator API Reference (Genesis)
+Simulator Module (Genesis)
 ==================================
 
 本章提供本项目基于Genesis模拟器开发的各个模块的详细API参考文档。

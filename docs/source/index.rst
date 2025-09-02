@@ -31,9 +31,7 @@ DeepEmbody OS（DEOS）是由 Syswonder 开发的、面向具身智能（Embodie
    :maxdepth: 2
    :caption: API 参考文档
 
-   api/skill_specs_table
-   api/uapi
-   api/genesis
+   api/index
 
 .. toctree::
    :maxdepth: 1
