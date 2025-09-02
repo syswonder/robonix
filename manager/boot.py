@@ -95,25 +95,38 @@ async def main():
     
     manager.boot()
     try:
-        mcp_task = asyncio.create_task(mcp_start())
-        # cmdline(manager)
-
-        cli = CLI(manager)
-        input_task = asyncio.create_task(cli.run())
+        # 重定向MCP服务器输出到日志文件，避免与CLI输出冲突
+        import subprocess
+        import sys
         
-        # 等待任意任务完成
-        done, pending = await asyncio.wait(
-            [mcp_task, input_task],
-            return_when=asyncio.FIRST_COMPLETED
+        # 创建日志文件
+        log_file = os.path.expanduser("~/.deepembody_mcp.log")
+        
+        # 启动MCP服务器进程，重定向输出到日志文件
+        mcp_process = subprocess.Popen(
+            [sys.executable, "-c", 
+             "import asyncio; from manager.eaios_decorators import mcp_start; asyncio.run(mcp_start())"],
+            stdout=open(log_file, 'w'),
+            stderr=subprocess.STDOUT,
+            text=True
         )
-
-        # 取消所有仍在运行的任务
-        for task in pending:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        
+        # 等待一下让MCP服务器启动
+        await asyncio.sleep(1)
+        
+        cli = CLI(manager)
+        
+        # 在单独的线程中运行CLI以避免阻塞异步任务
+        import threading
+        cli_thread = threading.Thread(target=cli.run, daemon=True)
+        cli_thread.start()
+        
+        # 等待CLI线程结束
+        cli_thread.join()
+        
+        # 清理MCP进程
+        mcp_process.terminate()
+        mcp_process.wait()
 
 
     except KeyboardInterrupt:
