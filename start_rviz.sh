@@ -1,0 +1,1 @@
+rviz2 -d ./rviz.config.rviz
