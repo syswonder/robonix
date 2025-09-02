@@ -15,7 +15,7 @@ The specifications follow a standardized format where:
 # SPDX-License-Identifier: MulanPSL-2.0
 # Copyright (c) 2025, wheatfox <wheatfox17@icloud.com>
 
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, Optional
 from .types import *
 
 # documentation:
@@ -48,13 +48,13 @@ EOS_SKILL_SPECS = {
         "description": "Get the position of the entity",
         "type": EOS_SkillType.CAPABILITY,
         "input": None,
-        "output": {"x": float, "y": float, "z": float},
+        "output": Optional[Tuple[float, float, float]],  # (x,y,z) tuple
     },
     "cap_space_move": {
         # DEPRECATED !!!
         "description": "Move the entity to the given position",
         "type": EOS_SkillType.CAPABILITY,
-        "input": {"x": float, "y": float, "z": float},
+        "input": {"x": float, "y": float, "z": float},  # (x,y,z) tuple
         "output": {"success": bool},
     },
     # "skl_space_move2entity": {
@@ -104,10 +104,11 @@ EOS_SKILL_SPECS = {
         "output": {"success": bool},
     },
     "cap_get_robot_pose": {
+        # TODO: rename this
         "description": "Get the current pose of the robot",
         "type": EOS_SkillType.CAPABILITY,
         "input": {"timeout_sec": float},
-        "output": {"x": float, "y": float, "z": float, "yaw": float},
+        "output": Optional[Tuple[float, float, float, float]],  # (x,y,z,yaw) tuple
     },
     "cap_set_goal": {
         "description": "Set the goal of the robot",
@@ -131,13 +132,13 @@ EOS_SKILL_SPECS = {
             "camera_info": Dict[str, Any],
             "robot_pose": {"x": float, "y": float, "z": float, "yaw": float},
         },
-        "output": Tuple[float, float, float],  # (global_x, global_y, global_z) tuple
+        "output": Optional[Tuple[float, float, float]],  # (global_x, global_y, global_z) tuple
     },
     "cap_get_pose": {
         "description": "Get the current pose of the robot",
         "type": EOS_SkillType.CAPABILITY,
         "input": [None, {"timeout_sec": float}],  # no arg or timeout_sec(float), the list is for multiple alternative types - wheatfox
-        "output": Tuple[float, float, float],  # (x,y,yaw) tuple
+        "output": Optional[Tuple[float, float, float]],  # (x,y,yaw) tuple
     },
     "cap_tf_transform": {
         "description": "Transform the coordinates from the source frame to the target frame",

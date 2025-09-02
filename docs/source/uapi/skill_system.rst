@@ -95,14 +95,14 @@ EOS_SKILL_SPECS
 .. code-block:: python
 
    def __getattr__(self, name):
-       if name in self.primitive_bindings:
+       if name in self.skill_bindings:
            def wrapper(**kwargs):
                # 参数验证
-               self._check_primitive_args(name, kwargs)
+               self._check_skill_args(name, kwargs)
                # 函数调用
-               result = self.primitive_bindings[name](**kwargs)
+               result = self.skill_bindings[name](**kwargs)
                # 结果验证
-               self._check_primitive_returns(name, result)
+               self._check_skill_returns(name, result)
                return result
            return wrapper
 

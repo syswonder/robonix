@@ -118,8 +118,8 @@ class RuntimeManager:
 
             # Print current entity with skills on the same line
             connector = "└── " if is_last else "├── "
-            if entity.primitives:
-                skills_str = f" {GREEN}[skills: {', '.join(entity.primitives)}]{RESET}"
+            if entity.skills:
+                skills_str = f" {GREEN}[skills: {', '.join(entity.skills)}]{RESET}"
             else:
                 skills_str = f" {GRAY}[no skills]{RESET}"
 

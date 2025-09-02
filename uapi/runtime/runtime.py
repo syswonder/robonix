@@ -240,7 +240,7 @@ class Runtime:
             }
 
             # Collect bound skill information
-            bound_skills = entity.primitives
+            bound_skills = entity.skills
             graph_info["skills"][entity_path] = bound_skills
 
             # Recursively process child entities
