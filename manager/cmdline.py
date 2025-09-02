@@ -17,6 +17,7 @@ class Colors:
     MAGENTA = "\033[95m"
     CYAN = "\033[96m"
     WHITE = "\033[97m"
+    GRAY = "\033[90m"
     RESET = "\033[0m"
     BOLD = "\033[1m"
 
@@ -49,6 +50,10 @@ def print_magenta(text, bold=False, end="\n"):
 
 def print_cyan(text, bold=False, end="\n"):
     _color_print(text, Colors.CYAN, bold, end)
+
+
+def print_gray(text, bold=False, end="\n"):
+    _color_print(text, Colors.GRAY, bold, end)
 
 
 class Command:
@@ -94,8 +99,8 @@ class Completer:
             line = readline.get_line_buffer()
             words = line.split()
             
-            if len(words) == 1:
-                # 第一个词：补全命令名
+            if len(words) <= 1:
+                # 第一个词或空白输入：补全命令名
                 all_commands = self.command_registry.get_all_command_names()
                 self.matches = [cmd for cmd in all_commands if cmd.startswith(text)]
             elif len(words) == 2:
@@ -247,20 +252,70 @@ class CLI:
             else:
                 stopped_nodes.append(node)
         
-        # 显示所有节点，每个节点一行
+        # 按类型分组节点
+        driver_nodes = []
+        capability_nodes = []
+        other_nodes = []
+        
         for node_id, node in self.manager.available_nodes.items():
-            is_running = (node_id in self.manager.running_processes and 
-                         self.manager.running_processes[node_id].is_running())
-            
-            if is_running:
-                status = f"{Colors.GREEN}Running{Colors.RESET}"
-                status_icon = f"{Colors.GREEN}✓{Colors.RESET}"
+            if node.node_type == "driver":
+                driver_nodes.append((node_id, node))
+            elif node.node_type == "capability":
+                capability_nodes.append((node_id, node))
             else:
-                status = f"{Colors.RED}Stopped{Colors.RESET}"
-                status_icon = f"{Colors.RED}✗{Colors.RESET}"
+                other_nodes.append((node_id, node))
+        
+        # 显示节点的辅助函数
+        def print_node_group(nodes, group_name=None):
+            if group_name:
+                print_cyan(f"\n{group_name}:", bold=True)
+                print("-" * 40)
             
-            # 格式化显示：状态图标 + 状态 + 节点名
-            print(f"{status_icon} [{status:<8}] {node.name}")
+            for node_id, node in nodes:
+                is_running = (node_id in self.manager.running_processes and 
+                             self.manager.running_processes[node_id].is_running())
+                
+                if is_running:
+                    status = f"{Colors.GREEN}Running{Colors.RESET}"
+                    status_icon = f"{Colors.GREEN}✓{Colors.RESET}"
+                else:
+                    status = f"{Colors.RED}Stopped{Colors.RESET}"
+                    status_icon = f"{Colors.RED}✗{Colors.RESET}"
+                
+                # 从cwd路径中提取目录名
+                import os
+                cwd_parts = os.path.normpath(node.cwd).split(os.sep)
+                folder_name = ""
+                if len(cwd_parts) > 0:
+                    folder_name = cwd_parts[-1]  # 获取最后一个目录名
+                
+                # 根据节点类型格式化显示
+                node_type_display = ""
+                if node.node_type and folder_name:
+                    if node.node_type == "driver":
+                        node_type_display = f" {Colors.GRAY}(driver@{folder_name}){Colors.RESET}"
+                    elif node.node_type == "capability":
+                        node_type_display = f" {Colors.GRAY}(cap@{folder_name}){Colors.RESET}"
+                    else:
+                        node_type_display = f" {Colors.GRAY}({node.node_type}@{folder_name}){Colors.RESET}"
+                
+                # 格式化显示：状态图标 + 状态 + 节点名(白色加粗) + 类型信息(灰色)
+                node_name_display = f"{Colors.BOLD}{Colors.WHITE}{node.name}{Colors.RESET}"
+                print(f"{status_icon} [{status:<8}] {node_name_display}{node_type_display}")
+        
+        # 按顺序显示各组节点
+        if driver_nodes:
+            print_node_group(driver_nodes, "Driver Nodes")
+        
+        if capability_nodes:
+            if driver_nodes:  # 如果前面有driver节点，添加分隔线
+                print()
+            print_node_group(capability_nodes, "Capability Nodes")
+        
+        if other_nodes:
+            if driver_nodes or capability_nodes:  # 如果前面有其他节点，添加分隔线
+                print()
+            print_node_group(other_nodes, "Other Nodes")
         
         print("-" * 60)
         print(f"Total: {len(running_nodes)} running, {len(stopped_nodes)} stopped")
