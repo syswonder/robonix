@@ -40,7 +40,7 @@ Simple Demo (Genesis)
    # 例如：pip3 install torch torchvision（Linux CUDA 12.8）
    
    # 安装其他依赖包
-   pip install rich loguru mcp pyyaml argparse grpcio grpcio-tools \
+   pip install rich loguru mcp pyyaml argparse grpcio grpcio-tools ultraimport \
                ultralytics genesis-world pynput openai python-dotenv opencv-python
 
 Genesis 模拟器启动

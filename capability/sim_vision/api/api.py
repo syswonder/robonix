@@ -13,7 +13,7 @@ sys.path.append("./simulator/genesis")
 
 from DeepEmbody.manager.eaios_decorators import eaios
 
-from .vision import (
+from DeepEmbody.capability.sim_vision.api.vision import (
     SimulatorRGBGetter,
     SimulatorRGBDGetter,
     SimulatorCameraInfoGetter,
