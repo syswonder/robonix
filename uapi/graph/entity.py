@@ -308,8 +308,10 @@ class Entity:
                                     # Try to cast the argument to one of the expected types
                                     try:
                                         original_value = kwargs[arg_name]
-                                        original_type = type(original_value).__name__
-                                        kwargs[arg_name] = self._try_cast(original_value, expected_type)
+                                        original_type = type(
+                                            original_value).__name__
+                                        kwargs[arg_name] = self._try_cast(
+                                            original_value, expected_type)
                                         logger.warning(
                                             f"Type cast for skill '{skill_name}' argument '{arg_name}' (alternative {i+1}): "
                                             f"{original_type} -> {type(kwargs[arg_name]).__name__} ({original_value} -> {kwargs[arg_name]})"
@@ -325,14 +327,14 @@ class Entity:
                             continue  # Try next alternative
                 except Exception:
                     continue  # Try next alternative
-            
+
             # If we get here, no alternative matched
             error_msg = f"Arguments for '{skill_name}' must match one of the alternatives: {expected_input}, got {list(kwargs.keys())}"
             logger.error(
                 f"[{self.get_absolute_path()}] argument validation failed: {error_msg}"
             )
             raise ValueError(error_msg) from None
-        
+
         # Handle case where expected_input is a dict (arguments with types required)
         elif isinstance(expected_input, dict):
             if set(kwargs.keys()) != set(expected_input.keys()):
@@ -349,7 +351,8 @@ class Entity:
                     try:
                         original_value = kwargs[arg_name]
                         original_type = type(original_value).__name__
-                        kwargs[arg_name] = self._try_cast(original_value, expected_type)
+                        kwargs[arg_name] = self._try_cast(
+                            original_value, expected_type)
                         logger.warning(
                             f"Type cast for skill '{skill_name}' argument '{arg_name}': "
                             f"{original_type} -> {type(kwargs[arg_name]).__name__} ({original_value} -> {kwargs[arg_name]})"
@@ -395,7 +398,8 @@ class Entity:
                     if value is None:
                         return True
                     # Check against the non-None type
-                    non_none_type = args[0] if args[1] is type(None) else args[1]
+                    non_none_type = args[0] if args[1] is type(
+                        None) else args[1]
                     return recursive_type_check(value, non_none_type)
                 else:
                     # This is a regular Union, check against all types
@@ -470,38 +474,40 @@ class Entity:
             logger.debug(f"Found {name} in skill_bindings")
 
             def wrapper(**kwargs):
-                logger.debug(f"First path wrapper called for {name} with kwargs: {kwargs}")
+                logger.debug(
+                    f"First path wrapper called for {name} with kwargs: {kwargs}")
                 logger.debug(
                     f"[{self.get_absolute_path()}] calling skill {name} with kwargs {kwargs}"
                 )
                 try:
                     # Get the actual function from skill_bindings
                     func = self.skill_bindings[name]
-                    
+
                     # Always inject self_entity as keyword argument if the function expects it
                     import inspect
                     sig = inspect.signature(func)
-                    
+
                     if 'self_entity' in sig.parameters:
                         # Function expects self_entity parameter, inject it as keyword argument
                         if 'self_entity' not in kwargs:
                             kwargs['self_entity'] = self
-                    
+
                     # Always use keyword arguments for all function calls
                     result = func(**kwargs)
-                    
+
                     return result
                 except (ValueError, TypeError) as e:
                     logger.error(
                         f"[{self.get_absolute_path()}] skill '{name}' execution failed: {str(e)}"
                     )
                     # Create a custom exception with better formatting
-                    error_msg = format_skill_error(name, type(e).__name__, str(e))
+                    error_msg = format_skill_error(
+                        name, type(e).__name__, str(e))
                     custom_exc = type(e)(error_msg)
                     raise custom_exc from None
 
             return wrapper
-        
+
         # Support for skill and capability calling with self_entity.skl_xxx and self_entity.cap_xxx
         # Note: The actual function names in skill/__init__.py may not start with cap_ or skl_
         # They are bound to standard names through entity.bind_skill() method
@@ -509,7 +515,7 @@ class Entity:
             def wrapper(**kwargs):
                 # Inject self_entity into the kwargs for skills and capabilities that support it
                 kwargs['self_entity'] = self
-                
+
                 # First, try to find the function in skill bindings (standard names)
                 if name in self.skill_bindings:
                     logger.debug(
@@ -519,24 +525,27 @@ class Entity:
                         # For skills and capabilities that support self_entity, we need to handle it specially
                         # Check if the function accepts self_entity parameter
                         func = self.skill_bindings[name]
-                        logger.debug(f"About to call skill {name}, func type: {type(func)}")
+                        logger.debug(
+                            f"About to call skill {name}, func type: {type(func)}")
                         logger.debug(f"kwargs before: {kwargs}")
                         import inspect
                         sig = inspect.signature(func)
                         params = list(sig.parameters.keys())
-                        
+
                         logger.debug(f"Function {name} signature: {sig}")
                         logger.debug(f"Parameters: {params}")
                         logger.debug(f"kwargs: {kwargs}")
-                        
+
                         if len(params) > 0 and params[0] == 'self_entity':
                             # Function expects self_entity as first positional argument
                             self_entity = kwargs.pop('self_entity')
-                            logger.debug(f"Calling {name} with self_entity as positional arg")
+                            logger.debug(
+                                f"Calling {name} with self_entity as positional arg")
                             result = func(self_entity, **kwargs)
                         elif 'self_entity' in sig.parameters:
                             # Function supports self_entity as keyword argument
-                            logger.debug(f"Calling {name} with self_entity as keyword arg in kwargs")
+                            logger.debug(
+                                f"Calling {name} with self_entity as keyword arg in kwargs")
                             result = func(**kwargs)
                         else:
                             # Function doesn't support self_entity, remove it from kwargs
@@ -551,58 +560,20 @@ class Entity:
                         logger.error(
                             f"[{self.get_absolute_path()}] skill '{name}' execution failed: {str(e)}"
                         )
-                        error_msg = format_skill_error(name, type(e).__name__, str(e))
+                        error_msg = format_skill_error(
+                            name, type(e).__name__, str(e))
                         custom_exc = type(e)(error_msg)
                         raise custom_exc from None
-                
-                # If not found in skill bindings, try to find in skill module
-                # The actual function names in skill/__init__.py may not match the standard names
-                try:
-                    from skill import __all__
-                    import skill
-                    
-                    # Try to find the function by standard name first
-                    if name in __all__:
-                        func = getattr(skill, name)
-                        logger.debug(f"Found {name} in skill module, calling with kwargs: {kwargs}")
-                        logger.debug(
-                            f"[{self.get_absolute_path()}] calling {name} from skill module with self_entity injection"
-                        )
-                        return func(**kwargs)
-                    
-                    # If not found by standard name, try to find by actual function name
-                    # This handles cases where the actual function doesn't start with cap_ or skl_
-                    for actual_func_name in __all__:
-                        # Check if this function is bound to the standard name
-                        # We can't easily determine this mapping, so we'll try calling
-                        # the function and see if it works
-                        try:
-                            func = getattr(skill, actual_func_name)
-                            # Try calling the function to see if it's the right one
-                            # This is a bit hacky but works for the current use case
-                            if hasattr(func, '_is_skill') or hasattr(func, '_is_capability'):
-                                logger.debug(
-                                    f"[{self.get_absolute_path()}] trying {actual_func_name} for {name}"
-                                )
-                                # We found a skill/capability function, but we can't easily
-                                # determine if it's the right one for this standard name
-                                # For now, we'll skip this approach and rely on proper binding
-                                pass
-                        except Exception:
-                            continue
-                            
-                except (ImportError, AttributeError) as e:
-                    logger.debug(f"[{self.get_absolute_path()}] {name} not found in skill module: {e}")
-                
+
                 # If not found, raise AttributeError
                 raise AttributeError(
                     f"'{type(self).__name__}' object has no attribute '{name}', "
                     f"and '{name}' is not available as a skill or capability. "
                     f"Available skills for {self.get_absolute_path()}: {self.skills}"
                 )
-            
+
             return wrapper
-        
+
         raise AttributeError(
             f"'{type(self).__name__}' object has no attribute '{name}', or this skill is not bound, available skills for {self.get_absolute_path()}: {self.skills}"
         )

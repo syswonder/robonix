@@ -1,65 +1,61 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 import rclpy
 from rclpy.node import Node
+from rclpy.duration import Duration
+
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from mcp.server.fastmcp import FastMCP
-
 from tf_transformations import euler_from_quaternion
 
-from DeepEmbody.manager.eaios_decorators import eaios
+from tf2_ros import Buffer, TransformListener
 
+from DeepEmbody.manager.eaios_decorators import eaios
 from typing import Optional, Tuple
 
-class AmclPoseGetter(Node):
-    def __init__(self):
-        super().__init__('amcl_pose_getter')
-        self.pose = None
-        self.subscription = self.create_subscription(
-            PoseWithCovarianceStamped,
-            '/amcl_pose',
-            self.pose_callback,
-            10
-        )
 
-    def pose_callback(self, msg):
-        self.pose = msg
-        self.get_logger().info("Got AMCL pose.")
-        self.destroy_subscription(self.subscription)
+class TfPoseGetter(Node):
+    def __init__(self):
+        super().__init__('tf_pose_getter')
+        self.target_frame = 'map'
+        self.source_frame = 'base_link'  # 或 'base_footprint'
+        self.buffer = Buffer()
+        self.listener = TransformListener(self.buffer, self)
+
+    def try_lookup(self, per_try_timeout_sec: float = 0.2) -> Optional[Tuple[float, float, float]]:
+        try:
+            tf = self.buffer.lookup_transform(
+                self.target_frame,
+                self.source_frame,
+                rclpy.time.Time(),  # now
+                timeout=Duration(seconds=per_try_timeout_sec)
+            )
+            t = tf.transform.translation
+            q = tf.transform.rotation
+            yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])[2]
+            return (t.x, t.y, yaw)
+        except Exception:
+            return None
+
 
 @eaios.api
-def get_pose(timeout_sec=2.0) -> Optional[Tuple[float, float, float]]:
-    """获取当前机器人位姿信息
-    Args:
-        timeout_sec: 等待位姿数据的超时时间（秒），默认2.0秒
-    Returns:
-        成功时返回(x, y, yaw)表示当前位置和朝向，超时返回None
-    """
-    # Check if rclpy is already initialized
-    if not rclpy.ok():
+def get_pose(timeout_sec: float = 20.0) -> Optional[Tuple[float, float, float]]:
+    """获取当前机器人位姿 (x, y, yaw)。超时返回 None。"""
+    init_here = not rclpy.ok()
+    if init_here:
         rclpy.init()
-        should_shutdown = True
-    else:
-        should_shutdown = False
-    
-    node = AmclPoseGetter()
 
-    # 等待 pose 被接收到
-    end_time = node.get_clock().now().nanoseconds + int(timeout_sec * 1e9)
-    while rclpy.ok() and node.pose is None and node.get_clock().now().nanoseconds < end_time:
-        rclpy.spin_once(node, timeout_sec=0.1)
+    node = TfPoseGetter()
 
-    result = None
-    if node.pose:
-        pos = node.pose.pose.pose.position
-        ori = node.pose.pose.pose.orientation
-        yaw = euler_from_quaternion([ori.x, ori.y, ori.z, ori.w])[2]
-        result = (pos.x, pos.y, yaw)
+    end_time_ns = node.get_clock().now().nanoseconds + int(timeout_sec * 1e9)
+    result: Optional[Tuple[float, float, float]] = None
+
+    while rclpy.ok() and node.get_clock().now().nanoseconds < end_time_ns:
+        rclpy.spin_once(node, timeout_sec=0.05)
+        result = node.try_lookup(per_try_timeout_sec=0.15)
+        if result is not None:
+            break
 
     node.destroy_node()
-    
-    # Only shutdown if we initialized rclpy
-    if should_shutdown:
+    if init_here:
         rclpy.shutdown()
-    
+
     return result
