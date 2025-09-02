@@ -106,9 +106,15 @@ class eaios:
         func = eaios.mcp.tool()(func)
 
         @functools.wraps(func)
-        def wrapper(*args, **kwargs):
+        def wrapper(**kwargs):
+            # Check if self_entity is already in kwargs (from entity wrapper)
+            if 'self_entity' in kwargs:
+                # self_entity is already provided by entity wrapper, just call the function
+                print(f"[DEBUG] {func.__name__}: self_entity already in kwargs, calling func directly")
+                return func(**kwargs)
+            
             # Get the current entity context from the runtime
-            from uapi.runtime.action import get_runtime
+            from DeepEmbody.uapi.runtime.action import get_runtime
             runtime = get_runtime()
             
             # Extract self_entity from kwargs if provided, otherwise use current context
@@ -117,12 +123,21 @@ class eaios:
                 # Try to get current entity from runtime context
                 self_entity = getattr(runtime, '_current_entity', None)
             
-            # Call the original function with self_entity injected
+            # Call the original function with self_entity injected as keyword argument
             if self_entity is not None:
-                return func(self_entity=self_entity, *args, **kwargs)
+                # Check if the function already has self_entity in its signature
+                import inspect
+                sig = inspect.signature(func)
+                if 'self_entity' in sig.parameters:
+                    # Function supports self_entity, pass it as keyword argument
+                    kwargs['self_entity'] = self_entity
+                    return func(**kwargs)
+                else:
+                    # Function doesn't support self_entity, call without it
+                    return func(**kwargs)
             else:
                 # Fallback: call without self_entity if not available
-                return func(*args, **kwargs)
+                return func(**kwargs)
 
         full_mod = func.__module__
         print("full mod",full_mod, "function name", func.__name__)
@@ -209,7 +224,7 @@ class eaios:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             # Get the current entity context from the runtime
-            from uapi.runtime.action import get_runtime
+            from DeepEmbody.uapi.runtime.action import get_runtime
             runtime = get_runtime()
             
             # Extract self_entity from kwargs if provided, otherwise use current context
@@ -228,22 +243,16 @@ class eaios:
             for name in getattr(skill_module, "__all__", []):
                 func.__globals__[name] = getattr(skill_module, name)
             
-            # Check if the function expects self_entity as first positional argument
+            # Always inject self_entity as keyword argument if the function expects it
             import inspect
             sig = inspect.signature(func)
-            params = list(sig.parameters.keys())
             
-            # Call the original function with self_entity injected
-            if self_entity is not None:
-                if len(params) > 0 and params[0] == 'self_entity':
-                    # Function expects self_entity as first positional argument
-                    return func(self_entity, *args, **kwargs)
-                else:
-                    # Function expects self_entity as keyword argument
-                    return func(self_entity=self_entity, *args, **kwargs)
-            else:
-                # Fallback: call without self_entity if not available
-                return func(*args, **kwargs)
+            # Call the original function with self_entity injected as keyword argument
+            if self_entity is not None and 'self_entity' in sig.parameters:
+                kwargs['self_entity'] = self_entity
+            
+            # Always use keyword arguments for all function calls
+            return func(**kwargs)
 
         # Mark this as a skill function
         wrapper._is_skill = True

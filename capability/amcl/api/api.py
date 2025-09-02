@@ -9,6 +9,7 @@ from tf_transformations import euler_from_quaternion
 
 from DeepEmbody.manager.eaios_decorators import eaios
 
+from typing import Optional, Tuple
 
 class AmclPoseGetter(Node):
     def __init__(self):
@@ -27,14 +28,20 @@ class AmclPoseGetter(Node):
         self.destroy_subscription(self.subscription)
 
 @eaios.api
-def get_pose(timeout_sec=2.0):
+def get_pose(timeout_sec=2.0) -> Optional[Tuple[float, float, float]]:
     """获取当前机器人位姿信息
     Args:
         timeout_sec: 等待位姿数据的超时时间（秒），默认2.0秒
     Returns:
         成功时返回(x, y, yaw)表示当前位置和朝向，超时返回None
     """
-    rclpy.init()
+    # Check if rclpy is already initialized
+    if not rclpy.ok():
+        rclpy.init()
+        should_shutdown = True
+    else:
+        should_shutdown = False
+    
     node = AmclPoseGetter()
 
     # 等待 pose 被接收到
@@ -50,5 +57,9 @@ def get_pose(timeout_sec=2.0):
         result = (pos.x, pos.y, yaw)
 
     node.destroy_node()
-    rclpy.shutdown()
+    
+    # Only shutdown if we initialized rclpy
+    if should_shutdown:
+        rclpy.shutdown()
+    
     return result

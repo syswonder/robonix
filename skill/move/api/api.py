@@ -18,13 +18,16 @@ if root_dir not in sys.path:
 print(root_dir)
 
 from DeepEmbody.manager.eaios_decorators import eaios
+from DeepEmbody.uapi.graph.entity import Entity
+
+from typing import Optional, Tuple
 
 #TODO memory
-mamory = {}
+memory = {}
 
 @eaios.api
 @eaios.caller
-def move_to_goal(goal_name:str) -> str:
+def move_to_goal(self_entity, goal_name:str) -> str:
     """通过预存名称移动到指定位置
     Args:
         goal_name: 预存位置点的名称
@@ -32,14 +35,14 @@ def move_to_goal(goal_name:str) -> str:
         移动操作的结果状态字符串
     """
     if goal_name in memory.keys():
-        return move_to_ab_pos(memory[goal_name])
+        return move_to_ab_pos(self_entity, memory[goal_name])
     else:
         return f"Service setmove_to_goal_gaol response: {False}, message: goal not in memory"
 
 
 @eaios.api
 @eaios.caller
-def move_to_ab_pos(x, y, yaw) -> str:
+def move_to_ab_pos(self_entity, x, y, yaw) -> str:
     """移动到绝对坐标位置
     Args:
         x: 目标点X坐标
@@ -49,11 +52,11 @@ def move_to_ab_pos(x, y, yaw) -> str:
         移动操作的结果状态字符串
     """
     #TODO how read dep
-    return set_goal(x,y,yaw)
+    return set_goal(self_entity, x,y,yaw)
 
 @eaios.api
 @eaios.caller
-def move_to_rel_pos(dx,dy,dyaw) -> str:
+def move_to_rel_pos(self_entity, dx,dy,dyaw) -> str:
     """相对当前位置移动指定偏移量
     Args:
         dx: X方向偏移量
@@ -62,9 +65,26 @@ def move_to_rel_pos(dx,dy,dyaw) -> str:
     Returns:
         移动操作的结果状态字符串
     """
-    set_goal = dep["move"][1]["set_goal"]
-    pos = get_pos()
-    return set_goal(pos.x + dx,pos.y + dy,pos.yaw + dyaw)
+
+    DEBUG_FLAG_USE_ACTION = True
+
+    if DEBUG_FLAG_USE_ACTION:
+        # use the uapi runtime entity to call the binded skill and capability dynamically
+        result: Optional[Tuple[float, float, float]] = self_entity.cap_get_pose()
+        if result is None:
+            return "failed to get robot pose"
+        x, y, yaw = result
+        target_x = x + dx
+        target_y = y + dy
+        target_yaw = yaw + dyaw
+        self_entity.cap_set_goal(x=target_x, y=target_y, yaw=target_yaw)
+        return "success"
+    else:
+        # use the dependency stuff from LHW
+        set_goal = dep["move"][1]["set_goal"]
+
+        pos = get_pos()
+        return set_goal(self_entity, pos.x + dx,pos.y + dy,pos.yaw + dyaw)
 
 def test():
     rclpy.init()
