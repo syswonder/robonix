@@ -4,7 +4,7 @@ from log import logger
 from constant import BASE_PATH
 
 class BaseNode:
-    def __init__(self, cwd: str, name: str, version: str, author: str, startup_on_boot: bool, startup_command: str):
+    def __init__(self, cwd: str, name: str, version: str, author: str, startup_on_boot: bool, startup_command: str, node_type: str = None):
         """
         Args:
             cwd (str): The name of the base directory.
@@ -13,6 +13,7 @@ class BaseNode:
             author (str): The author of the base.
             startup_on_boot (bool): Whether the base should start on boot.
             startup_command (str): The command to start the base.
+            node_type (str): The type of the node (driver, capability, etc.).
         """
         self.cwd = cwd
         self.name = name
@@ -20,6 +21,7 @@ class BaseNode:
         self.author = author
         self.start_on_boot = startup_on_boot
         self.startup_command = startup_command
+        self.node_type = node_type
 
     def __str__(self):
         return f"BaseNode(cwd='{self.cwd}', name='{self.name}', version='{self.version}', author='{self.author}', start_on_boot='{self.start_on_boot}', startup_command='{self.startup_command}')"
@@ -27,7 +29,7 @@ class BaseNode:
     def __repr__(self):
         return f"BaseNode({self.name}_{self.version}, cwd='{self.cwd}')"
 
-def get_node(entry,sub_dir_path) -> BaseNode:
+def get_node(entry, sub_dir_path, node_type: str = None) -> BaseNode:
     print(f"Checking entry: {entry} in path: {sub_dir_path} for description.yml")
     """
     Helper function to create a BaseNode object from a directory entry and its description.yml file.
@@ -57,7 +59,8 @@ def get_node(entry,sub_dir_path) -> BaseNode:
                         version=data.get("version"),
                         author=data.get("author"),
                         startup_on_boot=data.get("start_on_boot", False),
-                        startup_command=data.get("startup_command",None)
+                        startup_command=data.get("startup_command",None),
+                        node_type=node_type
                     )
                     return base_info
             except yaml.ymlError as e:
@@ -110,7 +113,7 @@ def get_node_details(config_path: str) -> list[BaseNode]:
             for entry in entrys:
                 sub_dir_path = os.path.join(base_dir_path, entry)
                 logger.info(f"Checking: {entry}")
-                base_info = get_node(entry, sub_dir_path)
+                base_info = get_node(entry, sub_dir_path, base)
                 if base_info:
                     all_base_details.append(base_info)
                 else:
