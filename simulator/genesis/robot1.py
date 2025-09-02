@@ -21,11 +21,11 @@ except ImportError:
     )
     logger = logging.getLogger(__name__)
 
-from .keyboard_device import KeyboardDevice
-from .scene_manager import SceneManager
-from .camera_manager import CameraManager
-from .main_loop import MainControlLoop
-from .grpc_service import serve_grpc
+from simulator.genesis.keyboard_device import KeyboardDevice
+from simulator.genesis.scene_manager import SceneManager
+from simulator.genesis.camera_manager import CameraManager
+from simulator.genesis.main_loop import MainControlLoop
+from simulator.genesis.grpc_service import serve_grpc
 
 
 class RobotSimulator:
