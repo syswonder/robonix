@@ -68,7 +68,7 @@ class RobotSimulator:
 
     def setup_main_loop(self, car):
         self.main_loop = MainControlLoop(
-            car, self.keyboard_device, self.scene_lock, self.camera_manager
+            car, self.keyboard_device, self.scene_lock, self.camera_manager, self.scene_manager
         )
 
     def run(self):

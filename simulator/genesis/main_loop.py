@@ -16,11 +16,12 @@ from .camera_manager import CameraManager
 
 
 class MainControlLoop:
-    def __init__(self, car, keyboard_device, scene_lock, camera_manager=None):
+    def __init__(self, car, keyboard_device, scene_lock, camera_manager=None, scene_manager=None):
         self.car = car
         self.keyboard_device = keyboard_device
         self.scene_lock = scene_lock
         self.camera_manager = camera_manager
+        self.scene_manager = scene_manager
 
         # Control parameters
         self.dt = 1.0 / 60.0  # 60 FPS
@@ -29,7 +30,7 @@ class MainControlLoop:
 
         # Create car controller
         self.car_controller = CarController(
-            car, keyboard_device, self.dt, self.speed, self.rot_speed
+            car, keyboard_device, self.dt, self.speed, self.rot_speed, scene_manager=scene_manager
         )
 
     def start_camera(self):
