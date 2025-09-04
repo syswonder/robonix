@@ -466,6 +466,33 @@ class Entity:
             f"[{self.get_absolute_path()}] return value validation passed for skill '{skill_name}'"
         )
 
+    def _inject_self_entity_if_needed(self, func, kwargs):
+        """
+        Unified handling of self_entity injection logic.
+        All functions are called with keyword arguments only.
+
+        Args:
+            func: The function to be called
+            kwargs: Keyword arguments for the function call
+
+        Returns:
+            str: Injection method - 'keyword' or 'none'
+        """
+        import inspect
+        sig = inspect.signature(func)
+
+        if 'self_entity' in sig.parameters:
+            # Function supports self_entity as keyword argument
+            if 'self_entity' not in kwargs:
+                kwargs['self_entity'] = self
+            return 'keyword'
+        else:
+            # Function doesn't support self_entity, remove it
+            logger.warning(
+                f"Function {func.__name__} does not support self_entity, removing it from kwargs")
+            kwargs.pop('self_entity', None)
+            return 'none'
+
     def __getattr__(self, name):
         # https://www.sefidian.com/2021/06/06/python-__getattr__-and-__getattribute__-magic-methods/
         # getattr is called when an attribute is not found in the object, while __getattribute__ is called no matter found or not
@@ -480,19 +507,11 @@ class Entity:
                     f"[{self.get_absolute_path()}] calling skill {name} with kwargs {kwargs}"
                 )
                 try:
-                    # Get the actual function from skill_bindings
                     func = self.skill_bindings[name]
 
-                    # Always inject self_entity as keyword argument if the function expects it
-                    import inspect
-                    sig = inspect.signature(func)
+                    injection_type = self._inject_self_entity_if_needed(
+                        func, kwargs)
 
-                    if 'self_entity' in sig.parameters:
-                        # Function expects self_entity parameter, inject it as keyword argument
-                        if 'self_entity' not in kwargs:
-                            kwargs['self_entity'] = self
-
-                    # Always use keyword arguments for all function calls
                     result = func(**kwargs)
 
                     return result
@@ -513,47 +532,34 @@ class Entity:
         # They are bound to standard names through entity.bind_skill() method
         if name.startswith('skl_') or name.startswith('cap_'):
             def wrapper(**kwargs):
-                # Inject self_entity into the kwargs for skills and capabilities that support it
-                kwargs['self_entity'] = self
-
                 # First, try to find the function in skill bindings (standard names)
                 if name in self.skill_bindings:
                     logger.debug(
                         f"[{self.get_absolute_path()}] calling skill {name} with self_entity injection"
                     )
                     try:
-                        # For skills and capabilities that support self_entity, we need to handle it specially
-                        # Check if the function accepts self_entity parameter
                         func = self.skill_bindings[name]
                         logger.debug(
                             f"About to call skill {name}, func type: {type(func)}")
                         logger.debug(f"kwargs before: {kwargs}")
-                        import inspect
-                        sig = inspect.signature(func)
-                        params = list(sig.parameters.keys())
 
-                        logger.debug(f"Function {name} signature: {sig}")
-                        logger.debug(f"Parameters: {params}")
-                        logger.debug(f"kwargs: {kwargs}")
+                        # Use unified self_entity injection logic
+                        injection_type = self._inject_self_entity_if_needed(
+                            func, kwargs)
 
-                        if len(params) > 0 and params[0] == 'self_entity':
-                            # Function expects self_entity as first positional argument
-                            self_entity = kwargs.pop('self_entity')
-                            logger.debug(
-                                f"Calling {name} with self_entity as positional arg")
-                            result = func(self_entity, **kwargs)
-                        elif 'self_entity' in sig.parameters:
-                            # Function supports self_entity as keyword argument
-                            logger.debug(
-                                f"Calling {name} with self_entity as keyword arg in kwargs")
-                            result = func(**kwargs)
-                        else:
-                            # Function doesn't support self_entity, remove it from kwargs
-                            kwargs.pop('self_entity', None)
-                            logger.debug(f"Calling {name} without self_entity")
+                        logger.debug(
+                            f"Function {name} injection type: {injection_type}")
+                        logger.debug(f"kwargs after injection: {kwargs}")
+
+                        # Always call function with keyword arguments only
+                        logger.debug(f"Calling {name} with keyword arguments")
+                        result = func(**kwargs)
+
+                        # Only check args and returns for functions that don't support self_entity
+                        if injection_type == 'none':
                             self._check_skill_args(name, kwargs)
-                            result = func(**kwargs)
                             self._check_skill_returns(name, result)
+
                         return result
                     except (ValueError, TypeError) as e:
                         logger.debug(f"Exception occurred in {name}: {str(e)}")

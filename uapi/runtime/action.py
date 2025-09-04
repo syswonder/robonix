@@ -29,7 +29,7 @@ __RUNTIME_INSTANCE__ = None
 def get_runtime():
     global __RUNTIME_INSTANCE__
     if __RUNTIME_INSTANCE__ is None:
-        from uapi.runtime.runtime import Runtime
+        from .runtime import Runtime
 
         __RUNTIME_INSTANCE__ = Runtime()
     return __RUNTIME_INSTANCE__
