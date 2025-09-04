@@ -61,8 +61,9 @@ def create_manual_entity_builder():
             entity_a.bind_skill("cap_get_pose", mock_getpos)
             entity_a.bind_skill("skl_debug_test_skill", debug_test_skill)
         except ImportError:
-            logger.warning(
-                "DeepEmbody.skill module not available, skipping skill binding")
+            logger.error(
+                "DeepEmbody.skill module not available!")
+            sys.exit(1)
 
         runtime.set_graph(root_room)
 
@@ -103,12 +104,12 @@ def create_yolo_entity_builder():
         def robot_move_impl(x, y, z):
             try:
                 from DeepEmbody.driver.sim_genesis_ranger.driver import move_to_point
-                # move_to_point(x, y)  # Uncomment when driver is available
+                move_to_point(x, y)  # Uncommet when you want to really move the robot
                 return {"success": True}
             except ImportError:
-                logger.warning(
-                    "Driver module not available, using mock implementation")
-                return {"success": True}
+                logger.error(
+                    "Driver module not available!")
+                sys.exit(1)
 
         def robot_getpos_impl():
             try:
@@ -228,9 +229,9 @@ def main():
         if args.mode == "manual":
             manager.configure_action("debug_test_action", a="/A")
         elif args.mode == "auto":
-            # In auto mode, use robot as both source and target for simplicity
+            # however, the "/chair" argument is hard-coded now for debugging purposes
             manager.configure_action(
-                "move_and_capture_action", a="/robot", b="/robot"
+                "move_and_capture_action", a="/robot", b="/chair"
             )
 
         # Execute action based on mode

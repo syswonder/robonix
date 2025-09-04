@@ -16,7 +16,7 @@ except ImportError:
 
 
 class CarController:
-    def __init__(self, car, keyboard_device, dt, max_speed, max_rot_speed, accel=3.0, rot_accel=5.0):
+    def __init__(self, car, keyboard_device, dt, max_speed, max_rot_speed, accel=3.0, rot_accel=5.0, scene_manager=None):
         self.car = car
         self.keyboard_device = keyboard_device
         self.dt = dt
@@ -24,6 +24,7 @@ class CarController:
         self.max_rot_speed = max_rot_speed
         self.accel = accel
         self.rot_accel = rot_accel
+        self.scene_manager = scene_manager
 
         # Initialize car state
         if not hasattr(car, "_my_yaw"):
@@ -183,10 +184,10 @@ class CarController:
         self.car.set_quat(quat)
 
     def print_position(self):
-        
+
         # deprecated
         return
-        
+
         """Print car position information"""
         car_x, car_y, car_z = self.car.get_pos()
         car_x = float(car_x)
@@ -205,7 +206,49 @@ class CarController:
         return pos, yaw_deg_rounded
 
     def reset_car(self):
-        logger.warning("reset_car is refactoring for the new quat logics")
+        """Reset car to initial position and orientation"""
+        try:
+            # Get initial position and quaternion from scene manager
+            if self.scene_manager is not None:
+                initial_pos = self.scene_manager.car_initial_pos
+                initial_quat = self.scene_manager.car_initial_quat
+            else:
+                # Fallback to hardcoded initial values from scene_manager.py
+                initial_pos = (-0.38341576, 0.4632059, 0.14989224)
+                initial_quat = None  # Will use identity quaternion
+
+            # Reset position
+            if initial_pos is not None:
+                self.car.set_pos(initial_pos)
+                logger.info(f"Car position reset to: {initial_pos}")
+
+            # reset _my_yaw to np.pi * 0.93
+            self.car._my_yaw = np.pi * 0.93
+            logger.info(f"Car orientation reset to yaw: {self.car._my_yaw}")
+
+            # Reset velocities
+            self.vx = 0.0
+            self.vy = 0.0
+            self.wz = 0.0
+            self.target_vx = 0.0
+            self.target_vy = 0.0
+            self.target_wz = 0.0
+
+            # Reset MoveTo state
+            self.move_to_vx = 0.0
+            self.move_to_vy = 0.0
+            self.move_to_active = False
+
+            # Clear any active MoveTo target
+            if hasattr(self.car, '_move_to_target'):
+                self.car._move_to_target["active"] = False
+
+            logger.info("Car reset completed successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to reset car: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
     def step(self):
         """Execute a control step"""
