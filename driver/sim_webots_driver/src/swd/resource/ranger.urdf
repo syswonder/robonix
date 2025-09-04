@@ -1,0 +1,6 @@
+<?xml version="1.0" ?>
+<robot name="ranger">
+    <webots>
+        <plugin type="swd.sim_webots_driver.SimWebotsDriver" />
+    </webots>
+</robot>
