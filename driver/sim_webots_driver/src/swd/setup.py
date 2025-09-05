@@ -11,7 +11,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name + '/launch', ['launch/ranger_launch.py']),
         ('share/' + package_name + '/resource', ['resource/ranger.urdf']),
-        ('share/' + package_name + '/config', ['config/nav2_params.yaml', 'config/ranger_nav2.rviz']),
+        ('share/' + package_name + '/config', ['config/ranger_lidar.rviz']),
         ('share/' + package_name, ['package.xml']),
     ],
     install_requires=['setuptools'],
