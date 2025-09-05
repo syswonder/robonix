@@ -41,8 +41,8 @@ WHEEL_SEPARATION_X = 0.33  # PR2 front-back wheel distance (meters)
 WHEEL_SEPARATION_Y = 0.26  # PR2 left-right wheel distance (meters)
 
 
-class WebotsNode:
-    def __init__(self, webots_node, properties):
+class MyRobotDriver:
+    def init(self, webots_node, properties):
         rclpy.init(args=None)
         self.__node = rclpy.create_node("sim_webots_driver")
         self.__logger = self.__node.get_logger()
