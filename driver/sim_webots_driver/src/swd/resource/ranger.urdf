@@ -1,6 +1,6 @@
 <?xml version="1.0" ?>
 <robot name="ranger">
-    <link name="base_footprint" />
+    <!-- <link name="base_footprint" />
     
     <link name="base_link">
         <visual>
@@ -56,9 +56,9 @@
         <parent link="base_link"/>
         <child link="laser_tilt_link"/>
         <origin xyz="0.2 0 0.2" rpy="0 0.3 0"/>
-    </joint>
+    </joint> -->
     
     <webots>
-        <plugin type="swd.sim_webots_driver.WebotsNode" />
+        <plugin type="swd.sim_webots_driver.MyRobotDriver" />
     </webots>
 </robot>

@@ -33,7 +33,7 @@ def generate_launch_description():
     webots = WebotsLauncher(world=world_path)
 
     my_robot_driver = WebotsController(
-        robot_name="Pr2",
+        robot_name="ranger",
         parameters=[
             {"robot_description": robot_description_path},
         ],
