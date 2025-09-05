@@ -93,7 +93,7 @@ WorldInfo {
 }
 Viewpoint {
   orientation -0.12560708688847025 0.9794806669770623 0.15760863790275406 0.9371634002695239
-  position -18.76190956359212 -7.824175974562803 15.177299546117503
+  position -17.16675416149091 -7.592629597223678 13.288723264157108
   exposure 0.5
   ambientOcclusionRadius 1
 }
@@ -317,8 +317,6 @@ DEF KITCHEN_BLOCK Pose {
       ]
     }
     Cabinet {
-      hidden translation_7 -2.549859012803339e-06 1.633615465124194e-11 0
-      hidden rotation_7 0 0 -0.9999999999999999 1.2813369791642978e-05
       translation 2.15 -1 0.83
       rotation 0 0 1 3.14159
       name "cabinet(6)"
@@ -352,10 +350,6 @@ DEF KITCHEN_BLOCK Pose {
       }
     }
     Cabinet {
-      hidden translation_7 -3.084343822643971e-06 -2.172950708256849e-11 0
-      hidden rotation_7 0 0 0.9999999999999999 1.4090196378261392e-05
-      hidden translation_11 -3.084343822583848e-06 -2.172950708256849e-11 0
-      hidden rotation_11 0 0 0.9999999999999999 1.4090196378261392e-05
       translation -0.11 1.65 0.15
       rotation 0 0 1 -1.5707953071795862
       name "cabinet(2)"
@@ -390,12 +384,6 @@ DEF KITCHEN_BLOCK Pose {
       }
     }
     Cabinet {
-      hidden translation_7 -3.0842614029346816e-06 -2.1728313592817017e-11 0
-      hidden rotation_7 0 0 1 1.4089818161954183e-05
-      hidden translation_11 -3.0849178555118798e-06 2.173775048852633e-11 0
-      hidden rotation_11 0 0 -1 1.4092812096484015e-05
-      hidden translation_15 -3.084917855551303e-06 2.173775048852633e-11 0
-      hidden rotation_15 0 0 -1 1.4092812096484015e-05
       translation 2.15 -0.1 1.4
       rotation 0 0 1 3.14159
       name "cabinet(3)"
@@ -429,8 +417,6 @@ DEF KITCHEN_BLOCK Pose {
       }
     }
     Cabinet {
-      hidden translation_7 -3.0842614029860533e-06 -2.1728313592817017e-11 0
-      hidden rotation_7 0 0 1 1.4089818161954183e-05
       translation 0.37 1.647 1.4
       rotation 0 0 1 -1.5707953071795862
       name "cabinet(4)"
@@ -460,8 +446,6 @@ DEF KITCHEN_BLOCK Pose {
       }
     }
     Cabinet {
-      hidden translation_7 -3.0842614029819558e-06 -2.1728313592817017e-11 0
-      hidden rotation_7 0 0 1 1.4089818161954183e-05
       translation -0.59 1.647 1.4
       rotation 0 0 1 -1.5707953071795862
       name "cabinet(1)"
@@ -491,12 +475,6 @@ DEF KITCHEN_BLOCK Pose {
       }
     }
     Cabinet {
-      hidden translation_7 -0.0023373888364837028 -1.168293181613711e-05 0
-      hidden rotation_7 0 0 1 0.009996483549759603
-      hidden translation_11 0.004233975389649126 3.833639961428603e-05 0
-      hidden rotation_11 0 0 1 0.018108443478470505
-      hidden translation_15 -1.6830050809285576e-06 -8.37260816233254e-12 0
-      hidden rotation_15 0 0 0.9999999999999999 9.949781053712667e-06
       translation 0.79 1.48 0.15
       rotation 0 0 1 -1.5707953071795862
       name "cabinet(5)"
@@ -530,12 +508,6 @@ DEF KITCHEN_BLOCK Pose {
       }
     }
     Cabinet {
-      hidden translation_7 -4.6455263527559436e-06 4.0165315517981526e-11 0
-      hidden rotation_7 0 0 -1 1.7292102570635128e-05
-      hidden translation_11 -2.9460182534970223e-06 2.0284968149653082e-11 0
-      hidden rotation_11 0 0 -0.9999999999999999 1.3771252989063806e-05
-      hidden translation_15 -2.946018254131377e-06 -2.0284968149653082e-11 0
-      hidden rotation_15 0 0 0.9999999999999999 1.3771252989063806e-05
       translation 2.15 -0.12 0.15
       rotation 0 0 1 3.14159
       name "cabinet(7)"
@@ -651,8 +623,6 @@ DEF KITCHEN_BLOCK Pose {
       }
     }
     Fridge {
-      hidden rotation_1 0 0 -1 8.789755824423715e-05
-      hidden rotation_2 0 0 1 8.789755824423715e-05
       translation 1.8 -1.57 0
       rotation 0 0 -1 3.14159
       name "fridge(1)"
@@ -844,8 +814,6 @@ WallPlug {
   name "wall plug(4)"
 }
 Laptop {
-  hidden translation_1 -0.10000806214662822 -0.013999999999999993 0.1299968388691502
-  hidden rotation_1 0.5773203327913526 -0.5774203300580681 -0.5773101382977035 2.094500200836835
   translation -6.04681390540596 -3.0099796538350363 0.5494348981168821
   rotation -0.00060463947027033 -0.0004976750747584282 -0.9999996933652685 1.8325889403203421
   controller "<none>"
@@ -1044,11 +1012,6 @@ Cabinet {
   }
 }
 Cabinet {
-  hidden translation_7 0.02594815845576405 -0.001698978530889017 0
-  hidden rotation_7 0 0 -1 0.13076510751520393
-  hidden translation_11 -1.103692788141233e-05 3.6007619108602285e-10 0
-  hidden rotation_11 0 0 -1 6.52493519212234e-05
-  hidden translation_39 -0.00010636624640085453 0 0
   translation -0.16999999999999998 -9.12 0
   rotation 0 0 1 3.14159
 }
@@ -1073,10 +1036,6 @@ Bed {
   }
 }
 Cabinet {
-  hidden translation_7 -2.5496411426096093e-06 -1.63332403158023e-11 0
-  hidden rotation_7 0 0 1 1.2812260679051072e-05
-  hidden translation_11 -1.8424418151473965e-06 1.0034306718864627e-11 0
-  hidden rotation_11 0 0 -1 1.0892371710617283e-05
   translation -5.445295 -9.996606 0
   name "cabinet(9)"
   depth 0.3
@@ -1089,10 +1048,6 @@ Cabinet {
   ]
 }
 Cabinet {
-  hidden translation_7 -2.5496411427223705e-06 -1.63332403158023e-11 0
-  hidden rotation_7 0 0 1 1.2812260679051072e-05
-  hidden translation_11 -1.8424418151108289e-06 1.0034306718864627e-11 0
-  hidden rotation_11 0 0 -1 1.0892371710617283e-05
   translation -5.80579 -10.1734 0
   rotation 0 0 1 3.14159
   name "cabinet(8)"
@@ -1368,8 +1323,6 @@ Wall {
   size 0.3 3.2 2.4
 }
 Door {
-  hidden translation_5 0.0011420821657393831 -4.484468561444244e-05 7.771561172376096e-16
-  hidden rotation_5 0 0 1 0.0002991062277892007
   translation -6.24 -8.43 0
   rotation 0 0 1 -1.5707953071795862
   size 0.3 1 2.4
@@ -1383,8 +1336,6 @@ Door {
   }
 }
 Door {
-  hidden translation_5 0.6225158120358751 -0.3143829429974855 -2.220446049250313e-16
-  hidden rotation_5 0 0 -1 1.548363290560715
   translation -3.89 -3.95 0
   name "door(6)"
   size 0.3 1 2.4
@@ -1394,8 +1345,6 @@ Door {
   }
 }
 Door {
-  hidden translation_5 0.0011420821657386615 4.484468561422039e-05 7.771561172376096e-16
-  hidden rotation_5 0 0 -1 0.0002991062277892007
   translation -4.94 -8.43 0
   rotation 0 0 1 -1.5707953071795862
   name "door(5)"
@@ -1406,8 +1355,6 @@ Door {
   }
 }
 Door {
-  hidden translation_5 0.0011420821657388558 4.484468561422039e-05 7.771561172376096e-16
-  hidden rotation_5 0 0 -1 0.0002991062277892007
   translation -6.97 -7.24 0
   rotation 0 0 1 3.14159
   name "door(3)"
@@ -1418,8 +1365,6 @@ Door {
   }
 }
 Door {
-  hidden translation_5 0.0011420821657388558 4.48446856142759e-05 7.771561172376096e-16
-  hidden rotation_5 0 0 -1 0.0002991062277892007
   translation -0.91 -6.6 0
   rotation 0 0 1 1.5708
   name "door(4)"
@@ -1430,8 +1375,6 @@ Door {
   }
 }
 Door {
-  hidden translation_5 0.02272799366810216 0.006322441188429839 4.440892098500626e-16
-  hidden rotation_5 0 0 -1 0.045432910739049225
   translation 0 -7.49 0
   name "door(1)"
   size 0.3 1 2.4
@@ -1441,8 +1384,6 @@ Door {
   }
 }
 Door {
-  hidden translation_5 0.0011420821657385782 4.48446856142759e-05 7.771561172376096e-16
-  hidden rotation_5 0 0 -1 0.0002991062277892007
   translation -2.14977 -8.43 0
   rotation 0 0 1 -1.5707953071795862
   name "door(2)"
@@ -2170,91 +2111,6 @@ DEF TREES Group {
   ]
 }
 Pr2 {
-  hidden position_2_0 1.6119759811884403e-07
-  hidden position_2_1 1.6123859882075193e-07
-  hidden position_2_2 1.5402480746990637e-07
-  hidden position_2_3 1.5710302475572587e-07
-  hidden position_2_4 0.1986790751000978
-  hidden position_2_5 8.61136680100164e-12
-  hidden rotation_6 0 0 1 1.6049041769309358e-07
-  hidden position_6_0 90.23883240626583
-  hidden position_6_1 120.52107393972325
-  hidden rotation_7 0 0.9999999999999999 0 2.2742381057516177
-  hidden rotation_8 0 -1 0 5.1426322038684775
-  hidden rotation_9 0 0 0.9999999999999999 1.6049041769309358e-07
-  hidden position_9_0 91.74605480230203
-  hidden position_9_1 121.70452043805179
-  hidden rotation_10 0 0.9999999999999999 0 3.781460501787816
-  hidden rotation_11 0 -1 0 3.959185705539942
-  hidden rotation_12 0 0 1 1.5485740967710712e-07
-  hidden position_12_0 91.31943095424435
-  hidden position_12_1 120.20657076875027
-  hidden rotation_13 0 0.9999999999999999 0 3.3548366537301426
-  hidden rotation_14 0 -1 0 5.457135374841462
-  hidden rotation_15 0 0 1 1.5769906706002898e-07
-  hidden position_15_0 92.58937950010835
-  hidden position_15_1 121.89138157009958
-  hidden rotation_16 0 0.9999999999999999 0 4.62478519959414
-  hidden rotation_17 0 -1 0 3.772324573492147
-  hidden translation_18 -0.05 0 0.9383540751000978
-  hidden position_18_0 -0.017915107201663255
-  hidden position_18_1 1.2686408484851332e-12
-  hidden position_18_2 -0.11199311266663724
-  hidden position_18_3 -3.689260444012642e-05
-  hidden rotation_23 0 0 -1 0.017915107201650918
-  hidden position_23_0 1.4563881332688874e-06
-  hidden rotation_24 0 1 0 1.4563550618733031e-06
-  hidden rotation_41 0 0 -1 0.11199311266663774
-  hidden position_41_0 0.500010789450944
-  hidden rotation_42 0 1 0 0.5000107894509441
-  hidden position_42_0 9.262196056081164e-06
-  hidden rotation_43 1 0 0 9.262195494620523e-06
-  hidden position_44_0 -0.4999150290584062
-  hidden rotation_45 0 -1 0 0.49991502905840585
-  hidden position_45_0 -1.6125494209243806e-05
-  hidden rotation_46 -1 0 0 1.612550761796398e-05
-  hidden position_47_0 1.010300628854978e-05
-  hidden rotation_48 0 1 0 1.0102987289439453e-05
-  hidden position_48_0 0.006191078904853071
-  hidden rotation_49 1 0 0 0.006191078904871623
-  hidden position_50_0 4.703845581902325e-10
-  hidden position_50_1 0.1101981996324609
-  hidden position_50_2 0.1102001230865347
-  hidden translation_56 0.16828000047038458 0 0
-  hidden rotation_57 0 0 0.9999999999999999 0.11019819963246237
-  hidden position_57_0 0.11020011454326213
-  hidden rotation_58 0 0 -1 0.11020011454326327
-  hidden rotation_59 0 0 -0.9999999999999999 0.11020012308653332
-  hidden position_59_0 0.1102001361521793
-  hidden rotation_60 0 0 1 0.11020013615217994
-  hidden position_60_0 -7.531976840143652e-08
-  hidden translation_61 0 -7.531976840143652e-08 0
-  hidden rotation_65 0 0 -1 3.6892602921348594e-05
-  hidden position_65_0 0.5000562078773738
-  hidden rotation_66 0 1 0 0.500056207877374
-  hidden position_66_0 -6.92662425927383e-05
-  hidden rotation_67 -1 0 0 6.926623943890128e-05
-  hidden position_68_0 -0.500178958945518
-  hidden rotation_69 0 -1 0 0.5001789589455183
-  hidden position_69_0 -1.5773737856038102e-05
-  hidden rotation_70 -1 0 0 1.5773736075591097e-05
-  hidden position_71_0 1.430165386529181e-05
-  hidden rotation_72 0 0.9999999999999999 0 1.430166843746539e-05
-  hidden position_72_0 0.005743649648442662
-  hidden rotation_73 1 0 0 0.005743649648451182
-  hidden position_74_0 1.05674254433741e-09
-  hidden position_74_1 0.041797785736972834
-  hidden position_74_2 0.04179735180417067
-  hidden translation_79 0.16828000105674257 0 0
-  hidden position_79_0 -4.487214512402764e-11
-  hidden rotation_81 0 0 1 0.04179778573697698
-  hidden position_81_0 0.04179778612564364
-  hidden rotation_82 0 0 -0.9999999999999999 0.04179778612564642
-  hidden rotation_83 0 0 -0.9999999999999999 0.04179735180416645
-  hidden position_83_0 0.0417975153755919
-  hidden rotation_84 0 0 1 0.041797515375586805
-  hidden position_84_0 -9.174087788572547e-08
-  hidden translation_85 0 -9.174087788572547e-08 0
   translation -6.25098 -5.41147 -0.0215192
   rotation 0.002729310746151432 6.388951746640796e-05 0.9999962733835465 3.14049
 }

@@ -1,8 +1,7 @@
 import os
 import launch
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
@@ -13,8 +12,7 @@ from webots_ros2_driver.webots_controller import WebotsController
 def generate_launch_description():
     package_dir = get_package_share_directory("swd")
     robot_description_path = os.path.join(package_dir, "resource", "ranger.urdf")
-    nav2_params_path = os.path.join(package_dir, "config", "nav2_params.yaml")
-    rviz_config_path = os.path.join(package_dir, "config", "ranger_nav2.rviz")
+    rviz_config_path = os.path.join(package_dir, "config", "ranger_lidar.rviz")
 
     DEEP_EMBODY_SRC_ROOT = os.path.join(package_dir, "../../../../../../../../")
 
@@ -35,7 +33,7 @@ def generate_launch_description():
     webots = WebotsLauncher(world=world_path)
 
     my_robot_driver = WebotsController(
-        robot_name="ranger",
+        robot_name="Pr2",
         parameters=[
             {"robot_description": robot_description_path},
         ],
@@ -45,18 +43,6 @@ def generate_launch_description():
         }
     )
 
-    # Nav2 launch
-    nav2_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(get_package_share_directory('nav2_bringup'), 'launch', 'bringup_launch.py')
-        ),
-        launch_arguments={
-            'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'params_file': nav2_params_path,
-            'slam': 'True',
-            'map': '',  # Empty map for SLAM mode
-        }.items()
-    )
 
     # RViz2 launch
     rviz2_node = Node(
@@ -73,7 +59,6 @@ def generate_launch_description():
             use_sim_time_arg,
             webots,
             my_robot_driver,
-            nav2_launch,
             rviz2_node,
             launch.actions.RegisterEventHandler(
                 event_handler=launch.event_handlers.OnProcessExit(

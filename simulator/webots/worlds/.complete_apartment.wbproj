@@ -13,9 +13,9 @@ renderingDevicePerspectives: PR2:r_forearm_cam_sensor;1;0.895833;0;0
 renderingDevicePerspectives: PR2:wide_stereo_l_stereo_camera_sensor;1;0.895833;0;0
 renderingDevicePerspectives: PR2:wide_stereo_r_stereo_camera_sensor;1;0.895833;0;0
 renderingDevicePerspectives: laptop:display;0;1;0;0
-renderingDevicePerspectives: ranger:high_def_sensor;1;0.868293;0;0
-renderingDevicePerspectives: ranger:l_forearm_cam_sensor;1;1;0;0
-renderingDevicePerspectives: ranger:r_forearm_cam_sensor;1;1;0;0
-renderingDevicePerspectives: ranger:wide_stereo_l_stereo_camera_sensor;1;1;0;0
-renderingDevicePerspectives: ranger:wide_stereo_r_stereo_camera_sensor;1;1;0;0
+renderingDevicePerspectives: ranger:high_def_sensor;1;0.419512;0;0
+renderingDevicePerspectives: ranger:l_forearm_cam_sensor;1;0.895833;0;0
+renderingDevicePerspectives: ranger:r_forearm_cam_sensor;1;0.895833;0;0
+renderingDevicePerspectives: ranger:wide_stereo_l_stereo_camera_sensor;1;0.895833;0;0
+renderingDevicePerspectives: ranger:wide_stereo_r_stereo_camera_sensor;1;0.895833;0;0
 renderingDevicePerspectives: television:display;0;1;0.149677;0.113229
