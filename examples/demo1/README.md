@@ -1,6 +1,8 @@
 # demo1 README
 wheatfox
 
+请参考 [examples/README.md](../README.md) 安装依赖。
+
 ## LLM任务规划Demo
 
 `llm_demo.py` 是一个基于DeepSeek LLM的机器人任务规划演示程序。它能够自动检测场景中的物体，理解用户的自然语言需求，生成相应的执行计划并自动执行。

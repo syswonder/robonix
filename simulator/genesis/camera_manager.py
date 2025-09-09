@@ -6,7 +6,6 @@ import time
 import os
 import cv2
 import numpy as np
-from pprint import pprint
 
 # Try to import uapi.log, fallback to standard logging if failed
 try:
@@ -128,7 +127,8 @@ class CameraManager:
             filepath = os.path.join(self.output_dir, filename)
 
             # Save image
-            success = cv2.imwrite(filepath, rgb_bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            success = cv2.imwrite(filepath, rgb_bgr, [
+                                  cv2.IMWRITE_JPEG_QUALITY, 90])
 
             if success:
                 self.image_counter += 1
@@ -168,11 +168,12 @@ class CameraManager:
 
             # Optimize depth visualization with better contrast and scaling
             success = self._save_optimized_depth_image(depth, filepath)
-            
+
             # Also save a colored version for better visualization
             if success:
                 colored_filename = "depth_current_colored.png"
-                colored_filepath = os.path.join(self.output_dir, colored_filename)
+                colored_filepath = os.path.join(
+                    self.output_dir, colored_filename)
                 self._save_colored_depth_image(depth, colored_filepath)
 
             if success:
@@ -192,46 +193,50 @@ class CameraManager:
         try:
             # Convert to float32 if not already
             depth_float = depth.astype(np.float32)
-            
+
             # Get depth statistics for better scaling
             min_depth = np.min(depth_float)
             max_depth = np.max(depth_float)
-            
+
             # Handle edge cases (all same values or invalid depths)
             if min_depth == max_depth or np.isnan(min_depth) or np.isnan(max_depth):
-                logger.warning("depth image has uniform or invalid values, using default scaling")
+                logger.warning(
+                    "depth image has uniform or invalid values, using default scaling")
                 min_depth = 0.0
                 max_depth = 1.0
-            
+
             # Apply depth normalization with clipping to remove outliers
             # Use percentile-based clipping for more robust scaling
-            depth_clipped = np.clip(depth_float, 
-                                  np.percentile(depth_float, 1), 
-                                  np.percentile(depth_float, 99))
-            
+            depth_clipped = np.clip(depth_float,
+                                    np.percentile(depth_float, 1),
+                                    np.percentile(depth_float, 99))
+
             # Normalize to 0-1 range
-            depth_normalized = (depth_clipped - np.min(depth_clipped)) / (np.max(depth_clipped) - np.min(depth_clipped) + 1e-8)
-            
+            depth_normalized = (depth_clipped - np.min(depth_clipped)) / \
+                (np.max(depth_clipped) - np.min(depth_clipped) + 1e-8)
+
             # Apply gamma correction for better visual contrast
             gamma = 0.6  # Darker mid-tones for better depth perception
             depth_gamma = np.power(depth_normalized, gamma)
-            
+
             # Convert to 8-bit grayscale (0-255)
             depth_8bit = (depth_gamma * 255).astype(np.uint8)
-            
+
             # Apply slight Gaussian blur to reduce noise (optional)
             depth_smoothed = cv2.GaussianBlur(depth_8bit, (3, 3), 0.5)
-            
+
             # Save the optimized depth image
             success = cv2.imwrite(filepath, depth_smoothed)
-            
+
             if success:
                 logger.debug(f"optimized depth image saved: {filepath}")
-                logger.debug(f"depth range: {min_depth:.4f} to {max_depth:.4f}")
-                logger.debug(f"normalized range: {np.min(depth_normalized):.4f} to {np.max(depth_normalized):.4f}")
-            
+                logger.debug(
+                    f"depth range: {min_depth:.4f} to {max_depth:.4f}")
+                logger.debug(
+                    f"normalized range: {np.min(depth_normalized):.4f} to {np.max(depth_normalized):.4f}")
+
             return success
-            
+
         except Exception as e:
             logger.error(f"Error in depth image optimization: {e}")
             # Fallback to original method
@@ -242,47 +247,49 @@ class CameraManager:
         try:
             # Convert to float32 if not already
             depth_float = depth.astype(np.float32)
-            
+
             # Get depth statistics for better scaling
             min_depth = np.min(depth_float)
             max_depth = np.max(depth_float)
-            
+
             # Handle edge cases
             if min_depth == max_depth or np.isnan(min_depth) or np.isnan(max_depth):
-                logger.warning("depth image has uniform or invalid values, using default scaling")
+                logger.warning(
+                    "depth image has uniform or invalid values, using default scaling")
                 min_depth = 0.0
                 max_depth = 1.0
-            
+
             # Apply depth normalization with clipping to remove outliers
-            depth_clipped = np.clip(depth_float, 
-                                  np.percentile(depth_float, 1), 
-                                  np.percentile(depth_float, 99))
-            
+            depth_clipped = np.clip(depth_float,
+                                    np.percentile(depth_float, 1),
+                                    np.percentile(depth_float, 99))
+
             # Normalize to 0-1 range
-            depth_normalized = (depth_clipped - np.min(depth_clipped)) / (np.max(depth_clipped) - np.min(depth_clipped) + 1e-8)
-            
+            depth_normalized = (depth_clipped - np.min(depth_clipped)) / \
+                (np.max(depth_clipped) - np.min(depth_clipped) + 1e-8)
+
             # Apply gamma correction for better visual contrast
             gamma = 0.7  # Slightly different gamma for color version
             depth_gamma = np.power(depth_normalized, gamma)
-            
+
             # Convert to 8-bit (0-255)
             depth_8bit = (depth_gamma * 255).astype(np.uint8)
-            
+
             # Apply color mapping using OpenCV's COLORMAP_JET (blue to red)
             # This provides intuitive depth perception: blue = near, red = far
             depth_colored = cv2.applyColorMap(depth_8bit, cv2.COLORMAP_JET)
-            
+
             # Apply slight Gaussian blur to reduce noise
             depth_smoothed = cv2.GaussianBlur(depth_colored, (3, 3), 0.5)
-            
+
             # Save the colored depth image
             success = cv2.imwrite(filepath, depth_smoothed)
-            
+
             if success:
                 logger.debug(f"colored depth image saved: {filepath}")
-            
+
             return success
-            
+
         except Exception as e:
             logger.error(f"Error in colored depth image generation: {e}")
             return False
@@ -296,19 +303,22 @@ class CameraManager:
                 )
 
                 # Debug: Check original rendered image format
-                logger.debug(f"Original rendered image - type: {type(rgb)}, shape: {rgb.shape}, dtype: {rgb.dtype}")
+                logger.debug(
+                    f"Original rendered image - type: {type(rgb)}, shape: {rgb.shape}, dtype: {rgb.dtype}")
                 if rgb.size > 0:
                     # Check center pixel colors in original image
                     center_y, center_x = rgb.shape[0] // 2, rgb.shape[1] // 2
                     center_color = rgb[center_y, center_x]
-                    logger.debug(f"Original center pixel values: [0]={center_color[0]}, [1]={center_color[1]}, [2]={center_color[2]}")
-                    
+                    logger.debug(
+                        f"Original center pixel values: [0]={center_color[0]}, [1]={center_color[1]}, [2]={center_color[2]}")
+
                     # Check some sample pixels
                     sample_positions = [(100, 100), (200, 200), (300, 300)]
                     for y, x in sample_positions:
                         if y < rgb.shape[0] and x < rgb.shape[1]:
                             color = rgb[y, x]
-                            logger.debug(f"Original sample pixel at ({x}, {y}): [0]={color[0]}, [1]={color[1]}, [2]={color[2]}")
+                            logger.debug(
+                                f"Original sample pixel at ({x}, {y}): [0]={color[0]}, [1]={color[1]}, [2]={color[2]}")
 
                 # Resize image
                 if width > 0 and height > 0:
@@ -321,7 +331,8 @@ class CameraManager:
                 rgb_bgr = rgb  # Genesis returns BGR, no conversion needed
                 encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
                 _, jpeg_data = cv2.imencode(".jpg", rgb_bgr, encode_param)
-                logger.debug("Using Genesis BGR format directly for JPEG encoding (no conversion)")
+                logger.debug(
+                    "Using Genesis BGR format directly for JPEG encoding (no conversion)")
 
                 return jpeg_data.tobytes(), rgb.shape[1], rgb.shape[0]
 
@@ -354,9 +365,12 @@ class CameraManager:
                 )
 
                 # dump depth_float32 with first 10, middle 10, last 10 rows
-                logger.info(f"first 10 rows of depth_float32: {depth_float32[:10]}")
-                logger.info(f"middle 10 rows of depth_float32: {depth_float32[depth.shape[0]//2-5:depth.shape[0]//2+5]}")
-                logger.info(f"last 10 rows of depth_float32: {depth_float32[-10:]}")
+                logger.info(
+                    f"first 10 rows of depth_float32: {depth_float32[:10]}")
+                logger.info(
+                    f"middle 10 rows of depth_float32: {depth_float32[depth.shape[0]//2-5:depth.shape[0]//2+5]}")
+                logger.info(
+                    f"last 10 rows of depth_float32: {depth_float32[-10:]}")
 
                 return (
                     depth_float32.tobytes(),

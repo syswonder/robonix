@@ -1,13 +1,23 @@
+"""
+Action Module
+=============
+
+This module provides the action system for DeepEmbody OS.
+It includes action decorators, execution control, runtime management,
+and result types for the action framework.
+"""
+
 from enum import Enum
 import threading
 import inspect
 from typing import Dict, List, Callable, Any
-from uapi.log import logger
+from ..log import logger
 import os
 from datetime import datetime
 
 
 class EOS_TYPE_ActionResult(Enum):
+    """Enumeration for action execution results."""
     SUCCESS = 0
     FAILURE = 1
     ABORT = 2
@@ -19,7 +29,7 @@ __RUNTIME_INSTANCE__ = None
 def get_runtime():
     global __RUNTIME_INSTANCE__
     if __RUNTIME_INSTANCE__ is None:
-        from uapi.runtime.runtime import Runtime
+        from .runtime import Runtime
 
         __RUNTIME_INSTANCE__ = Runtime()
     return __RUNTIME_INSTANCE__
@@ -32,7 +42,38 @@ def action(func: Callable) -> Callable:
             return result
         except Exception as e:
             logger.error(
-                f"action function {func.__name__} failed: {str(e)}", exc_info=True
+                f"action function {func.__name__} failed: {str(e)} at {inspect.currentframe().f_back.f_code.co_name}, line {inspect.currentframe().f_back.f_lineno}",
+                exc_info=True,
+            )
+            import traceback
+
+            colors = {
+                "RED": "\033[31m",
+                "YELLOW": "\033[33m",
+                "CYAN": "\033[36m",
+                "WHITE": "\033[37m",
+                "BOLD": "\033[1m",
+                "RESET": "\033[0m",
+                "BG_RED": "\033[41m",
+                "BG_YELLOW": "\033[43m",
+            }
+
+            print(
+                f"\n{colors['BOLD']}{colors['BG_RED']}{colors['WHITE']}============= STACKTRACE for {func.__name__} ============={colors['RESET']}"
+            )
+            print(
+                f"{colors['YELLOW']}Error:{colors['RESET']} {colors['RED']}{str(e)}{colors['RESET']}"
+            )
+            print(
+                f"{colors['CYAN']}Time:{colors['RESET']} {colors['WHITE']}{datetime.now().strftime('%H:%M:%S')}{colors['RESET']}"
+            )
+            print(
+                f"{colors['CYAN']}Thread:{colors['RESET']} {colors['WHITE']}{threading.current_thread().name}{colors['RESET']}"
+            )
+            print()
+            print(f"{colors['YELLOW']}{traceback.format_exc()}{colors['RESET']}")
+            print(
+                f"{colors['BOLD']}{colors['BG_YELLOW']}{colors['WHITE']}{'=' * 60}{colors['RESET']}"
             )
             return EOS_TYPE_ActionResult.FAILURE
 

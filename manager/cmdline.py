@@ -17,6 +17,7 @@ class Colors:
     MAGENTA = "\033[95m"
     CYAN = "\033[96m"
     WHITE = "\033[97m"
+    GRAY = "\033[90m"
     RESET = "\033[0m"
     BOLD = "\033[1m"
 
@@ -51,6 +52,10 @@ def print_cyan(text, bold=False, end="\n"):
     _color_print(text, Colors.CYAN, bold, end)
 
 
+def print_gray(text, bold=False, end="\n"):
+    _color_print(text, Colors.GRAY, bold, end)
+
+
 class Command:
     """Simple command definition"""
 
@@ -81,17 +86,38 @@ class CommandRegistry:
 
 
 class Completer:
-    """Simple autocompleter for command names only"""
+    """Enhanced autocompleter for command names and subcommands"""
 
-    def __init__(self, command_registry: CommandRegistry):
+    def __init__(self, command_registry: CommandRegistry, manager):
         self.command_registry = command_registry
+        self.manager = manager
 
     def complete(self, text: str, state: int) -> Optional[str]:
-        """Autocompletion callback function - only for command names"""
+        """Autocompletion callback function for commands and subcommands"""
         if state == 0:
-
-            all_commands = self.command_registry.get_all_command_names()
-            self.matches = [cmd for cmd in all_commands if cmd.startswith(text)]
+            # 获取当前输入行
+            line = readline.get_line_buffer()
+            words = line.split()
+            
+            if len(words) <= 1:
+                # 第一个词或空白输入：补全命令名
+                all_commands = self.command_registry.get_all_command_names()
+                self.matches = [cmd for cmd in all_commands if cmd.startswith(text)]
+            elif len(words) == 2:
+                # 第二个词：根据命令补全子命令
+                command_name = words[0]
+                if command_name == "list":
+                    # list命令的子命令是节点名
+                    all_nodes = list(self.manager.available_nodes.keys())
+                    self.matches = [node for node in all_nodes if node.startswith(text)]
+                elif command_name in ["start", "stop", "output"]:
+                    # start/stop/output命令的子命令也是节点名
+                    all_nodes = list(self.manager.available_nodes.keys())
+                    self.matches = [node for node in all_nodes if node.startswith(text)]
+                else:
+                    self.matches = []
+            else:
+                self.matches = []
 
         if state < len(self.matches):
             return self.matches[state]
@@ -113,7 +139,7 @@ class CLI:
     def __init__(self, manager):
         self.manager = manager
         self.command_registry = CommandRegistry()
-        self.completer = Completer(self.command_registry)
+        self.completer = Completer(self.command_registry, manager)
 
         self.history_file = os.path.expanduser("~/.deepembody_history")
 
@@ -143,6 +169,7 @@ class CLI:
                 name="list",
                 description="List all available nodes",
                 handler=self._cmd_list,
+                usage="list [node_name]",
             ),
             Command(
                 name="start",
@@ -180,6 +207,12 @@ class CLI:
                 usage="history [number]",
             ),
             Command(
+                name="mcp_log",
+                description="Show MCP server logs",
+                handler=self._cmd_mcp_log,
+                usage="mcp_log [lines]",
+            ),
+            Command(
                 name="exit", description="Exit the application", handler=self._cmd_exit
             ),
         ]
@@ -189,8 +222,135 @@ class CLI:
 
     def _cmd_list(self, args: List[str]) -> bool:
         """List available nodes command"""
-        self.manager.print_available_nodes()
+        if len(args) == 0:
+            # 显示简洁的节点列表
+            self._print_nodes_summary()
+        else:
+            # 显示特定节点的详细信息
+            node_name = args[0]
+            self._print_node_details(node_name)
         return True
+
+    def _print_nodes_summary(self):
+        """Print a concise summary of all nodes"""
+        if not self.manager.available_nodes:
+            print_yellow("No nodes found.")
+            return
+
+        print_cyan("Available nodes:", bold=True)
+        print("-" * 60)
+        
+        # 按状态分组显示
+        running_nodes = []
+        stopped_nodes = []
+        
+        for node_id, node in self.manager.available_nodes.items():
+            is_running = (node_id in self.manager.running_processes and 
+                         self.manager.running_processes[node_id].is_running())
+            if is_running:
+                running_nodes.append(node)
+            else:
+                stopped_nodes.append(node)
+        
+        # 按类型分组节点
+        driver_nodes = []
+        capability_nodes = []
+        other_nodes = []
+        
+        for node_id, node in self.manager.available_nodes.items():
+            if node.node_type == "driver":
+                driver_nodes.append((node_id, node))
+            elif node.node_type == "capability":
+                capability_nodes.append((node_id, node))
+            else:
+                other_nodes.append((node_id, node))
+        
+        # 显示节点的辅助函数
+        def print_node_group(nodes, group_name=None):
+            if group_name:
+                print_cyan(f"\n{group_name}:", bold=True)
+                print("-" * 40)
+            
+            for node_id, node in nodes:
+                is_running = (node_id in self.manager.running_processes and 
+                             self.manager.running_processes[node_id].is_running())
+                
+                if is_running:
+                    status = f"{Colors.GREEN}Running{Colors.RESET}"
+                    status_icon = f"{Colors.GREEN}✓{Colors.RESET}"
+                else:
+                    status = f"{Colors.RED}Stopped{Colors.RESET}"
+                    status_icon = f"{Colors.RED}✗{Colors.RESET}"
+                
+                # 从cwd路径中提取目录名
+                import os
+                cwd_parts = os.path.normpath(node.cwd).split(os.sep)
+                folder_name = ""
+                if len(cwd_parts) > 0:
+                    folder_name = cwd_parts[-1]  # 获取最后一个目录名
+                
+                # 根据节点类型格式化显示
+                node_type_display = ""
+                if node.node_type and folder_name:
+                    if node.node_type == "driver":
+                        node_type_display = f" {Colors.GRAY}(driver@{folder_name}){Colors.RESET}"
+                    elif node.node_type == "capability":
+                        node_type_display = f" {Colors.GRAY}(cap@{folder_name}){Colors.RESET}"
+                    else:
+                        node_type_display = f" {Colors.GRAY}({node.node_type}@{folder_name}){Colors.RESET}"
+                
+                # 格式化显示：状态图标 + 状态 + 节点名(白色加粗) + 类型信息(灰色)
+                node_name_display = f"{Colors.BOLD}{Colors.WHITE}{node.name}{Colors.RESET}"
+                print(f"{status_icon} [{status:<8}] {node_name_display}{node_type_display}")
+        
+        # 按顺序显示各组节点
+        if driver_nodes:
+            print_node_group(driver_nodes, "Driver Nodes")
+        
+        if capability_nodes:
+            if driver_nodes:  # 如果前面有driver节点，添加分隔线
+                print()
+            print_node_group(capability_nodes, "Capability Nodes")
+        
+        if other_nodes:
+            if driver_nodes or capability_nodes:  # 如果前面有其他节点，添加分隔线
+                print()
+            print_node_group(other_nodes, "Other Nodes")
+        
+        print("-" * 60)
+        print(f"Total: {len(running_nodes)} running, {len(stopped_nodes)} stopped")
+        print_cyan("Tip: Use 'list <node_name>' to see detailed information for a specific node", bold=False)
+
+    def _print_node_details(self, node_name: str):
+        """Print detailed information for a specific node"""
+        node = self.manager.available_nodes.get(node_name)
+        if not node:
+            print_red(f"Error: Node '{node_name}' not found.")
+            print("Available nodes:", ", ".join(self.manager.available_nodes.keys()))
+            return
+        
+        # 检查运行状态
+        is_running = (node_name in self.manager.running_processes and 
+                     self.manager.running_processes[node_name].is_running())
+        status = "Running" if is_running else "Stopped"
+        status_color = Colors.GREEN if is_running else Colors.RED
+        
+        print_cyan(f"Node Details: {node.name}", bold=True)
+        print("-" * 50)
+        print(f"Status: {status_color}{status}{Colors.RESET}")
+        print(f"Version: {node.version}")
+        print(f"Directory: {node.cwd}")
+        print(f"Start on boot: {node.start_on_boot}")
+        
+        if node.startup_command:
+            print(f"Command: {node.startup_command}")
+        else:
+            print("Command: No startup command defined")
+        
+        if is_running:
+            process = self.manager.running_processes[node_name]
+            if process.process:
+                print(f"PID: {process.process.pid}")
 
     def _cmd_start(self, args: List[str]) -> bool:
         """Start node command"""
@@ -284,6 +444,41 @@ class CLI:
 
         return True
 
+    def _cmd_mcp_log(self, args: List[str]) -> bool:
+        """Show MCP server logs"""
+        try:
+            if len(args) > 0:
+                num_lines = int(args[0])
+            else:
+                num_lines = 20
+
+            log_file = os.path.expanduser("~/.deepembody_mcp.log")
+            
+            if not os.path.exists(log_file):
+                print_yellow("MCP log file not found. MCP server may not be running.")
+                return True
+            
+            with open(log_file, 'r') as f:
+                lines = f.readlines()
+                total_lines = len(lines)
+                start_idx = max(0, total_lines - num_lines)
+                
+                print_cyan(f"MCP Server Log (last {num_lines} lines):", bold=True)
+                print("-" * 50)
+                
+                for i in range(start_idx, total_lines):
+                    print(lines[i].rstrip())
+                    
+                if total_lines > num_lines:
+                    print(f"\n... ({total_lines - num_lines} more lines, use 'mcp_log {total_lines}' to see all)")
+                    
+        except ValueError:
+            print_red("Error: Invalid number for mcp_log command")
+        except Exception as e:
+            print_red(f"Error reading MCP log: {e}")
+
+        return True
+
     def _cmd_exit(self, args: List[str]) -> bool:
         """Exit command"""
         self.manager.stop_all_nodes()
@@ -302,13 +497,21 @@ class CLI:
             + (os.getenv("ROS_VERSION") or "N/A")
         )
 
-    async def run(self):
+    def get_user_info(self):
+        """Get user info"""
+        try:
+            return "user: " + os.getlogin()
+        except Exception:
+            return "user: N/A"
+
+
+    def run(self):
         """Run command line interface"""
         print_cyan(
             "Welcome to DeepEmbody Shell (system time: "
             + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            + ", user: "
-            + os.getlogin()
+            + ", "
+            + self.get_user_info()
             + ", "
             + self.get_ros_info()
             + ")",
@@ -324,8 +527,6 @@ class CLI:
         try:
             readline.read_init_file()
         except FileNotFoundError:
-
-            readline.parse_and_bind("tab: complete")
             readline.parse_and_bind("set editing-mode emacs")
             readline.parse_and_bind("set completion-ignore-case on")
             readline.parse_and_bind("set show-all-if-ambiguous on")
@@ -345,14 +546,12 @@ class CLI:
         def get_prompt():
             return f"{Colors.GREEN}{Colors.BOLD}> {Colors.RESET}"
 
-        readline.parse_and_bind("set colored-completion-prefix on")
-        readline.parse_and_bind("set colored-stats on")
-
         while True:
             try:
                 prompt = get_prompt()
                 try:
-                    line = await aioconsole.ainput(prompt)
+                    # Use input() instead of aioconsole.ainput() to preserve readline completion
+                    line = input(prompt)
                 except (EOFError, KeyboardInterrupt):
                     print_red("\nExiting...")
                     break

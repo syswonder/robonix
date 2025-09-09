@@ -1,4 +1,4 @@
-from uapi.runtime.provider import SkillProvider
+from .provider import SkillProvider
 from typing import List
 
 

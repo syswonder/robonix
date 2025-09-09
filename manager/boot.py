@@ -12,8 +12,13 @@ import sys
 
 if os.path.dirname(BASE_PATH) not in sys.path:
     sys.path.append(os.path.dirname(BASE_PATH))
-from DeepEmbody.manager.eaios_decorators import package_init, mcp_start
-import DeepEmbody.skill
+
+from eaios_decorators import package_init, mcp_start
+
+# Ensure the root directory is in the Python path for skill import
+sys.path.insert(0, BASE_PATH)
+import skill
+
 logger.remove()
 logger.add(
     sys.stderr,
@@ -23,98 +28,53 @@ logger.add(
     backtrace=True,
     diagnose=True,
 )
-class Colors:
-    RED = '\033[91m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    MAGENTA = '\033[95m'
-    CYAN = '\033[96m'
-    WHITE = '\033[97m'
-    RESET = '\033[0m'
-    BOLD = '\033[1m'
 
-def _color_print(text, color_code, bold=False, end='\n'):
-    style = Colors.BOLD if bold else ''
-    sys.stdout.write(f"{style}{color_code}{text}{Colors.RESET}{end}")
-    sys.stdout.flush()
 
-def print_red(text, bold=False, end='\n'):
-    _color_print(text, Colors.RED, bold, end)
+async def shutdown(signame):
+    """Handle shutdown signals"""
+    logger.info(f"Received {signame}, shutting down...")
+    if 'manager' in globals():
+        manager.stop_all_nodes()
+    loop = asyncio.get_event_loop()
+    loop.stop()
 
-def print_green(text, bold=False, end='\n'):
-    _color_print(text, Colors.GREEN, bold, end)
 
-def print_yellow(text, bold=False, end='\n'):
-    _color_print(text, Colors.YELLOW, bold, end)
-
-def print_blue(text, bold=False, end='\n'):
-    _color_print(text, Colors.BLUE, bold, end)
-
-def print_magenta(text, bold=False, end='\n'):
-    _color_print(text, Colors.MAGENTA, bold, end)
-
-def print_cyan(text, bold=False, end='\n'):
-    _color_print(text, Colors.CYAN, bold, end)
-
-def cmdline(manager: process_manage.RuntimeManager):
-    """Entry point for command line interface."""
-    while True:
-        print_green(">", bold=True, end="")
-        cmd = input().strip().split()
-        if len(cmd) == 0:
-            continue
-
-        if cmd[0] == "list":
-            manager.print_available_nodes()
-        elif cmd[0] == "start":
-            if len(cmd) < 2:
-                print_red("Error: Missing node name.")
-            node_name = cmd[1]
-            manager.start_node(node_name)
-        elif cmd[0] == "stop":
-            if len(cmd) < 2:
-                print_red("Error: Missing node name.")
-            node_name = cmd[1]
-            manager.stop_node(node_name)
-        elif cmd[0] == "output":
-            if len(cmd) < 2:
-                print_red("Error: Missing node name.")
-            node_name = cmd[1]
-            manager.print_node_output(node_name)
-        elif cmd[0] == "pids":
-            pids = manager.get_all_running_PIDs()
-            print_magenta(f"Running PIDs: {pids}")
-        elif cmd[0] == "exit":
-            manager.stop_all_nodes()
-            break
-        else:
-            print_red(f"Error: Unknown command: {cmd}")
-        
 async def main():
-    
+
     manager.boot()
     try:
-        mcp_task = asyncio.create_task(mcp_start())
-        # cmdline(manager)
+        # 重定向MCP服务器输出到日志文件，避免与CLI输出冲突
+        import subprocess
+        import sys
 
-        cli = CLI(manager)
-        input_task = asyncio.create_task(cli.run())
-        
-        # 等待任意任务完成
-        done, pending = await asyncio.wait(
-            [mcp_task, input_task],
-            return_when=asyncio.FIRST_COMPLETED
+        # 创建日志文件
+        log_file = os.path.expanduser("~/.deepembody_mcp.log")
+
+        # 启动MCP服务器进程，重定向输出到日志文件
+        mcp_process = subprocess.Popen(
+            [sys.executable, "-c",
+             "import asyncio; import sys; import os; sys.path.append(os.path.dirname(os.path.abspath('.'))); from manager.eaios_decorators import mcp_start; asyncio.run(mcp_start())"],
+            stdout=open(log_file, 'w'),
+            stderr=subprocess.STDOUT,
+            text=True
         )
 
-        # 取消所有仍在运行的任务
-        for task in pending:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        # 等待一下让MCP服务器启动
+        await asyncio.sleep(1)
 
+        cli = CLI(manager)
+
+        # 在单独的线程中运行CLI以避免阻塞异步任务
+        import threading
+        cli_thread = threading.Thread(target=cli.run, daemon=True)
+        cli_thread.start()
+
+        # 等待CLI线程结束
+        cli_thread.join()
+
+        # 清理MCP进程
+        mcp_process.terminate()
+        mcp_process.wait()
 
     except KeyboardInterrupt:
         logger.info("Exiting...")
@@ -124,7 +84,8 @@ async def main():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='eaios boot and args')
-    parser.add_argument("--config", type=str, required=True, help="Path to the configuration file")
+    parser.add_argument("--config", type=str, required=True,
+                        help="Path to the configuration file")
     args = parser.parse_args()
     node_list = node.get_node_details(args.config)
     depend.check_depend(args.config)
