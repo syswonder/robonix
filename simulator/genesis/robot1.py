@@ -5,7 +5,6 @@ import sys
 import os
 import signal
 import threading
-import time
 
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,11 +21,11 @@ except ImportError:
     )
     logger = logging.getLogger(__name__)
 
-from keyboard_device import KeyboardDevice
-from scene_manager import SceneManager
-from camera_manager import CameraManager
-from main_loop import MainControlLoop
-from grpc_service import serve_grpc
+from simulator.genesis.keyboard_device import KeyboardDevice
+from simulator.genesis.scene_manager import SceneManager
+from simulator.genesis.camera_manager import CameraManager
+from simulator.genesis.main_loop import MainControlLoop
+from simulator.genesis.grpc_service import serve_grpc
 
 
 class RobotSimulator:
@@ -69,7 +68,7 @@ class RobotSimulator:
 
     def setup_main_loop(self, car):
         self.main_loop = MainControlLoop(
-            car, self.keyboard_device, self.scene_lock, self.camera_manager
+            car, self.keyboard_device, self.scene_lock, self.camera_manager, self.scene_manager
         )
 
     def run(self):

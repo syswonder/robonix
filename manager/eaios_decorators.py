@@ -98,9 +98,46 @@ class eaios:
     FUNCTION_REGISTRY = {}
     @staticmethod
     def api(func):
+        """
+        Decorator for capabilities (cap) that automatically injects self_entity parameter.
+        """
         print("eaios.__module__ =", eaios.__module__)
         print("eaios class id =", id(eaios))
         func = eaios.mcp.tool()(func)
+
+        @functools.wraps(func)
+        def wrapper(**kwargs):
+            # Check if self_entity is already in kwargs (from entity wrapper)
+            if 'self_entity' in kwargs:
+                # self_entity is already provided by entity wrapper, just call the function
+                print(f"[DEBUG] {func.__name__}: self_entity already in kwargs, calling func directly")
+                return func(**kwargs)
+            
+            # Get the current entity context from the runtime
+            from DeepEmbody.uapi.runtime.action import get_runtime
+            runtime = get_runtime()
+            
+            # Extract self_entity from kwargs if provided, otherwise use current context
+            self_entity = kwargs.pop('self_entity', None)
+            if self_entity is None:
+                # Try to get current entity from runtime context
+                self_entity = getattr(runtime, '_current_entity', None)
+            
+            # Call the original function with self_entity injected as keyword argument
+            if self_entity is not None:
+                # Check if the function already has self_entity in its signature
+                import inspect
+                sig = inspect.signature(func)
+                if 'self_entity' in sig.parameters:
+                    # Function supports self_entity, pass it as keyword argument
+                    kwargs['self_entity'] = self_entity
+                    return func(**kwargs)
+                else:
+                    # Function doesn't support self_entity, call without it
+                    return func(**kwargs)
+            else:
+                # Fallback: call without self_entity if not available
+                return func(**kwargs)
 
         full_mod = func.__module__
         print("full mod",full_mod, "function name", func.__name__)
@@ -108,7 +145,12 @@ class eaios:
         registry = FunctionRegistry()
         registry.add_function(func.__name__, full_mod)
         # print(f"[DEBUG] API 添加后: _registered_funcs = {_registered_funcs}, ID={id(_registered_funcs)}")
-        return func
+        
+        # Mark this as a capability function
+        wrapper._is_capability = True
+        wrapper._original_func = func
+        
+        return wrapper
 
     @staticmethod
     def plugin(cap,name):
@@ -177,37 +219,50 @@ class eaios:
     def caller(func):
         """
         装饰器：从 __init__.py 中动态导入所有 __all__ 中列出的函数
+        同时支持 self_entity 参数注入，用于技能调用
         """
-
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            # if os.path.abspath(os.path.dirname(__file__)) not in sys.path:
-            #     sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+            # Get the current entity context from the runtime
+            from DeepEmbody.uapi.runtime.action import get_runtime
+            runtime = get_runtime()
+            
+            # Extract self_entity from kwargs if provided, otherwise use current context
+            self_entity = kwargs.pop('self_entity', None)
+            if self_entity is None:
+                # Try to get current entity from runtime context
+                self_entity = getattr(runtime, '_current_entity', None)
+            
+            # Import skills from __init__.py
             print("[DEBUG] __file__:", __file__)
             print("[DEBUG] cwd:", os.getcwd())
-            print("[DEBUG] sys.path:",sys.path)
+            # print("[DEBUG] sys.path:",sys.path)
             skill_module = importlib.import_module("DeepEmbody.skill")  # 必须是模块路径
             print(id(skill_module),skill_module.__file__)
             print(eaios.FUNCTION_REGISTRY)
             for name in getattr(skill_module, "__all__", []):
                 func.__globals__[name] = getattr(skill_module, name)
-            return func(*args, **kwargs)
+            
+            # Always inject self_entity as keyword argument if the function expects it
+            import inspect
+            sig = inspect.signature(func)
+            
+            # Call the original function with self_entity injected as keyword argument
+            if self_entity is not None and 'self_entity' in sig.parameters:
+                kwargs['self_entity'] = self_entity
+            
+            # Always use keyword arguments for all function calls
+            return func(**kwargs)
 
+        # Mark this as a skill function
+        wrapper._is_skill = True
+        wrapper._original_func = func
+        
+        full_mod = func.__module__
+        registry = FunctionRegistry()
+        registry.add_function(func.__name__, full_mod)
+        
         return wrapper
-        # @functools.wraps(func)
-        # def wrapper(*args, **kwargs):
-        #     with open(INIT_FILE, 'r') as f:
-        #         for line in f:
-        #             if line.startswith('from'):
-        #                 parts = line.strip().split()
-        #                 if len(parts) == 4 and parts[0] == 'from' and parts[2] == 'import':
-        #                     rel_module = parts[1].lstrip('.')
-        #                     full_module = f"base_path.skill.{rel_module}"
-        #                     func_name = parts[3]
-        #                     imported = getattr(importlib.import_module(full_module), func_name)
-        #                     func.__globals__[func_name] = imported
-        #     return func(*args, **kwargs)
-        # return wrapper
 def package_init(config_path: str):
     """
     初始化包，扫描 config_path 中的所有模块并注册。

@@ -1,0 +1,43 @@
+/* 隐藏左侧导航栏的滚动条，但保持滚动功能 */
+.bd-sidebar {
+    overflow-y: auto;
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* Internet Explorer 10+ */
+}
+
+.bd-sidebar::-webkit-scrollbar {
+    display: none; /* WebKit */
+}
+
+/* 鼠标悬停时显示滚动条 */
+.bd-sidebar:hover {
+    scrollbar-width: thin; /* Firefox */
+    -ms-overflow-style: auto; /* Internet Explorer 10+ */
+}
+
+.bd-sidebar:hover::-webkit-scrollbar {
+    display: block; /* WebKit */
+    width: 6px;
+}
+
+.bd-sidebar:hover::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.bd-sidebar:hover::-webkit-scrollbar-thumb {
+    background-color: rgba(0, 0, 0, 0.3);
+    border-radius: 3px;
+}
+
+.bd-sidebar:hover::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(0, 0, 0, 0.5);
+}
+
+/* 优化导航栏的整体样式 */
+.bd-sidebar-primary {
+    max-height: calc(100vh - 4rem);
+}
+
+.bd-sidebar .bd-toc {
+    max-height: calc(100vh - 8rem);
+}

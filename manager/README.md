@@ -6,4 +6,4 @@ The bootstrap module, launched on system startup.
 - Initializes required capabilities based on config
 - Coordinates first-stage hardware checks
 
-Stable and rarely updated¡ªanalogous to a lightweight BIOS/Init system.
+Stable and rarely updatedï¿½ï¿½analogous to a lightweight BIOS/Init system.
