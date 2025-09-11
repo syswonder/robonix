@@ -17,8 +17,8 @@ if root_dir not in sys.path:
 
 print(root_dir)
 
-from DeepEmbody.manager.eaios_decorators import eaios
-from DeepEmbody.uapi.graph.entity import Entity
+from Robonix.manager.eaios_decorators import eaios
+from Robonix.uapi.graph.entity import Entity
 
 from typing import Optional, Tuple
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# DeepEmbody Documentation Deployment Script
+# Robonix Documentation Deployment Script
 # This script copies built HTML documentation to the remote server
 
 set -e  # Exit on any error
@@ -189,7 +189,7 @@ set_permissions() {
 
 # Main deployment function
 main() {
-    print_status "Starting DeepEmbody documentation deployment..."
+    print_status "Starting Robonix documentation deployment..."
     echo "=================================="
     
     # Setup trap to cleanup SSH connection on exit
@@ -225,7 +225,7 @@ main() {
 
 # Help function
 show_help() {
-    echo "DeepEmbody Documentation Deployment Script"
+    echo "Robonix Documentation Deployment Script"
     echo ""
     echo "Usage: $0 [OPTIONS]"
     echo ""

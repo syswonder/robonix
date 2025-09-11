@@ -1,1 +1,1 @@
-# DeepEmbody Capability Package
+# Robonix Capability Package

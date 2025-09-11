@@ -8,7 +8,7 @@ from tf_transformations import euler_from_quaternion
 
 from tf2_ros import Buffer, TransformListener
 
-from DeepEmbody.manager.eaios_decorators import eaios
+from Robonix.manager.eaios_decorators import eaios
 from typing import Optional, Tuple
 
 

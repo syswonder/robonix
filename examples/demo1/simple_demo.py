@@ -10,22 +10,22 @@ sys.path.insert(0, str(project_root))
 
 project_root_parent = Path(
     __file__
-).parent.parent.parent.parent.parent  # DeepEmbody root
+).parent.parent.parent.parent.parent  # Robonix root
 sys.path.insert(0, str(project_root_parent))
 
-from DeepEmbody.uapi.log import logger
-from DeepEmbody.uapi import create_runtime_manager, set_runtime
+from Robonix.uapi.log import logger
+from Robonix.uapi import create_runtime_manager, set_runtime
 
 def init_skill_providers(manager):
     """Initialize skill providers"""
-    from DeepEmbody.uapi.runtime.provider import SkillProvider
+    from Robonix.uapi.runtime.provider import SkillProvider
 
-    # dump __all__ in DeepEmbody.skill to skills list
+    # dump __all__ in Robonix.skill to skills list
     try:
-        from DeepEmbody.skill import __all__
+        from Robonix.skill import __all__
         skills = __all__
     except ImportError:
-        logger.warning("DeepEmbody.skill module not available")
+        logger.warning("Robonix.skill module not available")
         skills = []
 
     local_provider = SkillProvider(
@@ -41,7 +41,7 @@ def init_skill_providers(manager):
 def create_manual_entity_builder():
     """Create a manual entity graph builder"""
     def builder(runtime, **kwargs):
-        from DeepEmbody.uapi.graph.entity import create_root_room, create_controllable_entity
+        from Robonix.uapi.graph.entity import create_root_room, create_controllable_entity
 
         root_room = create_root_room()
 
@@ -57,12 +57,12 @@ def create_manual_entity_builder():
             return (1.0, 2.0, 0.0)
 
         try:
-            from DeepEmbody.skill import debug_test_skill
+            from Robonix.skill import debug_test_skill
             entity_a.bind_skill("cap_get_pose", mock_getpos)
             entity_a.bind_skill("skl_debug_test_skill", debug_test_skill)
         except ImportError:
             logger.error(
-                "DeepEmbody.skill module not available!")
+                "Robonix.skill module not available!")
             sys.exit(1)
 
         runtime.set_graph(root_room)
@@ -81,7 +81,7 @@ def create_yolo_entity_builder():
         logger.info("Building entity graph from YOLO detection...")
 
         try:
-            from DeepEmbody.skill import (
+            from Robonix.skill import (
                 sim_skl_detect_objs,
                 sim_save_rgb_image,
                 sim_save_depth_image,
@@ -93,7 +93,7 @@ def create_yolo_entity_builder():
             logger.error("Required skills not available")
             return
 
-        from DeepEmbody.uapi.graph.entity import create_root_room, create_controllable_entity
+        from Robonix.uapi.graph.entity import create_root_room, create_controllable_entity
 
         root_room = create_root_room()
         runtime.set_graph(root_room)
@@ -103,7 +103,7 @@ def create_yolo_entity_builder():
 
         def robot_move_impl(x, y, z):
             try:
-                from DeepEmbody.driver.sim_genesis_ranger.driver import move_to_point
+                from Robonix.driver.sim_genesis_ranger.driver import move_to_point
                 move_to_point(x, y)  # Uncommet when you want to really move the robot
                 return {"success": True}
             except ImportError:
@@ -113,7 +113,7 @@ def create_yolo_entity_builder():
 
         def robot_getpos_impl():
             try:
-                from DeepEmbody.driver.sim_genesis_ranger.driver import get_pose
+                from Robonix.driver.sim_genesis_ranger.driver import get_pose
                 x, y, z, yaw = get_pose()
                 return {"x": x, "y": y, "z": z}
             except ImportError:

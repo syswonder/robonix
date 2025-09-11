@@ -2,7 +2,7 @@
 Action Module
 =============
 
-This module provides the action system for DeepEmbody OS.
+This module provides the action system for Robonix OS.
 It includes action decorators, execution control, runtime management,
 and result types for the action framework.
 """

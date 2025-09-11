@@ -2,7 +2,7 @@
 Runtime Module
 ==============
 
-This module provides the core runtime system for DeepEmbody OS.
+This module provides the core runtime system for Robonix OS.
 The Runtime class manages entity graphs, action programs, skill registries,
 and execution control for the entire system.
 """
@@ -23,7 +23,7 @@ from datetime import datetime
 
 class Runtime:
     """
-    Core runtime system for DeepEmbody OS.
+    Core runtime system for Robonix OS.
     
     The Runtime class is responsible for:
     - Managing entity graphs and their lifecycle
