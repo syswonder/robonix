@@ -126,7 +126,7 @@ class Completer:
 
 
 class CLI:
-    """Command Line Interface for DeepEmbody"""
+    """Command Line Interface for Robonix"""
 
     """
         How to add a new command:
@@ -508,7 +508,7 @@ class CLI:
     def run(self):
         """Run command line interface"""
         print_cyan(
-            "Welcome to DeepEmbody Shell (system time: "
+            "Welcome to Robonix Shell (system time: "
             + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             + ", "
             + self.get_user_info()

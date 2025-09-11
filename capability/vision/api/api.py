@@ -1,5 +1,5 @@
 import rclpy
-from DeepEmbody.manager.eaios_decorators import eaios
+from Robonix.manager.eaios_decorators import eaios
 from .vision import CameraImageGetter, CameraRGBDGetter, CameraInfoGetter
 from tf2_ros import TransformListener, Buffer
 from rclpy.duration import Duration

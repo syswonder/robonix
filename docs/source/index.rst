@@ -1,20 +1,20 @@
-DeepEmbody OS 开发文档
+Robonix OS 开发文档
 =====================
 
 .. admonition:: 项目信息
    :class: info
 
-   代码仓库：https://github.com/HustWolfzzb/DeepEmbody
+   代码仓库：https://github.com/HustWolfzzb/Robonix
 
    Syswonder 社区：https://www.syswonder.org
 
-DeepEmbody OS（DEOS）是由 Syswonder 开发的、面向具身智能（Embodied AI）场景进行通用编程的具身操作系统（Embodied OS），提供了包括编程模型虚拟实体图（Virtual Entity Graph，VEG），Capbility-Skill-Action-Task（CSAT）抽象层次、Action 程序语法与运行时，以及基于 Genesis 模拟器和 Piper Ranger 四轮小车的完整运行框架。
+Robonix OS（DEOS）是由 Syswonder 开发的、面向具身智能（Embodied AI）场景进行通用编程的具身操作系统（Embodied OS），提供了包括编程模型虚拟实体图（Virtual Entity Graph，VEG），Capbility-Skill-Action-Task（CSAT）抽象层次、Action 程序语法与运行时，以及基于 Genesis 模拟器和 Piper Ranger 四轮小车的完整运行框架。
 
-**Overview Structure of DeepEmbody OS**
+**Overview Structure of Robonix OS**
 
 .. image:: _static/uapi_framework.png
    :width: 80%
-   :alt: Overview Structure of DeepEmbody OS
+   :alt: Overview Structure of Robonix OS
    :align: center
 
 **文档索引**

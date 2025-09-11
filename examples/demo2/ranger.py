@@ -10,25 +10,25 @@ sys.path.insert(0, str(project_root))
 
 project_root_parent = Path(
     __file__
-).parent.parent.parent.parent.parent  # DeepEmbody root
+).parent.parent.parent.parent.parent  # Robonix root
 sys.path.insert(0, str(project_root_parent))
 
 
-from DeepEmbody.uapi import create_runtime_manager, set_runtime
-from DeepEmbody.uapi.log import logger, set_log_level
+from Robonix.uapi import create_runtime_manager, set_runtime
+from Robonix.uapi.log import logger, set_log_level
 
 set_log_level("debug")
 
 def init_skill_providers(manager):
     """Initialize skill providers for ranger demo"""
-    from DeepEmbody.uapi.runtime.provider import SkillProvider
+    from Robonix.uapi.runtime.provider import SkillProvider
 
-    # dump __all__ in DeepEmbody.skill to skills list
+    # dump __all__ in Robonix.skill to skills list
     try:
-        from DeepEmbody.skill import __all__
+        from Robonix.skill import __all__
         skills = __all__
     except ImportError:
-        logger.warning("DeepEmbody.skill module not available")
+        logger.warning("Robonix.skill module not available")
         skills = []
 
     local_provider = SkillProvider(
@@ -44,8 +44,8 @@ def init_skill_providers(manager):
 def create_ranger_entity_builder():
     """Create a ranger-specific entity graph builder"""
     def builder(runtime, **kwargs):
-        from DeepEmbody.uapi.graph.entity import create_root_room, create_controllable_entity
-        from DeepEmbody.skill import get_pose, move_to_rel_pos, simple_set_goal
+        from Robonix.uapi.graph.entity import create_root_room, create_controllable_entity
+        from Robonix.skill import get_pose, move_to_rel_pos, simple_set_goal
 
         root_room = create_root_room()
         runtime.set_graph(root_room)

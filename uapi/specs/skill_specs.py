@@ -2,7 +2,7 @@
 Skill Specifications Module
 ===========================
 
-This module defines the skill specifications for the DeepEmbody OS system.
+This module defines the skill specifications for the Robonix OS system.
 It contains the complete specification of all capabilities and skills available
 in the system, including their input/output types and dependencies.
 

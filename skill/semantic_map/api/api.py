@@ -1,5 +1,5 @@
 from typing import Dict, Tuple, Optional
-from DeepEmbody.manager.eaios_decorators import eaios
+from Robonix.manager.eaios_decorators import eaios
 from .map import semantic_map
 
 @eaios.api

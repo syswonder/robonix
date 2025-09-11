@@ -114,7 +114,7 @@ class eaios:
                 return func(**kwargs)
             
             # Get the current entity context from the runtime
-            from DeepEmbody.uapi.runtime.action import get_runtime
+            from Robonix.uapi.runtime.action import get_runtime
             runtime = get_runtime()
             
             # Extract self_entity from kwargs if provided, otherwise use current context
@@ -224,7 +224,7 @@ class eaios:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             # Get the current entity context from the runtime
-            from DeepEmbody.uapi.runtime.action import get_runtime
+            from Robonix.uapi.runtime.action import get_runtime
             runtime = get_runtime()
             
             # Extract self_entity from kwargs if provided, otherwise use current context
@@ -237,7 +237,7 @@ class eaios:
             print("[DEBUG] __file__:", __file__)
             print("[DEBUG] cwd:", os.getcwd())
             # print("[DEBUG] sys.path:",sys.path)
-            skill_module = importlib.import_module("DeepEmbody.skill")  # 必须是模块路径
+            skill_module = importlib.import_module("Robonix.skill")  # 必须是模块路径
             print(id(skill_module),skill_module.__file__)
             print(eaios.FUNCTION_REGISTRY)
             for name in getattr(skill_module, "__all__", []):
@@ -285,7 +285,7 @@ def package_init(config_path: str):
             if not os.path.exists(entry_dir):
                 print(f"[eaios] Error: The '{entry_dir}' directory was not found at '{base}'")
                 continue
-            base_package = f"DeepEmbody.{base}.{entry}"
+            base_package = f"Robonix.{base}.{entry}"
             eaios.scan_dir(base_package, entry_dir)
     print("before finalize")
     eaios.finalize()

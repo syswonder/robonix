@@ -4,7 +4,7 @@ root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.pa
 print(root_dir)
 if root_dir not in sys.path:
     sys.path.append(root_dir)
-from DeepEmbody.manager.eaios_decorators import eaios, package_init,FunctionRegistry,mcp_start
+from Robonix.manager.eaios_decorators import eaios, package_init,FunctionRegistry,mcp_start
 
 import yaml
 package_init("config/include/ranger_test.yml")

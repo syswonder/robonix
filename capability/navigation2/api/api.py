@@ -10,7 +10,7 @@ from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from sensor_msgs.msg import Range
 import sys
 
-from DeepEmbody.manager.eaios_decorators import eaios
+from Robonix.manager.eaios_decorators import eaios
 
 
 class NavWithUltrasonicSafety(Node):
@@ -106,7 +106,7 @@ def set_goal(x, y, yaw) -> str:
 @eaios.api
 def simple_set_goal(x: float, y: float, yaw: float) -> str:
     # a simple set_goal function use navigation2 plugins - wheatfox
-    from DeepEmbody.capability.navigation2.plugins.ros2_navigation.lib import set_goal
+    from Robonix.capability.navigation2.plugins.ros2_navigation.lib import set_goal
     res = set_goal(x, y, yaw)
     return res
 

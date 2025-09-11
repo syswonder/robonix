@@ -11,16 +11,16 @@ PROJECT_ROOT = os.path.dirname(
 sys.path.insert(0, PROJECT_ROOT)
 sys.path.append("./simulator/genesis")
 
-from DeepEmbody.manager.eaios_decorators import eaios
+from Robonix.manager.eaios_decorators import eaios
 
-from DeepEmbody.capability.sim_vision.api.vision import (
+from Robonix.capability.sim_vision.api.vision import (
     SimulatorRGBGetter,
     SimulatorRGBDGetter,
     SimulatorCameraInfoGetter,
 )
 
 # Import driver functions directly
-from DeepEmbody.driver.sim_genesis_ranger.driver import (
+from Robonix.driver.sim_genesis_ranger.driver import (
     get_pose as driver_get_pose,
     save_rgb_image as driver_save_rgb_image,
     save_depth_image as driver_save_depth_image,

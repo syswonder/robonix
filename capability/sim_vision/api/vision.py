@@ -13,7 +13,7 @@ sys.path.insert(0, PROJECT_ROOT)
 sys.path.append("./simulator/genesis")
 
 # Import driver functions directly
-from DeepEmbody.driver.sim_genesis_ranger.driver import (
+from Robonix.driver.sim_genesis_ranger.driver import (
     get_rgb_image as driver_get_rgb_image,
     get_depth_image as driver_get_depth_image,
     get_pose as driver_get_pose,

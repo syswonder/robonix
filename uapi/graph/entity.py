@@ -2,7 +2,7 @@
 Entity Graph Module
 ===================
 
-This module provides the entity graph system for DeepEmbody OS.
+This module provides the entity graph system for Robonix OS.
 It defines the Entity class which represents nodes in the hierarchical
 entity graph, along with skill management, skill operations,
 and graph traversal functionality.
