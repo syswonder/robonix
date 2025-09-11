@@ -1,7 +1,7 @@
 UAPI 用户编程接口
 =================
 
-UAPI（User Application Programming Interface）是DeepEmbody OS 的核心用户编程模块，提供了一套完整的具身应用开发接口。该模块实现了分层架构设计，通过实体图建模、运行时管理、技能系统和动作框架等组件。
+UAPI（User Application Programming Interface）是Robonix OS 的核心用户编程模块，提供了一套完整的具身应用开发接口。该模块实现了分层架构设计，通过实体图建模、运行时管理、技能系统和动作框架等组件。
 
 UAPI模块的设计遵循以下核心原则：
 

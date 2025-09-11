@@ -1,7 +1,7 @@
 Simple Demo (Genesis)
 ============
 
-本章通过 ``examples/demo1`` 中的完整示例，演示如何使用DeepEmbody OS框架开发具身应用应用。
+本章通过 ``examples/demo1`` 中的完整示例，演示如何使用Robonix OS框架开发具身应用应用。
 
 环境配置
 -------
