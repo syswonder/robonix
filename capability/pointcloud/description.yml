@@ -1,0 +1,8 @@
+name: "pointcloud"
+version: "1.0.0"
+author: "wheatfox"
+start_on_boot: true
+startup_command: "bash run.sh"
+description: "The pointcloud utility capability"
+feature: 
+  - "cap_pointcloud_to_file"

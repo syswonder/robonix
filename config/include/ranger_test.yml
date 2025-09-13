@@ -1,8 +1,8 @@
 driver:
   # - pointcloud_to_laserscan
-  - piontcloud_to_laserscan # TODO: fix this to "pointcloud"
+  - pointcloud_to_laserscan # TODO: fix this to "pointcloud"
   - ranger_ros2
-  - raspi_hc_sr04
+  # - raspi_hc_sr04
   - realsense_ros2
   - static_tf
   - mid360
@@ -13,6 +13,7 @@ capability:
   - navigation2
   - activator
   - vision
+  - pointcloud
 skill:
   - move
   - vision
