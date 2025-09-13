@@ -1,3 +1,6 @@
 [submodule "driver/realsense_ros2/src/realsense-ros"]
 	path = driver/realsense_ros2/src/realsense-ros
 	url = https://github.com/IntelRealSense/realsense-ros.git
+[submodule "skill/pointcloud/api/spatiallm"]
+	path = skill/pointcloud/api/spatiallm
+	url = https://github.com/enkerewpo/spatiallm
