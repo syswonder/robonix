@@ -161,6 +161,15 @@ EOS_SKILL_SPECS = {
     ####################
     ###### SKILLS ######
     ####################
+    "skl_spatiallm_detect": {
+        "description": "Detect walls, doors, objects with bounding boxes using spatiallm",
+        "type": EOS_SkillType.SKILL,
+        "input": {"ply_model": bytes},
+        "output": {
+            "txt": str, # .txt file that marked each object with its bounding box and label
+            "rrd": bytes, # .rrd file used for visualization
+        }
+    },
     "skl_debug_test_skill": {
         "description": "Test skill",
         "type": EOS_SkillType.SKILL,

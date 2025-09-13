@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Copyright (c) 2025, wheatfox <wheatfox17@icloud.com>
+syntax = "proto3";
+
+package spatiallm_detect;
+
+service SpatialLMDetect {
+  rpc Detect(SpatialLMDetectRequest) returns (SpatialLMDetectReply);
+}
+
+message SpatialLMDetectRequest {
+  bytes ply_model = 1;  // PLY point cloud model data
+}
+
+message SpatialLMDetectReply {
+  string txt = 1;       // .txt file content with object detections and bounding boxes
+  bytes rrd = 2;        // .rrd file data for visualization
+  string status = 3;    // Processing status
+}
