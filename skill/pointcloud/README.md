@@ -43,6 +43,7 @@ And also, spatiallm will download some LLM models, so there should be at least s
 
 ### notes
 
+```bash
 # wheatfox 2025.6
 
 # mkdir -p ~/miniconda3
@@ -53,6 +54,7 @@ And also, spatiallm will download some LLM models, so there should be at least s
 # source ~/miniconda3/bin/activate
 # conda create -n stt python=3.10
 # conda activate stt
+
 
 # sudo apt install ffmpeg
 
@@ -71,6 +73,7 @@ pip install torch-2.7.0-cp310-cp310-linux_aarch64.whl torchaudio-2.7.0-cp310-cp3
 sudo apt install libcudnn9-cuda-12 
 
 https://pypi.jetson-ai-lab.io/
+```
 
 ### for RTX 5090
 
