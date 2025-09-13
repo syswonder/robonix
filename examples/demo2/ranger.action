@@ -12,36 +12,43 @@ def test_ranger(ranger_path: EntityPath) -> EOS_TYPE_ActionResult:
         action_print(f"ranger not found at path: {ranger_path}")
         return EOS_TYPE_ActionResult.FAILURE
 
-    #### CAP: cap_get_pose #######################
-    result: Optional[Tuple[float, float, float]] = ranger.cap_get_pose()
-    ##############################################
+    # #### CAP: cap_get_pose #######################
+    # result: Optional[Tuple[float, float, float]] = ranger.cap_get_pose()
+    # ##############################################
 
-    if result is None:
-        action_print("failed to get ranger pose before move to relative pos")
+    # if result is None:
+    #     action_print("failed to get ranger pose before move to relative pos")
+    #     return EOS_TYPE_ActionResult.FAILURE
+
+    # x, y, yaw = result
+    # action_print(f"ranger pose before move: x={x}, y={y}, yaw={yaw}")
+
+    # # move forward 1 meter
+
+    # #### SKL: skl_move_to_rel_pos ################
+    # result = ranger.skl_move_to_rel_pos(dx=1, dy=0.0, dyaw=0.0)
+    # ##############################################
+
+    # action_print(f"move to rel pos result: {result}")
+    # if result != "success":
+    #     action_print("failed to move to relative pos")
+    #     return EOS_TYPE_ActionResult.FAILURE
+
+    # #### CAP: cap_get_pose #######################
+    # result = ranger.cap_get_pose()
+    # ##############################################
+
+    # if result is None:
+    #     action_print("failed to get ranger pose after move to relative pos")
+    #     return EOS_TYPE_ActionResult.FAILURE
+    # x, y, yaw = result
+    # action_print(f"ranger pose after move: x={x}, y={y}, yaw={yaw}")
+
+    # test cap_pointcloud_to_file
+    result = ranger.cap_pointcloud_to_file(filename="./examples/demo2/pointcloud.ply")
+    if not result["success"]:
+        action_print("failed to save pointcloud to file")
         return EOS_TYPE_ActionResult.FAILURE
-
-    x, y, yaw = result
-    action_print(f"ranger pose before move: x={x}, y={y}, yaw={yaw}")
-
-    # move forward 1 meter
-
-    #### SKL: skl_move_to_rel_pos ################
-    result = ranger.skl_move_to_rel_pos(dx=1, dy=0.0, dyaw=0.0)
-    ##############################################
-
-    action_print(f"move to rel pos result: {result}")
-    if result != "success":
-        action_print("failed to move to relative pos")
-        return EOS_TYPE_ActionResult.FAILURE
-
-    #### CAP: cap_get_pose #######################
-    result = ranger.cap_get_pose()
-    ##############################################
-
-    if result is None:
-        action_print("failed to get ranger pose after move to relative pos")
-        return EOS_TYPE_ActionResult.FAILURE
-    x, y, yaw = result
-    action_print(f"ranger pose after move: x={x}, y={y}, yaw={yaw}")
+    action_print(f"pointcloud saved to file: {result}")
 
     return EOS_TYPE_ActionResult.SUCCESS
