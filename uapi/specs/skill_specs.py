@@ -43,6 +43,12 @@ EOS_SKILL_SPECS = {
     ##########################
     ###### CAPABILITIES ######
     ##########################
+    "cap_pointcloud_to_file": {
+        "description": "Convert pointcloud to a .ply 3D model file",
+        "type": EOS_SkillType.CAPABILITY,
+        "input": {"filename": str},
+        "output": {"success": bool},
+    },
     "cap_space_getpos": {
         # DEPRECATED !!!
         "description": "Get the position of the entity",
