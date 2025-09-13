@@ -71,3 +71,79 @@ pip install torch-2.7.0-cp310-cp310-linux_aarch64.whl torchaudio-2.7.0-cp310-cp3
 sudo apt install libcudnn9-cuda-12 
 
 https://pypi.jetson-ai-lab.io/
+
+### for RTX 5090
+
+pytorch should be at least 2.7 ! or 5090 cannot use it - wheatfox
+
+https://github.com/lllyasviel/Fooocus/issues/3862
+
+pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+# NOTE: This script assumes Linux + Python 3.11 + CUDA 12.8 toolkit.
+
+# 0) Create and activate a clean env
+conda create -n spatiallm python=3.11 -y
+conda activate spatiallm
+
+# 1) Install CUDA 12.8 toolkit for building native extensions (nvcc)
+conda install -y -c nvidia/label/cuda-12.8.0 cuda-toolkit conda-forge::sparsehash
+
+# 2) Go to your project root (adjust path if needed)
+cd spatiallm
+
+# IMPORTANT: Ensure pyproject.toml does NOT pin torch/vision/audio to cu124 and has no poe tasks.
+
+# 3) Install PyTorch stack first (supports RTX 5090 / sm_120)
+#    Choose one of the following two lines:
+#    Stable 2.8 (recommended if available):
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+#    Or pin to 2.7 specifically:
+# pip install torch==2.7.* torchvision==0.22.* torchaudio==2.7.* --index-url https://download.pytorch.org/whl/cu128
+
+# 4) Install project (pure Python deps) via Poetry without creating its own venv
+pip install poetry
+poetry config virtualenvs.create false --local
+poetry install
+
+# 5) Native extensions that previously used poe (install manually)
+
+# 5.1 TorchSparse (build from source; needs nvcc from CUDA 12.8)
+#     If you hit build errors, export CUDA_HOME and (optionally) TORCH_CUDA_ARCH_LIST.
+export CUDA_HOME="${CONDA_PREFIX}"
+# export TORCH_CUDA_ARCH_LIST="12.0"  # Uncomment to force Blackwell build only
+pip install --no-cache-dir git+https://github.com/mit-han-lab/torchsparse.git
+
+# 5.2 torch-scatter (pick the wheel index matching the installed torch version)
+#     If you installed torch==2.8.* above, use 2.8.0+cu128; for 2.7.*, change the URL accordingly.
+pip install --no-cache-dir torch-scatter -f https://data.pyg.org/whl/torch-2.8.0+cu128.html
+# Alternative for torch 2.7.*:
+# pip install --no-cache-dir torch-scatter -f https://data.pyg.org/whl/torch-2.7.0+cu128.html
+
+# 5.3 FlashAttention (recent versions support torch>=2.7; build from source if no wheel)
+pip install --no-cache-dir ninja
+pip install --no-build-isolation --no-cache-dir flash-attn
+
+# 5.4 spconv (try prebuilt CUDA12 wheels first; fall back to source if needed)
+pip install --no-cache-dir timm spconv-cu120
+
+# 6) (Optional) Training extras previously defined in poe install-training
+pip install --no-cache-dir "omegaconf" "datasets<=3.6.0" "accelerate<=1.7.0" "wandb"
+
+# 7) Sanity check (GPU, versions)
+python - <<'PY'
+import torch, torchvision, torchaudio
+print("torch:", torch.__version__)
+print("torchvision:", torchvision.__version__)
+print("torchaudio:", torchaudio.__version__)
+print("cuda available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("device:", torch.cuda.get_device_name(0))
+    a = torch.randn(1024, 1024, device="cuda"); b = torch.randn(1024, 1024, device="cuda")
+    c = a @ b
+    print("matmul ok:", c.is_cuda, c.shape)
+PY
+```

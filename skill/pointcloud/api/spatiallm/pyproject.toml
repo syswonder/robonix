@@ -8,9 +8,9 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = ">=3.10,<=3.12"
-torch = { version = "^2.4.1+cu124", source = "pytorch" }
-torchvision = { version = "^0.19.1+cu124", source = "pytorch" }
-torchaudio = { version = "^2.4.1+cu124", source = "pytorch" }
+# torch = { version = "^2.8.0+cu128", source = "pytorch-cu128", markers = "platform_system == 'Linux' and platform_machine == 'x86_64'" }
+# torchvision = { version = "^0.23.0+cu128", source = "pytorch-cu128", markers = "platform_system == 'Linux' and platform_machine == 'x86_64'" }
+# torchaudio = { version = "^2.8.0+cu128", source = "pytorch-cu128", markers = "platform_system == 'Linux' and platform_machine == 'x86_64'" }
 transformers = ">=4.41.2,<=4.46.1"
 safetensors = "^0.4.5"
 pandas = "^2.2.3"
@@ -31,23 +31,23 @@ nvidia-nccl-cu12 = "*"
 poethepoet = { extras = ["poetry-plugin"], version = "^0.33.1" }
 addict = "^2.4.0"
 
-[tool.poe.tasks]
-install-torchsparse = "pip install git+https://github.com/mit-han-lab/torchsparse.git"
-install-flash-attn = "pip install ninja flash-attn --no-build-isolation"
-install-torch-scatter = "pip install torch-scatter -f https://data.pyg.org/whl/torch-2.4.0+cu124.html"
-install-spconv = "pip install timm spconv-cu120"
-install-sonata = [
-    "install-flash-attn",
-    "install-torch-scatter",
-    "install-spconv",
-]
-install-training = "pip install omegaconf datasets<=3.6.0 accelerate<=1.7.0 wandb"
+# [tool.poe.tasks]
+# install-torchsparse = "pip install git+https://github.com/mit-han-lab/torchsparse.git"
+# install-flash-attn = "pip install ninja flash-attn --no-build-isolation"
+# install-torch-scatter = "pip install torch-scatter -f https://data.pyg.org/whl/torch-2.7.0+cu128.html"
+# install-spconv = "pip install timm spconv-cu120"
+# install-sonata = [
+#     "install-flash-attn",
+#     "install-torch-scatter",
+#     "install-spconv",
+# ]
+# install-training = "pip install omegaconf datasets<=3.6.0 accelerate<=1.7.0 wandb"
 
 [build-system]
 requires = ["poetry-core", "setuptools", "wheel", "torch"]
 build-backend = "poetry.core.masonry.api"
 
-[[tool.poetry.source]]
-priority = "supplemental"
-name = "pytorch"
-url = "https://download.pytorch.org/whl/cu124"
+# [[tool.poetry.source]]
+# priority = "supplemental"
+# name = "pytorch-cu128"
+# url = "https://download.pytorch.org/whl/cu128"
