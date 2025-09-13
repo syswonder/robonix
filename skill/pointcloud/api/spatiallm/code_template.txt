@@ -1,0 +1,39 @@
+@dataclass
+class Wall:
+    ax: int
+    ay: int
+    az: int
+    bx: int
+    by: int
+    bz: int
+    height: int
+    thickness: int
+
+@dataclass
+class Door:
+    wall_id: str
+    position_x: int
+    position_y: int
+    position_z: int
+    width: int
+    height: int
+
+@dataclass
+class Window:
+    wall_id: str
+    position_x: int
+    position_y: int
+    position_z: int
+    width: int
+    height: int
+
+@dataclass
+class Bbox:
+    class: str
+    position_x: int
+    position_y: int
+    position_z: int
+    angle_z: int
+    scale_x: int
+    scale_y: int
+    scale_z: int
