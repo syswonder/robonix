@@ -17,6 +17,8 @@ sys.path.insert(0, str(project_root_parent))
 from Robonix.uapi import create_runtime_manager, set_runtime
 from Robonix.uapi.log import logger, set_log_level
 
+from Robonix.skill import *
+
 set_log_level("debug")
 
 def init_skill_providers(manager):
@@ -40,12 +42,10 @@ def init_skill_providers(manager):
     manager.get_runtime().registry.add_provider(local_provider)
     logger.info(f"Added skill providers: {manager.get_runtime().registry}")
 
-
 def create_ranger_entity_builder():
     """Create a ranger-specific entity graph builder"""
     def builder(runtime, **kwargs):
         from Robonix.uapi.graph.entity import create_root_room, create_controllable_entity
-        from Robonix.skill import get_pose, move_to_rel_pos, simple_set_goal
 
         root_room = create_root_room()
         runtime.set_graph(root_room)
@@ -56,6 +56,7 @@ def create_ranger_entity_builder():
         ranger.bind_skill("cap_get_pose", get_pose)
         ranger.bind_skill("cap_set_goal", simple_set_goal)
         ranger.bind_skill("skl_move_to_rel_pos", move_to_rel_pos)
+        ranger.bind_skill("cap_pointcloud_to_file", cap_pointcloud_to_file)
 
         logger.info("Ranger entity graph initialized:")
         logger.info(f"  root room: {root_room.get_absolute_path()}")
