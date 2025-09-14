@@ -11,12 +11,11 @@ sys.path.append(
         )
     )
 )
-
 spatiallm_path = os.path.join(os.path.dirname(__file__), "spatiallm")
 sys.path.insert(0, spatiallm_path)
 
-print(f"Added Robonix root to sys.path")
-print(f"Added spatiallm path: {spatiallm_path}")
+print(f"added Robonix root to sys.path")
+print(f"added spatiallm path: {spatiallm_path}")
 print(f"sys.path: {sys.path[:3]}...")
 
 from Robonix.manager.eaios_decorators import eaios
@@ -210,7 +209,7 @@ def generate_layout(
     if detect_type != "arch" and categories:
         task_prompt = task_prompt.replace("boxes", ", ".join(categories))
 
-    prompt = f"<|point_start|><|point_pad|><|point_end|>{task_prompt} The reference code is as followed: {code_template}"
+    prompt = f"<|point_start|><|point_pad|><|point_end|>{task_prompt} the reference code is as followed: {code_template}"
 
     if model.config.model_type == "spatiallm_qwen":
         conversation = [
@@ -260,48 +259,48 @@ if __name__ == "__main__":
     with open(ply_file_path, "rb") as f:
         ply_data = f.read()
 
-    print("Starting SpatialLM detection test...")
+    print("starting spatiallm detection test...")
     print(f"PLY file size: {len(ply_data)} bytes")
 
     try:
         result = skl_spatiallm_detect_local.__wrapped__(None, ply_data)
 
-        print("Detection completed!")
-        print(f"Detected {len(result['walls'])} walls")
-        print(f"Detected {len(result['doors'])} doors")
-        print(f"Detected {len(result['windows'])} windows")
-        print(f"Detected {len(result['objects'])} objects")
+        print("detection completed!")
+        print(f"detected {len(result['walls'])} walls")
+        print(f"detected {len(result['doors'])} doors")
+        print(f"detected {len(result['windows'])} windows")
+        print(f"detected {len(result['objects'])} objects")
 
         if result["walls"]:
-            print("\nWalls:")
+            print("\nwalls:")
             for wall in result["walls"]:
                 print(f"  ID: {wall['id']}, start: {wall['start']}, end: {wall['end']}")
 
         if result["doors"]:
-            print("\nDoors:")
+            print("\ndoors:")
             for door in result["doors"]:
                 print(
                     f"  ID: {door['id']}, position: {door['position']}, size: {door['width']}x{door['height']}"
                 )
 
         if result["windows"]:
-            print("\nWindows:")
+            print("\nwindows:")
             for window in result["windows"]:
                 print(
                     f"  ID: {window['id']}, position: {window['position']}, size: {window['width']}x{window['height']}"
                 )
 
         if result["objects"]:
-            print("\nObjects:")
+            print("\nobjects:")
             for obj in result["objects"]:
                 print(
                     f"  ID: {obj['id']}, class: {obj['class']}, position: {obj['position']}"
                 )
 
-        print(f"\nLayout string length: {len(result['layout_string'])} characters")
+        print(f"\nlayout string length: {len(result['layout_string'])} characters")
 
     except Exception as e:
-        print(f"Test failed: {e}")
+        print(f"test failed: {e}")
         import traceback
 
         traceback.print_exc()
