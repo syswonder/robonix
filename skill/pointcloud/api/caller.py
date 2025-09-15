@@ -20,10 +20,14 @@ sys.path.insert(0, protobuf_path)
 
 import Robonix.skill.pointcloud.protos.skl_spatiallm_detect_pb2 as skl_spatiallm_detect_pb2
 import Robonix.skill.pointcloud.protos.skl_spatiallm_detect_pb2_grpc as skl_spatiallm_detect_pb2_grpc
+from Robonix.manager.eaios_decorators import eaios
+from Robonix.uapi.graph.entity import Entity
 
 
+@eaios.caller
 def __rpc_skl_spatiallm_detect(
     # __rpc functions will always have two prepended args
+    self_entity: Entity, # TODO: Entity should also be serialized and transferred across skill providers
     target_host: str,
     target_port: int,
     # the original input args

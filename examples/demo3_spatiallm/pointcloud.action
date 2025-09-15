@@ -1,0 +1,28 @@
+from Robonix.uapi.specs.skill_specs import EntityPath
+from Robonix.uapi.runtime.action import action, EOS_TYPE_ActionResult, get_runtime, action_print
+
+
+@action
+def test_ranger_pointcloud(ranger_path: EntityPath, server_pc_path: EntityPath) -> EOS_TYPE_ActionResult:
+    ranger = get_runtime().get_graph().get_entity_by_path(ranger_path)
+
+    # test cap_pointcloud_to_file
+    result = ranger.cap_pointcloud_to_file(
+        filename="./examples/demo2/pointcloud.ply")
+    if not result["success"]:
+        action_print("failed to save pointcloud to file")
+        return EOS_TYPE_ActionResult.FAILURE
+    action_print(f"pointcloud saved to file: success={result['success']}, points_collected={result['points_collected']}")
+
+    model_bytes = open("./examples/demo2/pointcloud.ply", "rb").read()
+
+    # then use skl_spatiallm_detect to detect the object
+    server_pc = get_runtime().get_graph().get_entity_by_path(server_pc_path)
+    
+    result = server_pc.skl_spatiallm_detect(ply_model=model_bytes)
+    # gRPC returns SpatialLMDetectReply object, not a dict
+    action_print(f"object detected: {result}")
+    action_print(f"result type: {type(result)}")
+    action_print(f"result attributes: {dir(result)}")
+
+    return EOS_TYPE_ActionResult.SUCCESS

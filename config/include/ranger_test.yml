@@ -19,6 +19,7 @@ skill:
   - vision
   - semantic_map
   - test_skill
+  - pointcloud
 brain:
   - test_brian
 
