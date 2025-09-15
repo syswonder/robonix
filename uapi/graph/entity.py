@@ -25,6 +25,13 @@ def format_skill_error(skill_name: str, error_type: str, details: str) -> str:
     return f"{error_type}: {details} (skill: {skill_name})"
 
 
+def truncate_log_content(content: str, max_length: int = 200) -> str:
+    """Truncate log content if it's too long to avoid verbose output."""
+    if len(str(content)) <= max_length:
+        return str(content)
+    return str(content)[:max_length] + "..."
+
+
 class EntityType(Enum):
     GENERIC = "generic"
     CONTROLLABLE = "controllable"
@@ -70,6 +77,7 @@ class Entity:
 
         self.skills: List[str] = []
         self.skill_bindings: Dict[str, callable] = {}
+        self.skill_providers: Dict[str, str] = {}  # skill_name -> provider_name
 
         self.is_active = True
         self.created_at = None
@@ -167,15 +175,30 @@ class Entity:
                 return None  # Path does not exist
         return current
 
-    def bind_skill(self, skill_name: str, func: callable) -> None:
+    def bind_skill(self, skill_name: str, func: callable, provider_name: str) -> None:
         """
         Bind a function to a skill name for this entity.
+        Each skill must be explicitly bound to a specific provider.
+        
+        Args:
+            skill_name: Name of the skill to bind
+            func: Function to bind to the skill
+            provider_name: Name of the provider that provides this skill
         """
         if skill_name not in EOS_SKILL_SPECS:
             raise ValueError(
                 f"skill '{skill_name}' is not a standard skill."
             )
+        
+        if provider_name is None:
+            raise ValueError(f"provider_name must be specified for skill '{skill_name}'")
+        
+        # Verify that the provider exists and provides this skill
+        # Note: This verification is deferred until runtime is available
+        # The actual verification happens during skill execution
+        
         self.skill_bindings[skill_name] = func
+        self.skill_providers[skill_name] = provider_name
         self.add_skill(skill_name)
 
     def _is_type_match(self, value, expected_type):
@@ -263,10 +286,10 @@ class Entity:
         Attempts to cast arguments to expected types with warnings before raising errors.
         Now supports multiple alternative types for arguments (e.g., list of types/specs).
         """
-        # Log arguments with their types
+        # Log arguments with their types (truncated if too long)
         arg_info = {k: f"{v} ({type(v).__name__})" for k, v in kwargs.items()}
         logger.debug(
-            f"[{self.get_absolute_path()}] checking arguments for skill '{skill_name}': {arg_info}"
+            f"[{self.get_absolute_path()}] checking arguments for skill '{skill_name}': {truncate_log_content(arg_info)}"
         )
 
         spec = EOS_SKILL_SPECS[skill_name]
@@ -379,7 +402,7 @@ class Entity:
         Check if the return value matches the skill spec, supporting dataclass, dict, list, and enum recursively.
         """
         logger.debug(
-            f"[{self.get_absolute_path()}] checking return value for skill '{skill_name}': {result}"
+            f"[{self.get_absolute_path()}] checking return value for skill '{skill_name}': {truncate_log_content(result)}"
         )
 
         spec = EOS_SKILL_SPECS[skill_name]
@@ -493,6 +516,55 @@ class Entity:
             kwargs.pop('self_entity', None)
             return 'none'
 
+    def _inject_provider_info_if_needed(self, skill_name: str, func, kwargs):
+        """
+        Inject provider information (target_host, target_port) for remote skills.
+        This method checks if the function expects target_host and target_port parameters,
+        and if so, injects them based on the entity's skill-provider mapping.
+        
+        Args:
+            skill_name: Name of the skill being called
+            func: The function to be called
+            kwargs: Keyword arguments for the function call
+        """
+        import inspect
+        sig = inspect.signature(func)
+        
+        # Check if this is a remote skill (function expects target_host and target_port)
+        # Note: self_entity parameter is handled separately by _inject_self_entity_if_needed
+        logger.debug(f"Checking if skill '{skill_name}' is remote: target_host in params={'target_host' in sig.parameters}, target_port in params={'target_port' in sig.parameters}")
+        if 'target_host' in sig.parameters and 'target_port' in sig.parameters:
+            # This is a remote skill, inject provider information
+            if skill_name in self.skill_providers:
+                provider_name = self.skill_providers[skill_name]
+                
+                # Get provider info from runtime registry
+                from Robonix.uapi.runtime.action import get_runtime
+                try:
+                    runtime = get_runtime()
+                    provider = runtime.registry.get_provider(provider_name)
+                    if provider is None:
+                        available_providers = [p.name for p in runtime.registry.providers]
+                        raise ValueError(f"Provider '{provider_name}' not found in registry. Available providers: {available_providers}")
+                    
+                    # Verify that the provider actually provides this skill
+                    if skill_name not in provider.skills:
+                        raise ValueError(f"Provider '{provider_name}' does not provide skill '{skill_name}'. Available skills: {provider.skills}")
+                    
+                    # Inject target_host and target_port if not already provided
+                    if 'target_host' not in kwargs:
+                        kwargs['target_host'] = provider.IP
+                    if 'target_port' not in kwargs:
+                        kwargs['target_port'] = provider.port
+                        
+                    logger.debug(f"Injected provider info for skill '{skill_name}' from provider '{provider_name}': host={provider.IP}, port={provider.port}")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to inject provider info for skill '{skill_name}': {e}")
+                    raise
+            else:
+                raise ValueError(f"No provider information found for skill '{skill_name}' in entity '{self.get_absolute_path()}'")
+
     def __getattr__(self, name):
         # https://www.sefidian.com/2021/06/06/python-__getattr__-and-__getattribute__-magic-methods/
         # getattr is called when an attribute is not found in the object, while __getattribute__ is called no matter found or not
@@ -502,15 +574,18 @@ class Entity:
 
             def wrapper(**kwargs):
                 logger.debug(
-                    f"First path wrapper called for {name} with kwargs: {kwargs}")
+                    f"First path wrapper called for {name} with kwargs: {truncate_log_content(kwargs)}")
                 logger.debug(
-                    f"[{self.get_absolute_path()}] calling skill {name} with kwargs {kwargs}"
+                    f"[{self.get_absolute_path()}] calling skill {name} with kwargs {truncate_log_content(kwargs)}"
                 )
                 try:
                     func = self.skill_bindings[name]
 
                     injection_type = self._inject_self_entity_if_needed(
                         func, kwargs)
+
+                    # Inject provider information for remote skills
+                    self._inject_provider_info_if_needed(name, func, kwargs)
 
                     result = func(**kwargs)
 
@@ -535,21 +610,24 @@ class Entity:
                 # First, try to find the function in skill bindings (standard names)
                 if name in self.skill_bindings:
                     logger.debug(
-                        f"[{self.get_absolute_path()}] calling skill {name} with self_entity injection"
+                        f"[{self.get_absolute_path()}] calling skill {name} with self_entity injection and kwargs {truncate_log_content(kwargs)}"
                     )
                     try:
                         func = self.skill_bindings[name]
                         logger.debug(
                             f"About to call skill {name}, func type: {type(func)}")
-                        logger.debug(f"kwargs before: {kwargs}")
+                        logger.debug(f"kwargs before: {truncate_log_content(kwargs)}")
 
                         # Use unified self_entity injection logic
                         injection_type = self._inject_self_entity_if_needed(
                             func, kwargs)
 
+                        # Inject provider information for remote skills
+                        self._inject_provider_info_if_needed(name, func, kwargs)
+
                         logger.debug(
                             f"Function {name} injection type: {injection_type}")
-                        logger.debug(f"kwargs after injection: {kwargs}")
+                        logger.debug(f"kwargs after injection: {truncate_log_content(kwargs)}")
 
                         # Always call function with keyword arguments only
                         logger.debug(f"Calling {name} with keyword arguments")
@@ -562,7 +640,7 @@ class Entity:
 
                         return result
                     except (ValueError, TypeError) as e:
-                        logger.debug(f"Exception occurred in {name}: {str(e)}")
+                        logger.debug(f"Exception occurred in {name}: {truncate_log_content(str(e))}")
                         logger.error(
                             f"[{self.get_absolute_path()}] skill '{name}' execution failed: {str(e)}"
                         )
