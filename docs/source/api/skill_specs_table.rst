@@ -5,7 +5,7 @@ Capability/Skill 调用规范表
 
 版本：2025年9月2日
 
-本文档展示了DeepEmbody OS系统中所有可用的能力(Capabilities)和技能(Skills)的完整规范。
+本文档展示了Robonix OS系统中所有可用的能力(Capabilities)和技能(Skills)的完整规范。
 
 技能规范表格
 ------------

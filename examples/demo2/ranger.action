@@ -1,5 +1,5 @@
-from DeepEmbody.uapi.specs.skill_specs import EntityPath
-from DeepEmbody.uapi.runtime.action import action, EOS_TYPE_ActionResult, get_runtime, action_print
+from Robonix.uapi.specs.skill_specs import EntityPath
+from Robonix.uapi.runtime.action import action, EOS_TYPE_ActionResult, get_runtime, action_print
 from typing import Optional, Tuple
 
 
@@ -43,5 +43,12 @@ def test_ranger(ranger_path: EntityPath) -> EOS_TYPE_ActionResult:
         return EOS_TYPE_ActionResult.FAILURE
     x, y, yaw = result
     action_print(f"ranger pose after move: x={x}, y={y}, yaw={yaw}")
+
+    # test cap_pointcloud_to_file
+    # result = ranger.cap_pointcloud_to_file(filename="./examples/demo2/pointcloud.ply")
+    # if not result["success"]:
+    #     action_print("failed to save pointcloud to file")
+    #     return EOS_TYPE_ActionResult.FAILURE
+    # action_print(f"pointcloud saved to file: {result}")
 
     return EOS_TYPE_ActionResult.SUCCESS

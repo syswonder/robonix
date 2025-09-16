@@ -1,0 +1,53 @@
+[tool.poetry]
+name = "spatiallm"
+version = "0.1.1"
+description = "SpatialLM: Training Large Language Models for Structured Indoor Modeling"
+authors = ["ManyCore Research Team"]
+license = "Llama3.2"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.10,<=3.12"
+torch = { version = "^2.4.1+cu124", source = "pytorch" }
+torchvision = { version = "^0.19.1+cu124", source = "pytorch" }
+torchaudio = { version = "^2.4.1+cu124", source = "pytorch" }
+transformers = ">=4.41.2,<=4.46.1"
+safetensors = "^0.4.5"
+pandas = "^2.2.3"
+einops = "^0.8.1"
+numpy = "^1.26"
+scipy = "^1.15.2"
+scikit-learn = "^1.6.1"
+toml = "^0.10.2"
+tokenizers = ">=0.19.0,<0.20.4"
+huggingface_hub = ">=0.25.0"
+rerun-sdk = "^0.21.0"
+shapely = "^2.0.7"
+bbox = "^0.9.4"
+terminaltables = "^3.1.10"
+open3d = "^0.18.0"
+nvidia-cudnn-cu12 = "*"
+nvidia-nccl-cu12 = "*"
+poethepoet = { extras = ["poetry-plugin"], version = "^0.33.1" }
+addict = "^2.4.0"
+
+[tool.poe.tasks]
+install-torchsparse = "pip install git+https://github.com/mit-han-lab/torchsparse.git"
+install-flash-attn = "pip install ninja flash-attn --no-build-isolation"
+install-torch-scatter = "pip install torch-scatter -f https://data.pyg.org/whl/torch-2.4.0+cu124.html"
+install-spconv = "pip install timm spconv-cu120"
+install-sonata = [
+    "install-flash-attn",
+    "install-torch-scatter",
+    "install-spconv",
+]
+install-training = "pip install omegaconf datasets<=3.6.0 accelerate<=1.7.0 wandb"
+
+[build-system]
+requires = ["poetry-core", "setuptools", "wheel", "torch"]
+build-backend = "poetry.core.masonry.api"
+
+[[tool.poetry.source]]
+priority = "supplemental"
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu124"

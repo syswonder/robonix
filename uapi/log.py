@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 # Copyright (c) 2025, syswonder
-# this is deepembody's logging module, and can be used in both manager and uapi
+# this is robonix's logging module, and can be used in both manager and uapi
 from loguru import logger
 import sys
 from enum import Enum

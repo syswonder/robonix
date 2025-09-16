@@ -2,7 +2,7 @@
 Skill Specifications Module
 ===========================
 
-This module defines the skill specifications for the DeepEmbody OS system.
+This module defines the skill specifications for the Robonix OS system.
 It contains the complete specification of all capabilities and skills available
 in the system, including their input/output types and dependencies.
 
@@ -43,6 +43,12 @@ EOS_SKILL_SPECS = {
     ##########################
     ###### CAPABILITIES ######
     ##########################
+    "cap_pointcloud_to_file": {
+        "description": "Convert pointcloud to a .ply 3D model file",
+        "type": EOS_SkillType.CAPABILITY,
+        "input": {"filename": str},
+        "output": {"success": bool},
+    },
     "cap_space_getpos": {
         # DEPRECATED !!!
         "description": "Get the position of the entity",
@@ -155,6 +161,15 @@ EOS_SKILL_SPECS = {
     ####################
     ###### SKILLS ######
     ####################
+    "skl_spatiallm_detect": {
+        "description": "Detect walls, doors, objects with bounding boxes using spatiallm",
+        "type": EOS_SkillType.SKILL,
+        "input": {"ply_model": bytes},
+        "output": {
+            "txt": str, # .txt file that marked each object with its bounding box and label
+            "rrd": bytes, # .rrd file used for visualization
+        }
+    },
     "skl_debug_test_skill": {
         "description": "Test skill",
         "type": EOS_SkillType.SKILL,
