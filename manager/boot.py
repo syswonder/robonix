@@ -48,7 +48,7 @@ async def main():
         import sys
 
         # 创建日志文件
-        log_file = os.path.expanduser("~/.deepembody_mcp.log")
+        log_file = os.path.expanduser("~/.robonix_mcp.log")
 
         # 启动MCP服务器进程，重定向输出到日志文件
         mcp_process = subprocess.Popen(

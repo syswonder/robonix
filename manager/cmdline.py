@@ -126,7 +126,7 @@ class Completer:
 
 
 class CLI:
-    """Command Line Interface for DeepEmbody"""
+    """Command Line Interface for Robonix"""
 
     """
         How to add a new command:
@@ -141,7 +141,7 @@ class CLI:
         self.command_registry = CommandRegistry()
         self.completer = Completer(self.command_registry, manager)
 
-        self.history_file = os.path.expanduser("~/.deepembody_history")
+        self.history_file = os.path.expanduser("~/.robonix_history")
 
         readline.set_completer(self.completer.complete)
         readline.parse_and_bind("tab: complete")
@@ -452,7 +452,7 @@ class CLI:
             else:
                 num_lines = 20
 
-            log_file = os.path.expanduser("~/.deepembody_mcp.log")
+            log_file = os.path.expanduser("~/.robonix_mcp.log")
             
             if not os.path.exists(log_file):
                 print_yellow("MCP log file not found. MCP server may not be running.")
@@ -508,7 +508,7 @@ class CLI:
     def run(self):
         """Run command line interface"""
         print_cyan(
-            "Welcome to DeepEmbody Shell (system time: "
+            "Welcome to Robonix Shell (system time: "
             + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             + ", "
             + self.get_user_info()

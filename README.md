@@ -71,8 +71,8 @@
 ## Setup
 
 ```bash
-git clone https://github.com/syswonder/deepembody.git
-cd deepembody
+git clone https://github.com/syswonder/Robonix.git
+cd Robonix
 ```
 
 ## Startup

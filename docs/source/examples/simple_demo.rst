@@ -1,7 +1,7 @@
 Simple Demo (Genesis)
 ============
 
-本章通过 ``examples/demo1`` 中的完整示例，演示如何使用DeepEmbody OS框架开发具身应用应用。
+本章通过 ``examples/demo1`` 中的完整示例，演示如何使用Robonix OS框架开发具身应用应用。
 
 环境配置
 -------
@@ -57,7 +57,7 @@ Genesis 模拟器启动
 
 .. code-block:: bash
 
-   # 在 DeepEmbody 根目录下启动 Genesis 模拟器
+   # 在 Robonix 根目录下启动 Genesis 模拟器
    python start_genesis.py
 
 等待模拟器启动完成，直到出现渲染窗口。
@@ -66,7 +66,7 @@ Genesis 模拟器启动
 
 .. code-block:: bash
 
-   # 在 DeepEmbody 根目录下导出技能系统配置（模拟器模式）
+   # 在 Robonix 根目录下导出技能系统配置（模拟器模式）
    python manager/eaios_decorators.py --config config/include/simulator.yml
 
 此命令会生成 ``skill/__init__.py`` 文件，用于技能系统的初始化。
@@ -80,7 +80,7 @@ Genesis 模拟器启动
 
 .. code-block:: bash
 
-   # 在 DeepEmbody 根目录下执行
+   # 在 Robonix 根目录下执行
    mkdir -p skill/sim_vision/models
    wget -P skill/sim_vision/models https://huggingface.co/jameslahm/yoloe/resolve/main/yoloe-11l-seg-pf.pt
 
@@ -101,7 +101,7 @@ Genesis 模拟器启动
 
 .. code-block:: bash
 
-   # 在 DeepEmbody 根目录下运行
+   # 在 Robonix 根目录下运行
    python examples/demo1/simple_demo.py --mode manual
 
 手动模式下，用户需要手动指定目标物体和动作参数。
@@ -110,7 +110,7 @@ Genesis 模拟器启动
 
 .. code-block:: bash
 
-   # 在 DeepEmbody 根目录下运行
+   # 在 Robonix 根目录下运行
    python examples/demo1/simple_demo.py --mode auto
 
 自动模式下，系统会：
@@ -124,7 +124,7 @@ Genesis 模拟器启动
 
 .. code-block:: bash
 
-   # 在 DeepEmbody 根目录下运行
+   # 在 Robonix 根目录下运行
    python examples/demo1/simple_demo.py --mode manual --export-scene scene_info.json
 
 此命令可以将当前场景信息导出为 JSON 文件，便于后续分析和调试。

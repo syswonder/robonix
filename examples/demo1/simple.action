@@ -1,5 +1,5 @@
-from DeepEmbody.uapi.specs.types import EntityPath
-from DeepEmbody.uapi.runtime.action import action, EOS_TYPE_ActionResult, get_runtime, action_print
+from Robonix.uapi.specs.types import EntityPath
+from Robonix.uapi.runtime.action import action, EOS_TYPE_ActionResult, get_runtime, action_print
 
 
 @action

@@ -8,7 +8,7 @@ from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from sensor_msgs.msg import Range
 import sys
 
-from DeepEmbody.manager.eaios_decorators import eaios
+from Robonix.manager.eaios_decorators import eaios
 
 class NavWithUltrasonicSafety(Node):
     def __init__(self,safety_threshold=0.5):

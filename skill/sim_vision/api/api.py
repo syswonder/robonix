@@ -1,4 +1,4 @@
-from DeepEmbody.manager.eaios_decorators import eaios
+from Robonix.manager.eaios_decorators import eaios
 
 # the below line should be commented when generating the skill/__init__.py, and after that you can uncomment it for LSP parsing - wheatfox
 # from skill import cap_camera_dep_rgb, cap_camera_info, cap_get_robot_pose
@@ -12,8 +12,8 @@ import random
 from datetime import datetime
 import math
 
-from DeepEmbody.skill.vision.api.vision import remove_mask_outliers, get_mask_center_opencv
-from DeepEmbody.uapi.graph.entity import Entity
+from Robonix.skill.vision.api.vision import remove_mask_outliers, get_mask_center_opencv
+from Robonix.uapi.graph.entity import Entity
 
 set_log_level("debug")
 

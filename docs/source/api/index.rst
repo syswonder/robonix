@@ -1,7 +1,7 @@
 API 参考文档
 =============
 
-本章节提供DeepEmbody OS系统的完整API参考文档。
+本章节提供Robonix OS系统的完整API参考文档。
 
 .. toctree::
    :maxdepth: 2

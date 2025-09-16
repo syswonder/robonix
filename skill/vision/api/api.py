@@ -1,4 +1,4 @@
-from DeepEmbody.manager.eaios_decorators import eaios
+from Robonix.manager.eaios_decorators import eaios
 import numpy as np
 from ultralytics import YOLOE
 import traceback
