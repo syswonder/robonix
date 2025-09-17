@@ -1,0 +1,17 @@
+from Robonix.uapi.specs.skill_specs import EntityPath
+from Robonix.uapi.runtime.action import action, EOS_TYPE_ActionResult, get_runtime, action_print
+
+
+@action
+def test_vision(ranger_path: EntityPath) -> EOS_TYPE_ActionResult:
+    runtime = get_runtime()
+    ranger = runtime.get_graph().get_entity_by_path(ranger_path)
+
+    if ranger is None:
+        action_print(f"ranger not found at path: {ranger_path}")
+        return EOS_TYPE_ActionResult.FAILURE
+
+    result = ranger.skl_detect_objs(camera_name="camera")
+    action_print(f"result: {result}")
+
+    return EOS_TYPE_ActionResult.SUCCESS
