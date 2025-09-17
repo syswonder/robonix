@@ -175,7 +175,7 @@ class Entity:
                 return None  # Path does not exist
         return current
 
-    def bind_skill(self, skill_name: str, func: callable, provider_name: str) -> None:
+    def bind_skill(self, skill_name: str, func: callable, provider_name: str = "local_provider") -> None:
         """
         Bind a function to a skill name for this entity.
         Each skill must be explicitly bound to a specific provider.
