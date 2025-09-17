@@ -4,6 +4,7 @@ import sys
 import os
 import argparse
 from pathlib import Path
+import traceback
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
@@ -61,8 +62,7 @@ def create_manual_entity_builder():
             entity_a.bind_skill("cap_get_pose", mock_getpos)
             entity_a.bind_skill("skl_debug_test_skill", debug_test_skill)
         except ImportError:
-            logger.error(
-                "Robonix.skill module not available!")
+            logger.error(f"error: import error, {traceback.format_exc()}")
             sys.exit(1)
 
         runtime.set_graph(root_room)
@@ -107,8 +107,7 @@ def create_yolo_entity_builder():
                 move_to_point(x, y)  # Uncommet when you want to really move the robot
                 return {"success": True}
             except ImportError:
-                logger.error(
-                    "Driver module not available!")
+                logger.error(f"error: import error, {traceback.format_exc()}")
                 sys.exit(1)
 
         def robot_getpos_impl():
@@ -117,8 +116,7 @@ def create_yolo_entity_builder():
                 x, y, z, yaw = get_pose()
                 return {"x": x, "y": y, "z": z}
             except ImportError:
-                logger.warning(
-                    "Driver module not available, using mock implementation")
+                logger.warning(f"error: import error, {traceback.format_exc()}")
                 return {"x": 0.0, "y": 0.0, "z": 0.0}
 
         # Bind skills to robot entity
