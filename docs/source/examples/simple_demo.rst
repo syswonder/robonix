@@ -82,7 +82,7 @@ Genesis 模拟器启动
 
    # 在 Robonix 根目录下执行
    mkdir -p skill/sim_vision/models
-   wget -P skill/sim_vision/models https://huggingface.co/jameslahm/yoloe/resolve/main/yoloe-11l-seg-pf.pt
+   wget -P skill/sim_vision/models https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11l-seg-pf.pt
 
 
 示例概述
