@@ -30,17 +30,18 @@ class BaseNode:
         return f"BaseNode({self.name}_{self.version}, cwd='{self.cwd}')"
 
 def get_node(entry, sub_dir_path, node_type: str = None) -> BaseNode:
-    print(f"Checking entry: {entry} in path: {sub_dir_path} for description.yml")
     """
     Helper function to create a BaseNode object from a directory entry and its description.yml file.
 
     Args:
         entry (str): The name of the directory entry.
         sub_dir_path (str): The path to the subdirectory containing the description.yml file.
+        node_type (str): The type of the node (driver, capability, etc.).
 
     Returns:
         BaseNode: An instance of BaseNode with details extracted from the description.yml file.
     """
+    logger.debug(f"Checking entry: {entry} in path: {sub_dir_path} for description.yml")
     # Check if the entry is a directory
     if os.path.isdir(sub_dir_path):
         description_file_path = os.path.join(sub_dir_path, "description.yml")
@@ -63,7 +64,7 @@ def get_node(entry, sub_dir_path, node_type: str = None) -> BaseNode:
                         node_type=node_type
                     )
                     return base_info
-            except yaml.ymlError as e:
+            except yaml.YAMLError as e:
                 logger.error(f"Error parsing YAML file '{description_file_path}': {e}")
             except Exception as e:
                 logger.error(f"An unexpected error occurred while processing '{description_file_path}': {e}")
@@ -98,9 +99,9 @@ def get_node_details(config_path: str) -> list[BaseNode]:
         config = yaml.safe_load(f)
     all_base_details = []
     
-    for base,entrys in config.items():
-        if entrys is None:
-            logger.error(f"No entry find in {base}")
+    for base, entries in config.items():
+        if entries is None:
+            logger.error(f"No entries found in {base}")
             continue
         base_dir_path = os.path.join(BASE_PATH, base)
         if not os.path.exists(base_dir_path):
@@ -113,7 +114,7 @@ def get_node_details(config_path: str) -> list[BaseNode]:
         try:
             # List all entries in the 'base' directory
 
-            for entry in entrys:
+            for entry in entries:
                 sub_dir_path = os.path.join(base_dir_path, entry)
                 logger.info(f"Checking: {entry}")
                 base_info = get_node(entry, sub_dir_path, base)

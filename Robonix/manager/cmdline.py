@@ -95,23 +95,23 @@ class Completer:
     def complete(self, text: str, state: int) -> Optional[str]:
         """Autocompletion callback function for commands and subcommands"""
         if state == 0:
-            # 获取当前输入行
+            # Get current input line
             line = readline.get_line_buffer()
             words = line.split()
             
             if len(words) <= 1:
-                # 第一个词或空白输入：补全命令名
+                # First word or blank input: complete command names
                 all_commands = self.command_registry.get_all_command_names()
                 self.matches = [cmd for cmd in all_commands if cmd.startswith(text)]
             elif len(words) == 2:
-                # 第二个词：根据命令补全子命令
+                # Second word: complete subcommands based on command
                 command_name = words[0]
                 if command_name == "list":
-                    # list命令的子命令是节点名
+                    # Subcommands for list command are node names
                     all_nodes = list(self.manager.available_nodes.keys())
                     self.matches = [node for node in all_nodes if node.startswith(text)]
                 elif command_name in ["start", "stop", "output"]:
-                    # start/stop/output命令的子命令也是节点名
+                    # Subcommands for start/stop/output commands are also node names
                     all_nodes = list(self.manager.available_nodes.keys())
                     self.matches = [node for node in all_nodes if node.startswith(text)]
                 else:
@@ -240,7 +240,7 @@ class CLI:
         print_cyan("Available nodes:", bold=True)
         print("-" * 60)
         
-        # 按状态分组显示
+        # Group by status
         running_nodes = []
         stopped_nodes = []
         
@@ -252,7 +252,7 @@ class CLI:
             else:
                 stopped_nodes.append(node)
         
-        # 按类型分组节点
+        # Group nodes by type
         driver_nodes = []
         capability_nodes = []
         other_nodes = []
@@ -265,7 +265,7 @@ class CLI:
             else:
                 other_nodes.append((node_id, node))
         
-        # 显示节点的辅助函数
+        # Helper function to display node groups
         def print_node_group(nodes, group_name=None):
             if group_name:
                 print_cyan(f"\n{group_name}:", bold=True)
@@ -282,14 +282,14 @@ class CLI:
                     status = f"{Colors.RED}Stopped{Colors.RESET}"
                     status_icon = f"{Colors.RED}✗{Colors.RESET}"
                 
-                # 从cwd路径中提取目录名
+                # Extract directory name from cwd path
                 import os
                 cwd_parts = os.path.normpath(node.cwd).split(os.sep)
                 folder_name = ""
                 if len(cwd_parts) > 0:
-                    folder_name = cwd_parts[-1]  # 获取最后一个目录名
+                    folder_name = cwd_parts[-1]  # Get last directory name
                 
-                # 根据节点类型格式化显示
+                # Format display based on node type
                 node_type_display = ""
                 if node.node_type and folder_name:
                     if node.node_type == "driver":
@@ -299,21 +299,21 @@ class CLI:
                     else:
                         node_type_display = f" {Colors.GRAY}({node.node_type}@{folder_name}){Colors.RESET}"
                 
-                # 格式化显示：状态图标 + 状态 + 节点名(白色加粗) + 类型信息(灰色)
+                # Format display: status icon + status + node name (white bold) + type info (gray)
                 node_name_display = f"{Colors.BOLD}{Colors.WHITE}{node.name}{Colors.RESET}"
                 print(f"{status_icon} [{status:<8}] {node_name_display}{node_type_display}")
         
-        # 按顺序显示各组节点
+        # Display node groups in order
         if driver_nodes:
             print_node_group(driver_nodes, "Driver Nodes")
         
         if capability_nodes:
-            if driver_nodes:  # 如果前面有driver节点，添加分隔线
+            if driver_nodes:  # Add separator if there are driver nodes before
                 print()
             print_node_group(capability_nodes, "Capability Nodes")
         
         if other_nodes:
-            if driver_nodes or capability_nodes:  # 如果前面有其他节点，添加分隔线
+            if driver_nodes or capability_nodes:  # Add separator if there are other nodes before
                 print()
             print_node_group(other_nodes, "Other Nodes")
         
@@ -329,7 +329,7 @@ class CLI:
             print("Available nodes:", ", ".join(self.manager.available_nodes.keys()))
             return
         
-        # 检查运行状态
+        # Check running status
         is_running = (node_name in self.manager.running_processes and 
                      self.manager.running_processes[node_name].is_running())
         status = "Running" if is_running else "Stopped"
