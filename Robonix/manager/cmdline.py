@@ -8,6 +8,8 @@ import atexit
 from typing import List, Dict, Any, Optional, Callable
 import traceback
 import aioconsole
+from log import logger
+
 
 class Colors:
     RED = "\033[91m"
@@ -98,7 +100,7 @@ class Completer:
             # Get current input line
             line = readline.get_line_buffer()
             words = line.split()
-            
+
             if len(words) <= 1:
                 # First word or blank input: complete command names
                 all_commands = self.command_registry.get_all_command_names()
@@ -239,24 +241,26 @@ class CLI:
 
         print_cyan("Available nodes:", bold=True)
         print("-" * 60)
-        
+
         # Group by status
         running_nodes = []
         stopped_nodes = []
-        
+
         for node_id, node in self.manager.available_nodes.items():
-            is_running = (node_id in self.manager.running_processes and 
-                         self.manager.running_processes[node_id].is_running())
+            is_running = (
+                node_id in self.manager.running_processes
+                and self.manager.running_processes[node_id].is_running()
+            )
             if is_running:
                 running_nodes.append(node)
             else:
                 stopped_nodes.append(node)
-        
+
         # Group nodes by type
         driver_nodes = []
         capability_nodes = []
         other_nodes = []
-        
+
         for node_id, node in self.manager.available_nodes.items():
             if node.node_type == "driver":
                 driver_nodes.append((node_id, node))
@@ -264,62 +268,78 @@ class CLI:
                 capability_nodes.append((node_id, node))
             else:
                 other_nodes.append((node_id, node))
-        
+
         # Helper function to display node groups
         def print_node_group(nodes, group_name=None):
             if group_name:
                 print_cyan(f"\n{group_name}:", bold=True)
                 print("-" * 40)
-            
+
             for node_id, node in nodes:
-                is_running = (node_id in self.manager.running_processes and 
-                             self.manager.running_processes[node_id].is_running())
-                
+                is_running = (
+                    node_id in self.manager.running_processes
+                    and self.manager.running_processes[node_id].is_running()
+                )
+
                 if is_running:
                     status = f"{Colors.GREEN}Running{Colors.RESET}"
                     status_icon = f"{Colors.GREEN}✓{Colors.RESET}"
                 else:
                     status = f"{Colors.RED}Stopped{Colors.RESET}"
                     status_icon = f"{Colors.RED}✗{Colors.RESET}"
-                
+
                 # Extract directory name from cwd path
                 import os
+
                 cwd_parts = os.path.normpath(node.cwd).split(os.sep)
                 folder_name = ""
                 if len(cwd_parts) > 0:
                     folder_name = cwd_parts[-1]  # Get last directory name
-                
+
                 # Format display based on node type
                 node_type_display = ""
                 if node.node_type and folder_name:
                     if node.node_type == "driver":
-                        node_type_display = f" {Colors.GRAY}(driver@{folder_name}){Colors.RESET}"
+                        node_type_display = (
+                            f" {Colors.GRAY}(driver@{folder_name}){Colors.RESET}"
+                        )
                     elif node.node_type == "capability":
-                        node_type_display = f" {Colors.GRAY}(cap@{folder_name}){Colors.RESET}"
+                        node_type_display = (
+                            f" {Colors.GRAY}(cap@{folder_name}){Colors.RESET}"
+                        )
                     else:
                         node_type_display = f" {Colors.GRAY}({node.node_type}@{folder_name}){Colors.RESET}"
-                
+
                 # Format display: status icon + status + node name (white bold) + type info (gray)
-                node_name_display = f"{Colors.BOLD}{Colors.WHITE}{node.name}{Colors.RESET}"
-                print(f"{status_icon} [{status:<8}] {node_name_display}{node_type_display}")
-        
+                node_name_display = (
+                    f"{Colors.BOLD}{Colors.WHITE}{node.name}{Colors.RESET}"
+                )
+                print(
+                    f"{status_icon} [{status:<8}] {node_name_display}{node_type_display}"
+                )
+
         # Display node groups in order
         if driver_nodes:
             print_node_group(driver_nodes, "Driver Nodes")
-        
+
         if capability_nodes:
             if driver_nodes:  # Add separator if there are driver nodes before
                 print()
             print_node_group(capability_nodes, "Capability Nodes")
-        
+
         if other_nodes:
-            if driver_nodes or capability_nodes:  # Add separator if there are other nodes before
+            if (
+                driver_nodes or capability_nodes
+            ):  # Add separator if there are other nodes before
                 print()
             print_node_group(other_nodes, "Other Nodes")
-        
+
         print("-" * 60)
         print(f"Total: {len(running_nodes)} running, {len(stopped_nodes)} stopped")
-        print_cyan("Tip: Use 'list <node_name>' to see detailed information for a specific node", bold=False)
+        print_cyan(
+            "Tip: Use 'list <node_name>' to see detailed information for a specific node",
+            bold=False,
+        )
 
     def _print_node_details(self, node_name: str):
         """Print detailed information for a specific node"""
@@ -328,25 +348,27 @@ class CLI:
             print_red(f"Error: Node '{node_name}' not found.")
             print("Available nodes:", ", ".join(self.manager.available_nodes.keys()))
             return
-        
+
         # Check running status
-        is_running = (node_name in self.manager.running_processes and 
-                     self.manager.running_processes[node_name].is_running())
+        is_running = (
+            node_name in self.manager.running_processes
+            and self.manager.running_processes[node_name].is_running()
+        )
         status = "Running" if is_running else "Stopped"
         status_color = Colors.GREEN if is_running else Colors.RED
-        
+
         print_cyan(f"Node Details: {node.name}", bold=True)
         print("-" * 50)
         print(f"Status: {status_color}{status}{Colors.RESET}")
         print(f"Version: {node.version}")
         print(f"Directory: {node.cwd}")
         print(f"Start on boot: {node.start_on_boot}")
-        
+
         if node.startup_command:
             print(f"Command: {node.startup_command}")
         else:
             print("Command: No startup command defined")
-        
+
         if is_running:
             process = self.manager.running_processes[node_name]
             if process.process:
@@ -453,25 +475,27 @@ class CLI:
                 num_lines = 20
 
             log_file = os.path.expanduser("~/.robonix_mcp.log")
-            
+
             if not os.path.exists(log_file):
                 print_yellow("MCP log file not found. MCP server may not be running.")
                 return True
-            
-            with open(log_file, 'r') as f:
+
+            with open(log_file, "r") as f:
                 lines = f.readlines()
                 total_lines = len(lines)
                 start_idx = max(0, total_lines - num_lines)
-                
+
                 print_cyan(f"MCP Server Log (last {num_lines} lines):", bold=True)
                 print("-" * 50)
-                
+
                 for i in range(start_idx, total_lines):
                     print(lines[i].rstrip())
-                    
+
                 if total_lines > num_lines:
-                    print(f"\n... ({total_lines - num_lines} more lines, use 'mcp_log {total_lines}' to see all)")
-                    
+                    print(
+                        f"\n... ({total_lines - num_lines} more lines, use 'mcp_log {total_lines}' to see all)"
+                    )
+
         except ValueError:
             print_red("Error: Invalid number for mcp_log command")
         except Exception as e:
@@ -503,7 +527,6 @@ class CLI:
             return "user: " + os.getlogin()
         except Exception:
             return "user: N/A"
-
 
     def run(self):
         """Run command line interface"""
@@ -586,4 +609,4 @@ class CLI:
                 print_red("\nUse 'exit' to quit the application.")
                 continue
 
-        print("Goodbye!")
+        logger.info("Goodbye!")

@@ -138,12 +138,17 @@ EOS_SKILL_SPECS = {
             "camera_info": Dict[str, Any],
             "robot_pose": {"x": float, "y": float, "z": float, "yaw": float},
         },
-        "output": Optional[Tuple[float, float, float]],  # (global_x, global_y, global_z) tuple
+        "output": Optional[
+            Tuple[float, float, float]
+        ],  # (global_x, global_y, global_z) tuple
     },
     "cap_get_pose": {
         "description": "Get the current pose of the robot",
         "type": EOS_SkillType.CAPABILITY,
-        "input": [None, {"timeout_sec": float}],  # no arg or timeout_sec(float), the list is for multiple alternative types - wheatfox
+        "input": [
+            None,
+            {"timeout_sec": float},
+        ],  # no arg or timeout_sec(float), the list is for multiple alternative types - wheatfox
         "output": Optional[Tuple[float, float, float]],  # (x,y,yaw) tuple
     },
     "cap_tf_transform": {
@@ -166,9 +171,9 @@ EOS_SKILL_SPECS = {
         "type": EOS_SkillType.SKILL,
         "input": {"ply_model": bytes},
         "output": {
-            "txt": str, # .txt file that marked each object with its bounding box and label
-            "rrd": bytes, # .rrd file used for visualization
-        }
+            "txt": str,  # .txt file that marked each object with its bounding box and label
+            "rrd": bytes,  # .rrd file used for visualization
+        },
     },
     "skl_debug_test_skill": {
         "description": "Test skill",

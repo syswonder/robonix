@@ -11,13 +11,14 @@ from enum import Enum
 import threading
 import inspect
 from typing import Dict, List, Callable, Any
-from ..log import logger
+from ...manager.log import logger
 import os
 from datetime import datetime
 
 
 class EOS_TYPE_ActionResult(Enum):
     """Enumeration for action execution results."""
+
     SUCCESS = 0
     FAILURE = 1
     ABORT = 2

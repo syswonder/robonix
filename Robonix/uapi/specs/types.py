@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 import datetime
 
+
 class EOS_TYPE_ImageFormat(Enum):
     JPEG = "jpeg"
     PNG = "png"

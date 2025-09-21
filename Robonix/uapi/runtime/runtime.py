@@ -10,7 +10,7 @@ and execution control for the entire system.
 from ..graph.entity import Entity
 from .registry import Registry
 from .action import get_action_functions
-from ..log import logger
+from ...manager.log import logger
 import threading
 import importlib.util
 import os
@@ -57,8 +57,7 @@ class Runtime:
             try:
                 hook(self)
             except Exception as e:
-                logger.error(
-                    f"Graph hook execution failed: {str(e)}", exc_info=True)
+                logger.error(f"Graph hook execution failed: {str(e)}", exc_info=True)
 
     def get_graph(self) -> Entity:
         return self.graph
@@ -72,8 +71,7 @@ class Runtime:
             try:
                 hook(self)
             except Exception as e:
-                logger.error(
-                    f"Graph hook execution failed: {str(e)}", exc_info=True)
+                logger.error(f"Graph hook execution failed: {str(e)}", exc_info=True)
 
     def remove_graph_hook(self, hook: Callable[[Any], None]):
         """Remove a graph hook function"""
@@ -109,10 +107,10 @@ class Runtime:
         # Store the loaded program
         program_name = os.path.basename(program_path)
         self._loaded_programs[program_name] = {
-            'module': module,
-            'path': program_path,
-            'action_names': action_names,
-            'loaded_at': datetime.now().isoformat()
+            "module": module,
+            "path": program_path,
+            "action_names": action_names,
+            "loaded_at": datetime.now().isoformat(),
         }
 
         self._program_module = module
@@ -131,10 +129,9 @@ class Runtime:
     def switch_program(self, program_name: str):
         """Switch to a previously loaded program"""
         if program_name not in self._loaded_programs:
-            raise ValueError(
-                f"Program '{program_name}' not found in loaded programs")
+            raise ValueError(f"Program '{program_name}' not found in loaded programs")
 
-        self._program_module = self._loaded_programs[program_name]['module']
+        self._program_module = self._loaded_programs[program_name]["module"]
         self._current_program = program_name
         logger.info(f"Switched to program: {program_name}")
 
@@ -174,8 +171,7 @@ class Runtime:
 
         action_func = getattr(self._program_module, action_name)
         if not hasattr(action_func, "_is_action"):
-            raise ValueError(
-                f"function '{action_name}' is not a action function")
+            raise ValueError(f"function '{action_name}' is not a action function")
 
         def action_worker():
             try:
@@ -188,14 +184,15 @@ class Runtime:
             except Exception as e:
                 self.action_results[action_name] = None
                 logger.error(
-                    f"action {action_name} failed: {str(e)} at {inspect.currentframe().f_back.f_code.co_name}", exc_info=True)
+                    f"action {action_name} failed: {str(e)} at {inspect.currentframe().f_back.f_code.co_name}",
+                    exc_info=True,
+                )
             finally:
                 # Clean up current entity context
                 if hasattr(self, "_current_entity"):
                     delattr(self, "_current_entity")
 
-        thread = threading.Thread(
-            target=action_worker, name=f"action_{action_name}")
+        thread = threading.Thread(target=action_worker, name=f"action_{action_name}")
         thread.daemon = True
         thread.start()
 
@@ -232,7 +229,7 @@ class Runtime:
             "entities": {},
             "skills": {},
             "graph_structure": {},
-            "exported_at": datetime.now().isoformat()
+            "exported_at": datetime.now().isoformat(),
         }
 
         def collect_entity_info(entity, parent_path=""):
@@ -253,8 +250,7 @@ class Runtime:
             # Recursively process child entities
             for child in entity.get_children():
                 child_path = child.get_absolute_path()
-                graph_info["entities"][entity_path]["children"].append(
-                    child_path)
+                graph_info["entities"][entity_path]["children"].append(child_path)
                 collect_entity_info(child, entity_path)
 
         collect_entity_info(self.graph)
@@ -271,13 +267,13 @@ class Runtime:
 
             for child_path in entity_info["children"]:
                 child_name = graph_info["entities"][child_path]["name"]
-                structure["children"][child_name] = build_graph_structure(
-                    child_path)
+                structure["children"][child_name] = build_graph_structure(child_path)
 
             return structure
 
         graph_info["graph_structure"] = build_graph_structure(
-            self.graph.get_absolute_path())
+            self.graph.get_absolute_path()
+        )
 
         return graph_info
 
@@ -292,23 +288,23 @@ class Runtime:
                 "description": str(skill_info["description"]),
                 "type": str(skill_type),
                 "input": (
-                    str(skill_info["input"]
-                        ) if skill_info["input"] is not None else None
+                    str(skill_info["input"])
+                    if skill_info["input"] is not None
+                    else None
                 ),
                 "output": (
-                    str(skill_info["output"]
-                        ) if skill_info["output"] is not None else None
+                    str(skill_info["output"])
+                    if skill_info["output"] is not None
+                    else None
                 ),
                 "dependencies": (
-                    skill_info.get("dependencies", [])
-                    if skill_type == "SKILL"
-                    else []
+                    skill_info.get("dependencies", []) if skill_type == "SKILL" else []
                 ),
             }
 
         return {
             "skill_specs": serializable_specs,
-            "exported_at": datetime.now().isoformat()
+            "exported_at": datetime.now().isoformat(),
         }
 
     def export_runtime_info(self) -> Dict[str, Any]:
@@ -320,14 +316,14 @@ class Runtime:
             "current_program": self.get_current_program(),
             "action_args": self._action_args,
             "action_status": self.get_action_status(),
-            "exported_at": datetime.now().isoformat()
+            "exported_at": datetime.now().isoformat(),
         }
 
     def save_runtime_info(self, file_path: str):
         """Save runtime information to a JSON file"""
         runtime_info = self.export_runtime_info()
 
-        with open(file_path, 'w', encoding='utf-8') as f:
+        with open(file_path, "w", encoding="utf-8") as f:
             json.dump(runtime_info, f, indent=2, ensure_ascii=False)
 
         logger.info(f"Runtime information saved to: {file_path}")
@@ -337,7 +333,7 @@ class Runtime:
         print("\n" + "=" * 50)
         print("Skill Providers Registry:")
         print("=" * 50)
-        
+
         for provider in self.registry.providers:
             print(f"Skill Provider: {provider.name}")
             print(f"  IP: {provider.IP}")

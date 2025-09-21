@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import uuid
 from ..specs.skill_specs import EOS_SKILL_SPECS
-from ..log import logger
+from ...manager.log import logger
 import dataclasses
 
 
@@ -175,28 +175,30 @@ class Entity:
                 return None  # Path does not exist
         return current
 
-    def bind_skill(self, skill_name: str, func: callable, provider_name: str = "local_provider") -> None:
+    def bind_skill(
+        self, skill_name: str, func: callable, provider_name: str = "local_provider"
+    ) -> None:
         """
         Bind a function to a skill name for this entity.
         Each skill must be explicitly bound to a specific provider.
-        
+
         Args:
             skill_name: Name of the skill to bind
             func: Function to bind to the skill
             provider_name: Name of the provider that provides this skill
         """
         if skill_name not in EOS_SKILL_SPECS:
-            raise ValueError(
-                f"skill '{skill_name}' is not a standard skill."
-            )
-        
+            raise ValueError(f"skill '{skill_name}' is not a standard skill.")
+
         if provider_name is None:
-            raise ValueError(f"provider_name must be specified for skill '{skill_name}'")
-        
+            raise ValueError(
+                f"provider_name must be specified for skill '{skill_name}'"
+            )
+
         # Verify that the provider exists and provides this skill
         # Note: This verification is deferred until runtime is available
         # The actual verification happens during skill execution
-        
+
         self.skill_bindings[skill_name] = func
         self.skill_providers[skill_name] = provider_name
         self.add_skill(skill_name)
@@ -327,14 +329,16 @@ class Entity:
                         if set(kwargs.keys()) == set(alt_spec.keys()):
                             # Check argument types and attempt casting if needed
                             for arg_name, expected_type in alt_spec.items():
-                                if not self._is_type_match(kwargs[arg_name], expected_type):
+                                if not self._is_type_match(
+                                    kwargs[arg_name], expected_type
+                                ):
                                     # Try to cast the argument to one of the expected types
                                     try:
                                         original_value = kwargs[arg_name]
-                                        original_type = type(
-                                            original_value).__name__
+                                        original_type = type(original_value).__name__
                                         kwargs[arg_name] = self._try_cast(
-                                            original_value, expected_type)
+                                            original_value, expected_type
+                                        )
                                         logger.warning(
                                             f"Type cast for skill '{skill_name}' argument '{arg_name}' (alternative {i+1}): "
                                             f"{original_type} -> {type(kwargs[arg_name]).__name__} ({original_value} -> {kwargs[arg_name]})"
@@ -374,8 +378,7 @@ class Entity:
                     try:
                         original_value = kwargs[arg_name]
                         original_type = type(original_value).__name__
-                        kwargs[arg_name] = self._try_cast(
-                            original_value, expected_type)
+                        kwargs[arg_name] = self._try_cast(original_value, expected_type)
                         logger.warning(
                             f"Type cast for skill '{skill_name}' argument '{arg_name}': "
                             f"{original_type} -> {type(kwargs[arg_name]).__name__} ({original_value} -> {kwargs[arg_name]})"
@@ -387,7 +390,9 @@ class Entity:
                         )
                         raise TypeError(error_msg) from None
         else:
-            error_msg = f"Invalid input spec type for '{skill_name}': {type(expected_input)}"
+            error_msg = (
+                f"Invalid input spec type for '{skill_name}': {type(expected_input)}"
+            )
             logger.error(
                 f"[{self.get_absolute_path()}] argument validation failed: {error_msg}"
             )
@@ -421,12 +426,13 @@ class Entity:
                     if value is None:
                         return True
                     # Check against the non-None type
-                    non_none_type = args[0] if args[1] is type(
-                        None) else args[1]
+                    non_none_type = args[0] if args[1] is type(None) else args[1]
                     return recursive_type_check(value, non_none_type)
                 else:
                     # This is a regular Union, check against all types
-                    return any(recursive_type_check(value, arg_type) for arg_type in args)
+                    return any(
+                        recursive_type_check(value, arg_type) for arg_type in args
+                    )
             # Handle dataclass
             if dataclasses.is_dataclass(expected_type):
                 if not isinstance(value, expected_type):
@@ -502,68 +508,86 @@ class Entity:
             str: Injection method - 'keyword' or 'none'
         """
         import inspect
+
         sig = inspect.signature(func)
 
-        if 'self_entity' in sig.parameters:
+        if "self_entity" in sig.parameters:
             # Function supports self_entity as keyword argument
-            if 'self_entity' not in kwargs:
-                kwargs['self_entity'] = self
-            return 'keyword'
+            if "self_entity" not in kwargs:
+                kwargs["self_entity"] = self
+            return "keyword"
         else:
             # Function doesn't support self_entity, remove it
             logger.warning(
-                f"Function {func.__name__} does not support self_entity, removing it from kwargs")
-            kwargs.pop('self_entity', None)
-            return 'none'
+                f"Function {func.__name__} does not support self_entity, removing it from kwargs"
+            )
+            kwargs.pop("self_entity", None)
+            return "none"
 
     def _inject_provider_info_if_needed(self, skill_name: str, func, kwargs):
         """
         Inject provider information (target_host, target_port) for remote skills.
         This method checks if the function expects target_host and target_port parameters,
         and if so, injects them based on the entity's skill-provider mapping.
-        
+
         Args:
             skill_name: Name of the skill being called
             func: The function to be called
             kwargs: Keyword arguments for the function call
         """
         import inspect
+
         sig = inspect.signature(func)
-        
+
         # Check if this is a remote skill (function expects target_host and target_port)
         # Note: self_entity parameter is handled separately by _inject_self_entity_if_needed
-        logger.debug(f"Checking if skill '{skill_name}' is remote: target_host in params={'target_host' in sig.parameters}, target_port in params={'target_port' in sig.parameters}")
-        if 'target_host' in sig.parameters and 'target_port' in sig.parameters:
+        logger.debug(
+            f"Checking if skill '{skill_name}' is remote: target_host in params={'target_host' in sig.parameters}, target_port in params={'target_port' in sig.parameters}"
+        )
+        if "target_host" in sig.parameters and "target_port" in sig.parameters:
             # This is a remote skill, inject provider information
             if skill_name in self.skill_providers:
                 provider_name = self.skill_providers[skill_name]
-                
+
                 # Get provider info from runtime registry
                 from Robonix.uapi.runtime.action import get_runtime
+
                 try:
                     runtime = get_runtime()
                     provider = runtime.registry.get_provider(provider_name)
                     if provider is None:
-                        available_providers = [p.name for p in runtime.registry.providers]
-                        raise ValueError(f"Provider '{provider_name}' not found in registry. Available providers: {available_providers}")
-                    
+                        available_providers = [
+                            p.name for p in runtime.registry.providers
+                        ]
+                        raise ValueError(
+                            f"Provider '{provider_name}' not found in registry. Available providers: {available_providers}"
+                        )
+
                     # Verify that the provider actually provides this skill
                     if skill_name not in provider.skills:
-                        raise ValueError(f"Provider '{provider_name}' does not provide skill '{skill_name}'. Available skills: {provider.skills}")
-                    
+                        raise ValueError(
+                            f"Provider '{provider_name}' does not provide skill '{skill_name}'. Available skills: {provider.skills}"
+                        )
+
                     # Inject target_host and target_port if not already provided
-                    if 'target_host' not in kwargs:
-                        kwargs['target_host'] = provider.IP
-                    if 'target_port' not in kwargs:
-                        kwargs['target_port'] = provider.port
-                        
-                    logger.debug(f"Injected provider info for skill '{skill_name}' from provider '{provider_name}': host={provider.IP}, port={provider.port}")
-                    
+                    if "target_host" not in kwargs:
+                        kwargs["target_host"] = provider.IP
+                    if "target_port" not in kwargs:
+                        kwargs["target_port"] = provider.port
+
+                    logger.debug(
+                        f"Injected provider info for skill '{skill_name}' from provider '{provider_name}': host={provider.IP}, port={provider.port}"
+                    )
+
                 except Exception as e:
-                    logger.error(f"Failed to inject provider info for skill '{skill_name}': {e}")
+                    logger.error(
+                        f"Failed to inject provider info for skill '{skill_name}': {e}"
+                    )
                     raise
             else:
-                raise ValueError(f"No provider information found for skill '{skill_name}' in entity '{self.get_absolute_path()}'")
+                raise ValueError(
+                    f"No provider information found for skill '{skill_name}' in entity '{self.get_absolute_path()}'"
+                )
 
     def __getattr__(self, name):
         # https://www.sefidian.com/2021/06/06/python-__getattr__-and-__getattribute__-magic-methods/
@@ -574,15 +598,15 @@ class Entity:
 
             def wrapper(**kwargs):
                 logger.debug(
-                    f"First path wrapper called for {name} with kwargs: {truncate_log_content(kwargs)}")
+                    f"First path wrapper called for {name} with kwargs: {truncate_log_content(kwargs)}"
+                )
                 logger.debug(
                     f"[{self.get_absolute_path()}] calling skill {name} with kwargs {truncate_log_content(kwargs)}"
                 )
                 try:
                     func = self.skill_bindings[name]
 
-                    injection_type = self._inject_self_entity_if_needed(
-                        func, kwargs)
+                    injection_type = self._inject_self_entity_if_needed(func, kwargs)
 
                     # Inject provider information for remote skills
                     self._inject_provider_info_if_needed(name, func, kwargs)
@@ -595,8 +619,7 @@ class Entity:
                         f"[{self.get_absolute_path()}] skill '{name}' execution failed: {str(e)}"
                     )
                     # Create a custom exception with better formatting
-                    error_msg = format_skill_error(
-                        name, type(e).__name__, str(e))
+                    error_msg = format_skill_error(name, type(e).__name__, str(e))
                     custom_exc = type(e)(error_msg)
                     raise custom_exc from None
 
@@ -605,7 +628,8 @@ class Entity:
         # Support for skill and capability calling with self_entity.skl_xxx and self_entity.cap_xxx
         # Note: The actual function names in skill/__init__.py may not start with cap_ or skl_
         # They are bound to standard names through entity.bind_skill() method
-        if name.startswith('skl_') or name.startswith('cap_'):
+        if name.startswith("skl_") or name.startswith("cap_"):
+
             def wrapper(**kwargs):
                 # First, try to find the function in skill bindings (standard names)
                 if name in self.skill_bindings:
@@ -615,37 +639,43 @@ class Entity:
                     try:
                         func = self.skill_bindings[name]
                         logger.debug(
-                            f"About to call skill {name}, func type: {type(func)}")
+                            f"About to call skill {name}, func type: {type(func)}"
+                        )
                         logger.debug(f"kwargs before: {truncate_log_content(kwargs)}")
 
                         # Use unified self_entity injection logic
                         injection_type = self._inject_self_entity_if_needed(
-                            func, kwargs)
+                            func, kwargs
+                        )
 
                         # Inject provider information for remote skills
                         self._inject_provider_info_if_needed(name, func, kwargs)
 
                         logger.debug(
-                            f"Function {name} injection type: {injection_type}")
-                        logger.debug(f"kwargs after injection: {truncate_log_content(kwargs)}")
+                            f"Function {name} injection type: {injection_type}"
+                        )
+                        logger.debug(
+                            f"kwargs after injection: {truncate_log_content(kwargs)}"
+                        )
 
                         # Always call function with keyword arguments only
                         logger.debug(f"Calling {name} with keyword arguments")
                         result = func(**kwargs)
 
                         # Only check args and returns for functions that don't support self_entity
-                        if injection_type == 'none':
+                        if injection_type == "none":
                             self._check_skill_args(name, kwargs)
                             self._check_skill_returns(name, result)
 
                         return result
                     except (ValueError, TypeError) as e:
-                        logger.debug(f"Exception occurred in {name}: {truncate_log_content(str(e))}")
+                        logger.debug(
+                            f"Exception occurred in {name}: {truncate_log_content(str(e))}"
+                        )
                         logger.error(
                             f"[{self.get_absolute_path()}] skill '{name}' execution failed: {str(e)}"
                         )
-                        error_msg = format_skill_error(
-                            name, type(e).__name__, str(e))
+                        error_msg = format_skill_error(name, type(e).__name__, str(e))
                         custom_exc = type(e)(error_msg)
                         raise custom_exc from None
 
