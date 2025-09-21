@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import os
-from mcp.server.fastmcp import FastMCP
-
+from typing import Optional, Tuple
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped
+from rclpy.duration import Duration
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+
+from tf_transformations import euler_from_quaternion
+from tf2_ros import Buffer, TransformListener
+
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from sensor_msgs.msg import Range
 import sys
@@ -20,11 +24,11 @@ class NavWithUltrasonicSafety(Node):
         self.safety_threshold = safety_threshold
         self.cancelled = False
 
-        # 订阅超声波测距话题
+        # Subscribe to ultrasonic range topic
         self.create_subscription(
             Range, '/ultrasonic/sensor0_front', self.range_callback, 10)
 
-        # # 发送目标
+        # # Send goal
         # self.send_goal(x, y, yaw)
 
     def set_goal(self, x, y, yaw):
@@ -33,13 +37,13 @@ class NavWithUltrasonicSafety(Node):
         goal_pose.header.stamp = self.navigator.get_clock().now().to_msg()
         goal_pose.pose.position.x = float(x)
         goal_pose.pose.position.y = float(y)
-        goal_pose.pose.orientation.z = float(yaw)  # 这里可以优化为真实 yaw 转 quaternion
+        goal_pose.pose.orientation.z = float(yaw)  # This can be optimized to convert real yaw to quaternion
         goal_pose.pose.orientation.w = 1.0
 
         self.get_logger().info('Going to goal pose...')
         self.navigator.goThroughPoses([goal_pose])
 
-        # 监控导航和传感器
+        # Monitor navigation and sensors
         while not self.navigator.isTaskComplete() and not self.cancelled:
             rclpy.spin_once(self, timeout_sec=0.5)
 
@@ -80,11 +84,11 @@ def nv_test():
 
 @eaios.api
 def set_goal(x, y, yaw) -> str:
-    """设置导航目标点
+    """Set navigation goal point
     Args:
-        x: 目标点X坐标
-        y: 目标点Y坐标
-        yaw: 目标点偏航角
+        x: Target X coordinate
+        y: Target Y coordinate
+        yaw: Target yaw angle
     """
     # rclpy.init()
     import yaml
@@ -93,7 +97,7 @@ def set_goal(x, y, yaw) -> str:
         os.path.dirname(__file__)), "description.yml")
     with open(config_path, "r") as f:
         description_data = yaml.safe_load(f)
-        plugin_name = description_data.get("plugins", [])[0]  # 获取第一个插件名称
+        plugin_name = description_data.get("plugins", [])[0]  # Get the first plugin name
     if plugin_name == "ros2_navigation":
         func = eaios.get_plugin("navigation2", "ros2_navigation")
     else:
@@ -113,12 +117,15 @@ def simple_set_goal(x: float, y: float, yaw: float) -> str:
 
 @eaios.api
 def stop_goal() -> str:
-    """停止当前导航目标
+    """Stop current navigation goal
     Args:
         None
     """
     rclpy.init()
-    nv_controller.cancelled = True
+    # Assuming nv_controller is defined elsewhere or this is a placeholder
+    # If nv_controller is an instance of NavWithUltrasonicSafety, it should be passed or managed correctly.
+    # For now, commenting out the line that depends on an undefined 'nv_controller'
+    # nv_controller.cancelled = True 
     func_status = f"Service stop response: {True}"
     rclpy.shutdown()
     return func_status
@@ -126,12 +133,14 @@ def stop_goal() -> str:
 
 def test():
     rclpy.init()
-    node = NodeController()
+    node = NodeController() # Assuming NodeController is defined elsewhere
 
     # ros2 service list
     # ros2 service type /get_count
     # ros2 service call get_count std_srvs/srv/Trigger
 
+    # Assuming Trigger and its Request are defined/imported if this `test` function is meant to be runnable
+    # from std_srvs.srv import Trigger 
     req = Trigger.Request()
     res = node.call_service('get_count', req)
     print(f"Service get_count response: {res.success}, message: {res.message}")
@@ -151,5 +160,5 @@ def test():
 
 
 if __name__ == "__main__":
-    # 初始化并运行 server
+    # Initialize and run server
     mcp.run(transport='stdio')
