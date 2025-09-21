@@ -1,5 +1,4 @@
 driver:
-  # - pointcloud_to_laserscan
   - pointcloud_to_laserscan # TODO: fix this to "pointcloud"
   - ranger_ros2
   # - raspi_hc_sr04
@@ -8,10 +7,7 @@ driver:
   - mid360
   # - unilidar_L2
 capability:
-  - amcl
-  - map_server
   - navigation2
-  - activator
   - vision
   - pointcloud
 skill:
