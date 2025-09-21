@@ -4,12 +4,13 @@ from collections import defaultdict
 from constant import BASE_PATH
 from log import logger
 
+
 def scan_dir(base_path, feature_set, feature_sources, all_dependencies):
     """Scan directory for description.yml files and extract features and dependencies"""
     if not os.path.exists(base_path):
         logger.warning(f"Path {base_path} does not exist, skipping")
         return
-    
+
     for root, dirs, files in os.walk(base_path):
         if "description.yml" in files:
             desc_path = os.path.join(root, "description.yml")
@@ -21,14 +22,18 @@ def scan_dir(base_path, feature_set, feature_sources, all_dependencies):
                     dependencies = data.get("depend", [])
 
                     if not features:
-                        logger.warning(f"No 'feature' key found in {desc_path}, skipping")
+                        logger.warning(
+                            f"No 'feature' key found in {desc_path}, skipping"
+                        )
                         continue
-                    
+
                     for feature in features:
                         if feature in feature_set:
-                            raise ValueError(f"Duplicate feature '{feature}' found in:\n"
-                                                f"  - {feature_sources[feature]}\n"
-                                                f"  - {desc_path}")
+                            raise ValueError(
+                                f"Duplicate feature '{feature}' found in:\n"
+                                f"  - {feature_sources[feature]}\n"
+                                f"  - {desc_path}"
+                            )
 
                         feature_set.add(feature)
                         feature_sources[feature] = desc_path
@@ -36,6 +41,7 @@ def scan_dir(base_path, feature_set, feature_sources, all_dependencies):
 
             except Exception as e:
                 logger.error(f"Failed to read {desc_path}: {e}")
+
 
 def check_depend(config_path):
     """
@@ -50,17 +56,17 @@ def check_depend(config_path):
 
     config = {}
     config_path = os.path.join(BASE_PATH, config_path)
-    with open(config_path, 'r', encoding='utf-8') as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
-    
+
     logger.info(f"Starting dependency check for config: {config_path}")
-    
+
     # Step 1: Scan all directories to get features and dependencies
     for base, entries in config.items():
         if entries is None:
             logger.warning(f"No entries found in {base}")
             continue
-        
+
         base_dir_path = os.path.join(BASE_PATH, base)
         if not os.path.exists(base_dir_path):
             logger.error(f"Base directory not found at '{base_dir_path}'")
@@ -77,7 +83,7 @@ def check_depend(config_path):
         except Exception as e:
             logger.error(f"Error accessing '{base_dir_path}': {e}")
             return []
-    
+
     # Step 2: Check if all dependencies exist in feature_set
     all_valid = True
     for entry_path, deps in all_dependencies.items():
@@ -91,6 +97,7 @@ def check_depend(config_path):
 
     logger.info("All features and dependencies validated successfully")
     return feature_set, all_dependencies
+
 
 # Example usage
 if __name__ == "__main__":

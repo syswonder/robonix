@@ -3,8 +3,18 @@ import yaml
 from log import logger
 from constant import BASE_PATH
 
+
 class BaseNode:
-    def __init__(self, cwd: str, name: str, version: str, author: str, startup_on_boot: bool, startup_command: str, node_type: str = None):
+    def __init__(
+        self,
+        cwd: str,
+        name: str,
+        version: str,
+        author: str,
+        startup_on_boot: bool,
+        startup_command: str,
+        node_type: str = None,
+    ):
         """
         Args:
             cwd (str): The name of the base directory.
@@ -25,9 +35,10 @@ class BaseNode:
 
     def __str__(self):
         return f"BaseNode(cwd='{self.cwd}', name='{self.name}', version='{self.version}', author='{self.author}', start_on_boot='{self.start_on_boot}', startup_command='{self.startup_command}')"
-    
+
     def __repr__(self):
         return f"BaseNode({self.name}_{self.version}, cwd='{self.cwd}')"
+
 
 def get_node(entry, sub_dir_path, node_type: str = None) -> BaseNode:
     """
@@ -47,11 +58,13 @@ def get_node(entry, sub_dir_path, node_type: str = None) -> BaseNode:
         description_file_path = os.path.join(sub_dir_path, "description.yml")
 
         # Check if description.yml exists in the subdirectory
-        if os.path.exists(description_file_path) and os.path.isfile(description_file_path):
+        if os.path.exists(description_file_path) and os.path.isfile(
+            description_file_path
+        ):
             logger.info(f"Found description.yml in: {sub_dir_path}")
             try:
                 # Read and parse the YAML file
-                with open(description_file_path, 'r', encoding='utf-8') as f:
+                with open(description_file_path, "r", encoding="utf-8") as f:
                     data = yaml.safe_load(f)
 
                     base_info = BaseNode(
@@ -60,16 +73,20 @@ def get_node(entry, sub_dir_path, node_type: str = None) -> BaseNode:
                         version=data.get("version"),
                         author=data.get("author"),
                         startup_on_boot=data.get("start_on_boot", False),
-                        startup_command=data.get("startup_command",None),
-                        node_type=node_type
+                        startup_command=data.get("startup_command", None),
+                        node_type=node_type,
                     )
                     return base_info
             except yaml.YAMLError as e:
                 logger.error(f"Error parsing YAML file '{description_file_path}': {e}")
             except Exception as e:
-                logger.error(f"An unexpected error occurred while processing '{description_file_path}': {e}")
+                logger.error(
+                    f"An unexpected error occurred while processing '{description_file_path}': {e}"
+                )
         else:
-            logger.warning(f"No description.yml found in '{entry}' or it's not a file. Skipping.")
+            logger.warning(
+                f"No description.yml found in '{entry}' or it's not a file. Skipping."
+            )
     else:
         logger.warning(f"Skipping non-directory entry: {entry}")
     return None
@@ -95,17 +112,19 @@ def get_node_details(config_path: str) -> list[BaseNode]:
         return []
     config = {}
 
-    with open(config_path, 'r', encoding='utf-8') as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     all_base_details = []
-    
+
     for base, entries in config.items():
         if entries is None:
             logger.error(f"No entries found in {base}")
             continue
         base_dir_path = os.path.join(BASE_PATH, base)
         if not os.path.exists(base_dir_path):
-            logger.error(f"Error: The 'base' directory was not found at '{base_dir_path}'")
+            logger.error(
+                f"Error: The 'base' directory was not found at '{base_dir_path}'"
+            )
             return []
         if not os.path.isdir(base_dir_path):
             logger.error(f"Error: '{base_dir_path}' exists but is not a directory.")
@@ -128,8 +147,10 @@ def get_node_details(config_path: str) -> list[BaseNode]:
 
     return all_base_details
 
+
 if __name__ == "__main__":
     import sys
+
     project_root_path = sys.argv[1]
     all_base_details = get_node_details(project_root_path)
     logger.info(all_base_details)

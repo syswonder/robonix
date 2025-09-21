@@ -10,13 +10,13 @@ class SkillProvider:
 
     def __repr__(self):
         return self.__str__()
-    
+
     def dump_skills(self):
         # dump beatified skills list in color
         if not self.skills:
             print("\033[93m(no skills)\033[0m")
             return None
-            
+
         print("\033[92m[", end="")
         for i, skill in enumerate(self.skills):
             if i == len(self.skills) - 1:

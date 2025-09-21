@@ -21,21 +21,33 @@ LOG_LEVEL = EAIOS_LOG_LEVEL.INFO
 # stacktrace
 install(show_locals=False, width=120, word_wrap=True, extra_lines=3)
 
+
 def get_terminal_width():
     try:
         return shutil.get_terminal_size().columns
     except:
         return 80
 
-def create_format_function(use_alignment=True):
-    if use_alignment:
+
+def create_format_function(use_alignment=True, for_file=False):
+    if use_alignment and not for_file:
+
         def format_record(record):
             file_line = f"{record['file']}:{record['line']}"
-            return f"[<level>{record['level'].name: <8}</level> {record['elapsed']!s: <12} <green>{file_line: <35}</green>] <level>{record['message']}</level>\n"
+            return f"[<level>{record['level'].name: <8}</level> {record['elapsed']!s: <12} <green>{file_line: <26}</green>] <level>{record['message']}</level>\n"
+
+    elif for_file:
+
+        def format_record(record):
+            file_line = f"{record['file']}:{record['line']}"
+            return f"[{record['time']}] [{record['level'].name}] {file_line} - {record['message']}\n"
+
     else:
+
         def format_record(record):
             file_line = f"{record['file']}:{record['line']}"
             return f"[<level>{record['level']}</level> {record['elapsed']} <green>{file_line}</green>] <level>{record['message']}</level>\n"
+
     return format_record
 
 
@@ -56,31 +68,55 @@ def set_log_level(level):
             raise ValueError(f"Invalid log level: {level}")
     else:
         raise TypeError("level must be EAIOS_LOG_LEVEL or str")
-    
+
     terminal_width = get_terminal_width()
     use_alignment = terminal_width >= 90
-    format_function = create_format_function(use_alignment)
-    
+    console_format = create_format_function(use_alignment, for_file=False)
+    file_format = create_format_function(use_alignment, for_file=True)
+
     logger.add(
         sys.stderr,
-        format=format_function,
+        format=console_format,
         level=log_level_value,
         colorize=True,
         backtrace=True,
         diagnose=True,
     )
 
+    logger.add(
+        "robonix.log",
+        format=file_format,
+        level=log_level_value,
+        colorize=False,
+        backtrace=True,
+        diagnose=True,
+        rotation="10 MB",
+        retention="7 days",
+    )
+
 
 terminal_width = get_terminal_width()
 use_alignment = terminal_width >= 90
-format_function = create_format_function(use_alignment)
+console_format = create_format_function(use_alignment, for_file=False)
+file_format = create_format_function(use_alignment, for_file=True)
 
 logger.remove()
 logger.add(
     sys.stderr,
-    format=format_function,
+    format=console_format,
     level=LOG_LEVEL.value,
     colorize=True,
     backtrace=True,
     diagnose=True,
+)
+
+logger.add(
+    "robonix.log",
+    format=file_format,
+    level=LOG_LEVEL.value,
+    colorize=False,
+    backtrace=True,
+    diagnose=True,
+    rotation="10 MB",
+    retention="7 days",
 )

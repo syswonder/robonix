@@ -30,3 +30,5 @@ frames_*
 # skill export
 __export__.py
 skill/__init__.py
+
+*.log
