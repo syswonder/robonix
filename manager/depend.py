@@ -51,6 +51,9 @@ def check_depend(config_path):
     all_base_details = []
     # Step 1: 扫描所有目录，获取 feature 和 dependency
     for base,entrys in config.items():
+        if entrys is None:
+            print(f"No entry find in {base}")
+            continue
         base_dir_path = os.path.join(BASE_PATH, base)
         if not os.path.exists(base_dir_path):
             print(f"[ERROR] The 'base' directory was not found at '{base_dir_path}'")
