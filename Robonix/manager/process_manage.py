@@ -132,7 +132,7 @@ class RuntimeManager:
             logger.warning("No nodes found.")
             return
 
-        print("\n--- Available nodes ---")
+        logger.info("Available nodes:")
         def green_color(text):
             return "\033[92m" + text + "\033[0m"
         def red_color(text):
@@ -142,11 +142,11 @@ class RuntimeManager:
 
         for node_id, node_node in self.available_nodes.items():
             status = green_color("Running") if node_id in self.running_processes and self.running_processes[node_id].is_running() else red_color("Stopped")
-            print(f"- [{status}] {blue_bold_color(node_node.name)} (dir: {node_node.cwd}, version: {node_node.version}, start_on_boot: {node_node.start_on_boot})", end="")
+            logger.info(f"- [{status}] {blue_bold_color(node_node.name)} (dir: {node_node.cwd}, version: {node_node.version}, start_on_boot: {node_node.start_on_boot})")
             if node_node.startup_command:
-                print(f"  Command: '{node_node.startup_command}'")
+                logger.info(f"  Command: '{node_node.startup_command}'")
             else:
-                print(f"  No startup command defined.")
+                logger.info(f"  No startup command defined.")
 
     def start_node(self, node_name: str):
         """Start a node by ID."""
@@ -201,7 +201,7 @@ class RuntimeManager:
                 output = process_wrapper.get_output()
                 if len(output)==0:
                     break
-                print(output)
+                logger.info(output)
         else:
             logger.warning(f"Node '{node_name}' is not running, so no output to display.")
 
