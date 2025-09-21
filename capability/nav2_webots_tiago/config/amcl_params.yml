@@ -1,0 +1,23 @@
+amcl:
+  ros__parameters:
+    use_sim_time: True
+    transform_tolerance: 0.3
+    tf_broadcast: true
+    scan_topic: /scanner
+    min_particles: 300
+    max_particles: 2000
+    odom_frame_id: "odom"
+    base_frame_id: "base_footprint"
+    global_frame_id: "map"
+    laser_max_range: -1.0
+    laser_min_range: -1.0
+    update_min_d: 0.05
+    update_min_a: 0.05
+    resample_interval: 1
+    set_initial_pose: true
+    initial_pose:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      yaw: 0.0
+  

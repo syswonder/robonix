@@ -99,6 +99,9 @@ def get_node_details(config_path: str) -> list[BaseNode]:
     all_base_details = []
     
     for base,entrys in config.items():
+        if entrys is None:
+            logger.error(f"No entry find in {base}")
+            continue
         base_dir_path = os.path.join(BASE_PATH, base)
         if not os.path.exists(base_dir_path):
             logger.error(f"Error: The 'base' directory was not found at '{base_dir_path}'")

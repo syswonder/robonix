@@ -1,0 +1,12 @@
+name: "navigation2"
+version: "1.0.0"
+author: "syswonder"
+start_on_boot: true
+startup_command: "bash run.sh"
+description: "The navigation capability of the robot"
+plugins:
+  - "ros2_navigation"
+feature: 
+  - "set_goal"
+  - "stop_goal"
+  - "nv_test"
