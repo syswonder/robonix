@@ -1,5 +1,7 @@
 # Robonix
-![robonix](robonix.png)
+<div align="center">
+  <img src="robonix.png" alt="robonix" width="200">
+</div>
 
 **Robonix** is an open-source embodied intelligence framework designed to provide the following features:
 
@@ -15,28 +17,19 @@
 
 ```
 .
-├── brain
-├── capability
-│   ├── example_hello
-│   │   ├── api
-│   │   ├── config
-│   │   ├── description.yml
-│   │   ├── README.md
-│   │   └── src
-│   │       └── hello.py
-│   └── example_ping
-│       ├── api
-│       ├── config
-│       ├── description.yml
-│       └── README.md
-├── config
-├── cost
-├── driver
-├── infra
-├── manager
-├── memory
-├── README.md
-└── skill
+├── config/                     # Global configuration and plugins
+├── docs/                       # Documentation
+├── examples/                   # Demo examples
+├── Robonix/                    # Core framework
+│   ├── brain/                  # Intelligence brain
+│   ├── capability/             # Capability modules
+│   ├── driver/                 # Hardware drivers
+│   ├── manager/                # System manager
+│   ├── memory/                 # Memory system
+│   ├── simulator/              # Simulator
+│   ├── skill/                  # Skill modules
+│   └── uapi/                   # Unified API
+└── README.md
 ```
 
 * **driver:** The hardware abstraction layer, responsible for abstracting hardware into software-accessible data streams, such as ROS2 topics.
