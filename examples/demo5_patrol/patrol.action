@@ -14,4 +14,27 @@ def test_patrol(ranger_path: EntityPath) -> EOS_TYPE_ActionResult:
     # patrolling logic
     action_info("Patrolling...")    
 
+    action_print("getting current pose")
+    
+    current_pose = ranger.cap_get_pose()
+    
+    if current_pose is None:
+        action_print("failed to get current pose")
+        return EOS_TYPE_ActionResult.FAILURE
+    x, y, yaw = current_pose
+    
+    action_print(f"current pose: x={x}, y={y}, yaw={yaw}")
+
+    action_print("moving...")
+    
+    # result = ranger.skl_move_to_rel_pos(dx=0.4, dy=0.0, dyaw=0.0)
+    result = ranger.skl_move_to_ab_pos(x=0, y=0, yaw=0)
+    
+    if result is None or result == "":
+        action_print("failed to start movement")
+        return EOS_TYPE_ActionResult.FAILURE
+    
+    action_print(f"movement command sent successfully: {result}")
+    action_print("patrol completed")
+
     return EOS_TYPE_ActionResult.SUCCESS
