@@ -46,9 +46,8 @@ def create_ranger_entity_builder():
         ranger = create_controllable_entity("ranger")
         root_room.add_child(ranger)
 
-        ranger.bind_skill("cap_set_goal", simple_set_goal)
         ranger.bind_skill("cap_get_pose", get_pose)
-        ranger.bind_skill("skl_move_to_ab_pos", move_to_ab_pos)
+        ranger.bind_skill("cap_set_goal", simple_set_goal)
         ranger.bind_skill("skl_move_to_rel_pos", move_to_rel_pos)
 
     return builder
