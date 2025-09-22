@@ -46,6 +46,11 @@ def create_ranger_entity_builder():
         ranger = create_controllable_entity("ranger")
         root_room.add_child(ranger)
 
+        ranger.bind_skill("cap_set_goal", simple_set_goal)
+        ranger.bind_skill("cap_get_pose", get_pose)
+        ranger.bind_skill("skl_move_to_ab_pos", move_to_ab_pos)
+        ranger.bind_skill("skl_move_to_rel_pos", move_to_rel_pos)
+
     return builder
 
 
@@ -92,11 +97,29 @@ def main():
         logger.info("Demo finished")
         return 0
 
+    except KeyboardInterrupt:
+        logger.info("Demo interrupted by user")
+        return 0
     except Exception as e:
         logger.error(f"Demo failed: {str(e)}", exc_info=True)
         return 1
+    finally:
+        # 确保 ROS2 节点正确关闭
+        try:
+            import rclpy
+            if rclpy.ok():
+                rclpy.shutdown()
+        except:
+            pass
 
 
 if __name__ == "__main__":
-    exit_code = main()
-    sys.exit(exit_code)
+    try:
+        exit_code = main()
+        sys.exit(exit_code)
+    except KeyboardInterrupt:
+        logger.info("Program interrupted by user")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Program failed: {str(e)}", exc_info=True)
+        sys.exit(1)

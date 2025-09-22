@@ -32,40 +32,22 @@ def get_terminal_width():
         return 80
 
 
-def _format_console_record(record, use_alignment=True):
-    """Format record for console output."""
-    file_line = f"{record['file']}:{record['line']}"
-    if use_alignment:
-        return f"[<level>{record['level'].name: <8}</level> {record['elapsed']!s: <12} <green>{file_line: <26}</green>] <level>{record['message']}</level>\n"
-    else:
-        return f"[<level>{record['level']}</level> {record['elapsed']} <green>{file_line}</green>] <level>{record['message']}</level>\n"
-
-
-def _format_file_record(record):
-    """Format record for file output."""
-    file_line = f"{record['file']}:{record['line']}"
-    return f"[{record['time']}] [{record['level'].name}] {file_line} - {record['message']}\n"
-
-
 def _setup_logger_handlers(level_value, filename):
     """Setup logger handlers with given level and filename."""
-    terminal_width = get_terminal_width()
-    use_alignment = terminal_width >= 90
-    
-    # Console handler
+    # Console handler - 使用 Loguru 官方推荐的简单格式
     logger.add(
         sys.stderr,
-        format=lambda record: _format_console_record(record, use_alignment),
+        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
         level=level_value,
         colorize=True,
         backtrace=True,
         diagnose=True,
     )
 
-    # File handler
+    # File handler - 使用简单的文件格式
     logger.add(
         filename,
-        format=_format_file_record,
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
         level=level_value,
         colorize=False,
         backtrace=True,

@@ -7,7 +7,6 @@ from mcp.server.fastmcp import FastMCP
 import yaml
 import sys
 import inspect
-from .log import logger
 
 if os.path.abspath(os.path.dirname(__file__)) not in sys.path:
     sys.path.append(os.path.abspath(os.path.dirname(__file__)))
@@ -15,6 +14,8 @@ from constant import BASE_SKILL_PATH, INIT_FILE, EXPORT_FILE, BASE_PATH
 
 if os.path.dirname(BASE_PATH) not in sys.path:
     sys.path.append(os.path.dirname(BASE_PATH))
+
+from robonix.manager.log import logger
 
 if not hasattr(sys, "_eaios_function_registry"):
     sys._eaios_function_registry = {"registered_funcs": []}
@@ -225,7 +226,7 @@ class eaios:
             logger.debug(
                 f"Skill module id: {id(skill_module)}, file: {skill_module.__file__}"
             )
-            logger.debug(f"Function registry: {eaios.FUNCTION_REGISTRY}")
+            logger.debug("Function registry: " + str(eaios.FUNCTION_REGISTRY))
             for name in getattr(skill_module, "__all__", []):
                 func.__globals__[name] = getattr(skill_module, name)
 
