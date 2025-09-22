@@ -121,7 +121,7 @@ def stop_goal() -> str:
     Args:
         None
     """
-    rclpy.init()
+    # rclpy.init()
     # Assuming nv_controller is defined elsewhere or this is a placeholder
     # If nv_controller is an instance of NavWithUltrasonicSafety, it should be passed or managed correctly.
     # For now, commenting out the line that depends on an undefined 'nv_controller'
@@ -132,7 +132,7 @@ def stop_goal() -> str:
 
 
 def test():
-    rclpy.init()
+    # rclpy.init()
     node = NodeController() # Assuming NodeController is defined elsewhere
 
     # ros2 service list
