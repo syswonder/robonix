@@ -625,69 +625,6 @@ class Entity:
 
             return wrapper
 
-        # Support for skill and capability calling with self_entity.skl_xxx and self_entity.cap_xxx
-        # Note: The actual function names in skill/__init__.py may not start with cap_ or skl_
-        # They are bound to standard names through entity.bind_skill() method
-        if name.startswith("skl_") or name.startswith("cap_"):
-
-            def wrapper(**kwargs):
-                # First, try to find the function in skill bindings (standard names)
-                if name in self.skill_bindings:
-                    logger.debug(
-                        f"[{self.get_absolute_path()}] calling skill {name} with self_entity injection and kwargs {truncate_log_content(kwargs)}"
-                    )
-                    try:
-                        func = self.skill_bindings[name]
-                        logger.debug(
-                            f"About to call skill {name}, func type: {type(func)}"
-                        )
-                        logger.debug(f"kwargs before: {truncate_log_content(kwargs)}")
-
-                        # Use unified self_entity injection logic
-                        injection_type = self._inject_self_entity_if_needed(
-                            func, kwargs
-                        )
-
-                        # Inject provider information for remote skills
-                        self._inject_provider_info_if_needed(name, func, kwargs)
-
-                        logger.debug(
-                            f"Function {name} injection type: {injection_type}"
-                        )
-                        logger.debug(
-                            f"kwargs after injection: {truncate_log_content(kwargs)}"
-                        )
-
-                        # Always call function with keyword arguments only
-                        logger.debug(f"Calling {name} with keyword arguments")
-                        result = func(**kwargs)
-
-                        # Only check args and returns for functions that don't support self_entity
-                        if injection_type == "none":
-                            self._check_skill_args(name, kwargs)
-                            self._check_skill_returns(name, result)
-
-                        return result
-                    except (ValueError, TypeError) as e:
-                        logger.debug(
-                            f"Exception occurred in {name}: {truncate_log_content(str(e))}"
-                        )
-                        logger.error(
-                            f"[{self.get_absolute_path()}] skill '{name}' execution failed: {str(e)}"
-                        )
-                        error_msg = format_skill_error(name, type(e).__name__, str(e))
-                        custom_exc = type(e)(error_msg)
-                        raise custom_exc from None
-
-                # If not found, raise AttributeError
-                raise AttributeError(
-                    f"'{type(self).__name__}' object has no attribute '{name}', "
-                    f"and '{name}' is not available as a skill or capability. "
-                    f"Available skills for {self.get_absolute_path()}: {self.skills}"
-                )
-
-            return wrapper
-
         raise AttributeError(
             f"'{type(self).__name__}' object has no attribute '{name}', or this skill is not bound, available skills for {self.get_absolute_path()}: {self.skills}"
         )
