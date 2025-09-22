@@ -1,27 +1,20 @@
-#!/usr/bin/env python3
-
-import argparse
 import sys
 import os
+import argparse
 from pathlib import Path
 
-project_root = Path(__file__).parent.parent.parent.parent
+# Add the project root to Python path
+project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-project_root_parent = Path(
-    __file__
-).parent.parent.parent.parent.parent  # Robonix root
-sys.path.insert(0, str(project_root_parent))
-
-
-from robonix.uapi import create_runtime_manager, set_runtime, RuntimeManager
+from robonix.uapi import create_runtime_manager, set_runtime
 from robonix.manager.log import logger, set_log_level
+from robonix.uapi.runtime.action import EOS_TYPE_ActionResult
 from robonix.skill import *
 
-set_log_level("debug")
+set_log_level("debug", "demo5_patrol.log")
 
-
-def init_skill_providers(manager: RuntimeManager):
+def init_skill_providers(manager):
     """Initialize skill providers for ranger demo"""
     from robonix.uapi.runtime.provider import SkillProvider
 
@@ -39,21 +32,11 @@ def init_skill_providers(manager: RuntimeManager):
         skills=skills,
     )
 
-    rtx5090server_provider = SkillProvider(
-        name="rtx5090server_provider",
-        IP="162.105.88.184",
-        port=50051,
-        skills=["skl_spatiallm_detect"],
-    )
-
     manager.get_runtime().registry.add_provider(local_provider)
-    manager.get_runtime().registry.add_provider(rtx5090server_provider)
-    logger.info("Skill providers registered successfully")
-    manager.get_runtime().dump_registry()
-
+    logger.info(f"Added skill providers: {manager.get_runtime().registry}")
 
 def create_ranger_entity_builder():
-    """Create a pointcloud-specific entity graph builder"""
+    """Create a ranger-specific entity graph builder"""
     def builder(runtime, **kwargs):
         from robonix.uapi.graph.entity import create_root_room, create_controllable_entity
 
@@ -62,21 +45,12 @@ def create_ranger_entity_builder():
 
         ranger = create_controllable_entity("ranger")
         root_room.add_child(ranger)
-        ranger.bind_skill("cap_pointcloud_to_file",
-                          cap_pointcloud_to_file, provider_name="local_provider")
-
-        server_pc = create_controllable_entity("server_pc")
-        root_room.add_child(server_pc)
-
-        server_pc.bind_skill("skl_spatiallm_detect",
-                             __rpc_skl_spatiallm_detect,
-                             provider_name="rtx5090server_provider")
 
     return builder
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Pointcloud Demo")
+    parser = argparse.ArgumentParser(description="Patrol Demo")
     parser.add_argument(
         "--export-scene",
         type=str,
@@ -84,7 +58,7 @@ def main():
     )
     args = parser.parse_args()
 
-    logger.info("Starting pointcloud demo")
+    logger.info("Starting patrol demo")
 
     manager = create_runtime_manager()
     manager.register_entity_builder("ranger", create_ranger_entity_builder())
@@ -97,21 +71,25 @@ def main():
         logger.info(f"Scene information exported to: {args.export_scene}")
 
     action_program_path = os.path.join(
-        os.path.dirname(__file__), "pointcloud.action")
+        os.path.dirname(__file__), "patrol.action")
     logger.info(f"Loading action program from: {action_program_path}")
 
     try:
         action_names = manager.load_action_program(action_program_path)
         logger.info(f"Loaded action functions: {action_names}")
 
-        manager.configure_action(
-            "test_ranger_pointcloud", ranger_path="/ranger", server_pc_path="/server_pc")
+        manager.configure_action("test_patrol", ranger_path="/ranger")
 
-        logger.info("Executing pointcloud test action...")
-        result = manager.execute_action("test_ranger_pointcloud")
+        logger.info("Executing ranger test action finished...")
+        result = manager.execute_action("test_patrol")
 
-        logger.info(f"Pointcloud test completed with result: {result}")
-        logger.info("Demo completed successfully")
+        logger.info(f"Ranger test finished with result: {result}")
+        
+        if result != EOS_TYPE_ActionResult.SUCCESS:
+            logger.error("Demo failed")
+            return 1
+        
+        logger.info("Demo finished")
         return 0
 
     except Exception as e:

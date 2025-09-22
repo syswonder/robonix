@@ -142,10 +142,49 @@ def action_print(message: str, level: str = "INFO"):
     try:
         frame = inspect.currentframe()
         caller_frame = frame.f_back
-        module_path = caller_frame.f_globals.get("__file__", "")
-
-        if module_path:
-            log_dir = os.path.dirname(os.path.abspath(module_path))
+        
+        # Try to find the actual .action file path by looking through the stack
+        action_file_path = None
+        
+        # First, try to find .action files in the stack
+        for frame_info in inspect.stack():
+            frame_file = frame_info.filename
+            if frame_file.endswith('.action'):
+                action_file_path = frame_file
+                break
+        
+        # If no .action file found, look for the closest action-related file
+        if not action_file_path:
+            for frame_info in inspect.stack():
+                frame_file = frame_info.filename
+                # Look for files that might contain action definitions
+                if ('action' in frame_file.lower() and 
+                    not frame_file.endswith('.py') and
+                    'runtime' not in frame_file):
+                    action_file_path = frame_file
+                    break
+        
+        # If still no action file found, try to find from action_name context
+        if not action_file_path and action_name != "unknown":
+            # Look for directories that might contain the action
+            import glob
+            possible_dirs = [
+                os.getcwd(),
+                os.path.join(os.getcwd(), 'examples'),
+                os.path.join(os.getcwd(), 'examples', 'demo5_patrol'),
+            ]
+            
+            for dir_path in possible_dirs:
+                if os.path.exists(dir_path):
+                    # Look for .action files in this directory
+                    action_files = glob.glob(os.path.join(dir_path, '*.action'))
+                    if action_files:
+                        action_file_path = action_files[0]
+                        break
+        
+        # If still no action file found, use the current working directory
+        if action_file_path:
+            log_dir = os.path.dirname(os.path.abspath(action_file_path))
         else:
             log_dir = os.getcwd()
 
