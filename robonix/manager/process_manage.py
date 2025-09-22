@@ -237,7 +237,9 @@ class RuntimeManager:
                 output = process_wrapper.get_output()
                 if len(output) == 0:
                     break
-                logger.info(output)
+                # Escape angle brackets to prevent Loguru colorization errors
+                escaped_output = output.replace('<', '\\<').replace('>', '\\>')
+                logger.info(escaped_output)
         else:
             logger.warning(
                 f"Node '{node_name}' is not running, so no output to display."

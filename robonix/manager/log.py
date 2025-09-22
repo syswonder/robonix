@@ -16,47 +16,76 @@ class EAIOS_LOG_LEVEL(Enum):
     CRITICAL = "CRITICAL"
 
 
+# Global configuration
 LOG_LEVEL = EAIOS_LOG_LEVEL.INFO
+LOG_FILENAME = "robonix.log"
 
-# stacktrace
+# Install rich traceback
 install(show_locals=False, width=120, word_wrap=True, extra_lines=3)
 
 
 def get_terminal_width():
+    """Get terminal width, fallback to 80 if unable to determine."""
     try:
         return shutil.get_terminal_size().columns
     except:
         return 80
 
 
-def create_format_function(use_alignment=True, for_file=False):
-    if use_alignment and not for_file:
-
-        def format_record(record):
-            file_line = f"{record['file']}:{record['line']}"
-            return f"[<level>{record['level'].name: <8}</level> {record['elapsed']!s: <12} <green>{file_line: <26}</green>] <level>{record['message']}</level>\n"
-
-    elif for_file:
-
-        def format_record(record):
-            file_line = f"{record['file']}:{record['line']}"
-            return f"[{record['time']}] [{record['level'].name}] {file_line} - {record['message']}\n"
-
+def _format_console_record(record, use_alignment=True):
+    """Format record for console output."""
+    file_line = f"{record['file']}:{record['line']}"
+    if use_alignment:
+        return f"[<level>{record['level'].name: <8}</level> {record['elapsed']!s: <12} <green>{file_line: <26}</green>] <level>{record['message']}</level>\n"
     else:
-
-        def format_record(record):
-            file_line = f"{record['file']}:{record['line']}"
-            return f"[<level>{record['level']}</level> {record['elapsed']} <green>{file_line}</green>] <level>{record['message']}</level>\n"
-
-    return format_record
+        return f"[<level>{record['level']}</level> {record['elapsed']} <green>{file_line}</green>] <level>{record['message']}</level>\n"
 
 
-def set_log_level(level):
+def _format_file_record(record):
+    """Format record for file output."""
+    file_line = f"{record['file']}:{record['line']}"
+    return f"[{record['time']}] [{record['level'].name}] {file_line} - {record['message']}\n"
+
+
+def _setup_logger_handlers(level_value, filename):
+    """Setup logger handlers with given level and filename."""
+    terminal_width = get_terminal_width()
+    use_alignment = terminal_width >= 90
+    
+    # Console handler
+    logger.add(
+        sys.stderr,
+        format=lambda record: _format_console_record(record, use_alignment),
+        level=level_value,
+        colorize=True,
+        backtrace=True,
+        diagnose=True,
+    )
+
+    # File handler
+    logger.add(
+        filename,
+        format=_format_file_record,
+        level=level_value,
+        colorize=False,
+        backtrace=True,
+        diagnose=True,
+        rotation="10 MB",
+        retention="7 days",
+    )
+
+
+def set_log_level(level, filename=None):
     """
-    Dynamically set the log level. 'level' can be an EAIOS_LOG_LEVEL enum value or a string (e.g., "DEBUG").
+    Dynamically set the log level. 
+    
+    Args:
+        level: EAIOS_LOG_LEVEL enum value or string (e.g., "DEBUG")
+        filename: Log filename, defaults to LOG_FILENAME if not provided
     """
-    global LOG_LEVEL
-    logger.remove()
+    global LOG_LEVEL, LOG_FILENAME, _logger_initialized
+    
+    # Determine log level value
     if isinstance(level, EAIOS_LOG_LEVEL):
         LOG_LEVEL = level
         log_level_value = level.value
@@ -68,55 +97,45 @@ def set_log_level(level):
             raise ValueError(f"Invalid log level: {level}")
     else:
         raise TypeError("level must be EAIOS_LOG_LEVEL or str")
-
-    terminal_width = get_terminal_width()
-    use_alignment = terminal_width >= 90
-    console_format = create_format_function(use_alignment, for_file=False)
-    file_format = create_format_function(use_alignment, for_file=True)
-
-    logger.add(
-        sys.stderr,
-        format=console_format,
-        level=log_level_value,
-        colorize=True,
-        backtrace=True,
-        diagnose=True,
-    )
-
-    logger.add(
-        "robonix.log",
-        format=file_format,
-        level=log_level_value,
-        colorize=False,
-        backtrace=True,
-        diagnose=True,
-        rotation="10 MB",
-        retention="7 days",
-    )
+    
+    # Use provided filename or default
+    if filename is not None:
+        LOG_FILENAME = filename
+    
+    # Remove existing handlers and setup new ones
+    logger.remove()
+    _setup_logger_handlers(log_level_value, LOG_FILENAME)
+    _logger_initialized = True
 
 
-terminal_width = get_terminal_width()
-use_alignment = terminal_width >= 90
-console_format = create_format_function(use_alignment, for_file=False)
-file_format = create_format_function(use_alignment, for_file=True)
+# Global flag to track if logger has been initialized
+_logger_initialized = False
 
-logger.remove()
-logger.add(
-    sys.stderr,
-    format=console_format,
-    level=LOG_LEVEL.value,
-    colorize=True,
-    backtrace=True,
-    diagnose=True,
-)
+def _ensure_logger_initialized():
+    """Ensure logger is initialized only once."""
+    global _logger_initialized
+    if not _logger_initialized:
+        logger.remove()
+        _setup_logger_handlers(LOG_LEVEL.value, LOG_FILENAME)
+        _logger_initialized = True
 
-logger.add(
-    "robonix.log",
-    format=file_format,
-    level=LOG_LEVEL.value,
-    colorize=False,
-    backtrace=True,
-    diagnose=True,
-    rotation="10 MB",
-    retention="7 days",
-)
+def init_logger(level=None, filename=None):
+    """
+    Initialize or reinitialize the logger with custom settings.
+    This should be called before any logging operations.
+    
+    Args:
+        level: Log level (EAIOS_LOG_LEVEL enum or string), defaults to LOG_LEVEL
+        filename: Log filename, defaults to LOG_FILENAME
+    """
+    global _logger_initialized
+    _logger_initialized = False
+    
+    if level is not None or filename is not None:
+        set_log_level(level or LOG_LEVEL, filename)
+    else:
+        _ensure_logger_initialized()
+
+# Initialize logger with default settings only if not already initialized
+# This prevents automatic initialization when module is imported
+# Users should call init_logger() or set_log_level() explicitly

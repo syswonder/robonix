@@ -15,7 +15,7 @@ sys.path.insert(0, str(project_root_parent))
 
 
 from robonix.uapi import create_runtime_manager, set_runtime
-from robonix.uapi.log import logger, set_log_level
+from robonix.manager.log import logger, set_log_level
 from robonix.uapi.runtime.action import EOS_TYPE_ActionResult
 
 from robonix.skill import *

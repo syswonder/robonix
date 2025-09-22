@@ -19,7 +19,7 @@ project_root_parent = Path(
 ).parent.parent.parent.parent.parent  # Robonix root
 sys.path.insert(0, str(project_root_parent))
 
-from robonix.uapi.log import logger
+from robonix.manager.log import logger
 from robonix.uapi import create_runtime_manager, set_runtime
 
 def init_skill_providers(manager):

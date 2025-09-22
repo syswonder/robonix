@@ -44,13 +44,19 @@ class RuntimeManager:
 
         action_names = self.runtime.load_program(program_path)
         logger.info(f"Loaded action program: {program_path}")
-        logger.info(f"Available actions: {action_names}")
+        # Avoid f-string formatting conflicts by listing actions separately
+        logger.info("Available actions:")
+        for action in action_names:
+            logger.info(f"  - {action}")
         return action_names
 
     def configure_action(self, action_name: str, **kwargs):
         """Configure arguments for an action"""
         self.runtime.set_action_args(action_name, **kwargs)
-        logger.info(f"Configured action '{action_name}' with args: {kwargs}")
+        # Avoid f-string formatting conflicts by using separate log statements
+        logger.info(f"Configured action '{action_name}' with args:")
+        for key, value in kwargs.items():
+            logger.info(f"  {key}: {value}")
 
     def execute_action(
         self, action_name: str, wait: bool = True, timeout: float = 30.0
