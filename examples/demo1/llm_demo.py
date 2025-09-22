@@ -19,19 +19,19 @@ project_root_parent = Path(
 ).parent.parent.parent.parent.parent  # Robonix root
 sys.path.insert(0, str(project_root_parent))
 
-from Robonix.uapi.log import logger
-from Robonix.uapi import create_runtime_manager, set_runtime
+from robonix.uapi.log import logger
+from robonix.uapi import create_runtime_manager, set_runtime
 
 def init_skill_providers(manager):
     """Initialize skill providers"""
-    from Robonix.uapi.runtime.provider import SkillProvider
+    from robonix.uapi.runtime.provider import SkillProvider
 
-    # dump __all__ in Robonix.skill to skills list
+    # dump __all__ in robonix.skill to skills list
     try:
-        from Robonix.skill import __all__
+        from robonix.skill import __all__
         skills = __all__
     except ImportError:
-        logger.warning("Robonix.skill module not available")
+        logger.warning("robonix.skill module not available")
         skills = []
 
     local_provider = SkillProvider(
@@ -50,7 +50,7 @@ def create_yolo_entity_builder():
         logger.info("Building entity graph from YOLO detection...")
 
         try:
-            from Robonix.skill import (
+            from robonix.skill import (
                 sim_skl_detect_objs,
                 sim_save_rgb_image,
                 sim_save_depth_image,
@@ -62,7 +62,7 @@ def create_yolo_entity_builder():
             logger.error("Required skills not available")
             return
 
-        from Robonix.uapi.graph.entity import create_root_room, create_controllable_entity
+        from robonix.uapi.graph.entity import create_root_room, create_controllable_entity
 
         root_room = create_root_room()
         runtime.set_graph(root_room)
@@ -72,7 +72,7 @@ def create_yolo_entity_builder():
 
         def robot_move_impl(x, y, z):
             try:
-                from Robonix.driver.sim_genesis_ranger.driver import move_to_point
+                from robonix.driver.sim_genesis_ranger.driver import move_to_point
                 # move_to_point(x, y)  # Uncomment when driver is available
                 return {"success": True}
             except ImportError:
@@ -82,7 +82,7 @@ def create_yolo_entity_builder():
 
         def robot_getpos_impl():
             try:
-                from Robonix.driver.sim_genesis_ranger.driver import get_pose
+                from robonix.driver.sim_genesis_ranger.driver import get_pose
                 x, y, z, yaw = get_pose()
                 return {"x": x, "y": y, "z": z}
             except ImportError:
