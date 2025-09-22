@@ -5,12 +5,12 @@ import sys
 import os
 from pathlib import Path
 
-project_root = Path(__file__).parent.parent.parent.parent
+project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 project_root_parent = Path(
     __file__
-).parent.parent.parent.parent.parent  # Robonix root
+).parent.parent.parent.parent  # Robonix root
 sys.path.insert(0, str(project_root_parent))
 
 

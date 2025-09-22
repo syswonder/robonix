@@ -3,9 +3,13 @@ import os
 import argparse
 from pathlib import Path
 
-# Add the project root to Python path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
+
+project_root_parent = Path(
+    __file__
+).parent.parent.parent.parent  # Robonix root
+sys.path.insert(0, str(project_root_parent))
 
 from robonix.uapi import create_runtime_manager, set_runtime
 from robonix.manager.log import logger, set_log_level
