@@ -60,7 +60,7 @@ class NavWithUltrasonicSafety(Node):
             self.navigator.cancelTask()
             self.cancelled = True
 
-rclpy.init()
+# rclpy.init()
 nv_controller = NavWithUltrasonicSafety()
 
 @eaios.plugin("navigation2","ros2_navigation")
