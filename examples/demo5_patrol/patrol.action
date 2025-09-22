@@ -27,8 +27,7 @@ def test_patrol(ranger_path: EntityPath) -> EOS_TYPE_ActionResult:
 
     action_print("moving...")
     
-    # result = ranger.skl_move_to_rel_pos(dx=0.4, dy=0.0, dyaw=0.0)
-    result = ranger.skl_move_to_ab_pos(x=0, y=0, yaw=0)
+    result = ranger.skl_move_to_rel_pos(dx=0.4, dy=0.0, dyaw=0.0)
     
     if result is None or result == "":
         action_print("failed to start movement")
