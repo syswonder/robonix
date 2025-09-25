@@ -1,38 +1,43 @@
 ---
-name: Bug report
-about: Create a report to help us improve
-title: ''
-labels: ''
+name: Bug Report
+about: Report a bug in the robonix embodied intelligence framework
+title: '[BUG] '
+labels: 'bug'
 assignees: ''
 
 ---
 
-**Describe the bug**
-A clear and concise description of what the bug is.
+## Bug Description
+Brief description of the issue.
 
-**To Reproduce**
-Steps to reproduce the behavior:
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+## Component
+- [ ] Brain (AI/LLM)
+- [ ] Capability (Hardware interface)
+- [ ] Driver (Hardware driver)
+- [ ] Manager (System bootstrap)
+- [ ] Memory (Knowledge storage)
+- [ ] Simulator (Genesis simulation)
+- [ ] Skill (Behavioral logic)
+- [ ] UAPI (User programming interface)
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
+## Steps to Reproduce
+1. 
+2. 
+3. 
 
-**Screenshots**
-If applicable, add screenshots to help explain your problem.
+## Expected Behavior
+What should happen instead.
 
-**Desktop (please complete the following information):**
- - OS: [e.g. iOS]
- - Browser [e.g. chrome, safari]
- - Version [e.g. 22]
+## Environment
+- OS: [e.g. Ubuntu 22.04]
+- ROS2 Version: [e.g. Humble]
+- Python Version: [e.g. 3.8]
+- Hardware: [e.g. Piper Ranger, Genesis Simulator]
 
-**Smartphone (please complete the following information):**
- - Device: [e.g. iPhone6]
- - OS: [e.g. iOS8.1]
- - Browser [e.g. stock browser, safari]
- - Version [e.g. 22]
+## Error Logs
+```
+Paste relevant error messages here
+```
 
-**Additional context**
-Add any other context about the problem here.
+## Additional Context
+Any other relevant information.
