@@ -26,3 +26,9 @@ path.sh
 scene_info.json
 
 frames_*
+
+# skill export
+__export__.py
+skill/__init__.py
+
+*.log

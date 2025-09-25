@@ -2,5 +2,7 @@ driver:
   - webots_tiago
 capability:
   - nav2_webots_tiago
+  - amcl
 skill:
+  - move
 brain:

@@ -1,4 +1,1 @@
-*.log
-*.png
-*.ply
-*.jpg
+pointcloud.ply

@@ -1,11 +1,13 @@
-from Robonix.uapi.specs.skill_specs import EntityPath
-from Robonix.uapi.runtime.action import action, EOS_TYPE_ActionResult, get_runtime, action_print
+from robonix.uapi.specs.skill_specs import EntityPath
+from robonix.uapi.runtime.action import action, EOS_TYPE_ActionResult, get_runtime, action_print
 
 
 @action
 def test_ranger_pointcloud(ranger_path: EntityPath, server_pc_path: EntityPath) -> EOS_TYPE_ActionResult:
     ranger = get_runtime().get_graph().get_entity_by_path(ranger_path)
 
+    action_print(f"ranger: {ranger}")
+    
     # test cap_pointcloud_to_file
     result = ranger.cap_pointcloud_to_file(
         filename="./examples/demo2/pointcloud.ply")
