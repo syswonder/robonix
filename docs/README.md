@@ -1,8 +1,8 @@
-# Robonix 文档系统
+# robonix 文档系统
 
 wheatfox
 
-本目录包含 Robonix 项目的完整技术文档，使用 Sphinx 构建系统生成。
+本目录包含 robonix 项目的完整技术文档，使用 Sphinx 构建系统生成。
 
 ## 构建文档
 

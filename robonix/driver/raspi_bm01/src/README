@@ -11,7 +11,7 @@ DO -> GPIO 20
 
 ros2 topic echo /pressure_detected
 
-➜  Robonix git:(main) ✗ ros2 topic echo /pressure_detected
+➜  robonix git:(main) ✗ ros2 topic echo /pressure_detected
 data: false
 ---
 data: true

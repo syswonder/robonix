@@ -14,7 +14,7 @@ sys.path.append(
 spatiallm_path = os.path.join(os.path.dirname(__file__), "spatiallm")
 sys.path.insert(0, spatiallm_path)
 
-print(f"added Robonix root to sys.path")
+print(f"added robonix root to sys.path")
 print(f"added spatiallm path: {spatiallm_path}")
 print(f"sys.path: {sys.path[:3]}...")
 

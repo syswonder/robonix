@@ -3,7 +3,7 @@ Types Module
 ============
 
 This module defines common data types and enumerations used throughout
-the Robonix OS system. It includes image formats, camera types,
+the robonix OS system. It includes image formats, camera types,
 skill types, and various data structures for system operations.
 """
 
