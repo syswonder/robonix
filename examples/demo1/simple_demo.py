@@ -11,7 +11,7 @@ sys.path.insert(0, str(project_root))
 
 project_root_parent = Path(
     __file__
-).parent.parent.parent.parent  # Robonix root
+).parent.parent.parent.parent  # robonix root
 sys.path.insert(0, str(project_root_parent))
 
 from robonix.uapi.log import logger

@@ -6,7 +6,7 @@
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
-project = 'Robonix OS'
+project = 'robonix OS'
 copyright = '2025, Syswonder'
 author = 'Syswonder'
 

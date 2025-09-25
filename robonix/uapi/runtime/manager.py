@@ -1,5 +1,5 @@
 """
-Runtime Manager - Provides convenient interfaces for managing Robonix runtime
+Runtime Manager - Provides convenient interfaces for managing robonix runtime
 """
 
 from typing import Dict, List, Callable, Optional, Any
@@ -11,7 +11,7 @@ from datetime import datetime
 
 
 class RuntimeManager:
-    """High-level manager for Robonix runtime operations"""
+    """High-level manager for robonix runtime operations"""
 
     def __init__(self):
         self.runtime = Runtime()

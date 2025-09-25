@@ -128,7 +128,7 @@ class Completer:
 
 
 class CLI:
-    """Command Line Interface for Robonix"""
+    """Command Line Interface for robonix"""
 
     """
         How to add a new command:
@@ -531,7 +531,7 @@ class CLI:
     def run(self):
         """Run command line interface"""
         print_cyan(
-            "Welcome to Robonix Shell (system time: "
+            "Welcome to robonix Shell (system time: "
             + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             + ", "
             + self.get_user_info()

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Robonix Documentation Deployment Script
+# robonix Documentation Deployment Script
 # This script copies built HTML documentation to the remote server
 
 set -e  # Exit on any error
@@ -189,7 +189,7 @@ set_permissions() {
 
 # Main deployment function
 main() {
-    print_status "Starting Robonix documentation deployment..."
+    print_status "Starting robonix documentation deployment..."
     echo "=================================="
     
     # Setup trap to cleanup SSH connection on exit
@@ -225,7 +225,7 @@ main() {
 
 # Help function
 show_help() {
-    echo "Robonix Documentation Deployment Script"
+    echo "robonix Documentation Deployment Script"
     echo ""
     echo "Usage: $0 [OPTIONS]"
     echo ""

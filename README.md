@@ -1,9 +1,9 @@
-# Robonix
+# robonix
 <div align="center">
   <img src="robonix.png" alt="robonix" width="200">
 </div>
 
-**Robonix** is an open-source embodied intelligence framework.
+**robonix** is an open-source embodied intelligence framework.
 
 ## Setup
 

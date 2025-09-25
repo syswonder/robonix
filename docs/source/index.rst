@@ -1,20 +1,20 @@
-Robonix OS 开发文档
+robonix OS 开发文档
 =====================
 
 .. admonition:: 项目信息
    :class: info
 
-   代码仓库：https://github.com/HustWolfzzb/Robonix
+   代码仓库：https://github.com/HustWolfzzb/robonix
 
    Syswonder 社区：https://www.syswonder.org
 
-Robonix OS（DEOS）是由 Syswonder 开发的、面向具身智能（Embodied AI）场景进行通用编程的具身操作系统（Embodied OS），提供了包括编程模型虚拟实体图（Virtual Entity Graph，VEG），Capbility-Skill-Action-Task（CSAT）抽象层次、Action 程序语法与运行时，以及基于 Genesis 模拟器和 Piper Ranger 四轮小车的完整运行框架。
+robonix OS（DEOS）是由 Syswonder 开发的、面向具身智能（Embodied AI）场景进行通用编程的具身操作系统（Embodied OS），提供了包括编程模型虚拟实体图（Virtual Entity Graph，VEG），Capbility-Skill-Action-Task（CSAT）抽象层次、Action 程序语法与运行时，以及基于 Genesis 模拟器和 Piper Ranger 四轮小车的完整运行框架。
 
-**Overview Structure of Robonix OS**
+**Overview Structure of robonix OS**
 
 .. image:: _static/uapi_framework.png
    :width: 80%
-   :alt: Overview Structure of Robonix OS
+   :alt: Overview Structure of robonix OS
    :align: center
 
 **文档索引**
