@@ -5,32 +5,32 @@ import sys
 import os
 from pathlib import Path
 
-project_root = Path(__file__).parent.parent.parent.parent
+project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 project_root_parent = Path(
     __file__
-).parent.parent.parent.parent.parent  # Robonix root
+).parent.parent.parent.parent  # Robonix root
 sys.path.insert(0, str(project_root_parent))
 
 
-from Robonix.uapi import create_runtime_manager, set_runtime, RuntimeManager
-from Robonix.uapi.log import logger, set_log_level
-from Robonix.skill import *
+from robonix.uapi import create_runtime_manager, set_runtime, RuntimeManager
+from robonix.manager.log import logger, set_log_level
+from robonix.skill import *
 
 set_log_level("debug")
 
 
 def init_skill_providers(manager: RuntimeManager):
     """Initialize skill providers for ranger demo"""
-    from Robonix.uapi.runtime.provider import SkillProvider
+    from robonix.uapi.runtime.provider import SkillProvider
 
-    # dump __all__ in Robonix.skill to skills list
+    # dump __all__ in robonix.skill to skills list
     try:
-        from Robonix.skill import __all__
+        from robonix.skill import __all__
         skills = __all__
     except ImportError:
-        logger.warning("Robonix.skill module not available")
+        logger.warning("robonix.skill module not available")
         skills = []
 
     local_provider = SkillProvider(
@@ -55,7 +55,7 @@ def init_skill_providers(manager: RuntimeManager):
 def create_ranger_entity_builder():
     """Create a pointcloud-specific entity graph builder"""
     def builder(runtime, **kwargs):
-        from Robonix.uapi.graph.entity import create_root_room, create_controllable_entity
+        from robonix.uapi.graph.entity import create_root_room, create_controllable_entity
 
         root_room = create_root_room()
         runtime.set_graph(root_room)

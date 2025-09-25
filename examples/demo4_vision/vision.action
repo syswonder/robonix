@@ -1,5 +1,5 @@
-from Robonix.uapi.specs.skill_specs import EntityPath
-from Robonix.uapi.runtime.action import action, EOS_TYPE_ActionResult, get_runtime, action_print
+from robonix.uapi.specs.skill_specs import EntityPath
+from robonix.uapi.runtime.action import action, EOS_TYPE_ActionResult, get_runtime, action_print
 
 
 @action
