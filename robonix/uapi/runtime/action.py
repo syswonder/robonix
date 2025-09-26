@@ -36,6 +36,7 @@ def get_runtime():
     return __RUNTIME_INSTANCE__
 
 
+# Decorator to mark a function as an action for the Robonix action system.
 def action(func: Callable) -> Callable:
     def wrapper(*args, **kwargs):
         try:

@@ -40,6 +40,9 @@ class Runtime:
         self.action_results: Dict[str, any] = {}
         self._action_args: Dict[str, dict] = {}
 
+        # Thread-local storage for current entity (thread-safe)
+        self._thread_local = threading.local()
+
         # Entity graph construction hooks
         self._graph_hooks: List[Callable] = []
         self._graph_initialized: bool = False
@@ -61,6 +64,10 @@ class Runtime:
 
     def get_graph(self) -> Entity:
         return self.graph
+
+    def get_current_entity(self) -> Optional[Entity]:
+        """Get the current entity for the calling thread (thread-safe)"""
+        return getattr(self._thread_local, 'current_entity', None)
 
     def add_graph_hook(self, hook: Callable[[Any], None]):
         """Add a hook function that will be called after graph is set"""
@@ -175,9 +182,9 @@ class Runtime:
 
         def action_worker():
             try:
-                # Set current entity context for skills and capabilities
-                # This allows them to access self_entity parameter
-                self._current_entity = self.graph
+                # Set current entity context for skills and capabilities using thread-local storage
+                # This allows them to access self_entity parameter in a thread-safe way
+                self._thread_local.current_entity = self.graph
 
                 result = action_func(*args, **kwargs)
                 self.action_results[action_name] = result
@@ -188,9 +195,9 @@ class Runtime:
                     exc_info=True,
                 )
             finally:
-                # Clean up current entity context
-                if hasattr(self, "_current_entity"):
-                    delattr(self, "_current_entity")
+                # Clean up current entity context from thread-local storage
+                if hasattr(self._thread_local, 'current_entity'):
+                    delattr(self._thread_local, 'current_entity')
 
         thread = threading.Thread(target=action_worker, name=f"action_{action_name}")
         thread.daemon = True
