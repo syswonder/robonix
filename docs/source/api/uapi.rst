@@ -3,14 +3,6 @@ UAPI Module
 
 本章提供UAPI模块各个组件的详细API参考文档。
 
-uapi.runtime.manager Module
--------------------------
-
-.. automodule:: uapi.runtime.manager
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 uapi.runtime.runtime Module
 -------------------------
 

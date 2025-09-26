@@ -141,25 +141,25 @@ Type Safety
 
 .. code-block:: python
 
-   from uapi import create_runtime_manager, set_runtime
+   from robonix.uapi import get_runtime, set_runtime
    
-   # 创建运行时管理器
-   manager = create_runtime_manager()
+   # 获取运行时实例
+   runtime = get_runtime()
    
    # 构建实体图和设置运行时
-   manager.build_entity_graph("my_scene")
-   set_runtime(manager.get_runtime())
+   runtime.build_entity_graph("my_scene")
+   set_runtime(runtime)
    
    # 加载Action程序
-   action_names = manager.load_action_program("example.action")
+   action_names = runtime.load_action_program("example.action")
    print(f"Loaded actions: {action_names}")
    
    # 配置Action参数
-   manager.configure_action("move_and_capture", robot_path="/robot")
+   runtime.configure_action("move_and_capture", robot_path="/robot")
    
    # 执行Action
-   thread = manager.execute_action("move_and_capture")
+   thread = runtime.execute_action("move_and_capture")
    
    # 等待执行完成
-   result = manager.get_runtime().wait_for_action("move_and_capture")
+   result = runtime.wait_for_action("move_and_capture")
    print(f"Action result: {result}")
