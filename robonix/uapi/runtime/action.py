@@ -28,12 +28,9 @@ __RUNTIME_INSTANCE__ = None
 
 
 def get_runtime():
-    global __RUNTIME_INSTANCE__
-    if __RUNTIME_INSTANCE__ is None:
-        from .runtime import Runtime
-
-        __RUNTIME_INSTANCE__ = Runtime()
-    return __RUNTIME_INSTANCE__
+    """Get the singleton Runtime instance"""
+    from .runtime import get_runtime as _get_runtime
+    return _get_runtime()
 
 
 def action(func: Callable) -> Callable:
@@ -108,8 +105,10 @@ def get_action_functions(module) -> List[Callable]:
 
 
 def set_runtime(runtime):
+    """Set the runtime instance (deprecated - Runtime is now singleton)"""
     global __RUNTIME_INSTANCE__
     __RUNTIME_INSTANCE__ = runtime
+    logger.warning("set_runtime() is deprecated - Runtime is now singleton")
 
 
 def action_print(message: str, level: str = "INFO"):
