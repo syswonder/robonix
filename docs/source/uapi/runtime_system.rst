@@ -65,10 +65,10 @@ Example
 
    from robonix.uapi import get_runtime, set_runtime
    
-   # 获取全局唯一的运行时实例
+   # Get globally unique runtime instance
    runtime = get_runtime()
    
-   # 注册实体构建器
+   # Register entity builder
    def my_builder(runtime, **kwargs):
        from robonix.uapi.graph.entity import create_root_room, create_controllable_entity
        root = create_root_room()
@@ -78,16 +78,16 @@ Example
    
    runtime.register_entity_builder("my_scene", my_builder)
    
-   # 构建实体图
+   # Build entity graph
    runtime.build_entity_graph("my_scene")
    
-   # 设置全局运行时
+   # Set global runtime
    set_runtime(runtime)
    
-   # 加载动作程序
+   # Load action program
    action_names = runtime.load_action_program("my_actions.action")
    
-   # 配置和执行动作
+   # Configure and execute action
    runtime.configure_action("my_action", param1="value1")
    runtime.execute_action("my_action")
 

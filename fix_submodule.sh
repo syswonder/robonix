@@ -21,7 +21,7 @@ git config -f .gitmodules submodule.robonix/driver/ranger_ros2/src/ugv_sdk.url "
 
 git add .gitmodules
 if ! git diff --cached --quiet; then
-  git commit -m "Fix .gitmodules -> forks" || true
+  git commit -m "fix: .gitmodules -> forks" || true
   # git push origin HEAD    # if you want to auto push, uncomment this
 fi
 

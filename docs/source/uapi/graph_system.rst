@@ -46,10 +46,10 @@ EntityPath
 
 .. code-block:: python
 
-   # 路径示例
-   root = create_root_room()           # 路径: /
-   robot = create_controllable_entity("robot")  # 路径: /robot
-   camera = create_controllable_entity("camera") # 路径: /robot/camera
+   # Path examples
+   root = create_root_room()           # Path: /
+   robot = create_controllable_entity("robot")  # Path: /robot
+   camera = create_controllable_entity("camera") # Path: /robot/camera
    
    root.add_child(robot)
    robot.add_child(camera)
@@ -84,7 +84,7 @@ Entity Factory Functions
 
 .. code-block:: python
 
-   # 创建不同类型的实体
+   # Create different types of entities
    generic_entity = create_generic_entity("object1")
    controllable_entity = create_controllable_entity("robot1")
    computing_entity = create_computing_entity("computer1")
@@ -103,23 +103,23 @@ Example
 
    from uapi.graph.entity import create_root_room, create_controllable_entity
    
-   # 创建根房间
+   # Create root room
    root_room = create_root_room()
    
-   # 创建机器人实体
+   # Create robot entity
    robot = create_controllable_entity("robot")
    root_room.add_child(robot)
    
-   # 创建相机实体
+   # Create camera entity
    camera = create_controllable_entity("camera")
    robot.add_child(camera)
    
-   # 绑定技能(Skill Binding)
+   # Bind skill (Skill Binding)
    def get_pose_impl():
        return {"x": 0.0, "y": 0.0, "z": 0.0}
    
    robot.bind_skill("cap_space_getpos", get_pose_impl)
    
-   # 使用技能(Skill Usage)
+   # Use skill (Skill Usage)
    position = robot.cap_space_getpos()
    print(f"Robot position: {position}")
