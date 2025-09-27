@@ -118,24 +118,24 @@ EOS_SKILL_SPECS
 
    from uapi.graph.entity import create_controllable_entity
    
-   # 创建实体
+   # Create entity
    robot = create_controllable_entity("robot")
    
-   # 定义技能实现
+   # Define skill implementations
    def get_position():
-       # 实际的位置获取逻辑
+       # Actual position retrieval logic
        return {"x": 1.0, "y": 2.0, "z": 0.0}
    
    def move_to_position(x, y, z):
-       # 实际的移动逻辑
+       # Actual movement logic
        print(f"Moving to ({x}, {y}, {z})")
        return {"success": True}
    
-   # 绑定技能
+   # Bind skills
    robot.bind_skill("cap_space_getpos", get_position)
    robot.bind_skill("cap_space_move", move_to_position)
    
-   # 使用技能
+   # Use skills
    current_pos = robot.cap_space_getpos()
    print(f"Current position: {current_pos}")
    

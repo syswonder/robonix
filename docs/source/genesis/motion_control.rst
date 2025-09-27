@@ -84,17 +84,17 @@ MoveTo 功能
 
 .. code-block:: python
 
-   # 计算到目标的向量
+   # Calculate vector to target
    rem_x = target_x - curr_x
    rem_y = target_y - curr_y
    rem_dist = np.hypot(rem_x, rem_y)
    
-   # 归一化方向向量
+   # Normalize direction vector
    if rem_dist > distance_threshold:
        norm_x = rem_x / rem_dist
        norm_y = rem_y / rem_dist
        
-       # 计算目标速度
+       # Calculate target velocity
        self.move_to_vx = norm_x * self.max_speed * 0.8
        self.move_to_vy = norm_y * self.max_speed * 0.8
 
@@ -115,10 +115,10 @@ MoveTo 功能
 
 .. code-block:: python
 
-   # 更新机器人朝向
+   # Update robot orientation
    self.car._my_yaw += self.wz * self.dt
    
-   # 角度归一化到[-π, π]范围
+   # Normalize angle to [-π, π] range
    while self.car._my_yaw > np.pi:
        self.car._my_yaw -= 2 * np.pi
    while self.car._my_yaw < -np.pi:
@@ -129,7 +129,7 @@ MoveTo 功能
 
 .. code-block:: python
 
-   # 本体坐标系到世界坐标系的变换
+   # Transform from body coordinate system to world coordinate system
    world_vx = body_vx * np.cos(yaw) - body_vy * np.sin(yaw)
    world_vy = body_vx * np.sin(yaw) + body_vy * np.cos(yaw)
 
@@ -181,15 +181,15 @@ MoveTo 功能
 .. code-block:: python
 
    def reset_car(self):
-       # 重置位置到初始位置
+       # Reset position to initial position
        initial_pos = getattr(self.car, '_initial_pos', (0.0, -2.0, 0.15))
        initial_yaw = getattr(self.car, '_initial_yaw', 0.0)
        
-       # 设置新的位置和姿态
+       # Set new position and orientation
        new_qpos = [initial_pos[0], initial_pos[1], initial_pos[2], 
-                   0.0, 0.0, 0.0, 1.0]  # 位置 + 四元数姿态
+                   0.0, 0.0, 0.0, 1.0]  # Position + quaternion orientation
        self.car.set_qpos(new_qpos)
        
-       # 重置速度和状态
+       # Reset velocity and state
        self.car._my_yaw = initial_yaw
        self.vx = self.vy = self.wz = 0.0
