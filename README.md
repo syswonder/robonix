@@ -7,6 +7,10 @@
 
 ## Setup
 
+```bash
+git clone --recurse-submodules https://github.com/syswonder/robonix.git
+```
+
 1. install ROS2 humble: https://docs.ros.org/en/humble/Installation.html
 2. build your driver and capability ROS2 node (enter the folder and run build.sh or colcon build)
 
