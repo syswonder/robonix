@@ -98,8 +98,9 @@ def main():
 
         runtime.configure_action("test_vision", ranger_path="/ranger")
 
-        logger.info("Executing ranger test action...")
-        result = runtime.execute_action("test_vision")
+        logger.info("Starting ranger test action...")
+        thread = runtime.start_action("test_vision")
+        result = runtime.wait_for_action("test_vision", timeout=30.0)
 
         logger.info(f"Ranger test completed with result: {result}")
         

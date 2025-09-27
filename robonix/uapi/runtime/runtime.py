@@ -176,7 +176,7 @@ class Runtime:
 
     def start_action(self, action_name: str):
         args = self._action_args.get(action_name, {})
-        return self.execute_action(action_name, **args)
+        return self._execute_action_worker(action_name, **args)
 
     def start_all_actions(self):
         threads = []
@@ -184,7 +184,7 @@ class Runtime:
             threads.append(self.start_action(action_name))
         return threads
 
-    def execute_action(self, action_name: str, *args, **kwargs):
+    def _execute_action_worker(self, action_name: str, *args, **kwargs):
         if not hasattr(self, "_program_module"):
             raise RuntimeError("no program loaded. call load_program() first.")
 

@@ -107,8 +107,9 @@ def main():
         runtime.configure_action(
             "test_ranger_pointcloud", ranger_path="/ranger", server_pc_path="/server_pc")
 
-        logger.info("Executing pointcloud test action...")
-        result = runtime.execute_action("test_ranger_pointcloud")
+        logger.info("Starting pointcloud test action...")
+        thread = runtime.start_action("test_ranger_pointcloud")
+        result = runtime.wait_for_action("test_ranger_pointcloud", timeout=30.0)
 
         logger.info(f"Pointcloud test completed with result: {result}")
         logger.info("Demo completed successfully")

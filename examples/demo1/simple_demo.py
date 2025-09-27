@@ -232,11 +232,13 @@ def main():
                 "move_and_capture_action", a="/robot", b="/chair"
             )
 
-        # Execute action based on mode
+        # Start action based on mode
         if args.mode == "manual":
-            runtime.execute_action("debug_test_action")
+            thread = runtime.start_action("debug_test_action")
+            result = runtime.wait_for_action("debug_test_action", timeout=30.0)
         elif args.mode == "auto":
-            runtime.execute_action("move_and_capture_action")
+            thread = runtime.start_action("move_and_capture_action")
+            result = runtime.wait_for_action("move_and_capture_action", timeout=30.0)
 
         logger.info("Demo completed successfully")
         return 0

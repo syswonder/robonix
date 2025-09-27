@@ -333,8 +333,9 @@ def execute_generated_action(runtime, action_code: str, action_args: dict):
         logger.info(f"Starting action execution: {action_name}")
         logger.info(f"Action arguments: {action_args}")
 
-        # Execute the specific action
-        result = runtime.execute_action(action_name, timeout=30.0)
+        # Start the specific action
+        thread = runtime.start_action(action_name)
+        result = runtime.wait_for_action(action_name, timeout=30.0)
         logger.info(f"Action execution result: {result}")
 
         # Clean up temporary file
