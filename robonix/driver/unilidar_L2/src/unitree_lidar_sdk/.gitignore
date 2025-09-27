@@ -1,0 +1,6 @@
+bin/*
+bin
+example_lidar_*
+set_ip_address
+set_to_serial_mode
+set_to_udp_mode
