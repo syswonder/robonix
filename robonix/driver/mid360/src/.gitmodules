@@ -1,0 +1,2 @@
+[submodule "robonix/driver/mid360/src/livox_ros_driver2"]
+	url = https://github.com/enkerewpo/livox_ros_driver2.git
