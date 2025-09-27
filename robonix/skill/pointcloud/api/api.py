@@ -20,6 +20,13 @@ print(f"sys.path: {sys.path[:3]}...")
 
 from robonix.manager.eaios_decorators import eaios
 from robonix.uapi.graph.entity import Entity
+from robonix.uapi.specs.types import (
+    EOS_TYPE_SpatialLM_WorldResult,
+    EOS_TYPE_SpatialLM_Wall,
+    EOS_TYPE_SpatialLM_Door,
+    EOS_TYPE_SpatialLM_Window,
+    EOS_TYPE_SpatialLM_Bbox,
+)
 
 import torch
 import numpy as np
@@ -27,6 +34,8 @@ from tqdm import tqdm
 from threading import Thread
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import TextIteratorStreamer, set_seed
+import re
+import math
 
 from spatiallm.layout.layout import Layout
 from spatiallm.pcd import (
@@ -304,3 +313,200 @@ if __name__ == "__main__":
         import traceback
 
         traceback.print_exc()
+
+
+def parse_spatiallm_txt(spatiallm_txt: str):
+    """
+    Parse SpatialLM txt output into structured data
+    
+    Args:
+        spatiallm_txt: The txt output from SpatialLM containing object definitions
+        
+    Returns:
+        dict: Parsed objects organized by type
+    """
+    walls = []
+    doors = []
+    windows = []
+    bboxes = []
+    
+    lines = spatiallm_txt.strip().split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        # Parse wall: wall_0=Wall(-3.941,-2.9770000000000003,-0.491,2.909,-2.9770000000000003,-0.491,3.0600000000000005,0.0)
+        wall_match = re.match(r'(\w+)=Wall\(([^)]+)\)', line)
+        if wall_match:
+            wall_id, params = wall_match.groups()
+            coords = [float(x) for x in params.split(',')]
+            if len(coords) == 8:
+                walls.append({
+                    'id': wall_id,
+                    'ax': coords[0], 'ay': coords[1], 'az': coords[2],
+                    'bx': coords[3], 'by': coords[4], 'bz': coords[5],
+                    'height': coords[6], 'thickness': coords[7]
+                })
+            continue
+        
+        # Parse door: door_0=Door(wall_1,-3.941,-2.3770000000000002,0.684,0.9800000000000001,2.44)
+        door_match = re.match(r'(\w+)=Door\(([^)]+)\)', line)
+        if door_match:
+            door_id, params = door_match.groups()
+            parts = params.split(',')
+            if len(parts) == 6:
+                doors.append({
+                    'id': door_id,
+                    'wall_id': parts[0],
+                    'position_x': float(parts[1]), 'position_y': float(parts[2]), 'position_z': float(parts[3]),
+                    'width': float(parts[4]), 'height': float(parts[5])
+                })
+            continue
+        
+        # Parse window: window_0=Window(wall_1,-3.941,-0.002000000000000224,0.8590000000000001,1.22,0.9800000000000001)
+        window_match = re.match(r'(\w+)=Window\(([^)]+)\)', line)
+        if window_match:
+            window_id, params = window_match.groups()
+            parts = params.split(',')
+            if len(parts) == 6:
+                windows.append({
+                    'id': window_id,
+                    'wall_id': parts[0],
+                    'position_x': float(parts[1]), 'position_y': float(parts[2]), 'position_z': float(parts[3]),
+                    'width': float(parts[4]), 'height': float(parts[5])
+                })
+            continue
+        
+        # Parse bbox: bbox_0=Bbox(tv_cabinet,2.609,-0.9770000000000003,-0.316,-1.5708000000000002,4.0,0.578125,0.53125)
+        bbox_match = re.match(r'(\w+)=Bbox\(([^)]+)\)', line)
+        if bbox_match:
+            bbox_id, params = bbox_match.groups()
+            parts = params.split(',')
+            if len(parts) == 8:
+                bboxes.append({
+                    'id': bbox_id,
+                    'class_name': parts[0],
+                    'position_x': float(parts[1]), 'position_y': float(parts[2]), 'position_z': float(parts[3]),
+                    'angle_z': float(parts[4]),
+                    'scale_x': float(parts[5]), 'scale_y': float(parts[6]), 'scale_z': float(parts[7])
+                })
+            continue
+    
+    return {
+        'walls': walls,
+        'doors': doors,
+        'windows': windows,
+        'bboxes': bboxes
+    }
+
+
+def transform_robot_to_world_coords(robot_x: float, robot_y: float, robot_z: float, robot_yaw: float,
+                                  local_x: float, local_y: float, local_z: float):
+    """
+    Transform coordinates from robot frame to world frame.
+    Follows ROS2 tf standard: X forward, Y left, Z up, yaw in radians.
+    """
+    cos_yaw = math.cos(robot_yaw)
+    sin_yaw = math.sin(robot_yaw)
+    
+    world_x = robot_x + cos_yaw * local_x - sin_yaw * local_y
+    world_y = robot_y + sin_yaw * local_x + cos_yaw * local_y
+    world_z = robot_z + local_z
+    
+    return world_x, world_y, world_z
+
+
+@eaios.caller
+def skl_spatiallm_to_world_pose(self_entity: Entity, spatiallm_txt: str) -> EOS_TYPE_SpatialLM_WorldResult:
+    """
+    Convert SpatialLM detection results from robot coordinates to world coordinates.
+    """
+    robot_pose = self_entity.cap_get_pose()
+    if robot_pose is None:
+        raise ValueError("Failed to get robot pose")
+    
+    robot_x, robot_y, robot_yaw = robot_pose
+    robot_z = 0.0  # Assume robot is on ground level
+    
+    parsed_objects = parse_spatiallm_txt(spatiallm_txt)
+    world_walls = []
+    for wall in parsed_objects['walls']:
+        center_x = (wall['ax'] + wall['bx']) / 2
+        center_y = (wall['ay'] + wall['by']) / 2
+        center_z = (wall['az'] + wall['bz']) / 2
+        
+        world_center_x, world_center_y, world_center_z = transform_robot_to_world_coords(
+            robot_x, robot_y, robot_z, robot_yaw, center_x, center_y, center_z
+        )
+        
+        world_walls.append(EOS_TYPE_SpatialLM_Wall(
+            id=wall['id'],
+            ax=wall['ax'], ay=wall['ay'], az=wall['az'],
+            bx=wall['bx'], by=wall['by'], bz=wall['bz'],
+            height=wall['height'], thickness=wall['thickness'],
+            world_center_x=world_center_x,
+            world_center_y=world_center_y,
+            world_center_z=world_center_z
+        ))
+    
+    world_doors = []
+    for door in parsed_objects['doors']:
+        world_pos_x, world_pos_y, world_pos_z = transform_robot_to_world_coords(
+            robot_x, robot_y, robot_z, robot_yaw,
+            door['position_x'], door['position_y'], door['position_z']
+        )
+        
+        world_doors.append(EOS_TYPE_SpatialLM_Door(
+            id=door['id'],
+            wall_id=door['wall_id'],
+            position_x=door['position_x'], position_y=door['position_y'], position_z=door['position_z'],
+            width=door['width'], height=door['height'],
+            world_center_x=world_pos_x,
+            world_center_y=world_pos_y,
+            world_center_z=world_pos_z
+        ))
+    
+    world_windows = []
+    for window in parsed_objects['windows']:
+        world_pos_x, world_pos_y, world_pos_z = transform_robot_to_world_coords(
+            robot_x, robot_y, robot_z, robot_yaw,
+            window['position_x'], window['position_y'], window['position_z']
+        )
+        
+        world_windows.append(EOS_TYPE_SpatialLM_Window(
+            id=window['id'],
+            wall_id=window['wall_id'],
+            position_x=window['position_x'], position_y=window['position_y'], position_z=window['position_z'],
+            width=window['width'], height=window['height'],
+            world_center_x=world_pos_x,
+            world_center_y=world_pos_y,
+            world_center_z=world_pos_z
+        ))
+    
+    world_bboxes = []
+    for bbox in parsed_objects['bboxes']:
+        world_pos_x, world_pos_y, world_pos_z = transform_robot_to_world_coords(
+            robot_x, robot_y, robot_z, robot_yaw,
+            bbox['position_x'], bbox['position_y'], bbox['position_z']
+        )
+        
+        world_bboxes.append(EOS_TYPE_SpatialLM_Bbox(
+            id=bbox['id'],
+            class_name=bbox['class_name'],
+            position_x=bbox['position_x'], position_y=bbox['position_y'], position_z=bbox['position_z'],
+            angle_z=bbox['angle_z'],
+            scale_x=bbox['scale_x'], scale_y=bbox['scale_y'], scale_z=bbox['scale_z'],
+            world_center_x=world_pos_x,
+            world_center_y=world_pos_y,
+            world_center_z=world_pos_z
+        ))
+    
+    return EOS_TYPE_SpatialLM_WorldResult(
+        walls=world_walls,
+        doors=world_doors,
+        windows=world_windows,
+        bboxes=world_bboxes,
+        robot_pose=(robot_x, robot_y, robot_z, robot_yaw)
+    )

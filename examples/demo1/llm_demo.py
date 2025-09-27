@@ -20,9 +20,9 @@ project_root_parent = Path(
 sys.path.insert(0, str(project_root_parent))
 
 from robonix.manager.log import logger
-from robonix.uapi import create_runtime_manager, set_runtime
+from robonix.uapi import get_runtime, set_runtime
 
-def init_skill_providers(manager):
+def init_skill_providers(runtime):
     """Initialize skill providers"""
     from robonix.uapi.runtime.provider import SkillProvider
 
@@ -40,8 +40,8 @@ def init_skill_providers(manager):
         skills=skills,
     )
 
-    manager.get_runtime().registry.add_provider(local_provider)
-    logger.info(f"Added skill providers: {manager.get_runtime().registry}")
+    runtime.registry.add_provider(local_provider)
+    logger.info(f"Added skill providers: {runtime.registry}")
 
 
 def create_yolo_entity_builder():
@@ -306,7 +306,7 @@ def save_debug_files(scene_info: dict, action_example: str, user_request: str,
     logger.info(f"Debug information saved to: {debug_dir}")
 
 
-def execute_generated_action(manager, action_code: str, action_args: dict):
+def execute_generated_action(runtime, action_code: str, action_args: dict):
     """Execute LLM generated action"""
     try:
         # Create temporary action file in the same directory as the running Python file
@@ -316,7 +316,7 @@ def execute_generated_action(manager, action_code: str, action_args: dict):
             f.write(action_code)
 
         # Load action program
-        action_names = manager.load_action_program(temp_action_path)
+        action_names = runtime.load_action_program(temp_action_path)
         logger.info(f"Loaded action functions: {action_names}")
 
         if not action_names:
@@ -327,14 +327,15 @@ def execute_generated_action(manager, action_code: str, action_args: dict):
         action_name = action_names[0]
 
         # Configure action arguments
-        manager.configure_action(action_name, **action_args)
+        runtime.configure_action(action_name, **action_args)
 
         # Execute action
         logger.info(f"Starting action execution: {action_name}")
         logger.info(f"Action arguments: {action_args}")
 
-        # Execute the specific action
-        result = manager.execute_action(action_name, timeout=30.0)
+        # Start the specific action
+        thread = runtime.start_action(action_name)
+        result = runtime.wait_for_action(action_name, timeout=30.0)
         logger.info(f"Action execution result: {result}")
 
         # Clean up temporary file
@@ -362,23 +363,23 @@ def main():
 
     logger.info("Starting LLM task planning demo")
 
-    # Initialize runtime manager
-    manager = create_runtime_manager()
-    init_skill_providers(manager)
+    # Get runtime instance
+    runtime = get_runtime()
+    init_skill_providers(runtime)
 
     # Register entity builders
-    manager.register_entity_builder("yolo", create_yolo_entity_builder())
+    runtime.register_entity_builder("yolo", create_yolo_entity_builder())
 
     # Build entity graph using YOLO detection
-    manager.build_entity_graph("yolo")
-    set_runtime(manager.get_runtime())
+    runtime.build_entity_graph("yolo")
+    set_runtime(runtime)
 
     # Export scene information
-    scene_info = manager.export_scene_info()
+    scene_info = runtime.export_scene_info()
     action_example = load_demo_action_example()
 
     # Print entity tree structure
-    manager.print_entity_tree()
+    runtime.print_entity_tree()
 
     user_request = input("\nPlease enter your command: ")
 
@@ -445,7 +446,7 @@ def main():
 
     if execute in ["y", "yes"]:
         logger.info("Starting execution of LLM generated action...")
-        success = execute_generated_action(manager, action_code, action_args)
+        success = execute_generated_action(runtime, action_code, action_args)
 
         if success:
             logger.info("Task execution completed!")

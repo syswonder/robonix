@@ -1,3 +1,12 @@
 [submodule "robonix/driver/realsense_ros2/src/realsense-ros"]
-	path = robonix/driver/realsense_ros2/src/realsense-ros
-	url = https://github.com/IntelRealSense/realsense-ros.git
+    path = robonix/driver/realsense_ros2/src/realsense-ros
+	url = https://github.com/enkerewpo/realsense-ros.git
+[submodule "robonix/driver/mid360/src/livox_ros_driver2"]
+	path = robonix/driver/mid360/src/livox_ros_driver2
+	url = https://github.com/enkerewpo/livox_ros_driver2.git
+[submodule "robonix/driver/ranger_ros2/src/ranger_ros2"]
+	path = robonix/driver/ranger_ros2/src/ranger_ros2
+	url = https://github.com/enkerewpo/ranger_ros2
+[submodule "robonix/driver/ranger_ros2/src/ugv_sdk"]
+	path = robonix/driver/ranger_ros2/src/ugv_sdk
+	url = https://github.com/enkerewpo/ugv_sdk.git
