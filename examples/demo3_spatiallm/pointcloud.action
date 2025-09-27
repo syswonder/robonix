@@ -26,5 +26,25 @@ def test_ranger_pointcloud(ranger_path: EntityPath, server_pc_path: EntityPath) 
     action_print(f"object detected: {result}")
     action_print(f"result type: {type(result)}")
     action_print(f"result attributes: {dir(result)}")
+    
+    # Convert spatiallm results to world coordinates
+    spatiallm_txt = result.txt
+    world_result = ranger.skl_spatiallm_to_world_pose(spatiallm_txt=spatiallm_txt)
+    
+    action_print(f"converted to world coordinates:")
+    action_print(f"  robot pose: {world_result.robot_pose}")
+    action_print(f"  detected {len(world_result.walls)} walls")
+    action_print(f"  detected {len(world_result.doors)} doors")
+    action_print(f"  detected {len(world_result.windows)} windows")
+    action_print(f"  detected {len(world_result.bboxes)} bboxes")
+    
+    # Print some example world coordinates
+    if world_result.walls:
+        wall = world_result.walls[0]
+        action_print(f"  example wall {wall.id}: world center at ({wall.world_center_x:.3f}, {wall.world_center_y:.3f}, {wall.world_center_z:.3f})")
+    
+    if world_result.bboxes:
+        bbox = world_result.bboxes[0]
+        action_print(f"  example bbox {bbox.id} ({bbox.class_name}): world center at ({bbox.world_center_x:.3f}, {bbox.world_center_y:.3f}, {bbox.world_center_z:.3f})")
 
     return EOS_TYPE_ActionResult.SUCCESS
