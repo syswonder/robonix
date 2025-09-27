@@ -64,6 +64,10 @@ def create_ranger_entity_builder():
         root_room.add_child(ranger)
         ranger.bind_skill("cap_pointcloud_to_file",
                           cap_pointcloud_to_file, provider_name="local_provider")
+        ranger.bind_skill("cap_get_pose",
+                          get_pose, provider_name="local_provider")
+        ranger.bind_skill("skl_spatiallm_to_world_pose",
+                          skl_spatiallm_to_world_pose, provider_name="local_provider")
 
         server_pc = create_controllable_entity("server_pc")
         root_room.add_child(server_pc)

@@ -221,4 +221,11 @@ EOS_SKILL_SPECS = {
         "output": bool,
         "dependencies": ["skl_detect_objs"],
     },
+    "skl_spatiallm_to_world_pose": {
+        "description": "Convert SpatialLM detection results from robot coordinates to world coordinates",
+        "type": EOS_SkillType.SKILL,
+        "input": {"spatiallm_txt": str},
+        "output": EOS_TYPE_SpatialLM_WorldResult,
+        "dependencies": ["cap_get_pose"],
+    },
 }
