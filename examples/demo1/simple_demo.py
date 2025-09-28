@@ -14,10 +14,10 @@ project_root_parent = Path(
 ).parent.parent.parent.parent  # robonix root
 sys.path.insert(0, str(project_root_parent))
 
-from robonix.uapi.log import logger
-from robonix.uapi import create_runtime_manager, set_runtime
+from robonix.manager.log import logger
+from robonix.uapi import get_runtime, set_runtime
 
-def init_skill_providers(manager):
+def init_skill_providers(runtime):
     """Initialize skill providers"""
     from robonix.uapi.runtime.provider import SkillProvider
 
@@ -35,8 +35,8 @@ def init_skill_providers(manager):
         skills=skills,
     )
 
-    manager.get_runtime().registry.add_provider(local_provider)
-    logger.info(f"Added skill providers: {manager.get_runtime().registry}")
+    runtime.registry.add_provider(local_provider)
+    logger.info(f"Added skill providers: {runtime.registry}")
 
 
 def create_manual_entity_builder():
@@ -191,28 +191,28 @@ def main():
 
     logger.info("Starting simple demo 1")
 
-    # Create runtime manager
-    manager = create_runtime_manager()
+    # Get runtime instance
+    runtime = get_runtime()
 
     # Register entity builders
-    manager.register_entity_builder("manual", create_manual_entity_builder())
-    manager.register_entity_builder("auto", create_yolo_entity_builder())
+    runtime.register_entity_builder("manual", create_manual_entity_builder())
+    runtime.register_entity_builder("auto", create_yolo_entity_builder())
 
     # Initialize skill providers
-    init_skill_providers(manager)
+    init_skill_providers(runtime)
 
     # Build entity graph based on mode
-    manager.build_entity_graph(args.mode)
+    runtime.build_entity_graph(args.mode)
 
     # Set runtime for action system
-    set_runtime(manager.get_runtime())
+    set_runtime(runtime)
 
     # Print entity tree structure
-    manager.print_entity_tree()
+    runtime.print_entity_tree()
 
     # Export scene information if requested
     if args.export_scene:
-        scene_info = manager.export_scene_info(args.export_scene)
+        scene_info = runtime.export_scene_info(args.export_scene)
         logger.info(f"Scene information exported to: {args.export_scene}")
 
     # Load action program
@@ -221,22 +221,24 @@ def main():
     logger.info(f"Loading action program from: {action_program_path}")
 
     try:
-        action_names = manager.load_action_program(action_program_path)
+        action_names = runtime.load_action_program(action_program_path)
         logger.info(f"Loaded action functions: {action_names}")
 
         if args.mode == "manual":
-            manager.configure_action("debug_test_action", a="/A")
+            runtime.configure_action("debug_test_action", a="/A")
         elif args.mode == "auto":
             # however, the "/chair" argument is hard-coded now for debugging purposes
-            manager.configure_action(
+            runtime.configure_action(
                 "move_and_capture_action", a="/robot", b="/chair"
             )
 
-        # Execute action based on mode
+        # Start action based on mode
         if args.mode == "manual":
-            manager.execute_action("debug_test_action")
+            thread = runtime.start_action("debug_test_action")
+            result = runtime.wait_for_action("debug_test_action", timeout=30.0)
         elif args.mode == "auto":
-            manager.execute_action("move_and_capture_action")
+            thread = runtime.start_action("move_and_capture_action")
+            result = runtime.wait_for_action("move_and_capture_action", timeout=30.0)
 
         logger.info("Demo completed successfully")
         return 0

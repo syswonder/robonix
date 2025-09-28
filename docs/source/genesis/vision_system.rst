@@ -37,23 +37,23 @@ CameraManager类采用生产者-消费者模式设计，通过独立线程处理
 
 .. code-block:: python
 
-   # 获取机器人当前状态
+   # Get robot current state
    car_pos = self.car.get_pos()
    car_yaw = getattr(self.car, "_my_yaw", 0.0)
    
-   # 计算相机在机器人前方的位置
+   # Calculate camera position in front of robot
    camera_offset_x = 0.3 * np.sin(car_yaw)
    camera_offset_y = 0.3 * np.cos(car_yaw)
    camera_x = car_x + camera_offset_x
    camera_y = car_y + camera_offset_y
-   camera_z = car_z + 0.2  # 略高于机器人中心
+   camera_z = car_z + 0.2  # Slightly above robot center
 
 **视线方向计算**
   系统根据机器人朝向自动计算相机的观察方向，确保相机始终朝向机器人的前进方向：
 
 .. code-block:: python
 
-   # 计算前视方向的观察点
+   # Calculate look-at point in forward direction
    lookat_x = camera_x + np.sin(car_yaw)
    lookat_y = camera_y + np.cos(car_yaw)
    lookat_z = camera_z
@@ -73,15 +73,15 @@ CameraManager类采用生产者-消费者模式设计，通过独立线程处理
 .. code-block:: python
 
    def capture_rgb_image(self, width=640, height=480, save_to_disk=True):
-       # 渲染RGB图像
+       # Render RGB image
        self.camera.render()
        rgb_image = self.camera.get_picture("Color")
        
-       # 格式转换和处理
+       # Format conversion and processing
        if hasattr(rgb_image, "cpu"):
            rgb_image = rgb_image.cpu().numpy()
        
-       # 图像后处理
+       # Image post-processing
        rgb_image = (rgb_image * 255).astype(np.uint8)
        rgb_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
        
@@ -93,15 +93,15 @@ CameraManager类采用生产者-消费者模式设计，通过独立线程处理
 .. code-block:: python
 
    def capture_depth_image(self, width=640, height=480, save_to_disk=True):
-       # 渲染深度图像
+       # Render depth image
        self.camera.render()
        depth_image = self.camera.get_picture("Depth")
        
-       # 深度值处理
+       # Depth value processing
        if hasattr(depth_image, "cpu"):
            depth_image = depth_image.cpu().numpy()
        
-       # 深度范围标准化
+       # Depth range normalization
        min_depth = np.min(depth_image)
        max_depth = np.max(depth_image)
        
@@ -113,10 +113,10 @@ CameraManager类采用生产者-消费者模式设计，通过独立线程处理
 .. code-block:: python
 
    def get_camera_info(self):
-       # 获取相机内参矩阵
+       # Get camera intrinsic matrix
        K = self.camera.get_intrinsic_matrix()
        
-       # 获取相机外参信息
+       # Get camera extrinsic information
        cam_pos = self.camera.get_pos()
        cam_lookat = self.camera.get_lookat()
        

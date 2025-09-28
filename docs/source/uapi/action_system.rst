@@ -19,7 +19,7 @@ Action 装饰器机制
 
    @action
    def my_action(param1: str, param2: int) -> EOS_TYPE_ActionResult:
-       # 实现业务逻辑
+       # Implement business logic
        action_print(f"Executing with {param1} and {param2}")
        return EOS_TYPE_ActionResult.SUCCESS
 
@@ -77,10 +77,10 @@ Runtime 系统
 
 .. code-block:: python
 
-   # 获取当前运行时实例
+   # Get current runtime instance
    runtime = get_runtime()
    
-   # 设置新的运行时实例
+   # Set new runtime instance
    set_runtime(new_runtime)
 
 **Action程序加载**
@@ -121,17 +121,17 @@ Type Safety
            action_print(f"Robot not found at path: {robot_path}", "ERROR")
            return EOS_TYPE_ActionResult.FAILURE
        
-       # 获取当前位置
+       # Get current position
        current_pos = robot.cap_space_getpos()
        action_print(f"Current position: {current_pos}")
        
-       # 移动到目标位置
+       # Move to target position
        move_result = robot.cap_space_move(x=5.0, y=3.0, z=0.0)
        if not move_result["success"]:
            action_print(f"Move failed: {move_result}", "ERROR")
            return EOS_TYPE_ActionResult.FAILURE
        
-       # 拍摄图像
+       # Capture image
        robot.cap_save_rgb_image(filename="captured.jpg", camera_name="camera0")
        action_print("Image captured successfully")
        
@@ -141,25 +141,25 @@ Type Safety
 
 .. code-block:: python
 
-   from uapi import create_runtime_manager, set_runtime
+   from robonix.uapi import get_runtime, set_runtime
    
-   # 创建运行时管理器
-   manager = create_runtime_manager()
+   # Get runtime instance
+   runtime = get_runtime()
    
-   # 构建实体图和设置运行时
-   manager.build_entity_graph("my_scene")
-   set_runtime(manager.get_runtime())
+   # Build entity graph and set runtime
+   runtime.build_entity_graph("my_scene")
+   set_runtime(runtime)
    
-   # 加载Action程序
-   action_names = manager.load_action_program("example.action")
+   # Load action program
+   action_names = runtime.load_action_program("example.action")
    print(f"Loaded actions: {action_names}")
    
-   # 配置Action参数
-   manager.configure_action("move_and_capture", robot_path="/robot")
+   # Configure action parameters
+   runtime.configure_action("move_and_capture", robot_path="/robot")
    
-   # 执行Action
-   thread = manager.execute_action("move_and_capture")
+   # Execute action
+   thread = runtime.execute_action("move_and_capture")
    
-   # 等待执行完成
-   result = manager.get_runtime().wait_for_action("move_and_capture")
+   # Wait for execution completion
+   result = runtime.wait_for_action("move_and_capture")
    print(f"Action result: {result}")

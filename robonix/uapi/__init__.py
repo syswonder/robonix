@@ -1,17 +1,14 @@
 # uapi package
 
-# Export runtime manager functionality
-from .runtime.manager import RuntimeManager, create_runtime_manager
-from .runtime.runtime import Runtime
-from .runtime.action import action, EOS_TYPE_ActionResult, get_runtime, set_runtime, action_print
+# Export runtime functionality
+from .runtime.runtime import Runtime, get_runtime
+from .runtime.action import action, EOS_TYPE_ActionResult, set_runtime, action_print
 
 __all__ = [
-    'RuntimeManager',
-    'create_runtime_manager', 
     'Runtime',
+    'get_runtime',
     'action',
     'EOS_TYPE_ActionResult',
-    'get_runtime',
     'set_runtime',
     'action_print'
 ] 
