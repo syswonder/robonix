@@ -1,15 +1,15 @@
 Runtime
 ==========
 
-运行时系统是UAPI的执行引擎，负责管理实体图的生命周期、动作程序的加载执行以及技能提供者的注册管理。该系统采用多层架构设计，提供了完整的运行时环境和管理接口。
+运行时系统是UAPI的执行引擎，负责管理实体图的生命周期、动作程序的加载执行以及技能提供者的注册管理。该系统采用单例模式设计，提供了完整的运行时环境和管理接口。
 
 数据结构
 -------
 
-Runtime 类
-~~~~~~~~~~
+Runtime 类（单例）
+~~~~~~~~~~~~~~~~~~
 
-Runtime类是运行时系统的核心，管理着整个系统的执行状态：
+Runtime类是运行时系统的核心，采用单例模式确保全局唯一性：
 
 **实体图管理**
   Runtime维护着全局的实体图引用，提供图的设置、获取和钩子管理功能。钩子机制允许在图初始化完成后自动执行自定义逻辑，为系统扩展提供了便利。
@@ -19,11 +19,6 @@ Runtime类是运行时系统的核心，管理着整个系统的执行状态：
 
 **并发执行控制**
   内置多线程支持，每个动作在独立线程中执行。系统维护线程池和结果集合，提供完整的并发控制和状态监控能力。
-
-RuntimeManager 类
-~~~~~~~~~~~~~~~~~
-
-RuntimeManager是Runtime的高级封装，提供了更便捷的管理接口：
 
 **实体构建器注册**
   通过构建器模式支持不同的实体图构建策略。用户可以注册多个构建器函数，根据不同场景选择合适的构建方式。
@@ -68,31 +63,31 @@ Example
 
 .. code-block:: python
 
-   from uapi import create_runtime_manager, set_runtime
+   from robonix.uapi import get_runtime, set_runtime
    
-   # 创建运行时管理器
-   manager = create_runtime_manager()
+   # Get globally unique runtime instance
+   runtime = get_runtime()
    
-   # 注册实体构建器
+   # Register entity builder
    def my_builder(runtime, **kwargs):
-       from uapi.graph.entity import create_root_room, create_controllable_entity
+       from robonix.uapi.graph.entity import create_root_room, create_controllable_entity
        root = create_root_room()
        robot = create_controllable_entity("robot")
        root.add_child(robot)
        runtime.set_graph(root)
    
-   manager.register_entity_builder("my_scene", my_builder)
+   runtime.register_entity_builder("my_scene", my_builder)
    
-   # 构建实体图
-   manager.build_entity_graph("my_scene")
+   # Build entity graph
+   runtime.build_entity_graph("my_scene")
    
-   # 设置全局运行时
-   set_runtime(manager.get_runtime())
+   # Set global runtime
+   set_runtime(runtime)
    
-   # 加载动作程序
-   action_names = manager.load_action_program("my_actions.action")
+   # Load action program
+   action_names = runtime.load_action_program("my_actions.action")
    
-   # 配置和执行动作
-   manager.configure_action("my_action", param1="value1")
-   manager.execute_action("my_action")
+   # Configure and execute action
+   runtime.configure_action("my_action", param1="value1")
+   runtime.execute_action("my_action")
 

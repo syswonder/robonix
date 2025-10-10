@@ -140,3 +140,79 @@ EntityPathAndRequired = {
     "entity": EntityPath,
     "required": List[str],
 }
+
+
+# --- SpatialLM Detection Result Types ---
+
+@dataclass
+class EOS_TYPE_SpatialLM_Wall:
+    """Wall detection result from SpatialLM"""
+    id: str
+    ax: float  # start point x
+    ay: float  # start point y
+    az: float  # start point z
+    bx: float  # end point x
+    by: float  # end point y
+    bz: float  # end point z
+    height: float
+    thickness: float
+    world_center_x: float  # geometric center in world coordinates
+    world_center_y: float
+    world_center_z: float
+
+
+@dataclass
+class EOS_TYPE_SpatialLM_Door:
+    """Door detection result from SpatialLM"""
+    id: str
+    wall_id: str
+    position_x: float
+    position_y: float
+    position_z: float
+    width: float
+    height: float
+    world_center_x: float  # geometric center in world coordinates
+    world_center_y: float
+    world_center_z: float
+
+
+@dataclass
+class EOS_TYPE_SpatialLM_Window:
+    """Window detection result from SpatialLM"""
+    id: str
+    wall_id: str
+    position_x: float
+    position_y: float
+    position_z: float
+    width: float
+    height: float
+    world_center_x: float  # geometric center in world coordinates
+    world_center_y: float
+    world_center_z: float
+
+
+@dataclass
+class EOS_TYPE_SpatialLM_Bbox:
+    """Bounding box detection result from SpatialLM"""
+    id: str
+    class_name: str
+    position_x: float
+    position_y: float
+    position_z: float
+    angle_z: float
+    scale_x: float
+    scale_y: float
+    scale_z: float
+    world_center_x: float  # geometric center in world coordinates
+    world_center_y: float
+    world_center_z: float
+
+
+@dataclass
+class EOS_TYPE_SpatialLM_WorldResult:
+    """Complete SpatialLM detection result with world coordinates"""
+    walls: List[EOS_TYPE_SpatialLM_Wall]
+    doors: List[EOS_TYPE_SpatialLM_Door]
+    windows: List[EOS_TYPE_SpatialLM_Window]
+    bboxes: List[EOS_TYPE_SpatialLM_Bbox]
+    robot_pose: Tuple[float, float, float, float]  # (x, y, z, yaw) of robot when detection was made

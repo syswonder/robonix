@@ -13,14 +13,14 @@ project_root_parent = Path(
 ).parent.parent.parent.parent  # robonix root
 sys.path.insert(0, str(project_root_parent))
 
-from robonix.uapi import create_runtime_manager, set_runtime
+from robonix.uapi import get_runtime, set_runtime
 from robonix.manager.log import logger, set_log_level
 
 from robonix.skill import *
 
 set_log_level("debug")
 
-def init_skill_providers(manager):
+def init_skill_providers(runtime):
     """Initialize skill providers for ranger demo"""
     from robonix.uapi.runtime.provider import SkillProvider
 
@@ -38,8 +38,8 @@ def init_skill_providers(manager):
         skills=skills,
     )
 
-    manager.get_runtime().registry.add_provider(local_provider)
-    logger.info(f"Added skill providers: {manager.get_runtime().registry}")
+    runtime.registry.add_provider(local_provider)
+    logger.info(f"Added skill providers: {runtime.registry}")
 
 def create_ranger_entity_builder():
     """Create a ranger-specific entity graph builder"""
@@ -75,14 +75,14 @@ def main():
 
     logger.info("Starting ranger demo")
 
-    manager = create_runtime_manager()
-    manager.register_entity_builder("ranger", create_ranger_entity_builder())
-    init_skill_providers(manager)
-    manager.build_entity_graph("ranger")
-    set_runtime(manager.get_runtime())
-    manager.print_entity_tree()
+    runtime = get_runtime()
+    runtime.register_entity_builder("ranger", create_ranger_entity_builder())
+    init_skill_providers(runtime)
+    runtime.build_entity_graph("ranger")
+    set_runtime(runtime)
+    runtime.print_entity_tree()
     if args.export_scene:
-        scene_info = manager.export_scene_info(args.export_scene)
+        scene_info = runtime.export_scene_info(args.export_scene)
         logger.info(f"Scene information exported to: {args.export_scene}")
 
     action_program_path = os.path.join(
@@ -90,13 +90,14 @@ def main():
     logger.info(f"Loading action program from: {action_program_path}")
 
     try:
-        action_names = manager.load_action_program(action_program_path)
+        action_names = runtime.load_action_program(action_program_path)
         logger.info(f"Loaded action functions: {action_names}")
 
-        manager.configure_action("test_ranger", ranger_path="/ranger")
+        runtime.configure_action("test_ranger", ranger_path="/ranger")
 
-        logger.info("Executing ranger test action...")
-        result = manager.execute_action("test_ranger")
+        logger.info("Starting ranger test action...")
+        thread = runtime.start_action("test_ranger")
+        result = runtime.wait_for_action("test_ranger", timeout=30.0)
 
         logger.info(f"Ranger test completed with result: {result}")
         logger.info("Demo completed successfully")

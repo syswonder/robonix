@@ -16,7 +16,7 @@ class TfPoseGetter(Node):
     def __init__(self):
         super().__init__('tf_pose_getter')
         self.target_frame = 'map'
-        self.source_frame = 'base_link'  # 或 'base_footprint'
+        self.source_frame = 'base_link'  # or 'base_footprint'
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer, self)
 
@@ -38,7 +38,11 @@ class TfPoseGetter(Node):
 
 @eaios.api
 def get_pose(timeout_sec: float = 20.0) -> Optional[Tuple[float, float, float]]:
-    """获取当前机器人位姿 (x, y, yaw)。超时返回 None。"""
+    """
+    Get current robot pose (x, y, yaw) in map frame.
+    Follows ROS2 tf standard: X forward, Y left, Z up, yaw in radians.
+    Returns None on timeout.
+    """
     init_here = not rclpy.ok()
     if init_here:
         rclpy.init()

@@ -32,3 +32,5 @@ __export__.py
 skill/__init__.py
 
 *.log
+
+tmp/

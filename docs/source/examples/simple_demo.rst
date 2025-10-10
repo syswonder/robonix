@@ -18,17 +18,17 @@ Simple Demo (Genesis)
 
 .. code-block:: bash
 
-   # 安装 OpenGL 相关依赖
+   # Install OpenGL related dependencies
    sudo apt-get install freeglut3 freeglut3-dev mesa-utils
    
-   # 配置 NVIDIA 作为 OpenGL 渲染后端（重要！）
+   # Configure NVIDIA as OpenGL rendering backend (Important!)
    export __GLX_VENDOR_LIBRARY_NAME=nvidia
 
 **创建 Python 环境**
 
 .. code-block:: bash
 
-   # 创建并激活 conda 环境
+   # Create and activate conda environment
    conda create -n genesis python=3.12
    conda activate genesis
 
@@ -36,10 +36,10 @@ Simple Demo (Genesis)
 
 .. code-block:: bash
 
-   # 首先根据 https://pytorch.org/get-started/locally/ 安装 PyTorch
-   # 例如：pip3 install torch torchvision（Linux CUDA 12.8）
+   # First install PyTorch according to https://pytorch.org/get-started/locally/
+   # For example: pip3 install torch torchvision (Linux CUDA 12.8)
    
-   # 安装其他依赖包
+   # Install other dependencies
    pip install rich loguru mcp pyyaml argparse grpcio grpcio-tools ultraimport \
                ultralytics genesis-world pynput openai python-dotenv opencv-python
 
@@ -57,7 +57,7 @@ Genesis 模拟器启动
 
 .. code-block:: bash
 
-   # 在 robonix 根目录下启动 Genesis 模拟器
+   # Start Genesis simulator in robonix root directory
    python start_genesis.py
 
 等待模拟器启动完成，直到出现渲染窗口。
@@ -66,7 +66,7 @@ Genesis 模拟器启动
 
 .. code-block:: bash
 
-   # 在 robonix 根目录下导出技能系统配置（模拟器模式）
+   # Export skill system configuration in robonix root directory (simulator mode)
    python manager/eaios_decorators.py --config config/include/simulator.yml
 
 此命令会生成 ``skill/__init__.py`` 文件，用于技能系统的初始化。
@@ -80,7 +80,7 @@ Genesis 模拟器启动
 
 .. code-block:: bash
 
-   # 在 robonix 根目录下执行
+   # Execute in robonix root directory
    mkdir -p skill/sim_vision/models
    wget -P skill/sim_vision/models https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11l-seg-pf.pt
 
@@ -101,7 +101,7 @@ Genesis 模拟器启动
 
 .. code-block:: bash
 
-   # 在 robonix 根目录下运行
+   # Run in robonix root directory
    python examples/demo1/simple_demo.py --mode manual
 
 手动模式下，用户需要手动指定目标物体和动作参数。
@@ -110,7 +110,7 @@ Genesis 模拟器启动
 
 .. code-block:: bash
 
-   # 在 robonix 根目录下运行
+   # Run in robonix root directory
    python examples/demo1/simple_demo.py --mode auto
 
 自动模式下，系统会：
@@ -124,7 +124,7 @@ Genesis 模拟器启动
 
 .. code-block:: bash
 
-   # 在 robonix 根目录下运行
+   # Run in robonix root directory
    python examples/demo1/simple_demo.py --mode manual --export-scene scene_info.json
 
 此命令可以将当前场景信息导出为 JSON 文件，便于后续分析和调试。
