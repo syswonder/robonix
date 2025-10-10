@@ -4,12 +4,47 @@ from rclpy.duration import Duration
 
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from mcp.server.fastmcp import FastMCP
-from tf_transformations import euler_from_quaternion
 
 from tf2_ros import Buffer, TransformListener
 
 from robonix.manager.eaios_decorators import eaios
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Iterable
+
+import math
+
+def euler_from_quaternion(q: Iterable[float]) -> Tuple[float, float, float]:
+    """
+    Convert quaternion (x, y, z, w) to Euler angles (roll, pitch, yaw)
+    in radians. Convention matches tf_transformations: XYZ (roll, pitch, yaw).
+    """
+    x, y, z, w = q
+
+    # (optional) normalize to avoid drift; safe for nearly-normalized inputs
+    norm = math.sqrt(x*x + y*y + z*z + w*w)
+    if norm == 0.0:
+        raise ValueError("Invalid quaternion with zero norm")
+    x, y, z, w = x/norm, y/norm, z/norm, w/norm
+
+    # roll (x-axis rotation)
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+
+    # pitch (y-axis rotation)
+    sinp = 2.0 * (w * y - z * x)
+    # clamp for numerical safety (|sinp| could be 1+epsilon)
+    if abs(sinp) >= 1.0:
+        pitch = math.copysign(math.pi / 2.0, sinp)
+    else:
+        pitch = math.asin(sinp)
+
+    # yaw (z-axis rotation)
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+
+    return roll, pitch, yaw
+
 
 
 class TfPoseGetter(Node):
