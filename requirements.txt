@@ -1,0 +1,29 @@
+# Basic packages for uapi and manager
+rich>=13.7.0
+loguru>=0.7.2
+mcp>=0.2.0
+pyyaml>=6.0.1
+argparse>=1.4.0
+aioconsole>=0.6.1
+readline>=6.2.4.1
+
+# Shell and CLI tools
+colorama>=0.4.6
+
+# Genesis simulator dependencies
+# grpcio>=1.60.0
+# grpcio-tools>=1.60.0
+# genesis-world>=0.1.0
+# pynput>=1.7.6
+
+# LLM integration
+openai>=1.6.1
+python-dotenv>=1.0.0
+
+# Type hints and development
+typing-extensions>=4.9.0
+dataclasses>=0.6
+uuid>=1.30
+
+# Note: ROS2 humble is required but should be installed separately via system package manager
+# See: https://docs.ros.org/en/humble/Installation.html

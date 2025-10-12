@@ -128,7 +128,7 @@ class eaios:
 
             self_entity = kwargs.pop("self_entity", None)
             if self_entity is None:
-                self_entity = getattr(runtime, "_current_entity", None)
+                self_entity = runtime.get_current_entity()
 
             if self_entity is not None:
                 import inspect
@@ -218,7 +218,7 @@ class eaios:
 
             self_entity = kwargs.pop("self_entity", None)
             if self_entity is None:
-                self_entity = getattr(runtime, "_current_entity", None)
+                self_entity = runtime.get_current_entity()
 
             logger.debug(f"__file__: {__file__}")
             logger.debug(f"cwd: {os.getcwd()}")

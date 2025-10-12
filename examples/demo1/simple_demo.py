@@ -6,6 +6,8 @@ import argparse
 from pathlib import Path
 import traceback
 
+from robonix.uapi.runtime.runtime import Runtime
+
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
@@ -41,7 +43,7 @@ def init_skill_providers(runtime):
 
 def create_manual_entity_builder():
     """Create a manual entity graph builder"""
-    def builder(runtime, **kwargs):
+    def builder(runtime: Runtime, **kwargs):
         from robonix.uapi.graph.entity import create_root_room, create_controllable_entity
 
         root_room = create_root_room()
@@ -77,7 +79,7 @@ def create_manual_entity_builder():
 
 def create_yolo_entity_builder():
     """Create a YOLO-based entity graph builder"""
-    def builder(runtime, **kwargs):
+    def builder(runtime: Runtime, **kwargs):
         logger.info("Building entity graph from YOLO detection...")
 
         try:
