@@ -11,15 +11,7 @@ PROJECT_ROOT = os.path.dirname(
 )
 sys.path.insert(0, PROJECT_ROOT)
 
-try:
-    from uapi.log import logger
-except ImportError:
-    import logging
-
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-    )
-    logger = logging.getLogger(__name__)
+from robonix.manager.log import logger, init_logger
 
 from simulator.genesis.keyboard_device import KeyboardDevice
 from simulator.genesis.scene_manager import SceneManager
@@ -117,6 +109,9 @@ class RobotSimulator:
 
 
 def main():
+    # Initialize logger first
+    init_logger()
+    
     simulator = RobotSimulator()
     simulator.setup_signal_handlers()
     simulator.run()

@@ -5,15 +5,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 from pynput import keyboard
 
-# Try to import uapi.log, fallback to standard logging if failed
-try:
-    from uapi.log import logger
-except ImportError:
-    import logging
-    logging.basicConfig(level=logging.INFO,
-                        format='%(asctime)s - %(levelname)s - %(message)s')
-    logger = logging.getLogger(__name__)
-
+from robonix.manager.log import logger
 
 class CarController:
     def __init__(self, car, keyboard_device, dt, max_speed, max_rot_speed, accel=3.0, rot_accel=5.0, scene_manager=None):
