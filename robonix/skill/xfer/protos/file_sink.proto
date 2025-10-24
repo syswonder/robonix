@@ -1,0 +1,16 @@
+syntax = "proto3";
+package filexfer;
+
+service FileSink {
+  rpc Upload(FileUpload) returns (Ack);
+}
+
+message FileUpload {
+  string filename = 1;  // e.g. "asr_20251016_101530.txt"
+  bytes  data     = 2;  // 文件字节
+}
+
+message Ack {
+  string status = 1;    // "ok" or "error: ..."
+}
+
