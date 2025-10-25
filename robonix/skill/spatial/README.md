@@ -150,3 +150,11 @@ if torch.cuda.is_available():
     print("matmul ok:", c.is_cuda, c.shape)
 PY
 ```
+
+notes:
+
+```
+python inference.py --point_cloud ../../pointcloud.ply --output room_315.txt --model_path manycore-research/SpatialLM1.1-Qwen-0.5B
+python visualize.py --point_cloud ../../pointcloud.ply --layout room_315.txt --save room_315.rrd
+rerun room_315.rrd
+```
