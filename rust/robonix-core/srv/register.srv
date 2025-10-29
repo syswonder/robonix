@@ -1,0 +1,11 @@
+# Request
+string provider_name
+string type # "cap" or "skl"
+string std_name
+string description
+string[] input_topics
+string[] output_topics
+
+---
+# Response
+bool success
