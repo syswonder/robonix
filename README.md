@@ -1,7 +1,4 @@
 # robonix
-<div align="center">
-  <img src="robonix.png" alt="robonix" width="200">
-</div>
 
 **robonix** is an open-source embodied intelligence framework.
 
