@@ -7,10 +7,11 @@ driver:
   - mid360
   # - unilidar_L2
 capability:
-  - navigation2
+  - navigation2:
+      params:
+        config_file: config/nav2_params.yml
   - vision
   - pointcloud
-  - amcl
 skill:
   - move
   - vision

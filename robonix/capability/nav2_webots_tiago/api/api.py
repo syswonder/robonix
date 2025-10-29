@@ -7,7 +7,7 @@ from rclpy.node import Node
 from rclpy.duration import Duration
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 
-from tf_transformations import euler_from_quaternion
+# from tf_transformations import euler_from_quaternion
 from tf2_ros import Buffer, TransformListener
 
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult

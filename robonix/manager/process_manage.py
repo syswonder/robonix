@@ -6,7 +6,46 @@ import pty
 import select
 import signal
 from log import logger
+import shlex
 
+def build_cli_args(params: dict, *, normalize_dash: bool = True) -> str:
+    """
+    combine params into a CLI argument string:
+    - key -> '--key value'
+    - True -> '--key'
+    - False/None -> skip
+    - list/tuple/set -> '--key v1 --key v2 ...'
+    - dict -> '--key.sub value'
+    - key underscore will be replaced with dash
+    """
+    def _k(k: str) -> str:
+        k = k.replace('_', '-') if normalize_dash else k
+        return k if k.startswith('-') else f'--{k}'
+
+    def _flatten(flag: str, v):
+        if v is True:
+            yield (flag, None)
+        elif v in (False, None):
+            return
+        elif isinstance(v, (list, tuple, set)):
+            for it in v:
+                # each element in the list/tuple/set will bind the same flag
+                yield from _flatten(flag, it)
+        elif isinstance(v, dict):
+            for k2, v2 in v.items():
+                yield from _flatten(f'{flag}.{k2.replace("_","-")}', v2)
+        else:
+            yield (flag, str(v))
+
+    parts = []
+    for k, v in (params or {}).items():
+        flag = _k(k)
+        for f, val in _flatten(flag, v):
+            if val is None:
+                parts.append(f)
+            else:
+                parts.append(f + ' ' + shlex.quote(val))
+    return ' '.join(parts)
 
 # NodeProcess class
 class ProcessNode:
@@ -46,9 +85,12 @@ class ProcessNode:
             # shell=True allows running shell commands with pipes or compound commands, but has security risks
             # Prefer shell=False and split the command into a list if possible
             # Here we assume startup_command is safe and needs to be run in a shell
+            base = shlex.split(command)  # split command into a list
+            param_list = shlex.split(build_cli_args(self.node_node.params)) if self.node_node.params else []
+            argv = ["stdbuf", "-oL", *base, *param_list]
             self.process = subprocess.Popen(
-                "stdbuf -oL " + command,
-                shell=True,
+                argv,
+                shell=False,
                 cwd=process_cwd,  # Run in the directory specific to this node
                 stdin=self.slave_fd,
                 stdout=self.slave_fd,

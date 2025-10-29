@@ -3,10 +3,11 @@ import yaml
 from collections import defaultdict
 from constant import BASE_PATH
 from log import logger
+from node import get_entry_name
 
 
-def scan_dir(base_path, feature_set, feature_sources, all_dependencies):
-    """Scan directory for description.yml files and extract features and dependencies"""
+def scan_dir(base_path, feature_set, feature_sources, all_dependencies, all_params):
+    """Scan directory for description.yml files and extract features, dependencies, and params"""
     if not os.path.exists(base_path):
         logger.warning(f"Path {base_path} does not exist, skipping")
         return
@@ -20,6 +21,9 @@ def scan_dir(base_path, feature_set, feature_sources, all_dependencies):
                     data = yaml.safe_load(f)
                     features = data.get("feature", [])
                     dependencies = data.get("depend", [])
+                    params = data.get("params", None)
+                    if params:
+                        all_params[base_path] = params
 
                     if not features:
                         logger.warning(
@@ -53,6 +57,8 @@ def check_depend(config_path):
     feature_set = set()
     feature_sources = {}  # feature -> file path
     all_dependencies = defaultdict(list)  # feature -> list of dependencies
+    all_params = {}  # feature -> params dict
+    all_valid = True
 
     config = {}
     config_path = os.path.join(BASE_PATH, config_path)
@@ -78,11 +84,34 @@ def check_depend(config_path):
         try:
             logger.debug(f"Scanning base directory: {base_dir_path}")
             for entry in entries:
-                sub_dir_path = os.path.join(base_dir_path, entry)
-                scan_dir(sub_dir_path, feature_set, feature_sources, all_dependencies)
+                entry_name, entry_content = get_entry_name(entry)
+                sub_dir_path = os.path.join(base_dir_path, entry_name)
+                scan_dir(sub_dir_path, feature_set, feature_sources, all_dependencies, all_params)
+                if sub_dir_path in all_params:
+                    for param_name, param_attr in all_params[sub_dir_path].items():
+                        if "required" in param_attr and param_attr["required"]:
+                            logger.info(f"param required: ",entry[entry_name].get('params',{}))
+                            # there is no param or param not defined
+                            if "params" not in entry[entry_name] or param_name not in entry[entry_name]["params"]:
+                                # use default value if exists
+                                if "default" in param_attr:
+                                    entry[entry_name]["params"] = entry[entry_name].get('params',{})
+                                    entry[entry_name]["params"][param_name] = param_attr["default"]
+                                else:
+                                    logger.error(f"node '{entry_name}' requires param '{param_name}' but it is not defined.")
+                                    all_valid = False
+                        # not required
+                        else:
+                            if "default" in param_attr:
+                                entry[entry_name]["params"] = entry[entry_name].get('params',{})
+                                entry[entry_name]["params"][param_name] = param_attr["default"]
+                            else:
+                                logger.error(f"node '{entry_name}' param '{param_name}' is not required and has no default value.")
+                                all_valid = False
         except Exception as e:
-            logger.error(f"Error accessing '{base_dir_path}': {e}")
-            return []
+            raise ValueError(f"[ERROR] An error occurred while accessing '{base_dir_path}': {e}")
+    if not all_valid:
+        raise ValueError("[FAILED] Some node params are required but not defined, or has neither required nor default value.")
 
     # Step 2: Check if all dependencies exist in feature_set
     all_valid = True
