@@ -14,6 +14,7 @@ class BaseNode:
         startup_on_boot: bool,
         startup_command: str,
         node_type: str = None,
+        params: dict = None,
     ):
         """
         Args:
@@ -32,15 +33,25 @@ class BaseNode:
         self.start_on_boot = startup_on_boot
         self.startup_command = startup_command
         self.node_type = node_type
+        self.params = params
 
     def __str__(self):
-        return f"BaseNode(cwd='{self.cwd}', name='{self.name}', version='{self.version}', author='{self.author}', start_on_boot='{self.start_on_boot}', startup_command='{self.startup_command}')"
-
+        return f"BaseNode(cwd='{self.cwd}', name='{self.name}', version='{self.version}', author='{self.author}', start_on_boot='{self.start_on_boot}', startup_command='{self.startup_command}', params = '{self.params}')"
+    
     def __repr__(self):
-        return f"BaseNode({self.name}_{self.version}, cwd='{self.cwd}')"
+        return f"BaseNode({self.name}_{self.version}, cwd='{self.cwd}', params={self.params})"
 
+def get_entry_name(entry):
+    if isinstance(entry,dict):
+        entry_name = list(entry.keys())[0]
+        entry_content = entry[entry_name]
+    else:
+        entry_name = entry
+        entry_content = None
 
-def get_node(entry, sub_dir_path, node_type: str = None) -> BaseNode:
+    return entry_name, entry_content
+
+def get_node(entry, sub_dir_path, node_type: str = None, entry_content: dict = None) -> BaseNode:
     """
     Helper function to create a BaseNode object from a directory entry and its description.yml file.
 
@@ -52,7 +63,7 @@ def get_node(entry, sub_dir_path, node_type: str = None) -> BaseNode:
     Returns:
         BaseNode: An instance of BaseNode with details extracted from the description.yml file.
     """
-    logger.debug(f"Checking entry: {entry} in path: {sub_dir_path} for description.yml")
+    logger.debug(f"Checking entry: {entry} content {entry_content} in path: {sub_dir_path} for description.yml")
     # Check if the entry is a directory
     if os.path.isdir(sub_dir_path):
         description_file_path = os.path.join(sub_dir_path, "description.yml")
@@ -66,7 +77,11 @@ def get_node(entry, sub_dir_path, node_type: str = None) -> BaseNode:
                 # Read and parse the YAML file
                 with open(description_file_path, "r", encoding="utf-8") as f:
                     data = yaml.safe_load(f)
-
+                    params = {}
+                    for k,v in data.get("params", {}).items():
+                        if "default" in v:
+                            params[k] = v.get("default")
+                    params.update(entry_content.get("params", {}) if isinstance(entry_content,dict) else {})
                     base_info = BaseNode(
                         cwd=sub_dir_path,
                         name=data.get("name"),
@@ -75,6 +90,7 @@ def get_node(entry, sub_dir_path, node_type: str = None) -> BaseNode:
                         startup_on_boot=data.get("start_on_boot", False),
                         startup_command=data.get("startup_command", None),
                         node_type=node_type,
+                        params=params
                     )
                     return base_info
             except yaml.YAMLError as e:
@@ -134,13 +150,14 @@ def get_node_details(config_path: str) -> list[BaseNode]:
             # List all entries in the 'base' directory
 
             for entry in entries:
-                sub_dir_path = os.path.join(base_dir_path, entry)
-                logger.info(f"Checking: {entry}")
-                base_info = get_node(entry, sub_dir_path, base)
+                entry_name, entry_content = get_entry_name(entry)
+                sub_dir_path = os.path.join(base_dir_path, entry_name)
+                logger.info(f"Checking: {entry_name}")
+                base_info = get_node(entry_name, sub_dir_path, base, entry_content)
                 if base_info:
                     all_base_details.append(base_info)
                 else:
-                    logger.warning(f"No valid BaseNode found for entry: {entry}")
+                    logger.warning(f"No valid BaseNode found for entry_name: {entry_name}")
         except Exception as e:
             logger.error(f"An error occurred while accessing '{base_dir_path}': {e}")
             return []

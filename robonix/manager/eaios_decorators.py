@@ -7,6 +7,7 @@ from mcp.server.fastmcp import FastMCP
 import yaml
 import sys
 import inspect
+from node import get_entry_name
 
 if os.path.abspath(os.path.dirname(__file__)) not in sys.path:
     sys.path.append(os.path.abspath(os.path.dirname(__file__)))
@@ -264,12 +265,14 @@ def package_init(config_path: str):
         if entrys is None:
             continue
         for entry in entrys:
-            entry_dir = os.path.join(BASE_PATH, base, entry)
+            entry_name, entry_content = get_entry_name(entry)
+            
+            entry_dir = os.path.join(BASE_PATH, base, entry_name)
             logger.debug(f"Entry directory: {entry_dir}")
             if not os.path.exists(entry_dir):
                 logger.error(f"The '{entry_dir}' directory was not found at '{base}'")
                 continue
-            base_package = f"robonix.{base}.{entry}"
+            base_package = f"robonix.{base}.{entry_name}"
             eaios.scan_dir(base_package, entry_dir)
     logger.debug("Before finalize")
     eaios.finalize()

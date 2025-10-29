@@ -6,6 +6,11 @@ startup_command: "bash run.sh"
 description: "The navigation capability of the robot"
 plugins:
   - "ros2_navigation"
+params:
+  config_file:
+    required: true
+  use_sim_time:
+    default: false
 feature: 
   - "set_goal"
   - "stop_goal"
