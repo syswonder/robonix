@@ -1,36 +1,23 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
-# ros2
 log/
 build/
 install/
-
-# additions
 temp/
 .vscode/
-
-#log
 log.txt
-
 .DS_Store
-
 .cursor/
 .cursorrules
 *.pt
 .env
-
 test.txt
 path.sh
 scene_info.json
-
 frames_*
-
-# skill export
 __export__.py
 skill/__init__.py
-
 *.log
-
 tmp/
+tailscale/
