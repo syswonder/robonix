@@ -1,7 +1,30 @@
 from robonix.uapi.specs.skill_specs import EntityPath
 from robonix.uapi.runtime.action import action, EOS_TYPE_ActionResult, get_runtime, action_print, action_info
 
+def extract_llm_response(llm_response: str):
+    import json
+    import re
+    """Extract action code and parameters from LLM response"""
+    try:
+        # Find JSON code block - updated regex to handle multi-line JSON properly
+        json_pattern = r"```json\s*\n(.*?)\n```"
+        json_match = re.search(json_pattern, llm_response, re.DOTALL)
 
+        if json_match:
+            json_str = json_match.group(1).strip()
+            action_info(f"Extracted JSON string: {json_str}")
+            parsed_response = json.loads(json_str)
+
+            return parsed_response
+        else:
+            action_info("No JSON format code block found in LLM response")
+            action_info(f"LLM response content: {llm_response}")
+            return None
+
+    except Exception as e:
+        action_info(f"Failed to parse LLM response: {str(e)}")
+        action_info(f"LLM response content: {llm_response}")
+        return None
 @action
 def find_chair(ranger_path: EntityPath, server_pc_path: EntityPath) -> EOS_TYPE_ActionResult:
     runtime = get_runtime()
@@ -38,26 +61,38 @@ def find_chair(ranger_path: EntityPath, server_pc_path: EntityPath) -> EOS_TYPE_
     server_pc = get_runtime().get_graph().get_entity_by_path(server_pc_path)
 
     retry_count = 3
+
+    chair_pose = None
     
     while retry_count > 0:
-        result = server_pc.skl_spatiallm_detect(ply_model=model_bytes)
+        try:
+            result = server_pc.skl_spatiallm_detect(ply_model=model_bytes)
 
-        action_print(f"object detected: {result}")
+            action_print(f"object detected: {result}")
 
-        pose_res = ranger.skl_spatiallm_to_world_pose(spatiallm_txt=result.txt)
-        if pose_res is None:
-            action_print("failed to get world pose")
-            return EOS_TYPE_ActionResult.FAILURE
-        action_print(f"world pose: {pose_res}")
+            pose_res = ranger.skl_spatiallm_to_world_pose(spatiallm_txt=result.txt)
+            if pose_res is None:
+                action_print("failed to get world pose")
+                return EOS_TYPE_ActionResult.FAILURE
+            action_print(f"world pose: {pose_res}")
 
-        chair_pose = None
-        for box in pose_res.bboxes:
-            if box.class_name == "dining_chair" or box.class_name == "chair":
-                chair_pose = [box.world_center_x, box.world_center_y, box.world_center_z]
-                break
-        
-        action_print(f"dining chair pose: {chair_pose}")
+            request = f"all object pos are {pose_res}, please give me the dining chair position"
+            chair_pose = ranger.skl_ask_llm(api_key="sk-a93a0c965ad5490ea147db69300fd565", request=request)
 
+            action_print(f"dining chair response: {chair_pose}")
+            chair_pose = extract_llm_response(chair_pose)
+            action_print(f"dining chair pose real: {chair_pose}")
+
+            chair_pose_debug = None
+            for box in pose_res.bboxes:
+                if box.class_name == "dining_chair" or box.class_name == "chair":
+                    chair_pose_debug = [box.world_center_x, box.world_center_y, box.world_center_z]
+                    break
+            
+            action_print(f"dining chair pose debug: {chair_pose_debug}")
+        except Exception as e:
+            action_print(f"failed to detect object: {e}")
+            
         if chair_pose is None:
             action_print("dining chair not found")
             if retry_count == 0:
@@ -73,11 +108,11 @@ def find_chair(ranger_path: EntityPath, server_pc_path: EntityPath) -> EOS_TYPE_
 
     action_print("moving...")
     
-    result = ranger.skl_move_to_ab_pos(x=chair_pose[0], y=chair_pose[1], yaw=0)
+    # result = ranger.skl_move_to_ab_pos(x=chair_pose[0], y=chair_pose[1], yaw=0)
     
-    if result is None or result == "":
-        action_print("failed to start movement")
-        return EOS_TYPE_ActionResult.FAILURE
+    # if result is None or result == "":
+    #     action_print("failed to start movement")
+    #     return EOS_TYPE_ActionResult.FAILURE
     
     action_print(f"movement command sent successfully: {result}")
     action_print("find chair completed")

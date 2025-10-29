@@ -67,6 +67,7 @@ def create_ranger_entity_builder():
         ranger.bind_skill("skl_move_to_rel_pos", move_to_rel_pos)
         ranger.bind_skill("skl_move_to_ab_pos", move_to_ab_pos)
         ranger.bind_skill("cap_pointcloud_to_file", cap_pointcloud_to_file)
+        ranger.bind_skill("skl_ask_llm", skl_ask_llm, provider_name="local_provider")
 
         logger.info("Ranger entity graph initialized:")
         logger.info(f"  root room: {root_room.get_absolute_path()}")

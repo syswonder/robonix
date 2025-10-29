@@ -228,4 +228,11 @@ EOS_SKILL_SPECS = {
         "output": EOS_TYPE_SpatialLM_WorldResult,
         "dependencies": ["cap_get_pose"],
     },
+    "skl_ask_llm": {
+        "description": "Ask the LLM a question",
+        "type": EOS_SkillType.SKILL,
+        "input": {"api_key": str, "prompt": Optional[str], "request": str},
+        "output": str,
+        "dependencies": [],
+    },
 }

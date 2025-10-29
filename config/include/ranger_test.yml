@@ -17,6 +17,7 @@ skill:
   - semantic_map
   - test_skill
   - pointcloud
+  - llm
 brain:
   - test_brian
 
