@@ -74,6 +74,6 @@ def set_goal(x, y, yaw) -> str:
     return func_status
     
 if __name__ == "__main__":
-    rclpy.init()
+    # rclpy.init()
     nv_controller = NavWithUltrasonicSafety()
 

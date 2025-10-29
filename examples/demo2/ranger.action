@@ -22,6 +22,7 @@ def test_ranger(ranger_path: EntityPath) -> EOS_TYPE_ActionResult:
 
     x, y, yaw = result
     action_print(f"ranger pose before move: x={x}, y={y}, yaw={yaw}")
+    return EOS_TYPE_ActionResult.SUCCESS
 
     # move forward 1 meter
 

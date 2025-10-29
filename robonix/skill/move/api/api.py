@@ -52,7 +52,11 @@ def move_to_ab_pos(self_entity, x, y, yaw) -> str:
         移动操作的结果状态字符串
     """
     #TODO how read dep
-    return set_goal(self_entity, x,y,yaw)
+    DEBUG_FLAG_USE_ACTION = True
+    if DEBUG_FLAG_USE_ACTION:
+        # use the uapi runtime entity to call the binded skill and capability dynamically
+        self_entity.cap_set_goal(x=x, y=y, yaw=yaw)
+        return "success"
 
 @eaios.api
 @eaios.caller

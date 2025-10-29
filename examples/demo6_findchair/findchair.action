@@ -1,0 +1,90 @@
+from robonix.uapi.specs.skill_specs import EntityPath
+from robonix.uapi.runtime.action import action, EOS_TYPE_ActionResult, get_runtime, action_print, action_info
+
+
+@action
+def find_chair(ranger_path: EntityPath, server_pc_path: EntityPath) -> EOS_TYPE_ActionResult:
+    runtime = get_runtime()
+    ranger = runtime.get_graph().get_entity_by_path(ranger_path)
+
+    if ranger is None:
+        action_print(f"ranger not found at path: {ranger_path}")
+        return EOS_TYPE_ActionResult.FAILURE
+
+    # patrolling logic
+    action_info("Patrolling...")    
+
+    action_print("getting current pose")
+    
+    current_pose = ranger.cap_get_pose()
+    
+    if current_pose is None:
+        action_print("failed to get current pose")
+        return EOS_TYPE_ActionResult.FAILURE
+    x, y, yaw = current_pose
+    
+    action_print(f"current pose: x={x}, y={y}, yaw={yaw}")
+
+    result = ranger.cap_pointcloud_to_file(
+        filename="./examples/demo2/pointcloud.ply")
+    if not result["success"]:
+        action_print("failed to save pointcloud to file")
+        return EOS_TYPE_ActionResult.FAILURE
+    action_print(f"pointcloud saved to file: success={result['success']}, points_collected={result['points_collected']}")
+
+    model_bytes = open("./examples/demo2/pointcloud.ply", "rb").read()
+
+    # then use skl_spatiallm_detect to detect the object
+    server_pc = get_runtime().get_graph().get_entity_by_path(server_pc_path)
+
+    retry_count = 3
+    
+    while retry_count > 0:
+        result = server_pc.skl_spatiallm_detect(ply_model=model_bytes)
+
+        action_print(f"object detected: {result}")
+
+        pose_res = ranger.skl_spatiallm_to_world_pose(spatiallm_txt=result.txt)
+        if pose_res is None:
+            action_print("failed to get world pose")
+            return EOS_TYPE_ActionResult.FAILURE
+        action_print(f"world pose: {pose_res}")
+
+        chair_pose = None
+        for box in pose_res.bboxes:
+            if box.class_name == "dining_chair" or box.class_name == "chair":
+                chair_pose = [box.world_center_x, box.world_center_y, box.world_center_z]
+                break
+        
+        action_print(f"dining chair pose: {chair_pose}")
+
+        if chair_pose is None:
+            action_print("dining chair not found")
+            if retry_count == 0:
+                action_print("dining chair not found")
+                return EOS_TYPE_ActionResult.FAILURE
+            # return EOS_TYPE_ActionResult.FAILURE
+        else:
+            break
+        action_print(f"retrying {retry_count}...")
+        retry_count -= 1
+    
+    action_print(f"dining chair pose: x={chair_pose[0]}, y={chair_pose[1]}, yaw={chair_pose[2]}")
+
+    action_print("moving...")
+    
+    result = ranger.skl_move_to_ab_pos(x=chair_pose[0], y=chair_pose[1], yaw=0)
+    
+    if result is None or result == "":
+        action_print("failed to start movement")
+        return EOS_TYPE_ActionResult.FAILURE
+    
+    action_print(f"movement command sent successfully: {result}")
+    action_print("find chair completed")
+
+    return EOS_TYPE_ActionResult.SUCCESS
+
+'''
+class_name='sofa', position_x=-2.191, position_y=-1.9520000000000002, position_z=0.03200000000000003, angle_z=-1.5708000000000002, scale_x=2.0, scale_y=0.828125, scale_z=1.03125, world_center_x=26.561971597607506, world_center_y=1.2528635693460008, world_center_z=0.03200000000000003)
+class_name='dining_chair', position_x=-2.049, position_y=0.19799999999999995, position_z=-0.11599999999999999, angle_z=-1.5708000000000002, scale_x=0.640625, scale_y=0.6875, scale_z=0.984375, world_center_x=28.716615699389337, world_center_y=1.2397184312044487, world_center_z=-0.11599999999999999)
+'''
