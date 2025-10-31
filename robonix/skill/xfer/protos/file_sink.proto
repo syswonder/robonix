@@ -6,11 +6,11 @@ service FileSink {
 }
 
 message FileUpload {
-  string filename = 1;  // e.g. "asr_20251016_101530.txt"
-  bytes  data     = 2;  // 文件字节
+  string filename = 1;  
+  bytes  data     = 2;  
 }
 
 message Ack {
-  string status = 1;    // "ok" or "error: ..."
+  string status = 1;    
 }
 
