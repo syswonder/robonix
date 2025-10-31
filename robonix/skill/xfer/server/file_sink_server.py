@@ -11,6 +11,7 @@ SAVE_DIR = os.environ.get("ASR_INBOX", os.path.expanduser("~/asr_inbox"))
 PORT = int(os.environ.get("FILESINK_PORT", "50111"))
 MAX_MSG = 50 * 1024 * 1024
 
+
 class FileSink(pb2_grpc.FileSinkServicer):
     def Upload(self, request, context):
         try:
