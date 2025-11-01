@@ -1,13 +1,17 @@
-use crate::messages::{Capability, RegisterRequest, RegisterResponse, Skill};
+use crate::messages::{
+    Capability, ConfigService, IOParameter, RegisterRequest, RegisterResponse, Skill,
+};
+use crate::spec::SpecRegistry;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 // Robonix core state
 pub struct RobonixCore {
     capabilities: Arc<RwLock<HashMap<String, Capability>>>,
     skills: Arc<RwLock<HashMap<String, Skill>>>,
+    spec_registry: Arc<SpecRegistry>,
 }
 
 impl RobonixCore {
@@ -15,18 +19,134 @@ impl RobonixCore {
         Self {
             capabilities: Arc::new(RwLock::new(HashMap::new())),
             skills: Arc::new(RwLock::new(HashMap::new())),
+            spec_registry: Arc::new(SpecRegistry::new()),
         }
     }
 
+    fn parse_io_parameters(
+        names: &[String],
+        ros_types: &[String],
+        channels: &[String],
+    ) -> Result<Vec<IOParameter>, String> {
+        if names.len() != ros_types.len() || names.len() != channels.len() {
+            return Err(format!(
+                "IO parameter arrays length mismatch: names={}, types={}, channels={}",
+                names.len(),
+                ros_types.len(),
+                channels.len()
+            ));
+        }
+
+        let mut params = Vec::new();
+        for (i, name) in names.iter().enumerate() {
+            params.push(IOParameter {
+                name: name.clone(),
+                ros_type: ros_types[i].clone(),
+                channel: channels[i].clone(),
+            });
+        }
+        Ok(params)
+    }
+
+    fn parse_config_services(
+        services: &[String],
+        names: &[String],
+    ) -> Result<Vec<ConfigService>, String> {
+        if services.len() != names.len() {
+            return Err(format!(
+                "Config service arrays length mismatch: services={}, names={}",
+                services.len(),
+                names.len()
+            ));
+        }
+
+        let mut configs = Vec::new();
+        for (i, service) in services.iter().enumerate() {
+            configs.push(ConfigService {
+                service: service.clone(),
+                name: names[i].clone(),
+            });
+        }
+        Ok(configs)
+    }
+
     pub async fn register(&self, req: RegisterRequest) -> RegisterResponse {
+        // Parse IO parameters
+        let inputs = match Self::parse_io_parameters(
+            &req.input_names,
+            &req.input_ros_types,
+            &req.input_channels,
+        ) {
+            Ok(params) => params,
+            Err(e) => {
+                error!("Failed to parse input parameters: {}", e);
+                return RegisterResponse {
+                    success: false,
+                    error_message: format!("Failed to parse input parameters: {}", e),
+                };
+            }
+        };
+
+        let outputs = match Self::parse_io_parameters(
+            &req.output_names,
+            &req.output_ros_types,
+            &req.output_channels,
+        ) {
+            Ok(params) => params,
+            Err(e) => {
+                error!("Failed to parse output parameters: {}", e);
+                return RegisterResponse {
+                    success: false,
+                    error_message: format!("Failed to parse output parameters: {}", e),
+                };
+            }
+        };
+
+        // Parse config services
+        let configs = match Self::parse_config_services(&req.config_services, &req.config_names) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                error!("Failed to parse config services: {}", e);
+                return RegisterResponse {
+                    success: false,
+                    error_message: format!("Failed to parse config services: {}", e),
+                };
+            }
+        };
+
         match req.provider_type.as_str() {
             "cap" => {
+                // Validate against spec
+                match self.spec_registry.validate_capability(
+                    &req.std_name,
+                    &inputs,
+                    &outputs,
+                    &configs,
+                ) {
+                    Ok(()) => {
+                        // Validation passed
+                    }
+                    Err(e) => {
+                        warn!(
+                            capability = %req.std_name,
+                            error = %e,
+                            "Capability validation failed"
+                        );
+                        return RegisterResponse {
+                            success: false,
+                            error_message: format!("Validation failed: {}", e),
+                        };
+                    }
+                }
+
                 let cap = Capability {
                     provider_name: req.provider_name.clone(),
                     std_name: req.std_name.clone(),
                     description: req.description.clone(),
-                    input_topics: req.input_topics.clone(),
-                    output_topics: req.output_topics.clone(),
+                    code_path: req.code_path.clone(),
+                    inputs,
+                    outputs,
+                    configs,
                 };
 
                 let mut caps = self.capabilities.write().await;
@@ -35,18 +155,49 @@ impl RobonixCore {
                 info!(
                     capability = %req.std_name,
                     provider = %req.provider_name,
+                    code_path = %req.code_path,
                     "Registered capability"
                 );
 
-                RegisterResponse { success: true }
+                RegisterResponse {
+                    success: true,
+                    error_message: String::new(),
+                }
             }
             "skl" => {
+                // Validate against spec
+                match self.spec_registry.validate_skill(
+                    &req.std_name,
+                    &inputs,
+                    &outputs,
+                    &configs,
+                    &req.dependencies,
+                ) {
+                    Ok(()) => {
+                        // Validation passed
+                    }
+                    Err(e) => {
+                        warn!(
+                            skill = %req.std_name,
+                            error = %e,
+                            "Skill validation failed"
+                        );
+                        return RegisterResponse {
+                            success: false,
+                            error_message: format!("Validation failed: {}", e),
+                        };
+                    }
+                }
+
                 let skl = Skill {
                     provider_name: req.provider_name.clone(),
                     std_name: req.std_name.clone(),
                     description: req.description.clone(),
-                    input_topics: req.input_topics.clone(),
-                    output_topics: req.output_topics.clone(),
+                    code_path: req.code_path.clone(),
+                    inputs,
+                    outputs,
+                    configs,
+                    dependencies: req.dependencies.clone(),
                 };
 
                 let mut skls = self.skills.write().await;
@@ -55,17 +206,25 @@ impl RobonixCore {
                 info!(
                     skill = %req.std_name,
                     provider = %req.provider_name,
+                    code_path = %req.code_path,
+                    dependencies = ?req.dependencies,
                     "Registered skill"
                 );
 
-                RegisterResponse { success: true }
+                RegisterResponse {
+                    success: true,
+                    error_message: String::new(),
+                }
             }
             _ => {
                 error!(
                     provider_type = %req.provider_type,
                     "Unknown provider type"
                 );
-                RegisterResponse { success: false }
+                RegisterResponse {
+                    success: false,
+                    error_message: format!("Unknown provider type: {}", req.provider_type),
+                }
             }
         }
     }

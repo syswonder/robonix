@@ -21,3 +21,4 @@ skill/__init__.py
 *.log
 tmp/
 tailscale/
+target
