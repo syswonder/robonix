@@ -13,3 +13,9 @@
 [submodule "rust/ros2-client"]
 	path = rust/ros2-client
 	url = https://github.com/enkerewpo/ros2-client
+[submodule "rust/rcl_interfaces"]
+	path = rust/rcl_interfaces
+	url = https://github.com/enkerewpo/rcl_interfaces
+[submodule "rust/common_interfaces"]
+	path = rust/common_interfaces
+	url = https://github.com/enkerewpo/common_interfaces
