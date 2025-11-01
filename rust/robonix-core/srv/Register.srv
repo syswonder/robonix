@@ -1,6 +1,6 @@
 # Register.srv
 string provider_name
-string type
+string provider_type
 string std_name
 string description
 string code_path

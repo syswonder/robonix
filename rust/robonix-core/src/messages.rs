@@ -20,7 +20,6 @@ pub struct ConfigService {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterRequest {
     pub provider_name: String,
-    #[serde(rename = "type")]
     pub provider_type: String, // "cap" or "skl"
     pub std_name: String,
     pub description: String,
