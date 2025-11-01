@@ -72,4 +72,7 @@ RUN echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda/compat:${
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
+# install rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
 WORKDIR /root/workspace

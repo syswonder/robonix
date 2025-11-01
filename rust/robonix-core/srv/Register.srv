@@ -1,0 +1,18 @@
+# Register.srv
+string provider_name
+string type
+string std_name
+string description
+string code_path
+string[] input_names
+string[] input_ros_types
+string[] input_channels
+string[] output_names
+string[] output_ros_types
+string[] output_channels
+string[] config_services
+string[] config_names
+string[] dependencies
+---
+bool success
+string error_message
