@@ -9,14 +9,7 @@ from pynput import keyboard
 from . import robot_control_pb2_grpc
 from . import robot_control_pb2
 
-# Try to import uapi.log, fallback to standard logging if failed
-try:
-    from uapi.log import logger
-except ImportError:
-    import logging
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    logger = logging.getLogger(__name__)
-
+from robonix.manager.log import logger
 
 class RobotControlService(robot_control_pb2_grpc.RobotControlServicer):
     def __init__(self, car, keyboard_device, scene_lock, camera_manager=None):

@@ -7,17 +7,7 @@ import os
 import cv2
 import numpy as np
 
-# Try to import uapi.log, fallback to standard logging if failed
-try:
-    from uapi.log import logger
-except ImportError:
-    import logging
-
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-    )
-    logger = logging.getLogger(__name__)
-
+from robonix.manager.log import logger
 
 class CameraManager:
     def __init__(
