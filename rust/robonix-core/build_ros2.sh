@@ -6,6 +6,13 @@ set -e
 
 echo "Building robonix_core ROS2 interface package..."
 
+# Fix dependencies compatibility issues with ROS2 Humble
+# ROS2 Humble requires empy==3.3.4, but newer versions (4.x) are incompatible
+echo "Checking and fixing dependencies..."
+pip install --force-reinstall "empy==3.3.4" --quiet
+# Install lark parser required by rosidl_parser
+pip install lark --quiet
+
 # Source ROS2
 source /opt/ros/humble/setup.bash
 
