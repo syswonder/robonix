@@ -10,7 +10,6 @@ capability:
   - navigation2
   - vision
   - pointcloud
-  - amcl
 skill:
   - move
   - vision
