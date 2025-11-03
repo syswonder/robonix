@@ -7,13 +7,7 @@ from numba.core.types import NoneType
 import genesis as gs
 import numpy as np
 
-try:
-    from uapi.log import logger
-except ImportError:
-    import logging
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
-    logger = logging.getLogger(__name__)
-
+from robonix.manager.log import logger
 
 class SceneManager:
     def __init__(self):
