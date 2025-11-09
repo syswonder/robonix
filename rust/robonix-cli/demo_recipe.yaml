@@ -12,5 +12,6 @@ packages:
   # Example 1: Register all capabilities and skills from a package
   # (when capabilities and skills are not specified, all will be registered)
   - name: demo_rgb_provider
+    entity_name: agilex_robot  # Entity name to mount in entity tree
     # capabilities: []  # If not specified, all capabilities will be registered
     # skills: []        # If not specified, all skills will be registered

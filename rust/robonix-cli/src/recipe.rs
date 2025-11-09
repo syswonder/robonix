@@ -14,6 +14,7 @@ pub struct RecipePackage {
     pub name: String,
     pub capabilities: Option<Vec<String>>,  // If None, register all capabilities
     pub skills: Option<Vec<String>>,        // If None, register all skills
+    pub entity_name: Option<String>,        // Entity name to mount (e.g., "agilex_robot")
 }
 
 impl Recipe {
