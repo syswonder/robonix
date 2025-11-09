@@ -1,0 +1,72 @@
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use dirs;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    pub package_storage_path: PathBuf,
+}
+
+impl Config {
+    pub fn config_file_path() -> Result<PathBuf> {
+        let config_dir = dirs::config_dir()
+            .context("Failed to get config directory")?;
+        Ok(config_dir.join("robonix").join("config.yaml"))
+    }
+
+    pub fn load() -> Result<Self> {
+        let config_path = Self::config_file_path()?;
+        
+        if !config_path.exists() {
+            // Create default config
+            let default = Self::default();
+            default.save()?;
+            return Ok(default);
+        }
+
+        let content = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
+        
+        let config: Config = serde_yaml::from_str(&content)
+            .with_context(|| format!("Failed to parse config file: {}", config_path.display()))?;
+        
+        Ok(config)
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let config_path = Self::config_file_path()?;
+        
+        // Create parent directory if it doesn't exist
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
+        }
+
+        let content = serde_yaml::to_string(self)
+            .context("Failed to serialize config")?;
+        
+        std::fs::write(&config_path, content)
+            .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
+        
+        Ok(())
+    }
+
+    pub fn default() -> Self {
+        let default_path = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join(".robonix")
+            .join("packages");
+        
+        Self {
+            package_storage_path: default_path,
+        }
+    }
+
+    pub fn ensure_storage_dir(&self) -> Result<()> {
+        std::fs::create_dir_all(&self.package_storage_path)
+            .with_context(|| format!("Failed to create package storage directory: {}", self.package_storage_path.display()))?;
+        Ok(())
+    }
+}
+

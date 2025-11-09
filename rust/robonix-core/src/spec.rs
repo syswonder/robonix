@@ -33,7 +33,6 @@ pub struct SkillSpec {
     pub inputs: Vec<IOParameterSpec>,
     pub outputs: Vec<IOParameterSpec>,
     pub configs: Vec<ConfigSpec>,
-    pub dependencies: Vec<String>, // Required capability names
 }
 
 pub struct SpecRegistry {
@@ -41,67 +40,81 @@ pub struct SpecRegistry {
     pub skills: HashMap<String, SkillSpec>,
 }
 
+// Macro to define a single capability
+// Format: CAP!(capabilities, name, desc, [INPUT(name, type), ...], [OUTPUT(name, type), ...], [CONFIG(service, name), ...])
+#[macro_export]
+macro_rules! CAP {
+    ($capabilities:ident, $name:expr, $desc:expr, 
+     INPUT: [$($input_name:expr => $input_type:expr),* $(,)?],
+     OUTPUT: [$($output_name:expr => $output_type:expr),* $(,)?],
+     CONFIG: [$($config_service:expr => $config_name:expr),* $(,)?]) => {
+        $capabilities.insert(
+            $name.to_string(),
+            $crate::spec::CapabilitySpec {
+                description: $desc.to_string(),
+                inputs: vec![$(
+                    $crate::spec::IOParameterSpec {
+                        name: $input_name.to_string(),
+                        ros_type: $input_type.to_string(),
+                    }
+                ),*],
+                outputs: vec![$(
+                    $crate::spec::IOParameterSpec {
+                        name: $output_name.to_string(),
+                        ros_type: $output_type.to_string(),
+                    }
+                ),*],
+                configs: vec![$(
+                    $crate::spec::ConfigSpec {
+                        service: $config_service.to_string(),
+                        name: $config_name.to_string(),
+                    }
+                ),*],
+            }
+        );
+    };
+}
+
+// Macro to define a single skill
+// Format: SKL!(skills, name, desc, [INPUT(name, type), ...], [OUTPUT(name, type), ...], [CONFIG(service, name), ...])
+#[macro_export]
+macro_rules! SKL {
+    ($skills:ident, $name:expr, $desc:expr,
+     INPUT: [$($input_name:expr => $input_type:expr),* $(,)?],
+     OUTPUT: [$($output_name:expr => $output_type:expr),* $(,)?],
+     CONFIG: [$($config_service:expr => $config_name:expr),* $(,)?]) => {
+        $skills.insert(
+            $name.to_string(),
+            $crate::spec::SkillSpec {
+                description: $desc.to_string(),
+                inputs: vec![$(
+                    $crate::spec::IOParameterSpec {
+                        name: $input_name.to_string(),
+                        ros_type: $input_type.to_string(),
+                    }
+                ),*],
+                outputs: vec![$(
+                    $crate::spec::IOParameterSpec {
+                        name: $output_name.to_string(),
+                        ros_type: $output_type.to_string(),
+                    }
+                ),*],
+                configs: vec![$(
+                    $crate::spec::ConfigSpec {
+                        service: $config_service.to_string(),
+                        name: $config_name.to_string(),
+                    }
+                ),*],
+            }
+        );
+    };
+}
+
 impl SpecRegistry {
     pub fn new() -> Self {
-        let mut capabilities = HashMap::new();
-        let mut skills = HashMap::new();
-
-        // Register standard capabilities
-        capabilities.insert(
-            "cap::grasp.move".to_string(),
-            CapabilitySpec {
-                description: "Move the gripper to a target pose".to_string(),
-                inputs: vec![IOParameterSpec {
-                    name: "target_pose".to_string(),
-                    ros_type: "geometry_msgs/msg/PoseStamped".to_string(),
-                }],
-                outputs: vec![IOParameterSpec {
-                    name: "status".to_string(),
-                    ros_type: "boolean".to_string(),
-                }],
-                configs: vec![ConfigSpec {
-                    service: "/arm/configure".to_string(),
-                    name: "piper_arm_config_update".to_string(),
-                }],
-            },
-        );
-
-        capabilities.insert(
-            "cap::vision.capture_rgb".to_string(),
-            CapabilitySpec {
-                description: "Capture RGB image from camera".to_string(),
-                inputs: vec![],
-                outputs: vec![IOParameterSpec {
-                    name: "image".to_string(),
-                    ros_type: "sensor_msgs/msg/Image".to_string(),
-                }],
-                configs: vec![],
-            },
-        );
-
-        // Register standard skills
-        skills.insert(
-            "skl::pick".to_string(),
-            SkillSpec {
-                description: "Pick an object by label".to_string(),
-                inputs: vec![IOParameterSpec {
-                    name: "target_label".to_string(),
-                    ros_type: "string".to_string(),
-                }],
-                outputs: vec![IOParameterSpec {
-                    name: "status".to_string(),
-                    ros_type: "boolean".to_string(),
-                }],
-                configs: vec![ConfigSpec {
-                    service: "/vla/configure_io".to_string(),
-                    name: "setup_topics_path".to_string(),
-                }],
-                dependencies: vec![
-                    "cap::grasp.move".to_string(),
-                    "cap::vision.capture_rgb".to_string(),
-                ],
-            },
-        );
+        // Load specifications from the table
+        let capabilities = crate::specs_table::load_capabilities();
+        let skills = crate::specs_table::load_skills();
 
         Self {
             capabilities,
@@ -202,7 +215,6 @@ impl SpecRegistry {
         inputs: &[crate::messages::IOParameter],
         outputs: &[crate::messages::IOParameter],
         configs: &[crate::messages::ConfigService],
-        dependencies: &[String],
     ) -> Result<(), String> {
         let spec = self
             .skills
@@ -277,35 +289,6 @@ impl SpecRegistry {
                 return Err(format!(
                     "Config name mismatch: expected '{}', got '{}'",
                     expected.name, provided.name
-                ));
-            }
-        }
-
-        // Validate dependencies
-        if dependencies.len() != spec.dependencies.len() {
-            return Err(format!(
-                "Dependency count mismatch: expected {}, got {}",
-                spec.dependencies.len(),
-                dependencies.len()
-            ));
-        }
-
-        // Check that all expected dependencies are present
-        for expected_dep in &spec.dependencies {
-            if !dependencies.contains(expected_dep) {
-                return Err(format!(
-                    "Missing required dependency: '{}' (required: {:?}, provided: {:?})",
-                    expected_dep, spec.dependencies, dependencies
-                ));
-            }
-        }
-
-        // Check for unexpected dependencies
-        for provided_dep in dependencies {
-            if !spec.dependencies.contains(provided_dep) {
-                return Err(format!(
-                    "Unexpected dependency: '{}' (expected: {:?})",
-                    provided_dep, spec.dependencies
                 ));
             }
         }

@@ -1,0 +1,23 @@
+{
+  "packages": {
+    "demo_rgb_provider": {
+      "name": "demo_rgb_provider",
+      "version": "0.0.1",
+      "path": "/root/workspace/rust/provider/demo_package",
+      "manifest_path": "/root/workspace/rust/provider/demo_package/rbnx_manifest.yaml",
+      "capabilities": [
+        "cap::vision.capture_rgb",
+        "cap::grasp.move"
+      ],
+      "skills": [
+        "skl::pick"
+      ],
+      "installed_at": "2025-11-09T09:42:13.960508902+00:00",
+      "source": {
+        "Local": {
+          "path": "/root/workspace/rust/provider/demo_package"
+        }
+      }
+    }
+  }
+}

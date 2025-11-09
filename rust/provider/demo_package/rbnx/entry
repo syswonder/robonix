@@ -1,0 +1,24 @@
+#!/bin/bash
+# rbnx entry script for demo_provider
+# This script is called by robonix as the entry point for the package
+# It can be used to initialize the package or perform setup tasks
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PACKAGE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+echo "Initializing demo package..."
+echo "Package directory: $PACKAGE_DIR"
+
+# Load package configuration if available
+if [ -f "$SCRIPT_DIR/config.yaml" ]; then
+    echo "Loading configuration from $SCRIPT_DIR/config.yaml"
+    # Configuration loading logic can be added here
+fi
+
+# Perform any initialization tasks
+# For example: check dependencies, setup environment, etc.
+
+echo "Demo package initialized successfully."
+

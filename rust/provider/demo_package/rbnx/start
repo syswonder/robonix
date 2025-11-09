@@ -1,0 +1,127 @@
+#!/bin/bash
+# rbnx start script for demo_provider
+# This script is called by robonix to start the package
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PACKAGE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PACKAGE_DIR"
+
+# Source ROS2 setup if available
+if [ -f /opt/ros/humble/setup.bash ]; then
+    source /opt/ros/humble/setup.bash
+fi
+
+# Fix library path issues with conda environment
+# Prefer system libraries over conda libraries for ROS2
+if [ -n "$CONDA_PREFIX" ]; then
+    export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
+    # Remove conda libstdc++ from path
+    export LD_LIBRARY_PATH=$(echo "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -v "$CONDA_PREFIX/lib" | tr '\n' ':' | sed 's/:$//')
+fi
+
+# Load configuration if available
+if [ -f "$SCRIPT_DIR/config.yaml" ]; then
+    echo "Loading configuration from $SCRIPT_DIR/config.yaml"
+    # Configuration can be parsed here if needed
+fi
+
+# Build the package if not already built (for ROS2 packages)
+if [ -f "package.xml" ] && [ ! -d "install" ]; then
+    echo "Building demo_rgb_provider package..."
+    colcon build --packages-select demo_rgb_provider 2>/dev/null || true
+fi
+
+# Source the local setup if available (for ROS2 packages)
+if [ -f "install/setup.bash" ]; then
+    source install/setup.bash
+elif [ -f "install/setup.sh" ]; then
+    source install/setup.sh
+fi
+
+# Start the package capabilities/skills
+echo "Starting demo package..."
+
+# Setup Python path if needed
+SYSTEM_PYTHON="/usr/bin/python3"
+if [ -f "$SYSTEM_PYTHON" ]; then
+    # Add install directory to PYTHONPATH if it exists
+    if [ -d "$PACKAGE_DIR/install/demo_rgb_provider/lib/python3.10/site-packages" ]; then
+        export PYTHONPATH="$PACKAGE_DIR/install/demo_rgb_provider/lib/python3.10/site-packages:${PYTHONPATH}"
+    fi
+    PYTHON_CMD="$SYSTEM_PYTHON"
+    LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+else
+    PYTHON_CMD="python3"
+fi
+
+# Start RGB publisher (capability: cap::vision.capture_rgb)
+if command -v ros2 > /dev/null 2>&1; then
+    ros2 run demo_rgb_provider rgb_publisher > /tmp/demo_rgb_cap.log 2>&1 &
+    RGB_PID=$!
+else
+    $PYTHON_CMD -m demo_rgb_provider.rgb_publisher > /tmp/demo_rgb_cap.log 2>&1 &
+    RGB_PID=$!
+fi
+
+# Start grasp move (capability: cap::grasp.move)
+if command -v ros2 > /dev/null 2>&1; then
+    ros2 run demo_rgb_provider grasp_move > /tmp/demo_grasp_cap.log 2>&1 &
+    GRASP_PID=$!
+else
+    $PYTHON_CMD -m demo_rgb_provider.grasp_move > /tmp/demo_grasp_cap.log 2>&1 &
+    GRASP_PID=$!
+fi
+
+# Start pick skill (skill: skl::pick)
+if command -v ros2 > /dev/null 2>&1; then
+    ros2 run demo_rgb_provider pick_skill > /tmp/demo_pick_skill.log 2>&1 &
+    PICK_PID=$!
+else
+    $PYTHON_CMD -m demo_rgb_provider.pick_skill > /tmp/demo_pick_skill.log 2>&1 &
+    PICK_PID=$!
+fi
+
+# Save PIDs to file for stop script
+echo "$RGB_PID" > /tmp/demo_provider.pids
+echo "$GRASP_PID" >> /tmp/demo_provider.pids
+echo "$PICK_PID" >> /tmp/demo_provider.pids
+
+# Wait a moment to check if processes started successfully
+sleep 2
+SUCCESS=true
+
+if ps -p $RGB_PID > /dev/null 2>&1; then
+    echo "  - RGB publisher (cap::vision.capture_rgb): PID $RGB_PID"
+else
+    echo "  - ERROR: RGB publisher failed to start (PID $RGB_PID)"
+    SUCCESS=false
+fi
+
+if ps -p $GRASP_PID > /dev/null 2>&1; then
+    echo "  - Grasp move (cap::grasp.move): PID $GRASP_PID"
+else
+    echo "  - ERROR: Grasp move failed to start (PID $GRASP_PID)"
+    SUCCESS=false
+fi
+
+if ps -p $PICK_PID > /dev/null 2>&1; then
+    echo "  - Pick skill (skl::pick): PID $PICK_PID"
+else
+    echo "  - ERROR: Pick skill failed to start (PID $PICK_PID)"
+    SUCCESS=false
+fi
+
+if [ "$SUCCESS" = true ]; then
+    echo "Demo package started successfully"
+    echo "Logs available at: /tmp/demo_*_cap.log and /tmp/demo_pick_skill.log"
+else
+    echo "Error: Some processes failed to start. Check logs:"
+    [ -f /tmp/demo_rgb_cap.log ] && echo "  - /tmp/demo_rgb_cap.log" && tail -5 /tmp/demo_rgb_cap.log
+    [ -f /tmp/demo_grasp_cap.log ] && echo "  - /tmp/demo_grasp_cap.log" && tail -5 /tmp/demo_grasp_cap.log
+    [ -f /tmp/demo_pick_skill.log ] && echo "  - /tmp/demo_pick_skill.log" && tail -5 /tmp/demo_pick_skill.log
+    rm -f /tmp/demo_provider.pids
+    exit 1
+fi
+

@@ -1,5 +1,5 @@
 use crate::messages::{
-    Capability, ConfigService, IOParameter, RegisterRequest, RegisterResponse, Skill,
+    Capability, ConfigService, IOParameter, QueryRequest, QueryResponse, RegisterRequest, RegisterResponse, Skill,
 };
 use crate::spec::SpecRegistry;
 use std::collections::HashMap;
@@ -114,7 +114,7 @@ impl RobonixCore {
             }
         };
 
-        match req.provider_type.as_str() {
+        match req.package_type.as_str() {
             "cap" => {
                 // Validate against spec
                 match self.spec_registry.validate_capability(
@@ -140,7 +140,7 @@ impl RobonixCore {
                 }
 
                 let cap = Capability {
-                    provider_name: req.provider_name.clone(),
+                    package_name: req.package_name.clone(),
                     std_name: req.std_name.clone(),
                     description: req.description.clone(),
                     code_path: req.code_path.clone(),
@@ -154,7 +154,7 @@ impl RobonixCore {
 
                 info!(
                     capability = %req.std_name,
-                    provider = %req.provider_name,
+                    package = %req.package_name,
                     code_path = %req.code_path,
                     "Registered capability"
                 );
@@ -171,7 +171,6 @@ impl RobonixCore {
                     &inputs,
                     &outputs,
                     &configs,
-                    &req.dependencies,
                 ) {
                     Ok(()) => {
                         // Validation passed
@@ -190,14 +189,13 @@ impl RobonixCore {
                 }
 
                 let skl = Skill {
-                    provider_name: req.provider_name.clone(),
+                    package_name: req.package_name.clone(),
                     std_name: req.std_name.clone(),
                     description: req.description.clone(),
                     code_path: req.code_path.clone(),
                     inputs,
                     outputs,
                     configs,
-                    dependencies: req.dependencies.clone(),
                 };
 
                 let mut skls = self.skills.write().await;
@@ -205,9 +203,8 @@ impl RobonixCore {
 
                 info!(
                     skill = %req.std_name,
-                    provider = %req.provider_name,
+                    package = %req.package_name,
                     code_path = %req.code_path,
-                    dependencies = ?req.dependencies,
                     "Registered skill"
                 );
 
@@ -218,12 +215,12 @@ impl RobonixCore {
             }
             _ => {
                 error!(
-                    provider_type = %req.provider_type,
-                    "Unknown provider type"
+                    package_type = %req.package_type,
+                    "Unknown package type"
                 );
                 RegisterResponse {
                     success: false,
-                    error_message: format!("Unknown provider type: {}", req.provider_type),
+                    error_message: format!("Unknown package type: {}", req.package_type),
                 }
             }
         }
@@ -237,5 +234,106 @@ impl RobonixCore {
     pub async fn get_skills(&self) -> Vec<String> {
         let skls = self.skills.read().await;
         skls.keys().cloned().collect()
+    }
+
+    pub async fn query(&self, req: QueryRequest) -> QueryResponse {
+        // Try to find in capabilities first
+        {
+            let caps = self.capabilities.read().await;
+            if let Some(cap) = caps.get(&req.std_name) {
+                let mut input_channels = Vec::new();
+                let mut output_channels = Vec::new();
+                let mut input_names = Vec::new();
+                let mut output_names = Vec::new();
+                let mut input_types = Vec::new();
+                let mut output_types = Vec::new();
+
+                for input in &cap.inputs {
+                    input_channels.push(input.channel.clone());
+                    input_names.push(input.name.clone());
+                    input_types.push(input.ros_type.clone());
+                }
+
+                for output in &cap.outputs {
+                    output_channels.push(output.channel.clone());
+                    output_names.push(output.name.clone());
+                    output_types.push(output.ros_type.clone());
+                }
+
+                info!(
+                    std_name = %req.std_name,
+                    "Query capability found"
+                );
+
+                return QueryResponse {
+                    success: true,
+                    error_message: String::new(),
+                    input_channels,
+                    output_channels,
+                    input_names,
+                    output_names,
+                    input_types,
+                    output_types,
+                };
+            }
+        }
+
+        // Try to find in skills
+        {
+            let skls = self.skills.read().await;
+            if let Some(skl) = skls.get(&req.std_name) {
+                let mut input_channels = Vec::new();
+                let mut output_channels = Vec::new();
+                let mut input_names = Vec::new();
+                let mut output_names = Vec::new();
+                let mut input_types = Vec::new();
+                let mut output_types = Vec::new();
+
+                for input in &skl.inputs {
+                    input_channels.push(input.channel.clone());
+                    input_names.push(input.name.clone());
+                    input_types.push(input.ros_type.clone());
+                }
+
+                for output in &skl.outputs {
+                    output_channels.push(output.channel.clone());
+                    output_names.push(output.name.clone());
+                    output_types.push(output.ros_type.clone());
+                }
+
+                info!(
+                    std_name = %req.std_name,
+                    "Query skill found"
+                );
+
+                return QueryResponse {
+                    success: true,
+                    error_message: String::new(),
+                    input_channels,
+                    output_channels,
+                    input_names,
+                    output_names,
+                    input_types,
+                    output_types,
+                };
+            }
+        }
+
+        // Not found
+        warn!(
+            std_name = %req.std_name,
+            "Query not found"
+        );
+
+        QueryResponse {
+            success: false,
+            error_message: format!("Capability or skill '{}' not found", req.std_name),
+            input_channels: Vec::new(),
+            output_channels: Vec::new(),
+            input_names: Vec::new(),
+            output_names: Vec::new(),
+            input_types: Vec::new(),
+            output_types: Vec::new(),
+        }
     }
 }
