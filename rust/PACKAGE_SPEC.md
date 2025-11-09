@@ -13,11 +13,6 @@
 ```
 provider_package/
 ├── rbnx_manifest.yaml    # Robonix package manifest (必需)
-├── rbnx/                 # Robonix 配置目录 (必需)
-│   ├── start             # 启动脚本 (必需)
-│   ├── stop              # 停止脚本 (必需)
-│   ├── entry             # 入口脚本 (可选)
-│   └── config.yaml       # 配置文件 (可选)
 └── [source code]         # 源代码 (实现相关，任意技术栈)
 ```
 
@@ -134,7 +129,7 @@ skills:
 
 ### 2. rbnx/ 目录
 
-`rbnx/` 目录包含所有 robonix 特定的配置和脚本。
+（可选）推荐使用 `rbnx/` 目录包含所有 robonix 特定的配置和脚本。
 
 **重要**: 每个 capability 和 skill 都需要有自己独立的启动和停止脚本。这些脚本在 manifest 中通过 `start_script` 和 `stop_script` 字段指定。
 
@@ -155,38 +150,11 @@ skills:
 
 脚本要求：
 - 必须是可执行文件 (`chmod +x`)
-- 应该优雅地停止对应的进程（发送 SIGTERM，必要时使用 SIGKILL）
+- 应该停止对应的进程（发送 SIGTERM，必要时使用 SIGKILL）
 - 应该清理临时文件和资源
 - 脚本路径相对于 package 根目录
 
 **注意**: 虽然 CLI 目前通过 PID 直接管理进程，但 `stop_script` 字段保留以备将来使用，或者用于执行额外的清理工作。
-
-#### rbnx/entry (可选)
-
-入口脚本，用于初始化 package。可以在启动前执行一些初始化任务。
-
-#### rbnx/config.yaml (可选)
-
-Package 特定的配置文件，可以包含：
-- 日志配置
-- 资源限制
-- 环境变量
-- 其他 package 特定的设置
-
-## 实现独立性
-
-Robonix **不要求**以下内容：
-
-- ❌ ROS2 package.xml
-- ❌ 特定的构建系统 (CMake, setuptools, Cargo 等)
-- ❌ 特定的编程语言
-- ❌ ROS2 依赖（除非 capability/skill 本身需要 ROS2）
-
-开发者可以：
-- ✅ 使用任何编程语言实现 capabilities 和 skills
-- ✅ 使用任何构建系统或打包方式
-- ✅ 使用 ROS2 或非 ROS2 的通信机制（只要符合 channel 规范）
-- ✅ 自由组织源代码目录结构
 
 ## 标准规范验证
 
