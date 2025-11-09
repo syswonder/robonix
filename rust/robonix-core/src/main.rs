@@ -1,7 +1,7 @@
 use ansi_term::Colour;
 use futures_util::stream::StreamExt;
 use robonix_core::core::RobonixCore;
-use robonix_core::messages::{RegisterRequest, RegisterResponse};
+use robonix_core::messages::{QueryRequest, QueryResponse, RegisterRequest, RegisterResponse};
 use ros2_client::{
     AService, Context, Name, Node, NodeName, NodeOptions, ServiceMapping, ServiceTypeName,
     rustdds::{
@@ -50,33 +50,76 @@ fn main() {
         .unwrap();
 
     info!("Registration service created at /rbnx/srv/register");
-    info!("Robonix Core ready. Waiting for requests...");
 
-    // Handle registration requests in a loop
-    let register_stream = register_server.receive_request_stream();
+    // Create query service at /rbnx/srv/query
+    let query_server = node
+        .create_server::<AService<QueryRequest, QueryResponse>>(
+            ServiceMapping::Enhanced,
+            &Name::new("/rbnx/srv", "query").unwrap(),
+            &ServiceTypeName::new("robonix_core", "Query"),
+            service_qos.clone(),
+            service_qos.clone(),
+        )
+        .unwrap();
+
+    info!("Query service created at /rbnx/srv/query");
+    info!("Robonix Core ready. Waiting for requests...");
 
     // run it!
     smol::block_on(async {
-        register_stream
-            .for_each(|result| async {
-                match result {
-                    Ok((req_id, req)) => {
-                        info!(
-                            provider = %req.provider_name,
-                            provider_type = %req.provider_type,
-                            std_name = %req.std_name,
-                            "Received registration request"
-                        );
-                        let resp = core.register(req).await;
-                        let sr = register_server.async_send_response(req_id, resp).await;
-                        if let Err(e) = sr {
-                            error!("Send response error: {e:?}");
+        let core_clone1 = core.clone();
+        let core_clone2 = core.clone();
+
+        // Handle registration requests
+        let register_task = smol::spawn(async move {
+            let register_stream = register_server.receive_request_stream();
+            register_stream
+                .for_each(|result| async {
+                    match result {
+                        Ok((req_id, req)) => {
+                            info!(
+                                package = %req.package_name,
+                                package_type = %req.package_type,
+                                std_name = %req.std_name,
+                                "Received registration request"
+                            );
+                            let resp = core_clone1.register(req).await;
+                            let sr = register_server.async_send_response(req_id, resp).await;
+                            if let Err(e) = sr {
+                                error!("Send response error: {e:?}");
+                            }
                         }
+                        Err(e) => error!("Receive request error: {e:?}"),
                     }
-                    Err(e) => error!("Receive request error: {e:?}"),
-                }
-            })
-            .await;
+                })
+                .await;
+        });
+
+        // Handle query requests
+        let query_task = smol::spawn(async move {
+            let query_stream = query_server.receive_request_stream();
+            query_stream
+                .for_each(|result| async {
+                    match result {
+                        Ok((req_id, req)) => {
+                            debug!(
+                                std_name = %req.std_name,
+                                "Received query request"
+                            );
+                            let resp = core_clone2.query(req).await;
+                            let sr = query_server.async_send_response(req_id, resp).await;
+                            if let Err(e) = sr {
+                                error!("Send query response error: {e:?}");
+                            }
+                        }
+                        Err(e) => error!("Receive query request error: {e:?}"),
+                    }
+                })
+                .await;
+        });
+
+        // Wait for both tasks (both run indefinitely)
+        futures_util::future::select(register_task, query_task).await;
     });
     // .count() here just converts Stream to ordinary Future.
     // It would return the count of requestes processed, if the stream would end.

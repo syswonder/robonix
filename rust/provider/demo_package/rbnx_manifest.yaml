@@ -1,0 +1,44 @@
+# Robonix Package Manifest
+# This file defines the capabilities and skills provided by this package
+# Format version: 1.0
+#
+# Note: 
+# - name and type are defined in spec, only channel mappings are needed here
+# - code_path, package_id, etc. are automatically filled by CLI during registration
+# - Channel mapping format: {parameter_name: topic_channel}
+
+package:
+  name: demo_rgb_provider
+  version: 0.0.1
+  description: Demo package with multiple capabilities and skills
+  maintainer: root
+  maintainer_email: root@todo.todo
+  license: Apache-2.0
+
+# Capabilities provided by this package
+# Only need to specify channel mappings for inputs/outputs defined in spec
+capabilities:
+  - name: cap::vision.capture_rgb
+    # Spec defines: OUTPUT: ["image" => "sensor_msgs/msg/Image"]
+    outputs:
+      image: /demo_rgb/image
+
+  - name: cap::grasp.move
+    # Spec defines: 
+    #   INPUT: ["target_pose" => "geometry_msgs/msg/PoseStamped"]
+    #   OUTPUT: ["status" => "boolean"]
+    inputs:
+      target_pose: /demo_grasp/pose_goal
+    outputs:
+      status: /demo_grasp/pose_status
+
+# Skills provided by this package
+skills:
+  - name: skl::pick
+    # Spec defines:
+    #   INPUT: ["target_label" => "string"]
+    #   OUTPUT: ["status" => "boolean"]
+    inputs:
+      target_label: /demo_pick/target_label
+    outputs:
+      status: /demo_pick/status

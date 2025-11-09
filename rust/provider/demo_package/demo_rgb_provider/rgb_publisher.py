@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Demo RGB camera provider that publishes random color images.
+Demo RGB camera package that publishes random color images.
 """
 
 import rclpy
@@ -16,10 +16,10 @@ class RGBPublisher(Node):
 
     def __init__(self):
         super().__init__('demo_rgb_provider')
-        self.publisher_ = self.create_publisher(Image, '/demo_provider/rgb_image', 10)
+        self.publisher_ = self.create_publisher(Image, '/demo_rgb/image', 10)
         timer_period = 0.1  # 10 Hz
         self.timer = self.create_timer(timer_period, self.timer_callback)
-        self.get_logger().info('Demo RGB camera provider started. Publishing to /demo_provider/rgb_image')
+        self.get_logger().info('Demo RGB camera package started. Publishing to /demo_rgb/image')
 
     def timer_callback(self):
         """Generate and publish a random color image."""

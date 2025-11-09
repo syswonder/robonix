@@ -1,0 +1,32 @@
+#!/bin/bash
+# rbnx stop script for demo_provider
+# This script is called by robonix to stop the package
+
+set -e
+
+PID_FILE="/tmp/demo_provider.pids"
+
+if [ -f "$PID_FILE" ]; then
+    echo "Stopping demo package..."
+    while read PID; do
+        if [ -n "$PID" ] && ps -p $PID > /dev/null 2>&1; then
+            echo "  Stopping process (PID: $PID)..."
+            kill $PID
+            wait $PID 2>/dev/null || true
+        fi
+    done < "$PID_FILE"
+    rm -f "$PID_FILE"
+    echo "Demo package stopped."
+else
+    echo "PID file not found. Trying to kill by process name..."
+    pkill -f "rgb_publisher" || true
+    pkill -f "grasp_move" || true
+    pkill -f "pick_skill" || true
+    echo "No running package processes found."
+fi
+
+# Clean up any remaining temporary files
+rm -f /tmp/demo_rgb_cap.log
+rm -f /tmp/demo_grasp_cap.log
+rm -f /tmp/demo_pick_skill.log
+

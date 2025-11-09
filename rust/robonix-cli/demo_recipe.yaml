@@ -1,0 +1,16 @@
+# Robonix Recipe Example
+# A recipe defines which packages and their capabilities/skills should be registered
+# when running 'rbnx register <recipe_file>'
+#
+# Since a package can provide multiple capabilities and skills, recipes allow
+# arbitrary selection of which capabilities and skills to register.
+
+name: demo_recipe
+description: Demo recipe showing how to selectively register capabilities and skills from packages
+
+packages:
+  # Example 1: Register all capabilities and skills from a package
+  # (when capabilities and skills are not specified, all will be registered)
+  - name: demo_rgb_provider
+    # capabilities: []  # If not specified, all capabilities will be registered
+    # skills: []        # If not specified, all skills will be registered

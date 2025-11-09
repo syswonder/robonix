@@ -15,11 +15,13 @@ setup(
     zip_safe=True,
     maintainer='root',
     maintainer_email='root@todo.todo',
-    description='Demo RGB camera provider that outputs random color images',
+    description='Demo RGB camera package that outputs random color images',
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
             'rgb_publisher = demo_rgb_provider.rgb_publisher:main',
+            'grasp_move = demo_rgb_provider.grasp_move:main',
+            'pick_skill = demo_rgb_provider.pick_skill:main',
         ],
     },
 )

@@ -47,21 +47,19 @@ pip3 install --upgrade pip
 
 ENV PATH=/opt/miniconda3/bin:$PATH
 
-RUN conda tos accept || true && \
-    conda create -n env1 python=3.10 -y && \
-    conda clean -ya
+# RUN conda tos accept || true && \
+#     conda create -n env1 python=3.10 -y && \
+#     conda clean -ya
 
-RUN echo "source /opt/miniconda3/bin/activate env1" >> ~/.bashrc
-
-RUN conda config --set solver classic && \
-    conda config --set channel_priority flexible
+# RUN conda config --set solver classic && \
+#     conda config --set channel_priority flexible
 
 # install some basic packages in the env1 conda env
-RUN conda run -n env1 pip install intel-openmp && \
-    conda run -n env1 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+# RUN conda run -n env1 pip install intel-openmp && \
+#     conda run -n env1 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
-RUN conda run -n env1 pip install git+https://github.com/colcon/colcon-cargo.git && \
-    conda run -n env1 pip install git+https://github.com/colcon/colcon-ros-cargo.git
+# RUN conda run -n env1 pip install git+https://github.com/colcon/colcon-cargo.git && \
+#     conda run -n env1 pip install git+https://github.com/colcon/colcon-ros-cargo.git
 
 # CUDA 12.4 toolkit installs to /usr/local/cuda by default
 # Also set up version-specific paths for compatibility

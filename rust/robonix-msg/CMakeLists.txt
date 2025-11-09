@@ -12,7 +12,15 @@ find_package(rosidl_default_generators REQUIRED)
 # Generate interfaces from .srv files
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/Register.srv"
+  "srv/Query.srv"
   DEPENDENCIES
+)
+
+# Install Python client library
+install(DIRECTORY robonix_core
+  DESTINATION lib/${PROJECT_NAME}
+  FILES_MATCHING
+  PATTERN "*.py"
 )
 
 if(BUILD_TESTING)

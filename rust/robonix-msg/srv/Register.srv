@@ -1,6 +1,6 @@
 # Register.srv
-string provider_name
-string provider_type
+string package_name
+string package_type
 string std_name
 string description
 string code_path
@@ -12,7 +12,6 @@ string[] output_ros_types
 string[] output_channels
 string[] config_services
 string[] config_names
-string[] dependencies
 ---
 bool success
 string error_message
