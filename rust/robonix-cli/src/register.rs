@@ -1,6 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context as AnyhowContext, Result};
 use crate::config::Config;
 use crate::database::PackageDatabase;
+use crate::process_manager::ProcessManager;
 use crate::recipe::Recipe;
 use serde_yaml::Value;
 use std::path::PathBuf;
@@ -17,15 +18,21 @@ pub struct PackageRegistrar {
     config: Config,
     node: Arc<Mutex<Option<Node>>>,
     register_client: Arc<Mutex<Option<ros2_client::service::Client<AService<RegisterRequest, RegisterResponse>>>>>,
+    process_manager: Arc<ProcessManager>,
 }
 
 impl PackageRegistrar {
-    pub fn new(config: Config) -> Self {
-        Self {
+    pub fn new(config: Config) -> Result<Self> {
+        // Create log directory for process logs
+        let log_dir = config.package_storage_path.join("logs");
+        let process_manager = Arc::new(ProcessManager::new(log_dir)?);
+        
+        Ok(Self {
             config,
             node: Arc::new(Mutex::new(None)),
             register_client: Arc::new(Mutex::new(None)),
-        }
+            process_manager,
+        })
     }
 
     async fn ensure_client(&self) -> Result<()> {
@@ -98,10 +105,91 @@ impl PackageRegistrar {
             println!("Description: {}", desc);
         }
 
-        // Register each package in recipe
+        // Get entity name from recipe (use first package's entity_name, or default)
+        let entity_name = recipe.packages
+            .iter()
+            .find_map(|pkg| pkg.entity_name.as_ref())
+            .cloned()
+            .unwrap_or_else(|| "default_entity".to_string());
+
+        // Step 1: Start all processes first
+        println!("\nStep 1: Starting processes...");
+        let mut processes_to_start = Vec::new();
+
         for recipe_pkg in &recipe.packages {
             let pkg_info = db.find_by_name(&recipe_pkg.name)
                 .ok_or_else(|| anyhow::anyhow!("Package not found: {}", recipe_pkg.name))?;
+
+            // Load manifest
+            let manifest_content = std::fs::read_to_string(&pkg_info.manifest_path)?;
+            let manifest: Value = serde_yaml::from_str(&manifest_content)?;
+
+            // Collect capabilities to start
+            let caps_to_register = if let Some(caps) = &recipe_pkg.capabilities {
+                caps.clone()
+            } else {
+                pkg_info.capabilities.clone()
+            };
+
+            for cap_name in caps_to_register {
+                if let Some(cap) = find_capability_in_manifest(&manifest, &cap_name)? {
+                    let start_script = cap["start_script"]
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("start_script not found for capability: {}", cap_name))?;
+                    
+                    processes_to_start.push((
+                        pkg_info.name.clone(),
+                        cap_name.clone(),
+                        "cap".to_string(),
+                        pkg_info.path.clone(),
+                        start_script.to_string(),
+                    ));
+                }
+            }
+
+            // Collect skills to start
+            let skills_to_register = if let Some(skills) = &recipe_pkg.skills {
+                skills.clone()
+            } else {
+                pkg_info.skills.clone()
+            };
+
+            for skill_name in skills_to_register {
+                if let Some(skill) = find_skill_in_manifest(&manifest, &skill_name)? {
+                    let start_script = skill["start_script"]
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("start_script not found for skill: {}", skill_name))?;
+                    
+                    processes_to_start.push((
+                        pkg_info.name.clone(),
+                        skill_name.clone(),
+                        "skl".to_string(),
+                        pkg_info.path.clone(),
+                        start_script.to_string(),
+                    ));
+                }
+            }
+        }
+
+        // Start all processes
+        for (package_name, std_name, package_type, package_path, start_script) in &processes_to_start {
+            println!("  Starting {} {}...", package_type, std_name);
+            self.process_manager
+                .start_process(package_name, std_name, package_type, package_path, start_script)
+                .await
+                .with_context(|| format!("Failed to start {} {}", package_type, std_name))?;
+        }
+
+        println!("All processes started successfully.\n");
+
+        // Step 2: Register all capabilities and skills
+        println!("Step 2: Registering capabilities and skills...");
+        for recipe_pkg in &recipe.packages {
+            let pkg_info = db.find_by_name(&recipe_pkg.name)
+                .ok_or_else(|| anyhow::anyhow!("Package not found: {}", recipe_pkg.name))?;
+
+            // Use package-specific entity_name if provided, otherwise use recipe-level entity_name
+            let pkg_entity_name = recipe_pkg.entity_name.as_ref().unwrap_or(&entity_name);
 
             // Load manifest
             let manifest_content = std::fs::read_to_string(&pkg_info.manifest_path)?;
@@ -116,7 +204,12 @@ impl PackageRegistrar {
 
             for cap_name in caps_to_register {
                 if let Some(cap) = find_capability_in_manifest(&manifest, &cap_name)? {
-                    self.register_capability(&pkg_info.name, &pkg_info.path, cap).await?;
+                    self.register_capability(
+                        &pkg_info.name,
+                        &pkg_info.path,
+                        cap,
+                        pkg_entity_name,
+                    ).await?;
                 }
             }
 
@@ -129,12 +222,17 @@ impl PackageRegistrar {
 
             for skill_name in skills_to_register {
                 if let Some(skill) = find_skill_in_manifest(&manifest, &skill_name)? {
-                    self.register_skill(&pkg_info.name, &pkg_info.path, skill).await?;
+                    self.register_skill(
+                        &pkg_info.name,
+                        &pkg_info.path,
+                        skill,
+                        pkg_entity_name,
+                    ).await?;
                 }
             }
         }
 
-        println!("Recipe registration completed successfully");
+        println!("\nRecipe registration completed successfully");
         Ok(())
     }
 
@@ -143,6 +241,7 @@ impl PackageRegistrar {
         package_name: &str,
         package_path: &PathBuf,
         cap: &Value,
+        entity_name: &str,
     ) -> Result<()> {
         let std_name = cap["name"].as_str()
             .ok_or_else(|| anyhow::anyhow!("Capability name not found"))?;
@@ -176,10 +275,12 @@ impl PackageRegistrar {
             output_channels,
             config_services,
             config_names,
+            hostname: self.process_manager.get_hostname().to_string(),
+            entity_name: entity_name.to_string(),
         };
 
         self.call_register_service(request).await?;
-        println!("  Registered capability: {}", std_name);
+        println!("  Registered capability: {} (host: {}, entity: {})", std_name, self.process_manager.get_hostname(), entity_name);
         Ok(())
     }
 
@@ -188,6 +289,7 @@ impl PackageRegistrar {
         package_name: &str,
         package_path: &PathBuf,
         skill: &Value,
+        entity_name: &str,
     ) -> Result<()> {
         let std_name = skill["name"].as_str()
             .ok_or_else(|| anyhow::anyhow!("Skill name not found"))?;
@@ -221,10 +323,12 @@ impl PackageRegistrar {
             output_channels,
             config_services,
             config_names,
+            hostname: self.process_manager.get_hostname().to_string(),
+            entity_name: entity_name.to_string(),
         };
 
         self.call_register_service(request).await?;
-        println!("  Registered skill: {}", std_name);
+        println!("  Registered skill: {} (host: {}, entity: {})", std_name, self.process_manager.get_hostname(), entity_name);
         Ok(())
     }
 

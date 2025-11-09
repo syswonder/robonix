@@ -40,6 +40,8 @@ package:
 
 capabilities:
   - name: string            # 标准能力名称 (如 cap::grasp.move)
+    start_script: string    # 启动脚本路径 (相对于 package 根目录，如 "rbnx/start_cap.sh")
+    stop_script: string     # 停止脚本路径 (相对于 package 根目录，如 "rbnx/stop_cap.sh")
     inputs:                 # 输入参数通道映射 (字典格式: {参数名: topic通道})
       parameter_name: topic_channel
     outputs:                # 输出参数通道映射 (字典格式: {参数名: topic通道})
@@ -48,6 +50,8 @@ capabilities:
 
 skills:
   - name: string            # 标准技能名称 (如 skl::pick)
+    start_script: string    # 启动脚本路径 (相对于 package 根目录，如 "rbnx/start_skill.sh")
+    stop_script: string     # 停止脚本路径 (相对于 package 根目录，如 "rbnx/stop_skill.sh")
     inputs:                 # 输入参数通道映射 (字典格式: {参数名: topic通道})
       parameter_name: topic_channel
     outputs:                # 输出参数通道映射 (字典格式: {参数名: topic通道})
@@ -73,12 +77,16 @@ skills:
 
 **Capability 字段：**
 - `name`: 标准能力名称，必须以 `cap::` 开头，格式为 `cap::category.action`。名称和参数定义由标准规范 (spec) 定义
+- `start_script`: 启动脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/start_cap.sh`。CLI 会在注册时使用此脚本启动对应的 capability 进程。每个 capability 必须有自己独立的启动脚本
+- `stop_script`: 停止脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/stop_cap.sh`。CLI 会在需要时使用此脚本停止对应的 capability 进程。每个 capability 必须有自己独立的停止脚本
 - `inputs`: 输入参数的通道映射，字典格式 `{参数名: topic通道}`。参数名必须与 spec 中定义的标准参数名一致
 - `outputs`: 输出参数的通道映射，字典格式 `{参数名: topic通道}`。参数名必须与 spec 中定义的标准参数名一致
 - `configs`: 配置服务的映射，字典格式（通常为空）
 
 **Skill 字段：**
 - `name`: 标准技能名称，必须以 `skl::` 开头。名称和参数定义由标准规范 (spec) 定义
+- `start_script`: 启动脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/start_skill.sh`。CLI 会在注册时使用此脚本启动对应的 skill 进程。每个 skill 必须有自己独立的启动脚本
+- `stop_script`: 停止脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/stop_skill.sh`。CLI 会在需要时使用此脚本停止对应的 skill 进程。每个 skill 必须有自己独立的停止脚本
 - `inputs`: 输入参数的通道映射，字典格式 `{参数名: topic通道}`。参数名必须与 spec 中定义的标准参数名一致
 - `outputs`: 输出参数的通道映射，字典格式 `{参数名: topic通道}`。参数名必须与 spec 中定义的标准参数名一致
 - `configs`: 配置服务的映射，字典格式（通常为空）
@@ -95,6 +103,8 @@ skills:
 capabilities:
   - name: cap::vision.capture_rgb
     # Spec 定义: OUTPUT: ["image" => "sensor_msgs/msg/Image"]
+    start_script: rbnx/start_capture_rgb.sh
+    stop_script: rbnx/stop_capture_rgb.sh
     outputs:
       image: /demo_rgb/image
 
@@ -102,6 +112,8 @@ capabilities:
     # Spec 定义:
     #   INPUT: ["target_pose" => "geometry_msgs/msg/PoseStamped"]
     #   OUTPUT: ["status" => "boolean"]
+    start_script: rbnx/start_grasp_move.sh
+    stop_script: rbnx/stop_grasp_move.sh
     inputs:
       target_pose: /demo_grasp/pose_goal
     outputs:
@@ -112,6 +124,8 @@ skills:
     # Spec 定义:
     #   INPUT: ["target_label" => "string"]
     #   OUTPUT: ["status" => "boolean"]
+    start_script: rbnx/start_pick.sh
+    stop_script: rbnx/stop_pick.sh
     inputs:
       target_label: /demo_pick/target_label
     outputs:
@@ -122,24 +136,30 @@ skills:
 
 `rbnx/` 目录包含所有 robonix 特定的配置和脚本。
 
-#### rbnx/start (必需)
+**重要**: 每个 capability 和 skill 都需要有自己独立的启动和停止脚本。这些脚本在 manifest 中通过 `start_script` 和 `stop_script` 字段指定。
 
-启动脚本，用于启动 package。Robonix 会在需要时调用此脚本。
+#### 启动脚本 (start_script)
+
+每个 capability/skill 的启动脚本用于启动对应的进程。
 
 脚本要求：
 - 必须是可执行文件 (`chmod +x`)
-- 应该启动 package 提供的所有 capabilities/skills
-- 应该将进程 PID 保存到文件，供 stop 脚本使用
+- 应该使用 `exec` 启动目标进程，这样 CLI 可以正确管理进程
+- 应该设置必要的环境变量（ROS2、Python 路径等）
 - 应该处理错误情况并返回适当的退出码
+- 脚本路径相对于 package 根目录
 
-#### rbnx/stop (必需)
+#### 停止脚本 (stop_script)
 
-停止脚本，用于停止 package。Robonix 会在需要时调用此脚本。
+每个 capability/skill 的停止脚本用于停止对应的进程。
 
 脚本要求：
 - 必须是可执行文件 (`chmod +x`)
-- 应该停止所有由 start 脚本启动的进程
+- 应该优雅地停止对应的进程（发送 SIGTERM，必要时使用 SIGKILL）
 - 应该清理临时文件和资源
+- 脚本路径相对于 package 根目录
+
+**注意**: 虽然 CLI 目前通过 PID 直接管理进程，但 `stop_script` 字段保留以备将来使用，或者用于执行额外的清理工作。
 
 #### rbnx/entry (可选)
 
@@ -184,10 +204,38 @@ CLI 在注册时会自动：
 
 ## 注册流程
 
-Package 在安装后，需要通过 ROS2 service `/rbnx/srv/register` 注册其提供的 capabilities 和 skills。每个 capability 和 skill 需要单独注册。
+Package 在安装后，需要通过 CLI 命令 `rbnx register <recipe_file>` 注册其提供的 capabilities 和 skills。
+
+### Recipe 文件格式
+
+Recipe 文件定义了要注册的 packages 和对应的 capabilities/skills，以及挂载的 entity 名称：
+
+```yaml
+name: recipe_name
+description: Optional description
+
+packages:
+  - name: package_name
+    entity_name: agilex_robot  # Entity 名称，用于在 entity tree 中挂载
+    capabilities:              # 可选，如果不指定则注册所有 capabilities
+      - cap::vision.capture_rgb
+    skills:                    # 可选，如果不指定则注册所有 skills
+      - skl::pick
+```
+
+### 注册流程说明
+
+1. **启动进程阶段**：CLI 会先根据 manifest 中每个 cap/skill 的 `start_script` 启动对应的进程
+   - 所有进程的 stdout/stderr 会被重定向到日志文件（存储在 `{package_storage_path}/logs/`）
+   - CLI 会记录本机启动的所有 cap/skill 及其进程信息
+   - 所有进程启动成功后，才会进入注册阶段
+
+2. **注册阶段**：向 robonix-core 注册每个 cap/skill
+   - 每个注册请求包含 `hostname`（当前主机名）和 `entity_name`（从 recipe 中获取）
+   - 这确保了 entity tree 和 graph 中的节点能够正确对应到实际运行的 cap/skill
 
 注册请求格式参见 `robonix-core/srv/Register.srv`。
 
 ## 示例
 
-完整示例请参考 `demo_provider/` 目录
+完整示例请参考 `demo_package/` 目录

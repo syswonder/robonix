@@ -32,6 +32,8 @@ pub struct RegisterRequest {
     pub output_channels: Vec<String>,
     pub config_services: Vec<String>,
     pub config_names: Vec<String>,
+    pub hostname: String,
+    pub entity_name: String,
 }
 impl Message for RegisterRequest {}
 

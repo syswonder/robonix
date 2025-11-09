@@ -20,6 +20,8 @@ package:
 capabilities:
   - name: cap::vision.capture_rgb
     # Spec defines: OUTPUT: ["image" => "sensor_msgs/msg/Image"]
+    start_script: rbnx/start_capture_rgb.sh
+    stop_script: rbnx/stop_capture_rgb.sh
     outputs:
       image: /demo_rgb/image
 
@@ -27,6 +29,8 @@ capabilities:
     # Spec defines: 
     #   INPUT: ["target_pose" => "geometry_msgs/msg/PoseStamped"]
     #   OUTPUT: ["status" => "boolean"]
+    start_script: rbnx/start_grasp_move.sh
+    stop_script: rbnx/stop_grasp_move.sh
     inputs:
       target_pose: /demo_grasp/pose_goal
     outputs:
@@ -38,6 +42,8 @@ skills:
     # Spec defines:
     #   INPUT: ["target_label" => "string"]
     #   OUTPUT: ["status" => "boolean"]
+    start_script: rbnx/start_pick.sh
+    stop_script: rbnx/stop_pick.sh
     inputs:
       target_label: /demo_pick/target_label
     outputs:

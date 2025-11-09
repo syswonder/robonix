@@ -12,7 +12,7 @@
       "skills": [
         "skl::pick"
       ],
-      "installed_at": "2025-11-09T09:42:13.960508902+00:00",
+      "installed_at": "2025-11-09T10:17:29.998339297+00:00",
       "source": {
         "Local": {
           "path": "/root/workspace/rust/provider/demo_package"

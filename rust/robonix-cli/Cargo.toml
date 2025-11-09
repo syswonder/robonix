@@ -21,6 +21,9 @@ dirs = "5.0"
 pathdiff = "0.2"
 chrono = "0.4"
 git2 = { version = "0.18", default-features = false, features = ["https", "ssh"] }
+hostname = "0.4"
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28", features = ["signal", "process"] }
 robonix-core = { path = "../robonix-core" }
 ros2-client = { version = "0.8.2", features = ["pre-iron-gid"] }
 rustdds = "0.11"

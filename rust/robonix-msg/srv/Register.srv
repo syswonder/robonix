@@ -12,6 +12,8 @@ string[] output_ros_types
 string[] output_channels
 string[] config_services
 string[] config_names
+string hostname
+string entity_name
 ---
 bool success
 string error_message

@@ -47,6 +47,15 @@ enum Commands {
         /// Recipe file path
         recipe: PathBuf,
     },
+    /// Unregister packages, capabilities, skills, or recipes
+    Unregister {
+        /// Target to unregister. Can be:
+        /// - package name (e.g., "demo_rgb_provider")
+        /// - package.capability (e.g., "demo_rgb_provider.cap::vision.capture_rgb")
+        /// - package.skill (e.g., "demo_rgb_provider.skl::pick")
+        /// - recipe file path (e.g., "demo_recipe.yaml")
+        target: String,
+    },
     /// Configure robonix-cli
     Config {
         /// Set package storage path
@@ -136,8 +145,38 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Register { recipe } => {
-            let registrar = PackageRegistrar::new(config);
+            let registrar = PackageRegistrar::new(config)?;
             registrar.register_from_recipe(&recipe).await?;
+        }
+        Commands::Unregister { target } => {
+            let unregistrar = PackageUnregistrar::new(config)?;
+            
+            // Parse target format
+            if target.ends_with(".yaml") || target.ends_with(".yml") {
+                // Recipe file
+                let recipe_path = PathBuf::from(&target);
+                unregistrar.unregister_from_recipe(&recipe_path).await?;
+            } else if target.contains('.') {
+                // package.capability or package.skill format
+                let parts: Vec<&str> = target.splitn(2, '.').collect();
+                if parts.len() == 2 {
+                    let package_name = parts[0];
+                    let cap_or_skill = parts[1];
+                    
+                    if cap_or_skill.starts_with("cap::") {
+                        unregistrar.unregister_capability(package_name, cap_or_skill).await?;
+                    } else if cap_or_skill.starts_with("skl::") {
+                        unregistrar.unregister_skill(package_name, cap_or_skill).await?;
+                    } else {
+                        anyhow::bail!("Invalid format. Expected 'package.cap::name' or 'package.skl::name', got: {}", target);
+                    }
+                } else {
+                    anyhow::bail!("Invalid format. Expected 'package.cap::name' or 'package.skl::name', got: {}", target);
+                }
+            } else {
+                // Package name
+                unregistrar.unregister_package(&target).await?;
+            }
         }
         Commands::Config { set_storage_path, show } => {
             if let Some(new_path) = set_storage_path {
