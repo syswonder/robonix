@@ -1,32 +1,25 @@
-use anyhow::{Context, Result};
 use crate::config::Config;
 use crate::database::PackageDatabase;
-use crate::process_manager::ProcessManager;
 use crate::recipe::Recipe;
+use crate::recipe_state::RecipeState;
+use anyhow::Result;
 use serde_yaml::Value;
 use std::path::PathBuf;
 
 pub struct PackageUnregistrar {
     config: Config,
-    process_manager: ProcessManager,
 }
 
 impl PackageUnregistrar {
     pub fn new(config: Config) -> Result<Self> {
-        // Create log directory for process logs
-        let log_dir = config.package_storage_path.join("logs");
-        let process_manager = ProcessManager::new(log_dir)?;
-        
-        Ok(Self {
-            config,
-            process_manager,
-        })
+        Ok(Self { config })
     }
 
     /// Unregister a package (all capabilities and skills)
     pub async fn unregister_package(&self, package_name: &str) -> Result<()> {
         let db = PackageDatabase::load(&self.config.package_storage_path)?;
-        let pkg_info = db.find_by_name(package_name)
+        let pkg_info = db
+            .find_by_name(package_name)
             .ok_or_else(|| anyhow::anyhow!("Package not found: {}", package_name))?;
 
         // Load manifest
@@ -38,36 +31,24 @@ impl PackageUnregistrar {
         // TODO: Call core unregister service for all capabilities
         // For now, we'll just stop the processes
 
-        // Stop all capabilities
+        // Unregister all capabilities
         if let Some(caps) = manifest["capabilities"].as_sequence() {
             for cap in caps {
                 if let Some(std_name) = cap["name"].as_str() {
                     println!("  Unregistering capability: {}", std_name);
                     // TODO: Call core unregister service
                     // self.call_unregister_service(package_name, "cap", std_name).await?;
-                    
-                    // Stop the process
-                    if self.process_manager.is_running(std_name, "cap") {
-                        self.process_manager.stop_process(std_name, "cap").await?;
-                        println!("    Stopped process for {}", std_name);
-                    }
                 }
             }
         }
 
-        // Stop all skills
+        // Unregister all skills
         if let Some(skills) = manifest["skills"].as_sequence() {
             for skill in skills {
                 if let Some(std_name) = skill["name"].as_str() {
                     println!("  Unregistering skill: {}", std_name);
                     // TODO: Call core unregister service
                     // self.call_unregister_service(package_name, "skl", std_name).await?;
-                    
-                    // Stop the process
-                    if self.process_manager.is_running(std_name, "skl") {
-                        self.process_manager.stop_process(std_name, "skl").await?;
-                        println!("    Stopped process for {}", std_name);
-                    }
                 }
             }
         }
@@ -79,21 +60,17 @@ impl PackageUnregistrar {
     /// Unregister a specific capability
     pub async fn unregister_capability(&self, package_name: &str, std_name: &str) -> Result<()> {
         let db = PackageDatabase::load(&self.config.package_storage_path)?;
-        let _pkg_info = db.find_by_name(package_name)
+        let _pkg_info = db
+            .find_by_name(package_name)
             .ok_or_else(|| anyhow::anyhow!("Package not found: {}", package_name))?;
 
-        println!("Unregistering capability: {} from package: {}", std_name, package_name);
+        println!(
+            "Unregistering capability: {} from package: {}",
+            std_name, package_name
+        );
 
         // TODO: Call core unregister service
         // self.call_unregister_service(package_name, "cap", std_name).await?;
-
-        // Stop the process
-        if self.process_manager.is_running(std_name, "cap") {
-            self.process_manager.stop_process(std_name, "cap").await?;
-            println!("  Stopped process for {}", std_name);
-        } else {
-            println!("  No running process found for {}", std_name);
-        }
 
         println!("Capability unregistration completed");
         Ok(())
@@ -102,21 +79,17 @@ impl PackageUnregistrar {
     /// Unregister a specific skill
     pub async fn unregister_skill(&self, package_name: &str, std_name: &str) -> Result<()> {
         let db = PackageDatabase::load(&self.config.package_storage_path)?;
-        let _pkg_info = db.find_by_name(package_name)
+        let _pkg_info = db
+            .find_by_name(package_name)
             .ok_or_else(|| anyhow::anyhow!("Package not found: {}", package_name))?;
 
-        println!("Unregistering skill: {} from package: {}", std_name, package_name);
+        println!(
+            "Unregistering skill: {} from package: {}",
+            std_name, package_name
+        );
 
         // TODO: Call core unregister service
         // self.call_unregister_service(package_name, "skl", std_name).await?;
-
-        // Stop the process
-        if self.process_manager.is_running(std_name, "skl") {
-            self.process_manager.stop_process(std_name, "skl").await?;
-            println!("  Stopped process for {}", std_name);
-        } else {
-            println!("  No running process found for {}", std_name);
-        }
 
         println!("Skill unregistration completed");
         Ok(())
@@ -134,7 +107,8 @@ impl PackageUnregistrar {
 
         // Unregister each package in recipe
         for recipe_pkg in &recipe.packages {
-            let pkg_info = db.find_by_name(&recipe_pkg.name)
+            let pkg_info = db
+                .find_by_name(&recipe_pkg.name)
                 .ok_or_else(|| anyhow::anyhow!("Package not found: {}", recipe_pkg.name))?;
 
             // Load manifest
@@ -150,18 +124,13 @@ impl PackageUnregistrar {
 
             for cap_name in caps_to_unregister {
                 if let Some(cap) = find_capability_in_manifest(&manifest, &cap_name)? {
-                    let std_name = cap["name"].as_str()
+                    let std_name = cap["name"]
+                        .as_str()
                         .ok_or_else(|| anyhow::anyhow!("Capability name not found"))?;
-                    
+
                     println!("  Unregistering capability: {}", std_name);
                     // TODO: Call core unregister service
                     // self.call_unregister_service(&pkg_info.name, "cap", std_name).await?;
-                    
-                    // Stop the process
-                    if self.process_manager.is_running(std_name, "cap") {
-                        self.process_manager.stop_process(std_name, "cap").await?;
-                        println!("    Stopped process for {}", std_name);
-                    }
                 }
             }
 
@@ -174,19 +143,21 @@ impl PackageUnregistrar {
 
             for skill_name in skills_to_unregister {
                 if let Some(skill) = find_skill_in_manifest(&manifest, &skill_name)? {
-                    let std_name = skill["name"].as_str()
+                    let std_name = skill["name"]
+                        .as_str()
                         .ok_or_else(|| anyhow::anyhow!("Skill name not found"))?;
-                    
+
                     println!("  Unregistering skill: {}", std_name);
                     // TODO: Call core unregister service
                     // self.call_unregister_service(&pkg_info.name, "skl", std_name).await?;
-                    
-                    // Stop the process
-                    if self.process_manager.is_running(std_name, "skl") {
-                        self.process_manager.stop_process(std_name, "skl").await?;
-                        println!("    Stopped process for {}", std_name);
-                    }
                 }
+            }
+        }
+
+        // Clear recipe state if this recipe was active
+        if let Ok(Some(state)) = RecipeState::load(&self.config.package_storage_path) {
+            if state.recipe_path == *recipe_path {
+                RecipeState::clear(&self.config.package_storage_path)?;
             }
         }
 
@@ -223,4 +194,3 @@ fn find_skill_in_manifest<'a>(manifest: &'a Value, name: &str) -> Result<Option<
     }
     Ok(None)
 }
-

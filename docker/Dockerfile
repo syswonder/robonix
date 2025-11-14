@@ -2,8 +2,8 @@ FROM osrf/ros:humble-desktop
     
 ENV ROS_DOMAIN_ID=0
 ENV ROS_LOCALHOST_ONLY=0
-ENV FASTRTPS_DEFAULT_PROFILES_FILE=/root/shared/fast.xml
-ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+# ENV FASTRTPS_DEFAULT_PROFILES_FILE=/root/shared/fast.xml
+# ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
 RUN apt-get update && apt-get install -y \
     wget gnupg && \

@@ -1,8 +1,8 @@
-use anyhow::{Context, Result};
 use crate::config::Config;
 use crate::database::{PackageDatabase, PackageInfo, PackageSource};
-use std::path::Path;
+use anyhow::{Context, Result};
 use serde_yaml::Value;
+use std::path::Path;
 use std::time::SystemTime;
 
 pub struct PackageInstaller {
@@ -21,9 +21,9 @@ impl PackageInstaller {
             .last()
             .context("Invalid GitHub repository format")?
             .trim_end_matches(".git");
-        
+
         let target_path = self.config.package_storage_path.join(repo_name);
-        
+
         if target_path.exists() {
             anyhow::bail!("Package already exists at: {}", target_path.display());
         }
@@ -33,18 +33,16 @@ impl PackageInstaller {
         if let Some(branch) = branch {
             repo_builder.branch(branch);
         }
-        
+
         let git_repo = repo_builder
             .clone(repo, &target_path)
             .context("Failed to clone repository")?;
-        
-        let head = git_repo.head()
-            .context("Failed to get HEAD")?;
-        let commit = head.target()
-            .context("Failed to get commit OID")?;
-        
+
+        let head = git_repo.head().context("Failed to get HEAD")?;
+        let commit = head.target().context("Failed to get commit OID")?;
+
         let commit_str = commit.to_string();
-        
+
         // Verify package has manifest
         let manifest_path = target_path.join("rbnx_manifest.yaml");
         if !manifest_path.exists() {
@@ -73,9 +71,10 @@ impl PackageInstaller {
     }
 
     pub fn install_from_path(&self, source_path: &Path) -> Result<String> {
-        let source_path = source_path.canonicalize()
+        let source_path = source_path
+            .canonicalize()
             .with_context(|| format!("Failed to canonicalize path: {}", source_path.display()))?;
-        
+
         // Verify package has manifest
         let manifest_path = source_path.join("rbnx_manifest.yaml");
         if !manifest_path.exists() {
@@ -84,23 +83,26 @@ impl PackageInstaller {
 
         let package_name = Self::parse_manifest_name(&manifest_path)?;
         let target_path = self.config.package_storage_path.join(&package_name);
-        
+
         if target_path.exists() {
             anyhow::bail!("Package already exists at: {}", target_path.display());
         }
 
         // Copy package
-        copy_dir_all(&source_path, &target_path)
-            .with_context(|| format!("Failed to copy package from {} to {}", source_path.display(), target_path.display()))?;
+        copy_dir_all(&source_path, &target_path).with_context(|| {
+            format!(
+                "Failed to copy package from {} to {}",
+                source_path.display(),
+                target_path.display()
+            )
+        })?;
 
         let manifest_path = target_path.join("rbnx_manifest.yaml");
         let package_info = Self::create_package_info(
             &package_name,
             &target_path,
             &manifest_path,
-            PackageSource::Local {
-                path: source_path,
-            },
+            PackageSource::Local { path: source_path },
         )?;
 
         let mut db = PackageDatabase::load(&self.config.package_storage_path)?;
@@ -113,14 +115,14 @@ impl PackageInstaller {
     pub fn parse_manifest_name(manifest_path: &Path) -> Result<String> {
         let content = std::fs::read_to_string(manifest_path)
             .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
-        
+
         let manifest: Value = serde_yaml::from_str(&content)
             .with_context(|| format!("Failed to parse manifest: {}", manifest_path.display()))?;
-        
+
         let name = manifest["package"]["name"]
             .as_str()
             .context("Package name not found in manifest")?;
-        
+
         Ok(name.to_string())
     }
 
@@ -132,12 +134,12 @@ impl PackageInstaller {
     ) -> Result<PackageInfo> {
         let content = std::fs::read_to_string(manifest_path)?;
         let manifest: Value = serde_yaml::from_str(&content)?;
-        
+
         let version = manifest["package"]["version"]
             .as_str()
             .unwrap_or("0.0.0")
             .to_string();
-        
+
         let mut capabilities = Vec::new();
         if let Some(caps) = manifest["capabilities"].as_sequence() {
             for cap in caps {
@@ -146,7 +148,7 @@ impl PackageInstaller {
                 }
             }
         }
-        
+
         let mut skills = Vec::new();
         if let Some(skls) = manifest["skills"].as_sequence() {
             for skl in skls {
@@ -155,10 +157,9 @@ impl PackageInstaller {
                 }
             }
         }
-        
-        let installed_at = chrono::DateTime::<chrono::Utc>::from(SystemTime::now())
-            .to_rfc3339();
-        
+
+        let installed_at = chrono::DateTime::<chrono::Utc>::from(SystemTime::now()).to_rfc3339();
+
         Ok(PackageInfo {
             name: name.to_string(),
             version,
@@ -179,7 +180,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
         let ty = entry.file_type()?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        
+
         if ty.is_dir() {
             copy_dir_all(&src_path, &dst_path)?;
         } else {
@@ -188,4 +189,3 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     }
     Ok(())
 }
-

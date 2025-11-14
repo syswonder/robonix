@@ -9,16 +9,22 @@ pub struct PackageInfo {
     pub version: String,
     pub path: PathBuf,
     pub manifest_path: PathBuf,
-    pub capabilities: Vec<String>,  // List of std_name
-    pub skills: Vec<String>,         // List of std_name
-    pub installed_at: String,        // ISO 8601 timestamp
+    pub capabilities: Vec<String>, // List of std_name
+    pub skills: Vec<String>,       // List of std_name
+    pub installed_at: String,      // ISO 8601 timestamp
     pub source: PackageSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PackageSource {
-    Local { path: PathBuf },
-    GitHub { repo: String, branch: Option<String>, commit: String },
+    Local {
+        path: PathBuf,
+    },
+    GitHub {
+        repo: String,
+        branch: Option<String>,
+        commit: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,7 +39,7 @@ impl PackageDatabase {
 
     pub fn load(storage_path: &Path) -> Result<Self> {
         let db_path = Self::db_path(storage_path);
-        
+
         if !db_path.exists() {
             return Ok(Self {
                 packages: HashMap::new(),
@@ -42,22 +48,21 @@ impl PackageDatabase {
 
         let content = std::fs::read_to_string(&db_path)
             .with_context(|| format!("Failed to read database: {}", db_path.display()))?;
-        
+
         let db: PackageDatabase = serde_json::from_str(&content)
             .with_context(|| format!("Failed to parse database: {}", db_path.display()))?;
-        
+
         Ok(db)
     }
 
     pub fn save(&self, storage_path: &Path) -> Result<()> {
         let db_path = Self::db_path(storage_path);
-        
-        let content = serde_json::to_string_pretty(self)
-            .context("Failed to serialize database")?;
-        
+
+        let content = serde_json::to_string_pretty(self).context("Failed to serialize database")?;
+
         std::fs::write(&db_path, content)
             .with_context(|| format!("Failed to write database: {}", db_path.display()))?;
-        
+
         Ok(())
     }
 
@@ -99,41 +104,45 @@ impl PackageDatabase {
     /// This scans the storage directory and updates the database to match the filesystem
     pub fn sync(storage_path: &Path) -> Result<()> {
         use crate::install::PackageInstaller;
-        
+
         // Load existing database
         let mut db = Self::load(storage_path)?;
-        
+
         // Track which packages we found in the filesystem
         let mut found_packages = HashSet::new();
-        
+
         // Scan storage directory for packages
         if storage_path.exists() {
-            for entry in std::fs::read_dir(storage_path)
-                .with_context(|| format!("Failed to read storage directory: {}", storage_path.display()))? {
+            for entry in std::fs::read_dir(storage_path).with_context(|| {
+                format!(
+                    "Failed to read storage directory: {}",
+                    storage_path.display()
+                )
+            })? {
                 let entry = entry?;
                 let path = entry.path();
-                
+
                 // Skip db.json file
                 if path.file_name().and_then(|n| n.to_str()) == Some("db.json") {
                     continue;
                 }
-                
+
                 // Only process directories
                 if !path.is_dir() {
                     continue;
                 }
-                
+
                 // Check if this directory contains a manifest
                 let manifest_path = path.join("rbnx_manifest.yaml");
                 if !manifest_path.exists() {
                     continue;
                 }
-                
+
                 // Parse manifest and create/update package info
                 match PackageInstaller::parse_manifest_name(&manifest_path) {
                     Ok(package_name) => {
                         found_packages.insert(package_name.clone());
-                        
+
                         // Determine source (try to preserve existing source if available)
                         let source = if let Some(existing) = db.get_package(&package_name) {
                             // Preserve existing source if path matches
@@ -147,7 +156,7 @@ impl PackageDatabase {
                             // New package, treat as local
                             PackageSource::Local { path: path.clone() }
                         };
-                        
+
                         // Create or update package info
                         match PackageInstaller::create_package_info(
                             &package_name,
@@ -177,7 +186,7 @@ impl PackageDatabase {
                 }
             }
         }
-        
+
         // Remove packages from database that no longer exist in filesystem
         let db_package_names: Vec<String> = db.packages.keys().cloned().collect();
         for package_name in db_package_names {
@@ -191,11 +200,10 @@ impl PackageDatabase {
                 }
             }
         }
-        
+
         // Save updated database
         db.save(storage_path)?;
-        
+
         Ok(())
     }
 }
-

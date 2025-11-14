@@ -1,82 +1,26 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use robonix_cli::*;
-use std::path::PathBuf;
+
+mod cmd;
 
 #[derive(Parser)]
 #[command(name = "rbnx")]
 #[command(about = "Robonix Package Manager CLI", long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Install a package from GitHub or local path
-    Install {
-        /// GitHub repository URL (e.g., https://github.com/user/repo.git)
-        #[arg(short, long)]
-        github: Option<String>,
-        /// Branch to clone (for GitHub)
-        #[arg(short, long)]
-        branch: Option<String>,
-        /// Local path to package directory
-        #[arg(short, long)]
-        path: Option<PathBuf>,
-    },
-    /// List all installed packages
-    List,
-    /// Show detailed information about a package
-    Info {
-        /// Package name
-        name: String,
-    },
-    /// Search packages by capability
-    SearchCap {
-        /// Capability name (e.g., cap::vision.capture_rgb)
-        name: String,
-    },
-    /// Search packages by skill
-    SearchSkill {
-        /// Skill name (e.g., skl::pick)
-        name: String,
-    },
-    /// Register packages from a recipe file
-    Register {
-        /// Recipe file path
-        recipe: PathBuf,
-    },
-    /// Unregister packages, capabilities, skills, or recipes
-    Unregister {
-        /// Target to unregister. Can be:
-        /// - package name (e.g., "demo_rgb_provider")
-        /// - package.capability (e.g., "demo_rgb_provider.cap::vision.capture_rgb")
-        /// - package.skill (e.g., "demo_rgb_provider.skl::pick")
-        /// - recipe file path (e.g., "demo_recipe.yaml")
-        target: String,
-    },
-    /// Configure robonix-cli
-    Config {
-        /// Set package storage path
-        #[arg(short = 'p', long)]
-        set_storage_path: Option<PathBuf>,
-        /// Show current configuration
-        #[arg(short, long)]
-        show: bool,
-    },
+    command: cmd::Commands,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| {
-                    tracing_subscriber::EnvFilter::new("info")
-                        .add_directive("rustdds=off".parse().unwrap())
-                        .add_directive("ros2_client=warn".parse().unwrap())
-                }),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("info")
+                    .add_directive("rustdds=off".parse().unwrap())
+                    .add_directive("ros2_client=warn".parse().unwrap())
+            }),
         )
         .init();
 
@@ -84,117 +28,11 @@ async fn main() -> Result<()> {
 
     let config = Config::load()?;
     config.ensure_storage_dir()?;
-    
-    // Sync database with filesystem on startup
-    PackageDatabase::sync(&config.package_storage_path)
-        .context("Failed to sync database")?;
 
-    match cli.command {
-        Commands::Install { github, branch, path } => {
-            let installer = PackageInstaller::new(config.clone());
-            
-            if let Some(repo) = github {
-                let package_name = installer.install_from_github(&repo, branch.as_deref())?;
-                println!("Successfully installed package: {}", package_name);
-            } else if let Some(source_path) = path {
-                let package_name = installer.install_from_path(&source_path)?;
-                println!("Successfully installed package: {}", package_name);
-            } else {
-                eprintln!("Error: Either --github or --path must be specified");
-                std::process::exit(1);
-            }
-        }
-        Commands::List => {
-            let query = PackageQuery::new(config);
-            let packages = query.list_all()?;
-            if packages.is_empty() {
-                println!("No packages installed.");
-            } else {
-                println!("Installed packages:");
-                for pkg in packages {
-                    println!("  - {}", pkg);
-                }
-            }
-        }
-        Commands::Info { name } => {
-            let query = PackageQuery::new(config);
-            query.show_info(&name)?;
-        }
-        Commands::SearchCap { name } => {
-            let query = PackageQuery::new(config);
-            let packages = query.find_by_capability(&name)?;
-            if packages.is_empty() {
-                println!("No packages found with capability: {}", name);
-            } else {
-                println!("Packages with capability '{}':", name);
-                for pkg in packages {
-                    println!("  - {}", pkg);
-                }
-            }
-        }
-        Commands::SearchSkill { name } => {
-            let query = PackageQuery::new(config);
-            let packages = query.find_by_skill(&name)?;
-            if packages.is_empty() {
-                println!("No packages found with skill: {}", name);
-            } else {
-                println!("Packages with skill '{}':", name);
-                for pkg in packages {
-                    println!("  - {}", pkg);
-                }
-            }
-        }
-        Commands::Register { recipe } => {
-            let registrar = PackageRegistrar::new(config)?;
-            registrar.register_from_recipe(&recipe).await?;
-        }
-        Commands::Unregister { target } => {
-            let unregistrar = PackageUnregistrar::new(config)?;
-            
-            // Parse target format
-            if target.ends_with(".yaml") || target.ends_with(".yml") {
-                // Recipe file
-                let recipe_path = PathBuf::from(&target);
-                unregistrar.unregister_from_recipe(&recipe_path).await?;
-            } else if target.contains('.') {
-                // package.capability or package.skill format
-                let parts: Vec<&str> = target.splitn(2, '.').collect();
-                if parts.len() == 2 {
-                    let package_name = parts[0];
-                    let cap_or_skill = parts[1];
-                    
-                    if cap_or_skill.starts_with("cap::") {
-                        unregistrar.unregister_capability(package_name, cap_or_skill).await?;
-                    } else if cap_or_skill.starts_with("skl::") {
-                        unregistrar.unregister_skill(package_name, cap_or_skill).await?;
-                    } else {
-                        anyhow::bail!("Invalid format. Expected 'package.cap::name' or 'package.skl::name', got: {}", target);
-                    }
-                } else {
-                    anyhow::bail!("Invalid format. Expected 'package.cap::name' or 'package.skl::name', got: {}", target);
-                }
-            } else {
-                // Package name
-                unregistrar.unregister_package(&target).await?;
-            }
-        }
-        Commands::Config { set_storage_path, show } => {
-            if let Some(new_path) = set_storage_path {
-                let mut config = Config::load()?;
-                config.package_storage_path = new_path;
-                config.save()?;
-                config.ensure_storage_dir()?;
-                println!("Package storage path updated to: {}", config.package_storage_path.display());
-            } else if show {
-                let config = Config::load()?;
-                println!("Package storage path: {}", config.package_storage_path.display());
-            } else {
-                eprintln!("Error: Either --set-storage-path or --show must be specified");
-                std::process::exit(1);
-            }
-        }
-    }
+    // Sync database with filesystem on startup
+    PackageDatabase::sync(&config.package_storage_path).context("Failed to sync database")?;
+
+    cmd::execute(cli.command, config).await?;
 
     Ok(())
 }
-
