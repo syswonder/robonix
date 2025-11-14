@@ -369,9 +369,14 @@ impl ProcessManager {
     /// Stop a specific process
     pub async fn stop_process(&self, std_name: &str, package_type: &str) -> Result<()> {
         let key = format!("{}::{}", package_type, std_name);
-        let mut processes = self.processes.lock().unwrap();
+        
+        // Get and remove process info, then drop the lock
+        let process_info = {
+            let mut processes = self.processes.lock().unwrap();
+            processes.remove(&key)
+        };
 
-        if let Some(process_info) = processes.remove(&key) {
+        if let Some(process_info) = process_info {
             tracing::info!("Stopping process: {} (PID: {})", key, process_info.pid);
 
             // Kill the process by PID
@@ -417,7 +422,7 @@ impl ProcessManager {
 
             tracing::info!("Process stopped: {}", key);
 
-            // Save state to persistent storage
+            // Save state to persistent storage (lock is already dropped, so this is safe)
             self.save_state()?;
         } else {
             tracing::warn!("Process not found: {}", key);

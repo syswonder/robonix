@@ -1,8 +1,25 @@
-use crate::{Config, PackageUnregistrar};
+use crate::{Config, PackageUnregistrar, ProcessManager};
 use anyhow::Result;
 use std::path::PathBuf;
 
 pub async fn execute(config: Config, target: String) -> Result<()> {
+    // Check if there are any running processes before unregistering
+    let log_dir = config.package_storage_path.join("logs");
+    let process_manager = ProcessManager::new(log_dir)?;
+    let running_processes = process_manager.get_running_processes();
+
+    if !running_processes.is_empty() {
+        anyhow::bail!(
+            "Cannot unregister while processes are running. Please stop all processes first using 'deploy stop'.\n\
+            Running processes:\n{}",
+            running_processes
+                .iter()
+                .map(|p| format!("  - {}::{} (PID: {})", p.package_type, p.std_name, p.pid))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
     let unregistrar = PackageUnregistrar::new(config)?;
 
     // Parse target format
