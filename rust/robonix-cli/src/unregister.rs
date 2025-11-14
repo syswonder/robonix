@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::database::PackageDatabase;
+use crate::output;
 use crate::recipe::Recipe;
 use crate::recipe_state::RecipeState;
 use anyhow::Result;
@@ -26,7 +27,7 @@ impl PackageUnregistrar {
         let manifest_content = std::fs::read_to_string(&pkg_info.manifest_path)?;
         let manifest: Value = serde_yaml::from_str(&manifest_content)?;
 
-        println!("Unregistering package: {}", package_name);
+        output::action("Unregistering", &format!("package '{}'", package_name));
 
         // TODO: Call core unregister service for all capabilities
         // For now, we'll just stop the processes
@@ -35,7 +36,7 @@ impl PackageUnregistrar {
         if let Some(caps) = manifest["capabilities"].as_sequence() {
             for cap in caps {
                 if let Some(std_name) = cap["name"].as_str() {
-                    println!("  Unregistering capability: {}", std_name);
+                    output::sub_step(&format!("Unregistering capability: {}", std_name));
                     // TODO: Call core unregister service
                     // self.call_unregister_service(package_name, "cap", std_name).await?;
                 }
@@ -46,14 +47,14 @@ impl PackageUnregistrar {
         if let Some(skills) = manifest["skills"].as_sequence() {
             for skill in skills {
                 if let Some(std_name) = skill["name"].as_str() {
-                    println!("  Unregistering skill: {}", std_name);
+                    output::sub_step(&format!("Unregistering skill: {}", std_name));
                     // TODO: Call core unregister service
                     // self.call_unregister_service(package_name, "skl", std_name).await?;
                 }
             }
         }
 
-        println!("Package unregistration completed");
+        output::success("Package unregistration completed");
         Ok(())
     }
 
@@ -64,15 +65,15 @@ impl PackageUnregistrar {
             .find_by_name(package_name)
             .ok_or_else(|| anyhow::anyhow!("Package not found: {}", package_name))?;
 
-        println!(
-            "Unregistering capability: {} from package: {}",
-            std_name, package_name
+        output::action(
+            "Unregistering",
+            &format!("capability '{}' from package '{}'", std_name, package_name),
         );
 
         // TODO: Call core unregister service
         // self.call_unregister_service(package_name, "cap", std_name).await?;
 
-        println!("Capability unregistration completed");
+        output::success("Capability unregistration completed");
         Ok(())
     }
 
@@ -83,15 +84,15 @@ impl PackageUnregistrar {
             .find_by_name(package_name)
             .ok_or_else(|| anyhow::anyhow!("Package not found: {}", package_name))?;
 
-        println!(
-            "Unregistering skill: {} from package: {}",
-            std_name, package_name
+        output::action(
+            "Unregistering",
+            &format!("skill '{}' from package '{}'", std_name, package_name),
         );
 
         // TODO: Call core unregister service
         // self.call_unregister_service(package_name, "skl", std_name).await?;
 
-        println!("Skill unregistration completed");
+        output::success("Skill unregistration completed");
         Ok(())
     }
 
@@ -100,9 +101,9 @@ impl PackageUnregistrar {
         let recipe = Recipe::load(recipe_path)?;
         let db = PackageDatabase::load(&self.config.package_storage_path)?;
 
-        println!("Unregistering recipe: {}", recipe.name);
+        output::action("Unregistering", &format!("recipe '{}'", recipe.name));
         if let Some(desc) = &recipe.description {
-            println!("Description: {}", desc);
+            output::sub_step(&format!("Description: {}", desc));
         }
 
         // Unregister each package in recipe
@@ -128,7 +129,7 @@ impl PackageUnregistrar {
                         .as_str()
                         .ok_or_else(|| anyhow::anyhow!("Capability name not found"))?;
 
-                    println!("  Unregistering capability: {}", std_name);
+                    output::sub_step(&format!("Unregistering capability: {}", std_name));
                     // TODO: Call core unregister service
                     // self.call_unregister_service(&pkg_info.name, "cap", std_name).await?;
                 }
@@ -147,7 +148,7 @@ impl PackageUnregistrar {
                         .as_str()
                         .ok_or_else(|| anyhow::anyhow!("Skill name not found"))?;
 
-                    println!("  Unregistering skill: {}", std_name);
+                    output::sub_step(&format!("Unregistering skill: {}", std_name));
                     // TODO: Call core unregister service
                     // self.call_unregister_service(&pkg_info.name, "skl", std_name).await?;
                 }
@@ -161,7 +162,7 @@ impl PackageUnregistrar {
             }
         }
 
-        println!("Recipe unregistration completed");
+        output::success("Recipe unregistration completed");
         Ok(())
     }
 

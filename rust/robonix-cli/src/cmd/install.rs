@@ -1,4 +1,4 @@
-use crate::{Config, PackageInstaller};
+use crate::{output, Config, PackageInstaller};
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -11,13 +11,24 @@ pub async fn execute(
     let installer = PackageInstaller::new(config);
 
     if let Some(repo) = github {
+        output::action("Installing", &format!("package from {}", repo));
         let package_name = installer.install_from_github(&repo, branch.as_deref())?;
-        println!("Successfully installed package: {}", package_name);
+        output::success(&format!(
+            "Package '{}' installed successfully",
+            package_name
+        ));
     } else if let Some(source_path) = path {
+        output::action(
+            "Installing",
+            &format!("package from {}", source_path.display()),
+        );
         let package_name = installer.install_from_path(&source_path)?;
-        println!("Successfully installed package: {}", package_name);
+        output::success(&format!(
+            "Package '{}' installed successfully",
+            package_name
+        ));
     } else {
-        eprintln!("Error: Either --github or --path must be specified");
+        output::error("Either --github or --path must be specified");
         std::process::exit(1);
     }
 

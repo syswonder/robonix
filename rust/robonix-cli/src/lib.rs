@@ -1,6 +1,7 @@
 pub mod config;
 pub mod database;
 pub mod install;
+pub mod output;
 pub mod process;
 pub mod query;
 pub mod recipe;

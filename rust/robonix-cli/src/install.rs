@@ -1,7 +1,9 @@
 use crate::config::Config;
 use crate::database::{PackageDatabase, PackageInfo, PackageSource};
+use crate::output;
 use anyhow::{Context, Result};
 use serde_yaml::Value;
+use std::io::{self, Write};
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -24,18 +26,22 @@ impl PackageInstaller {
 
         let target_path = self.config.package_storage_path.join(repo_name);
 
-        if target_path.exists() {
-            anyhow::bail!("Package already exists at: {}", target_path.display());
+        // Clone repository to temporary location first
+        let temp_path = self
+            .config
+            .package_storage_path
+            .join(format!("{}_temp", repo_name));
+        if temp_path.exists() {
+            std::fs::remove_dir_all(&temp_path)?;
         }
 
-        // Clone repository
         let mut repo_builder = git2::build::RepoBuilder::new();
         if let Some(branch) = branch {
             repo_builder.branch(branch);
         }
 
         let git_repo = repo_builder
-            .clone(repo, &target_path)
+            .clone(repo, &temp_path)
             .context("Failed to clone repository")?;
 
         let head = git_repo.head().context("Failed to get HEAD")?;
@@ -44,18 +50,49 @@ impl PackageInstaller {
         let commit_str = commit.to_string();
 
         // Verify package has manifest
-        let manifest_path = target_path.join("rbnx_manifest.yaml");
+        let manifest_path = temp_path.join("rbnx_manifest.yaml");
         if !manifest_path.exists() {
-            std::fs::remove_dir_all(&target_path)?;
+            std::fs::remove_dir_all(&temp_path)?;
             anyhow::bail!("Package does not have rbnx_manifest.yaml");
         }
 
-        // Parse manifest and add to database
-        let package_name = Self::parse_manifest_name(&manifest_path)?;
+        // Validate manifest and get package info
+        output::step("Validating", "package manifest");
+        let (package_name, version) = Self::validate_manifest(&manifest_path)
+            .with_context(|| "Invalid robonix package manifest")?;
+
+        // Display validation info
+        output::sub_step(&format!("Package name: {}", package_name));
+        output::sub_step(&format!("Version: {}", version));
+
+        // Check if package already exists by name
+        let db = PackageDatabase::load(&self.config.package_storage_path)?;
+        if let Some(existing_pkg) = db.get_package(&package_name) {
+            let old_version = &existing_pkg.version;
+
+            if !Self::prompt_overwrite(old_version, &version, &package_name)? {
+                std::fs::remove_dir_all(&temp_path)?;
+                output::info("Installation cancelled.");
+                std::process::exit(0);
+            }
+
+            // Remove old package directory if it exists
+            if existing_pkg.path.exists() {
+                std::fs::remove_dir_all(&existing_pkg.path)?;
+            }
+        }
+
+        // Move temp directory to final location
+        if target_path.exists() {
+            std::fs::remove_dir_all(&target_path)?;
+        }
+        std::fs::rename(&temp_path, &target_path)?;
+
+        // Create package info and add to database
         let package_info = Self::create_package_info(
             &package_name,
             &target_path,
-            &manifest_path,
+            &target_path.join("rbnx_manifest.yaml"),
             PackageSource::GitHub {
                 repo: repo_url,
                 branch: branch.map(|s| s.to_string()),
@@ -81,12 +118,32 @@ impl PackageInstaller {
             anyhow::bail!("Package does not have rbnx_manifest.yaml");
         }
 
-        let package_name = Self::parse_manifest_name(&manifest_path)?;
-        let target_path = self.config.package_storage_path.join(&package_name);
+        // Validate manifest and get package info
+        output::step("Validating", "package manifest");
+        let (package_name, version) = Self::validate_manifest(&manifest_path)
+            .with_context(|| "Invalid robonix package manifest")?;
 
-        if target_path.exists() {
-            anyhow::bail!("Package already exists at: {}", target_path.display());
+        // Display validation info
+        output::sub_step(&format!("Package name: {}", package_name));
+        output::sub_step(&format!("Version: {}", version));
+
+        // Check if package already exists by name
+        let db = PackageDatabase::load(&self.config.package_storage_path)?;
+        if let Some(existing_pkg) = db.get_package(&package_name) {
+            let old_version = &existing_pkg.version;
+
+            if !Self::prompt_overwrite(old_version, &version, &package_name)? {
+                output::info("Installation cancelled.");
+                std::process::exit(0);
+            }
+
+            // Remove old package directory if it exists
+            if existing_pkg.path.exists() {
+                std::fs::remove_dir_all(&existing_pkg.path)?;
+            }
         }
+
+        let target_path = self.config.package_storage_path.join(&package_name);
 
         // Copy package
         copy_dir_all(&source_path, &target_path).with_context(|| {
@@ -124,6 +181,56 @@ impl PackageInstaller {
             .context("Package name not found in manifest")?;
 
         Ok(name.to_string())
+    }
+
+    /// Validate that the manifest is a valid robonix package
+    /// Returns (name, version) if valid
+    pub fn validate_manifest(manifest_path: &Path) -> Result<(String, String)> {
+        let content = std::fs::read_to_string(manifest_path)
+            .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
+
+        let manifest: Value = serde_yaml::from_str(&content)
+            .with_context(|| format!("Failed to parse manifest: {}", manifest_path.display()))?;
+
+        // Check required fields
+        let package = manifest
+            .get("package")
+            .context("Missing 'package' section in manifest")?;
+
+        let name = package
+            .get("name")
+            .and_then(|v| v.as_str())
+            .context("Missing 'package.name' in manifest")?;
+
+        let version = package
+            .get("version")
+            .and_then(|v| v.as_str())
+            .context("Missing 'package.version' in manifest")?;
+
+        // Check that capabilities and skills sections exist (even if empty)
+        if !manifest.get("capabilities").is_some() {
+            anyhow::bail!("Missing 'capabilities' section in manifest");
+        }
+        if !manifest.get("skills").is_some() {
+            anyhow::bail!("Missing 'skills' section in manifest");
+        }
+
+        Ok((name.to_string(), version.to_string()))
+    }
+
+    /// Prompt user for confirmation to overwrite existing package
+    fn prompt_overwrite(old_version: &str, new_version: &str, package_name: &str) -> Result<bool> {
+        output::warning(&format!("Package '{}' is already installed", package_name));
+        output::sub_step(&format!("Old version: {}", old_version));
+        output::sub_step(&format!("New version: {}", new_version));
+        print!("Overwrite? [y/N]: ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+
+        let answer = input.trim().to_lowercase();
+        Ok(answer == "y" || answer == "yes")
     }
 
     pub fn create_package_info(
