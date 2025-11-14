@@ -22,20 +22,21 @@ pub async fn execute(config: Config) -> Result<()> {
         println!();
     }
 
-    // Get all packages from recipe or all installed packages
-    let packages_to_show =
-        if let Ok(Some(recipe_state)) = RecipeState::load(&config.package_storage_path) {
-            // Show packages from recipe
-            recipe_state
-                .recipe
-                .packages
-                .iter()
-                .filter_map(|rp| db.find_by_name(&rp.name))
-                .collect::<Vec<_>>()
-        } else {
-            // Show all installed packages
-            db.list_packages()
-        };
+    // Get all packages from active recipe only
+    let recipe_state = RecipeState::load(&config.package_storage_path)?;
+    let packages_to_show = if let Some(recipe_state) = &recipe_state {
+        // Show packages from recipe
+        recipe_state
+            .recipe
+            .packages
+            .iter()
+            .filter_map(|rp| db.find_by_name(&rp.name))
+            .collect::<Vec<_>>()
+    } else {
+        // No active recipe, nothing to show
+        println!("No active recipe. Register a recipe to see status.");
+        return Ok(());
+    };
 
     if packages_to_show.is_empty() {
         println!("No packages to display.");
@@ -53,31 +54,32 @@ pub async fn execute(config: Config) -> Result<()> {
         let _manifest: Value = serde_yaml::from_str(&manifest_content)?;
 
         // Determine which capabilities/skills to show based on recipe
-        let (caps_to_show, skills_to_show) =
-            if let Ok(Some(recipe_state)) = RecipeState::load(&config.package_storage_path) {
-                if let Some(recipe_pkg) = recipe_state
-                    .recipe
-                    .packages
-                    .iter()
-                    .find(|rp| rp.name == pkg_info.name)
-                {
-                    let caps = if let Some(caps) = &recipe_pkg.capabilities {
-                        caps.clone()
-                    } else {
-                        pkg_info.capabilities.clone()
-                    };
-                    let skills = if let Some(skills) = &recipe_pkg.skills {
-                        skills.clone()
-                    } else {
-                        pkg_info.skills.clone()
-                    };
-                    (caps, skills)
+        // recipe_state is guaranteed to be Some at this point
+        let (caps_to_show, skills_to_show) = if let Some(recipe_state) = &recipe_state {
+            if let Some(recipe_pkg) = recipe_state
+                .recipe
+                .packages
+                .iter()
+                .find(|rp| rp.name == pkg_info.name)
+            {
+                let caps = if let Some(caps) = &recipe_pkg.capabilities {
+                    caps.clone()
                 } else {
-                    (pkg_info.capabilities.clone(), pkg_info.skills.clone())
-                }
+                    pkg_info.capabilities.clone()
+                };
+                let skills = if let Some(skills) = &recipe_pkg.skills {
+                    skills.clone()
+                } else {
+                    pkg_info.skills.clone()
+                };
+                (caps, skills)
             } else {
                 (pkg_info.capabilities.clone(), pkg_info.skills.clone())
-            };
+            }
+        } else {
+            // This should never happen due to early return above
+            (pkg_info.capabilities.clone(), pkg_info.skills.clone())
+        };
 
         // Add capabilities
         for cap_name in &caps_to_show {
