@@ -1,5 +1,6 @@
 use crate::messages::{
-    Capability, ConfigService, IOParameter, QueryRequest, QueryResponse, RegisterRequest, RegisterResponse, Skill,
+    Capability, ConfigService, IOParameter, QueryRequest, QueryResponse, RegisterRequest,
+    RegisterResponse, Skill,
 };
 use crate::spec::SpecRegistry;
 use std::collections::HashMap;
@@ -166,12 +167,10 @@ impl RobonixCore {
             }
             "skl" => {
                 // Validate against spec
-                match self.spec_registry.validate_skill(
-                    &req.std_name,
-                    &inputs,
-                    &outputs,
-                    &configs,
-                ) {
+                match self
+                    .spec_registry
+                    .validate_skill(&req.std_name, &inputs, &outputs, &configs)
+                {
                     Ok(()) => {
                         // Validation passed
                     }

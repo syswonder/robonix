@@ -44,7 +44,7 @@ pub struct SpecRegistry {
 // Format: CAP!(capabilities, name, desc, [INPUT(name, type), ...], [OUTPUT(name, type), ...], [CONFIG(service, name), ...])
 #[macro_export]
 macro_rules! CAP {
-    ($capabilities:ident, $name:expr, $desc:expr, 
+    ($capabilities:ident, $name:expr, $desc:expr,
      INPUT: [$($input_name:expr => $input_type:expr),* $(,)?],
      OUTPUT: [$($output_name:expr => $output_type:expr),* $(,)?],
      CONFIG: [$($config_service:expr => $config_name:expr),* $(,)?]) => {

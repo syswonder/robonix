@@ -72,7 +72,7 @@ pub struct Skill {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryRequest {
     pub std_name: String,          // Standard name (e.g., "cap::vision.capture_rgb")
-    pub requirements: Vec<String>,  // Optional requirements/filters
+    pub requirements: Vec<String>, // Optional requirements/filters
 }
 impl Message for QueryRequest {}
 

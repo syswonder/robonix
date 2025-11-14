@@ -41,8 +41,9 @@ impl ProcessManager {
 
         // State file in /var/lib/robonix/processes.json
         let state_dir = PathBuf::from("/var/lib/robonix");
-        std::fs::create_dir_all(&state_dir)
-            .with_context(|| format!("Failed to create state directory: {}", state_dir.display()))?;
+        std::fs::create_dir_all(&state_dir).with_context(|| {
+            format!("Failed to create state directory: {}", state_dir.display())
+        })?;
         let state_file = state_dir.join("processes.json");
 
         let mut manager = Self {
@@ -67,8 +68,9 @@ impl ProcessManager {
         let content = std::fs::read_to_string(&self.state_file)
             .with_context(|| format!("Failed to read state file: {}", self.state_file.display()))?;
 
-        let processes: Vec<ProcessInfo> = serde_json::from_str(&content)
-            .with_context(|| format!("Failed to parse state file: {}", self.state_file.display()))?;
+        let processes: Vec<ProcessInfo> = serde_json::from_str(&content).with_context(|| {
+            format!("Failed to parse state file: {}", self.state_file.display())
+        })?;
 
         // Verify processes are still running and filter out dead ones
         let mut valid_processes = HashMap::new();
@@ -79,8 +81,11 @@ impl ProcessManager {
                 let key = format!("{}::{}", process_info.package_type, process_info.std_name);
                 valid_processes.insert(key, process_info);
             } else {
-                tracing::info!("Process {} (PID: {}) is no longer running, removing from state", 
-                    process_info.std_name, process_info.pid);
+                tracing::info!(
+                    "Process {} (PID: {}) is no longer running, removing from state",
+                    process_info.std_name,
+                    process_info.pid
+                );
             }
         }
 
@@ -129,8 +134,9 @@ impl ProcessManager {
         let content = serde_json::to_string_pretty(&processes_vec)
             .context("Failed to serialize process state")?;
 
-        std::fs::write(&self.state_file, content)
-            .with_context(|| format!("Failed to write state file: {}", self.state_file.display()))?;
+        std::fs::write(&self.state_file, content).with_context(|| {
+            format!("Failed to write state file: {}", self.state_file.display())
+        })?;
 
         Ok(())
     }
@@ -175,7 +181,12 @@ impl ProcessManager {
         }
 
         // Create log file path
-        let log_filename = format!("{}_{}_{}.log", package_name, package_type, std_name.replace("::", "_"));
+        let log_filename = format!(
+            "{}_{}_{}.log",
+            package_name,
+            package_type,
+            std_name.replace("::", "_")
+        );
         let log_file = self.log_dir.join(&log_filename);
 
         // Open log file for writing
@@ -199,7 +210,11 @@ impl ProcessManager {
         log_writer.flush().await?;
 
         // Start the process
-        tracing::info!("Starting process: {} (script: {})", key, script_path.display());
+        tracing::info!(
+            "Starting process: {} (script: {})",
+            key,
+            script_path.display()
+        );
 
         // Use tokio::process::Command for async I/O
         let mut cmd = Command::new(&script_path);
@@ -207,7 +222,8 @@ impl ProcessManager {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let mut child = cmd.spawn()
+        let mut child = cmd
+            .spawn()
             .with_context(|| format!("Failed to start script: {}", script_path.display()))?;
 
         // Spawn task to capture output and write to log
@@ -288,13 +304,14 @@ impl ProcessManager {
         }
 
         // Get PID and detach the child (let it run independently)
-        let pid = child.id()
+        let pid = child
+            .id()
             .ok_or_else(|| anyhow::anyhow!("Failed to get process ID"))?;
-        
+
         // Detach the child - it will continue running even if we drop the handle
         // We'll manage it by PID
         drop(child);
-        
+
         // Store process info
         let process_info = ProcessInfo {
             package_name: package_name.to_string(),
@@ -325,13 +342,13 @@ impl ProcessManager {
     /// Check if a process is running
     pub fn is_running(&self, std_name: &str, package_type: &str) -> bool {
         let key = format!("{}::{}", package_type, std_name);
-        
+
         // Check in memory first
         let process_info = {
             let processes = self.processes.lock().unwrap();
             processes.get(&key).cloned()
         };
-        
+
         if let Some(process_info) = process_info {
             // Verify the process is actually still running
             if Self::is_process_running(process_info.pid) {
@@ -345,7 +362,7 @@ impl ProcessManager {
                 return false;
             }
         }
-        
+
         false
     }
 
@@ -356,7 +373,7 @@ impl ProcessManager {
 
         if let Some(process_info) = processes.remove(&key) {
             tracing::info!("Stopping process: {} (PID: {})", key, process_info.pid);
-            
+
             // Kill the process by PID
             #[cfg(unix)]
             {
@@ -364,7 +381,11 @@ impl ProcessManager {
                 use nix::unistd::Pid;
                 let pid = Pid::from_raw(process_info.pid as i32);
                 if let Err(e) = kill(pid, Signal::SIGTERM) {
-                    tracing::warn!("Failed to send SIGTERM to process {}: {:?}", process_info.pid, e);
+                    tracing::warn!(
+                        "Failed to send SIGTERM to process {}: {:?}",
+                        process_info.pid,
+                        e
+                    );
                     // Try SIGKILL as fallback
                     let _ = kill(pid, Signal::SIGKILL);
                 }
@@ -395,7 +416,7 @@ impl ProcessManager {
             }
 
             tracing::info!("Process stopped: {}", key);
-            
+
             // Save state to persistent storage
             self.save_state()?;
         } else {
@@ -430,4 +451,3 @@ impl ProcessManager {
 // Processes are started as daemon processes and should continue running
 // even after the CLI exits. They can be stopped explicitly using the
 // unregister command or stop_process/stop_all methods.
-

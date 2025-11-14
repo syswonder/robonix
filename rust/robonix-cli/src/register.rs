@@ -1,23 +1,25 @@
-use anyhow::{Context as AnyhowContext, Result};
 use crate::config::Config;
 use crate::database::PackageDatabase;
-use crate::process_manager::ProcessManager;
+use crate::process::ProcessManager;
 use crate::recipe::Recipe;
-use serde_yaml::Value;
-use std::path::PathBuf;
+use crate::recipe_state::RecipeState;
+use anyhow::Result;
 use robonix_core::messages::{RegisterRequest, RegisterResponse};
 use ros2_client::{
-    service::AService,
-    Context, Name, Node, NodeName, NodeOptions, ServiceMapping, ServiceTypeName,
+    service::AService, Context, Name, Node, NodeName, NodeOptions, ServiceMapping, ServiceTypeName,
 };
 use rustdds::{policy, QosPolicyBuilder};
+use serde_yaml::Value;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub struct PackageRegistrar {
     config: Config,
     node: Arc<Mutex<Option<Node>>>,
-    register_client: Arc<Mutex<Option<ros2_client::service::Client<AService<RegisterRequest, RegisterResponse>>>>>,
+    register_client: Arc<
+        Mutex<Option<ros2_client::service::Client<AService<RegisterRequest, RegisterResponse>>>>,
+    >,
     process_manager: Arc<ProcessManager>,
 }
 
@@ -26,7 +28,7 @@ impl PackageRegistrar {
         // Create log directory for process logs
         let log_dir = config.package_storage_path.join("logs");
         let process_manager = Arc::new(ProcessManager::new(log_dir)?);
-        
+
         Ok(Self {
             config,
             node: Arc::new(Mutex::new(None)),
@@ -42,7 +44,7 @@ impl PackageRegistrar {
         if node_guard.is_none() {
             let context = Context::new()
                 .map_err(|e| anyhow::anyhow!("Failed to create ROS2 context: {:?}", e))?;
-            
+
             let mut node = context
                 .new_node(
                     NodeName::new("/rbnx", "rbnx_cli").unwrap(),
@@ -51,7 +53,8 @@ impl PackageRegistrar {
                 .map_err(|e| anyhow::anyhow!("Failed to create ROS2 node: {:?}", e))?;
 
             // Start spinner in background
-            let spinner = node.spinner()
+            let spinner = node
+                .spinner()
                 .map_err(|e| anyhow::anyhow!("Failed to get node spinner: {:?}", e))?;
             tokio::spawn(async move {
                 let _ = spinner.spin().await;
@@ -73,7 +76,9 @@ impl PackageRegistrar {
                     service_qos.clone(),
                     service_qos,
                 )
-                .map_err(|e| anyhow::anyhow!("Failed to create register service client: {:?}", e))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to create register service client: {:?}", e)
+                })?;
 
             // Wait for service to be available (with timeout)
             tracing::debug!("Waiting for register service to be available...");
@@ -106,86 +111,18 @@ impl PackageRegistrar {
         }
 
         // Get entity name from recipe (use first package's entity_name, or default)
-        let entity_name = recipe.packages
+        let entity_name = recipe
+            .packages
             .iter()
             .find_map(|pkg| pkg.entity_name.as_ref())
             .cloned()
             .unwrap_or_else(|| "default_entity".to_string());
 
-        // Step 1: Start all processes first
-        println!("\nStep 1: Starting processes...");
-        let mut processes_to_start = Vec::new();
-
+        // Register all capabilities and skills (without starting processes)
+        println!("\nRegistering capabilities and skills...");
         for recipe_pkg in &recipe.packages {
-            let pkg_info = db.find_by_name(&recipe_pkg.name)
-                .ok_or_else(|| anyhow::anyhow!("Package not found: {}", recipe_pkg.name))?;
-
-            // Load manifest
-            let manifest_content = std::fs::read_to_string(&pkg_info.manifest_path)?;
-            let manifest: Value = serde_yaml::from_str(&manifest_content)?;
-
-            // Collect capabilities to start
-            let caps_to_register = if let Some(caps) = &recipe_pkg.capabilities {
-                caps.clone()
-            } else {
-                pkg_info.capabilities.clone()
-            };
-
-            for cap_name in caps_to_register {
-                if let Some(cap) = find_capability_in_manifest(&manifest, &cap_name)? {
-                    let start_script = cap["start_script"]
-                        .as_str()
-                        .ok_or_else(|| anyhow::anyhow!("start_script not found for capability: {}", cap_name))?;
-                    
-                    processes_to_start.push((
-                        pkg_info.name.clone(),
-                        cap_name.clone(),
-                        "cap".to_string(),
-                        pkg_info.path.clone(),
-                        start_script.to_string(),
-                    ));
-                }
-            }
-
-            // Collect skills to start
-            let skills_to_register = if let Some(skills) = &recipe_pkg.skills {
-                skills.clone()
-            } else {
-                pkg_info.skills.clone()
-            };
-
-            for skill_name in skills_to_register {
-                if let Some(skill) = find_skill_in_manifest(&manifest, &skill_name)? {
-                    let start_script = skill["start_script"]
-                        .as_str()
-                        .ok_or_else(|| anyhow::anyhow!("start_script not found for skill: {}", skill_name))?;
-                    
-                    processes_to_start.push((
-                        pkg_info.name.clone(),
-                        skill_name.clone(),
-                        "skl".to_string(),
-                        pkg_info.path.clone(),
-                        start_script.to_string(),
-                    ));
-                }
-            }
-        }
-
-        // Start all processes
-        for (package_name, std_name, package_type, package_path, start_script) in &processes_to_start {
-            println!("  Starting {} {}...", package_type, std_name);
-            self.process_manager
-                .start_process(package_name, std_name, package_type, package_path, start_script)
-                .await
-                .with_context(|| format!("Failed to start {} {}", package_type, std_name))?;
-        }
-
-        println!("All processes started successfully.\n");
-
-        // Step 2: Register all capabilities and skills
-        println!("Step 2: Registering capabilities and skills...");
-        for recipe_pkg in &recipe.packages {
-            let pkg_info = db.find_by_name(&recipe_pkg.name)
+            let pkg_info = db
+                .find_by_name(&recipe_pkg.name)
                 .ok_or_else(|| anyhow::anyhow!("Package not found: {}", recipe_pkg.name))?;
 
             // Use package-specific entity_name if provided, otherwise use recipe-level entity_name
@@ -204,12 +141,8 @@ impl PackageRegistrar {
 
             for cap_name in caps_to_register {
                 if let Some(cap) = find_capability_in_manifest(&manifest, &cap_name)? {
-                    self.register_capability(
-                        &pkg_info.name,
-                        &pkg_info.path,
-                        cap,
-                        pkg_entity_name,
-                    ).await?;
+                    self.register_capability(&pkg_info.name, &pkg_info.path, cap, pkg_entity_name)
+                        .await?;
                 }
             }
 
@@ -222,15 +155,19 @@ impl PackageRegistrar {
 
             for skill_name in skills_to_register {
                 if let Some(skill) = find_skill_in_manifest(&manifest, &skill_name)? {
-                    self.register_skill(
-                        &pkg_info.name,
-                        &pkg_info.path,
-                        skill,
-                        pkg_entity_name,
-                    ).await?;
+                    self.register_skill(&pkg_info.name, &pkg_info.path, skill, pkg_entity_name)
+                        .await?;
                 }
             }
         }
+
+        // Save recipe state
+        let recipe_state = RecipeState {
+            recipe_path: recipe_path.clone(),
+            recipe: recipe.clone(),
+            registered_at: chrono::Utc::now().to_rfc3339(),
+        };
+        recipe_state.save(&self.config.package_storage_path)?;
 
         println!("\nRecipe registration completed successfully");
         Ok(())
@@ -243,23 +180,33 @@ impl PackageRegistrar {
         cap: &Value,
         entity_name: &str,
     ) -> Result<()> {
-        let std_name = cap["name"].as_str()
+        let std_name = cap["name"]
+            .as_str()
             .ok_or_else(|| anyhow::anyhow!("Capability name not found"))?;
-        
+
         // Description from spec, not needed in manifest
         let description = String::new();
-        
+
         // Code path is the package path
-        let code_path = package_path.to_str()
+        let code_path = package_path
+            .to_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid package path"))?
             .to_string();
 
         let (mut input_names, mut input_types, input_channels) = parse_io_params(cap, "inputs")?;
-        let (mut output_names, mut output_types, output_channels) = parse_io_params(cap, "outputs")?;
+        let (mut output_names, mut output_types, output_channels) =
+            parse_io_params(cap, "outputs")?;
         let (config_services, config_names) = parse_configs(cap)?;
-        
+
         // Fill types from spec if empty (new simplified manifest format)
-        fill_types_from_spec(std_name, "cap", &mut input_names, &mut input_types, &mut output_names, &mut output_types)?;
+        fill_types_from_spec(
+            std_name,
+            "cap",
+            &mut input_names,
+            &mut input_types,
+            &mut output_names,
+            &mut output_types,
+        )?;
 
         let request = RegisterRequest {
             package_name: package_name.to_string(),
@@ -280,7 +227,12 @@ impl PackageRegistrar {
         };
 
         self.call_register_service(request).await?;
-        println!("  Registered capability: {} (host: {}, entity: {})", std_name, self.process_manager.get_hostname(), entity_name);
+        println!(
+            "  Registered capability: {} (host: {}, entity: {})",
+            std_name,
+            self.process_manager.get_hostname(),
+            entity_name
+        );
         Ok(())
     }
 
@@ -291,23 +243,33 @@ impl PackageRegistrar {
         skill: &Value,
         entity_name: &str,
     ) -> Result<()> {
-        let std_name = skill["name"].as_str()
+        let std_name = skill["name"]
+            .as_str()
             .ok_or_else(|| anyhow::anyhow!("Skill name not found"))?;
-        
+
         // Description from spec, not needed in manifest
         let description = String::new();
-        
+
         // Code path is the package path
-        let code_path = package_path.to_str()
+        let code_path = package_path
+            .to_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid package path"))?
             .to_string();
 
         let (mut input_names, mut input_types, input_channels) = parse_io_params(skill, "inputs")?;
-        let (mut output_names, mut output_types, output_channels) = parse_io_params(skill, "outputs")?;
+        let (mut output_names, mut output_types, output_channels) =
+            parse_io_params(skill, "outputs")?;
         let (config_services, config_names) = parse_configs(skill)?;
-        
+
         // Fill types from spec if empty (new simplified manifest format)
-        fill_types_from_spec(std_name, "skl", &mut input_names, &mut input_types, &mut output_names, &mut output_types)?;
+        fill_types_from_spec(
+            std_name,
+            "skl",
+            &mut input_names,
+            &mut input_types,
+            &mut output_names,
+            &mut output_types,
+        )?;
 
         let request = RegisterRequest {
             package_name: package_name.to_string(),
@@ -328,7 +290,12 @@ impl PackageRegistrar {
         };
 
         self.call_register_service(request).await?;
-        println!("  Registered skill: {} (host: {}, entity: {})", std_name, self.process_manager.get_hostname(), entity_name);
+        println!(
+            "  Registered skill: {} (host: {}, entity: {})",
+            std_name,
+            self.process_manager.get_hostname(),
+            entity_name
+        );
         Ok(())
     }
 
@@ -337,23 +304,34 @@ impl PackageRegistrar {
         self.ensure_client().await?;
 
         let client_guard = self.register_client.lock().await;
-        let client = client_guard.as_ref()
+        let client = client_guard
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Register client not initialized"))?;
-        
+
         let node_guard = self.node.lock().await;
-        let _node = node_guard.as_ref()
+        let _node = node_guard
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("ROS2 node not initialized"))?;
 
         // Call service directly using ROS2 client
-        tracing::info!("Calling register service for {}: {}", request.package_type, request.std_name);
+        tracing::info!(
+            "Calling register service for {}: {}",
+            request.package_type,
+            request.std_name
+        );
         let call_result = tokio::time::timeout(
             tokio::time::Duration::from_secs(10),
-            client.async_call_service(request)
-        ).await;
-        
+            client.async_call_service(request),
+        )
+        .await;
+
         match call_result {
             Ok(Ok(response)) => {
-                tracing::info!("Received response: success={}, error={}", response.success, response.error_message);
+                tracing::info!(
+                    "Received response: success={}, error={}",
+                    response.success,
+                    response.error_message
+                );
                 if !response.success {
                     anyhow::bail!("Registration failed: {}", response.error_message);
                 }
@@ -370,7 +348,6 @@ impl PackageRegistrar {
         }
     }
 }
-
 
 fn find_capability_in_manifest<'a>(manifest: &'a Value, name: &str) -> Result<Option<&'a Value>> {
     if let Some(caps) = manifest["capabilities"].as_sequence() {
@@ -394,7 +371,10 @@ fn find_skill_in_manifest<'a>(manifest: &'a Value, name: &str) -> Result<Option<
     Ok(None)
 }
 
-fn parse_io_params(cap_or_skill: &Value, field: &str) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
+fn parse_io_params(
+    cap_or_skill: &Value,
+    field: &str,
+) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
     let mut names = Vec::new();
     let mut types = Vec::new();
     let mut channels = Vec::new();
@@ -482,23 +462,24 @@ fn fill_types_from_spec(
     output_types: &mut Vec<String>,
 ) -> Result<()> {
     // Check if we need to fill types (new format where types are empty)
-    let needs_filling = input_types.iter().any(|t| t.is_empty()) || output_types.iter().any(|t| t.is_empty());
-    
+    let needs_filling =
+        input_types.iter().any(|t| t.is_empty()) || output_types.iter().any(|t| t.is_empty());
+
     if !needs_filling {
         // Old format, types already provided
         return Ok(());
     }
-    
+
     // Use robonix-core's spec registry to get types
     let spec_registry = robonix_core::spec::SpecRegistry::new();
-    
+
     match package_type {
         "cap" => {
             let spec = spec_registry
                 .capabilities
                 .get(std_name)
                 .ok_or_else(|| anyhow::anyhow!("Unknown capability spec: {}", std_name))?;
-            
+
             // Match input names from manifest with spec and fill types
             for (i, input_name) in input_names.iter().enumerate() {
                 if let Some(spec_input) = spec.inputs.iter().find(|s| s.name == *input_name) {
@@ -507,7 +488,7 @@ fn fill_types_from_spec(
                     }
                 }
             }
-            
+
             // Match output names from manifest with spec and fill types
             for (i, output_name) in output_names.iter().enumerate() {
                 if let Some(spec_output) = spec.outputs.iter().find(|s| s.name == *output_name) {
@@ -522,7 +503,7 @@ fn fill_types_from_spec(
                 .skills
                 .get(std_name)
                 .ok_or_else(|| anyhow::anyhow!("Unknown skill spec: {}", std_name))?;
-            
+
             // Match input names from manifest with spec and fill types
             for (i, input_name) in input_names.iter().enumerate() {
                 if let Some(spec_input) = spec.inputs.iter().find(|s| s.name == *input_name) {
@@ -531,7 +512,7 @@ fn fill_types_from_spec(
                     }
                 }
             }
-            
+
             // Match output names from manifest with spec and fill types
             for (i, output_name) in output_names.iter().enumerate() {
                 if let Some(spec_output) = spec.outputs.iter().find(|s| s.name == *output_name) {
@@ -545,6 +526,6 @@ fn fill_types_from_spec(
             anyhow::bail!("Invalid package type: {}", package_type);
         }
     }
-    
+
     Ok(())
 }

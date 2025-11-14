@@ -19,9 +19,10 @@ impl PackageQuery {
 
     pub fn show_info(&self, name: &str) -> Result<()> {
         let db = PackageDatabase::load(&self.config.package_storage_path)?;
-        let pkg = db.find_by_name(name)
+        let pkg = db
+            .find_by_name(name)
             .ok_or_else(|| anyhow::anyhow!("Package not found: {}", name))?;
-        
+
         println!("Package: {}", pkg.name);
         println!("Version: {}", pkg.version);
         println!("Path: {}", pkg.path.display());
@@ -35,7 +36,7 @@ impl PackageQuery {
         for skill in &pkg.skills {
             println!("  - {}", skill);
         }
-        
+
         Ok(())
     }
 
@@ -51,4 +52,3 @@ impl PackageQuery {
         Ok(packages.iter().map(|p| p.name.clone()).collect())
     }
 }
-
