@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::database::PackageDatabase;
+use crate::output;
 use crate::process::ProcessManager;
 use crate::recipe::Recipe;
 use crate::recipe_state::RecipeState;
@@ -105,9 +106,9 @@ impl PackageRegistrar {
         let recipe = Recipe::load(recipe_path)?;
         let db = PackageDatabase::load(&self.config.package_storage_path)?;
 
-        println!("Registering recipe: {}", recipe.name);
+        output::action("Registering", &format!("recipe '{}'", recipe.name));
         if let Some(desc) = &recipe.description {
-            println!("Description: {}", desc);
+            output::sub_step(&format!("Description: {}", desc));
         }
 
         // Get entity name from recipe (use first package's entity_name, or default)
@@ -119,7 +120,7 @@ impl PackageRegistrar {
             .unwrap_or_else(|| "default_entity".to_string());
 
         // Register all capabilities and skills (without starting processes)
-        println!("\nRegistering capabilities and skills...");
+        output::info("");
         for recipe_pkg in &recipe.packages {
             let pkg_info = db
                 .find_by_name(&recipe_pkg.name)
@@ -169,7 +170,7 @@ impl PackageRegistrar {
         };
         recipe_state.save(&self.config.package_storage_path)?;
 
-        println!("\nRecipe registration completed successfully");
+        output::success("Recipe registration completed");
         Ok(())
     }
 
@@ -227,12 +228,12 @@ impl PackageRegistrar {
         };
 
         self.call_register_service(request).await?;
-        println!(
-            "  Registered capability: {} (host: {}, entity: {})",
+        output::check(&format!(
+            "Registered capability: {} (host: {}, entity: {})",
             std_name,
             self.process_manager.get_hostname(),
             entity_name
-        );
+        ));
         Ok(())
     }
 
@@ -290,12 +291,12 @@ impl PackageRegistrar {
         };
 
         self.call_register_service(request).await?;
-        println!(
-            "  Registered skill: {} (host: {}, entity: {})",
+        output::check(&format!(
+            "Registered skill: {} (host: {}, entity: {})",
             std_name,
             self.process_manager.get_hostname(),
             entity_name
-        );
+        ));
         Ok(())
     }
 

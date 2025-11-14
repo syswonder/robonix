@@ -1,5 +1,5 @@
 use super::recipe_utils;
-use crate::{Config, ProcessManager};
+use crate::{output, Config, ProcessManager};
 use anyhow::Result;
 
 pub async fn execute(config: Config, target: String) -> Result<()> {
@@ -17,11 +17,11 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
     };
 
     if items_to_start.is_empty() {
-        println!("No matching items found for pattern: {}", target);
+        output::warning(&format!("No matching items found for pattern: {}", target));
         return Ok(());
     }
 
-    println!("Starting {} item(s)...", items_to_start.len());
+    output::action("Starting", &format!("{} item(s)", items_to_start.len()));
 
     let mut started = 0;
     let mut skipped = 0;
@@ -30,15 +30,18 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
     for item in &items_to_start {
         // Check if already running
         if process_manager.is_running(&item.std_name, &item.package_type) {
-            println!(
-                "  Skipping {} {} (already running)",
+            output::sub_step(&format!(
+                "Skipping {} {} (already running)",
                 item.package_type, item.std_name
-            );
+            ));
             skipped += 1;
             continue;
         }
 
-        println!("  Starting {} {}...", item.package_type, item.std_name);
+        output::sub_step(&format!(
+            "Starting {} {}...",
+            item.package_type, item.std_name
+        ));
         match process_manager
             .start_process(
                 &item.package_name,
@@ -50,23 +53,23 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
             .await
         {
             Ok(_) => {
-                println!("  ✓ Started {} {}", item.package_type, item.std_name);
+                output::check(&format!("Started {} {}", item.package_type, item.std_name));
                 started += 1;
             }
             Err(e) => {
-                eprintln!(
-                    "  ✗ Failed to start {} {}: {}",
+                output::cross(&format!(
+                    "Failed to start {} {}: {}",
                     item.package_type, item.std_name, e
-                );
+                ));
                 errors += 1;
             }
         }
     }
 
-    println!(
-        "\nSummary: {} started, {} skipped, {} errors",
+    output::summary(&format!(
+        "Summary: {} started, {} skipped, {} errors",
         started, skipped, errors
-    );
+    ));
 
     Ok(())
 }

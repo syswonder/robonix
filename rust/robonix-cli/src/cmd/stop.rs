@@ -1,5 +1,5 @@
 use super::recipe_utils;
-use crate::{Config, ProcessManager};
+use crate::{output, Config, ProcessManager};
 use anyhow::Result;
 
 pub async fn execute(config: Config, target: String) -> Result<()> {
@@ -45,39 +45,45 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
     };
 
     if processes_to_stop.is_empty() {
-        println!(
+        output::warning(&format!(
             "No matching running processes found for pattern: {}",
             target
-        );
+        ));
         return Ok(());
     }
 
-    println!("Stopping {} process(es)...", processes_to_stop.len());
+    output::action(
+        "Stopping",
+        &format!("{} process(es)", processes_to_stop.len()),
+    );
 
     let mut stopped = 0;
     let mut errors = 0;
 
     for proc in &processes_to_stop {
-        println!("  Stopping {} {}...", proc.package_type, proc.std_name);
+        output::sub_step(&format!(
+            "Stopping {} {}...",
+            proc.package_type, proc.std_name
+        ));
         match process_manager
             .stop_process(&proc.std_name, &proc.package_type)
             .await
         {
             Ok(_) => {
-                println!("  ✓ Stopped {} {}", proc.package_type, proc.std_name);
+                output::check(&format!("Stopped {} {}", proc.package_type, proc.std_name));
                 stopped += 1;
             }
             Err(e) => {
-                eprintln!(
-                    "  ✗ Failed to stop {} {}: {}",
+                output::cross(&format!(
+                    "Failed to stop {} {}: {}",
                     proc.package_type, proc.std_name, e
-                );
+                ));
                 errors += 1;
             }
         }
     }
 
-    println!("\nSummary: {} stopped, {} errors", stopped, errors);
+    output::summary(&format!("Summary: {} stopped, {} errors", stopped, errors));
 
     Ok(())
 }

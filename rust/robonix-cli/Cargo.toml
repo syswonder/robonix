@@ -23,6 +23,7 @@ chrono = "0.4"
 git2 = { version = "0.18", default-features = false, features = ["https", "ssh"] }
 hostname = "0.4"
 regex = "1.10"
+colored = "2.1"
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["signal", "process"] }
 robonix-core = { path = "../robonix-core" }
