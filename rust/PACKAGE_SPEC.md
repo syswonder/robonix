@@ -35,7 +35,7 @@ package:
 
 capabilities:
   - name: string            # 标准能力名称 (如 cap::grasp.move)
-    impl_id: string          # 可选：实现标识符 (如 "algo01", "algo02")。如果省略，默认为 "default"
+    impl_id: string         # 可选：实现标识符 (如 "algo01", "algo02")。如果省略，默认为 "default"
     start_script: string    # 启动脚本路径 (相对于 package 根目录，如 "rbnx/start_cap.sh")
     stop_script: string     # 停止脚本路径 (相对于 package 根目录，如 "rbnx/stop_cap.sh")
     inputs:                 # 输入参数通道映射 (字典格式: {参数名: topic通道})
@@ -57,12 +57,13 @@ skills:
 ```
 
 **重要说明：**
-- `name` 和 `type` 由标准规范 (spec) 定义，manifest 中无需重复指定
+- **capability/skill 的 `name` 字段是必需的**：必须在 manifest 中指定标准名称（如 `cap::vision.capture_rgb`、`skl::pick`），用于标识该 capability/skill 符合哪个标准规范
+- **参数的 ROS 类型无需指定**：参数的类型（如 `sensor_msgs/msg/Image`、`geometry_msgs/msg/PoseStamped`）会从 spec 中自动获取，无需在 manifest 中重复指定
+- **参数的名称必须指定**：在 `inputs` 和 `outputs` 字典中，key 必须是参数名（如 `image`、`target_pose`），且必须与 spec 中定义的标准参数名完全一致
+- **参数到通道的映射**：只需提供参数名到 ROS2 topic 通道的映射关系，格式为字典：`{参数名: topic通道}`
 - `impl_id` 用于区分同一标准名称下的不同实现。如果省略，系统会自动使用 "default" 作为默认值
 - 一个 package 可以为同一个标准名称提供多个实现（通过不同的 `impl_id` 区分）
 - `code_path`、`package_id`、`description` 等字段由 CLI 在注册时自动填充
-- 只需提供参数名到通道的映射关系，格式为字典：`{参数名: topic通道}`
-- 参数名必须与 spec 中定义的标准参数名完全一致
 
 #### 字段说明
 
@@ -77,8 +78,8 @@ skills:
 **Capability 字段：**
 - `name`: 标准能力名称，必须以 `cap::` 开头，格式为 `cap::category.action`。名称和参数定义由标准规范 (spec) 定义
 - `impl_id`: 实现标识符（可选），用于区分同一标准名称下的不同实现。例如：`"algo01"`、`"algo02"`、`"fast"`、`"accurate"` 等。如果省略，系统会自动使用 `"default"` 作为默认值。**重要**：同一个 package 可以为同一个标准名称提供多个实现，只需使用不同的 `impl_id` 即可
-- `start_script`: 启动脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/start_cap.sh`。CLI 会在注册时使用此脚本启动对应的 capability 进程。每个 capability 必须有自己独立的启动脚本
-- `stop_script`: 停止脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/stop_cap.sh`。CLI 会在需要时使用此脚本停止对应的 capability 进程。每个 capability 必须有自己独立的停止脚本
+- `start_script`: 启动脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/start_cap.sh`。CLI 会在执行 `rbnx deploy start` 时使用此脚本启动对应的 capability 进程。每个 capability 必须有自己独立的启动脚本
+- `stop_script`: 停止脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/stop_cap.sh`。CLI 会在执行 `rbnx deploy stop` 时使用此脚本停止对应的 capability 进程。每个 capability 必须有自己独立的停止脚本
 - `inputs`: 输入参数的通道映射，字典格式 `{参数名: topic通道}`。参数名必须与 spec 中定义的标准参数名一致
 - `outputs`: 输出参数的通道映射，字典格式 `{参数名: topic通道}`。参数名必须与 spec 中定义的标准参数名一致
 - `configs`: 配置服务的映射，字典格式（通常为空）
@@ -86,8 +87,8 @@ skills:
 **Skill 字段：**
 - `name`: 标准技能名称，必须以 `skl::` 开头。名称和参数定义由标准规范 (spec) 定义
 - `impl_id`: 实现标识符（可选），用于区分同一标准名称下的不同实现。例如：`"algo01"`、`"algo02"`、`"fast"`、`"accurate"` 等。如果省略，系统会自动使用 `"default"` 作为默认值。**重要**：同一个 package 可以为同一个标准名称提供多个实现，只需使用不同的 `impl_id` 即可
-- `start_script`: 启动脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/start_skill.sh`。CLI 会在注册时使用此脚本启动对应的 skill 进程。每个 skill 必须有自己独立的启动脚本
-- `stop_script`: 停止脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/stop_skill.sh`。CLI 会在需要时使用此脚本停止对应的 skill 进程。每个 skill 必须有自己独立的停止脚本
+- `start_script`: 启动脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/start_skill.sh`。CLI 会在执行 `rbnx deploy start` 时使用此脚本启动对应的 skill 进程。每个 skill 必须有自己独立的启动脚本
+- `stop_script`: 停止脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/stop_skill.sh`。CLI 会在执行 `rbnx deploy stop` 时使用此脚本停止对应的 skill 进程。每个 skill 必须有自己独立的停止脚本
 - `inputs`: 输入参数的通道映射，字典格式 `{参数名: topic通道}`。参数名必须与 spec 中定义的标准参数名一致
 - `outputs`: 输出参数的通道映射，字典格式 `{参数名: topic通道}`。参数名必须与 spec 中定义的标准参数名一致
 - `configs`: 配置服务的映射，字典格式（通常为空）
@@ -95,8 +96,8 @@ skills:
 **自动填充字段（无需在 manifest 中指定）：**
 - `package_id`: 由 CLI 根据 package 名称自动生成
 - `code_path`: 由 CLI 自动设置为 package 的安装路径
-- `description`: 从 spec 中自动获取
-- `type`: 从 spec 中自动获取参数类型
+- `description`: capability/skill 的描述从 spec 中自动获取
+- 参数的 ROS 类型：从 spec 中自动获取，无需在 manifest 的 `inputs`/`outputs` 中指定
 
 **示例：**
 
@@ -204,7 +205,7 @@ CLI 在注册时会自动：
 
 ## 注册流程
 
-Package 在安装后，需要通过 CLI 命令 `rbnx register <recipe_file>` 注册其提供的 capabilities 和 skills。
+Package 在安装后，需要通过 CLI 命令 `rbnx deploy register <recipe_file>` 注册其提供的 capabilities 和 skills。
 
 ### Recipe 文件格式
 
@@ -223,19 +224,54 @@ packages:
       - skl::pick
 ```
 
-### 注册流程说明
+### 部署工作流程
 
-1. **启动进程阶段**：CLI 会先根据 manifest 中每个 cap/skill 的 `start_script` 启动对应的进程
+部署流程分为多个步骤，按顺序执行：
+
+1. **注册阶段** (`rbnx deploy register <recipe_file>`): 向 robonix-core 注册每个 cap/skill
+   - 每个注册请求包含 `hostname`（当前主机名）和 `entity_name`（从 recipe 中获取）
+   - 这确保了 entity tree 和 graph 中的节点能够正确对应到 cap/skill
+   - **注意**：注册时不会启动进程，只是将 cap/skill 信息注册到系统中
+
+2. **启动进程阶段** (`rbnx deploy start [target]`): 根据 manifest 中每个 cap/skill 的 `start_script` 启动对应的进程
    - 所有进程的 stdout/stderr 会被重定向到日志文件（存储在 `{package_storage_path}/logs/`）
    - CLI 会记录本机启动的所有 cap/skill 及其进程信息
-   - 所有进程启动成功后，才会进入注册阶段
+   - 可以指定 `target` 参数来启动特定的 cap/skill，或使用 `"all"` 启动所有（默认）
 
-2. **注册阶段**：向 robonix-core 注册每个 cap/skill
-   - 每个注册请求包含 `hostname`（当前主机名）和 `entity_name`（从 recipe 中获取）
-   - 这确保了 entity tree 和 graph 中的节点能够正确对应到实际运行的 cap/skill
+3. **停止进程阶段** (`rbnx deploy stop [target]`): 停止正在运行的 cap/skill 进程
+   - 可以指定 `target` 参数来停止特定的 cap/skill，或使用 `"all"` 停止所有（默认）
 
-注册请求格式参见 `robonix-core/srv/Register.srv`。
+4. **重启进程阶段** (`rbnx deploy restart [target]`): 重启 cap/skill 进程
+   - 相当于先执行 `stop` 再执行 `start`
+
+5. **查看状态** (`rbnx deploy status`): 查看所有正在运行的 cap/skill 进程状态
+
+6. **注销阶段** (`rbnx deploy unregister <target>`): 从系统中注销 cap/skill
+   - 需要先停止所有相关进程
+   - 可以注销整个 recipe、package、或特定的 cap/skill
+
+**完整工作流程示例：**
+```bash
+# 1. 注册 recipe
+rbnx deploy register demo_recipe.yaml
+
+# 2. 启动所有进程
+rbnx deploy start
+
+# 3. 查看状态
+rbnx deploy status
+
+# 4. 停止所有进程
+rbnx deploy stop
+
+# 5. 注销 recipe
+rbnx deploy unregister demo_recipe.yaml
+```
+
+标准 capabilities 和 skills 的规范定义参见 [`robonix-core/src/specs_table.rs`](robonix-core/src/specs_table.rs)。
 
 ## 示例
 
-完整示例请参考 `demo_package/` 目录
+完整示例请参考：
+- Package 示例：`rust/provider/demo_package/` 目录（包含完整的 `rbnx_manifest.yaml` 和启动/停止脚本）
+- Recipe 示例：`rust/robonix-cli/demo_recipe.yaml` 文件

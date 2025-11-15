@@ -1,6 +1,6 @@
 # Robonix Recipe Example
 # A recipe defines which packages and their capabilities/skills should be registered
-# when running 'rbnx register <recipe_file>'
+# when running 'rbnx deploy register <recipe_file>'
 #
 # Since a package can provide multiple capabilities and skills, recipes allow
 # arbitrary selection of which capabilities and skills to register.
