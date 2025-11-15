@@ -1,0 +1,6 @@
+# AddSpatialMapEntry service for adding spatial map entries
+SpatialMapEntry entry
+---
+bool success
+string error_message
+

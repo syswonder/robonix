@@ -1,0 +1,9 @@
+# GetSemanticMap service for querying semantic map entities
+string entity_id    # If empty, return all entities
+string label        # Filter by label (empty to ignore)
+string path         # Filter by path (e.g., "/room/table/box", empty to ignore)
+---
+bool success
+string error_message
+Entity[] entities
+

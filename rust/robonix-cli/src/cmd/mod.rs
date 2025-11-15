@@ -8,9 +8,11 @@ mod config;
 mod info;
 mod install;
 mod list;
+mod model;
 mod recipe_utils;
 mod register;
 mod search;
+mod restart;
 mod start;
 mod status;
 mod stop;
@@ -29,10 +31,16 @@ pub enum Commands {
         /// Set package storage path
         #[arg(short = 'p', long)]
         set_storage_path: Option<PathBuf>,
+        /// Set robonix-msg path
+        #[arg(short = 'm', long)]
+        set_msg_path: Option<PathBuf>,
         /// Show current configuration
         #[arg(short, long)]
         show: bool,
     },
+    /// AI model management commands (LLM, VLM, etc.)
+    #[command(subcommand)]
+    Model(ModelCommands),
 }
 
 #[derive(Subcommand)]
@@ -102,6 +110,18 @@ pub enum DeployCommands {
         #[arg(required = false, default_value = "all")]
         target: String,
     },
+    /// Restart capability or skill processes from active recipe
+    /// 
+    /// This is equivalent to: stop -> wait -> start
+    /// Stops the target processes (if running) and then starts them again.
+    Restart {
+        /// Target to restart. Can be:
+        /// - "all" to restart all processes from recipe
+        /// - Pattern like "cap::vision.*" or "*.pick" to match multiple
+        /// - Exact name like "cap::vision.capture_rgb"
+        #[arg(required = false, default_value = "all")]
+        target: String,
+    },
     /// Show status of all running cap/skill processes from active recipe
     Status,
     /// Unregister packages, capabilities, skills, or recipes
@@ -115,6 +135,49 @@ pub enum DeployCommands {
         /// - package.skill (e.g., "demo_rgb_provider.skl::pick")
         /// - recipe file path (e.g., "demo_recipe.yaml")
         target: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ModelCommands {
+    /// Register an AI model (LLM, VLM, etc.)
+    Register {
+        /// Model ID (unique identifier)
+        #[arg(long)]
+        model_id: String,
+        /// Model name
+        #[arg(long)]
+        model_name: String,
+        /// Model type: "llm" or "vlm"
+        #[arg(long)]
+        model_type: String,
+        /// Provider (e.g., "openai", "anthropic", "local")
+        #[arg(long)]
+        provider: String,
+        /// API endpoint URL
+        #[arg(long)]
+        api_endpoint: String,
+        /// API key (optional, can also be set via environment variable)
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Model description
+        #[arg(long)]
+        description: String,
+        /// Supported capabilities (comma-separated)
+        #[arg(long)]
+        capabilities: Option<String>,
+    },
+    /// Query registered AI models
+    Query {
+        /// Filter by model ID
+        #[arg(long)]
+        model_id: Option<String>,
+        /// Filter by model type: "llm" or "vlm"
+        #[arg(long)]
+        model_type: Option<String>,
+        /// Filter by capability
+        #[arg(long)]
+        capability: Option<String>,
     },
 }
 
@@ -135,12 +198,42 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             DeployCommands::Register { recipe } => register::execute(config, recipe).await,
             DeployCommands::Start { target } => start::execute(config, target).await,
             DeployCommands::Stop { target } => stop::execute(config, target).await,
+            DeployCommands::Restart { target } => restart::execute(config, target).await,
             DeployCommands::Status => status::execute(config).await,
             DeployCommands::Unregister { target } => unregister::execute(config, target).await,
         },
         Commands::Config {
             set_storage_path,
+            set_msg_path,
             show,
-        } => config::execute(config, set_storage_path, show).await,
+        } => config::execute(config, set_storage_path, set_msg_path, show).await,
+        Commands::Model(cmd) => match cmd {
+            ModelCommands::Register {
+                model_id,
+                model_name,
+                model_type,
+                provider,
+                api_endpoint,
+                api_key,
+                description,
+                capabilities,
+            } => model::execute_register(
+                config,
+                model_id,
+                model_name,
+                model_type,
+                provider,
+                api_endpoint,
+                api_key,
+                description,
+                capabilities,
+            )
+            .await,
+            ModelCommands::Query {
+                model_id,
+                model_type,
+                capability,
+            } => model::execute_query(config, model_id, model_type, capability).await,
+        },
     }
 }

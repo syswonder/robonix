@@ -1,6 +1,7 @@
 pub mod config;
 pub mod database;
 pub mod install;
+pub mod model;
 pub mod output;
 pub mod process;
 pub mod query;
@@ -12,6 +13,7 @@ pub mod unregister;
 pub use config::Config;
 pub use database::PackageDatabase;
 pub use install::PackageInstaller;
+pub use model::ModelClient;
 pub use process::ProcessManager;
 pub use query::PackageQuery;
 pub use recipe::Recipe;

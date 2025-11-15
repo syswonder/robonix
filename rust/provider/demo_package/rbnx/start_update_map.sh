@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start script for cap::grasp.move
+# Start script for skl::update_map
 
 set -e
 
@@ -93,12 +93,12 @@ else
     echo "[WARN] robonix-msg not found, robonix_core may not be available" >&2
 fi
 
-# Start grasp move (capability: cap::grasp.move)
+# Start update_map skill (skill: skl::update_map)
 # Try ros2 run first, fallback to Python module if not available
 if command -v ros2 > /dev/null 2>&1 && ros2 pkg list 2>/dev/null | grep -q "^demo_rgb_provider$"; then
-    exec ros2 run demo_rgb_provider grasp_move
+    exec ros2 run demo_rgb_provider update_map_skill
 else
     # Use Python module directly
-    exec $PYTHON_CMD -m demo_rgb_provider.grasp_move
+    exec $PYTHON_CMD -m demo_rgb_provider.update_map_skill
 fi
 

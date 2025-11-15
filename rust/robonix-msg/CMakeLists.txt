@@ -1,24 +1,43 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.20)
 project(robonix_core)
-
-if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic)
-endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
-# Generate interfaces from .srv files
+# Generate interfaces from .msg and .srv files
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "srv/Register.srv"
-  "srv/Query.srv"
+# messages
+  "msg/RelationType.msg"
+  "msg/Relation.msg"
+  "msg/TextureType.msg"
+  "msg/BoundingBox.msg"
+  "msg/Point3D.msg"
+  "msg/FrameMapping.msg"
+  "msg/Entity.msg"
+  "msg/SpatialMapEntry.msg"
+# services
+  "srv/RegisterCapSkl.srv"
+  "srv/QueryCapSkl.srv"
+  "srv/RegisterModel.srv"
+  "srv/QueryModel.srv"
+  "srv/CreateTask.srv"
+  "srv/GetTask.srv"
+  "srv/ListTasks.srv"
+  "srv/CancelTask.srv"
+  "srv/GetSemanticMap.srv"
+  "srv/AddEntity.srv"
+  "srv/GetSpatialMap.srv"
+  "srv/AddSpatialMapEntry.srv"
+  "srv/GetMapStatus.srv"
   DEPENDENCIES
 )
 
 # Install Python client library
+# Install to Python site-packages (local/lib/python3.10/dist-packages)
+# This ensures the package can be imported via PYTHONPATH
 install(DIRECTORY robonix_core
-  DESTINATION lib/${PROJECT_NAME}
+  DESTINATION local/lib/python3.10/dist-packages
   FILES_MATCHING
   PATTERN "*.py"
 )

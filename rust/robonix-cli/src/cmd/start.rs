@@ -49,6 +49,7 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
                 &item.package_type,
                 &item.package_path,
                 &item.start_script,
+                config.robonix_msg_path.as_ref(),
             )
             .await
         {

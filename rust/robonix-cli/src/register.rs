@@ -72,8 +72,8 @@ impl PackageRegistrar {
             let client = node
                 .create_client::<AService<RegisterRequest, RegisterResponse>>(
                     ServiceMapping::Enhanced,
-                    &Name::new("/rbnx/srv", "register").unwrap(),
-                    &ServiceTypeName::new("robonix_core", "Register"),
+                    &Name::new("/rbnx/srv/mgmt", "register_cap_skl").unwrap(),
+                    &ServiceTypeName::new("robonix_core", "RegisterCapSkl"),
                     service_qos.clone(),
                     service_qos,
                 )

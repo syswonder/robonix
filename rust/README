@@ -1,7 +1,0 @@
-
-sudo rm -rf ~/.robonix/packages;sudo ln -s "$(realpath ../provider/)" ~/.robonix/packages
-
-export FASTRTPS_DEFAULT_PROFILES_FILE=
-
-# in robonix-cli, run:
-cargo run -- install --github https://github.com/enkerewpo/demo-package-01-robonix

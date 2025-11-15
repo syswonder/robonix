@@ -1,4 +1,4 @@
-# Query service for getting capability/skill information
+# QueryCapSkl service for querying capability/skill information
 string std_name          # Standard name (e.g., "cap::vision.capture_rgb")
 string[] requirements    # Optional requirements/filters
 ---

@@ -22,6 +22,7 @@ setup(
             'rgb_publisher = demo_rgb_provider.rgb_publisher:main',
             'grasp_move = demo_rgb_provider.grasp_move:main',
             'pick_skill = demo_rgb_provider.pick_skill:main',
+            'update_map_skill = demo_rgb_provider.update_map_skill:main',
         ],
     },
 )

@@ -12,6 +12,23 @@ if [ -f /opt/ros/humble/setup.bash ]; then
     source /opt/ros/humble/setup.bash
 fi
 
+# Source robonix-msg setup to make robonix_core SDK available
+# First try environment variable, then search upward from current directory
+ROBONIX_MSG_DIR=""
+if [ -n "$ROBONIX_MSG_PATH" ] && [ -f "$ROBONIX_MSG_PATH/install/setup.bash" ]; then
+    ROBONIX_MSG_DIR="$ROBONIX_MSG_PATH"
+else
+    # Search upward from package directory for robonix-msg
+    SEARCH_DIR="$PACKAGE_DIR"
+    while [ "$SEARCH_DIR" != "/" ]; do
+        if [ -d "$SEARCH_DIR/robonix-msg" ] && [ -f "$SEARCH_DIR/robonix-msg/install/setup.bash" ]; then
+            ROBONIX_MSG_DIR="$SEARCH_DIR/robonix-msg"
+            break
+        fi
+        SEARCH_DIR="$(dirname "$SEARCH_DIR")"
+    done
+fi
+
 # Fix library path issues with conda environment
 if [ -n "$CONDA_PREFIX" ]; then
     export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
@@ -48,6 +65,23 @@ else
     PYTHON_CMD="python3"
 fi
 
+# Source robonix-msg setup AFTER setting PYTHONPATH to ensure it's preserved
+# First try environment variable, then search upward from current directory
+ROBONIX_MSG_DIR=""
+if [ -n "$ROBONIX_MSG_PATH" ] && [ -f "$ROBONIX_MSG_PATH/install/setup.bash" ]; then
+    ROBONIX_MSG_DIR="$ROBONIX_MSG_PATH"
+else
+    # Search upward from package directory for robonix-msg
+    SEARCH_DIR="$PACKAGE_DIR"
+    while [ "$SEARCH_DIR" != "/" ]; do
+        if [ -d "$SEARCH_DIR/robonix-msg" ] && [ -f "$SEARCH_DIR/robonix-msg/install/setup.bash" ]; then
+            ROBONIX_MSG_DIR="$SEARCH_DIR/robonix-msg"
+            break
+        fi
+        SEARCH_DIR="$(dirname "$SEARCH_DIR")"
+    done
+fi
+
 # Set COLCON_CURRENT_PREFIX to current package directory to fix setup script path issues
 export COLCON_CURRENT_PREFIX="$PACKAGE_DIR"
 
@@ -57,6 +91,23 @@ if [ -f "install/setup.bash" ]; then
     source install/setup.bash 2>/dev/null || true
 elif [ -f "install/setup.sh" ]; then
     source install/setup.sh 2>/dev/null || true
+fi
+
+# Source robonix-msg setup AFTER local setup to ensure robonix_core is in PYTHONPATH
+if [ -n "$ROBONIX_MSG_DIR" ] && [ -f "$ROBONIX_MSG_DIR/install/setup.bash" ]; then
+    # Source setup.bash which will add robonix_core to PYTHONPATH
+    # Save current PYTHONPATH, source, then restore to ensure robonix_core is included
+    OLD_PYTHONPATH="$PYTHONPATH"
+    if source "$ROBONIX_MSG_DIR/install/setup.bash" 2>&1; then
+        # Merge PYTHONPATH: robonix paths first, then old paths
+        export PYTHONPATH="$PYTHONPATH:$OLD_PYTHONPATH"
+        echo "[INFO] Sourced robonix-msg setup.bash, PYTHONPATH includes robonix_core" >&2
+    else
+        echo "[WARN] Failed to source robonix-msg setup.bash" >&2
+        export PYTHONPATH="$OLD_PYTHONPATH"
+    fi
+else
+    echo "[WARN] robonix-msg not found, robonix_core may not be available" >&2
 fi
 
 # Start pick skill (skill: skl::pick)

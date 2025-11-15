@@ -1,0 +1,4 @@
+# GetMapStatus service for checking if map is being updated
+---
+bool is_updating     # True if update_map skill is registered and active
+

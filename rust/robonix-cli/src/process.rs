@@ -153,6 +153,7 @@ impl ProcessManager {
         package_type: &str,
         package_path: &Path,
         start_script: &str,
+        robonix_msg_path: Option<&PathBuf>,
     ) -> Result<()> {
         let key = format!("{}::{}", package_type, std_name);
 
@@ -221,6 +222,13 @@ impl ProcessManager {
         cmd.current_dir(package_path);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        
+        // Set ROBONIX_MSG_PATH from config or environment variable
+        if std::env::var("ROBONIX_MSG_PATH").is_err() {
+            if let Some(config_path) = robonix_msg_path {
+                cmd.env("ROBONIX_MSG_PATH", config_path);
+            }
+        }
 
         let mut child = cmd
             .spawn()
@@ -282,12 +290,14 @@ impl ProcessManager {
             });
         }
 
-        // Wait a bit to check if process started successfully
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        // Wait a bit to check if process started successfully and let initial output be captured
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
         // Check if process is still running
         match child.try_wait() {
             Ok(Some(status)) => {
+                // Process exited, wait a bit more for log capture to finish
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 anyhow::bail!(
                     "Process exited immediately with status: {:?}. Check log: {}",
                     status,

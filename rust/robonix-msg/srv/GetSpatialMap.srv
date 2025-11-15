@@ -1,0 +1,7 @@
+# GetSpatialMap service for querying spatial map entries
+string frame_id     # Filter by frame_id (empty to get all)
+---
+bool success
+string error_message
+SpatialMapEntry[] entries
+
