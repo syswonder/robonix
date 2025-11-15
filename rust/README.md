@@ -21,7 +21,7 @@ cargo run -- package info demo_package_01_github
 ## HOW TO REGISTER A MODEL (FOR PLANNING)
 
 ```bash
-export ROBONIX_MODEL_API_KEY=sk-xxxx
+export ROBONIX_MODEL_API_KEY=sk-xxxx # or add --api-key sk-xxxx to the command
 # in robonix-cli, run:
 cargo run -- model register \
   --model-id deepseek-chat \
