@@ -23,18 +23,20 @@ class PickSkill(Node):
         self.grasp_pose_goal_topic = None
         self.grasp_status_topic = None
         
-        # Use simplified QueryClient from robonix_core
+        # Use RobonixSDK from robonix_core
         try:
-            from robonix_core.client import QueryClient
-            self.query_client = QueryClient(self)
+            from robonix_core.client import RobonixSDK
+            self.sdk = RobonixSDK()
             self._query_capabilities()
-        except ImportError:
-            self.get_logger().warn('robonix_core.client not available, using fallback topics')
-            self.query_client = None
+        except ImportError as e:
+            self.get_logger().warn(f'robonix_core.client not available ({e}), using fallback topics')
+            self.sdk = None
             self._use_fallback_topics()
         except Exception as e:
-            self.get_logger().warn(f'Failed to create QueryClient: {e}, using fallback topics')
-            self.query_client = None
+            import traceback
+            self.get_logger().warn(f'Failed to create RobonixSDK: {e}, using fallback topics')
+            self.get_logger().debug(f'Traceback: {traceback.format_exc()}')
+            self.sdk = None
             self._use_fallback_topics()
         
         # Subscribe to target label (skill input)
@@ -100,13 +102,13 @@ class PickSkill(Node):
     
     def _query_capabilities(self):
         """Query robonix core for required capabilities and get their topic names."""
-        if not self.query_client:
+        if not self.sdk:
             self._use_fallback_topics()
             return
         
         # Query cap::vision.capture_rgb
         self.get_logger().info('Querying cap::vision.capture_rgb...')
-        result = self.query_client.query('cap::vision.capture_rgb')
+        result = self.sdk.query_cap_skl('cap::vision.capture_rgb')
         
         if result.success:
             # Get channel by parameter name from spec
@@ -122,7 +124,7 @@ class PickSkill(Node):
         
         # Query cap::grasp.move
         self.get_logger().info('Querying cap::grasp.move...')
-        result = self.query_client.query('cap::grasp.move')
+        result = self.sdk.query_cap_skl('cap::grasp.move')
         
         if result.success:
             # Get channels by parameter names from spec

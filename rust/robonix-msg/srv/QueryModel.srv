@@ -1,0 +1,15 @@
+# QueryModel service for querying AI models (LLM, VLM, etc.)
+string model_id          # Optional: specific model ID (empty string to query all)
+string model_type        # Optional: "LLM" or "VLM" (empty string for all)
+string capability        # Optional: filter by capability (empty string for all)
+---
+bool success
+string error_message
+string[] model_ids       # Parallel arrays (all same length)
+string[] model_names
+string[] model_types     # "LLM" or "VLM"
+string[] providers
+string[] api_endpoints
+string[] descriptions
+string[] capabilities    # Comma-separated capabilities per model (e.g., "vision,planning")
+

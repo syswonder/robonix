@@ -16,9 +16,9 @@ pub struct ConfigService {
     pub name: String,    // Configuration parameter name (e.g., "piper_arm_config_update")
 }
 
-// Registration service types based on srv/register.srv
+// Registration service types for capabilities and skills (based on srv/RegisterCapSkl.srv)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegisterRequest {
+pub struct RegisterCapSklRequest {
     pub package_name: String,
     pub package_type: String, // "cap" or "skl"
     pub std_name: String,
@@ -35,14 +35,18 @@ pub struct RegisterRequest {
     pub hostname: String,
     pub entity_name: String,
 }
-impl Message for RegisterRequest {}
+impl Message for RegisterCapSklRequest {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegisterResponse {
+pub struct RegisterCapSklResponse {
     pub success: bool,
     pub error_message: String,
 }
-impl Message for RegisterResponse {}
+impl Message for RegisterCapSklResponse {}
+
+// Backward compatibility aliases
+pub type RegisterRequest = RegisterCapSklRequest;
+pub type RegisterResponse = RegisterCapSklResponse;
 
 // Capability registration data
 #[derive(Debug, Clone)]
@@ -68,16 +72,16 @@ pub struct Skill {
     pub configs: Vec<ConfigService>,
 }
 
-// Query service types based on srv/query.srv
+// Query service types for capabilities and skills (based on srv/QueryCapSkl.srv)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryRequest {
+pub struct QueryCapSklRequest {
     pub std_name: String,          // Standard name (e.g., "cap::vision.capture_rgb")
     pub requirements: Vec<String>, // Optional requirements/filters
 }
-impl Message for QueryRequest {}
+impl Message for QueryCapSklRequest {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryResponse {
+pub struct QueryCapSklResponse {
     pub success: bool,
     pub error_message: String,
     pub input_channels: Vec<String>,  // Input topic channels
@@ -87,4 +91,66 @@ pub struct QueryResponse {
     pub input_types: Vec<String>,     // Input ROS message types
     pub output_types: Vec<String>,    // Output ROS message types
 }
-impl Message for QueryResponse {}
+impl Message for QueryCapSklResponse {}
+
+// Backward compatibility aliases
+pub type QueryRequest = QueryCapSklRequest;
+pub type QueryResponse = QueryCapSklResponse;
+
+// Model type
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelType {
+    LLM, // Large Language Model (text only)
+    VLM, // Vision Language Model (text + vision)
+}
+
+// Model registration data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Model {
+    pub model_id: String,
+    pub model_name: String,
+    pub model_type: ModelType,  // LLM or VLM
+    pub provider: String,       // e.g., "openai", "anthropic", "local"
+    pub api_endpoint: String,   // API endpoint URL
+    pub api_key: Option<String>, // Optional API key
+    pub description: String,
+    pub capabilities: Vec<String>, // Supported capabilities
+}
+
+// Model registration request/response (based on srv/RegisterLLM.srv)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterModelRequest {
+    pub model_id: String,
+    pub model_name: String,
+    pub model_type: ModelType, // LLM or VLM
+    pub provider: String,
+    pub api_endpoint: String,
+    pub api_key: Option<String>,
+    pub description: String,
+    pub capabilities: Vec<String>,
+}
+impl Message for RegisterModelRequest {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterModelResponse {
+    pub success: bool,
+    pub error_message: String,
+}
+impl Message for RegisterModelResponse {}
+
+// Query model request/response (based on srv/QueryLLM.srv)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryModelRequest {
+    pub model_id: Option<String>,   // If None, query all models
+    pub model_type: Option<ModelType>, // Filter by model type (LLM or VLM)
+    pub capability: Option<String>,  // Filter by capability
+}
+impl Message for QueryModelRequest {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryModelResponse {
+    pub success: bool,
+    pub error_message: String,
+    pub models: Vec<Model>,
+}
+impl Message for QueryModelResponse {}

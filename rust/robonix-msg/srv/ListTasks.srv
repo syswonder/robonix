@@ -1,0 +1,10 @@
+# ListTasks service for listing all tasks
+---
+bool success
+string error_message
+string[] task_ids
+string[] natural_languages
+string[] states
+uint64[] created_at
+uint64[] updated_at
+

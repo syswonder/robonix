@@ -1,4 +1,4 @@
-# Register.srv
+# RegisterCapSkl service for registering capabilities and skills
 string package_name
 string package_type
 string std_name

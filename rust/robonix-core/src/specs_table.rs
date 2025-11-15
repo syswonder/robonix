@@ -33,5 +33,10 @@ pub fn load_skills() -> HashMap<String, SkillSpec> {
          OUTPUT: ["status" => "boolean"],
          CONFIG: []);
 
+    SKL!(skills, "skl::update_map", "Update system maps (semantic and spatial)",
+         INPUT: [],
+         OUTPUT: ["status" => "boolean"],
+         CONFIG: []);
+
     skills
 }

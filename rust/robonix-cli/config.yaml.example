@@ -6,3 +6,8 @@
 # Default: ~/.robonix/packages
 package_storage_path: ~/.robonix/packages
 
+# Robonix-msg path (optional)
+# Set via: rbnx config --set-msg-path <path>
+# If not set, will use ROBONIX_MSG_PATH environment variable
+# robonix_msg_path: /path/to/robonix-msg
+
