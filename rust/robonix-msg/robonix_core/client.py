@@ -18,6 +18,8 @@ class QueryCapSklResult:
 
     success: bool
     error_message: str = ""
+    impl_id: str = ""
+    impl_ids: List[str] = None
     input_channels: List[str] = None
     output_channels: List[str] = None
     input_names: List[str] = None
@@ -27,6 +29,8 @@ class QueryCapSklResult:
 
     def __post_init__(self):
         """Initialize empty lists if None."""
+        if self.impl_ids is None:
+            self.impl_ids = []
         if self.input_channels is None:
             self.input_channels = []
         if self.output_channels is None:
@@ -495,6 +499,7 @@ class RobonixSDK:
     def query_cap_skl(
         self,
         std_name: str,
+        impl_id: Optional[str] = None,
         requirements: Optional[List[str]] = None,
         timeout: float = 5.0,
     ) -> QueryCapSklResult:
@@ -505,18 +510,21 @@ class RobonixSDK:
 
         Args:
             std_name: Standard name (e.g., 'cap::vision.capture_rgb')
+            impl_id: Optional implementation ID. If None or empty, returns first match and all available impl_ids
             requirements: Optional list of requirements/filters
             timeout: Timeout in seconds (default: 5.0)
 
         Returns:
             QueryCapSklResult with success status and channel information
         """
-        self._logger.debug(f"query_cap_skl called: std_name={std_name}, timeout={timeout}")
+        self._logger.debug(f"query_cap_skl called: std_name={std_name}, impl_id={impl_id}, timeout={timeout}")
         self._ensure_query_client()
         self._logger.debug("Query client ensured")
 
         if requirements is None:
             requirements = []
+        if impl_id is None:
+            impl_id = ""
 
         # Wait for service with detailed logging and periodic status updates
         self._logger.debug(f"Waiting for service /rbnx/srv/mgmt/query_cap_skl (timeout={timeout}s)...")
@@ -556,9 +564,10 @@ class RobonixSDK:
         # Create and send request
         request = self._query_client.srv_type.Request()
         request.std_name = std_name
+        request.impl_id = impl_id
         request.requirements = requirements
 
-        self._logger.debug(f"Calling query_cap_skl for: {std_name}")
+        self._logger.debug(f"Calling query_cap_skl for: {std_name} (impl_id: {impl_id})")
         # Use async call with executor spin_until_future_complete
         future = self._query_client.call_async(request)
         self._logger.debug("Service call sent, waiting for response...")
@@ -574,10 +583,12 @@ class RobonixSDK:
         self._logger.debug("Future is done, getting result...")
         try:
             response = future.result()
-            self._logger.debug(f"Got response: success={response.success}, error_message={response.error_message}")
+            self._logger.debug(f"Got response: success={response.success}, error_message={response.error_message}, impl_id={response.impl_id}, impl_ids={list(response.impl_ids)}")
             return QueryCapSklResult(
                 success=response.success,
                 error_message=response.error_message,
+                impl_id=response.impl_id,
+                impl_ids=list(response.impl_ids),
                 input_channels=list(response.input_channels),
                 output_channels=list(response.output_channels),
                 input_names=list(response.input_names),
@@ -600,6 +611,7 @@ class RobonixSDK:
         std_name: str,
         description: str,
         code_path: str,
+        impl_id: Optional[str] = None,
         input_names: Optional[List[str]] = None,
         input_ros_types: Optional[List[str]] = None,
         input_channels: Optional[List[str]] = None,
@@ -623,6 +635,7 @@ class RobonixSDK:
             std_name: Standard name
             description: Description
             code_path: Code path
+            impl_id: Optional implementation ID. If None or empty, defaults to "default"
             input_names: Input parameter names
             input_ros_types: Input ROS message types
             input_channels: Input topic channels
@@ -657,6 +670,8 @@ class RobonixSDK:
             config_services = []
         if config_names is None:
             config_names = []
+        if impl_id is None:
+            impl_id = ""
 
         # Wait for service
         if not self._register_client.wait_for_service(timeout_sec=timeout):
@@ -670,6 +685,7 @@ class RobonixSDK:
         request.package_name = package_name
         request.package_type = package_type
         request.std_name = std_name
+        request.impl_id = impl_id
         request.description = description
         request.code_path = code_path
         request.input_names = input_names
@@ -683,7 +699,7 @@ class RobonixSDK:
         request.hostname = hostname
         request.entity_name = entity_name
 
-        self._logger.debug(f"Calling register_cap_skl for: {std_name}")
+        self._logger.debug(f"Calling register_cap_skl for: {std_name} (impl_id: {impl_id})")
         future = self._register_client.call_async(request)
         self._spin_until_complete(future, timeout)
 

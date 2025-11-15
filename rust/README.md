@@ -13,7 +13,9 @@ export FASTRTPS_DEFAULT_PROFILES_FILE=
 
 ```bash
 # in robonix-cli, run:
-cargo run -- install --github https://github.com/enkerewpo/demo-package-01-robonix
+cargo run -- package install --github https://github.com/enkerewpo/demo-package-01-robonix
+cargo run -- package list
+cargo run -- package info demo_package_01_github
 ```
 
 ## HOW TO REGISTER A MODEL (FOR PLANNING)

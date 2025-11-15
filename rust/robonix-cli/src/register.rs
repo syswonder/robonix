@@ -185,6 +185,12 @@ impl PackageRegistrar {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Capability name not found"))?;
 
+        // Get impl_id from manifest, default to empty string (will be normalized to "default" in core)
+        let impl_id = cap["impl_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+
         // Description from spec, not needed in manifest
         let description = String::new();
 
@@ -213,6 +219,7 @@ impl PackageRegistrar {
             package_name: package_name.to_string(),
             package_type: "cap".to_string(),
             std_name: std_name.to_string(),
+            impl_id,
             description,
             code_path,
             input_names,
@@ -228,9 +235,11 @@ impl PackageRegistrar {
         };
 
         self.call_register_service(request).await?;
+        let impl_display = if request.impl_id.is_empty() { "default" } else { &request.impl_id };
         output::check(&format!(
-            "Registered capability: {} (host: {}, entity: {})",
+            "Registered capability: {} (impl_id: {}, host: {}, entity: {})",
             std_name,
+            impl_display,
             self.process_manager.get_hostname(),
             entity_name
         ));
@@ -247,6 +256,12 @@ impl PackageRegistrar {
         let std_name = skill["name"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Skill name not found"))?;
+
+        // Get impl_id from manifest, default to empty string (will be normalized to "default" in core)
+        let impl_id = skill["impl_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
 
         // Description from spec, not needed in manifest
         let description = String::new();
@@ -276,6 +291,7 @@ impl PackageRegistrar {
             package_name: package_name.to_string(),
             package_type: "skl".to_string(),
             std_name: std_name.to_string(),
+            impl_id,
             description,
             code_path,
             input_names,
@@ -291,9 +307,11 @@ impl PackageRegistrar {
         };
 
         self.call_register_service(request).await?;
+        let impl_display = if request.impl_id.is_empty() { "default" } else { &request.impl_id };
         output::check(&format!(
-            "Registered skill: {} (host: {}, entity: {})",
+            "Registered skill: {} (impl_id: {}, host: {}, entity: {})",
             std_name,
+            impl_display,
             self.process_manager.get_hostname(),
             entity_name
         ));

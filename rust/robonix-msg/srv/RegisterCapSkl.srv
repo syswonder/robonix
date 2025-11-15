@@ -2,6 +2,7 @@
 string package_name
 string package_type
 string std_name
+string impl_id          # Implementation ID (e.g., "algo01", "algo02"). If empty, defaults to "default"
 string description
 string code_path
 string[] input_names
