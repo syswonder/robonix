@@ -42,6 +42,7 @@ skills:
     # Spec defines:
     #   INPUT: ["target_label" => "string"]
     #   OUTPUT: ["status" => "boolean"]
+    # impl_id: algo01  # Optional: Implementation ID. If omitted, defaults to "default"
     start_script: rbnx/start_pick.sh
     stop_script: rbnx/stop_pick.sh
     inputs:
@@ -57,3 +58,13 @@ skills:
     stop_script: rbnx/stop_update_map.sh
     outputs:
       status: /demo_update_map/status
+
+  # Example: Multiple implementations of the same standard skill
+  # - name: skl::pick
+  #   impl_id: algo02  # Different implementation
+  #   start_script: rbnx/start_pick_algo02.sh
+  #   stop_script: rbnx/stop_pick_algo02.sh
+  #   inputs:
+  #     target_label: /demo_pick_algo02/target_label
+  #   outputs:
+  #     status: /demo_pick_algo02/status

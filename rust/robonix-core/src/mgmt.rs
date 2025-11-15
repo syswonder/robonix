@@ -139,6 +139,16 @@ impl ManagementModule {
 
     /// Register a capability or skill
     pub async fn register(&self, req: RegisterCapSklRequest) -> RegisterCapSklResponse {
+        // Normalize impl_id: if empty, use "default"
+        let impl_id = if req.impl_id.is_empty() {
+            "default".to_string()
+        } else {
+            req.impl_id.clone()
+        };
+
+        // Create composite key: std_name::impl_id
+        let key = format!("{}::{}", req.std_name, impl_id);
+
         // Parse IO parameters
         let inputs = match Self::parse_io_parameters(
             &req.input_names,
@@ -197,6 +207,7 @@ impl ManagementModule {
                     Err(e) => {
                         warn!(
                             capability = %req.std_name,
+                            impl_id = %impl_id,
                             error = %e,
                             "Capability validation failed"
                         );
@@ -210,6 +221,7 @@ impl ManagementModule {
                 let cap = Capability {
                     package_name: req.package_name.clone(),
                     std_name: req.std_name.clone(),
+                    impl_id: impl_id.clone(),
                     description: req.description.clone(),
                     code_path: req.code_path.clone(),
                     inputs,
@@ -218,10 +230,11 @@ impl ManagementModule {
                 };
 
                 let mut caps = self.capabilities.write().await;
-                caps.insert(req.std_name.clone(), cap);
+                caps.insert(key.clone(), cap);
 
                 info!(
                     capability = %req.std_name,
+                    impl_id = %impl_id,
                     package = %req.package_name,
                     code_path = %req.code_path,
                     "Registered capability"
@@ -244,6 +257,7 @@ impl ManagementModule {
                     Err(e) => {
                         warn!(
                             skill = %req.std_name,
+                            impl_id = %impl_id,
                             error = %e,
                             "Skill validation failed"
                         );
@@ -257,6 +271,7 @@ impl ManagementModule {
                 let skl = Skill {
                     package_name: req.package_name.clone(),
                     std_name: req.std_name.clone(),
+                    impl_id: impl_id.clone(),
                     description: req.description.clone(),
                     code_path: req.code_path.clone(),
                     inputs,
@@ -265,10 +280,11 @@ impl ManagementModule {
                 };
 
                 let mut skls = self.skills.write().await;
-                skls.insert(req.std_name.clone(), skl);
+                skls.insert(key.clone(), skl);
 
                 info!(
                     skill = %req.std_name,
+                    impl_id = %impl_id,
                     package = %req.package_name,
                     code_path = %req.code_path,
                     "Registered skill"
@@ -294,97 +310,259 @@ impl ManagementModule {
 
     /// Query a capability or skill
     pub async fn query(&self, req: QueryCapSklRequest) -> QueryCapSklResponse {
+        // Normalize impl_id: if empty, use "default" for lookup, but we'll search all if not found
+        let impl_id = if req.impl_id.is_empty() {
+            "default".to_string()
+        } else {
+            req.impl_id.clone()
+        };
+
         // Try to find in capabilities first
         {
             let caps = self.capabilities.read().await;
-            if let Some(cap) = caps.get(&req.std_name) {
-                let mut input_channels = Vec::new();
-                let mut output_channels = Vec::new();
-                let mut input_names = Vec::new();
-                let mut output_names = Vec::new();
-                let mut input_types = Vec::new();
-                let mut output_types = Vec::new();
+            
+            // If impl_id is specified, try exact match first
+            if !req.impl_id.is_empty() {
+                let key = format!("{}::{}", req.std_name, impl_id);
+                if let Some(cap) = caps.get(&key) {
+                    let mut input_channels = Vec::new();
+                    let mut output_channels = Vec::new();
+                    let mut input_names = Vec::new();
+                    let mut output_names = Vec::new();
+                    let mut input_types = Vec::new();
+                    let mut output_types = Vec::new();
 
-                for input in &cap.inputs {
-                    input_channels.push(input.channel.clone());
-                    input_names.push(input.name.clone());
-                    input_types.push(input.ros_type.clone());
+                    for input in &cap.inputs {
+                        input_channels.push(input.channel.clone());
+                        input_names.push(input.name.clone());
+                        input_types.push(input.ros_type.clone());
+                    }
+
+                    for output in &cap.outputs {
+                        output_channels.push(output.channel.clone());
+                        output_names.push(output.name.clone());
+                        output_types.push(output.ros_type.clone());
+                    }
+
+                    // Collect all impl_ids for this std_name
+                    let mut all_impl_ids = Vec::new();
+                    for key in caps.keys() {
+                        if key.starts_with(&format!("{}::", req.std_name)) {
+                            if let Some(id) = key.split("::").nth(1) {
+                                all_impl_ids.push(id.to_string());
+                            }
+                        }
+                    }
+
+                    info!(
+                        std_name = %req.std_name,
+                        impl_id = %impl_id,
+                        "Query capability found"
+                    );
+
+                    return QueryCapSklResponse {
+                        success: true,
+                        error_message: String::new(),
+                        impl_id: impl_id.clone(),
+                        impl_ids: all_impl_ids,
+                        input_channels,
+                        output_channels,
+                        input_names,
+                        output_names,
+                        input_types,
+                        output_types,
+                    };
                 }
+            } else {
+                // If impl_id is empty, find first match and return all impl_ids
+                let mut matching_caps: Vec<_> = caps
+                    .iter()
+                    .filter(|(key, _)| key.starts_with(&format!("{}::", req.std_name)))
+                    .collect();
+                
+                if !matching_caps.is_empty() {
+                    // Sort by key for consistent ordering
+                    matching_caps.sort_by_key(|(k, _)| *k);
+                    let (_, cap) = matching_caps[0];
+                    
+                    let mut input_channels = Vec::new();
+                    let mut output_channels = Vec::new();
+                    let mut input_names = Vec::new();
+                    let mut output_names = Vec::new();
+                    let mut input_types = Vec::new();
+                    let mut output_types = Vec::new();
 
-                for output in &cap.outputs {
-                    output_channels.push(output.channel.clone());
-                    output_names.push(output.name.clone());
-                    output_types.push(output.ros_type.clone());
+                    for input in &cap.inputs {
+                        input_channels.push(input.channel.clone());
+                        input_names.push(input.name.clone());
+                        input_types.push(input.ros_type.clone());
+                    }
+
+                    for output in &cap.outputs {
+                        output_channels.push(output.channel.clone());
+                        output_names.push(output.name.clone());
+                        output_types.push(output.ros_type.clone());
+                    }
+
+                    // Collect all impl_ids for this std_name
+                    let mut all_impl_ids = Vec::new();
+                    for (key, _) in matching_caps {
+                        if let Some(id) = key.split("::").nth(1) {
+                            all_impl_ids.push(id.to_string());
+                        }
+                    }
+
+                    info!(
+                        std_name = %req.std_name,
+                        impl_id = %cap.impl_id,
+                        "Query capability found (first match)"
+                    );
+
+                    return QueryCapSklResponse {
+                        success: true,
+                        error_message: String::new(),
+                        impl_id: cap.impl_id.clone(),
+                        impl_ids: all_impl_ids,
+                        input_channels,
+                        output_channels,
+                        input_names,
+                        output_names,
+                        input_types,
+                        output_types,
+                    };
                 }
-
-                info!(
-                    std_name = %req.std_name,
-                    "Query capability found"
-                );
-
-                return QueryCapSklResponse {
-                    success: true,
-                    error_message: String::new(),
-                    input_channels,
-                    output_channels,
-                    input_names,
-                    output_names,
-                    input_types,
-                    output_types,
-                };
             }
         }
 
         // Try to find in skills
         {
             let skls = self.skills.read().await;
-            if let Some(skl) = skls.get(&req.std_name) {
-                let mut input_channels = Vec::new();
-                let mut output_channels = Vec::new();
-                let mut input_names = Vec::new();
-                let mut output_names = Vec::new();
-                let mut input_types = Vec::new();
-                let mut output_types = Vec::new();
+            
+            // If impl_id is specified, try exact match first
+            if !req.impl_id.is_empty() {
+                let key = format!("{}::{}", req.std_name, impl_id);
+                if let Some(skl) = skls.get(&key) {
+                    let mut input_channels = Vec::new();
+                    let mut output_channels = Vec::new();
+                    let mut input_names = Vec::new();
+                    let mut output_names = Vec::new();
+                    let mut input_types = Vec::new();
+                    let mut output_types = Vec::new();
 
-                for input in &skl.inputs {
-                    input_channels.push(input.channel.clone());
-                    input_names.push(input.name.clone());
-                    input_types.push(input.ros_type.clone());
+                    for input in &skl.inputs {
+                        input_channels.push(input.channel.clone());
+                        input_names.push(input.name.clone());
+                        input_types.push(input.ros_type.clone());
+                    }
+
+                    for output in &skl.outputs {
+                        output_channels.push(output.channel.clone());
+                        output_names.push(output.name.clone());
+                        output_types.push(output.ros_type.clone());
+                    }
+
+                    // Collect all impl_ids for this std_name
+                    let mut all_impl_ids = Vec::new();
+                    for key in skls.keys() {
+                        if key.starts_with(&format!("{}::", req.std_name)) {
+                            if let Some(id) = key.split("::").nth(1) {
+                                all_impl_ids.push(id.to_string());
+                            }
+                        }
+                    }
+
+                    info!(
+                        std_name = %req.std_name,
+                        impl_id = %impl_id,
+                        "Query skill found"
+                    );
+
+                    return QueryCapSklResponse {
+                        success: true,
+                        error_message: String::new(),
+                        impl_id: impl_id.clone(),
+                        impl_ids: all_impl_ids,
+                        input_channels,
+                        output_channels,
+                        input_names,
+                        output_names,
+                        input_types,
+                        output_types,
+                    };
                 }
+            } else {
+                // If impl_id is empty, find first match and return all impl_ids
+                let mut matching_skls: Vec<_> = skls
+                    .iter()
+                    .filter(|(key, _)| key.starts_with(&format!("{}::", req.std_name)))
+                    .collect();
+                
+                if !matching_skls.is_empty() {
+                    // Sort by key for consistent ordering
+                    matching_skls.sort_by_key(|(k, _)| *k);
+                    let (_, skl) = matching_skls[0];
+                    
+                    let mut input_channels = Vec::new();
+                    let mut output_channels = Vec::new();
+                    let mut input_names = Vec::new();
+                    let mut output_names = Vec::new();
+                    let mut input_types = Vec::new();
+                    let mut output_types = Vec::new();
 
-                for output in &skl.outputs {
-                    output_channels.push(output.channel.clone());
-                    output_names.push(output.name.clone());
-                    output_types.push(output.ros_type.clone());
+                    for input in &skl.inputs {
+                        input_channels.push(input.channel.clone());
+                        input_names.push(input.name.clone());
+                        input_types.push(input.ros_type.clone());
+                    }
+
+                    for output in &skl.outputs {
+                        output_channels.push(output.channel.clone());
+                        output_names.push(output.name.clone());
+                        output_types.push(output.ros_type.clone());
+                    }
+
+                    // Collect all impl_ids for this std_name
+                    let mut all_impl_ids = Vec::new();
+                    for (key, _) in matching_skls {
+                        if let Some(id) = key.split("::").nth(1) {
+                            all_impl_ids.push(id.to_string());
+                        }
+                    }
+
+                    info!(
+                        std_name = %req.std_name,
+                        impl_id = %skl.impl_id,
+                        "Query skill found (first match)"
+                    );
+
+                    return QueryCapSklResponse {
+                        success: true,
+                        error_message: String::new(),
+                        impl_id: skl.impl_id.clone(),
+                        impl_ids: all_impl_ids,
+                        input_channels,
+                        output_channels,
+                        input_names,
+                        output_names,
+                        input_types,
+                        output_types,
+                    };
                 }
-
-                info!(
-                    std_name = %req.std_name,
-                    "Query skill found"
-                );
-
-                return QueryCapSklResponse {
-                    success: true,
-                    error_message: String::new(),
-                    input_channels,
-                    output_channels,
-                    input_names,
-                    output_names,
-                    input_types,
-                    output_types,
-                };
             }
         }
 
         // Not found
         warn!(
             std_name = %req.std_name,
+            impl_id = %req.impl_id,
             "Query not found"
         );
 
         QueryCapSklResponse {
             success: false,
-            error_message: format!("Capability or skill '{}' not found", req.std_name),
+            error_message: format!("Capability or skill '{}' (impl_id: '{}') not found", req.std_name, if req.impl_id.is_empty() { "any" } else { &req.impl_id }),
+            impl_id: String::new(),
+            impl_ids: Vec::new(),
             input_channels: Vec::new(),
             output_channels: Vec::new(),
             input_names: Vec::new(),
@@ -394,22 +572,24 @@ impl ManagementModule {
         }
     }
 
-    /// Get all registered capabilities
+    /// Get all registered capabilities (returns std_name::impl_id format)
     pub async fn get_capabilities(&self) -> Vec<String> {
         let caps = self.capabilities.read().await;
         caps.keys().cloned().collect()
     }
 
-    /// Get all registered skills
+    /// Get all registered skills (returns std_name::impl_id format)
     pub async fn get_skills(&self) -> Vec<String> {
         let skls = self.skills.read().await;
         skls.keys().cloned().collect()
     }
 
-    /// Get a skill by name
-    pub async fn get_skill(&self, skill_name: &str) -> Option<Skill> {
+    /// Get a skill by name and impl_id
+    pub async fn get_skill(&self, skill_name: &str, impl_id: Option<&str>) -> Option<Skill> {
         let skls = self.skills.read().await;
-        skls.get(skill_name).cloned()
+        let impl_id = impl_id.unwrap_or("default");
+        let key = format!("{}::{}", skill_name, impl_id);
+        skls.get(&key).cloned()
     }
 
     /// Register an AI model

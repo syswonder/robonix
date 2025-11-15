@@ -35,6 +35,7 @@ package:
 
 capabilities:
   - name: string            # 标准能力名称 (如 cap::grasp.move)
+    impl_id: string          # 可选：实现标识符 (如 "algo01", "algo02")。如果省略，默认为 "default"
     start_script: string    # 启动脚本路径 (相对于 package 根目录，如 "rbnx/start_cap.sh")
     stop_script: string     # 停止脚本路径 (相对于 package 根目录，如 "rbnx/stop_cap.sh")
     inputs:                 # 输入参数通道映射 (字典格式: {参数名: topic通道})
@@ -45,6 +46,7 @@ capabilities:
 
 skills:
   - name: string            # 标准技能名称 (如 skl::pick)
+    impl_id: string         # 可选：实现标识符 (如 "algo01", "algo02")。如果省略，默认为 "default"
     start_script: string    # 启动脚本路径 (相对于 package 根目录，如 "rbnx/start_skill.sh")
     stop_script: string     # 停止脚本路径 (相对于 package 根目录，如 "rbnx/stop_skill.sh")
     inputs:                 # 输入参数通道映射 (字典格式: {参数名: topic通道})
@@ -56,6 +58,8 @@ skills:
 
 **重要说明：**
 - `name` 和 `type` 由标准规范 (spec) 定义，manifest 中无需重复指定
+- `impl_id` 用于区分同一标准名称下的不同实现。如果省略，系统会自动使用 "default" 作为默认值
+- 一个 package 可以为同一个标准名称提供多个实现（通过不同的 `impl_id` 区分）
 - `code_path`、`package_id`、`description` 等字段由 CLI 在注册时自动填充
 - 只需提供参数名到通道的映射关系，格式为字典：`{参数名: topic通道}`
 - 参数名必须与 spec 中定义的标准参数名完全一致
@@ -72,6 +76,7 @@ skills:
 
 **Capability 字段：**
 - `name`: 标准能力名称，必须以 `cap::` 开头，格式为 `cap::category.action`。名称和参数定义由标准规范 (spec) 定义
+- `impl_id`: 实现标识符（可选），用于区分同一标准名称下的不同实现。例如：`"algo01"`、`"algo02"`、`"fast"`、`"accurate"` 等。如果省略，系统会自动使用 `"default"` 作为默认值。**重要**：同一个 package 可以为同一个标准名称提供多个实现，只需使用不同的 `impl_id` 即可
 - `start_script`: 启动脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/start_cap.sh`。CLI 会在注册时使用此脚本启动对应的 capability 进程。每个 capability 必须有自己独立的启动脚本
 - `stop_script`: 停止脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/stop_cap.sh`。CLI 会在需要时使用此脚本停止对应的 capability 进程。每个 capability 必须有自己独立的停止脚本
 - `inputs`: 输入参数的通道映射，字典格式 `{参数名: topic通道}`。参数名必须与 spec 中定义的标准参数名一致
@@ -80,6 +85,7 @@ skills:
 
 **Skill 字段：**
 - `name`: 标准技能名称，必须以 `skl::` 开头。名称和参数定义由标准规范 (spec) 定义
+- `impl_id`: 实现标识符（可选），用于区分同一标准名称下的不同实现。例如：`"algo01"`、`"algo02"`、`"fast"`、`"accurate"` 等。如果省略，系统会自动使用 `"default"` 作为默认值。**重要**：同一个 package 可以为同一个标准名称提供多个实现，只需使用不同的 `impl_id` 即可
 - `start_script`: 启动脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/start_skill.sh`。CLI 会在注册时使用此脚本启动对应的 skill 进程。每个 skill 必须有自己独立的启动脚本
 - `stop_script`: 停止脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/stop_skill.sh`。CLI 会在需要时使用此脚本停止对应的 skill 进程。每个 skill 必须有自己独立的停止脚本
 - `inputs`: 输入参数的通道映射，字典格式 `{参数名: topic通道}`。参数名必须与 spec 中定义的标准参数名一致
@@ -119,13 +125,39 @@ skills:
     # Spec 定义:
     #   INPUT: ["target_label" => "string"]
     #   OUTPUT: ["status" => "boolean"]
+    # impl_id 省略，将使用默认值 "default"
     start_script: rbnx/start_pick.sh
     stop_script: rbnx/stop_pick.sh
     inputs:
       target_label: /demo_pick/target_label
     outputs:
       status: /demo_pick/status
+
+  # 示例：同一标准名称的多个实现
+  - name: skl::pick
+    impl_id: algo01  # 第一个实现
+    start_script: rbnx/start_pick_algo01.sh
+    stop_script: rbnx/stop_pick_algo01.sh
+    inputs:
+      target_label: /demo_pick_algo01/target_label
+    outputs:
+      status: /demo_pick_algo01/status
+
+  - name: skl::pick
+    impl_id: algo02  # 第二个实现（不同的算法）
+    start_script: rbnx/start_pick_algo02.sh
+    stop_script: rbnx/stop_pick_algo02.sh
+    inputs:
+      target_label: /demo_pick_algo02/target_label
+    outputs:
+      status: /demo_pick_algo02/status
 ```
+
+**多实现说明：**
+- 同一个 package 可以为同一个标准名称（如 `skl::pick`）提供多个实现
+- 每个实现必须使用不同的 `impl_id` 来区分
+- 每个实现可以有自己独立的启动/停止脚本和 ROS2 topic 通道
+- 查询时可以通过指定 `impl_id` 来选择特定的实现，或者不指定 `impl_id` 来获取第一个匹配的实现（以及所有可用的 `impl_id` 列表）
 
 ### 2. rbnx/ 目录
 

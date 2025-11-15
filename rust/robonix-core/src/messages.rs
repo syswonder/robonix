@@ -22,6 +22,7 @@ pub struct RegisterCapSklRequest {
     pub package_name: String,
     pub package_type: String, // "cap" or "skl"
     pub std_name: String,
+    pub impl_id: String, // Implementation ID (e.g., "algo01", "algo02"). If empty, defaults to "default"
     pub description: String,
     pub code_path: String,
     pub input_names: Vec<String>,
@@ -53,6 +54,7 @@ pub type RegisterResponse = RegisterCapSklResponse;
 pub struct Capability {
     pub package_name: String,
     pub std_name: String,
+    pub impl_id: String, // Implementation ID
     pub description: String,
     pub code_path: String,
     pub inputs: Vec<IOParameter>,
@@ -65,6 +67,7 @@ pub struct Capability {
 pub struct Skill {
     pub package_name: String,
     pub std_name: String,
+    pub impl_id: String, // Implementation ID
     pub description: String,
     pub code_path: String,
     pub inputs: Vec<IOParameter>,
@@ -76,6 +79,7 @@ pub struct Skill {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryCapSklRequest {
     pub std_name: String,          // Standard name (e.g., "cap::vision.capture_rgb")
+    pub impl_id: String,           // Implementation ID (optional). If empty, returns first match
     pub requirements: Vec<String>, // Optional requirements/filters
 }
 impl Message for QueryCapSklRequest {}
@@ -84,6 +88,8 @@ impl Message for QueryCapSklRequest {}
 pub struct QueryCapSklResponse {
     pub success: bool,
     pub error_message: String,
+    pub impl_id: String,           // Implementation ID of the returned capability/skill
+    pub impl_ids: Vec<String>,      // All available implementation IDs for this std_name (if impl_id was empty)
     pub input_channels: Vec<String>,  // Input topic channels
     pub output_channels: Vec<String>, // Output topic channels
     pub input_names: Vec<String>,     // Input parameter names
