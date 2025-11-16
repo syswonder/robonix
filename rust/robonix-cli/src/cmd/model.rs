@@ -37,6 +37,11 @@ pub async fn execute_register(
     // Get API key from argument or environment
     let api_key_final = api_key.or_else(|| std::env::var("ROBONIX_MODEL_API_KEY").ok());
 
+    if api_key_final.is_none() {
+        output::error("API key is required. Please set the ROBONIX_MODEL_API_KEY environment variable or use the --api-key option");
+        anyhow::bail!("API key is empty");
+    }
+
     let client = ModelClient::new(config)?;
     client
         .register(
@@ -86,30 +91,12 @@ pub async fn execute_query(
     } else {
         output::info(&format!("Found {} AI model(s):", response.models.len()));
         for model in &response.models {
-            output::sub_step(&format!(
-                "  Model ID: {}",
-                model.model_id
-            ));
-            output::sub_step(&format!(
-                "  Name: {}",
-                model.model_name
-            ));
-            output::sub_step(&format!(
-                "  Type: {:?}",
-                model.model_type
-            ));
-            output::sub_step(&format!(
-                "  Provider: {}",
-                model.provider
-            ));
-            output::sub_step(&format!(
-                "  Endpoint: {}",
-                model.api_endpoint
-            ));
-            output::sub_step(&format!(
-                "  Description: {}",
-                model.description
-            ));
+            output::sub_step(&format!("  Model ID: {}", model.model_id));
+            output::sub_step(&format!("  Name: {}", model.model_name));
+            output::sub_step(&format!("  Type: {:?}", model.model_type));
+            output::sub_step(&format!("  Provider: {}", model.provider));
+            output::sub_step(&format!("  Endpoint: {}", model.api_endpoint));
+            output::sub_step(&format!("  Description: {}", model.description));
             if !model.capabilities.is_empty() {
                 output::sub_step(&format!(
                     "  Capabilities: {}",
@@ -122,4 +109,3 @@ pub async fn execute_query(
 
     Ok(())
 }
-
