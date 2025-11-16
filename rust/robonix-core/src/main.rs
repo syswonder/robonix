@@ -697,7 +697,9 @@ where
         let elapsed = start.elapsed();
         let secs = elapsed.as_secs();
         let micros = elapsed.subsec_micros();
-        let timestamp = format!("[{}.{:05}]", secs, micros);
+        // Format: [seconds.microseconds] with 6 digits for microseconds (always)
+        // This ensures consistent alignment: [123.456789]
+        let timestamp = format!("[{}.{:06}]", secs, micros);
 
         // Get log level and format it as a single colored letter
         let level = *event.metadata().level();

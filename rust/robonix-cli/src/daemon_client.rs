@@ -26,6 +26,12 @@ pub enum DaemonCommand {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum DaemonResponse {
     Ok(String),
+    OkWithDetails {
+        message: String,
+        pid: u32,
+        pgid: Option<u32>,
+        pids: Option<Vec<u32>>,
+    },
     Error(String),
     Status(Vec<ProcessStatus>),
 }
