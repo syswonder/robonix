@@ -1,6 +1,8 @@
 use crate::config::Config;
 use anyhow::Result;
-use robonix_core::messages::{ModelType, QueryModelRequest, QueryModelResponse, RegisterModelRequest, RegisterModelResponse};
+use robonix_core::messages::{
+    ModelType, QueryModelRequest, QueryModelResponse, RegisterModelRequest, RegisterModelResponse,
+};
 use ros2_client::{
     service::AService, Context, Name, Node, NodeName, NodeOptions, ServiceMapping, ServiceTypeName,
 };
@@ -9,20 +11,26 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub struct ModelClient {
-    config: Config,
+    _config: Config,
     node: Arc<Mutex<Option<Node>>>,
     register_client: Arc<
-        Mutex<Option<ros2_client::service::Client<AService<RegisterModelRequest, RegisterModelResponse>>>>,
+        Mutex<
+            Option<
+                ros2_client::service::Client<AService<RegisterModelRequest, RegisterModelResponse>>,
+            >,
+        >,
     >,
     query_client: Arc<
-        Mutex<Option<ros2_client::service::Client<AService<QueryModelRequest, QueryModelResponse>>>>,
+        Mutex<
+            Option<ros2_client::service::Client<AService<QueryModelRequest, QueryModelResponse>>>,
+        >,
     >,
 }
 
 impl ModelClient {
     pub fn new(config: Config) -> Result<Self> {
         Ok(Self {
-            config,
+            _config: config,
             node: Arc::new(Mutex::new(None)),
             register_client: Arc::new(Mutex::new(None)),
             query_client: Arc::new(Mutex::new(None)),
@@ -230,4 +238,3 @@ impl ModelClient {
         }
     }
 }
-

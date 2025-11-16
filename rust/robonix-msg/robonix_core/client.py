@@ -60,7 +60,8 @@ class RobonixClient(Node):
         self._lock = threading.Lock()
         
         # Service clients (lazy initialization)
-        self._clients: Dict[str, Any] = {}
+        # Note: Using _service_clients instead of _clients to avoid conflict with Node._clients
+        self._service_clients: Dict[str, Any] = {}
         self._client_locks: Dict[str, threading.Lock] = {}
         
         # Service names
@@ -103,10 +104,10 @@ class RobonixClient(Node):
         Returns:
             Service client instance
         """
-        if service_name not in self._clients:
+        if service_name not in self._service_clients:
             with self._lock:
                 # Double-check locking pattern
-                if service_name not in self._clients:
+                if service_name not in self._service_clients:
                     full_name = self._service_names[service_name]
                     # Create client with matching QoS profile
                     client = self.create_client(
@@ -114,10 +115,10 @@ class RobonixClient(Node):
                         full_name,
                         qos_profile=self._service_qos
                     )
-                    self._clients[service_name] = client
+                    self._service_clients[service_name] = client
                     self._client_locks[service_name] = threading.Lock()
         
-        return self._clients[service_name]
+        return self._service_clients[service_name]
     
     def _call_service(self, service_name: str, service_type, request, timeout_sec: float = 5.0):
         """
@@ -200,14 +201,38 @@ class RobonixClient(Node):
         """
         try:
             from robonix_core.srv import QueryCapSkl
+            self.get_logger().debug(f'query_capability: Creating QueryCapSkl.Request for {std_name}')
             request = QueryCapSkl.Request()
+            self.get_logger().debug(f'query_capability: Setting std_name={std_name}, impl_id={impl_id}')
             request.std_name = std_name
             request.impl_id = impl_id
-            request.requirements = requirements or []
+            # Convert to list to ensure proper type (not dict-like)
+            self.get_logger().debug(f'query_capability: requirements type={type(requirements)}, value={requirements}')
+            try:
+                if requirements is not None:
+                    self.get_logger().debug(f'query_capability: Converting requirements to list, type={type(requirements)}')
+                    request.requirements = list(requirements)
+                    self.get_logger().debug(f'query_capability: requirements converted, type={type(request.requirements)}')
+                else:
+                    self.get_logger().debug('query_capability: requirements is None, setting to empty list')
+                    request.requirements = []
+                    self.get_logger().debug(f'query_capability: requirements set to empty list, type={type(request.requirements)}')
+            except Exception as e:
+                self.get_logger().error(f'query_capability: Error setting requirements: {e}')
+                self.get_logger().error(f'query_capability: requirements type={type(requirements)}, value={requirements}')
+                import traceback
+                self.get_logger().error(f'query_capability: Traceback:\n{traceback.format_exc()}')
+                raise
+            self.get_logger().debug('query_capability: Calling service...')
             return self._call_service('query_cap_skl', QueryCapSkl, request, timeout_sec)
         except ImportError as e:
             self.get_logger().error(f'Failed to import QueryCapSkl service: {e}')
             return None
+        except Exception as e:
+            self.get_logger().error(f'query_capability: Unexpected error: {e}')
+            import traceback
+            self.get_logger().error(f'query_capability: Traceback:\n{traceback.format_exc()}')
+            raise
     
     def register_capability(self, package_name: str, package_type: str, std_name: str,
                            impl_id: str, description: str, code_path: str,
@@ -249,14 +274,15 @@ class RobonixClient(Node):
             request.impl_id = impl_id
             request.description = description
             request.code_path = code_path
-            request.input_names = input_names
-            request.input_ros_types = input_ros_types
-            request.input_channels = input_channels
-            request.output_names = output_names
-            request.output_ros_types = output_ros_types
-            request.output_channels = output_channels
-            request.config_services = config_services or []
-            request.config_names = config_names or []
+            # Convert all list fields to proper lists to ensure proper type (not dict-like)
+            request.input_names = list(input_names) if input_names else []
+            request.input_ros_types = list(input_ros_types) if input_ros_types else []
+            request.input_channels = list(input_channels) if input_channels else []
+            request.output_names = list(output_names) if output_names else []
+            request.output_ros_types = list(output_ros_types) if output_ros_types else []
+            request.output_channels = list(output_channels) if output_channels else []
+            request.config_services = list(config_services) if config_services else []
+            request.config_names = list(config_names) if config_names else []
             request.hostname = hostname
             request.entity_name = entity_name
             return self._call_service('register_cap_skl', RegisterCapSkl, request, timeout_sec)

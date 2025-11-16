@@ -405,6 +405,101 @@ impl ProcessManager {
         false
     }
 
+    /// Kill a process and all its children recursively
+    #[cfg(unix)]
+    fn kill_process_tree(&self, pid: u32) -> Result<()> {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+        use std::io::{BufRead, BufReader};
+        use std::process::Stdio as StdioSync;
+        use std::process::Command as SyncCommand;
+
+        // Collect all PIDs in the process tree (parent + all children)
+        let mut pids_to_kill = vec![pid];
+        
+        // Use pgrep to find all child processes recursively
+        // pgrep -P <pid> finds direct children, we need to recurse
+        let mut current_level = vec![pid];
+        
+        while !current_level.is_empty() {
+            let mut next_level = Vec::new();
+            
+            for parent_pid in &current_level {
+                // Find direct children of this parent
+                if let Ok(output) = SyncCommand::new("pgrep")
+                    .arg("-P")
+                    .arg(parent_pid.to_string())
+                    .stdout(StdioSync::piped())
+                    .output()
+                {
+                    let reader = BufReader::new(&*output.stdout);
+                    for line in reader.lines() {
+                        if let Ok(child_pid_str) = line {
+                            if let Ok(child_pid) = child_pid_str.parse::<u32>() {
+                                if !pids_to_kill.contains(&child_pid) {
+                                    pids_to_kill.push(child_pid);
+                                    next_level.push(child_pid);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            current_level = next_level;
+        }
+        
+        tracing::info!(
+            "Killing process tree: root PID {} and {} child processes",
+            pid,
+            pids_to_kill.len() - 1
+        );
+        
+        // First, send SIGTERM to all processes in the tree
+        for pid_to_kill in &pids_to_kill {
+            let pid_obj = Pid::from_raw(*pid_to_kill as i32);
+            if let Err(e) = kill(pid_obj, Signal::SIGTERM) {
+                // Process might already be dead, that's okay
+                tracing::debug!("Failed to send SIGTERM to PID {}: {:?}", pid_to_kill, e);
+            }
+        }
+        
+        // Wait a bit for processes to terminate gracefully
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        
+        // Check which processes are still alive and kill them with SIGKILL
+        for pid_to_kill in &pids_to_kill {
+            // Check if process still exists
+            if let Ok(output) = SyncCommand::new("ps")
+                .arg("-p")
+                .arg(pid_to_kill.to_string())
+                .output()
+            {
+                if output.status.success() {
+                    // Process still exists, kill it
+                    let pid_obj = Pid::from_raw(*pid_to_kill as i32);
+                    if let Err(e) = kill(pid_obj, Signal::SIGKILL) {
+                        tracing::warn!("Failed to send SIGKILL to PID {}: {:?}", pid_to_kill, e);
+                    } else {
+                        tracing::debug!("Sent SIGKILL to PID {}", pid_to_kill);
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    #[cfg(not(unix))]
+    fn kill_process_tree(&self, pid: u32) -> Result<()> {
+        // On Windows, use taskkill with /T flag to kill process tree
+        use std::process::Command as SyncCommand;
+        let _ = SyncCommand::new("taskkill")
+            .args(&["/PID", &pid.to_string(), "/T", "/F"])
+            .output();
+        Ok(())
+    }
+
     /// Stop a specific process
     pub async fn stop_process(&self, std_name: &str, package_type: &str) -> Result<()> {
         let key = format!("{}::{}", package_type, std_name);
@@ -418,29 +513,30 @@ impl ProcessManager {
         if let Some(process_info) = process_info {
             tracing::info!("Stopping process: {} (PID: {})", key, process_info.pid);
 
-            // Kill the process by PID
-            #[cfg(unix)]
-            {
-                use nix::sys::signal::{kill, Signal};
-                use nix::unistd::Pid;
-                let pid = Pid::from_raw(process_info.pid as i32);
-                if let Err(e) = kill(pid, Signal::SIGTERM) {
-                    tracing::warn!(
-                        "Failed to send SIGTERM to process {}: {:?}",
-                        process_info.pid,
-                        e
-                    );
-                    // Try SIGKILL as fallback
+            // Kill the process tree (parent + all children)
+            if let Err(e) = self.kill_process_tree(process_info.pid) {
+                tracing::warn!(
+                    "Failed to kill process tree for PID {}: {:?}",
+                    process_info.pid,
+                    e
+                );
+                // Fallback: try to kill just the main process
+                #[cfg(unix)]
+                {
+                    use nix::sys::signal::{kill, Signal};
+                    use nix::unistd::Pid;
+                    let pid = Pid::from_raw(process_info.pid as i32);
+                    let _ = kill(pid, Signal::SIGTERM);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     let _ = kill(pid, Signal::SIGKILL);
                 }
-            }
-            #[cfg(not(unix))]
-            {
-                // On Windows, use taskkill or similar
-                let _ = Command::new("taskkill")
-                    .args(&["/PID", &process_info.pid.to_string(), "/F"])
-                    .output()
-                    .await;
+                #[cfg(not(unix))]
+                {
+                    let _ = Command::new("taskkill")
+                        .args(&["/PID", &process_info.pid.to_string(), "/F"])
+                        .output()
+                        .await;
+                }
             }
 
             // Append stop message to log
