@@ -1,10 +1,34 @@
-use crate::{Config, PackageDatabase, ProcessManager, RecipeState};
+use crate::daemon_client::{DaemonClient, DaemonCommand, DaemonResponse};
+use crate::{Config, PackageDatabase, RecipeState};
 use anyhow::Result;
 use serde_yaml::Value;
+use std::path::PathBuf;
 
 pub async fn execute(config: Config) -> Result<()> {
-    let log_dir = config.package_storage_path.join("logs");
-    let process_manager = ProcessManager::new(log_dir)?;
+    // Ensure daemon is running
+    let client = DaemonClient::new()?;
+    client.ensure_daemon_running().await?;
+
+    // Get status from daemon
+    let status_response = client
+        .send_command(DaemonCommand::Status)
+        .await?;
+
+    let running_processes = match status_response {
+        DaemonResponse::Status(procs) => procs,
+        _ => {
+            anyhow::bail!("Unexpected response from daemon");
+        }
+    };
+
+    // Create a map for quick lookup
+    let running_map: std::collections::HashMap<(String, String), (u32, PathBuf)> = running_processes
+        .into_iter()
+        .map(|proc| {
+            let key = (proc.std_name.clone(), proc.package_type.clone());
+            (key, (proc.pid, proc.log_file))
+        })
+        .collect();
     let db = PackageDatabase::load(&config.package_storage_path)?;
 
     // Show active recipe
@@ -83,28 +107,21 @@ pub async fn execute(config: Config) -> Result<()> {
 
         // Add capabilities
         for cap_name in &caps_to_show {
-            let is_running = process_manager.is_running(cap_name, "cap");
-            let (pid, log_file) = if is_running {
-                if let Some(proc) = process_manager
-                    .get_running_processes()
-                    .iter()
-                    .find(|p| p.std_name == *cap_name && p.package_type == "cap")
-                {
-                    (
-                        Some(proc.pid),
-                        Some(
-                            proc.log_file
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .map(|s| s.to_string())
-                                .unwrap_or_default(),
-                        ),
-                    )
-                } else {
-                    (None, None)
-                }
+            let key = (cap_name.clone(), "cap".to_string());
+            let (is_running, pid, log_file) = if let Some((proc_pid, proc_log_file)) = running_map.get(&key) {
+                (
+                    true,
+                    Some(*proc_pid),
+                    Some(
+                        proc_log_file
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_default(),
+                    ),
+                )
             } else {
-                (None, None)
+                (false, None, None)
             };
             all_items.push((
                 pkg_info.name.clone(),
@@ -118,28 +135,21 @@ pub async fn execute(config: Config) -> Result<()> {
 
         // Add skills
         for skill_name in &skills_to_show {
-            let is_running = process_manager.is_running(skill_name, "skl");
-            let (pid, log_file) = if is_running {
-                if let Some(proc) = process_manager
-                    .get_running_processes()
-                    .iter()
-                    .find(|p| p.std_name == *skill_name && p.package_type == "skl")
-                {
-                    (
-                        Some(proc.pid),
-                        Some(
-                            proc.log_file
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .map(|s| s.to_string())
-                                .unwrap_or_default(),
-                        ),
-                    )
-                } else {
-                    (None, None)
-                }
+            let key = (skill_name.clone(), "skl".to_string());
+            let (is_running, pid, log_file) = if let Some((proc_pid, proc_log_file)) = running_map.get(&key) {
+                (
+                    true,
+                    Some(*proc_pid),
+                    Some(
+                        proc_log_file
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_default(),
+                    ),
+                )
             } else {
-                (None, None)
+                (false, None, None)
             };
             all_items.push((
                 pkg_info.name.clone(),

@@ -47,6 +47,13 @@ pub async fn execute(
     }
 
     if show {
+        // Get actual config file path and display real absolute path
+        let config_path = Config::config_file_path()?;
+        // Get canonical (real) path, resolving symlinks
+        let real_path = std::fs::canonicalize(&config_path)
+            .unwrap_or_else(|_| config_path.clone());
+        
+        println!("{} {}", "Current robonix system config are located at:", real_path.display().to_string().bold().cyan());
         println!("\n{}", "Configuration:".bold().cyan());
         println!("  {} {}", "Package storage path:".bright_black(), config.package_storage_path.display().to_string().white());
         if let Some(ref msg_path) = config.robonix_msg_path {

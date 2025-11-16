@@ -30,6 +30,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/GetSpatialMap.srv"
   "srv/AddSpatialMapEntry.srv"
   "srv/GetMapStatus.srv"
+  "srv/Ping.srv"
   DEPENDENCIES
 )
 

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use crate::Config;
 
 mod config;
+mod daemon;
 mod info;
 mod install;
 mod list;
@@ -41,6 +42,9 @@ pub enum Commands {
     /// AI model management commands (LLM, VLM, etc.)
     #[command(subcommand)]
     Model(ModelCommands),
+    /// Daemon management commands
+    #[command(subcommand)]
+    Daemon(DaemonCommands),
 }
 
 #[derive(Subcommand)]
@@ -139,6 +143,18 @@ pub enum DeployCommands {
 }
 
 #[derive(Subcommand)]
+pub enum DaemonCommands {
+    /// Start the daemon
+    Start,
+    /// Stop the daemon
+    Stop,
+    /// Show daemon status
+    Status,
+    /// Restart the daemon
+    Restart,
+}
+
+#[derive(Subcommand)]
 pub enum ModelCommands {
     /// Register an AI model (LLM, VLM, etc.)
     Register {
@@ -234,6 +250,12 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
                 model_type,
                 capability,
             } => model::execute_query(config, model_id, model_type, capability).await,
+        },
+        Commands::Daemon(cmd) => match cmd {
+            DaemonCommands::Start => daemon::start().await,
+            DaemonCommands::Stop => daemon::stop().await,
+            DaemonCommands::Status => daemon::status().await,
+            DaemonCommands::Restart => daemon::restart().await,
         },
     }
 }

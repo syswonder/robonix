@@ -160,3 +160,18 @@ pub struct QueryModelResponse {
     pub models: Vec<Model>,
 }
 impl Message for QueryModelResponse {}
+
+// Ping service for testing concurrent service calls
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PingRequest {
+    pub sequence: u32, // Sequence number for tracking
+}
+impl Message for PingRequest {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PingResponse {
+    pub success: bool,
+    pub sequence: u32, // Echo back the sequence number
+    pub timestamp: u64, // Server timestamp in nanoseconds
+}
+impl Message for PingResponse {}

@@ -215,6 +215,7 @@ impl PackageRegistrar {
             &mut output_types,
         )?;
 
+        let impl_display = if impl_id.is_empty() { "default".to_string() } else { impl_id.clone() };
         let request = RegisterRequest {
             package_name: package_name.to_string(),
             package_type: "cap".to_string(),
@@ -235,7 +236,6 @@ impl PackageRegistrar {
         };
 
         self.call_register_service(request).await?;
-        let impl_display = if request.impl_id.is_empty() { "default" } else { &request.impl_id };
         output::check(&format!(
             "Registered capability: {} (impl_id: {}, host: {}, entity: {})",
             std_name,
@@ -287,6 +287,7 @@ impl PackageRegistrar {
             &mut output_types,
         )?;
 
+        let impl_display = if impl_id.is_empty() { "default".to_string() } else { impl_id.clone() };
         let request = RegisterRequest {
             package_name: package_name.to_string(),
             package_type: "skl".to_string(),
@@ -307,7 +308,6 @@ impl PackageRegistrar {
         };
 
         self.call_register_service(request).await?;
-        let impl_display = if request.impl_id.is_empty() { "default" } else { &request.impl_id };
         output::check(&format!(
             "Registered skill: {} (impl_id: {}, host: {}, entity: {})",
             std_name,

@@ -1,5 +1,4 @@
 use crate::config::Config;
-use crate::output;
 use anyhow::Result;
 use robonix_core::messages::{ModelType, QueryModelRequest, QueryModelResponse, RegisterModelRequest, RegisterModelResponse};
 use ros2_client::{

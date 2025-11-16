@@ -700,5 +700,21 @@ impl ManagementModule {
     pub async fn get_llm_model(&self, model_id: &str) -> Option<LLMModel> {
         self.get_model(model_id).await
     }
+
+    /// Ping service for testing concurrent service calls
+    pub async fn ping(&self, req: crate::messages::PingRequest) -> crate::messages::PingResponse {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        
+        crate::messages::PingResponse {
+            success: true,
+            sequence: req.sequence,
+            timestamp,
+        }
+    }
 }
 

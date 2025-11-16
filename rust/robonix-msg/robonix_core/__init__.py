@@ -1,30 +1,5 @@
-"""Robonix SDK - High-performance client library for Robonix Core services."""
+"""Robonix Core - ROS2 message and service definitions for Robonix system."""
 
-from .client import (
-    RobonixSDK,
-    QueryCapSklResult,
-    RegisterResult,
-    CreateTaskResult,
-    GetTaskResult,
-    ListTasksResult,
-    CancelTaskResult,
-    GetSemanticMapResult,
-    GetSpatialMapResult,
-    GetMapStatusResult,
-    ModelQueryResult,
-)
-
-__all__ = [
-    'RobonixSDK',
-    'QueryCapSklResult',
-    'RegisterResult',
-    'CreateTaskResult',
-    'GetTaskResult',
-    'ListTasksResult',
-    'CancelTaskResult',
-    'GetSemanticMapResult',
-    'GetSpatialMapResult',
-    'GetMapStatusResult',
-    'ModelQueryResult',
-]
+# This package provides ROS2 message and service definitions.
+# Users should implement their own service clients using standard ROS2 patterns.
 

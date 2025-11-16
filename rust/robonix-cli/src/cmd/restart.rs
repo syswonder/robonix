@@ -1,11 +1,13 @@
 use super::recipe_utils;
-use crate::{output, Config, ProcessManager};
+use crate::daemon_client::{DaemonClient, DaemonCommand, DaemonResponse};
+use crate::{output, Config};
 use anyhow::Result;
 use tokio::time::{sleep, Duration};
 
 pub async fn execute(config: Config, target: String) -> Result<()> {
-    let log_dir = config.package_storage_path.join("logs");
-    let process_manager = ProcessManager::new(log_dir)?;
+    // Ensure daemon is running
+    let client = DaemonClient::new()?;
+    client.ensure_daemon_running().await?;
 
     // Get all items from active recipe
     let all_items = recipe_utils::get_recipe_items(&config)?;
@@ -32,7 +34,17 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
     let mut errors = 0;
 
     // Step 1: Stop running processes
-    let running_processes = process_manager.get_running_processes();
+    let status_response = client
+        .send_command(DaemonCommand::Status)
+        .await?;
+
+    let running_processes = match status_response {
+        DaemonResponse::Status(procs) => procs,
+        _ => {
+            anyhow::bail!("Unexpected response from daemon");
+        }
+    };
+
     let items_to_stop: Vec<_> = items_to_restart
         .iter()
         .filter(|item| {
@@ -50,17 +62,34 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
                 "Stopping {} {}...",
                 item.package_type, item.std_name
             ));
-            match process_manager
-                .stop_process(&item.std_name, &item.package_type)
+            match client
+                .send_command(DaemonCommand::Stop {
+                    std_name: item.std_name.clone(),
+                    package_type: item.package_type.clone(),
+                })
                 .await
             {
-                Ok(_) => {
+                Ok(DaemonResponse::Ok(_)) => {
                     output::check(&format!("Stopped {} {}", item.package_type, item.std_name));
+                }
+                Ok(DaemonResponse::Error(e)) => {
+                    output::cross(&format!(
+                        "Failed to stop {} {}: {}",
+                        item.package_type, item.std_name, e
+                    ));
+                    errors += 1;
                 }
                 Err(e) => {
                     output::cross(&format!(
                         "Failed to stop {} {}: {}",
                         item.package_type, item.std_name, e
+                    ));
+                    errors += 1;
+                }
+                _ => {
+                    output::cross(&format!(
+                        "Unexpected response when stopping {} {}",
+                        item.package_type, item.std_name
                     ));
                     errors += 1;
                 }
@@ -80,18 +109,18 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
             "Starting {} {}...",
             item.package_type, item.std_name
         ));
-        match process_manager
-            .start_process(
-                &item.package_name,
-                &item.std_name,
-                &item.package_type,
-                &item.package_path,
-                &item.start_script,
-                config.robonix_msg_path.as_ref(),
-            )
+        match client
+            .send_command(DaemonCommand::Start {
+                package_name: item.package_name.clone(),
+                std_name: item.std_name.clone(),
+                package_type: item.package_type.clone(),
+                package_path: item.package_path.clone(),
+                start_script: item.start_script.clone(),
+                robonix_msg_path: config.robonix_msg_path.clone(),
+            })
             .await
         {
-            Ok(_) => {
+            Ok(DaemonResponse::Ok(_)) => {
                 output::check(&format!("Started {} {}", item.package_type, item.std_name));
                 if items_to_stop
                     .iter()
@@ -102,10 +131,36 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
                     started += 1;
                 }
             }
+            Ok(DaemonResponse::Error(e)) => {
+                if e.contains("already running") {
+                    // Already running, count as restarted if it was in stop list
+                    if items_to_stop
+                        .iter()
+                        .any(|i| i.std_name == item.std_name && i.package_type == item.package_type)
+                    {
+                        restarted += 1;
+                    } else {
+                        started += 1;
+                    }
+                } else {
+                    output::cross(&format!(
+                        "Failed to start {} {}: {}",
+                        item.package_type, item.std_name, e
+                    ));
+                    errors += 1;
+                }
+            }
             Err(e) => {
                 output::cross(&format!(
                     "Failed to start {} {}: {}",
                     item.package_type, item.std_name, e
+                ));
+                errors += 1;
+            }
+            _ => {
+                output::cross(&format!(
+                    "Unexpected response when starting {} {}",
+                    item.package_type, item.std_name
                 ));
                 errors += 1;
             }

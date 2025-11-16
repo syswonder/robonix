@@ -12,8 +12,9 @@ pub struct Config {
 
 impl Config {
     pub fn config_file_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir().context("Failed to get config directory")?;
-        Ok(config_dir.join("robonix").join("config.yaml"))
+        // Use ~/.robonix/config.yaml instead of ~/.config/robonix/config.yaml
+        let home_dir = dirs::home_dir().context("Failed to get home directory")?;
+        Ok(home_dir.join(".robonix").join("config.yaml"))
     }
 
     pub fn load() -> Result<Self> {
