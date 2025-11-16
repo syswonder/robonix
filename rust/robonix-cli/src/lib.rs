@@ -1,4 +1,6 @@
 pub mod config;
+pub mod daemon;
+pub mod daemon_client;
 pub mod database;
 pub mod install;
 pub mod model;

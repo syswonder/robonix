@@ -1,7 +1,7 @@
 use ansi_term::Colour;
 use futures_util::stream::StreamExt;
 use robonix_core::core::RobonixCore;
-use robonix_core::messages::{QueryCapSklRequest, QueryCapSklResponse, RegisterCapSklRequest, RegisterCapSklResponse};
+use robonix_core::messages::{PingRequest, PingResponse, QueryCapSklRequest, QueryCapSklResponse, RegisterCapSklRequest, RegisterCapSklResponse};
 use robonix_core::mgmt::{QueryModelRequest, QueryModelResponse, RegisterModelRequest, RegisterModelResponse};
 use robonix_core::perception::{
     AddEntityRequest, AddEntityResponse, AddSpatialMapEntryRequest, AddSpatialMapEntryResponse,
@@ -76,6 +76,18 @@ fn main() {
         .unwrap();
 
     info!("Query capability/skill service created at /rbnx/srv/mgmt/query_cap_skl");
+
+    // Create ping service for testing
+    let ping_server = node
+        .create_server::<AService<PingRequest, PingResponse>>(
+            ServiceMapping::Enhanced,
+            &Name::new("/rbnx/srv/mgmt", "ping").unwrap(),
+            &ServiceTypeName::new("robonix_core", "Ping"),
+            service_qos.clone(),
+            service_qos.clone(),
+        )
+        .unwrap();
+    info!("Ping service created at /rbnx/srv/mgmt/ping");
 
     // Get perception module
     let perception = core.get_perception();
@@ -232,6 +244,7 @@ fn main() {
         let mgmt_clone3 = mgmt.clone();
         let mgmt_clone4 = mgmt.clone();
         let mgmt_clone5 = mgmt.clone();
+        let mgmt_clone6 = mgmt.clone();
         let planning_clone1 = planning.clone();
         let planning_clone2 = planning.clone();
         let planning_clone3 = planning.clone();
@@ -323,11 +336,11 @@ fn main() {
                 .await;
         });
 
-        // Handle add entity requests
+        // Handle add entity requests (concurrent processing)
         let add_entity_task = smol::spawn(async move {
             let stream = add_entity_server.receive_request_stream();
             stream
-                .for_each(|result| async {
+                .for_each_concurrent(10, |result| async {
                     match result {
                         Ok((req_id, req)) => {
                             perception_clone2.add_entity(req.entity).await;
@@ -553,6 +566,24 @@ fn main() {
                 .await;
         });
 
+        // Handle ping requests (concurrent processing)
+        let ping_task = smol::spawn(async move {
+            let stream = ping_server.receive_request_stream();
+            stream
+                .for_each_concurrent(10, |result| async {
+                    match result {
+                        Ok((req_id, req)) => {
+                            let resp = mgmt_clone6.ping(req).await;
+                            if let Err(e) = ping_server.async_send_response(req_id, resp).await {
+                                error!("Send ping response error: {e:?}");
+                            }
+                        }
+                        Err(e) => error!("Receive ping request error: {e:?}"),
+                    }
+                })
+                .await;
+        });
+
         // Wait for all tasks (all run indefinitely)
         futures_util::future::select_all(vec![
             Box::pin(register_task),
@@ -568,6 +599,7 @@ fn main() {
             Box::pin(get_task_task),
             Box::pin(list_tasks_task),
             Box::pin(cancel_task_task),
+            Box::pin(ping_task),
         ]).await;
     });
     // .count() here just converts Stream to ordinary Future.

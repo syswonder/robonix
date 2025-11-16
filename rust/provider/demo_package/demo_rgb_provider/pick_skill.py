@@ -23,20 +23,23 @@ class PickSkill(Node):
         self.grasp_pose_goal_topic = None
         self.grasp_status_topic = None
         
-        # Use RobonixSDK from robonix_core
+        # Test ping service with 20 concurrent calls
+        self._test_ping_service()
+        
+        # Create service client for querying capabilities
         try:
-            from robonix_core.client import RobonixSDK
-            self.sdk = RobonixSDK()
+            from robonix_core.srv import QueryCapSkl
+            self.query_client = self.create_client(QueryCapSkl, '/rbnx/srv/mgmt/query_cap_skl')
             self._query_capabilities()
         except ImportError as e:
-            self.get_logger().warn(f'robonix_core.client not available ({e}), using fallback topics')
-            self.sdk = None
+            self.get_logger().warn(f'robonix_core.srv.QueryCapSkl not available ({e}), using fallback topics')
+            self.query_client = None
             self._use_fallback_topics()
         except Exception as e:
             import traceback
-            self.get_logger().warn(f'Failed to create RobonixSDK: {e}, using fallback topics')
+            self.get_logger().warn(f'Failed to create query client: {e}, using fallback topics')
             self.get_logger().debug(f'Traceback: {traceback.format_exc()}')
-            self.sdk = None
+            self.query_client = None
             self._use_fallback_topics()
         
         # Subscribe to target label (skill input)
@@ -100,47 +103,165 @@ class PickSkill(Node):
         self.get_logger().info('  Subscribing to: /demo_pick/target_label')
         self.get_logger().info('  Publishing to: /demo_pick/status')
     
+    def _test_ping_service(self):
+        """Test ping service with 20 concurrent calls to check for concurrency issues."""
+        try:
+            from robonix_core.srv import Ping
+            ping_client = self.create_client(Ping, '/rbnx/srv/mgmt/ping')
+            
+            # Wait for service
+            if not ping_client.wait_for_service(timeout_sec=5.0):
+                self.get_logger().warn('Ping service not available, skipping ping test')
+                return
+            
+            self.get_logger().info('Testing ping service with 20 calls...')
+            success_count = 0
+            futures = []
+            
+            # Create 20 async calls
+            for i in range(20):
+                request = ping_client.srv_type.Request()
+                request.sequence = i
+                future = ping_client.call_async(request)
+                futures.append((i, future))
+            
+            # Wait for all responses concurrently
+            # Use a loop that checks all futures periodically
+            import time
+            start_time = time.time()
+            timeout = 10.0  # Total timeout for all requests
+            done_futures = set()
+            
+            while len(done_futures) < len(futures) and (time.time() - start_time) < timeout:
+                for seq, future in futures:
+                    if seq in done_futures:
+                        continue
+                    # Spin once to process any pending callbacks
+                    rclpy.spin_once(self, timeout_sec=0.1)
+                    if future.done():
+                        done_futures.add(seq)
+                        try:
+                            response = future.result()
+                            if response.success and response.sequence == seq:
+                                success_count += 1
+                                self.get_logger().debug(f'Ping {seq}: success (timestamp: {response.timestamp})')
+                            else:
+                                self.get_logger().warn(f'Ping {seq}: failed (success={response.success}, seq={response.sequence})')
+                        except Exception as e:
+                            self.get_logger().warn(f'Ping {seq}: exception: {e}')
+                
+                # Small sleep to avoid busy waiting
+                time.sleep(0.01)
+            
+            # Check for any remaining timeouts
+            for seq, future in futures:
+                if seq not in done_futures:
+                    self.get_logger().warn(f'Ping {seq}: timeout')
+            
+            self.get_logger().info(f'Ping test completed: {success_count}/20 successful')
+            if success_count < 20:
+                self.get_logger().warn(f'Ping test FAILED: {20 - success_count} calls failed or timed out')
+        except ImportError as e:
+            self.get_logger().warn(f'Ping service not available ({e}), skipping ping test')
+        except Exception as e:
+            self.get_logger().warn(f'Ping test failed: {e}')
+            import traceback
+            self.get_logger().debug(f'Traceback: {traceback.format_exc()}')
+    
     def _query_capabilities(self):
         """Query robonix core for required capabilities and get their topic names."""
-        if not self.sdk:
+        if not self.query_client:
+            self._use_fallback_topics()
+            return
+        
+        # Wait for service to be available
+        if not self.query_client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().warn('Query service not available, using fallback topics')
             self._use_fallback_topics()
             return
         
         # Query cap::vision.capture_rgb
         self.get_logger().info('Querying cap::vision.capture_rgb...')
-        result = self.sdk.query_cap_skl('cap::vision.capture_rgb')
+        request = self.query_client.srv_type.Request()
+        request.std_name = 'cap::vision.capture_rgb'
+        request.impl_id = ''
+        request.requirements = []
         
-        if result.success:
-            # Get channel by parameter name from spec
-            self.vision_image_topic = result.get_output_channel('image')
-            if self.vision_image_topic:
-                self.get_logger().info(f'  Found vision capability at: {self.vision_image_topic}')
-            else:
-                self.get_logger().warn('  Vision capability found but "image" output not available')
+        future = self.query_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+        
+        if future.done():
+            try:
+                response = future.result()
+                if response.success:
+                    # Find 'image' in output_names and get corresponding channel
+                    try:
+                        idx = list(response.output_names).index('image')
+                        if idx < len(response.output_channels):
+                            self.vision_image_topic = list(response.output_channels)[idx]
+                            self.get_logger().info(f'  Found vision capability at: {self.vision_image_topic}')
+                        else:
+                            self.get_logger().warn('  Vision capability found but "image" output not available')
+                            self._use_fallback_topics()
+                    except ValueError:
+                        self.get_logger().warn('  Vision capability found but "image" output not found')
+                        self._use_fallback_topics()
+                else:
+                    self.get_logger().warn(f'  Failed to query vision capability: {response.error_message}')
+                    self._use_fallback_topics()
+            except Exception as e:
+                self.get_logger().warn(f'  Error getting vision capability response: {e}')
                 self._use_fallback_topics()
         else:
-            self.get_logger().warn(f'  Failed to query vision capability: {result.error_message}')
+            self.get_logger().warn('  Vision capability query timeout')
             self._use_fallback_topics()
         
         # Query cap::grasp.move
         self.get_logger().info('Querying cap::grasp.move...')
-        result = self.sdk.query_cap_skl('cap::grasp.move')
+        request = self.query_client.srv_type.Request()
+        request.std_name = 'cap::grasp.move'
+        request.impl_id = ''
+        request.requirements = []
         
-        if result.success:
-            # Get channels by parameter names from spec
-            self.grasp_pose_goal_topic = result.get_input_channel('target_pose')
-            self.grasp_status_topic = result.get_output_channel('status')
-            
-            if self.grasp_pose_goal_topic and self.grasp_status_topic:
-                self.get_logger().info(f'  Found grasp capability')
-                self.get_logger().info(f'    Input (target_pose): {self.grasp_pose_goal_topic}')
-                self.get_logger().info(f'    Output (status): {self.grasp_status_topic}')
-            else:
-                self.get_logger().warn('  Grasp capability found but required parameters not available')
+        future = self.query_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+        
+        if future.done():
+            try:
+                response = future.result()
+                if response.success:
+                    # Find 'target_pose' in input_names and 'status' in output_names
+                    try:
+                        input_idx = list(response.input_names).index('target_pose')
+                        output_idx = list(response.output_names).index('status')
+                        
+                        if input_idx < len(response.input_channels):
+                            self.grasp_pose_goal_topic = list(response.input_channels)[input_idx]
+                        if output_idx < len(response.output_channels):
+                            self.grasp_status_topic = list(response.output_channels)[output_idx]
+                        
+                        if self.grasp_pose_goal_topic and self.grasp_status_topic:
+                            self.get_logger().info(f'  Found grasp capability')
+                            self.get_logger().info(f'    Input (target_pose): {self.grasp_pose_goal_topic}')
+                            self.get_logger().info(f'    Output (status): {self.grasp_status_topic}')
+                        else:
+                            self.get_logger().warn('  Grasp capability found but required parameters not available')
+                            if not self.grasp_pose_goal_topic:
+                                self._use_fallback_topics()
+                    except ValueError as e:
+                        self.get_logger().warn(f'  Grasp capability found but required parameters not found: {e}')
+                        if not self.grasp_pose_goal_topic:
+                            self._use_fallback_topics()
+                else:
+                    self.get_logger().warn(f'  Failed to query grasp capability: {response.error_message}')
+                    if not self.grasp_pose_goal_topic:
+                        self._use_fallback_topics()
+            except Exception as e:
+                self.get_logger().warn(f'  Error getting grasp capability response: {e}')
                 if not self.grasp_pose_goal_topic:
                     self._use_fallback_topics()
         else:
-            self.get_logger().warn(f'  Failed to query grasp capability: {result.error_message}')
+            self.get_logger().warn('  Grasp capability query timeout')
             if not self.grasp_pose_goal_topic:
                 self._use_fallback_topics()
     

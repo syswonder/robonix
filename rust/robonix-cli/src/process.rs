@@ -223,6 +223,10 @@ impl ProcessManager {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         
+        // Set PYTHONUNBUFFERED=1 to disable Python output buffering
+        // This ensures logs are written immediately
+        cmd.env("PYTHONUNBUFFERED", "1");
+        
         // Set ROBONIX_MSG_PATH from config or environment variable
         if std::env::var("ROBONIX_MSG_PATH").is_err() {
             if let Some(config_path) = robonix_msg_path {
@@ -234,57 +238,80 @@ impl ProcessManager {
             .spawn()
             .with_context(|| format!("Failed to start script: {}", script_path.display()))?;
 
-        // Spawn task to capture output and write to log
-        let log_file_clone = log_file.clone();
+        // Spawn tasks to capture output and write to log
+        // Use separate file handles for stdout and stderr to avoid synchronization issues
+        let log_file_stdout = log_file.clone();
+        let log_file_stderr = log_file.clone();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
-        if let Some(mut stdout) = stdout {
-            let log_file_clone = log_file_clone.clone();
+        // Capture stdout (line-by-line for better reliability)
+        if let Some(stdout) = stdout {
             tokio::spawn(async move {
                 if let Ok(mut file) = OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(&log_file_clone)
+                    .open(&log_file_stdout)
                     .await
                 {
-                    use tokio::io::AsyncReadExt;
-                    let mut buffer = vec![0u8; 1024];
-                    loop {
-                        match stdout.read(&mut buffer).await {
-                            Ok(0) => break, // EOF
-                            Ok(n) => {
-                                let _ = file.write_all(&buffer[..n]).await;
-                                let _ = file.flush().await;
-                            }
-                            Err(_) => break,
+                    use tokio::io::{AsyncBufReadExt, BufReader};
+                    let reader = BufReader::new(stdout);
+                    let mut lines = reader.lines();
+                    
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        if let Err(e) = file.write_all(line.as_bytes()).await {
+                            tracing::error!("Failed to write stdout to log: {}", e);
+                            break;
+                        }
+                        if let Err(e) = file.write_all(b"\n").await {
+                            tracing::error!("Failed to write newline: {}", e);
+                            break;
+                        }
+                        // Flush after each line to ensure immediate persistence
+                        if let Err(e) = file.flush().await {
+                            tracing::error!("Failed to flush stdout log: {}", e);
+                            break;
                         }
                     }
                 }
             });
         }
 
-        if let Some(mut stderr) = stderr {
-            let log_file_clone = log_file_clone.clone();
+        // Capture stderr with prefix (line-by-line for proper prefix placement)
+        if let Some(stderr) = stderr {
             tokio::spawn(async move {
                 if let Ok(mut file) = OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(&log_file_clone)
+                    .open(&log_file_stderr)
                     .await
                 {
-                    use tokio::io::AsyncReadExt;
-                    let mut buffer = vec![0u8; 1024];
-                    loop {
-                        match stderr.read(&mut buffer).await {
-                            Ok(0) => break, // EOF
-                            Ok(n) => {
-                                let _ = file.write_all(format!("[STDERR] ").as_bytes()).await;
-                                let _ = file.write_all(&buffer[..n]).await;
-                                let _ = file.flush().await;
+                    use tokio::io::{AsyncBufReadExt, BufReader};
+                    let reader = BufReader::new(stderr);
+                    let mut lines = reader.lines();
+                    let mut is_new_line = true;
+                    
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        // Add prefix only at the start of each line
+                        if is_new_line {
+                            if let Err(e) = file.write_all(b"[STDERR] ").await {
+                                tracing::error!("Failed to write stderr prefix: {}", e);
+                                break;
                             }
-                            Err(_) => break,
                         }
+                        if let Err(e) = file.write_all(line.as_bytes()).await {
+                            tracing::error!("Failed to write stderr to log: {}", e);
+                            break;
+                        }
+                        if let Err(e) = file.write_all(b"\n").await {
+                            tracing::error!("Failed to write newline: {}", e);
+                            break;
+                        }
+                        if let Err(e) = file.flush().await {
+                            tracing::error!("Failed to flush stderr log: {}", e);
+                            break;
+                        }
+                        is_new_line = true;
                     }
                 }
             });
