@@ -155,8 +155,9 @@ fn main() {
 
     info!("Perception module initialized");
 
-    // Get planning module
+    // Get planning and action modules
     let planning = core.get_planning();
+    let action = core.get_action();
 
     // Create model registration service
     let register_model_server = node
@@ -246,6 +247,7 @@ fn main() {
         let planning_clone2 = planning.clone();
         let planning_clone3 = planning.clone();
         let planning_clone4 = planning.clone();
+        let action_clone1 = action.clone();
 
         // Handle registration requests
         let register_task = smol::spawn(async move {
@@ -494,15 +496,63 @@ fn main() {
                 .for_each(|result| async {
                     match result {
                         Ok((req_id, req)) => {
-                            let task_id = planning_clone1.create_task(req.natural_language).await;
+                            let task_id = planning_clone1.create_task(req.natural_language.clone()).await;
                             let resp = CreateTaskResponse {
                                 success: true,
                                 error_message: String::new(),
-                                task_id,
+                                task_id: task_id.clone(),
                             };
                             if let Err(e) = create_task_server.async_send_response(req_id, resp).await {
                                 error!("Send create task response error: {e:?}");
                             }
+                            
+                            // Automatically execute the full workflow after task creation
+                            let planning_for_workflow = planning_clone1.clone();
+                            let action_for_workflow = action_clone1.clone();
+                            let task_id_for_workflow = task_id.clone();
+                            smol::spawn(async move {
+                                info!(task_id = %task_id_for_workflow, "Starting automatic workflow execution");
+                                
+                                // Step 1: Generate DSL
+                                match planning_for_workflow.generate_dsl(&task_id_for_workflow).await {
+                                    Ok(dsl_code) => {
+                                        info!(task_id = %task_id_for_workflow, "DSL generated successfully");
+                                        
+                                        // Update state to Running before execution
+                                        let _ = planning_for_workflow.update_task_state(
+                                            &task_id_for_workflow,
+                                            robonix_core::planning::task::TaskState::Running,
+                                            None,
+                                        ).await;
+                                        
+                                        // Step 2: Execute DSL
+                                        match action_for_workflow.execute_dsl(&task_id_for_workflow, &dsl_code).await {
+                                            Ok(()) => {
+                                                info!(task_id = %task_id_for_workflow, "Task execution completed successfully");
+                                                // Update task state to Completed
+                                                let _ = planning_for_workflow.update_task_state(
+                                                    &task_id_for_workflow,
+                                                    robonix_core::planning::task::TaskState::Completed,
+                                                    None,
+                                                ).await;
+                                            }
+                                            Err(e) => {
+                                                error!(task_id = %task_id_for_workflow, error = %e, "DSL execution failed");
+                                                // Update task state to Failed
+                                                let _ = planning_for_workflow.update_task_state(
+                                                    &task_id_for_workflow,
+                                                    robonix_core::planning::task::TaskState::Failed,
+                                                    Some(e),
+                                                ).await;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!(task_id = %task_id_for_workflow, error = %e, "DSL generation failed");
+                                        // Task state is already set to Failed in generate_dsl
+                                    }
+                                }
+                            }).detach();
                         }
                         Err(e) => error!("Receive create task request error: {e:?}"),
                     }

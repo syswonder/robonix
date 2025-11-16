@@ -1,5 +1,6 @@
 #[macro_use]
 pub mod spec;
+pub mod action;
 pub mod core;
 pub mod mgmt;
 pub mod messages;

@@ -1,3 +1,4 @@
+use crate::action::ActionModule;
 use crate::mgmt::ManagementModule;
 use crate::perception::PerceptionModule;
 use crate::planning::PlanningModule;
@@ -8,18 +9,30 @@ pub struct RobonixCore {
     mgmt: Arc<ManagementModule>,
     perception: Arc<PerceptionModule>,
     planning: Arc<PlanningModule>,
+    action: Arc<ActionModule>,
 }
 
 impl RobonixCore {
     pub fn new() -> Self {
         let mgmt = Arc::new(ManagementModule::new());
         let perception = Arc::new(PerceptionModule::new());
-        let planning = Arc::new(PlanningModule::new());
+        
+        // Create planning module and connect it
+        let mut planning = PlanningModule::new();
+        planning.set_mgmt(mgmt.clone());
+        planning.set_perception(perception.clone());
+        let planning = Arc::new(planning);
+        
+        // Create action module and connect it
+        let mut action = ActionModule::new();
+        action.set_mgmt(mgmt.clone());
+        let action = Arc::new(action);
 
         Self {
             mgmt,
             perception,
             planning,
+            action,
         }
     }
 
@@ -33,6 +46,10 @@ impl RobonixCore {
 
     pub fn get_planning(&self) -> Arc<PlanningModule> {
         self.planning.clone()
+    }
+
+    pub fn get_action(&self) -> Arc<ActionModule> {
+        self.action.clone()
     }
 
     /// Register capability or skill (delegates to management module)
