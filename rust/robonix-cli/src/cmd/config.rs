@@ -55,11 +55,14 @@ pub async fn execute(
         
         println!("{} {}", "Current robonix system config are located at:", real_path.display().to_string().bold().cyan());
         println!("\n{}", "Configuration:".bold().cyan());
-        println!("  {} {}", "Package storage path:".bright_black(), config.package_storage_path.display().to_string().white());
+        let label1 = format!("{:<25}", "Package storage path:");
+        println!("  {} {}", label1.bright_white(), config.package_storage_path.display().to_string().white());
         if let Some(ref msg_path) = config.robonix_msg_path {
-            println!("  {} {}", "Robonix-msg path:".bright_black(), msg_path.display().to_string().white());
+            let label2 = format!("{:<25}", "Robonix-msg path:");
+            println!("  {} {}", label2.bright_white(), msg_path.display().to_string().white());
         } else {
-            println!("  {} {}", "Robonix-msg path:".bright_black(), "(not set)".yellow());
+            let label2 = format!("{:<25}", "Robonix-msg path:");
+            println!("  {} {}", label2.bright_white(), "(not set)".yellow());
         }
         println!();
     } else if !updated {

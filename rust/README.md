@@ -13,6 +13,10 @@ cargo build
 # in robonix-cli, run:
 mkdir -p ~/.robonix; rm -rf ~/.robonix/packages; ln -s "$(realpath ../provider/)" ~/.robonix/packages;
 export FASTRTPS_DEFAULT_PROFILES_FILE=
+
+# then build the robonix-msg
+cd robonix-msg
+./build_ros2.sh
 ```
 
 ## start robonix-core

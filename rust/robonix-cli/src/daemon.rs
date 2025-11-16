@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use crate::process::ProcessManager;
 use crate::daemon_client::{DaemonCommand, DaemonResponse, ProcessStatus};
+use dirs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
@@ -19,7 +20,8 @@ impl Daemon {
         let log_dir = config.package_storage_path.join("logs");
         let process_manager = Arc::new(ProcessManager::new(log_dir)?);
 
-        let socket_dir = PathBuf::from("/var/run/robonix");
+        let home_dir = dirs::home_dir().context("Failed to get home directory")?;
+        let socket_dir = home_dir.join(".robonix");
         std::fs::create_dir_all(&socket_dir)
             .with_context(|| format!("Failed to create socket directory: {}", socket_dir.display()))?;
         let socket_path = socket_dir.join("daemon.sock");

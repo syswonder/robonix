@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use dirs;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -39,8 +40,9 @@ impl ProcessManager {
             .to_string_lossy()
             .to_string();
 
-        // State file in /var/lib/robonix/processes.json
-        let state_dir = PathBuf::from("/var/lib/robonix");
+        // State file in ~/.robonix/processes.json
+        let home_dir = dirs::home_dir().context("Failed to get home directory")?;
+        let state_dir = home_dir.join(".robonix");
         std::fs::create_dir_all(&state_dir).with_context(|| {
             format!("Failed to create state directory: {}", state_dir.display())
         })?;

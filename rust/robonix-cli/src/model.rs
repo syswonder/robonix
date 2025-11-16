@@ -64,8 +64,8 @@ impl ModelClient {
             let register_client = node
                 .create_client::<AService<RegisterModelRequest, RegisterModelResponse>>(
                     ServiceMapping::Enhanced,
-                    &Name::new("/rbnx/srv/mgmt", "register_llm").unwrap(),
-                    &ServiceTypeName::new("robonix_core", "RegisterLLM"),
+                    &Name::new("/rbnx/srv/mgmt", "register_model").unwrap(),
+                    &ServiceTypeName::new("robonix_core", "RegisterModel"),
                     service_qos.clone(),
                     service_qos.clone(),
                 )
@@ -76,8 +76,8 @@ impl ModelClient {
             let query_client = node
                 .create_client::<AService<QueryModelRequest, QueryModelResponse>>(
                     ServiceMapping::Enhanced,
-                    &Name::new("/rbnx/srv/mgmt", "query_llm").unwrap(),
-                    &ServiceTypeName::new("robonix_core", "QueryLLM"),
+                    &Name::new("/rbnx/srv/mgmt", "query_model").unwrap(),
+                    &ServiceTypeName::new("robonix_core", "QueryModel"),
                     service_qos.clone(),
                     service_qos,
                 )
