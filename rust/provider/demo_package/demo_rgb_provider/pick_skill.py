@@ -10,6 +10,7 @@ from std_msgs.msg import String, Bool
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import PoseStamped
 import time
+import signal
 from robonix_core import RobonixClient
 
 
@@ -26,15 +27,24 @@ class PickSkill(Node):
         
         # Create Robonix client for service calls
         try:
+            self.get_logger().info('Creating RobonixClient...')
             self.robonix_client = RobonixClient(node_name='demo_pick_skill_client', max_workers=20)
+            self.get_logger().info('RobonixClient created successfully, querying capabilities...')
             # Test ping service with 20 concurrent calls
             # self._test_ping_service()
             # Query capabilities
             self._query_capabilities()
         except Exception as e:
             import traceback
-            self.get_logger().warn(f'Failed to create RobonixClient: {e}, using fallback topics')
-            self.get_logger().debug(f'Traceback: {traceback.format_exc()}')
+            error_traceback = traceback.format_exc()
+            self.get_logger().error(f'Failed to create RobonixClient: {e}')
+            self.get_logger().error(f'Error type: {type(e).__name__}')
+            self.get_logger().error(f'Full traceback:\n{error_traceback}')
+            # Also print to stderr for immediate visibility
+            import sys
+            print(f'[ERROR] Failed to create RobonixClient: {e}', file=sys.stderr)
+            print(f'[ERROR] Error type: {type(e).__name__}', file=sys.stderr)
+            print(f'[ERROR] Full traceback:\n{error_traceback}', file=sys.stderr)
             self.robonix_client = None
             self._use_fallback_topics()
         
@@ -140,7 +150,17 @@ class PickSkill(Node):
         
         # Query cap::vision.capture_rgb
         self.get_logger().info('Querying cap::vision.capture_rgb...')
-        response = self.robonix_client.query_capability('cap::vision.capture_rgb', '', [], timeout_sec=5.0)
+        try:
+            response = self.robonix_client.query_capability('cap::vision.capture_rgb', '', None, timeout_sec=5.0)
+        except Exception as e:
+            import traceback
+            self.get_logger().error(f'Error in query_capability for vision: {e}')
+            self.get_logger().error(f'Traceback:\n{traceback.format_exc()}')
+            import sys
+            print(f'[ERROR] Error in query_capability for vision: {e}', file=sys.stderr)
+            print(f'[ERROR] Traceback:\n{traceback.format_exc()}', file=sys.stderr)
+            self._use_fallback_topics()
+            return
         
         if response and response.success:
             try:
@@ -161,7 +181,18 @@ class PickSkill(Node):
         
         # Query cap::grasp.move
         self.get_logger().info('Querying cap::grasp.move...')
-        response = self.robonix_client.query_capability('cap::grasp.move', '', [], timeout_sec=5.0)
+        try:
+            response = self.robonix_client.query_capability('cap::grasp.move', '', None, timeout_sec=5.0)
+        except Exception as e:
+            import traceback
+            self.get_logger().error(f'Error in query_capability for grasp: {e}')
+            self.get_logger().error(f'Traceback:\n{traceback.format_exc()}')
+            import sys
+            print(f'[ERROR] Error in query_capability for grasp: {e}', file=sys.stderr)
+            print(f'[ERROR] Traceback:\n{traceback.format_exc()}', file=sys.stderr)
+            if not self.grasp_pose_goal_topic:
+                self._use_fallback_topics()
+            return
         
         if response and response.success:
             try:
@@ -286,15 +317,33 @@ def main(args=None):
     rclpy.init(args=args)
     pick_skill = PickSkill()
     
+    # Flag to track if shutdown was requested
+    shutdown_requested = False
+    
+    def signal_handler(signum, frame):
+        """Handle shutdown signals (SIGTERM, SIGINT)."""
+        nonlocal shutdown_requested
+        shutdown_requested = True
+        pick_skill.get_logger().info(f'Received signal {signum}, shutting down...')
+        # Shutdown rclpy to exit spin loop
+        rclpy.shutdown()
+    
+    # Register signal handlers
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
     try:
         rclpy.spin(pick_skill)
     except KeyboardInterrupt:
-        pass
+        shutdown_requested = True
+        pick_skill.get_logger().info('Received KeyboardInterrupt, shutting down...')
     finally:
         if pick_skill.robonix_client:
             pick_skill.robonix_client.shutdown()
         pick_skill.destroy_node()
         rclpy.shutdown()
+        if shutdown_requested:
+            pick_skill.get_logger().info('Pick skill shutdown complete')
 
 
 if __name__ == '__main__':
