@@ -125,10 +125,12 @@ impl Daemon {
                         )
                         .await
                     {
-                        Ok(_) => DaemonResponse::Ok(format!(
-                            "Started {} {}",
-                            package_type, std_name
-                        )),
+                        Ok(result) => DaemonResponse::OkWithDetails {
+                            message: format!("Started {} {}", package_type, std_name),
+                            pid: result.pid,
+                            pgid: result.pgid,
+                            pids: result.pids,
+                        },
                         Err(e) => DaemonResponse::Error(format!("Failed to start: {}", e)),
                     }
                 }
@@ -141,10 +143,12 @@ impl Daemon {
                     .stop_process(&std_name, &package_type)
                     .await
                 {
-                    Ok(_) => DaemonResponse::Ok(format!(
-                        "Stopped {} {}",
-                        package_type, std_name
-                    )),
+                    Ok(result) => DaemonResponse::OkWithDetails {
+                        message: format!("Stopped {} {}", package_type, std_name),
+                        pid: result.pid,
+                        pgid: result.pgid,
+                        pids: result.pids,
+                    },
                     Err(e) => DaemonResponse::Error(format!("Failed to stop: {}", e)),
                 }
             }

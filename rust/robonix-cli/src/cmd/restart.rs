@@ -58,36 +58,60 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
         output::step("Stopping", &format!("{} process(es)", items_to_stop.len()));
 
         for item in &items_to_stop {
-            output::sub_step(&format!(
+            let mut spinner = output::Spinner::new(format!(
                 "Stopping {} {}...",
                 item.package_type, item.std_name
             ));
-            match client
+            spinner.start();
+            
+            let result = client
                 .send_command(DaemonCommand::Stop {
                     std_name: item.std_name.clone(),
                     package_type: item.package_type.clone(),
                 })
-                .await
-            {
+                .await;
+            
+            match result {
                 Ok(DaemonResponse::Ok(_)) => {
-                    output::check(&format!("Stopped {} {}", item.package_type, item.std_name));
+                    spinner.finish_success(&format!("Stopped {} {}", item.package_type, item.std_name));
+                }
+                Ok(DaemonResponse::OkWithDetails { message, pid, pgid, pids }) => {
+                    spinner.finish_success(&message);
+                    if let Some(pgid) = pgid {
+                        if let Some(ref pids_list) = pids {
+                            if pids_list.len() > 1 {
+                                output::sub_step(&format!(
+                                    "  Process group {} ({} processes): {}",
+                                    pgid,
+                                    pids_list.len(),
+                                    pids_list.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+                                ));
+                            } else {
+                                output::sub_step(&format!("  PID: {}, PGID: {}", pid, pgid));
+                            }
+                        } else {
+                            output::sub_step(&format!("  PID: {}, PGID: {}", pid, pgid));
+                        }
+                    } else {
+                        output::sub_step(&format!("  PID: {}", pid));
+                    }
                 }
                 Ok(DaemonResponse::Error(e)) => {
-                    output::cross(&format!(
+                    spinner.finish_error(&format!(
                         "Failed to stop {} {}: {}",
                         item.package_type, item.std_name, e
                     ));
                     errors += 1;
                 }
                 Err(e) => {
-                    output::cross(&format!(
+                    spinner.finish_error(&format!(
                         "Failed to stop {} {}: {}",
                         item.package_type, item.std_name, e
                     ));
                     errors += 1;
                 }
                 _ => {
-                    output::cross(&format!(
+                    spinner.finish_error(&format!(
                         "Unexpected response when stopping {} {}",
                         item.package_type, item.std_name
                     ));
@@ -105,11 +129,13 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
     output::step("Starting", &format!("{} item(s)", items_to_restart.len()));
 
     for item in &items_to_restart {
-        output::sub_step(&format!(
+        let mut spinner = output::Spinner::new(format!(
             "Starting {} {}...",
             item.package_type, item.std_name
         ));
-        match client
+        spinner.start();
+        
+        let result = client
             .send_command(DaemonCommand::Start {
                 package_name: item.package_name.clone(),
                 std_name: item.std_name.clone(),
@@ -118,10 +144,72 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
                 start_script: item.start_script.clone(),
                 robonix_msg_path: config.robonix_msg_path.clone(),
             })
-            .await
-        {
+            .await;
+        
+        match result {
             Ok(DaemonResponse::Ok(_)) => {
-                output::check(&format!("Started {} {}", item.package_type, item.std_name));
+                // Fallback for old response format (should not happen with new daemon)
+                spinner.finish_success(&format!("Started {} {}", item.package_type, item.std_name));
+                if items_to_stop
+                    .iter()
+                    .any(|i| i.std_name == item.std_name && i.package_type == item.package_type)
+                {
+                    restarted += 1;
+                } else {
+                    started += 1;
+                }
+            }
+            Ok(DaemonResponse::OkWithDetails { message, pid, pgid, pids }) => {
+                spinner.finish_success(&message);
+                
+                // Display process group info first
+                if let Some(pgid) = pgid {
+                    if let Some(ref pids_list) = pids {
+                        if pids_list.len() > 1 {
+                            output::sub_step(&format!(
+                                "  Process group {} ({} processes): {}",
+                                pgid,
+                                pids_list.len(),
+                                pids_list.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+                            ));
+                        } else {
+                            output::sub_step(&format!("  PID: {}, PGID: {}", pid, pgid));
+                        }
+                    } else {
+                        output::sub_step(&format!("  PID: {}, PGID: {}", pid, pgid));
+                    }
+                } else {
+                    output::sub_step(&format!("  PID: {}", pid));
+                }
+                
+                // Wait a bit more for process to fully start and spawn children
+                tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                
+                // Get and display process tree
+                #[cfg(unix)]
+                {
+                    use crate::process::ProcessManager;
+                    match ProcessManager::get_process_tree(pid) {
+                        Ok(tree) => {
+                            output::sub_step("Process tree:");
+                            let tree_str = tree.format_tree("", true);
+                            // Print each line
+                            for line in tree_str.lines() {
+                                if !line.trim().is_empty() {
+                                    println!("    {}", line);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            output::sub_step(&format!("  (tree fetch failed: {})", e));
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    // Already displayed above
+                }
+                
                 if items_to_stop
                     .iter()
                     .any(|i| i.std_name == item.std_name && i.package_type == item.package_type)
@@ -134,6 +222,10 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
             Ok(DaemonResponse::Error(e)) => {
                 if e.contains("already running") {
                     // Already running, count as restarted if it was in stop list
+                    spinner.finish_success(&format!(
+                        "Skipped {} {} (already running)",
+                        item.package_type, item.std_name
+                    ));
                     if items_to_stop
                         .iter()
                         .any(|i| i.std_name == item.std_name && i.package_type == item.package_type)
@@ -143,7 +235,7 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
                         started += 1;
                     }
                 } else {
-                    output::cross(&format!(
+                    spinner.finish_error(&format!(
                         "Failed to start {} {}: {}",
                         item.package_type, item.std_name, e
                     ));
@@ -151,14 +243,14 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
                 }
             }
             Err(e) => {
-                output::cross(&format!(
+                spinner.finish_error(&format!(
                     "Failed to start {} {}: {}",
                     item.package_type, item.std_name, e
                 ));
                 errors += 1;
             }
             _ => {
-                output::cross(&format!(
+                spinner.finish_error(&format!(
                     "Unexpected response when starting {} {}",
                     item.package_type, item.std_name
                 ));

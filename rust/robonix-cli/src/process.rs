@@ -20,6 +20,52 @@ pub struct ProcessInfo {
     pub hostname: String,
 }
 
+/// Process start result with group information
+#[derive(Debug, Clone)]
+pub struct ProcessStartResult {
+    pub pid: u32,
+    pub pgid: Option<u32>,
+    pub pids: Option<Vec<u32>>,
+}
+
+/// Process stop result with group information
+#[derive(Debug, Clone)]
+pub struct ProcessStopResult {
+    pub pid: u32,
+    pub pgid: Option<u32>,
+    pub pids: Option<Vec<u32>>,
+}
+
+/// Process tree node structure
+#[derive(Debug, Clone)]
+pub struct ProcessTreeNode {
+    pub pid: u32,
+    pub cmd: String,
+    pub children: Vec<ProcessTreeNode>,
+}
+
+impl ProcessTreeNode {
+    /// Format tree as string with indentation
+    pub fn format_tree(&self, prefix: &str, is_last: bool) -> String {
+        let connector = if is_last { "└── " } else { "├── " };
+        let mut result = format!("{}{}PID {}: {}\n", prefix, connector, self.pid, self.cmd);
+        
+        let new_prefix = if is_last {
+            format!("{}    ", prefix)
+        } else {
+            format!("{}│   ", prefix)
+        };
+        
+        let child_count = self.children.len();
+        for (idx, child) in self.children.iter().enumerate() {
+            let is_last_child = idx == child_count - 1;
+            result.push_str(&child.format_tree(&new_prefix, is_last_child));
+        }
+        
+        result
+    }
+}
+
 /// Manager for processes running capabilities and skills
 pub struct ProcessManager {
     processes: Arc<Mutex<HashMap<String, ProcessInfo>>>, // key: "{package_type}::{std_name}"
@@ -156,15 +202,31 @@ impl ProcessManager {
         package_path: &Path,
         start_script: &str,
         robonix_msg_path: Option<&PathBuf>,
-    ) -> Result<()> {
+    ) -> Result<ProcessStartResult> {
         let key = format!("{}::{}", package_type, std_name);
 
         // Check if already running
         {
             let processes = self.processes.lock().unwrap();
-            if processes.contains_key(&key) {
+            if let Some(existing) = processes.get(&key) {
                 tracing::warn!("Process for {} already running, skipping", key);
-                return Ok(());
+                // Return existing process info
+                #[cfg(unix)]
+                let (pgid, pids) = {
+                    if let Ok(pgid) = Self::get_process_group_id(existing.pid) {
+                        let pids = Self::get_processes_in_group(pgid).ok();
+                        (Some(pgid), pids)
+                    } else {
+                        (None, None)
+                    }
+                };
+                #[cfg(not(unix))]
+                let (pgid, pids) = (None, None);
+                return Ok(ProcessStartResult {
+                    pid: existing.pid,
+                    pgid,
+                    pids,
+                });
             }
         }
 
@@ -233,6 +295,24 @@ impl ProcessManager {
         if std::env::var("ROBONIX_MSG_PATH").is_err() {
             if let Some(config_path) = robonix_msg_path {
                 cmd.env("ROBONIX_MSG_PATH", config_path);
+            }
+        }
+
+        // Create process in new process group for isolation
+        #[cfg(unix)]
+        {
+            use nix::unistd::setsid;
+            // Use pre_exec to create new session/process group before exec
+            unsafe {
+                cmd.pre_exec(|| {
+                    // Create new session (which also creates new process group)
+                    // This ensures all child processes are in the same group
+                    setsid().map_err(|e| {
+                        // Convert nix error to io::Error
+                        std::io::Error::from_raw_os_error(e as i32)
+                    })?;
+                    Ok(())
+                });
             }
         }
 
@@ -351,6 +431,19 @@ impl ProcessManager {
         // We'll manage it by PID
         drop(child);
 
+        // Get process group information for return value
+        #[cfg(unix)]
+        let (pgid, pids) = {
+            if let Ok(pgid) = Self::get_process_group_id(pid) {
+                let pids = Self::get_processes_in_group(pgid).ok();
+                (Some(pgid), pids)
+            } else {
+                (None, None)
+            }
+        };
+        #[cfg(not(unix))]
+        let (pgid, pids) = (None, None);
+
         // Store process info
         let process_info = ProcessInfo {
             package_name: package_name.to_string(),
@@ -369,7 +462,7 @@ impl ProcessManager {
         // Save state to persistent storage
         self.save_state()?;
 
-        Ok(())
+        Ok(ProcessStartResult { pid, pgid, pids })
     }
 
     /// Get all running processes
@@ -405,89 +498,243 @@ impl ProcessManager {
         false
     }
 
-    /// Kill a process and all its children recursively
+    /// Kill a process group (more efficient than killing individual processes)
     #[cfg(unix)]
     fn kill_process_tree(&self, pid: u32) -> Result<()> {
-        use nix::sys::signal::{kill, Signal};
+        use nix::sys::signal::{killpg, kill, Signal};
         use nix::unistd::Pid;
         use std::io::{BufRead, BufReader};
-        use std::process::Stdio as StdioSync;
         use std::process::Command as SyncCommand;
 
-        // Collect all PIDs in the process tree (parent + all children)
-        let mut pids_to_kill = vec![pid];
+        let pid_obj = Pid::from_raw(pid as i32);
         
-        // Use pgrep to find all child processes recursively
-        // pgrep -P <pid> finds direct children, we need to recurse
-        let mut current_level = vec![pid];
+        // Get the actual process group ID from the process
+        // If we used setsid, the PGID should equal the PID, but let's verify
+        let pgid = match Self::get_process_group_id(pid) {
+            Ok(gid) => {
+                let pgid_obj = Pid::from_raw(gid as i32);
+                // List all processes in the group before killing
+                if let Ok(pids) = Self::get_processes_in_group(gid) {
+                    tracing::info!("Stopping process group {} (root PID: {}): found {} processes: {:?}", gid, pid, pids.len(), pids);
+                } else {
+                    tracing::info!("Stopping process group {} (root PID: {})", gid, pid);
+                }
+                pgid_obj
+            }
+            Err(_) => {
+                // Fallback: assume PGID equals PID (true if we used setsid)
+                tracing::warn!("Could not get process group ID for PID {}, assuming PGID=PID", pid);
+                tracing::info!("Stopping process (PID: {}, assumed PGID: {})", pid, pid);
+                pid_obj
+            }
+        };
         
-        while !current_level.is_empty() {
-            let mut next_level = Vec::new();
-            
-            for parent_pid in &current_level {
-                // Find direct children of this parent
-                if let Ok(output) = SyncCommand::new("pgrep")
-                    .arg("-P")
-                    .arg(parent_pid.to_string())
-                    .stdout(StdioSync::piped())
-                    .output()
-                {
-                    let reader = BufReader::new(&*output.stdout);
-                    for line in reader.lines() {
-                        if let Ok(child_pid_str) = line {
-                            if let Ok(child_pid) = child_pid_str.parse::<u32>() {
-                                if !pids_to_kill.contains(&child_pid) {
-                                    pids_to_kill.push(child_pid);
-                                    next_level.push(child_pid);
+        // First, send SIGTERM to the entire process group
+        if let Err(e) = killpg(pgid, Signal::SIGTERM) {
+            tracing::warn!("Failed to send SIGTERM to process group {}: {:?}", pgid, e);
+            // Fallback: try killing the process directly
+            let _ = kill(pid_obj, Signal::SIGTERM);
+        }
+        
+        // Wait a bit for processes to terminate gracefully
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        
+        // Check if process group still has any processes alive
+        // Use pgrep to find processes in the group
+        if let Ok(output) = SyncCommand::new("pgrep")
+            .arg("-g")
+            .arg(pgid.as_raw().to_string())
+            .output()
+        {
+            if output.status.success() {
+                let reader = BufReader::new(&*output.stdout);
+                let mut still_alive = Vec::new();
+                for line in reader.lines() {
+                    if let Ok(pid_str) = line {
+                        if let Ok(proc_pid) = pid_str.parse::<u32>() {
+                            still_alive.push(proc_pid);
+                        }
+                    }
+                }
+                
+                if !still_alive.is_empty() {
+                    tracing::info!("Process group still has {} processes alive, sending SIGKILL", still_alive.len());
+                    // Send SIGKILL to the process group
+                    let _ = killpg(pgid, Signal::SIGKILL);
+                    // Also kill individual processes as fallback
+                    for proc_pid in still_alive {
+                        let proc_pid_obj = Pid::from_raw(proc_pid as i32);
+                        let _ = kill(proc_pid_obj, Signal::SIGKILL);
+                    }
+                }
+            }
+        } else {
+            // Fallback: try to kill the process directly if pgrep fails
+            // Check if process still exists
+            if let Ok(output) = SyncCommand::new("ps")
+                .arg("-p")
+                .arg(pid.to_string())
+                .output()
+            {
+                if output.status.success() {
+                    let _ = kill(pid_obj, Signal::SIGKILL);
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Get process group ID for a given PID
+    #[cfg(unix)]
+    fn get_process_group_id(pid: u32) -> Result<u32> {
+        use std::process::Command as SyncCommand;
+        
+        // Use ps to get the process group ID
+        if let Ok(output) = SyncCommand::new("ps")
+            .arg("-o")
+            .arg("pgid=")
+            .arg("-p")
+            .arg(pid.to_string())
+            .output()
+        {
+            if output.status.success() {
+                let pgid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if let Ok(pgid) = pgid_str.parse::<u32>() {
+                    return Ok(pgid);
+                }
+            }
+        }
+        
+        anyhow::bail!("Failed to get process group ID for PID {}", pid)
+    }
+    
+    /// Get all process IDs in a process group
+    #[cfg(unix)]
+    fn get_processes_in_group(pgid: u32) -> Result<Vec<u32>> {
+        use std::io::{BufRead, BufReader};
+        use std::process::Command as SyncCommand;
+        use std::process::Stdio;
+        
+        let mut pids = Vec::new();
+        
+        // Use pgrep to find all processes in the group
+        if let Ok(output) = SyncCommand::new("pgrep")
+            .arg("-g")
+            .arg(pgid.to_string())
+            .stdout(Stdio::piped())
+            .output()
+        {
+            if output.status.success() {
+                let reader = BufReader::new(&*output.stdout);
+                for line in reader.lines() {
+                    if let Ok(pid_str) = line {
+                        if let Ok(pid) = pid_str.parse::<u32>() {
+                            pids.push(pid);
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(pids)
+    }
+    
+    /// Get process tree structure (parent-child relationships)
+    #[cfg(unix)]
+    pub fn get_process_tree(pid: u32) -> Result<ProcessTreeNode> {
+        use std::collections::HashMap;
+        use std::io::{BufRead, BufReader};
+        use std::process::Command as SyncCommand;
+        use std::process::Stdio;
+        
+        #[derive(Debug, Clone)]
+        struct ProcessInfo {
+            pid: u32,
+            ppid: u32,
+            cmd: String,
+        }
+        
+        // Get all processes with their parent PIDs
+        let mut processes: HashMap<u32, ProcessInfo> = HashMap::new();
+        
+        // Use ps to get process tree with full command
+        // Use -ww to get full command line (no width limit)
+        if let Ok(output) = SyncCommand::new("ps")
+            .arg("-eo")
+            .arg("pid,ppid,args")
+            .arg("--no-headers")
+            .stdout(Stdio::piped())
+            .output()
+        {
+            if output.status.success() {
+                let reader = BufReader::new(&*output.stdout);
+                for line in reader.lines() {
+                    if let Ok(line_str) = line {
+                        // Parse line: PID PPID COMMAND...
+                        // We need to handle spaces in command, so split by first two numbers
+                        let trimmed = line_str.trim();
+                        if let Some(first_space) = trimmed.find(' ') {
+                            if let Ok(proc_pid) = trimmed[..first_space].parse::<u32>() {
+                                let rest = &trimmed[first_space + 1..].trim_start();
+                                if let Some(second_space) = rest.find(' ') {
+                                    if let Ok(proc_ppid) = rest[..second_space].parse::<u32>() {
+                                        let cmd = rest[second_space + 1..].trim().to_string();
+                                        // Truncate long commands for display
+                                        let cmd_display = if cmd.len() > 60 {
+                                            format!("{}...", &cmd[..57])
+                                        } else {
+                                            cmd
+                                        };
+                                        processes.insert(proc_pid, ProcessInfo {
+                                            pid: proc_pid,
+                                            ppid: proc_ppid,
+                                            cmd: cmd_display,
+                                        });
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+        }
+        
+        // Check if root process exists
+        if !processes.contains_key(&pid) {
+            anyhow::bail!("Process {} not found in process list", pid);
+        }
+        
+        // Build tree starting from root PID
+        fn build_tree(pid: u32, processes: &HashMap<u32, ProcessInfo>) -> ProcessTreeNode {
+            let proc_info = processes.get(&pid);
+            let cmd = proc_info.map(|p| p.cmd.clone()).unwrap_or_else(|| format!("[PID {}]", pid));
             
-            current_level = next_level;
+            // Find all children
+            let children: Vec<ProcessTreeNode> = processes
+                .values()
+                .filter(|p| p.ppid == pid)
+                .map(|p| build_tree(p.pid, processes))
+                .collect();
+            
+            ProcessTreeNode {
+                pid,
+                cmd,
+                children,
+            }
         }
         
-        tracing::info!(
-            "Killing process tree: root PID {} and {} child processes",
+        Ok(build_tree(pid, &processes))
+    }
+    
+    #[cfg(not(unix))]
+    pub fn get_process_tree(pid: u32) -> Result<ProcessTreeNode> {
+        // On Windows, return simple structure
+        Ok(ProcessTreeNode {
             pid,
-            pids_to_kill.len() - 1
-        );
-        
-        // First, send SIGTERM to all processes in the tree
-        for pid_to_kill in &pids_to_kill {
-            let pid_obj = Pid::from_raw(*pid_to_kill as i32);
-            if let Err(e) = kill(pid_obj, Signal::SIGTERM) {
-                // Process might already be dead, that's okay
-                tracing::debug!("Failed to send SIGTERM to PID {}: {:?}", pid_to_kill, e);
-            }
-        }
-        
-        // Wait a bit for processes to terminate gracefully
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        
-        // Check which processes are still alive and kill them with SIGKILL
-        for pid_to_kill in &pids_to_kill {
-            // Check if process still exists
-            if let Ok(output) = SyncCommand::new("ps")
-                .arg("-p")
-                .arg(pid_to_kill.to_string())
-                .output()
-            {
-                if output.status.success() {
-                    // Process still exists, kill it
-                    let pid_obj = Pid::from_raw(*pid_to_kill as i32);
-                    if let Err(e) = kill(pid_obj, Signal::SIGKILL) {
-                        tracing::warn!("Failed to send SIGKILL to PID {}: {:?}", pid_to_kill, e);
-                    } else {
-                        tracing::debug!("Sent SIGKILL to PID {}", pid_to_kill);
-                    }
-                }
-            }
-        }
-        
-        Ok(())
+            cmd: format!("[PID {}]", pid),
+            children: Vec::new(),
+        })
     }
     
     #[cfg(not(unix))]
@@ -501,7 +748,7 @@ impl ProcessManager {
     }
 
     /// Stop a specific process
-    pub async fn stop_process(&self, std_name: &str, package_type: &str) -> Result<()> {
+    pub async fn stop_process(&self, std_name: &str, package_type: &str) -> Result<ProcessStopResult> {
         let key = format!("{}::{}", package_type, std_name);
         
         // Get and remove process info, then drop the lock
@@ -512,6 +759,19 @@ impl ProcessManager {
 
         if let Some(process_info) = process_info {
             tracing::info!("Stopping process: {} (PID: {})", key, process_info.pid);
+
+            // Get process group information before killing
+            #[cfg(unix)]
+            let (pgid, pids) = {
+                if let Ok(pgid) = Self::get_process_group_id(process_info.pid) {
+                    let pids = Self::get_processes_in_group(pgid).ok();
+                    (Some(pgid), pids)
+                } else {
+                    (None, None)
+                }
+            };
+            #[cfg(not(unix))]
+            let (pgid, pids) = (None, None);
 
             // Kill the process tree (parent + all children)
             if let Err(e) = self.kill_process_tree(process_info.pid) {
@@ -559,11 +819,16 @@ impl ProcessManager {
 
             // Save state to persistent storage (lock is already dropped, so this is safe)
             self.save_state()?;
+            
+            Ok(ProcessStopResult {
+                pid: process_info.pid,
+                pgid,
+                pids,
+            })
         } else {
             tracing::warn!("Process not found: {}", key);
+            anyhow::bail!("Process not found: {}", key)
         }
-
-        Ok(())
     }
 
     /// Stop all processes
