@@ -2,7 +2,7 @@
 
 wheatfox
 
-## 完整工作流程
+## workflow
 
 Robonix系统的工作流程如下：
 1. **准备环境**：安装ROS2和Rust，构建消息包
@@ -16,7 +16,7 @@ Robonix系统的工作流程如下：
 
 ## 准备环境
 
-首先需要ROS2环境和Rust安装。
+首先需要ROS2环境和Rust。
 
 ```bash
 cd rust # at robonix src root folder
@@ -123,110 +123,14 @@ cargo run -- deploy restart
 cargo run -- deploy stop
 
 # 清理所有ROS2进程
-pkill -9 -f "ros2|robonix|rclpy|rclcpp|demo_rgb_provider"
+# pkill -9 -f "ros2|robonix|rclpy|rclcpp|demo_rgb_provider"
 ```
-
-**重要**：注册recipe时，系统会：
-1. 将能力技能注册到robonix-core
-2. 创建或更新语义地图中的实体（机器人）
-3. 将实体支持的skills信息保存到实体的`registered_skills`字段中
 
 ## 构建语义地图
 
 语义地图包含环境中的实体（物体、机器人等）及其关系。机器人本身也是语义地图中的一个entity，包含其支持的skills信息。
 
 `robonix-msg` ROS2 包提供了封装好的调用 robonix service 的接口代码，在 source 之后可以直接使用。
-
-### 添加实体到语义地图
-
-使用RobonixClient添加实体：
-
-```python
-import rclpy
-from robonix_core.client import RobonixClient
-from robonix_core.msg import Entity, Relation, RelationType, Point3D, FrameMapping
-
-rclpy.init()
-client = RobonixClient()
-
-# 创建机器人实体
-robot_entity = Entity()
-robot_entity.id = "robot_01"
-robot_entity.label = "agilex_robot"
-robot_entity.registered_skills = ["skl::pick", "skl::place", "skl::move_to"]  # 机器人支持的skills
-robot_entity.registered_capabilities = ["cap::vision.capture_rgb", "cap::grasp.move"]
-robot_entity.relations = []
-
-# 添加frame映射（可选）
-frame_mapping = FrameMapping()
-frame_mapping.frame_id = "base_link"
-frame_mapping.center = Point3D(x=0.0, y=0.0, z=0.0)
-robot_entity.frame_mapping = [frame_mapping]
-
-# 使用client添加实体
-response = client.add_entity(robot_entity)
-if response and response.success:
-    print("Robot entity added successfully")
-else:
-    print(f"Failed to add entity: {response.error_message if response else 'No response'}")
-
-# 处理回调
-rclpy.spin_once(client, timeout_sec=0.1)
-```
-
-### 添加其他实体（物体、环境等）
-
-```python
-# 添加一个桌子实体
-table_entity = Entity()
-table_entity.id = "table_01"
-table_entity.label = "table"
-table_entity.registered_skills = []  # 物体通常没有skills
-table_entity.registered_capabilities = []
-table_entity.relations = []
-
-# 添加关系：桌子在房间中
-room_relation = Relation()
-room_relation.relation_type = RelationType.CHILD_OF
-room_relation.target_entity_id = "room_01"
-table_entity.relations = [room_relation]
-
-# 添加frame映射
-table_frame = FrameMapping()
-table_frame.frame_id = "table_frame"
-table_frame.center = Point3D(x=1.0, y=2.0, z=0.0)
-table_entity.frame_mapping = [table_frame]
-
-# 使用client添加实体
-response = client.add_entity(table_entity)
-if response and response.success:
-    print("Table entity added successfully")
-
-# 处理回调
-rclpy.spin_once(client, timeout_sec=0.1)
-```
-
-### 查询语义地图
-
-```python
-# 获取所有实体
-response = client.get_semantic_map()
-if response and response.success:
-    for entity in response.entities:
-        print(f"Entity: {entity.label} (id: {entity.id})")
-        print(f"  Skills: {entity.registered_skills}")
-        print(f"  Capabilities: {entity.registered_capabilities}")
-
-# 按标签查询
-response = client.get_semantic_map(label="table")
-
-# 按ID查询
-response = client.get_semantic_map(entity_id="robot_01")
-
-rclpy.spin_once(client, timeout_sec=0.1)
-```
-
-## 感知模块持续更新地图
 
 当注册了`skl::update_map`技能后，感知模块将处于“持续更新”状态，监控相关技能的执行。
 
@@ -283,49 +187,6 @@ cargo run -- task get <task_id>
 
 # 取消任务
 cargo run -- task cancel <task_id>
-```
-
-## 使用Python客户端
-
-使用RobonixClient可以方便地调用所有服务：
-
-```python
-import rclpy
-from robonix_core.client import RobonixClient
-
-rclpy.init()
-client = RobonixClient()
-
-# 创建任务
-task_resp = client.create_task("Pick up the red box")
-if task_resp and task_resp.success:
-    print(f"Task created: {task_resp.task_id}")
-    
-    # 查询任务
-    task_info = client.get_task(task_resp.task_id)
-    if task_info and task_info.success and task_info.task:
-        print(f"Task state: {task_info.task.state}")
-        print(f"DSL code: {task_info.task.dsl_code}")
-
-# 获取语义地图
-map_resp = client.get_semantic_map()
-if map_resp and map_resp.success:
-    for entity in map_resp.entities:
-        print(f"Entity: {entity.label}, Skills: {entity.registered_skills}")
-
-# 查询能力/技能
-cap_resp = client.query_capability("cap::vision.capture_rgb")
-if cap_resp and cap_resp.success:
-    print(f"Found capability at: {cap_resp.output_channels[0]}")
-
-# 查询模型
-model_resp = client.query_model(model_type="llm", capability="planning")
-if model_resp and model_resp.success:
-    for model in model_resp.models:
-        print(f"Model: {model.model_name} ({model.model_id})")
-
-# 处理回调
-rclpy.spin_once(client, timeout_sec=0.1)
 ```
 
 ## 注意事项
