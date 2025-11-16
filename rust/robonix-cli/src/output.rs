@@ -47,5 +47,5 @@ pub fn cross(message: &str) {
 
 /// Print a summary line
 pub fn summary(message: &str) {
-    println!("\n{}", message.bright_black());
+    println!("\n{}", message.dimmed());
 }

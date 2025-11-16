@@ -40,27 +40,27 @@ colcon build --cmake-args \
   -DPYTHON3_EXECUTABLE=/usr/bin/python3 \
   -DCMAKE_PREFIX_PATH=/opt/ros/humble
 
-# Install robonix_core to system site-packages for easy import
-echo "Installing robonix_core to system site-packages..."
-# Use the same Python executable that was used for building
-INSTALL_DIR=$($PYTHON3_EXECUTABLE -c "import site; print(site.getsitepackages()[0])")
-ROBONIX_CORE_SOURCE="install/robonix_core/local/lib/python3.10/dist-packages/robonix_core"
-ROBONIX_CORE_TARGET="$INSTALL_DIR/robonix_core"
+# # Install robonix_core to system site-packages for easy import
+# echo "Installing robonix_core to system site-packages..."
+# # Use the same Python executable that was used for building
+# INSTALL_DIR=$($PYTHON3_EXECUTABLE -c "import site; print(site.getsitepackages()[0])")
+# ROBONIX_CORE_SOURCE="install/robonix_core/local/lib/python3.10/dist-packages/robonix_core"
+# ROBONIX_CORE_TARGET="$INSTALL_DIR/robonix_core"
 
-if [ -d "$ROBONIX_CORE_SOURCE" ]; then
-    # Remove old installation if exists
-    if [ -d "$ROBONIX_CORE_TARGET" ] || [ -L "$ROBONIX_CORE_TARGET" ]; then
-        echo "Removing old robonix_core installation..."
-        rm -rf "$ROBONIX_CORE_TARGET"
-    fi
+# if [ -d "$ROBONIX_CORE_SOURCE" ]; then
+#     # Remove old installation if exists
+#     if [ -d "$ROBONIX_CORE_TARGET" ] || [ -L "$ROBONIX_CORE_TARGET" ]; then
+#         echo "Removing old robonix_core installation..."
+#         rm -rf "$ROBONIX_CORE_TARGET"
+#     fi
     
-    # Copy or symlink to system site-packages
-    echo "Installing robonix_core to $ROBONIX_CORE_TARGET..."
-    cp -r "$ROBONIX_CORE_SOURCE" "$ROBONIX_CORE_TARGET"
-    echo "robonix_core installed successfully to system site-packages"
-else
-    echo "Warning: robonix_core source directory not found at $ROBONIX_CORE_SOURCE"
-    echo "Skipping system site-packages installation"
-fi
+#     # Copy or symlink to system site-packages
+#     echo "Installing robonix_core to $ROBONIX_CORE_TARGET..."
+#     cp -r "$ROBONIX_CORE_SOURCE" "$ROBONIX_CORE_TARGET"
+#     echo "robonix_core installed successfully to system site-packages"
+# else
+#     echo "Warning: robonix_core source directory not found at $ROBONIX_CORE_SOURCE"
+#     echo "Skipping system site-packages installation"
+# fi
 
 echo "Build completed successfully!"
