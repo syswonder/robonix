@@ -10,6 +10,7 @@ pub mod query;
 pub mod recipe;
 pub mod recipe_state;
 pub mod register;
+pub mod task;
 pub mod unregister;
 
 pub use config::Config;

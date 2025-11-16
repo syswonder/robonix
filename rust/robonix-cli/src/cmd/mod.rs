@@ -18,6 +18,7 @@ mod search;
 mod start;
 mod status;
 mod stop;
+mod task;
 mod unregister;
 
 #[derive(Subcommand)]
@@ -46,6 +47,9 @@ pub enum Commands {
     /// Daemon management commands
     #[command(subcommand)]
     Daemon(DaemonCommands),
+    /// Task management commands
+    #[command(subcommand)]
+    Task(TaskCommands),
 }
 
 #[derive(Subcommand)]
@@ -178,6 +182,27 @@ pub enum DaemonCommands {
 }
 
 #[derive(Subcommand)]
+pub enum TaskCommands {
+    /// Create a new task from natural language
+    Create {
+        /// Natural language task description
+        natural_language: String,
+    },
+    /// Get task by ID
+    Get {
+        /// Task ID
+        task_id: String,
+    },
+    /// List all tasks
+    List,
+    /// Cancel a task
+    Cancel {
+        /// Task ID
+        task_id: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum ModelCommands {
     /// Register an AI model (LLM, VLM, etc.)
     Register {
@@ -281,6 +306,14 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             DaemonCommands::Stop => daemon::stop().await,
             DaemonCommands::Status => daemon::status().await,
             DaemonCommands::Restart => daemon::restart().await,
+        },
+        Commands::Task(cmd) => match cmd {
+            TaskCommands::Create { natural_language } => {
+                task::execute_create(config, natural_language).await
+            }
+            TaskCommands::Get { task_id } => task::execute_get(config, task_id).await,
+            TaskCommands::List => task::execute_list(config).await,
+            TaskCommands::Cancel { task_id } => task::execute_cancel(config, task_id).await,
         },
     }
 }
