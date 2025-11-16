@@ -79,21 +79,27 @@ impl PackageDatabase {
     }
 
     pub fn list_packages(&self) -> Vec<&PackageInfo> {
-        self.packages.values().collect()
+        let mut packages: Vec<&PackageInfo> = self.packages.values().collect();
+        packages.sort_by(|a, b| a.name.cmp(&b.name));
+        packages
     }
 
     pub fn find_by_capability(&self, cap_name: &str) -> Vec<&PackageInfo> {
-        self.packages
+        let mut packages: Vec<&PackageInfo> = self.packages
             .values()
             .filter(|pkg| pkg.capabilities.iter().any(|c| c == cap_name))
-            .collect()
+            .collect();
+        packages.sort_by(|a, b| a.name.cmp(&b.name));
+        packages
     }
 
     pub fn find_by_skill(&self, skill_name: &str) -> Vec<&PackageInfo> {
-        self.packages
+        let mut packages: Vec<&PackageInfo> = self.packages
             .values()
             .filter(|pkg| pkg.skills.iter().any(|s| s == skill_name))
-            .collect()
+            .collect();
+        packages.sort_by(|a, b| a.name.cmp(&b.name));
+        packages
     }
 
     pub fn find_by_name(&self, name: &str) -> Option<&PackageInfo> {

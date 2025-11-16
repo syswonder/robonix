@@ -240,10 +240,7 @@ fn main() {
         let perception_clone4 = perception.clone();
         let perception_clone5 = perception.clone();
         let mgmt_clone1 = mgmt.clone();
-        let mgmt_clone2 = mgmt.clone();
-        let mgmt_clone3 = mgmt.clone();
         let mgmt_clone4 = mgmt.clone();
-        let mgmt_clone5 = mgmt.clone();
         let mgmt_clone6 = mgmt.clone();
         let planning_clone1 = planning.clone();
         let planning_clone2 = planning.clone();
@@ -340,19 +337,48 @@ fn main() {
         let add_entity_task = smol::spawn(async move {
             let stream = add_entity_server.receive_request_stream();
             stream
-                .for_each_concurrent(10, |result| async {
+                .for_each_concurrent(None, |result| async {
                     match result {
                         Ok((req_id, req)) => {
+                            let entity_id = req.entity.id.clone();
+                            let entity_label = req.entity.label.clone();
+                            info!(entity_id = %entity_id, entity_label = %entity_label, "Received add entity request");
+                            let start = Instant::now();
+                            
+                            // Add entity - log before and after to track lock contention
+                            debug!(entity_id = %entity_id, "Acquiring semantic map write lock");
+                            let lock_start = Instant::now();
                             perception_clone2.add_entity(req.entity).await;
+                            let lock_elapsed = lock_start.elapsed();
+                            let total_elapsed = start.elapsed();
+                            
+                            if lock_elapsed.as_millis() > 100 {
+                                warn!(entity_id = %entity_id, lock_ms = lock_elapsed.as_millis(), "Long lock wait detected");
+                            }
+                            
+                            info!(entity_id = %entity_id, total_ms = total_elapsed.as_millis(), lock_ms = lock_elapsed.as_millis(), "Entity added successfully");
+                            
                             let resp = AddEntityResponse {
                                 success: true,
                                 error_message: String::new(),
                             };
-                            if let Err(e) = add_entity_server.async_send_response(req_id, resp).await {
-                                error!("Send add entity response error: {e:?}");
+                            
+                            let send_start = Instant::now();
+                            match add_entity_server.async_send_response(req_id, resp).await {
+                                Ok(_) => {
+                                    let send_elapsed = send_start.elapsed();
+                                    if send_elapsed.as_millis() > 50 {
+                                        warn!(entity_id = %entity_id, send_ms = send_elapsed.as_millis(), "Slow response send");
+                                    }
+                                    debug!(entity_id = %entity_id, send_ms = send_elapsed.as_millis(), "Add entity response sent successfully");
+                                }
+                                Err(e) => {
+                                    let send_elapsed = send_start.elapsed();
+                                    error!(entity_id = %entity_id, send_ms = send_elapsed.as_millis(), error = ?e, "Send add entity response error");
+                                }
                             }
                         }
-                        Err(e) => error!("Receive add entity request error: {e:?}"),
+                        Err(e) => error!(error = ?e, "Receive add entity request error"),
                     }
                 })
                 .await;
@@ -570,15 +596,31 @@ fn main() {
         let ping_task = smol::spawn(async move {
             let stream = ping_server.receive_request_stream();
             stream
-                .for_each_concurrent(10, |result| async {
+                .for_each_concurrent(None, |result| async {
                     match result {
                         Ok((req_id, req)) => {
+                            let seq = req.sequence;
+                            debug!(sequence = seq, "Received ping request");
+                            let start = Instant::now();
                             let resp = mgmt_clone6.ping(req).await;
-                            if let Err(e) = ping_server.async_send_response(req_id, resp).await {
-                                error!("Send ping response error: {e:?}");
+                            let elapsed = start.elapsed();
+                            debug!(sequence = resp.sequence, elapsed_ms = elapsed.as_millis(), "Ping processed");
+                            let send_start = Instant::now();
+                            match ping_server.async_send_response(req_id, resp).await {
+                                Ok(_) => {
+                                    let send_elapsed = send_start.elapsed();
+                                    if send_elapsed.as_millis() > 50 {
+                                        warn!(sequence = seq, send_ms = send_elapsed.as_millis(), "Slow ping response send");
+                                    }
+                                    debug!(sequence = seq, send_ms = send_elapsed.as_millis(), "Ping response sent");
+                                }
+                                Err(e) => {
+                                    let send_elapsed = send_start.elapsed();
+                                    error!(sequence = seq, send_ms = send_elapsed.as_millis(), error = ?e, "Send ping response error");
+                                }
                             }
                         }
-                        Err(e) => error!("Receive ping request error: {e:?}"),
+                        Err(e) => error!(error = ?e, "Receive ping request error"),
                     }
                 })
                 .await;
@@ -609,7 +651,7 @@ fn main() {
 fn create_qos() -> QosPolicies {
     let service_qos: QosPolicies = {
         QosPolicyBuilder::new()
-            .history(policy::History::KeepLast { depth: 10 })
+            .history(policy::History::KeepLast { depth: 1000 }) // Increased from 10 to handle high concurrency
             .reliability(policy::Reliability::Reliable {
                 max_blocking_time: Duration::from_millis(100),
             })

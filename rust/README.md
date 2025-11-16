@@ -65,6 +65,9 @@ cargo run -- model register \
 using a recipe file:
 ```bash
 cd robonix-cli
+# force build every package
+cargo run -- package build all
+
 # in robonix-cli, run:
 cargo run -- deploy register demo_recipe.yaml
 cargo run -- deploy start
@@ -72,6 +75,9 @@ cargo run -- deploy status
 cargo run -- deploy restart
 # cargo run -- deploy stop
 # cargo run -- deploy unregister demo_recipe.yaml
+
+# clean all ROS2 processes
+pkill -9 -f "ros2|robonix|rclpy|rclcpp|demo_rgb_provider"
 ```
 
 Note: robonix-msg setup is automatically sourced by start scripts. The CLI will:

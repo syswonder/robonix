@@ -123,3 +123,11 @@ pub fn filter_items(items: &[RecipeItem], pattern: &str) -> Vec<RecipeItem> {
         .cloned()
         .collect()
 }
+
+/// Get all package names from active recipe
+pub fn get_recipe_packages(config: &Config) -> Result<Vec<String>> {
+    let recipe_state = RecipeState::load(&config.package_storage_path)?
+        .ok_or_else(|| anyhow::anyhow!("No active recipe. Please register a recipe first."))?;
+    
+    Ok(recipe_state.recipe.packages.iter().map(|p| p.name.clone()).collect())
+}

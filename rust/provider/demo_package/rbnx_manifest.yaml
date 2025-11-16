@@ -14,6 +14,7 @@ package:
   maintainer: root
   maintainer_email: root@todo.todo
   license: Apache-2.0
+  # build_script: rbnx/build.sh  # Optional: build script path. If omitted, defaults to rbnx/build.sh
 
 # Capabilities provided by this package
 # Only need to specify channel mappings for inputs/outputs defined in spec

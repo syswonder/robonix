@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use crate::Config;
 
+mod build;
 mod config;
 mod daemon;
 mod info;
@@ -12,8 +13,8 @@ mod list;
 mod model;
 mod recipe_utils;
 mod register;
-mod search;
 mod restart;
+mod search;
 mod start;
 mod status;
 mod stop;
@@ -78,6 +79,17 @@ pub enum PackageCommands {
         /// Skill name (e.g., skl::pick)
         name: String,
     },
+    /// Build a package (compile, install dependencies, etc.)
+    /// 
+    /// Builds a package directly without requiring an active recipe.
+    /// Can build a specific package by name or all installed packages.
+    Build {
+        /// Target to build. Can be:
+        /// - "all" to build all installed packages
+        /// - Package name (e.g., "demo_rgb_provider")
+        #[arg(required = false, default_value = "all")]
+        target: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -128,6 +140,17 @@ pub enum DeployCommands {
     },
     /// Show status of all running cap/skill processes from active recipe
     Status,
+    /// Build packages (compile, install dependencies, etc.)
+    /// 
+    /// Builds packages before deployment. Can build all packages in recipe
+    /// or a specific package by name.
+    Build {
+        /// Target to build. Can be:
+        /// - "all" to build all packages in recipe
+        /// - Package name (e.g., "demo_rgb_provider")
+        #[arg(required = false, default_value = "all")]
+        target: String,
+    },
     /// Unregister packages, capabilities, skills, or recipes
     /// 
     /// Requires: all processes must be stopped first (use 'deploy stop')
@@ -209,9 +232,11 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             PackageCommands::Info { name } => info::execute(config, name).await,
             PackageCommands::SearchCap { name } => search::execute_cap(config, name).await,
             PackageCommands::SearchSkill { name } => search::execute_skill(config, name).await,
+            PackageCommands::Build { target } => build::execute_package(config, target).await,
         },
         Commands::Deploy(cmd) => match cmd {
             DeployCommands::Register { recipe } => register::execute(config, recipe).await,
+            DeployCommands::Build { target } => build::execute(config, target).await,
             DeployCommands::Start { target } => start::execute(config, target).await,
             DeployCommands::Stop { target } => stop::execute(config, target).await,
             DeployCommands::Restart { target } => restart::execute(config, target).await,

@@ -32,6 +32,7 @@ package:
   maintainer: string        # 维护者
   maintainer_email: string  # 维护者邮箱
   license: string           # 许可证
+  build_script: string      # 可选：构建脚本路径 (相对于 package 根目录，如 "rbnx/build.sh")。如果省略，默认查找 "rbnx/build.sh"
 
 capabilities:
   - name: string            # 标准能力名称 (如 cap::grasp.move)
@@ -74,6 +75,7 @@ skills:
 - `maintainer`: 维护者名称
 - `maintainer_email`: 维护者邮箱
 - `license`: 许可证类型 (如 Apache-2.0)
+- `build_script`: 构建脚本路径（可选），相对于 package 根目录的路径，如 `rbnx/build.sh`。如果省略，CLI 会默认查找 `rbnx/build.sh`。如果都不存在，build 命令会跳过该 package
 
 **Capability 字段：**
 - `name`: 标准能力名称，必须以 `cap::` 开头，格式为 `cap::category.action`。名称和参数定义由标准规范 (spec) 定义
@@ -164,7 +166,22 @@ skills:
 
 （可选）推荐使用 `rbnx/` 目录包含所有 robonix 特定的配置和脚本。
 
-**重要**: 每个 capability 和 skill 都需要有自己独立的启动和停止脚本。这些脚本在 manifest 中通过 `start_script` 和 `stop_script` 字段指定。
+**重要**: 
+- 每个 capability 和 skill 都需要有自己独立的启动和停止脚本。这些脚本在 manifest 中通过 `start_script` 和 `stop_script` 字段指定。
+- Package 可以有一个可选的构建脚本 `rbnx/build.sh`（或在 manifest 中通过 `build_script` 字段指定），用于编译、安装依赖等构建操作。
+
+#### 构建脚本 (build_script)
+
+Package 的构建脚本用于编译、安装依赖等构建操作。
+
+脚本要求：
+- 必须是可执行文件 (`chmod +x`)
+- 应该在 package 根目录下执行
+- 应该处理错误情况并返回适当的退出码（0 表示成功，非 0 表示失败）
+- 脚本路径相对于 package 根目录
+- 如果脚本不存在，build 命令会跳过该 package（不会报错）
+
+**默认位置**: 如果 manifest 中没有指定 `build_script`，CLI 会默认查找 `rbnx/build.sh`。
 
 #### 启动脚本 (start_script)
 
@@ -233,20 +250,26 @@ packages:
    - 这确保了 entity tree 和 graph 中的节点能够正确对应到 cap/skill
    - **注意**：注册时不会启动进程，只是将 cap/skill 信息注册到系统中
 
-2. **启动进程阶段** (`rbnx deploy start [target]`): 根据 manifest 中每个 cap/skill 的 `start_script` 启动对应的进程
+2. **构建阶段** (`rbnx deploy build [target]`): 构建 packages（编译、安装依赖等）
+   - 可以指定 `target` 参数来构建特定的 package（如 `"demo_rgb_provider"`），或使用 `"all"` 构建所有 packages（默认）
+   - 执行每个 package 的构建脚本（`rbnx/build.sh` 或在 manifest 中指定的 `build_script`）
+   - 如果构建脚本不存在，会跳过该 package（不会报错）
+   - **注意**：构建是可选的，如果 package 不需要构建（如纯 Python 脚本），可以跳过此步骤
+
+3. **启动进程阶段** (`rbnx deploy start [target]`): 根据 manifest 中每个 cap/skill 的 `start_script` 启动对应的进程
    - 所有进程的 stdout/stderr 会被重定向到日志文件（存储在 `{package_storage_path}/logs/`）
    - CLI 会记录本机启动的所有 cap/skill 及其进程信息
    - 可以指定 `target` 参数来启动特定的 cap/skill，或使用 `"all"` 启动所有（默认）
 
-3. **停止进程阶段** (`rbnx deploy stop [target]`): 停止正在运行的 cap/skill 进程
+4. **停止进程阶段** (`rbnx deploy stop [target]`): 停止正在运行的 cap/skill 进程
    - 可以指定 `target` 参数来停止特定的 cap/skill，或使用 `"all"` 停止所有（默认）
 
-4. **重启进程阶段** (`rbnx deploy restart [target]`): 重启 cap/skill 进程
+5. **重启进程阶段** (`rbnx deploy restart [target]`): 重启 cap/skill 进程
    - 相当于先执行 `stop` 再执行 `start`
 
-5. **查看状态** (`rbnx deploy status`): 查看所有正在运行的 cap/skill 进程状态
+6. **查看状态** (`rbnx deploy status`): 查看所有正在运行的 cap/skill 进程状态
 
-6. **注销阶段** (`rbnx deploy unregister <target>`): 从系统中注销 cap/skill
+7. **注销阶段** (`rbnx deploy unregister <target>`): 从系统中注销 cap/skill
    - 需要先停止所有相关进程
    - 可以注销整个 recipe、package、或特定的 cap/skill
 
@@ -255,16 +278,19 @@ packages:
 # 1. 注册 recipe
 rbnx deploy register demo_recipe.yaml
 
-# 2. 启动所有进程
+# 2. 构建所有 packages（可选，如果需要编译等操作）
+rbnx deploy build
+
+# 3. 启动所有进程
 rbnx deploy start
 
-# 3. 查看状态
+# 4. 查看状态
 rbnx deploy status
 
-# 4. 停止所有进程
+# 5. 停止所有进程
 rbnx deploy stop
 
-# 5. 注销 recipe
+# 6. 注销 recipe
 rbnx deploy unregister demo_recipe.yaml
 ```
 

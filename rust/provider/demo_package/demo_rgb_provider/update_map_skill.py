@@ -11,6 +11,7 @@ from std_msgs.msg import Bool
 from sensor_msgs.msg import Image
 import time
 import uuid
+from robonix_core import RobonixClient
 
 
 class UpdateMapSkill(Node):
@@ -22,28 +23,21 @@ class UpdateMapSkill(Node):
         # Query capabilities and get topic names
         self.vision_image_topic = None
         
-        # Test ping service with 20 concurrent calls
-        self._test_ping_service()
-        
-        # Create service clients
-        self.query_client = None
-        self.add_entity_client = None
-        self.add_spatial_map_entry_client = None
-        
+        # Create Robonix client for service calls
         try:
-            from robonix_core.srv import QueryCapSkl, AddEntity, AddSpatialMapEntry
-            self.query_client = self.create_client(QueryCapSkl, '/rbnx/srv/mgmt/query_cap_skl')
-            self.add_entity_client = self.create_client(AddEntity, '/rbnx/srv/perception/add_entity')
-            self.add_spatial_map_entry_client = self.create_client(AddSpatialMapEntry, '/rbnx/srv/perception/add_spatial_map_entry')
+            self.robonix_client = RobonixClient(node_name='demo_update_map_skill_client', max_workers=20)
+            # Test ping service with 20 concurrent calls
+            # self._test_ping_service()
+            # Query capabilities
             self._query_capabilities()
-        except ImportError as e:
-            self.get_logger().warn(f'robonix_core.srv not available ({e}), using fallback topics')
-            self._use_fallback_topics()
         except Exception as e:
             import traceback
-            self.get_logger().warn(f'Failed to create service clients: {e}, using fallback topics')
+            self.get_logger().warn(f'Failed to create RobonixClient: {e}, using fallback topics')
             self.get_logger().debug(f'Traceback: {traceback.format_exc()}')
+            self.robonix_client = None
             self._use_fallback_topics()
+        
+        self.get_logger().info(f'RobonixClient created: {self.robonix_client}')
         
         # Publish status (skill output)
         self.status_publisher = self.create_publisher(
@@ -74,115 +68,60 @@ class UpdateMapSkill(Node):
     
     def _test_ping_service(self):
         """Test ping service with 20 concurrent calls to check for concurrency issues."""
-        try:
-            from robonix_core.srv import Ping
-            ping_client = self.create_client(Ping, '/rbnx/srv/mgmt/ping')
+        if not self.robonix_client:
+            self.get_logger().warn('RobonixClient not available, skipping ping test')
+            return
+        
+        self.get_logger().info('Testing ping service with 20 calls...')
+        success_count = 0
+        
+        # Use thread pool for concurrent calls
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            futures = {executor.submit(self.robonix_client.ping, i, timeout_sec=5.0): i for i in range(20)}
             
-            # Wait for service
-            if not ping_client.wait_for_service(timeout_sec=5.0):
-                self.get_logger().warn('Ping service not available, skipping ping test')
-                return
-            
-            self.get_logger().info('Testing ping service with 20 calls...')
-            success_count = 0
-            futures = []
-            
-            # Create 20 async calls
-            for i in range(20):
-                request = ping_client.srv_type.Request()
-                request.sequence = i
-                future = ping_client.call_async(request)
-                futures.append((i, future))
-            
-            # Wait for all responses concurrently
-            # Use a loop that checks all futures periodically
-            import time
-            start_time = time.time()
-            timeout = 10.0  # Total timeout for all requests
-            done_futures = set()
-            
-            while len(done_futures) < len(futures) and (time.time() - start_time) < timeout:
-                for seq, future in futures:
-                    if seq in done_futures:
-                        continue
-                    # Spin once to process any pending callbacks
-                    rclpy.spin_once(self, timeout_sec=0.1)
-                    if future.done():
-                        done_futures.add(seq)
-                        try:
-                            response = future.result()
-                            if response.success and response.sequence == seq:
-                                success_count += 1
-                                self.get_logger().debug(f'Ping {seq}: success (timestamp: {response.timestamp})')
-                            else:
-                                self.get_logger().warn(f'Ping {seq}: failed (success={response.success}, seq={response.sequence})')
-                        except Exception as e:
-                            self.get_logger().warn(f'Ping {seq}: exception: {e}')
-                
-                # Small sleep to avoid busy waiting
-                time.sleep(0.01)
-            
-            # Check for any remaining timeouts
-            for seq, future in futures:
-                if seq not in done_futures:
-                    self.get_logger().warn(f'Ping {seq}: timeout')
-            
-            self.get_logger().info(f'Ping test completed: {success_count}/20 successful')
-            if success_count < 20:
-                self.get_logger().warn(f'Ping test FAILED: {20 - success_count} calls failed or timed out')
-        except ImportError as e:
-            self.get_logger().warn(f'Ping service not available ({e}), skipping ping test')
-        except Exception as e:
-            self.get_logger().warn(f'Ping test failed: {e}')
-            import traceback
-            self.get_logger().debug(f'Traceback: {traceback.format_exc()}')
+            for future in as_completed(futures):
+                seq = futures[future]
+                try:
+                    response = future.result()
+                    if response and response.success and response.sequence == seq:
+                        success_count += 1
+                        self.get_logger().debug(f'Ping {seq}: success (timestamp: {response.timestamp})')
+                    else:
+                        self.get_logger().warn(f'Ping {seq}: failed')
+                except Exception as e:
+                    self.get_logger().warn(f'Ping {seq}: exception: {e}')
+        
+        self.get_logger().info(f'Ping test completed: {success_count}/20 successful')
+        if success_count < 20:
+            self.get_logger().warn(f'Ping test FAILED: {20 - success_count} calls failed or timed out')
     
     def _query_capabilities(self):
         """Query robonix core for required capabilities and get their topic names."""
-        if not self.query_client:
-            self._use_fallback_topics()
-            return
-        
-        # Wait for service to be available
-        if not self.query_client.wait_for_service(timeout_sec=5.0):
-            self.get_logger().warn('Query service not available, using fallback topics')
+        if not self.robonix_client:
             self._use_fallback_topics()
             return
         
         # Query cap::vision.capture_rgb
         self.get_logger().info('Querying cap::vision.capture_rgb...')
-        request = self.query_client.srv_type.Request()
-        request.std_name = 'cap::vision.capture_rgb'
-        request.impl_id = ''
-        request.requirements = []
+        response = self.robonix_client.query_capability('cap::vision.capture_rgb', '', [], timeout_sec=5.0)
         
-        future = self.query_client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
-        
-        if future.done():
+        if response and response.success:
             try:
-                response = future.result()
-                if response.success:
-                    # Find 'image' in output_names and get corresponding channel
-                    try:
-                        idx = list(response.output_names).index('image')
-                        if idx < len(response.output_channels):
-                            self.vision_image_topic = list(response.output_channels)[idx]
-                            self.get_logger().info(f'  Found vision capability at: {self.vision_image_topic}')
-                        else:
-                            self.get_logger().warn('  Vision capability found but "image" output not available')
-                            self._use_fallback_topics()
-                    except ValueError:
-                        self.get_logger().warn('  Vision capability found but "image" output not found')
-                        self._use_fallback_topics()
+                idx = list(response.output_names).index('image')
+                if idx < len(response.output_channels):
+                    self.vision_image_topic = list(response.output_channels)[idx]
+                    self.get_logger().info(f'  Found vision capability at: {self.vision_image_topic}')
                 else:
-                    self.get_logger().warn(f'  Failed to query vision capability: {response.error_message}')
+                    self.get_logger().warn('  Vision capability found but "image" output not available')
                     self._use_fallback_topics()
-            except Exception as e:
-                self.get_logger().warn(f'  Error getting vision capability response: {e}')
+            except ValueError:
+                self.get_logger().warn('  Vision capability found but "image" output not found')
                 self._use_fallback_topics()
         else:
-            self.get_logger().warn('  Vision capability query timeout')
+            error_msg = response.error_message if response else 'No response'
+            self.get_logger().warn(f'  Failed to query vision capability: {error_msg}')
             self._use_fallback_topics()
     
     def _use_fallback_topics(self):
@@ -270,8 +209,8 @@ class UpdateMapSkill(Node):
 
     def _add_entity_to_map(self, label, pose):
         """Add an entity to the semantic map using AddEntity service."""
-        if not self.add_entity_client:
-            self.get_logger().warn('AddEntity service client not available, cannot add entity')
+        if not self.robonix_client:
+            self.get_logger().warn('RobonixClient not available, cannot add entity')
             return False
         
         try:
@@ -305,32 +244,15 @@ class UpdateMapSkill(Node):
             # Add frame mapping to entity (as array)
             entity.frame_mapping = [frame_mapping]
             
-            # Wait for service
-            if not self.add_entity_client.wait_for_service(timeout_sec=5.0):
-                self.get_logger().warn('AddEntity service not available')
-                return False
+            # Call AddEntity service using client
+            response = self.robonix_client.add_entity(entity, timeout_sec=5.0)
             
-            # Call AddEntity service
-            request = self.add_entity_client.srv_type.Request()
-            request.entity = entity
-            
-            future = self.add_entity_client.call_async(request)
-            rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
-            
-            if future.done():
-                try:
-                    response = future.result()
-                    if response.success:
-                        self.get_logger().info(f'  Successfully added entity {entity.id} ({label})')
-                        return True
-                    else:
-                        self.get_logger().warn(f'  Failed to add entity: {response.error_message}')
-                        return False
-                except Exception as e:
-                    self.get_logger().error(f'Error getting AddEntity response: {e}')
-                    return False
+            if response and response.success:
+                self.get_logger().info(f'  Successfully added entity {entity.id} ({label})')
+                return True
             else:
-                self.get_logger().warn('AddEntity service call timeout')
+                error_msg = response.error_message if response else 'No response'
+                self.get_logger().warn(f'  Failed to add entity: {error_msg}')
                 return False
                 
         except ImportError as e:
@@ -342,8 +264,8 @@ class UpdateMapSkill(Node):
 
     def _add_spatial_map_entry(self, image_msg):
         """Add a spatial map entry using AddSpatialMapEntry service."""
-        if not self.add_spatial_map_entry_client:
-            self.get_logger().warn('AddSpatialMapEntry service client not available, cannot add spatial map entry')
+        if not self.robonix_client:
+            self.get_logger().warn('RobonixClient not available, cannot add spatial map entry')
             return False
         
         try:
@@ -356,31 +278,14 @@ class UpdateMapSkill(Node):
             entry.timestamp = int(image_msg.header.stamp.sec * 1e9 + image_msg.header.stamp.nanosec)
             entry.source_skill = 'skl::update_map'
             
-            # Wait for service
-            if not self.add_spatial_map_entry_client.wait_for_service(timeout_sec=5.0):
-                self.get_logger().warn('AddSpatialMapEntry service not available')
-                return False
+            # Call AddSpatialMapEntry service using client
+            response = self.robonix_client.add_spatial_map_entry(entry, timeout_sec=5.0)
             
-            # Call AddSpatialMapEntry service
-            request = self.add_spatial_map_entry_client.srv_type.Request()
-            request.entry = entry
-            
-            future = self.add_spatial_map_entry_client.call_async(request)
-            rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
-            
-            if future.done():
-                try:
-                    response = future.result()
-                    if response.success:
-                        return True
-                    else:
-                        self.get_logger().warn(f'  Failed to add spatial map entry: {response.error_message}')
-                        return False
-                except Exception as e:
-                    self.get_logger().error(f'Error getting AddSpatialMapEntry response: {e}')
-                    return False
+            if response and response.success:
+                return True
             else:
-                self.get_logger().warn('AddSpatialMapEntry service call timeout')
+                error_msg = response.error_message if response else 'No response'
+                self.get_logger().warn(f'  Failed to add spatial map entry: {error_msg}')
                 return False
                 
         except ImportError as e:
@@ -407,6 +312,8 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        if update_map_skill.robonix_client:
+            update_map_skill.robonix_client.shutdown()
         update_map_skill.destroy_node()
         rclpy.shutdown()
 
