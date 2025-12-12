@@ -9,22 +9,70 @@ if [ -f .env ]; then
     export $(cat .env | grep -v '^#' | xargs)
 fi
 
-IMAGE_NAME=robonix_ros
+# Default: use remote image from Docker Hub
+USE_LOCAL=false
+REMOTE_IMAGE="docker.io/enkerewpo/robonix_ros:latest"
+LOCAL_IMAGE="robonix_ros"
 CONTAINER_NAME=robonix_ros_dev
 
-if [ "$1" == "-b" ]; then
-    echo "[*] Building Docker image..."
-    docker build -t $IMAGE_NAME .
-fi
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -b|--build)
+            USE_LOCAL=true
+            shift
+            ;;
+        -d|--delete)
+            echo "[*] Deleting Docker container..."
+            docker rm -f $CONTAINER_NAME 2>/dev/null || true
+            exit 0
+            ;;
+        -h|--help)
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  -b, --build    Build and use local image (default: use remote image from Docker Hub)"
+            echo "  -d, --delete   Delete existing container"
+            echo "  -h, --help     Show this help message"
+            echo ""
+            echo "By default, pulls and uses: docker.io/enkerewpo/robonix_ros:latest"
+            echo "Use -b to build and use local image instead"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use -h or --help for usage information"
+            exit 1
+            ;;
+    esac
+done
 
-if ! docker image inspect $IMAGE_NAME >/dev/null 2>&1; then
-    echo "[*] Building Docker image..."
-    docker build -t $IMAGE_NAME .
-fi
-
-if [ "$1" == "-d" ]; then
-    echo "[*] Deleting Docker container..."
-    docker rm -f $CONTAINER_NAME
+# Determine which image to use
+if [ "$USE_LOCAL" = true ]; then
+    IMAGE_NAME=$LOCAL_IMAGE
+    echo "[*] Using local image: $IMAGE_NAME"
+    
+    # Build local image if it doesn't exist
+    if ! docker image inspect $IMAGE_NAME >/dev/null 2>&1; then
+        echo "[*] Local image not found, building..."
+        docker build -t $IMAGE_NAME .
+    else
+        echo "[*] Local image found, skipping build"
+    fi
+else
+    IMAGE_NAME=$REMOTE_IMAGE
+    echo "[*] Using remote image: $IMAGE_NAME"
+    
+    # Pull remote image
+    echo "[*] Pulling remote image..."
+    docker pull $IMAGE_NAME || {
+        echo "[!] Failed to pull remote image. Falling back to local build..."
+        IMAGE_NAME=$LOCAL_IMAGE
+        if ! docker image inspect $IMAGE_NAME >/dev/null 2>&1; then
+            echo "[*] Building local image as fallback..."
+            docker build -t $IMAGE_NAME .
+        fi
+    }
 fi
 
 GPU_ARGS=""
@@ -45,8 +93,12 @@ fi
 if [ -z "$XAUTHORITY" ]; then
     export XAUTHORITY=$HOME/.Xauthority
 fi
+if [ -z "$XDG_RUNTIME_DIR" ]; then
+    export XDG_RUNTIME_DIR=/tmp
+fi
 echo "[*] DISPLAY=$DISPLAY"
 echo "[*] XAUTHORITY=$XAUTHORITY"
+echo "[*] XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
 xhost +local:docker 2>/dev/null || xhost + 2>/dev/null || echo "[*] Warning: Could not set xhost permissions"
 
 docker run -it --rm \

@@ -28,29 +28,33 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
         let recipe_path = PathBuf::from(&target);
         unregistrar.unregister_from_recipe(&recipe_path).await?;
     } else if target.contains('.') {
-        // package.capability or package.skill format
+        // package.primitive, package.service, or package.skill format
         let parts: Vec<&str> = target.splitn(2, '.').collect();
         if parts.len() == 2 {
             let package_name = parts[0];
-            let cap_or_skill = parts[1];
+            let item_name = parts[1];
 
-            if cap_or_skill.starts_with("cap::") {
+            if item_name.starts_with("prm::") {
                 unregistrar
-                    .unregister_capability(package_name, cap_or_skill)
+                    .unregister_primitive(package_name, item_name)
                     .await?;
-            } else if cap_or_skill.starts_with("skl::") {
+            } else if item_name.starts_with("srv::") {
                 unregistrar
-                    .unregister_skill(package_name, cap_or_skill)
+                    .unregister_service(package_name, item_name)
+                    .await?;
+            } else if item_name.starts_with("skl::") {
+                unregistrar
+                    .unregister_skill(package_name, item_name)
                     .await?;
             } else {
                 anyhow::bail!(
-                    "Invalid format. Expected 'package.cap::name' or 'package.skl::name', got: {}",
+                    "Invalid format. Expected 'package.prm::name', 'package.srv::name', or 'package.skl::name', got: {}",
                     target
                 );
             }
         } else {
             anyhow::bail!(
-                "Invalid format. Expected 'package.cap::name' or 'package.skl::name', got: {}",
+                "Invalid format. Expected 'package.prm::name', 'package.srv::name', or 'package.skl::name', got: {}",
                 target
             );
         }

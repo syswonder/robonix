@@ -5,11 +5,14 @@ use crate::process::ProcessManager;
 use crate::recipe::Recipe;
 use crate::recipe_state::RecipeState;
 use anyhow::Result;
-use robonix_core::messages::{RegisterRequest, RegisterResponse};
+use robonix_core::primitive::primitive::{RegisterPrimitiveRequest, RegisterPrimitiveResponse};
+use robonix_core::service::service::{RegisterServiceRequest, RegisterServiceResponse};
+use robonix_core::skill_library::skill::{RegisterSkillRequest, RegisterSkillResponse};
 use ros2_client::{
     service::AService, Context, Name, Node, NodeName, NodeOptions, ServiceMapping, ServiceTypeName,
 };
 use rustdds::{policy, QosPolicyBuilder};
+use serde_json;
 use serde_yaml::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,8 +21,14 @@ use tokio::sync::Mutex;
 pub struct PackageRegistrar {
     config: Config,
     node: Arc<Mutex<Option<Node>>>,
-    register_client: Arc<
-        Mutex<Option<ros2_client::service::Client<AService<RegisterRequest, RegisterResponse>>>>,
+    primitive_client: Arc<
+        Mutex<Option<ros2_client::service::Client<AService<RegisterPrimitiveRequest, RegisterPrimitiveResponse>>>>,
+    >,
+    service_client: Arc<
+        Mutex<Option<ros2_client::service::Client<AService<RegisterServiceRequest, RegisterServiceResponse>>>>,
+    >,
+    skill_client: Arc<
+        Mutex<Option<ros2_client::service::Client<AService<RegisterSkillRequest, RegisterSkillResponse>>>>,
     >,
     process_manager: Arc<ProcessManager>,
 }
@@ -33,14 +42,18 @@ impl PackageRegistrar {
         Ok(Self {
             config,
             node: Arc::new(Mutex::new(None)),
-            register_client: Arc::new(Mutex::new(None)),
+            primitive_client: Arc::new(Mutex::new(None)),
+            service_client: Arc::new(Mutex::new(None)),
+            skill_client: Arc::new(Mutex::new(None)),
             process_manager,
         })
     }
 
-    async fn ensure_client(&self) -> Result<()> {
+    async fn ensure_clients(&self) -> Result<()> {
         let mut node_guard = self.node.lock().await;
-        let mut client_guard = self.register_client.lock().await;
+        let mut primitive_client_guard = self.primitive_client.lock().await;
+        let mut service_client_guard = self.service_client.lock().await;
+        let mut skill_client_guard = self.skill_client.lock().await;
 
         if node_guard.is_none() {
             let context = Context::new()
@@ -61,7 +74,7 @@ impl PackageRegistrar {
                 let _ = spinner.spin().await;
             });
 
-            // Create service client
+            // Create service clients
             let service_qos = QosPolicyBuilder::new()
                 .reliability(policy::Reliability::Reliable {
                     max_blocking_time: rustdds::Duration::from_millis(100),
@@ -69,34 +82,62 @@ impl PackageRegistrar {
                 .history(policy::History::KeepLast { depth: 1 })
                 .build();
 
-            let client = node
-                .create_client::<AService<RegisterRequest, RegisterResponse>>(
+            // Primitive register client
+            let primitive_client = node
+                .create_client::<AService<RegisterPrimitiveRequest, RegisterPrimitiveResponse>>(
                     ServiceMapping::Enhanced,
-                    &Name::new("/rbnx/srv/mgmt", "register_cap_skl").unwrap(),
-                    &ServiceTypeName::new("robonix_core", "RegisterCapSkl"),
+                    &Name::new("/rbnx/prm", "register").unwrap(),
+                    &ServiceTypeName::new("robonix_core", "RegisterPrimitive"),
+                    service_qos.clone(),
+                    service_qos.clone(),
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to create primitive register service client: {:?}", e)
+                })?;
+
+            // Service register client
+            let service_client = node
+                .create_client::<AService<RegisterServiceRequest, RegisterServiceResponse>>(
+                    ServiceMapping::Enhanced,
+                    &Name::new("/rbnx/srv", "register").unwrap(),
+                    &ServiceTypeName::new("robonix_core", "RegisterService"),
+                    service_qos.clone(),
+                    service_qos.clone(),
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to create service register service client: {:?}", e)
+                })?;
+
+            // Skill register client
+            let skill_client = node
+                .create_client::<AService<RegisterSkillRequest, RegisterSkillResponse>>(
+                    ServiceMapping::Enhanced,
+                    &Name::new("/rbnx/skl", "register").unwrap(),
+                    &ServiceTypeName::new("robonix_core", "RegisterSkill"),
                     service_qos.clone(),
                     service_qos,
                 )
                 .map_err(|e| {
-                    anyhow::anyhow!("Failed to create register service client: {:?}", e)
+                    anyhow::anyhow!("Failed to create skill register service client: {:?}", e)
                 })?;
 
-            // Wait for service to be available (with timeout)
-            tracing::debug!("Waiting for register service to be available...");
-            let wait_future = client.wait_for_service(&node);
+            // Wait for services to be available (with timeout)
+            tracing::debug!("Waiting for register services to be available...");
+            let wait_future = primitive_client.wait_for_service(&node);
             let timeout_future = tokio::time::sleep(tokio::time::Duration::from_secs(5));
             tokio::select! {
                 _ = wait_future => {
-                    tracing::debug!("Register service is available");
+                    tracing::debug!("Register services are available");
                 }
                 _ = timeout_future => {
-                    tracing::warn!("Register service not available after 5 seconds, continuing anyway...");
-                    // Continue anyway, the service call will fail if service is not available
+                    tracing::warn!("Register services not available after 5 seconds, continuing anyway...");
                 }
             }
 
             *node_guard = Some(node);
-            *client_guard = Some(client);
+            *primitive_client_guard = Some(primitive_client);
+            *service_client_guard = Some(service_client);
+            *skill_client_guard = Some(skill_client);
         }
 
         Ok(())
@@ -111,38 +152,41 @@ impl PackageRegistrar {
             output::sub_step(&format!("Description: {}", desc));
         }
 
-        // Get entity name from recipe (use first package's entity_name, or default)
-        let entity_name = recipe
-            .packages
-            .iter()
-            .find_map(|pkg| pkg.entity_name.as_ref())
-            .cloned()
-            .unwrap_or_else(|| "default_entity".to_string());
-
-        // Register all capabilities and skills (without starting processes)
+        // Register all primitives, services, and skills
         output::info("");
         for recipe_pkg in &recipe.packages {
             let pkg_info = db
                 .find_by_name(&recipe_pkg.name)
                 .ok_or_else(|| anyhow::anyhow!("Package not found: {}", recipe_pkg.name))?;
 
-            // Use package-specific entity_name if provided, otherwise use recipe-level entity_name
-            let pkg_entity_name = recipe_pkg.entity_name.as_ref().unwrap_or(&entity_name);
-
             // Load manifest
             let manifest_content = std::fs::read_to_string(&pkg_info.manifest_path)?;
             let manifest: Value = serde_yaml::from_str(&manifest_content)?;
 
-            // Register capabilities
-            let caps_to_register = if let Some(caps) = &recipe_pkg.capabilities {
-                caps.clone()
+            // Register primitives
+            let primitives_to_register = if let Some(primitives) = &recipe_pkg.primitives {
+                primitives.clone()
             } else {
-                pkg_info.capabilities.clone()
+                pkg_info.primitives.clone()
             };
 
-            for cap_name in caps_to_register {
-                if let Some(cap) = find_capability_in_manifest(&manifest, &cap_name)? {
-                    self.register_capability(&pkg_info.name, &pkg_info.path, cap, pkg_entity_name)
+            for primitive_name in primitives_to_register {
+                if let Some(primitive) = find_primitive_in_manifest(&manifest, &primitive_name)? {
+                    self.register_primitive(&pkg_info.name, &pkg_info.path, primitive)
+                        .await?;
+                }
+            }
+
+            // Register services
+            let services_to_register = if let Some(services) = &recipe_pkg.services {
+                services.clone()
+            } else {
+                pkg_info.services.clone()
+            };
+
+            for service_name in services_to_register {
+                if let Some(service) = find_service_in_manifest(&manifest, &service_name)? {
+                    self.register_service(&pkg_info.name, &pkg_info.path, service)
                         .await?;
                 }
             }
@@ -156,7 +200,7 @@ impl PackageRegistrar {
 
             for skill_name in skills_to_register {
                 if let Some(skill) = find_skill_in_manifest(&manifest, &skill_name)? {
-                    self.register_skill(&pkg_info.name, &pkg_info.path, skill, pkg_entity_name)
+                    self.register_skill(&pkg_info.name, &pkg_info.path, skill)
                         .await?;
                 }
             }
@@ -174,74 +218,103 @@ impl PackageRegistrar {
         Ok(())
     }
 
-    async fn register_capability(
+    async fn register_primitive(
         &self,
         package_name: &str,
         package_path: &PathBuf,
-        cap: &Value,
-        entity_name: &str,
+        primitive: &Value,
     ) -> Result<()> {
-        let std_name = cap["name"]
+        let name = primitive["name"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Capability name not found"))?;
-
-        // Get impl_id from manifest, default to empty string (will be normalized to "default" in core)
-        let impl_id = cap["impl_id"]
-            .as_str()
-            .unwrap_or("")
+            .ok_or_else(|| anyhow::anyhow!("Primitive name not found"))?
             .to_string();
 
-        // Description from spec, not needed in manifest
-        let description = String::new();
+        let input_schema_str = primitive["input_schema"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Primitive input_schema not found"))?;
+        // Validate JSON but keep as string for ROS2 service
+        let input_schema_str = primitive["input_schema"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Primitive input_schema not found"))?;
+        serde_json::from_str::<serde_json::Value>(input_schema_str)
+            .map_err(|e| anyhow::anyhow!("Invalid input_schema JSON: {}", e))?;
 
-        // Code path is the package path
-        let code_path = package_path
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid package path"))?
-            .to_string();
+        let output_schema_str = primitive["output_schema"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Primitive output_schema not found"))?;
+        serde_json::from_str::<serde_json::Value>(output_schema_str)
+            .map_err(|e| anyhow::anyhow!("Invalid output_schema JSON: {}", e))?;
 
-        let (mut input_names, mut input_types, input_channels) = parse_io_params(cap, "inputs")?;
-        let (mut output_names, mut output_types, output_channels) =
-            parse_io_params(cap, "outputs")?;
-        let (config_services, config_names) = parse_configs(cap)?;
+        let metadata_str = primitive["metadata"]
+            .as_str()
+            .unwrap_or("{}");
+        serde_json::from_str::<serde_json::Value>(metadata_str)
+            .map_err(|e| anyhow::anyhow!("Invalid metadata JSON: {}", e))?;
 
-        // Fill types from spec if empty (new simplified manifest format)
-        fill_types_from_spec(
-            std_name,
-            "cap",
-            &mut input_names,
-            &mut input_types,
-            &mut output_names,
-            &mut output_types,
-        )?;
+        // Use package name as provider
+        let provider = package_name.to_string();
 
-        let impl_display = if impl_id.is_empty() { "default".to_string() } else { impl_id.clone() };
-        let request = RegisterRequest {
-            package_name: package_name.to_string(),
-            package_type: "cap".to_string(),
-            std_name: std_name.to_string(),
-            impl_id,
-            description,
-            code_path,
-            input_names,
-            input_ros_types: input_types,
-            input_channels,
-            output_names,
-            output_ros_types: output_types,
-            output_channels,
-            config_services,
-            config_names,
-            hostname: self.process_manager.get_hostname().to_string(),
-            entity_name: entity_name.to_string(),
+        let request = RegisterPrimitiveRequest {
+            name: name.clone(),
+            input_schema: input_schema_str.to_string(),
+            output_schema: output_schema_str.to_string(),
+            metadata: metadata_str.to_string(),
+            provider: provider.clone(),
         };
 
-        self.call_register_service(request).await?;
+        self.call_primitive_register_service(request).await?;
         output::check(&format!(
-            "Registered capability: {} (impl_id: {}, host: {}, entity: {})",
-            std_name,
-            impl_display,
-            self.process_manager.get_hostname(),
-            entity_name
+            "Registered primitive: {} (provider: {})",
+            name,
+            provider
+        ));
+        Ok(())
+    }
+
+    async fn register_service(
+        &self,
+        package_name: &str,
+        package_path: &PathBuf,
+        service: &Value,
+    ) -> Result<()> {
+        let name = service["name"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Service name not found"))?
+            .to_string();
+
+        let srv_type = service["srv_type"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Service srv_type not found"))?
+            .to_string();
+
+        let entry = service["entry"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Service entry not found"))?
+            .to_string();
+
+        let metadata_str = service["metadata"]
+            .as_str()
+            .unwrap_or("{}");
+        // Validate JSON but keep as string for ROS2 service
+        serde_json::from_str::<serde_json::Value>(metadata_str)
+            .map_err(|e| anyhow::anyhow!("Invalid metadata JSON: {}", e))?;
+
+        // Use package name as provider
+        let provider = package_name.to_string();
+
+        let request = RegisterServiceRequest {
+            name: name.clone(),
+            srv_type,
+            entry,
+            metadata: metadata_str.to_string(),
+            provider: provider.clone(),
+        };
+
+        self.call_service_register_service(request).await?;
+        output::check(&format!(
+            "Registered service: {} (provider: {})",
+            name,
+            provider
         ));
         Ok(())
     }
@@ -251,93 +324,114 @@ impl PackageRegistrar {
         package_name: &str,
         package_path: &PathBuf,
         skill: &Value,
-        entity_name: &str,
     ) -> Result<()> {
-        let std_name = skill["name"]
+        let name_raw = skill["name"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Skill name not found"))?;
-
-        // Get impl_id from manifest, default to empty string (will be normalized to "default" in core)
-        let impl_id = skill["impl_id"]
-            .as_str()
-            .unwrap_or("")
+            .ok_or_else(|| anyhow::anyhow!("Skill name not found"))?
             .to_string();
-
-        // Description from spec, not needed in manifest
-        let description = String::new();
-
-        // Code path is the package path
-        let code_path = package_path
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid package path"))?
-            .to_string();
-
-        let (mut input_names, mut input_types, input_channels) = parse_io_params(skill, "inputs")?;
-        let (mut output_names, mut output_types, output_channels) =
-            parse_io_params(skill, "outputs")?;
-        let (config_services, config_names) = parse_configs(skill)?;
-
-        // Fill types from spec if empty (new simplified manifest format)
-        fill_types_from_spec(
-            std_name,
-            "skl",
-            &mut input_names,
-            &mut input_types,
-            &mut output_names,
-            &mut output_types,
-        )?;
-
-        let impl_display = if impl_id.is_empty() { "default".to_string() } else { impl_id.clone() };
-        let request = RegisterRequest {
-            package_name: package_name.to_string(),
-            package_type: "skl".to_string(),
-            std_name: std_name.to_string(),
-            impl_id,
-            description,
-            code_path,
-            input_names,
-            input_ros_types: input_types,
-            input_channels,
-            output_names,
-            output_ros_types: output_types,
-            output_channels,
-            config_services,
-            config_names,
-            hostname: self.process_manager.get_hostname().to_string(),
-            entity_name: entity_name.to_string(),
+        // Automatically add 'skl::' prefix if not present
+        let name = if name_raw.starts_with("skl::") {
+            name_raw
+        } else {
+            format!("skl::{}", name_raw)
         };
 
-        self.call_register_service(request).await?;
+        let start_topic = skill["start_topic"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Skill start_topic not found"))?
+            .to_string();
+
+        let status_topic = skill["status_topic"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Skill status_topic not found"))?
+            .to_string();
+
+        let skill_dir = skill["skill_dir"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Skill skill_dir not found"))?
+            .to_string();
+        // Make skill_dir absolute path
+        let skill_dir = if skill_dir.starts_with('/') {
+            skill_dir
+        } else {
+            package_path.join(&skill_dir)
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("Invalid skill_dir path"))?
+                .to_string()
+        };
+
+        let main_rtdl = skill["main_rtdl"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Skill main_rtdl not found"))?
+            .to_string();
+
+        let start_args_str = skill["start_args"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Skill start_args not found"))?;
+        // Validate JSON but keep as string for ROS2 service
+        serde_json::from_str::<serde_json::Value>(start_args_str)
+            .map_err(|e| anyhow::anyhow!("Invalid start_args JSON: {}", e))?;
+
+        let status_str = skill["status"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Skill status not found"))?;
+        serde_json::from_str::<serde_json::Value>(status_str)
+            .map_err(|e| anyhow::anyhow!("Invalid status JSON: {}", e))?;
+
+        let metadata_str = skill["metadata"]
+            .as_str()
+            .unwrap_or("{}");
+        serde_json::from_str::<serde_json::Value>(metadata_str)
+            .map_err(|e| anyhow::anyhow!("Invalid metadata JSON: {}", e))?;
+
+        // Use package name as provider
+        let provider = package_name.to_string();
+
+        let version = skill["version"]
+            .as_str()
+            .unwrap_or("1.0.0")
+            .to_string();
+
+        let request = RegisterSkillRequest {
+            name: name.clone(),
+            start_topic,
+            status_topic,
+            skill_dir,
+            main_rtdl,
+            start_args: start_args_str.to_string(),
+            status: status_str.to_string(),
+            metadata: metadata_str.to_string(),
+            provider: provider.clone(),
+            version,
+        };
+
+        let response = self.call_skill_register_service(request).await?;
         output::check(&format!(
-            "Registered skill: {} (impl_id: {}, host: {}, entity: {})",
-            std_name,
-            impl_display,
-            self.process_manager.get_hostname(),
-            entity_name
+            "Registered skill: {} (skill_id: {}, provider: {})",
+            name,
+            response.skill_id,
+            provider
         ));
         Ok(())
     }
 
-    async fn call_register_service(&self, request: RegisterRequest) -> Result<()> {
-        // Ensure client is initialized
-        self.ensure_client().await?;
+    async fn call_primitive_register_service(
+        &self,
+        request: RegisterPrimitiveRequest,
+    ) -> Result<RegisterPrimitiveResponse> {
+        self.ensure_clients().await?;
 
-        let client_guard = self.register_client.lock().await;
+        let client_guard = self.primitive_client.lock().await;
         let client = client_guard
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Register client not initialized"))?;
+            .ok_or_else(|| anyhow::anyhow!("Primitive register client not initialized"))?;
 
         let node_guard = self.node.lock().await;
         let _node = node_guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("ROS2 node not initialized"))?;
 
-        // Call service directly using ROS2 client
-        tracing::info!(
-            "Calling register service for {}: {}",
-            request.package_type,
-            request.std_name
-        );
+        tracing::info!("Calling primitive register service for: {}", request.name);
         let call_result = tokio::time::timeout(
             tokio::time::Duration::from_secs(10),
             client.async_call_service(request),
@@ -346,15 +440,95 @@ impl PackageRegistrar {
 
         match call_result {
             Ok(Ok(response)) => {
-                tracing::info!(
-                    "Received response: success={}, error={}",
-                    response.success,
-                    response.error_message
-                );
-                if !response.success {
-                    anyhow::bail!("Registration failed: {}", response.error_message);
+                tracing::info!("Received response: ok={}", response.ok);
+                if !response.ok {
+                    anyhow::bail!("Primitive registration failed");
                 }
-                Ok(())
+                Ok(response)
+            }
+            Ok(Err(e)) => {
+                tracing::error!("Service call error: {:?}", e);
+                anyhow::bail!("Service call error: {:?}", e);
+            }
+            Err(_) => {
+                tracing::error!("Service call timeout after 10 seconds");
+                anyhow::bail!("Service call timeout after 10 seconds");
+            }
+        }
+    }
+
+    async fn call_service_register_service(
+        &self,
+        request: RegisterServiceRequest,
+    ) -> Result<RegisterServiceResponse> {
+        self.ensure_clients().await?;
+
+        let client_guard = self.service_client.lock().await;
+        let client = client_guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Service register client not initialized"))?;
+
+        let node_guard = self.node.lock().await;
+        let _node = node_guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("ROS2 node not initialized"))?;
+
+        tracing::info!("Calling service register service for: {}", request.name);
+        let call_result = tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            client.async_call_service(request),
+        )
+        .await;
+
+        match call_result {
+            Ok(Ok(response)) => {
+                tracing::info!("Received response: ok={}", response.ok);
+                if !response.ok {
+                    anyhow::bail!("Service registration failed");
+                }
+                Ok(response)
+            }
+            Ok(Err(e)) => {
+                tracing::error!("Service call error: {:?}", e);
+                anyhow::bail!("Service call error: {:?}", e);
+            }
+            Err(_) => {
+                tracing::error!("Service call timeout after 10 seconds");
+                anyhow::bail!("Service call timeout after 10 seconds");
+            }
+        }
+    }
+
+    async fn call_skill_register_service(
+        &self,
+        request: RegisterSkillRequest,
+    ) -> Result<RegisterSkillResponse> {
+        self.ensure_clients().await?;
+
+        let client_guard = self.skill_client.lock().await;
+        let client = client_guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Skill register client not initialized"))?;
+
+        let node_guard = self.node.lock().await;
+        let _node = node_guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("ROS2 node not initialized"))?;
+
+        tracing::info!("Calling skill register service for: {}", request.name);
+        let call_result = tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            client.async_call_service(request),
+        )
+        .await;
+
+        match call_result {
+            Ok(Ok(response)) => {
+                tracing::info!("Received response: ok={}, skill_id={}", response.ok, response.skill_id);
+                if !response.ok {
+                    anyhow::bail!("Skill registration failed");
+                }
+                Ok(response)
             }
             Ok(Err(e)) => {
                 tracing::error!("Service call error: {:?}", e);
@@ -368,11 +542,22 @@ impl PackageRegistrar {
     }
 }
 
-fn find_capability_in_manifest<'a>(manifest: &'a Value, name: &str) -> Result<Option<&'a Value>> {
-    if let Some(caps) = manifest["capabilities"].as_sequence() {
-        for cap in caps {
-            if cap["name"].as_str() == Some(name) {
-                return Ok(Some(cap));
+fn find_primitive_in_manifest<'a>(manifest: &'a Value, name: &str) -> Result<Option<&'a Value>> {
+    if let Some(primitives) = manifest["primitives"].as_sequence() {
+        for primitive in primitives {
+            if primitive["name"].as_str() == Some(name) {
+                return Ok(Some(primitive));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn find_service_in_manifest<'a>(manifest: &'a Value, name: &str) -> Result<Option<&'a Value>> {
+    if let Some(services) = manifest["services"].as_sequence() {
+        for service in services {
+            if service["name"].as_str() == Some(name) {
+                return Ok(Some(service));
             }
         }
     }
@@ -388,163 +573,4 @@ fn find_skill_in_manifest<'a>(manifest: &'a Value, name: &str) -> Result<Option<
         }
     }
     Ok(None)
-}
-
-fn parse_io_params(
-    cap_or_skill: &Value,
-    field: &str,
-) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
-    let mut names = Vec::new();
-    let mut types = Vec::new();
-    let mut channels = Vec::new();
-
-    // Support both old format (list of objects) and new format (dict: name => channel)
-    if let Some(params) = cap_or_skill[field].as_sequence() {
-        // Old format: list of {name, type, channel}
-        for param in params {
-            if let Some(name) = param["name"].as_str() {
-                names.push(name.to_string());
-            } else {
-                names.push(String::new());
-            }
-
-            if let Some(typ) = param["type"].as_str() {
-                types.push(typ.to_string());
-            } else {
-                types.push(String::new());
-            }
-
-            if let Some(channel) = param["channel"].as_str() {
-                channels.push(channel.to_string());
-            } else {
-                channels.push(String::new());
-            }
-        }
-    } else if let Some(channel_map) = cap_or_skill[field].as_mapping() {
-        // New format: dict {name: channel}
-        // Note: names and types will be filled from spec during registration
-        // For now, we just extract the channel mappings
-        for (name_key, channel_value) in channel_map {
-            if let (Some(name), Some(channel)) = (name_key.as_str(), channel_value.as_str()) {
-                names.push(name.to_string());
-                channels.push(channel.to_string());
-                // Type will be filled from spec
-                types.push(String::new());
-            }
-        }
-    }
-
-    Ok((names, types, channels))
-}
-
-fn parse_configs(cap_or_skill: &Value) -> Result<(Vec<String>, Vec<String>)> {
-    let mut services = Vec::new();
-    let mut names = Vec::new();
-
-    // Support both old format (list) and new format (dict, though configs are usually empty)
-    if let Some(configs) = cap_or_skill["configs"].as_sequence() {
-        // Old format: list of {service, name}
-        for config in configs {
-            if let Some(service) = config["service"].as_str() {
-                services.push(service.to_string());
-            } else {
-                services.push(String::new());
-            }
-
-            if let Some(name) = config["name"].as_str() {
-                names.push(name.to_string());
-            } else {
-                names.push(String::new());
-            }
-        }
-    } else if let Some(config_map) = cap_or_skill["configs"].as_mapping() {
-        // New format: dict {name: service} (if needed in future)
-        for (name_key, service_value) in config_map {
-            if let (Some(name), Some(service)) = (name_key.as_str(), service_value.as_str()) {
-                names.push(name.to_string());
-                services.push(service.to_string());
-            }
-        }
-    }
-
-    Ok((services, names))
-}
-
-/// Fill types from spec for capabilities/skills using simplified manifest format
-/// This function matches channel mappings from manifest with spec definitions
-fn fill_types_from_spec(
-    std_name: &str,
-    package_type: &str,
-    input_names: &mut Vec<String>,
-    input_types: &mut Vec<String>,
-    output_names: &mut Vec<String>,
-    output_types: &mut Vec<String>,
-) -> Result<()> {
-    // Check if we need to fill types (new format where types are empty)
-    let needs_filling =
-        input_types.iter().any(|t| t.is_empty()) || output_types.iter().any(|t| t.is_empty());
-
-    if !needs_filling {
-        // Old format, types already provided
-        return Ok(());
-    }
-
-    // Use robonix-core's spec registry to get types
-    let spec_registry = robonix_core::spec::SpecRegistry::new();
-
-    match package_type {
-        "cap" => {
-            let spec = spec_registry
-                .capabilities
-                .get(std_name)
-                .ok_or_else(|| anyhow::anyhow!("Unknown capability spec: {}", std_name))?;
-
-            // Match input names from manifest with spec and fill types
-            for (i, input_name) in input_names.iter().enumerate() {
-                if let Some(spec_input) = spec.inputs.iter().find(|s| s.name == *input_name) {
-                    if i < input_types.len() && input_types[i].is_empty() {
-                        input_types[i] = spec_input.ros_type.clone();
-                    }
-                }
-            }
-
-            // Match output names from manifest with spec and fill types
-            for (i, output_name) in output_names.iter().enumerate() {
-                if let Some(spec_output) = spec.outputs.iter().find(|s| s.name == *output_name) {
-                    if i < output_types.len() && output_types[i].is_empty() {
-                        output_types[i] = spec_output.ros_type.clone();
-                    }
-                }
-            }
-        }
-        "skl" => {
-            let spec = spec_registry
-                .skills
-                .get(std_name)
-                .ok_or_else(|| anyhow::anyhow!("Unknown skill spec: {}", std_name))?;
-
-            // Match input names from manifest with spec and fill types
-            for (i, input_name) in input_names.iter().enumerate() {
-                if let Some(spec_input) = spec.inputs.iter().find(|s| s.name == *input_name) {
-                    if i < input_types.len() && input_types[i].is_empty() {
-                        input_types[i] = spec_input.ros_type.clone();
-                    }
-                }
-            }
-
-            // Match output names from manifest with spec and fill types
-            for (i, output_name) in output_names.iter().enumerate() {
-                if let Some(spec_output) = spec.outputs.iter().find(|s| s.name == *output_name) {
-                    if i < output_types.len() && output_types[i].is_empty() {
-                        output_types[i] = spec_output.ros_type.clone();
-                    }
-                }
-            }
-        }
-        _ => {
-            anyhow::bail!("Invalid package type: {}", package_type);
-        }
-    }
-
-    Ok(())
 }

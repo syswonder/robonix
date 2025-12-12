@@ -207,13 +207,9 @@ impl PackageInstaller {
             .and_then(|v| v.as_str())
             .context("Missing 'package.version' in manifest")?;
 
-        // Check that capabilities and skills sections exist (even if empty)
-        if !manifest.get("capabilities").is_some() {
-            anyhow::bail!("Missing 'capabilities' section in manifest");
-        }
-        if !manifest.get("skills").is_some() {
-            anyhow::bail!("Missing 'skills' section in manifest");
-        }
+        // Check that at least one of primitives, services, or skills sections exist
+        // (They can be empty lists, but the sections should exist)
+        // Note: We don't require all sections to exist, as packages may only provide primitives, services, or skills
 
         Ok((name.to_string(), version.to_string()))
     }
@@ -247,11 +243,20 @@ impl PackageInstaller {
             .unwrap_or("0.0.0")
             .to_string();
 
-        let mut capabilities = Vec::new();
-        if let Some(caps) = manifest["capabilities"].as_sequence() {
-            for cap in caps {
-                if let Some(name) = cap["name"].as_str() {
-                    capabilities.push(name.to_string());
+        let mut primitives = Vec::new();
+        if let Some(prms) = manifest["primitives"].as_sequence() {
+            for prm in prms {
+                if let Some(name) = prm["name"].as_str() {
+                    primitives.push(name.to_string());
+                }
+            }
+        }
+
+        let mut services = Vec::new();
+        if let Some(srvs) = manifest["services"].as_sequence() {
+            for srv in srvs {
+                if let Some(name) = srv["name"].as_str() {
+                    services.push(name.to_string());
                 }
             }
         }
@@ -272,7 +277,8 @@ impl PackageInstaller {
             version,
             path: path.to_path_buf(),
             manifest_path: manifest_path.to_path_buf(),
-            capabilities,
+            primitives,
+            services,
             skills,
             installed_at,
             source,

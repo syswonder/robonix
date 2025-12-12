@@ -12,9 +12,9 @@ pub struct Recipe {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecipePackage {
     pub name: String,
-    pub capabilities: Option<Vec<String>>, // If None, register all capabilities
-    pub skills: Option<Vec<String>>,       // If None, register all skills
-    pub entity_name: Option<String>,       // Entity name to mount (e.g., "agilex_robot")
+    pub primitives: Option<Vec<String>>, // If None, register all primitives
+    pub services: Option<Vec<String>>, // If None, register all services
+    pub skills: Option<Vec<String>>,    // If None, register all skills
 }
 
 impl Recipe {

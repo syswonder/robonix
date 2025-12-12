@@ -1,71 +1,65 @@
 # Robonix Package Manifest
-# This file defines the capabilities and skills provided by this package
-# Format version: 1.0
+# This file defines the primitives, services, and skills provided by this package
+# Format version: 2.0 (EAIOS Architecture)
 #
 # Note: 
-# - name and type are defined in spec, only channel mappings are needed here
-# - code_path, package_id, etc. are automatically filled by CLI during registration
-# - Channel mapping format: {parameter_name: topic_channel}
+# - Primitives and services must conform to standard specifications
+# - Skills are flexible and user-defined
+# - JSON fields (input_schema, output_schema, metadata, start_args, status) must be valid JSON strings
 
 package:
   name: demo_rgb_provider
   version: 0.0.1
-  description: Demo package with multiple capabilities and skills
+  description: Demo package with primitives and skills
   maintainer: root
   maintainer_email: root@todo.todo
   license: Apache-2.0
   # build_script: rbnx/build.sh  # Optional: build script path. If omitted, defaults to rbnx/build.sh
 
-# Capabilities provided by this package
-# Only need to specify channel mappings for inputs/outputs defined in spec
-capabilities:
-  - name: cap::vision.capture_rgb
-    # Spec defines: OUTPUT: ["image" => "sensor_msgs/msg/Image"]
+# Primitives provided by this package
+# Primitives provide standardized hardware capability mapping
+primitives:
+  - name: prm::camera_capture
+    # Spec defines: OUTPUT: {"image": "sensor_msgs/Image"}
+    input_schema: '{}'
+    output_schema: '{"image":"/demo_rgb/image"}'
+    metadata: '{"resolution":"640x480","format":"RGB"}'
+    provider: demo_rgb_provider
     start_script: rbnx/start_capture_rgb.sh
     stop_script: rbnx/stop_capture_rgb.sh
-    outputs:
-      image: /demo_rgb/image
 
-  - name: cap::grasp.move
+  - name: prm::arm_move_ee
     # Spec defines: 
-    #   INPUT: ["target_pose" => "geometry_msgs/msg/PoseStamped"]
-    #   OUTPUT: ["status" => "boolean"]
+    #   INPUT: {"pose": "geometry_msgs/PoseStamped"}
+    #   OUTPUT: {"status": "bool"}
+    input_schema: '{"pose":"/demo_grasp/pose_goal"}'
+    output_schema: '{"status":"/demo_grasp/pose_status"}'
+    metadata: '{"robot":"demo_arm"}'
+    provider: demo_rgb_provider
     start_script: rbnx/start_grasp_move.sh
     stop_script: rbnx/stop_grasp_move.sh
-    inputs:
-      target_pose: /demo_grasp/pose_goal
-    outputs:
-      status: /demo_grasp/pose_status
+
+# Services provided by this package
+# Services provide standardized algorithm capabilities
+# (This package doesn't provide any standard services, but here's an example format)
+# services:
+#   - name: spatial_map
+#     srv_type: robonix_core/srv/service/spatial_map/GetSpatialMap
+#     entry: /mapping/get_spatial_map
+#     metadata: '{"supported_types":["2d","3d"]}'
+#     provider: demo_rgb_provider
 
 # Skills provided by this package
+# Skills are user-defined and flexible, using RTDL for implementation
 skills:
-  - name: skl::pick
-    # Spec defines:
-    #   INPUT: ["target_label" => "string"]
-    #   OUTPUT: ["status" => "boolean"]
-    # impl_id: algo01  # Optional: Implementation ID. If omitted, defaults to "default"
+  - name: pick
+    start_topic: /robot1/skill/pick/start
+    status_topic: /robot1/skill/pick/status
+    skill_dir: skills/pick
+    main_rtdl: pick.rtdl
+    start_args: '{"target_label":"string"}'
+    status: '{"state":"string","result":"any"}'
+    metadata: '{"domain":"demo","capability":["vision","manipulation"]}'
+    version: 1.0.0
     start_script: rbnx/start_pick.sh
     stop_script: rbnx/stop_pick.sh
-    inputs:
-      target_label: /demo_pick/target_label
-    outputs:
-      status: /demo_pick/status
-
-  - name: skl::update_map
-    # Spec defines:
-    #   INPUT: []
-    #   OUTPUT: ["status" => "boolean"]
-    start_script: rbnx/start_update_map.sh
-    stop_script: rbnx/stop_update_map.sh
-    outputs:
-      status: /demo_update_map/status
-
-  # Example: Multiple implementations of the same standard skill
-  # - name: skl::pick
-  #   impl_id: algo02  # Different implementation
-  #   start_script: rbnx/start_pick_algo02.sh
-  #   stop_script: rbnx/stop_pick_algo02.sh
-  #   inputs:
-  #     target_label: /demo_pick_algo02/target_label
-  #   outputs:
-  #     status: /demo_pick_algo02/status

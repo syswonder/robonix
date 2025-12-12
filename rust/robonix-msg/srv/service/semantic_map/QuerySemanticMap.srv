@@ -1,0 +1,7 @@
+# QuerySemanticMap service (robonix spec)
+# Semantic map service builds entity-level representation on top of spatial map
+string[] types             # Filter by entity type, e.g., ["room","window","robot"]
+---
+robonix_core/Entity[] entities
+builtin_interfaces/Time stamp
+

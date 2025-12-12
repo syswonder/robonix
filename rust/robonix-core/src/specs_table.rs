@@ -1,42 +1,51 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// Standard Capability and Skill Specifications Table
+// Standard Primitive and Service Specifications Table
 //
-// This file defines all standard capabilities and skills in a compact table format.
-// Format:
-//   CAP!(capabilities, name, desc, INPUT: [name => type, ...], OUTPUT: [name => type, ...], CONFIG: // TODO
-//   SKL!(skills, name, desc, INPUT: [name => type, ...], OUTPUT: [name => type, ...], CONFIG: // TODO
+// This file defines all standard primitives and services in a compact table format.
+// Note: Skills do not have specifications - they are user-defined and flexible.
 
-use crate::spec::{CapabilitySpec, SkillSpec};
+use crate::spec::{PrimitiveSpec, ServiceSpec};
 use std::collections::HashMap;
 
-pub fn load_capabilities() -> HashMap<String, CapabilitySpec> {
-    let mut capabilities = HashMap::new();
+pub fn load_primitives() -> HashMap<String, PrimitiveSpec> {
+    let mut primitives = HashMap::new();
 
-    CAP!(capabilities, "cap::grasp.move", "Move the gripper to a target pose",
-         INPUT: ["target_pose" => "geometry_msgs/msg/PoseStamped"],
-         OUTPUT: ["status" => "boolean"],
-         CONFIG: []);
+    // Camera capture primitive
+    PRM!(primitives, "prm::camera_capture", "Capture RGB image from camera",
+         {},
+         { "image": "/topic/image" });
 
-    CAP!(capabilities, "cap::vision.capture_rgb", "Capture RGB image from camera",
-         INPUT: [],
-         OUTPUT: ["image" => "sensor_msgs/msg/Image"],
-         CONFIG: []);
+    // Arm movement primitive
+    PRM!(primitives, "prm::arm_move_ee", "Move end effector to target pose",
+         { "pose": "/topic/pose" },
+         { "status": "/topic/status" });
 
-    capabilities
+    // Gripper primitive
+    PRM!(primitives, "prm::gripper.close", "Close gripper",
+         {},
+         { "status": "/topic/status" });
+
+    primitives
 }
 
-pub fn load_skills() -> HashMap<String, SkillSpec> {
-    let mut skills = HashMap::new();
+pub fn load_services() -> HashMap<String, ServiceSpec> {
+    let mut services = HashMap::new();
 
-    SKL!(skills, "skl::pick", "Pick an object by label",
-         INPUT: ["target_label" => "string"],
-         OUTPUT: ["status" => "boolean"],
-         CONFIG: []);
+    // Standard services
+    SRV!(services, "spatial_map", "Spatial map service providing geometric structure information",
+         "robonix_core/srv/spatial_map/GetSpatialMap");
 
-    SKL!(skills, "skl::update_map", "Update system maps (semantic and spatial)",
-         INPUT: [],
-         OUTPUT: ["status" => "boolean"],
-         CONFIG: []);
+    SRV!(services, "semantic_map", "Semantic map service providing entity-level representation",
+         "robonix_core/srv/semantic_map/QuerySemanticMap");
 
-    skills
+    SRV!(services, "task_plan", "Task planning service converting natural language to RTDL",
+         "robonix_core/srv/task_plan/PlanTask");
+
+    SRV!(services, "plan_simulate", "Plan simulation service for feasibility and safety checking",
+         "robonix_core/srv/plan_simulate/SimulatePlan");
+
+    SRV!(services, "result_feedback", "Result feedback service for execution verification",
+         "robonix_core/srv/result_feedback/ResultFeedback");
+
+    services
 }

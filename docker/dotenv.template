@@ -1,0 +1,49 @@
+# Docker Upload Configuration
+# Copy this file to .env and fill in your values
+# cp dotenv.template .env
+
+# ============================================
+# Registry Configuration
+# ============================================
+
+# Full registry path (recommended)
+# For Docker Hub (default):
+DOCKER_REGISTRY=docker.io/your_dockerhub_username/robonix_ros
+
+# For GitHub Container Registry:
+# DOCKER_REGISTRY=ghcr.io/your_github_username/robonix_ros
+
+# Or just registry (will use default image name)
+# DOCKER_REGISTRY=docker.io
+# DOCKER_IMAGE_NAME=robonix_ros
+
+# Image tag (default: latest)
+DOCKER_TAG=latest
+
+# ============================================
+# Authentication
+# ============================================
+
+# Your Docker Hub username
+DOCKER_USERNAME=your_dockerhub_username
+
+# Your Docker Hub password or access token
+# You can use your account password or create an access token at:
+# https://hub.docker.com/settings/security
+DOCKER_PASSWORD=your_dockerhub_password_or_token
+
+# ============================================
+# Upload Options
+# ============================================
+
+# Whether to push image to registry (default: true)
+# Set to false to only build locally without pushing
+DOCKER_PUSH=true
+
+# ============================================
+# Other Configuration (if needed)
+# ============================================
+
+# Tailscale auth key (if using Tailscale)
+# DOCKERKEY_PERM=PASTE_YOUR_TAILSCALE_AUTH_KEY_HERE
+

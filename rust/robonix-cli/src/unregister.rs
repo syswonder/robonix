@@ -16,7 +16,7 @@ impl PackageUnregistrar {
         Ok(Self { config })
     }
 
-    /// Unregister a package (all capabilities and skills)
+    /// Unregister a package (all primitives, services, and skills)
     pub async fn unregister_package(&self, package_name: &str) -> Result<()> {
         let db = PackageDatabase::load(&self.config.package_storage_path)?;
         let pkg_info = db
@@ -29,16 +29,27 @@ impl PackageUnregistrar {
 
         output::action("Unregistering", &format!("package '{}'", package_name));
 
-        // TODO: Call core unregister service for all capabilities
+        // TODO: Call core unregister service for all primitives, services, and skills
         // For now, we'll just stop the processes
 
-        // Unregister all capabilities
-        if let Some(caps) = manifest["capabilities"].as_sequence() {
-            for cap in caps {
-                if let Some(std_name) = cap["name"].as_str() {
-                    output::sub_step(&format!("Unregistering capability: {}", std_name));
+        // Unregister all primitives
+        if let Some(primitives) = manifest["primitives"].as_sequence() {
+            for primitive in primitives {
+                if let Some(std_name) = primitive["name"].as_str() {
+                    output::sub_step(&format!("Unregistering primitive: {}", std_name));
                     // TODO: Call core unregister service
-                    // self.call_unregister_service(package_name, "cap", std_name).await?;
+                    // self.call_unregister_primitive(package_name, std_name).await?;
+                }
+            }
+        }
+
+        // Unregister all services
+        if let Some(services) = manifest["services"].as_sequence() {
+            for service in services {
+                if let Some(std_name) = service["name"].as_str() {
+                    output::sub_step(&format!("Unregistering service: {}", std_name));
+                    // TODO: Call core unregister service
+                    // self.call_unregister_service(package_name, std_name).await?;
                 }
             }
         }
@@ -49,7 +60,7 @@ impl PackageUnregistrar {
                 if let Some(std_name) = skill["name"].as_str() {
                     output::sub_step(&format!("Unregistering skill: {}", std_name));
                     // TODO: Call core unregister service
-                    // self.call_unregister_service(package_name, "skl", std_name).await?;
+                    // self.call_unregister_skill(package_name, std_name).await?;
                 }
             }
         }
@@ -58,8 +69,8 @@ impl PackageUnregistrar {
         Ok(())
     }
 
-    /// Unregister a specific capability
-    pub async fn unregister_capability(&self, package_name: &str, std_name: &str) -> Result<()> {
+    /// Unregister a specific primitive
+    pub async fn unregister_primitive(&self, package_name: &str, std_name: &str) -> Result<()> {
         let db = PackageDatabase::load(&self.config.package_storage_path)?;
         let _pkg_info = db
             .find_by_name(package_name)
@@ -67,13 +78,32 @@ impl PackageUnregistrar {
 
         output::action(
             "Unregistering",
-            &format!("capability '{}' from package '{}'", std_name, package_name),
+            &format!("primitive '{}' from package '{}'", std_name, package_name),
         );
 
         // TODO: Call core unregister service
-        // self.call_unregister_service(package_name, "cap", std_name).await?;
+        // self.call_unregister_primitive(package_name, std_name).await?;
 
-        output::success("Capability unregistration completed");
+        output::success("Primitive unregistration completed");
+        Ok(())
+    }
+
+    /// Unregister a specific service
+    pub async fn unregister_service(&self, package_name: &str, std_name: &str) -> Result<()> {
+        let db = PackageDatabase::load(&self.config.package_storage_path)?;
+        let _pkg_info = db
+            .find_by_name(package_name)
+            .ok_or_else(|| anyhow::anyhow!("Package not found: {}", package_name))?;
+
+        output::action(
+            "Unregistering",
+            &format!("service '{}' from package '{}'", std_name, package_name),
+        );
+
+        // TODO: Call core unregister service
+        // self.call_unregister_service(package_name, std_name).await?;
+
+        output::success("Service unregistration completed");
         Ok(())
     }
 
@@ -116,22 +146,41 @@ impl PackageUnregistrar {
             let manifest_content = std::fs::read_to_string(&pkg_info.manifest_path)?;
             let manifest: Value = serde_yaml::from_str(&manifest_content)?;
 
-            // Unregister capabilities
-            let caps_to_unregister = if let Some(caps) = &recipe_pkg.capabilities {
-                caps.clone()
+            // Unregister primitives
+            let primitives_to_unregister = if let Some(primitives) = &recipe_pkg.primitives {
+                primitives.clone()
             } else {
-                pkg_info.capabilities.clone()
+                pkg_info.primitives.clone()
             };
 
-            for cap_name in caps_to_unregister {
-                if let Some(cap) = find_capability_in_manifest(&manifest, &cap_name)? {
-                    let std_name = cap["name"]
+            for primitive_name in primitives_to_unregister {
+                if let Some(primitive) = find_primitive_in_manifest(&manifest, &primitive_name)? {
+                    let std_name = primitive["name"]
                         .as_str()
-                        .ok_or_else(|| anyhow::anyhow!("Capability name not found"))?;
+                        .ok_or_else(|| anyhow::anyhow!("Primitive name not found"))?;
 
-                    output::sub_step(&format!("Unregistering capability: {}", std_name));
+                    output::sub_step(&format!("Unregistering primitive: {}", std_name));
                     // TODO: Call core unregister service
-                    // self.call_unregister_service(&pkg_info.name, "cap", std_name).await?;
+                    // self.call_unregister_primitive(&pkg_info.name, std_name).await?;
+                }
+            }
+
+            // Unregister services
+            let services_to_unregister = if let Some(services) = &recipe_pkg.services {
+                services.clone()
+            } else {
+                pkg_info.services.clone()
+            };
+
+            for service_name in services_to_unregister {
+                if let Some(service) = find_service_in_manifest(&manifest, &service_name)? {
+                    let std_name = service["name"]
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("Service name not found"))?;
+
+                    output::sub_step(&format!("Unregistering service: {}", std_name));
+                    // TODO: Call core unregister service
+                    // self.call_unregister_service(&pkg_info.name, std_name).await?;
                 }
             }
 
@@ -150,7 +199,7 @@ impl PackageUnregistrar {
 
                     output::sub_step(&format!("Unregistering skill: {}", std_name));
                     // TODO: Call core unregister service
-                    // self.call_unregister_service(&pkg_info.name, "skl", std_name).await?;
+                    // self.call_unregister_skill(&pkg_info.name, std_name).await?;
                 }
             }
         }
@@ -174,11 +223,22 @@ impl PackageUnregistrar {
     // }
 }
 
-fn find_capability_in_manifest<'a>(manifest: &'a Value, name: &str) -> Result<Option<&'a Value>> {
-    if let Some(caps) = manifest["capabilities"].as_sequence() {
-        for cap in caps {
-            if cap["name"].as_str() == Some(name) {
-                return Ok(Some(cap));
+fn find_primitive_in_manifest<'a>(manifest: &'a Value, name: &str) -> Result<Option<&'a Value>> {
+    if let Some(primitives) = manifest["primitives"].as_sequence() {
+        for primitive in primitives {
+            if primitive["name"].as_str() == Some(name) {
+                return Ok(Some(primitive));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn find_service_in_manifest<'a>(manifest: &'a Value, name: &str) -> Result<Option<&'a Value>> {
+    if let Some(services) = manifest["services"].as_sequence() {
+        for service in services {
+            if service["name"].as_str() == Some(name) {
+                return Ok(Some(service));
             }
         }
     }

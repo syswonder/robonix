@@ -1,0 +1,17 @@
+# RTDL file for pick skill
+# This skill combines vision and manipulation capabilities
+
+def skl::pick(target_label: str):
+    # Capture image from camera
+    image = prm::camera_capture()
+    
+    # Process image to find target (simplified)
+    # In real implementation, this would use vision processing
+    
+    # Move arm to target pose (simplified)
+    # In real implementation, this would calculate pose from image
+    pose = geometry_msgs/PoseStamped()
+    prm::arm_move_ee(pose=pose)
+    
+    return True
+

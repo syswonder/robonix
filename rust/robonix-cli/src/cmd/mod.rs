@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{arg, Subcommand};
+use clap::Subcommand;
 use std::path::PathBuf;
 
 use crate::Config;
@@ -10,7 +10,6 @@ mod daemon;
 mod info;
 mod install;
 mod list;
-mod model;
 mod recipe_utils;
 mod register;
 mod restart;
@@ -41,9 +40,6 @@ pub enum Commands {
         #[arg(short, long)]
         show: bool,
     },
-    /// AI model management commands (LLM, VLM, etc.)
-    #[command(subcommand)]
-    Model(ModelCommands),
     /// Daemon management commands
     #[command(subcommand)]
     Daemon(DaemonCommands),
@@ -202,49 +198,6 @@ pub enum TaskCommands {
     },
 }
 
-#[derive(Subcommand)]
-pub enum ModelCommands {
-    /// Register an AI model (LLM, VLM, etc.)
-    Register {
-        /// Model ID (unique identifier)
-        #[arg(long)]
-        model_id: String,
-        /// Model name
-        #[arg(long)]
-        model_name: String,
-        /// Model type: "llm" or "vlm"
-        #[arg(long)]
-        model_type: String,
-        /// Provider (e.g., "openai", "anthropic", "local")
-        #[arg(long)]
-        provider: String,
-        /// API endpoint URL
-        #[arg(long)]
-        api_endpoint: String,
-        /// API key (optional, can also be set via environment variable)
-        #[arg(long)]
-        api_key: Option<String>,
-        /// Model description
-        #[arg(long)]
-        description: String,
-        /// Supported capabilities (comma-separated)
-        #[arg(long)]
-        capabilities: Option<String>,
-    },
-    /// Query registered AI models
-    Query {
-        /// Filter by model ID
-        #[arg(long)]
-        model_id: Option<String>,
-        /// Filter by model type: "llm" or "vlm"
-        #[arg(long)]
-        model_type: Option<String>,
-        /// Filter by capability
-        #[arg(long)]
-        capability: Option<String>,
-    },
-}
-
 pub async fn execute(command: Commands, config: Config) -> Result<()> {
     match command {
         Commands::Package(cmd) => match cmd {
@@ -273,34 +226,6 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             set_msg_path,
             show,
         } => config::execute(config, set_storage_path, set_msg_path, show).await,
-        Commands::Model(cmd) => match cmd {
-            ModelCommands::Register {
-                model_id,
-                model_name,
-                model_type,
-                provider,
-                api_endpoint,
-                api_key,
-                description,
-                capabilities,
-            } => model::execute_register(
-                config,
-                model_id,
-                model_name,
-                model_type,
-                provider,
-                api_endpoint,
-                api_key,
-                description,
-                capabilities,
-            )
-            .await,
-            ModelCommands::Query {
-                model_id,
-                model_type,
-                capability,
-            } => model::execute_query(config, model_id, model_type, capability).await,
-        },
         Commands::Daemon(cmd) => match cmd {
             DaemonCommands::Start => daemon::start().await,
             DaemonCommands::Stop => daemon::stop().await,

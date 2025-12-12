@@ -4,17 +4,12 @@ use crate::task::TaskClient;
 use anyhow::Result;
 
 pub async fn execute_create(config: Config, natural_language: String) -> Result<()> {
-    output::action("Creating", "task");
+    output::action("Submitting", "task");
 
     let client = TaskClient::new(config)?;
-    let response = client.create(natural_language.clone()).await?;
+    let response = client.submit(natural_language.clone(), serde_json::json!({})).await?;
 
-    if !response.success {
-        output::error(&format!("Failed to create task: {}", response.error_message));
-        anyhow::bail!("Task creation failed: {}", response.error_message);
-    }
-
-    output::success(&format!("Task created: {}", response.task_id));
+    output::success(&format!("Task submitted: {}", response.task_id));
     output::info(&format!("  Natural language: {}", natural_language));
     output::info(&format!("  Task ID: {}", response.task_id));
 
@@ -25,86 +20,29 @@ pub async fn execute_get(config: Config, task_id: String) -> Result<()> {
     output::action("Getting", &format!("task {}", task_id));
 
     let client = TaskClient::new(config)?;
-    let response = client.get(task_id.clone()).await?;
-
-    if !response.success {
-        output::error(&format!("Failed to get task: {}", response.error_message));
-        anyhow::bail!("Task query failed: {}", response.error_message);
-    }
-
-    if let Some(task) = response.task {
-        output::success(&format!("Task {} found", task_id));
-        output::info(&format!("  Task ID: {}", task.task_id));
-        output::info(&format!("  State: {:?}", task.state));
-        output::info(&format!("  Natural language: {}", task.natural_language));
-        if let Some(ref dsl_code) = task.dsl_code {
-            output::info("  DSL code:");
-            for line in dsl_code.lines() {
-                output::sub_step(&format!("    {}", line));
-            }
-        } else {
-            output::info("  DSL code: (not generated yet)");
-        }
-        if let Some(ref error) = task.error_message {
-            output::warning(&format!("  Error: {}", error));
-        }
-        output::info(&format!("  Created at: {}", task.created_at));
-        output::info(&format!("  Updated at: {}", task.updated_at));
-    } else {
-        output::error(&format!("Task {} not found", task_id));
-        anyhow::bail!("Task not found");
-    }
+    
+    // Get task status
+    let status_response = client.status(task_id.clone()).await?;
+    output::info(&format!("  Status: {}", status_response.status));
+    
+    // Get task result
+    let result_response = client.result(task_id.clone()).await?;
+    // Parse JSON string and pretty print
+    let result_value: serde_json::Value = serde_json::from_str(&result_response.result)
+        .unwrap_or_else(|_| serde_json::json!({"error": "Failed to parse result JSON"}));
+    output::info(&format!("  Result: {}", serde_json::to_string_pretty(&result_value)?));
 
     Ok(())
 }
 
-pub async fn execute_list(config: Config) -> Result<()> {
-    output::action("Listing", "tasks");
-
-    let client = TaskClient::new(config)?;
-    let response = client.list().await?;
-
-    if !response.success {
-        output::error(&format!("Failed to list tasks: {}", response.error_message));
-        anyhow::bail!("Task list failed: {}", response.error_message);
-    }
-
-    if response.tasks.is_empty() {
-        output::info("No tasks found");
-    } else {
-        output::info(&format!("Found {} task(s):", response.tasks.len()));
-        for task in &response.tasks {
-            output::sub_step(&format!("  Task ID: {}", task.task_id));
-            output::sub_step(&format!("    State: {:?}", task.state));
-            output::sub_step(&format!("    Natural language: {}", task.natural_language));
-            if let Some(ref dsl_code) = task.dsl_code {
-                let preview = if dsl_code.len() > 50 {
-                    format!("{}...", &dsl_code[..50])
-                } else {
-                    dsl_code.clone()
-                };
-                output::sub_step(&format!("    DSL: {}", preview));
-            }
-            output::info("");
-        }
-    }
-
+pub async fn execute_list(_config: Config) -> Result<()> {
+    output::warning("List tasks functionality is not yet implemented in the new EAIOS API");
+    output::info("Use 'task get <task_id>' to query individual tasks");
     Ok(())
 }
 
-pub async fn execute_cancel(config: Config, task_id: String) -> Result<()> {
-    output::action("Cancelling", &format!("task {}", task_id));
-
-    let client = TaskClient::new(config)?;
-    let response = client.cancel(task_id.clone()).await?;
-
-    if !response.success {
-        output::error(&format!("Failed to cancel task: {}", response.error_message));
-        anyhow::bail!("Task cancellation failed: {}", response.error_message);
-    }
-
-    output::success(&format!("Task {} cancelled", task_id));
-
+pub async fn execute_cancel(_config: Config, _task_id: String) -> Result<()> {
+    output::warning("Cancel task functionality is not yet implemented in the new EAIOS API");
     Ok(())
 }
 
