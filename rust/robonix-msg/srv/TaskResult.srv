@@ -1,5 +1,0 @@
-# TaskResult service (EAIOS spec)
-string task_id
----
-string result                  # JSON: task result
-
