@@ -1,232 +1,261 @@
 # Robonix Package Specification
 
-## 概述
+## Overview
 
-本文档定义了 robonix provider package 的规范。一个 package 可以提供多个 capabilities (cap) 和 skills (skl)。
+This document defines the specification for robonix provider packages. A package can provide multiple primitives (prm), services (srv), and skills (skl).
 
-**重要**: Robonix 不关心开发者如何实现 capabilities 和 skills。开发者可以使用任何技术栈（Python、C++、Rust、ROS2等）。Robonix 只要求 package 提供标准的 manifest 文件和必要的控制脚本，并提供 ROS2 通信接口。
+**Important**: Robonix does not care how developers implement primitives, services, and skills. Developers can use any technology stack (Python, C++, Rust, ROS2, etc.). Robonix only requires packages to provide standard manifest files and necessary control scripts, and provide ROS2 communication interfaces.
 
-## Package 目录结构
+## Package Directory Structure
 
-一个标准的 robonix provider package 应包含以下结构：
+A standard robonix provider package should contain the following structure:
 
 ```
 provider_package/
-├── rbnx_manifest.yaml    # Robonix package manifest (必需)
-└── [source code]         # 源代码 (实现相关，任意技术栈)
+├── rbnx_manifest.yaml    # Robonix package manifest (required)
+└── [source code]         # Source code (implementation-related, any technology stack)
 ```
 
-## 必需配置文件
+## Required Configuration Files
 
 ### 1. rbnx_manifest.yaml
 
-这是 robonix package 的核心配置文件，定义了 package 提供的所有 capabilities 和 skills。
+This is the core configuration file for robonix packages, defining all primitives, services, and skills provided by the package.
 
-#### 格式规范
+#### Format Specification
 
 ```yaml
 package:
-  name: string              # Package 名称
-  version: string           # 版本号 (语义化版本)
-  description: string       # 描述
-  maintainer: string        # 维护者
-  maintainer_email: string  # 维护者邮箱
-  license: string           # 许可证
-  build_script: string      # 可选：构建脚本路径 (相对于 package 根目录，如 "rbnx/build.sh")。如果省略，默认查找 "rbnx/build.sh"
+  name: string              # Package name
+  version: string           # Version number (semantic versioning)
+  description: string       # Description
+  maintainer: string        # Maintainer
+  maintainer_email: string  # Maintainer email
+  license: string           # License
+  build_script: string      # Optional: build script path (relative to package root, e.g., "rbnx/build.sh"). If omitted, defaults to "rbnx/build.sh"
 
-capabilities:
-  - name: string            # 标准能力名称 (如 cap::grasp.move)
-    impl_id: string         # 可选：实现标识符 (如 "algo01", "algo02")。如果省略，默认为 "default"
-    start_script: string    # 启动脚本路径 (相对于 package 根目录，如 "rbnx/start_cap.sh")
-    stop_script: string     # 停止脚本路径 (相对于 package 根目录，如 "rbnx/stop_cap.sh")
-    inputs:                 # 输入参数通道映射 (字典格式: {参数名: topic通道})
-      parameter_name: topic_channel
-    outputs:                # 输出参数通道映射 (字典格式: {参数名: topic通道})
-      parameter_name: topic_channel
-    configs: {}             # 配置服务映射 (字典格式，通常为空)
+primitives:
+  - name: string            # Standard primitive name (e.g., prm::arm_move_ee)
+    input_schema: string    # JSON string: {"argname0":"/topic0", ...}
+    output_schema: string   # JSON string: {"argname1":"/topic1", ...}
+    metadata: string        # JSON string: metadata for instance filtering (e.g., {"resolution":">=720p"}, {"index":0})
+    start_script: string    # Optional: start script path (relative to package root, e.g., "rbnx/start_capture_rgb.sh")
+    stop_script: string     # Optional: stop script path (relative to package root, e.g., "rbnx/stop_capture_rgb.sh")
+    # Note: provider is automatically set to package name by CLI during registration
+
+services:
+  - name: string            # Standard service name (e.g., spatial_map, semantic_map, task_plan)
+    srv_type: string        # ROS2 service type (e.g., "robonix_core/srv/service/spatial_map/GetSpatialMap")
+    entry: string           # Actual ROS2 service name (e.g., "/mapping/get_spatial_map")
+    metadata: string        # JSON string: metadata for instance filtering (e.g., {"model":"deepseek"}, {"backend":"webots"})
+    start_script: string    # Optional: start script path (relative to package root, e.g., "rbnx/start_spatial_map.sh")
+    stop_script: string     # Optional: stop script path (relative to package root, e.g., "rbnx/stop_spatial_map.sh")
+    # Note: provider is automatically set to package name by CLI during registration
 
 skills:
-  - name: string            # 标准技能名称 (如 skl::pick)
-    impl_id: string         # 可选：实现标识符 (如 "algo01", "algo02")。如果省略，默认为 "default"
-    start_script: string    # 启动脚本路径 (相对于 package 根目录，如 "rbnx/start_skill.sh")
-    stop_script: string     # 停止脚本路径 (相对于 package 根目录，如 "rbnx/stop_skill.sh")
-    inputs:                 # 输入参数通道映射 (字典格式: {参数名: topic通道})
-      parameter_name: topic_channel
-    outputs:                # 输出参数通道映射 (字典格式: {参数名: topic通道})
-      parameter_name: topic_channel
-    configs: {}             # 配置服务映射 (字典格式，通常为空)
+  - name: string            # Skill name (e.g., close_window)
+    start_topic: string     # Skill start topic (e.g., "/robot1/skill/close_window/start")
+    status_topic: string    # Status feedback topic (e.g., "/robot1/skill/close_window/status")
+    skill_dir: string       # Skill directory path (relative to package root, e.g., "skills/close_window")
+    main_rtdl: string       # Main RTDL file name (e.g., "close_window.rtdl")
+    start_args: string      # JSON string: input parameter schema (e.g., '{"room":"string"}')
+    status: string          # JSON string: status feedback schema (e.g., '{"state":"string","result":"any"}')
+    metadata: string         # JSON string: metadata for instance filtering (e.g., '{"domain":"indoor","robot":"arm6dof"}')
+    version: string         # Skill version (e.g., "1.0.0")
+    start_script: string    # Optional: start script path (relative to package root, e.g., "rbnx/start_pick.sh")
+    stop_script: string     # Optional: stop script path (relative to package root, e.g., "rbnx/stop_pick.sh")
+    # Note: provider is automatically set to package name by CLI during registration
 ```
 
-**重要说明：**
-- **capability/skill 的 `name` 字段是必需的**：必须在 manifest 中指定标准名称（如 `cap::vision.capture_rgb`、`skl::pick`），用于标识该 capability/skill 符合哪个标准规范
-- **参数的 ROS 类型无需指定**：参数的类型（如 `sensor_msgs/msg/Image`、`geometry_msgs/msg/PoseStamped`）会从 spec 中自动获取，无需在 manifest 中重复指定
-- **参数的名称必须指定**：在 `inputs` 和 `outputs` 字典中，key 必须是参数名（如 `image`、`target_pose`），且必须与 spec 中定义的标准参数名完全一致
-- **参数到通道的映射**：只需提供参数名到 ROS2 topic 通道的映射关系，格式为字典：`{参数名: topic通道}`
-- `impl_id` 用于区分同一标准名称下的不同实现。如果省略，系统会自动使用 "default" 作为默认值
-- 一个 package 可以为同一个标准名称提供多个实现（通过不同的 `impl_id` 区分）
-- `code_path`、`package_id`、`description` 等字段由 CLI 在注册时自动填充
+**Important Notes:**
+- **The `name` field for primitive/service is required**: Must specify the standard name in the manifest (e.g., `prm::arm_move_ee`, `spatial_map`) to identify which standard specification the primitive/service conforms to
+- **Primitives and services must conform to standard specifications**: The system will validate input/output schemas (for primitives) and service types (for services) against the spec during registration
+- **Skills are flexible**: Skills do not need to conform to a spec, but must provide proper start/status topics and RTDL files
+- **JSON fields**: Fields like `input_schema`, `output_schema`, `metadata`, `start_args`, `status` must be valid JSON strings
+- **Multiple instances**: A package can provide multiple instances of the same primitive/service/skill (distinguished by different `provider` or `metadata`)
 
-#### 字段说明
+#### Field Descriptions
 
-**Package 字段：**
-- `name`: Package 名称
-- `version`: 语义化版本号 (如 1.0.0)
-- `description`: Package 功能描述
-- `maintainer`: 维护者名称
-- `maintainer_email`: 维护者邮箱
-- `license`: 许可证类型 (如 Apache-2.0)
-- `build_script`: 构建脚本路径（可选），相对于 package 根目录的路径，如 `rbnx/build.sh`。如果省略，CLI 会默认查找 `rbnx/build.sh`。如果都不存在，build 命令会跳过该 package
+**Package Fields:**
+- `name`: Package name
+- `version`: Semantic version number (e.g., 1.0.0)
+- `description`: Package functionality description
+- `maintainer`: Maintainer name
+- `maintainer_email`: Maintainer email
+- `license`: License type (e.g., Apache-2.0)
+- `build_script`: Build script path (optional), relative path to package root, e.g., `rbnx/build.sh`. If omitted, CLI will default to `rbnx/build.sh`. If neither exists, the build command will skip the package
 
-**Capability 字段：**
-- `name`: 标准能力名称，必须以 `cap::` 开头，格式为 `cap::category.action`。名称和参数定义由标准规范 (spec) 定义
-- `impl_id`: 实现标识符（可选），用于区分同一标准名称下的不同实现。例如：`"algo01"`、`"algo02"`、`"fast"`、`"accurate"` 等。如果省略，系统会自动使用 `"default"` 作为默认值。**重要**：同一个 package 可以为同一个标准名称提供多个实现，只需使用不同的 `impl_id` 即可
-- `start_script`: 启动脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/start_cap.sh`。CLI 会在执行 `rbnx deploy start` 时使用此脚本启动对应的 capability 进程。每个 capability 必须有自己独立的启动脚本
-- `stop_script`: 停止脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/stop_cap.sh`。CLI 会在执行 `rbnx deploy stop` 时使用此脚本停止对应的 capability 进程。每个 capability 必须有自己独立的停止脚本
-- `inputs`: 输入参数的通道映射，字典格式 `{参数名: topic通道}`。参数名必须与 spec 中定义的标准参数名一致
-- `outputs`: 输出参数的通道映射，字典格式 `{参数名: topic通道}`。参数名必须与 spec 中定义的标准参数名一致
-- `configs`: 配置服务的映射，字典格式（通常为空）
+**Primitive Fields:**
+- `name`: Standard primitive name, must start with `prm::`, format is `prm::category.action` (e.g., `prm::arm_move_ee`). Name and schema definitions are defined by the standard specification (spec)
+- `input_schema`: JSON string mapping input argument names to ROS2 topic channels, e.g., `'{"pose":"/arm/pose_goal"}'`
+- `output_schema`: JSON string mapping output argument names to ROS2 topic channels, e.g., `'{"success":"/arm/status"}'`
+- `metadata`: JSON string for instance filtering, e.g., `'{"resolution":">=720p"}'` or `'{"index":0}'`
+- `start_script`: Optional. Start script path (relative to package root, e.g., `"rbnx/start_capture_rgb.sh"`). Used to start the primitive's ROS2 node or process. If not specified, the primitive will not be started via CLI
+- `stop_script`: Optional. Stop script path (relative to package root, e.g., `"rbnx/stop_capture_rgb.sh"`). Used for cleanup when stopping the primitive. CLI will also manage the process by PID
+- **Note**: `provider` is automatically set to the package name by CLI during registration (no need to specify in manifest)
 
-**Skill 字段：**
-- `name`: 标准技能名称，必须以 `skl::` 开头。名称和参数定义由标准规范 (spec) 定义
-- `impl_id`: 实现标识符（可选），用于区分同一标准名称下的不同实现。例如：`"algo01"`、`"algo02"`、`"fast"`、`"accurate"` 等。如果省略，系统会自动使用 `"default"` 作为默认值。**重要**：同一个 package 可以为同一个标准名称提供多个实现，只需使用不同的 `impl_id` 即可
-- `start_script`: 启动脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/start_skill.sh`。CLI 会在执行 `rbnx deploy start` 时使用此脚本启动对应的 skill 进程。每个 skill 必须有自己独立的启动脚本
-- `stop_script`: 停止脚本路径（必需），相对于 package 根目录的路径，如 `rbnx/stop_skill.sh`。CLI 会在执行 `rbnx deploy stop` 时使用此脚本停止对应的 skill 进程。每个 skill 必须有自己独立的停止脚本
-- `inputs`: 输入参数的通道映射，字典格式 `{参数名: topic通道}`。参数名必须与 spec 中定义的标准参数名一致
-- `outputs`: 输出参数的通道映射，字典格式 `{参数名: topic通道}`。参数名必须与 spec 中定义的标准参数名一致
-- `configs`: 配置服务的映射，字典格式（通常为空）
+**Service Fields:**
+- `name`: Standard service name (e.g., `spatial_map`, `semantic_map`, `task_plan`, `plan_simulate`, `result_feedback`). Name and service type are defined by the standard specification (spec)
+- `srv_type`: ROS2 service type, e.g., `"robonix_core/srv/service/spatial_map/GetSpatialMap"`
+- `entry`: Actual ROS2 service name that implements this service, e.g., `"/mapping/get_spatial_map"`
+- `metadata`: JSON string for instance filtering, e.g., `'{"model":"deepseek"}'` or `'{"backend":"webots"}'`
+- `start_script`: Optional. Start script path (relative to package root, e.g., `"rbnx/start_spatial_map.sh"`). Used to start the service's ROS2 node or process. If not specified, the service will not be started via CLI
+- `stop_script`: Optional. Stop script path (relative to package root, e.g., `"rbnx/stop_spatial_map.sh"`). Used for cleanup when stopping the service. CLI will also manage the process by PID
+- **Note**: `provider` is automatically set to the package name by CLI during registration (no need to specify in manifest)
 
-**自动填充字段（无需在 manifest 中指定）：**
-- `package_id`: 由 CLI 根据 package 名称自动生成
-- `code_path`: 由 CLI 自动设置为 package 的安装路径
-- `description`: capability/skill 的描述从 spec 中自动获取
-- 参数的 ROS 类型：从 spec 中自动获取，无需在 manifest 的 `inputs`/`outputs` 中指定
+**Skill Fields:**
+- `name`: Skill name (e.g., `close_window`, `pick_object`). Skills are flexible and do not need to conform to a spec
+- `start_topic`: ROS2 topic name for starting the skill (triggering execution), e.g., `"/robot1/skill/close_window/start"`
+- `status_topic`: ROS2 topic name for receiving skill status updates, e.g., `"/robot1/skill/close_window/status"`
+- `skill_dir`: Directory path (relative to package root) containing the skill's RTDL files and data
+- `main_rtdl`: Main RTDL file name (e.g., `"close_window.rtdl"`)
+- `start_args`: JSON string describing the input parameter schema, e.g., `'{"room":"string"}'`
+- `status`: JSON string describing the status feedback schema, e.g., `'{"state":"string","result":"any"}'`
+- `metadata`: JSON string for instance filtering, e.g., `'{"domain":"indoor","robot":"arm6dof"}'`
+- `version`: Skill version (e.g., `"1.0.0"`)
+- `start_script`: Optional. Start script path (relative to package root, e.g., `"rbnx/start_pick.sh"`). Used to start the skill's process (e.g., Python script that listens to `start_topic`). If not specified, the skill will not be started via CLI
+- `stop_script`: Optional. Stop script path (relative to package root, e.g., `"rbnx/stop_pick.sh"`). Used for cleanup when stopping the skill. CLI will also manage the process by PID
+- **Note**: `provider` is automatically set to the package name by CLI during registration (no need to specify in manifest)
 
-**示例：**
+**Example:**
 
 ```yaml
-capabilities:
-  - name: cap::vision.capture_rgb
-    # Spec 定义: OUTPUT: ["image" => "sensor_msgs/msg/Image"]
-    start_script: rbnx/start_capture_rgb.sh
-    stop_script: rbnx/stop_capture_rgb.sh
-    outputs:
-      image: /demo_rgb/image
+primitives:
+  - name: prm::arm_move_ee
+    # Spec definition: INPUT: {"pose":"geometry_msgs/PoseStamped"}, OUTPUT: {"success":"bool"}
+    input_schema: '{"pose":"/arm/pose_goal"}'
+    output_schema: '{"success":"/arm/status"}'
+    metadata: '{"robot":"arm6dof"}'
+    start_script: rbnx/start_arm_move.sh
+    stop_script: rbnx/stop_arm_move.sh
 
-  - name: cap::grasp.move
-    # Spec 定义:
-    #   INPUT: ["target_pose" => "geometry_msgs/msg/PoseStamped"]
-    #   OUTPUT: ["status" => "boolean"]
-    start_script: rbnx/start_grasp_move.sh
-    stop_script: rbnx/stop_grasp_move.sh
-    inputs:
-      target_pose: /demo_grasp/pose_goal
-    outputs:
-      status: /demo_grasp/pose_status
+  - name: prm::camera_capture
+    # Spec definition: OUTPUT: {"image":"sensor_msgs/Image"}
+    input_schema: '{}'
+    output_schema: '{"image":"/camera/image"}'
+    metadata: '{"resolution":"720p","index":0}'
+    start_script: rbnx/start_camera_capture.sh
+    stop_script: rbnx/stop_camera_capture.sh
+
+services:
+  - name: spatial_map
+    srv_type: robonix_core/srv/service/spatial_map/GetSpatialMap
+    entry: /mapping/get_spatial_map
+    metadata: '{"supported_types":["2d","3d","cloud"]}'
+    start_script: rbnx/start_spatial_map.sh
+    stop_script: rbnx/stop_spatial_map.sh
+
+  - name: task_plan
+    srv_type: robonix_core/srv/service/task_plan/PlanTask
+    entry: /planner/plan
+    metadata: '{"model":"qwen2.5-vl","capabilities":["navigation","manipulation"],"rtdl_type":"BT"}'
+    start_script: rbnx/start_task_plan.sh
+    stop_script: rbnx/stop_task_plan.sh
 
 skills:
-  - name: skl::pick
-    # Spec 定义:
-    #   INPUT: ["target_label" => "string"]
-    #   OUTPUT: ["status" => "boolean"]
-    # impl_id 省略，将使用默认值 "default"
-    start_script: rbnx/start_pick.sh
-    stop_script: rbnx/stop_pick.sh
-    inputs:
-      target_label: /demo_pick/target_label
-    outputs:
-      status: /demo_pick/status
+  - name: close_window
+    start_topic: /robot1/skill/close_window/start
+    status_topic: /robot1/skill/close_window/status
+    skill_dir: skills/close_window
+    main_rtdl: close_window.rtdl
+    start_args: '{"room":"string"}'
+    status: '{"state":"string","result":"any"}'
+    metadata: '{"domain":"indoor","capability":["navigation","manipulation"]}'
+    version: 1.0.0
+    start_script: rbnx/start_close_window.sh
+    stop_script: rbnx/stop_close_window.sh
 
-  # 示例：同一标准名称的多个实现
-  - name: skl::pick
-    impl_id: algo01  # 第一个实现
-    start_script: rbnx/start_pick_algo01.sh
-    stop_script: rbnx/stop_pick_algo01.sh
-    inputs:
-      target_label: /demo_pick_algo01/target_label
-    outputs:
-      status: /demo_pick_algo01/status
-
-  - name: skl::pick
-    impl_id: algo02  # 第二个实现（不同的算法）
-    start_script: rbnx/start_pick_algo02.sh
-    stop_script: rbnx/stop_pick_algo02.sh
-    inputs:
-      target_label: /demo_pick_algo02/target_label
-    outputs:
-      status: /demo_pick_algo02/status
+  - name: pick_object
+    start_topic: /robot1/skill/pick_object/start
+    status_topic: /robot1/skill/pick_object/status
+    skill_dir: skills/pick_object
+    main_rtdl: pick_object.rtdl
+    start_args: '{"target_label":"string"}'
+    status: '{"state":"string","result":"any"}'
+    metadata: '{"domain":"indoor","robot":"arm6dof"}'
+    version: 1.0.0
+    start_script: rbnx/start_pick_object.sh
+    stop_script: rbnx/stop_pick_object.sh
 ```
 
-**多实现说明：**
-- 同一个 package 可以为同一个标准名称（如 `skl::pick`）提供多个实现
-- 每个实现必须使用不同的 `impl_id` 来区分
-- 每个实现可以有自己独立的启动/停止脚本和 ROS2 topic 通道
-- 查询时可以通过指定 `impl_id` 来选择特定的实现，或者不指定 `impl_id` 来获取第一个匹配的实现（以及所有可用的 `impl_id` 列表）
+**Multiple Instance Notes:**
+- The same package can provide multiple instances of the same primitive/service/skill
+- Each instance must use different `metadata` to distinguish (since `provider` is always the package name)
+- When querying, you can filter by `metadata` to select specific instances
 
-### 2. rbnx/ 目录
+### 2. rbnx/ Directory
 
-（可选）推荐使用 `rbnx/` 目录包含所有 robonix 特定的配置和脚本。
+(Optional) It is recommended to use the `rbnx/` directory to contain all robonix-specific configuration and scripts.
 
-**重要**: 
-- 每个 capability 和 skill 都需要有自己独立的启动和停止脚本。这些脚本在 manifest 中通过 `start_script` 和 `stop_script` 字段指定。
-- Package 可以有一个可选的构建脚本 `rbnx/build.sh`（或在 manifest 中通过 `build_script` 字段指定），用于编译、安装依赖等构建操作。
+**Important**: 
+- Primitives, services, and skills may require start/stop scripts if they run as separate processes or ROS2 nodes that need to be managed by the CLI
+- Start scripts are used to launch the primitive/service/skill process (e.g., ROS2 nodes, Python scripts)
+- Stop scripts are used for cleanup when stopping the process (CLI will also manage the process by PID)
+- If `start_script` is not specified in the manifest, the item will not be started via CLI (it may be started manually or by other means)
+- A package can have an optional build script `rbnx/build.sh` (or specified in the manifest through the `build_script` field) for compilation, dependency installation, and other build operations
 
-#### 构建脚本 (build_script)
+#### Build Script (build_script)
 
-Package 的构建脚本用于编译、安装依赖等构建操作。
+The package's build script is used for compilation, dependency installation, and other build operations.
 
-脚本要求：
-- 必须是可执行文件 (`chmod +x`)
-- 应该在 package 根目录下执行
-- 应该处理错误情况并返回适当的退出码（0 表示成功，非 0 表示失败）
-- 脚本路径相对于 package 根目录
-- 如果脚本不存在，build 命令会跳过该 package（不会报错）
+Script Requirements:
+- Must be an executable file (`chmod +x`)
+- Should be executed in the package root directory
+- Should handle error cases and return appropriate exit codes (0 for success, non-zero for failure)
+- Script path is relative to package root directory
+- If the script does not exist, the build command will skip the package (no error)
 
-**默认位置**: 如果 manifest 中没有指定 `build_script`，CLI 会默认查找 `rbnx/build.sh`。
+**Default Location**: If `build_script` is not specified in the manifest, CLI will default to `rbnx/build.sh`.
 
-#### 启动脚本 (start_script)
+#### Start/Stop Scripts
 
-每个 capability/skill 的启动脚本用于启动对应的进程。
+Start and stop scripts are used to manage primitive/service/skill processes. These scripts are specified in the manifest via `start_script` and `stop_script` fields.
 
-脚本要求：
-- 必须是可执行文件 (`chmod +x`)
-- 应该使用 `exec` 启动目标进程，这样 CLI 可以正确管理进程
-- 应该设置必要的环境变量（ROS2、Python 路径等）
-- 应该处理错误情况并返回适当的退出码
-- 脚本路径相对于 package 根目录
+**Start Scripts:**
+- Used to launch the primitive/service/skill process (e.g., ROS2 nodes, Python scripts)
+- Must be an executable file (`chmod +x`)
+- Should use `exec` to start the target process so CLI can properly manage the process
+- Should set necessary environment variables (ROS2, Python paths, robonix-msg setup, etc.)
+- Should handle error cases and return appropriate exit codes
+- Script path is relative to package root directory (e.g., `"rbnx/start_capture_rgb.sh"`)
+- If `start_script` is not specified, the item will not be started via CLI
 
-#### 停止脚本 (stop_script)
+**Stop Scripts:**
+- Used for cleanup when stopping the process
+- CLI will also manage the process by PID, but stop scripts can be used for additional cleanup
+- Must be an executable file (`chmod +x`)
+- Script path is relative to package root directory (e.g., `"rbnx/stop_capture_rgb.sh"`)
+- Optional: If not specified, CLI will only stop the process by PID
 
-每个 capability/skill 的停止脚本用于停止对应的进程。
+**Naming Convention:**
+- Start scripts: `rbnx/start_<name>.sh` (e.g., `rbnx/start_capture_rgb.sh`, `rbnx/start_pick.sh`)
+- Stop scripts: `rbnx/stop_<name>.sh` (e.g., `rbnx/stop_capture_rgb.sh`, `rbnx/stop_pick.sh`)
 
-脚本要求：
-- 必须是可执行文件 (`chmod +x`)
-- 应该停止对应的进程（发送 SIGTERM，必要时使用 SIGKILL）
-- 应该清理临时文件和资源
-- 脚本路径相对于 package 根目录
+## Standard Specification Validation
 
-**注意**: 虽然 CLI 目前通过 PID 直接管理进程，但 `stop_script` 字段保留以备将来使用，或者用于执行额外的清理工作。
+Primitives and standard services must conform to the standard specifications defined in `robonix-core`. The system will validate during registration:
 
-## 标准规范验证
+1. **Primitives**: 
+   - Primitive names must match standard specifications
+   - Input/output schemas must exactly match the specifications
+   - Schema validation ensures topic mappings are correct
 
-所有 capabilities 和 skills 必须符合 `robonix-core` 中定义的标准规范。系统会在注册时进行验证：
+2. **Services**:
+   - Service names must match standard specifications (e.g., `spatial_map`, `semantic_map`, `task_plan`)
+   - Service types must match the specifications
+   - Service entry points must be valid ROS2 service names
 
-1. 能力/技能名称必须匹配标准规范
-2. 输入/输出参数名称必须与规范完全一致
-3. 参数类型由 spec 自动提供，无需在 manifest 中指定
-4. 配置服务必须与规范完全一致
+3. **Skills**:
+   - Skills are flexible and do not need to conform to a spec
+   - Skills must provide valid start/status topics and RTDL files
 
-CLI 在注册时会自动：
-- 从 spec 中获取参数的类型信息
-- 验证 manifest 中的参数名是否与 spec 定义一致
-- 自动填充 `code_path`、`package_id`、`description` 等字段
+## Registration Process
 
-## 注册流程
+After installation, packages need to register their provided primitives, services, and skills through the CLI command `rbnx deploy register <recipe_file>`.
 
-Package 在安装后，需要通过 CLI 命令 `rbnx deploy register <recipe_file>` 注册其提供的 capabilities 和 skills。
+### Recipe File Format
 
-### Recipe 文件格式
-
-Recipe 文件定义了要注册的 packages 和对应的 capabilities/skills，以及挂载的 entity 名称：
+Recipe files define the packages to register and their corresponding primitives/services/skills:
 
 ```yaml
 name: recipe_name
@@ -234,70 +263,72 @@ description: Optional description
 
 packages:
   - name: package_name
-    entity_name: agilex_robot  # Entity 名称，用于在 entity tree 中挂载
-    capabilities:              # 可选，如果不指定则注册所有 capabilities
-      - cap::vision.capture_rgb
-    skills:                    # 可选，如果不指定则注册所有 skills
-      - skl::pick
+    primitives:                # Optional, if not specified, register all primitives
+      - prm::arm_move_ee
+    services:                  # Optional, if not specified, register all services
+      - spatial_map
+    skills:                    # Optional, if not specified, register all skills
+      - close_window
 ```
 
-### 部署工作流程
+### Deployment Workflow
 
-部署流程分为多个步骤，按顺序执行：
+The deployment process is divided into multiple steps, executed in order:
 
-1. **注册阶段** (`rbnx deploy register <recipe_file>`): 向 robonix-core 注册每个 cap/skill
-   - 每个注册请求包含 `hostname`（当前主机名）和 `entity_name`（从 recipe 中获取）
-   - 这确保了 entity tree 和 graph 中的节点能够正确对应到 cap/skill
-   - **注意**：注册时不会启动进程，只是将 cap/skill 信息注册到系统中
+1. **Registration Phase** (`rbnx deploy register <recipe_file>`): Register each primitive/service/skill to robonix-core
+   - Each registration request includes `provider` (package name) and metadata
+   - **Note**: Registration does not start processes, it only registers primitive/service/skill information to the system
 
-2. **构建阶段** (`rbnx deploy build [target]`): 构建 packages（编译、安装依赖等）
-   - 可以指定 `target` 参数来构建特定的 package（如 `"demo_rgb_provider"`），或使用 `"all"` 构建所有 packages（默认）
-   - 执行每个 package 的构建脚本（`rbnx/build.sh` 或在 manifest 中指定的 `build_script`）
-   - 如果构建脚本不存在，会跳过该 package（不会报错）
-   - **注意**：构建是可选的，如果 package 不需要构建（如纯 Python 脚本），可以跳过此步骤
+2. **Build Phase** (`rbnx deploy build [target]`): Build packages (compile, install dependencies, etc.)
+   - Can specify `target` parameter to build a specific package (e.g., `"demo_rgb_provider"`), or use `"all"` to build all packages (default)
+   - Execute each package's build script (`rbnx/build.sh` or `build_script` specified in manifest)
+   - If the build script does not exist, skip the package (no error)
+   - **Note**: Build is optional, if a package does not need building (e.g., pure Python scripts), this step can be skipped
 
-3. **启动进程阶段** (`rbnx deploy start [target]`): 根据 manifest 中每个 cap/skill 的 `start_script` 启动对应的进程
-   - 所有进程的 stdout/stderr 会被重定向到日志文件（存储在 `{package_storage_path}/logs/`）
-   - CLI 会记录本机启动的所有 cap/skill 及其进程信息
-   - 可以指定 `target` 参数来启动特定的 cap/skill，或使用 `"all"` 启动所有（默认）
+3. **Start Process Phase** (`rbnx deploy start [target]`): Start corresponding processes (if needed)
+   - Primitives, services, and skills that have `start_script` defined in the manifest will be started
+   - Items without `start_script` will be skipped (they may be started manually or by other means)
+   - All process stdout/stderr will be redirected to log files (stored in `{package_storage_path}/logs/`)
+   - CLI will record all processes started on this machine and their process information
+   - Can specify `target` parameter to start a specific item, or use `"all"` to start all (default)
 
-4. **停止进程阶段** (`rbnx deploy stop [target]`): 停止正在运行的 cap/skill 进程
-   - 可以指定 `target` 参数来停止特定的 cap/skill，或使用 `"all"` 停止所有（默认）
+4. **Stop Process Phase** (`rbnx deploy stop [target]`): Stop running processes
+   - Can specify `target` parameter to stop a specific item, or use `"all"` to stop all (default)
 
-5. **重启进程阶段** (`rbnx deploy restart [target]`): 重启 cap/skill 进程
-   - 相当于先执行 `stop` 再执行 `start`
+5. **Restart Process Phase** (`rbnx deploy restart [target]`): Restart processes
+   - Equivalent to executing `stop` then `start`
 
-6. **查看状态** (`rbnx deploy status`): 查看所有正在运行的 cap/skill 进程状态
+6. **View Status** (`rbnx deploy status`): View status of all running processes
 
-7. **注销阶段** (`rbnx deploy unregister <target>`): 从系统中注销 cap/skill
-   - 需要先停止所有相关进程
-   - 可以注销整个 recipe、package、或特定的 cap/skill
+7. **Unregister Phase** (`rbnx deploy unregister <target>`): Unregister primitive/service/skill from the system
+   - Need to stop all related processes first
+   - Can unregister entire recipe, package, or specific primitive/service/skill
 
-**完整工作流程示例：**
+**Complete Workflow Example:**
 ```bash
-# 1. 注册 recipe
+# 1. Register recipe
 rbnx deploy register demo_recipe.yaml
 
-# 2. 构建所有 packages（可选，如果需要编译等操作）
+# 2. Build all packages (optional, if compilation etc. is needed)
 rbnx deploy build
 
-# 3. 启动所有进程
+# 3. Start all processes
 rbnx deploy start
 
-# 4. 查看状态
+# 4. View status
 rbnx deploy status
 
-# 5. 停止所有进程
+# 5. Stop all processes
 rbnx deploy stop
 
-# 6. 注销 recipe
+# 6. Unregister recipe
 rbnx deploy unregister demo_recipe.yaml
 ```
 
-标准 capabilities 和 skills 的规范定义参见 [`robonix-core/src/specs_table.rs`](robonix-core/src/specs_table.rs)。
+Standard primitive and service specifications are defined in [`robonix-core/src/specs_table.rs`](robonix-core/src/specs_table.rs).
 
-## 示例
+## Examples
 
-完整示例请参考：
-- Package 示例：`rust/provider/demo_package/` 目录（包含完整的 `rbnx_manifest.yaml` 和启动/停止脚本）
-- Recipe 示例：`rust/robonix-cli/demo_recipe.yaml` 文件
+For complete examples, please refer to:
+- Package example: `rust/provider/demo_package/` directory (contains complete `rbnx_manifest.yaml` and start/stop scripts)
+- Recipe example: `rust/robonix-cli/demo_recipe.yaml` file

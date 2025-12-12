@@ -7,8 +7,8 @@ use serde_yaml::Value;
 pub struct RecipeItem {
     pub package_name: String,
     pub std_name: String,
-    pub package_type: String, // "cap" or "skl"
-    pub start_script: String,
+    pub package_type: String, // "prm", "srv", or "skl"
+    pub start_script: Option<String>, // Start script path (for primitives, services, and skills)
     pub package_path: std::path::PathBuf,
 }
 
@@ -30,53 +30,75 @@ pub fn get_recipe_items(config: &Config) -> Result<Vec<RecipeItem>> {
         let manifest_content = std::fs::read_to_string(&pkg_info.manifest_path)?;
         let manifest: Value = serde_yaml::from_str(&manifest_content)?;
 
-        // Determine which capabilities/skills to include
-        let caps_to_include = if let Some(caps) = &recipe_pkg.capabilities {
-            caps.clone()
+        // Add primitives
+        let primitives_to_include = if let Some(primitives) = &recipe_pkg.primitives {
+            primitives.clone()
         } else {
-            pkg_info.capabilities.clone()
+            pkg_info.primitives.clone()
         };
 
+        for primitive_name in &primitives_to_include {
+            if let Some(primitive) = manifest["primitives"].as_sequence().and_then(|primitives| {
+                primitives
+                    .iter()
+                    .find(|p| p["name"].as_str() == Some(primitive_name))
+            }) {
+                let start_script = primitive["start_script"].as_str().map(|s| s.to_string());
+                items.push(RecipeItem {
+                    package_name: pkg_info.name.clone(),
+                    std_name: primitive_name.clone(),
+                    package_type: "prm".to_string(),
+                    start_script,
+                    package_path: pkg_info.path.clone(),
+                });
+            }
+        }
+
+        // Add services
+        let services_to_include = if let Some(services) = &recipe_pkg.services {
+            services.clone()
+        } else {
+            pkg_info.services.clone()
+        };
+
+        for service_name in &services_to_include {
+            if let Some(service) = manifest["services"].as_sequence().and_then(|services| {
+                services
+                    .iter()
+                    .find(|s| s["name"].as_str() == Some(service_name))
+            }) {
+                let start_script = service["start_script"].as_str().map(|s| s.to_string());
+                items.push(RecipeItem {
+                    package_name: pkg_info.name.clone(),
+                    std_name: service_name.clone(),
+                    package_type: "srv".to_string(),
+                    start_script,
+                    package_path: pkg_info.path.clone(),
+                });
+            }
+        }
+
+        // Add skills
         let skills_to_include = if let Some(skills) = &recipe_pkg.skills {
             skills.clone()
         } else {
             pkg_info.skills.clone()
         };
 
-        // Add capabilities
-        for cap_name in &caps_to_include {
-            if let Some(cap) = manifest["capabilities"]
-                .as_sequence()
-                .and_then(|caps| caps.iter().find(|c| c["name"].as_str() == Some(cap_name)))
-            {
-                if let Some(start_script) = cap["start_script"].as_str() {
-                    items.push(RecipeItem {
-                        package_name: pkg_info.name.clone(),
-                        std_name: cap_name.clone(),
-                        package_type: "cap".to_string(),
-                        start_script: start_script.to_string(),
-                        package_path: pkg_info.path.clone(),
-                    });
-                }
-            }
-        }
-
-        // Add skills
         for skill_name in &skills_to_include {
             if let Some(skill) = manifest["skills"].as_sequence().and_then(|skills| {
                 skills
                     .iter()
                     .find(|s| s["name"].as_str() == Some(skill_name))
             }) {
-                if let Some(start_script) = skill["start_script"].as_str() {
-                    items.push(RecipeItem {
-                        package_name: pkg_info.name.clone(),
-                        std_name: skill_name.clone(),
-                        package_type: "skl".to_string(),
-                        start_script: start_script.to_string(),
-                        package_path: pkg_info.path.clone(),
-                    });
-                }
+                let start_script = skill["start_script"].as_str().map(|s| s.to_string());
+                items.push(RecipeItem {
+                    package_name: pkg_info.name.clone(),
+                    std_name: skill_name.clone(),
+                    package_type: "skl".to_string(),
+                    start_script,
+                    package_path: pkg_info.path.clone(),
+                });
             }
         }
     }

@@ -1,8 +1,9 @@
 use crate::config::Config;
 use anyhow::Result;
-use robonix_core::planning::{
-    CancelTaskRequest, CancelTaskResponse, CreateTaskRequest, CreateTaskResponse,
-    GetTaskRequest, GetTaskResponse, ListTasksRequest, ListTasksResponse,
+use robonix_core::task_manager::api::{
+    SubmitTaskRequest, SubmitTaskResponse,
+    TaskStatusRequest, TaskStatusResponse,
+    TaskResultRequest, TaskResultResponse,
 };
 use ros2_client::{
     service::AService, Context, Name, Node, NodeName, NodeOptions, ServiceMapping, ServiceTypeName,
@@ -14,26 +15,21 @@ use tokio::sync::Mutex;
 pub struct TaskClient {
     _config: Config,
     node: Arc<Mutex<Option<Node>>>,
-    create_client: Arc<
+    submit_client: Arc<
         Mutex<
             Option<
-                ros2_client::service::Client<AService<CreateTaskRequest, CreateTaskResponse>>,
+                ros2_client::service::Client<AService<SubmitTaskRequest, SubmitTaskResponse>>,
             >,
         >,
     >,
-    get_client: Arc<
+    status_client: Arc<
         Mutex<
-            Option<ros2_client::service::Client<AService<GetTaskRequest, GetTaskResponse>>>,
+            Option<ros2_client::service::Client<AService<TaskStatusRequest, TaskStatusResponse>>>,
         >,
     >,
-    list_client: Arc<
+    result_client: Arc<
         Mutex<
-            Option<ros2_client::service::Client<AService<ListTasksRequest, ListTasksResponse>>>,
-        >,
-    >,
-    cancel_client: Arc<
-        Mutex<
-            Option<ros2_client::service::Client<AService<CancelTaskRequest, CancelTaskResponse>>>,
+            Option<ros2_client::service::Client<AService<TaskResultRequest, TaskResultResponse>>>,
         >,
     >,
 }
@@ -43,19 +39,17 @@ impl TaskClient {
         Ok(Self {
             _config: config,
             node: Arc::new(Mutex::new(None)),
-            create_client: Arc::new(Mutex::new(None)),
-            get_client: Arc::new(Mutex::new(None)),
-            list_client: Arc::new(Mutex::new(None)),
-            cancel_client: Arc::new(Mutex::new(None)),
+            submit_client: Arc::new(Mutex::new(None)),
+            status_client: Arc::new(Mutex::new(None)),
+            result_client: Arc::new(Mutex::new(None)),
         })
     }
 
     async fn ensure_clients(&self) -> Result<()> {
         let mut node_guard = self.node.lock().await;
-        let mut create_guard = self.create_client.lock().await;
-        let mut get_guard = self.get_client.lock().await;
-        let mut list_guard = self.list_client.lock().await;
-        let mut cancel_guard = self.cancel_client.lock().await;
+        let mut submit_guard = self.submit_client.lock().await;
+        let mut status_guard = self.status_client.lock().await;
+        let mut result_guard = self.result_client.lock().await;
 
         if node_guard.is_none() {
             let context = Context::new()
@@ -84,113 +78,95 @@ impl TaskClient {
                 .history(policy::History::KeepLast { depth: 1 })
                 .build();
 
-            let create_client = node
-                .create_client::<AService<CreateTaskRequest, CreateTaskResponse>>(
+            let submit_client = node
+                .create_client::<AService<SubmitTaskRequest, SubmitTaskResponse>>(
                     ServiceMapping::Enhanced,
-                    &Name::new("/rbnx/srv/planning", "create_task").unwrap(),
-                    &ServiceTypeName::new("robonix_core", "CreateTask"),
+                    &Name::new("/rbnx/task", "submit").unwrap(),
+                    &ServiceTypeName::new("robonix_core", "SubmitTask"),
                     service_qos.clone(),
                     service_qos.clone(),
                 )
-                .map_err(|e| anyhow::anyhow!("Failed to create create_task client: {:?}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to create submit_task client: {:?}", e))?;
 
-            let get_client = node
-                .create_client::<AService<GetTaskRequest, GetTaskResponse>>(
+            let status_client = node
+                .create_client::<AService<TaskStatusRequest, TaskStatusResponse>>(
                     ServiceMapping::Enhanced,
-                    &Name::new("/rbnx/srv/planning", "get_task").unwrap(),
-                    &ServiceTypeName::new("robonix_core", "GetTask"),
+                    &Name::new("/rbnx/task", "status").unwrap(),
+                    &ServiceTypeName::new("robonix_core", "TaskStatus"),
                     service_qos.clone(),
                     service_qos.clone(),
                 )
-                .map_err(|e| anyhow::anyhow!("Failed to create get_task client: {:?}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to create task_status client: {:?}", e))?;
 
-            let list_client = node
-                .create_client::<AService<ListTasksRequest, ListTasksResponse>>(
+            let result_client = node
+                .create_client::<AService<TaskResultRequest, TaskResultResponse>>(
                     ServiceMapping::Enhanced,
-                    &Name::new("/rbnx/srv/planning", "list_tasks").unwrap(),
-                    &ServiceTypeName::new("robonix_core", "ListTasks"),
-                    service_qos.clone(),
-                    service_qos.clone(),
-                )
-                .map_err(|e| anyhow::anyhow!("Failed to create list_tasks client: {:?}", e))?;
-
-            let cancel_client = node
-                .create_client::<AService<CancelTaskRequest, CancelTaskResponse>>(
-                    ServiceMapping::Enhanced,
-                    &Name::new("/rbnx/srv/planning", "cancel_task").unwrap(),
-                    &ServiceTypeName::new("robonix_core", "CancelTask"),
+                    &Name::new("/rbnx/task", "result").unwrap(),
+                    &ServiceTypeName::new("robonix_core", "TaskResult"),
                     service_qos.clone(),
                     service_qos,
                 )
-                .map_err(|e| anyhow::anyhow!("Failed to create cancel_task client: {:?}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to create task_result client: {:?}", e))?;
 
             // Wait for services to be available (with timeout)
             tracing::debug!("Waiting for task services to be available...");
-            let wait_create = create_client.wait_for_service(&node);
-            let wait_get = get_client.wait_for_service(&node);
-            let wait_list = list_client.wait_for_service(&node);
-            let wait_cancel = cancel_client.wait_for_service(&node);
+            let wait_submit = submit_client.wait_for_service(&node);
+            let wait_status = status_client.wait_for_service(&node);
+            let wait_result = result_client.wait_for_service(&node);
             let timeout_future = tokio::time::sleep(tokio::time::Duration::from_secs(5));
             
             tokio::select! {
-                _ = wait_create => {
-                    tracing::debug!("Create task service is available");
+                _ = wait_submit => {
+                    tracing::debug!("Submit task service is available");
                 }
                 _ = timeout_future => {
-                    tracing::warn!("Create task service not available after 5 seconds, continuing anyway...");
+                    tracing::warn!("Submit task service not available after 5 seconds, continuing anyway...");
                 }
             }
             tokio::select! {
-                _ = wait_get => {
-                    tracing::debug!("Get task service is available");
+                _ = wait_status => {
+                    tracing::debug!("Task status service is available");
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
-                    tracing::debug!("Get task service wait timeout, continuing...");
+                    tracing::debug!("Task status service wait timeout, continuing...");
                 }
             }
             tokio::select! {
-                _ = wait_list => {
-                    tracing::debug!("List tasks service is available");
+                _ = wait_result => {
+                    tracing::debug!("Task result service is available");
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
-                    tracing::debug!("List tasks service wait timeout, continuing...");
-                }
-            }
-            tokio::select! {
-                _ = wait_cancel => {
-                    tracing::debug!("Cancel task service is available");
-                }
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
-                    tracing::debug!("Cancel task service wait timeout, continuing...");
+                    tracing::debug!("Task result service wait timeout, continuing...");
                 }
             }
 
             *node_guard = Some(node);
-            *create_guard = Some(create_client);
-            *get_guard = Some(get_client);
-            *list_guard = Some(list_client);
-            *cancel_guard = Some(cancel_client);
+            *submit_guard = Some(submit_client);
+            *status_guard = Some(status_client);
+            *result_guard = Some(result_client);
         }
 
         Ok(())
     }
 
-    pub async fn create(&self, natural_language: String) -> Result<CreateTaskResponse> {
+    pub async fn submit(&self, description: String, params: serde_json::Value) -> Result<SubmitTaskResponse> {
         self.ensure_clients().await?;
 
-        let request = CreateTaskRequest { natural_language };
+        // Serialize params to JSON string
+        let params_str = serde_json::to_string(&params).unwrap_or_else(|_| "{}".to_string());
+        let request = SubmitTaskRequest { description, params: params_str };
 
-        let client_guard = self.create_client.lock().await;
+        let client_guard: tokio::sync::MutexGuard<'_, Option<ros2_client::service::Client<AService<SubmitTaskRequest, SubmitTaskResponse>>>> = self.submit_client.lock().await;
         let client = client_guard
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Create client not initialized"))?;
+            .ok_or_else(|| anyhow::anyhow!("Submit client not initialized"))?;
 
         let node_guard = self.node.lock().await;
         let _node = node_guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("ROS2 node not initialized"))?;
 
-        tracing::info!("Calling create_task service");
+        tracing::info!("Calling submit_task service");
         let call_result = tokio::time::timeout(
             tokio::time::Duration::from_secs(30),
             client.async_call_service(request),
@@ -199,11 +175,7 @@ impl TaskClient {
 
         match call_result {
             Ok(Ok(response)) => {
-                tracing::info!(
-                    "Received response: success={}, task_id={}",
-                    response.success,
-                    response.task_id
-                );
+                tracing::info!("Received response: task_id={}", response.task_id);
                 Ok(response)
             }
             Ok(Err(e)) => {
@@ -220,22 +192,22 @@ impl TaskClient {
         }
     }
 
-    pub async fn get(&self, task_id: String) -> Result<GetTaskResponse> {
+    pub async fn status(&self, task_id: String) -> Result<TaskStatusResponse> {
         self.ensure_clients().await?;
 
-        let request = GetTaskRequest { task_id };
+        let request = TaskStatusRequest { task_id };
 
-        let client_guard = self.get_client.lock().await;
+        let client_guard: tokio::sync::MutexGuard<'_, Option<ros2_client::service::Client<AService<TaskStatusRequest, TaskStatusResponse>>>> = self.status_client.lock().await;
         let client = client_guard
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Get client not initialized"))?;
+            .ok_or_else(|| anyhow::anyhow!("Status client not initialized"))?;
 
         let node_guard = self.node.lock().await;
         let _node = node_guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("ROS2 node not initialized"))?;
 
-        tracing::info!("Calling get_task service");
+        tracing::info!("Calling task_status service");
         let call_result = tokio::time::timeout(
             tokio::time::Duration::from_secs(10),
             client.async_call_service(request),
@@ -244,11 +216,7 @@ impl TaskClient {
 
         match call_result {
             Ok(Ok(response)) => {
-                tracing::info!(
-                    "Received response: success={}, task={:?}",
-                    response.success,
-                    response.task.is_some()
-                );
+                tracing::info!("Received response: status={}", response.status);
                 Ok(response)
             }
             Ok(Err(e)) => {
@@ -262,22 +230,22 @@ impl TaskClient {
         }
     }
 
-    pub async fn list(&self) -> Result<ListTasksResponse> {
+    pub async fn result(&self, task_id: String) -> Result<TaskResultResponse> {
         self.ensure_clients().await?;
 
-        let request = ListTasksRequest {};
+        let request = TaskResultRequest { task_id };
 
-        let client_guard = self.list_client.lock().await;
+        let client_guard: tokio::sync::MutexGuard<'_, Option<ros2_client::service::Client<AService<TaskResultRequest, TaskResultResponse>>>> = self.result_client.lock().await;
         let client = client_guard
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("List client not initialized"))?;
+            .ok_or_else(|| anyhow::anyhow!("Result client not initialized"))?;
 
         let node_guard = self.node.lock().await;
         let _node = node_guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("ROS2 node not initialized"))?;
 
-        tracing::info!("Calling list_tasks service");
+        tracing::info!("Calling task_result service");
         let call_result = tokio::time::timeout(
             tokio::time::Duration::from_secs(10),
             client.async_call_service(request),
@@ -286,53 +254,7 @@ impl TaskClient {
 
         match call_result {
             Ok(Ok(response)) => {
-                tracing::info!(
-                    "Received response: success={}, tasks={}",
-                    response.success,
-                    response.tasks.len()
-                );
-                Ok(response)
-            }
-            Ok(Err(e)) => {
-                tracing::error!("Service call error: {:?}", e);
-                anyhow::bail!("Service call error: {:?}", e);
-            }
-            Err(_) => {
-                tracing::error!("Service call timeout after 10 seconds");
-                anyhow::bail!("Service call timeout after 10 seconds");
-            }
-        }
-    }
-
-    pub async fn cancel(&self, task_id: String) -> Result<CancelTaskResponse> {
-        self.ensure_clients().await?;
-
-        let request = CancelTaskRequest { task_id };
-
-        let client_guard = self.cancel_client.lock().await;
-        let client = client_guard
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Cancel client not initialized"))?;
-
-        let node_guard = self.node.lock().await;
-        let _node = node_guard
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("ROS2 node not initialized"))?;
-
-        tracing::info!("Calling cancel_task service");
-        let call_result = tokio::time::timeout(
-            tokio::time::Duration::from_secs(10),
-            client.async_call_service(request),
-        )
-        .await;
-
-        match call_result {
-            Ok(Ok(response)) => {
-                tracing::info!(
-                    "Received response: success={}, error={}",
-                    response.success,
-                    response.error_message
-                );
+                tracing::info!("Received response: result={:?}", response.result);
                 Ok(response)
             }
             Ok(Err(e)) => {

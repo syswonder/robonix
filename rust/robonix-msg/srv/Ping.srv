@@ -1,7 +1,0 @@
-# Ping service for testing concurrent service calls
-uint32 sequence    # Sequence number for tracking
----
-bool success
-uint32 sequence   # Echo back the sequence number
-uint64 timestamp   # Server timestamp in nanoseconds
-

@@ -1,8 +1,0 @@
-# CreateTask service for creating a new task from natural language
-string natural_language  # Natural language task description
----
-bool success
-string error_message
-string task_id           # Task ID if successful
-
-

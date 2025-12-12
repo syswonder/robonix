@@ -28,9 +28,13 @@ impl PackageQuery {
         println!("Path: {}", pkg.path.display());
         println!("Installed at: {}", pkg.installed_at);
         println!("Source: {:?}", pkg.source);
-        println!("\nCapabilities:");
-        for cap in &pkg.capabilities {
-            println!("  - {}", cap);
+        println!("\nPrimitives:");
+        for prm in &pkg.primitives {
+            println!("  - {}", prm);
+        }
+        println!("\nServices:");
+        for srv in &pkg.services {
+            println!("  - {}", srv);
         }
         println!("\nSkills:");
         for skill in &pkg.skills {
@@ -40,9 +44,15 @@ impl PackageQuery {
         Ok(())
     }
 
-    pub fn find_by_capability(&self, cap_name: &str) -> Result<Vec<String>> {
+    pub fn find_by_primitive(&self, primitive_name: &str) -> Result<Vec<String>> {
         let db = PackageDatabase::load(&self.config.package_storage_path)?;
-        let packages = db.find_by_capability(cap_name);
+        let packages = db.find_by_primitive(primitive_name);
+        Ok(packages.iter().map(|p| p.name.clone()).collect())
+    }
+
+    pub fn find_by_service(&self, service_name: &str) -> Result<Vec<String>> {
+        let db = PackageDatabase::load(&self.config.package_storage_path)?;
+        let packages = db.find_by_service(service_name);
         Ok(packages.iter().map(|p| p.name.clone()).collect())
     }
 

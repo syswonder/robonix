@@ -31,6 +31,7 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
 
     let mut restarted = 0;
     let mut started = 0;
+    let mut skipped = 0;
     let mut errors = 0;
 
     // Step 1: Stop running processes
@@ -129,6 +130,16 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
     output::step("Starting", &format!("{} item(s)", items_to_restart.len()));
 
     for item in &items_to_restart {
+        // Skip items without start_script (primitives and services typically don't need start scripts)
+        if item.start_script.is_none() {
+            output::warning(&format!(
+                "Skipping {} {} (no start_script defined)",
+                item.package_type, item.std_name
+            ));
+            skipped += 1;
+            continue;
+        }
+
         let mut spinner = output::Spinner::new(format!(
             "Starting {} {}...",
             item.package_type, item.std_name
@@ -141,7 +152,7 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
                 std_name: item.std_name.clone(),
                 package_type: item.package_type.clone(),
                 package_path: item.package_path.clone(),
-                start_script: item.start_script.clone(),
+                start_script: item.start_script.as_ref().unwrap().clone(),
                 robonix_msg_path: config.robonix_msg_path.clone(),
             })
             .await;
@@ -260,8 +271,8 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
     }
 
     output::summary(&format!(
-        "Summary: {} restarted, {} started, {} errors",
-        restarted, started, errors
+        "Summary: {} restarted, {} started, {} skipped, {} errors",
+        restarted, started, skipped, errors
     ));
 
     Ok(())

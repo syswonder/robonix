@@ -1,6 +1,0 @@
-# AddEntity service for adding entities to semantic map
-Entity entity
----
-bool success
-string error_message
-

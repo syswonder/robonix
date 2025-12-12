@@ -1,71 +1,55 @@
-use crate::action::ActionModule;
-use crate::mgmt::ManagementModule;
-use crate::perception::PerceptionModule;
-use crate::planning::PlanningModule;
+use crate::primitive::PrimitiveRegistry;
+use crate::service::ServiceRegistry;
+use crate::skill_library::SkillLibrary;
+use crate::task_manager::TaskManager;
 use std::sync::Arc;
 
-// Robonix core - coordinates all modules
+// robonix Core - coordinates all modules according to robonix architecture
 pub struct RobonixCore {
-    mgmt: Arc<ManagementModule>,
-    perception: Arc<PerceptionModule>,
-    planning: Arc<PlanningModule>,
-    action: Arc<ActionModule>,
+    // robonix core components
+    task_manager: Arc<TaskManager>,
+    skill_library: Arc<SkillLibrary>,
+    service_registry: Arc<ServiceRegistry>,
+    primitive_registry: Arc<PrimitiveRegistry>,
 }
 
 impl RobonixCore {
     pub fn new() -> Self {
-        let mgmt = Arc::new(ManagementModule::new());
-        let perception = Arc::new(PerceptionModule::new());
+        // Create robonix core components
+        let skill_library = Arc::new(SkillLibrary::new());
+        let service_registry = Arc::new(ServiceRegistry::new());
+        let primitive_registry = Arc::new(PrimitiveRegistry::new());
         
-        // Create planning module and connect it
-        let mut planning = PlanningModule::new();
-        planning.set_mgmt(mgmt.clone());
-        planning.set_perception(perception.clone());
-        let planning = Arc::new(planning);
+        let mut task_manager = TaskManager::new(
+            skill_library.clone(),
+            service_registry.clone(),
+            primitive_registry.clone(),
+        );
         
-        // Create action module and connect it
-        let mut action = ActionModule::new();
-        action.set_mgmt(mgmt.clone());
-        let action = Arc::new(action);
+        let task_manager = Arc::new(task_manager);
 
         Self {
-            mgmt,
-            perception,
-            planning,
-            action,
+            task_manager,
+            skill_library,
+            service_registry,
+            primitive_registry,
         }
     }
 
-    pub fn get_mgmt(&self) -> Arc<ManagementModule> {
-        self.mgmt.clone()
+    // robonix core component accessors
+    pub fn get_task_manager(&self) -> Arc<TaskManager> {
+        self.task_manager.clone()
     }
 
-    pub fn get_perception(&self) -> Arc<PerceptionModule> {
-        self.perception.clone()
+    pub fn get_skill_library(&self) -> Arc<SkillLibrary> {
+        self.skill_library.clone()
     }
 
-    pub fn get_planning(&self) -> Arc<PlanningModule> {
-        self.planning.clone()
+    pub fn get_service_registry(&self) -> Arc<ServiceRegistry> {
+        self.service_registry.clone()
     }
 
-    pub fn get_action(&self) -> Arc<ActionModule> {
-        self.action.clone()
-    }
-
-    /// Register capability or skill (delegates to management module)
-    pub async fn register(&self, req: crate::messages::RegisterCapSklRequest) -> crate::messages::RegisterCapSklResponse {
-        let resp = self.mgmt.register(req.clone()).await;
-        
-        // Notify perception module if skill was registered
-        if resp.success && req.package_type == "skl" {
-            self.perception.on_skill_registered(&req.std_name).await;
-        }
-        
-        resp
-    }
-
-    /// Query capability or skill (delegates to management module)
-    pub async fn query(&self, req: crate::messages::QueryCapSklRequest) -> crate::messages::QueryCapSklResponse {
-        self.mgmt.query(req).await
+    pub fn get_primitive_registry(&self) -> Arc<PrimitiveRegistry> {
+        self.primitive_registry.clone()
     }
 }

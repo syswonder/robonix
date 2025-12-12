@@ -77,37 +77,42 @@ pub async fn execute(config: Config) -> Result<()> {
         let manifest_content = std::fs::read_to_string(&pkg_info.manifest_path)?;
         let _manifest: Value = serde_yaml::from_str(&manifest_content)?;
 
-        // Determine which capabilities/skills to show based on recipe
+        // Determine which primitives, services, and skills to show based on recipe
         // recipe_state is guaranteed to be Some at this point
-        let (caps_to_show, skills_to_show) = if let Some(recipe_state) = &recipe_state {
+        let (prims_to_show, srvs_to_show, skills_to_show) = if let Some(recipe_state) = &recipe_state {
             if let Some(recipe_pkg) = recipe_state
                 .recipe
                 .packages
                 .iter()
                 .find(|rp| rp.name == pkg_info.name)
             {
-                let caps = if let Some(caps) = &recipe_pkg.capabilities {
-                    caps.clone()
+                let prims = if let Some(prims) = &recipe_pkg.primitives {
+                    prims.clone()
                 } else {
-                    pkg_info.capabilities.clone()
+                    pkg_info.primitives.clone()
+                };
+                let srvs = if let Some(srvs) = &recipe_pkg.services {
+                    srvs.clone()
+                } else {
+                    pkg_info.services.clone()
                 };
                 let skills = if let Some(skills) = &recipe_pkg.skills {
                     skills.clone()
                 } else {
                     pkg_info.skills.clone()
                 };
-                (caps, skills)
+                (prims, srvs, skills)
             } else {
-                (pkg_info.capabilities.clone(), pkg_info.skills.clone())
+                (pkg_info.primitives.clone(), pkg_info.services.clone(), pkg_info.skills.clone())
             }
         } else {
             // This should never happen due to early return above
-            (pkg_info.capabilities.clone(), pkg_info.skills.clone())
+            (pkg_info.primitives.clone(), pkg_info.services.clone(), pkg_info.skills.clone())
         };
 
-        // Add capabilities
-        for cap_name in &caps_to_show {
-            let key = (cap_name.clone(), "cap".to_string());
+        // Add primitives
+        for prim_name in &prims_to_show {
+            let key = (prim_name.clone(), "prm".to_string());
             let (is_running, pid, log_file) = if let Some((proc_pid, proc_log_file)) = running_map.get(&key) {
                 (
                     true,
@@ -125,8 +130,36 @@ pub async fn execute(config: Config) -> Result<()> {
             };
             all_items.push((
                 pkg_info.name.clone(),
-                cap_name.clone(),
-                "cap".to_string(),
+                prim_name.clone(),
+                "prm".to_string(),
+                is_running,
+                pid,
+                log_file,
+            ));
+        }
+
+        // Add services
+        for srv_name in &srvs_to_show {
+            let key = (srv_name.clone(), "srv".to_string());
+            let (is_running, pid, log_file) = if let Some((proc_pid, proc_log_file)) = running_map.get(&key) {
+                (
+                    true,
+                    Some(*proc_pid),
+                    Some(
+                        proc_log_file
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_default(),
+                    ),
+                )
+            } else {
+                (false, None, None)
+            };
+            all_items.push((
+                pkg_info.name.clone(),
+                srv_name.clone(),
+                "srv".to_string(),
                 is_running,
                 pid,
                 log_file,
@@ -163,7 +196,7 @@ pub async fn execute(config: Config) -> Result<()> {
     }
 
     if all_items.is_empty() {
-        println!("No capabilities or skills to display.");
+        println!("No primitives, services, or skills to display.");
         return Ok(());
     }
 

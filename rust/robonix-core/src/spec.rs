@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// Standard Capability and Skill Specifications
+// Standard Primitive and Service Specifications
 //
-// This module defines the formal specifications for all standard capabilities
-// and skills in the Robonix system. These specifications are used to validate
+// This module defines the formal specifications for all standard primitives
+// and services in the EAIOS system. These specifications are used to validate
 // registration requests.
+//
+// Note: Skills do not have specifications - they are user-defined and flexible.
 
 use std::collections::HashMap;
 
@@ -28,16 +30,21 @@ pub struct CapabilitySpec {
 }
 
 #[derive(Debug, Clone)]
-pub struct SkillSpec {
+pub struct PrimitiveSpec {
     pub description: String,
-    pub inputs: Vec<IOParameterSpec>,
-    pub outputs: Vec<IOParameterSpec>,
-    pub configs: Vec<ConfigSpec>,
+    pub input_schema: serde_json::Value,  // Expected input schema format
+    pub output_schema: serde_json::Value, // Expected output schema format
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceSpec {
+    pub description: String,
+    pub srv_type: String,  // Expected ROS2 service type (e.g., "robonix_core/srv/GetSpatialMap")
 }
 
 pub struct SpecRegistry {
-    pub capabilities: HashMap<String, CapabilitySpec>,
-    pub skills: HashMap<String, SkillSpec>,
+    pub primitives: HashMap<String, PrimitiveSpec>,
+    pub services: HashMap<String, ServiceSpec>,
 }
 
 // Macro to define a single capability
@@ -75,36 +82,32 @@ macro_rules! CAP {
     };
 }
 
-// Macro to define a single skill
-// Format: SKL!(skills, name, desc, [INPUT(name, type), ...], [OUTPUT(name, type), ...], [CONFIG(service, name), ...])
+// Macro to define a single primitive
+// Format: PRM!(primitives, name, desc, input_schema_json, output_schema_json)
 #[macro_export]
-macro_rules! SKL {
-    ($skills:ident, $name:expr, $desc:expr,
-     INPUT: [$($input_name:expr => $input_type:expr),* $(,)?],
-     OUTPUT: [$($output_name:expr => $output_type:expr),* $(,)?],
-     CONFIG: [$($config_service:expr => $config_name:expr),* $(,)?]) => {
-        $skills.insert(
+macro_rules! PRM {
+    ($primitives:ident, $name:expr, $desc:expr, $input_schema:tt, $output_schema:tt) => {
+        $primitives.insert(
             $name.to_string(),
-            $crate::spec::SkillSpec {
+            $crate::spec::PrimitiveSpec {
                 description: $desc.to_string(),
-                inputs: vec![$(
-                    $crate::spec::IOParameterSpec {
-                        name: $input_name.to_string(),
-                        ros_type: $input_type.to_string(),
-                    }
-                ),*],
-                outputs: vec![$(
-                    $crate::spec::IOParameterSpec {
-                        name: $output_name.to_string(),
-                        ros_type: $output_type.to_string(),
-                    }
-                ),*],
-                configs: vec![$(
-                    $crate::spec::ConfigSpec {
-                        service: $config_service.to_string(),
-                        name: $config_name.to_string(),
-                    }
-                ),*],
+                input_schema: serde_json::json!($input_schema),
+                output_schema: serde_json::json!($output_schema),
+            }
+        );
+    };
+}
+
+// Macro to define a single service
+// Format: SRV!(services, name, desc, srv_type)
+#[macro_export]
+macro_rules! SRV {
+    ($services:ident, $name:expr, $desc:expr, $srv_type:expr) => {
+        $services.insert(
+            $name.to_string(),
+            $crate::spec::ServiceSpec {
+                description: $desc.to_string(),
+                srv_type: $srv_type.to_string(),
             }
         );
     };
@@ -113,184 +116,79 @@ macro_rules! SKL {
 impl SpecRegistry {
     pub fn new() -> Self {
         // Load specifications from the table
-        let capabilities = crate::specs_table::load_capabilities();
-        let skills = crate::specs_table::load_skills();
+        let primitives = crate::specs_table::load_primitives();
+        let services = crate::specs_table::load_services();
 
         Self {
-            capabilities,
-            skills,
+            primitives,
+            services,
         }
     }
 
-    pub fn validate_capability(
+    /// Validate primitive registration against spec
+    pub fn validate_primitive(
         &self,
         std_name: &str,
-        inputs: &[crate::messages::IOParameter],
-        outputs: &[crate::messages::IOParameter],
-        configs: &[crate::messages::ConfigService],
+        input_schema: &serde_json::Value,
+        output_schema: &serde_json::Value,
     ) -> Result<(), String> {
         let spec = self
-            .capabilities
+            .primitives
             .get(std_name)
-            .ok_or_else(|| format!("Unknown capability: {}", std_name))?;
+            .ok_or_else(|| format!("Unknown primitive: {}", std_name))?;
 
-        // Validate inputs
-        if inputs.len() != spec.inputs.len() {
-            return Err(format!(
-                "Input count mismatch: expected {}, got {}",
-                spec.inputs.len(),
-                inputs.len()
-            ));
-        }
-
-        for (provided, expected) in inputs.iter().zip(spec.inputs.iter()) {
-            if provided.name != expected.name {
-                return Err(format!(
-                    "Input name mismatch: expected '{}', got '{}'",
-                    expected.name, provided.name
-                ));
-            }
-            if provided.ros_type != expected.ros_type {
-                return Err(format!(
-                    "Input ROS type mismatch for '{}': expected '{}', got '{}'",
-                    provided.name, expected.ros_type, provided.ros_type
-                ));
+        // Validate input schema structure
+        // Check that all required keys from spec are present
+        if let Some(spec_obj) = spec.input_schema.as_object() {
+            if let Some(provided_obj) = input_schema.as_object() {
+                for (key, _) in spec_obj {
+                    if !provided_obj.contains_key(key) {
+                        return Err(format!(
+                            "Missing required input parameter in schema: '{}'",
+                            key
+                        ));
+                    }
+                }
+            } else {
+                return Err("Input schema must be a JSON object".to_string());
             }
         }
 
-        // Validate outputs
-        if outputs.len() != spec.outputs.len() {
-            return Err(format!(
-                "Output count mismatch: expected {}, got {}",
-                spec.outputs.len(),
-                outputs.len()
-            ));
-        }
-
-        for (provided, expected) in outputs.iter().zip(spec.outputs.iter()) {
-            if provided.name != expected.name {
-                return Err(format!(
-                    "Output name mismatch: expected '{}', got '{}'",
-                    expected.name, provided.name
-                ));
-            }
-            if provided.ros_type != expected.ros_type {
-                return Err(format!(
-                    "Output ROS type mismatch for '{}': expected '{}', got '{}'",
-                    provided.name, expected.ros_type, provided.ros_type
-                ));
-            }
-        }
-
-        // Validate configs
-        if configs.len() != spec.configs.len() {
-            return Err(format!(
-                "Config count mismatch: expected {}, got {}",
-                spec.configs.len(),
-                configs.len()
-            ));
-        }
-
-        for (provided, expected) in configs.iter().zip(spec.configs.iter()) {
-            if provided.service != expected.service {
-                return Err(format!(
-                    "Config service mismatch: expected '{}', got '{}'",
-                    expected.service, provided.service
-                ));
-            }
-            if provided.name != expected.name {
-                return Err(format!(
-                    "Config name mismatch: expected '{}', got '{}'",
-                    expected.name, provided.name
-                ));
+        // Validate output schema structure
+        if let Some(spec_obj) = spec.output_schema.as_object() {
+            if let Some(provided_obj) = output_schema.as_object() {
+                for (key, _) in spec_obj {
+                    if !provided_obj.contains_key(key) {
+                        return Err(format!(
+                            "Missing required output parameter in schema: '{}'",
+                            key
+                        ));
+                    }
+                }
+            } else {
+                return Err("Output schema must be a JSON object".to_string());
             }
         }
 
         Ok(())
     }
 
-    pub fn validate_skill(
+    /// Validate service registration against spec
+    pub fn validate_service(
         &self,
         std_name: &str,
-        inputs: &[crate::messages::IOParameter],
-        outputs: &[crate::messages::IOParameter],
-        configs: &[crate::messages::ConfigService],
+        srv_type: &str,
     ) -> Result<(), String> {
         let spec = self
-            .skills
+            .services
             .get(std_name)
-            .ok_or_else(|| format!("Unknown skill: {}", std_name))?;
+            .ok_or_else(|| format!("Unknown service: {}", std_name))?;
 
-        // Validate inputs
-        if inputs.len() != spec.inputs.len() {
+        if srv_type != spec.srv_type {
             return Err(format!(
-                "Input count mismatch: expected {}, got {}",
-                spec.inputs.len(),
-                inputs.len()
+                "Service type mismatch for '{}': expected '{}', got '{}'",
+                std_name, spec.srv_type, srv_type
             ));
-        }
-
-        for (provided, expected) in inputs.iter().zip(spec.inputs.iter()) {
-            if provided.name != expected.name {
-                return Err(format!(
-                    "Input name mismatch: expected '{}', got '{}'",
-                    expected.name, provided.name
-                ));
-            }
-            if provided.ros_type != expected.ros_type {
-                return Err(format!(
-                    "Input ROS type mismatch for '{}': expected '{}', got '{}'",
-                    provided.name, expected.ros_type, provided.ros_type
-                ));
-            }
-        }
-
-        // Validate outputs
-        if outputs.len() != spec.outputs.len() {
-            return Err(format!(
-                "Output count mismatch: expected {}, got {}",
-                spec.outputs.len(),
-                outputs.len()
-            ));
-        }
-
-        for (provided, expected) in outputs.iter().zip(spec.outputs.iter()) {
-            if provided.name != expected.name {
-                return Err(format!(
-                    "Output name mismatch: expected '{}', got '{}'",
-                    expected.name, provided.name
-                ));
-            }
-            if provided.ros_type != expected.ros_type {
-                return Err(format!(
-                    "Output ROS type mismatch for '{}': expected '{}', got '{}'",
-                    provided.name, expected.ros_type, provided.ros_type
-                ));
-            }
-        }
-
-        // Validate configs
-        if configs.len() != spec.configs.len() {
-            return Err(format!(
-                "Config count mismatch: expected {}, got {}",
-                spec.configs.len(),
-                configs.len()
-            ));
-        }
-
-        for (provided, expected) in configs.iter().zip(spec.configs.iter()) {
-            if provided.service != expected.service {
-                return Err(format!(
-                    "Config service mismatch: expected '{}', got '{}'",
-                    expected.service, provided.service
-                ));
-            }
-            if provided.name != expected.name {
-                return Err(format!(
-                    "Config name mismatch: expected '{}', got '{}'",
-                    expected.name, provided.name
-                ));
-            }
         }
 
         Ok(())

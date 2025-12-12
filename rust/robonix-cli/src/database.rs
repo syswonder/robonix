@@ -9,8 +9,12 @@ pub struct PackageInfo {
     pub version: String,
     pub path: PathBuf,
     pub manifest_path: PathBuf,
-    pub capabilities: Vec<String>, // List of std_name
-    pub skills: Vec<String>,       // List of std_name
+    #[serde(default)]
+    pub primitives: Vec<String>, // List of primitive names
+    #[serde(default)]
+    pub services: Vec<String>,   // List of service names
+    #[serde(default)]
+    pub skills: Vec<String>,       // List of skill names
     pub installed_at: String,      // ISO 8601 timestamp
     pub source: PackageSource,
 }
@@ -84,10 +88,19 @@ impl PackageDatabase {
         packages
     }
 
-    pub fn find_by_capability(&self, cap_name: &str) -> Vec<&PackageInfo> {
+    pub fn find_by_primitive(&self, primitive_name: &str) -> Vec<&PackageInfo> {
         let mut packages: Vec<&PackageInfo> = self.packages
             .values()
-            .filter(|pkg| pkg.capabilities.iter().any(|c| c == cap_name))
+            .filter(|pkg| pkg.primitives.iter().any(|p| p == primitive_name))
+            .collect();
+        packages.sort_by(|a, b| a.name.cmp(&b.name));
+        packages
+    }
+
+    pub fn find_by_service(&self, service_name: &str) -> Vec<&PackageInfo> {
+        let mut packages: Vec<&PackageInfo> = self.packages
+            .values()
+            .filter(|pkg| pkg.services.iter().any(|s| s == service_name))
             .collect();
         packages.sort_by(|a, b| a.name.cmp(&b.name));
         packages

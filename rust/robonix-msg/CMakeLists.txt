@@ -4,6 +4,11 @@ project(robonix_core)
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 
 # Generate interfaces from .msg and .srv files
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -16,22 +21,37 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/FrameMapping.msg"
   "msg/Entity.msg"
   "msg/SpatialMapEntry.msg"
-# services
-  "srv/RegisterCapSkl.srv"
-  "srv/QueryCapSkl.srv"
-  "srv/RegisterModel.srv"
-  "srv/QueryModel.srv"
-  "srv/CreateTask.srv"
-  "srv/GetTask.srv"
-  "srv/ListTasks.srv"
-  "srv/CancelTask.srv"
-  "srv/GetSemanticMap.srv"
-  "srv/AddEntity.srv"
-  "srv/GetSpatialMap.srv"
-  "srv/AddSpatialMapEntry.srv"
-  "srv/GetMapStatus.srv"
-  "srv/Ping.srv"
+  "msg/Dict.msg"
+  "msg/Occupancy3D.msg"
+  "msg/PrimitiveInstance.msg"
+  "msg/ServiceInstance.msg"
+  "msg/SkillInstance.msg"
+# services - robonix API
+  # Primitive services
+  "srv/primitive/RegisterPrimitive.srv"
+  "srv/primitive/QueryPrimitive.srv"
+  # Service services
+  "srv/service/RegisterService.srv"
+  "srv/service/QueryService.srv"
+  # Standard service definitions
+  "srv/service/spatial_map/GetSpatialMap.srv"
+  "srv/service/semantic_map/QuerySemanticMap.srv"
+  "srv/service/task_plan/PlanTask.srv"
+  "srv/service/plan_simulate/SimulatePlan.srv"
+  "srv/service/result_feedback/ResultFeedback.srv"
+  # Skill services
+  "srv/skill/RegisterSkill.srv"
+  "srv/skill/QuerySkill.srv"
+  # Task services
+  "srv/task/SubmitTask.srv"
+  "srv/task/TaskStatus.srv"
+  "srv/task/TaskResult.srv"
   DEPENDENCIES
+    std_msgs
+    geometry_msgs
+    nav_msgs
+    sensor_msgs
+    builtin_interfaces
 )
 
 # Install Python client library

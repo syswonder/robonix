@@ -2,21 +2,9 @@
 
 wheatfox
 
-## workflow
+## Environment Setup
 
-Robonix系统的工作流程如下：
-1. **准备环境**：安装ROS2和Rust，构建消息包
-2. **启动robonix-core**：启动核心服务
-3. **注册大模型**：注册用于DSL生成的AI模型
-4. **注册能力技能**：通过recipe注册机器人的能力和技能
-5. **构建语义地图**：添加实体（包括机器人）到语义地图，实体包含其支持的skills
-6. **感知模块持续更新**：通过update_map skill持续更新语义地图和空间地图
-7. **创建任务**：用户发送自然语言任务
-8. **自动执行**：系统生成DSL代码并执行
-
-## 准备环境
-
-首先需要ROS2环境和Rust。
+First, you need ROS2 environment and Rust.
 
 ```bash
 cd rust # at robonix src root folder
@@ -31,191 +19,193 @@ cd robonix-msg
 ./build_ros2.sh
 ```
 
-## 启动 robonix-core
+## Start robonix-core
 
-在开始一切之前，需要先启动 robonix-core（在单独的终端中）。
+Before starting everything, you need to start robonix-core first (in a separate terminal).
 
 ```bash
 cd robonix-core
 cargo run --
 ```
 
-robonix-core 会启动以下服务：
-- **管理模块服务** (`/rbnx/srv/mgmt/*`)：能力技能注册查询、大模型注册查询
-- **感知模块服务** (`/rbnx/srv/perception/*`)：语义地图和空间地图操作
-- **规划模块服务** (`/rbnx/srv/planning/*`)：任务创建、查询、DSL生成
-- **行动模块服务** (`/rbnx/srv/action/*`)：DSL执行
+robonix-core will start the following EAIOS API services:
+- **Primitive API** (`/rbnx/prm/*`): Primitive registration and query
+- **Service API** (`/rbnx/srv/*`): Standard service registration and query (e.g., spatial map, semantic map, task planning, etc.)
+- **Skill API** (`/rbnx/skl/*`): Skill registration and query
+- **Task API** (`/rbnx/task/*`): Task submission, status query, and result retrieval
 
-然后可以在另一个终端使用 `robonix-cli`。
+Then you can use `robonix-cli` in another terminal.
 
-## 配置 robonix-cli
+## Configure robonix-cli
 
 ```bash
 cd robonix-cli
-# 查看当前配置
+# View current configuration
 cargo run -- config -s
 
-# 设置 robonix-msg 路径
+# Set robonix-msg path
 cargo run -- config --set-msg-path ../robonix-msg
 cargo run -- config -s
 ```
 
-## 注册大模型（用于DSL生成）
+## Install and Register Packages (Primitives, Services, Skills)
 
-系统需要一个大模型来将自然语言任务转换为DSL代码。支持OpenAI兼容的API格式。
-
-```bash
-cd robonix-cli
-export ROBONIX_MODEL_API_KEY=sk-xxxx # 或使用 --api-key 参数
-
-# 注册DeepSeek模型示例
-cargo run -- model register \
-  --model-id deepseek-chat \
-  --model-name "deepseek-chat" \
-  --model-type llm \
-  --provider deepseek \
-  --api-endpoint https://api.deepseek.com/v1/chat/completions \
-  --description "DeepSeek Chat model via DeepSeek API" \
-  --capabilities "planning,reasoning,general"
-
-# 查询已注册的模型
-cargo run -- model query
-```
-
-## 安装和注册包（能力技能）
-
-### 安装包
+### Install Packages
 
 ```bash
 cd robonix-cli
 
-# 从GitHub安装包
+# Install package from GitHub
 cargo run -- package install --github https://github.com/enkerewpo/demo-package-01-robonix
 cargo run -- package list
 cargo run -- package info demo_package_01_github
 
-# 构建所有包，也可以指定包名称
+# Build all packages, or specify package name
 cargo run -- package build all
 ```
 
-### 注册包到 robonix-core（使用recipe）
+### Register Packages to robonix-core (using recipe)
 
-使用recipe文件注册包，recipe会指定哪些能力技能注册到哪个实体（机器人）。
+Use recipe files to register packages. The recipe specifies which primitives, services, and skills need to be registered.
 
 ```bash
 cd robonix-cli
 
-# 构建所有包
-cargo build && cargo run -- daemon restart # 如果修改了daemon代码
+# Build all packages
+cargo build && cargo run -- daemon restart # if daemon code was modified
 cargo run -- package build all
 
-# 注册recipe（会自动注册recipe中指定的能力技能）
+# Register recipe (will automatically register primitives, services, and skills specified in recipe)
 cargo run -- deploy register demo_recipe.yaml
 
-# 启动所有注册的包
+# Start all registered packages
 cargo run -- deploy start
 
-# 查看状态
+# View status
 cargo run -- deploy status
 
-# 重启/停止
+# Restart/Stop
 cargo run -- deploy restart
 cargo run -- deploy stop
 
-# 清理所有ROS2进程
+# Clean up all ROS2 processes
 # pkill -9 -f "ros2|robonix|rclpy|rclcpp|demo_rgb_provider"
 ```
 
-## 构建语义地图
+## Using Standard Services
 
-语义地图包含环境中的实体（物体、机器人等）及其关系。机器人本身也是语义地图中的一个entity，包含其支持的skills信息。
+The system provides multiple standard services, including:
 
-`robonix-msg` ROS2 包提供了封装好的调用 robonix service 的接口代码，在 source 之后可以直接使用。
+- **Spatial Map Service** (`spatial_map`): Provides geometric structure information of the environment (2D/3D occupancy grids, point clouds, etc.)
+- **Semantic Map Service** (`semantic_map`): Provides entity-level environment representation (objects, rooms, robots, etc.)
+- **Task Planning Service** (`task_plan`): Converts natural language tasks to RTDL code
+- **Plan Simulation Service** (`plan_simulate`): Validates task plan feasibility in simulation environment
+- **Result Feedback Service** (`result_feedback`): Validates task execution results
 
-当注册了`skl::update_map`技能后，感知模块将处于“持续更新”状态，监控相关技能的执行。
+These services can be queried via `/rbnx/srv/query` and will be automatically called by the task manager during task execution.
 
 ```bash
-# 确保update_map skill已注册并运行
-cargo run -- deploy status
-
-# 检查地图更新状态
-# 通过ROS2服务调用 /rbnx/srv/perception/get_map_status
+# View registered services
+# Call ROS2 service /rbnx/srv/query
 ```
 
-## 创建和执行任务
+## Create and Execute Tasks
 
-### 创建任务（自然语言输入）
+### Create Task (Natural Language Input)
 
 ```bash
 cd robonix-cli
 
-# 创建任务
+# Create task
 cargo run -- task create "Pick up the red box on the table"
 
-# 查看任务列表
+# View task list
 cargo run -- task list
 
-# 查看任务详情
+# View task details
 cargo run -- task get task_0
 ```
 
-### 任务执行流程
+### Task Execution Flow
 
-创建任务后，系统会自动执行以下流程：
+After creating a task, the system will automatically execute the following flow:
 
-1. **任务创建**：任务状态为 `Pending`
-2. **DSL生成**：系统调用注册的大模型，根据任务描述和语义地图生成DSL代码
-   - 大模型会看到：
-     - 语义地图中的所有实体及其支持的skills
-     - 所有注册的skills列表
-     - 可用的数据类型（Robonix自定义类型和ROS2标准类型）
-   - 任务状态变为 `Generating` → `Parsing`
-3. **DSL执行**：action模块解析DSL代码，按顺序执行每个skill调用
-   - 向skill的input topic发送参数
-   - 收集skill的output
-   - 任务状态变为 `Running`
-4. **任务完成**：所有skill执行完成后，任务状态变为 `Completed` 或 `Failed`
+1. **Task Submission**: Submit task via `/rbnx/task/submit`, task status is `pending`
+2. **Task Planning**: Task manager calls task planning service (`task_plan`), converts natural language description to RTDL code
+   - Planning service will query:
+     - All entities in semantic map and their supported skills
+     - All registered skills list
+     - Available primitives and services
+   - Task status changes to `planning`
+3. **Plan Simulation** (optional): Task manager calls plan simulation service (`plan_simulate`), validates RTDL code feasibility
+   - Task status changes to `simulating`
+4. **Task Execution**: Task manager parses RTDL code, executes each skill call in sequence
+   - Send parameters to skill's start_topic
+   - Receive status updates from skill's status_topic
+   - Task status changes to `running`
+5. **Result Feedback** (optional): Task manager calls result feedback service (`result_feedback`), validates execution results
+   - Task status changes to `finished` or `failed`
 
-### 查看任务状态
+### View Task Status
 
 ```bash
-# 列出所有任务
+# List all tasks
 cargo run -- task list
 
-# 获取任务详情（包括生成的DSL代码）
+# Get task details (including generated RTDL code)
 cargo run -- task get <task_id>
 
-# 取消任务
+# Cancel task
 cargo run -- task cancel <task_id>
 ```
 
-## 注意事项
+## Notes
 
-1. **robonix-msg设置**：robonix-msg的setup会自动被启动脚本source。CLI会：
-   - 首先检查配置文件（通过`rbnx config --set-msg-path`设置）
-   - 然后检查`ROBONIX_MSG_PATH`环境变量
+1. **robonix-msg Setup**: robonix-msg setup will be automatically sourced by startup scripts. CLI will:
+   - First check configuration file (set via `rbnx config --set-msg-path`)
+   - Then check `ROBONIX_MSG_PATH` environment variable
 
-2. **实体和Skills**：
-   - 机器人本身是语义地图中的一个entity
-   - 实体的`registered_skills`字段包含该实体（机器人）支持的所有skills
-   - 规划模块在生成DSL时会考虑实体支持的skills
+2. **Primitives, Services, and Skills**:
+   - **Primitives**: Standardized hardware capability mapping (e.g., `prm::arm_move_ee`), must conform to specifications
+   - **Services**: Standardized algorithm capabilities (e.g., `spatial_map`, `semantic_map`), must conform to specifications
+   - **Skills**: User-defined high-level action logic, written in RTDL, flexible and do not need to conform to specifications
+   - Skills can call primitives and services, and can also call other skills
 
-3. **DSL格式**：
-   - 当前的DSL格式是简单的指令列表，每行一个skill调用。后续会持续优化（如基于 PLEXIL）
-   - 格式：`skill_name(param1=value1, param2=value2)`
-   - 按顺序执行
+3. **RTDL Format**:
+   - RTDL (Robot Task Description Language) is the task description language
+   - Format example:
+     ```python
+     def skl::close_window(room: str):
+         skl::navigate_to(target_label = room)
+         srv::semantic_map.update(entity = room)
+         pose = srv::semantic_map.query_pose(
+             entity_type = "window",
+             parent_room = room
+         )
+         prm::arm_move_ee(pose = pose)
+         prm::gripper.close()
+         return True
+     ```
 
-4. **数据类型**：
-   - 系统支持Robonix自定义消息类型（Point3D, Entity, BoundingBox等）
-   - 也支持标准ROS2消息类型（geometry_msgs, sensor_msgs, std_msgs等）
-   - 大模型在生成DSL时会知道这些数据类型
+4. **Data Types**:
+   - System supports Robonix custom message types (Point3D, Entity, BoundingBox, etc.)
+   - Also supports standard ROS2 message types (geometry_msgs, sensor_msgs, std_msgs, etc.)
 
-## 故障排查
+## Troubleshooting
 
 ```bash
-# 检查robonix-core是否运行
+# Check if robonix-core is running
 ros2 service list | grep rbnx
 
-# 检查服务是否可用
-ros2 service call /rbnx/srv/mgmt/ping robonix_core/Ping "{sequence: 1}"
+# Check if primitive register service is available
+ros2 service type /rbnx/prm/register
+
+# Check if service register service is available
+ros2 service type /rbnx/srv/register
+
+# Check if skill register service is available
+ros2 service type /rbnx/skl/register
+
+# Check if task submit service is available
+ros2 service type /rbnx/task/submit
 ```
