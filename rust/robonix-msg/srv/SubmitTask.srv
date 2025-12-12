@@ -1,0 +1,6 @@
+# SubmitTask service (EAIOS spec)
+string description             # Natural language task description
+string params                  # JSON: optional parameters
+---
+string task_id
+
