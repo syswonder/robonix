@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-22.04
     container:
       image: docker.io/enkerewpo/robonix_ros:latest
-      options: --privileged --network host
+      options: --privileged
 
     steps:
       - name: Checkout Repository
