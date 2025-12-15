@@ -24,7 +24,7 @@ primitives:
     input_schema: '{}'
     output_schema: '{"image":"/demo_rgb/image"}'
     metadata: '{"resolution":"640x480","format":"RGB"}'
-    provider: demo_rgb_provider
+    version: 0.0.1-impl-alpha
     start_script: rbnx/start_capture_rgb.sh
     stop_script: rbnx/stop_capture_rgb.sh
 
@@ -35,7 +35,7 @@ primitives:
     input_schema: '{"pose":"/demo_grasp/pose_goal"}'
     output_schema: '{"status":"/demo_grasp/pose_status"}'
     metadata: '{"robot":"demo_arm"}'
-    provider: demo_rgb_provider
+    version: 0.0.1
     start_script: rbnx/start_grasp_move.sh
     stop_script: rbnx/stop_grasp_move.sh
 
@@ -44,22 +44,22 @@ primitives:
 # (This package doesn't provide any standard services, but here's an example format)
 # services:
 #   - name: spatial_map
-#     srv_type: robonix_core/srv/service/spatial_map/GetSpatialMap
+#     srv_type: robonix_sdk/srv/service/spatial_map/GetSpatialMap
 #     entry: /mapping/get_spatial_map
 #     metadata: '{"supported_types":["2d","3d"]}'
 #     provider: demo_rgb_provider
 
 # Skills provided by this package
-# Skills are user-defined and flexible, using RTDL for implementation
+# Skills are user-defined and flexible, can be basic (static program) or rtdl (RTDL-based)
 skills:
   - name: pick
+    type: basic
     start_topic: /robot1/skill/pick/start
     status_topic: /robot1/skill/pick/status
-    skill_dir: skills/pick
-    main_rtdl: pick.rtdl
+    entry: python3 /path/to/pick_skill.py
     start_args: '{"target_label":"string"}'
     status: '{"state":"string","result":"any"}'
     metadata: '{"domain":"demo","capability":["vision","manipulation"]}'
-    version: 1.0.0
+    version: 0.0.1
     start_script: rbnx/start_pick.sh
     stop_script: rbnx/stop_pick.sh

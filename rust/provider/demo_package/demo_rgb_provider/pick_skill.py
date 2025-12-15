@@ -12,7 +12,7 @@ from geometry_msgs.msg import PoseStamped
 import json
 import time
 import signal
-from robonix_core import RobonixClient
+from robonixpy import RobonixClient
 
 
 class PickSkill(Node):
@@ -119,13 +119,44 @@ class PickSkill(Node):
         # Query prm::camera_capture
         self.get_logger().info('Querying prm::camera_capture...')
         try:
-            # Note: This would use the new primitive query API
-            # For now, use fallback topics
-            self._use_fallback_topics()
+            response = self.robonix_client.query_primitive('prm::camera_capture')
+            if response and response.instances:
+                instance = response.instances[0]
+                # Parse output_schema to get image topic
+                import json
+                output_schema = json.loads(instance.output_schema)
+                if 'image' in output_schema:
+                    self.vision_image_topic = output_schema['image']
+                    self.get_logger().info(f'  Found vision primitive: {self.vision_image_topic}')
         except Exception as e:
             import traceback
-            self.get_logger().error(f'Error querying primitives: {e}')
+            self.get_logger().error(f'Error querying prm::camera_capture: {e}')
             self.get_logger().error(f'Traceback:\n{traceback.format_exc()}')
+        
+        # Query prm::arm_move_ee
+        self.get_logger().info('Querying prm::arm_move_ee...')
+        try:
+            response = self.robonix_client.query_primitive('prm::arm_move_ee')
+            if response and response.instances:
+                instance = response.instances[0]
+                # Parse input_schema and output_schema to get topics
+                import json
+                input_schema = json.loads(instance.input_schema)
+                output_schema = json.loads(instance.output_schema)
+                if 'pose' in input_schema:
+                    self.grasp_pose_goal_topic = input_schema['pose']
+                    self.get_logger().info(f'  Found grasp input topic: {self.grasp_pose_goal_topic}')
+                if 'status' in output_schema:
+                    self.grasp_status_topic = output_schema['status']
+                    self.get_logger().info(f'  Found grasp output topic: {self.grasp_status_topic}')
+        except Exception as e:
+            import traceback
+            self.get_logger().error(f'Error querying prm::arm_move_ee: {e}')
+            self.get_logger().error(f'Traceback:\n{traceback.format_exc()}')
+        
+        # Use fallback topics if query failed
+        if not self.vision_image_topic or not self.grasp_pose_goal_topic:
+            self.get_logger().warn('Some primitives not found, using fallback topics')
             self._use_fallback_topics()
     
     def _use_fallback_topics(self):

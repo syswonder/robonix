@@ -19,6 +19,7 @@ pub struct RegisterPrimitiveRequest {
     pub output_schema: String, // JSON string: {"argname1":"/topic1", ...}
     pub metadata: String,      // JSON string: metadata for instance filtering
     pub provider: String,      // Primitive provider identifier
+    pub version: String,       // Implementation version (e.g., "1.0.0", "1.0.0-alpha")
 }
 
 impl ros2_client::Message for RegisterPrimitiveRequest {}
@@ -42,6 +43,7 @@ impl ros2_client::Message for QueryPrimitiveRequest {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrimitiveInstance {
     pub provider: String,
+    pub version: String,
     pub input_schema: serde_json::Value,
     pub output_schema: serde_json::Value,
     pub metadata: serde_json::Value,
@@ -61,6 +63,7 @@ struct PrimitiveEntry {
     output_schema: serde_json::Value,
     metadata: serde_json::Value,
     provider: String,
+    version: String,
 }
 
 /// Primitive Registry - Manages primitive registration and querying
@@ -139,7 +142,8 @@ impl PrimitiveRegistry {
             }
         }
 
-        let key = format!("{}::{}", req.name, req.provider);
+        // Key includes name, provider, and version to distinguish different implementations
+        let key = format!("{}::{}::{}", req.name, req.provider, req.version);
 
         let entry = PrimitiveEntry {
             name: req.name.clone(),
@@ -147,6 +151,7 @@ impl PrimitiveRegistry {
             output_schema,
             metadata,
             provider: req.provider.clone(),
+            version: req.version.clone(),
         };
 
         let mut primitives = self.primitives.write().await;
@@ -185,6 +190,7 @@ impl PrimitiveRegistry {
 
             instances.push(PrimitiveInstance {
                 provider: entry.provider.clone(),
+                version: entry.version.clone(),
                 input_schema: entry.input_schema.clone(),
                 output_schema: entry.output_schema.clone(),
                 metadata: entry.metadata.clone(),

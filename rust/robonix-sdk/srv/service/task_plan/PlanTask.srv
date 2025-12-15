@@ -1,7 +1,7 @@
 # PlanTask service (robonix spec)
 # Task planning service converts user's natural language description to structured RTDL
 string description            # Natural language task description
-robonix_core/Dict params        # Optional parameters
+robonix_sdk/Dict params        # Optional parameters
 ---
 string rtdl                   # RTDL code
 string rtdl_type              # RTDL style

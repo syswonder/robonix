@@ -32,16 +32,16 @@ fi
 export PYTHON3_EXECUTABLE=/usr/bin/python3
 export PYTHON_EXECUTABLE=/usr/bin/python3
 
-# Find robonix-msg directory
-ROBONIX_MSG_DIR=""
-if [ -n "$ROBONIX_MSG_PATH" ] && [ -d "$ROBONIX_MSG_PATH" ]; then
-    ROBONIX_MSG_DIR="$ROBONIX_MSG_PATH"
+# Find robonix-sdk directory
+ROBONIX_SDK_DIR=""
+if [ -n "$ROBONIX_SDK_PATH" ] && [ -d "$ROBONIX_SDK_PATH" ]; then
+    ROBONIX_SDK_DIR="$ROBONIX_SDK_PATH"
 else
-    # Search upward from package directory for robonix-msg
+    # Search upward from package directory for robonix-sdk
     SEARCH_DIR="$PACKAGE_DIR"
     while [ "$SEARCH_DIR" != "/" ]; do
-        if [ -d "$SEARCH_DIR/robonix-msg" ]; then
-            ROBONIX_MSG_DIR="$SEARCH_DIR/robonix-msg"
+        if [ -d "$SEARCH_DIR/robonix-sdk" ]; then
+            ROBONIX_SDK_DIR="$SEARCH_DIR/robonix-sdk"
             break
         fi
         SEARCH_DIR="$(dirname "$SEARCH_DIR")"

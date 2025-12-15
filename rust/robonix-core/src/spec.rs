@@ -39,7 +39,7 @@ pub struct PrimitiveSpec {
 #[derive(Debug, Clone)]
 pub struct ServiceSpec {
     pub description: String,
-    pub srv_type: String,  // Expected ROS2 service type (e.g., "robonix_core/srv/GetSpatialMap")
+    pub srv_type: String,  // Expected ROS2 service type (e.g., "robonix_sdk/srv/service/spatial_map/GetSpatialMap")
 }
 
 pub struct SpecRegistry {

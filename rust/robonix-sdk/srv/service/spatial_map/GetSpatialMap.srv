@@ -3,7 +3,7 @@
 uint8 map_type         # 0=2D occupancy, 1=3D occupancy, 2=pointcloud
 ---
 nav_msgs/OccupancyGrid occupancy_grid   # if map_type=0
-robonix_core/Occupancy3D occupancy_3d     # if map_type=1
+robonix_sdk/Occupancy3D occupancy_3d     # if map_type=1
 sensor_msgs/PointCloud2 cloud            # if map_type=2
 builtin_interfaces/Time stamp
 

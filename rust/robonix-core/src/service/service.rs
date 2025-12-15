@@ -15,10 +15,11 @@ use tracing::{error, info, warn};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterServiceRequest {
     pub name: String,     // Standard service name
-    pub srv_type: String, // ROS2 service type (e.g., "robonix_core/srv/spatial_map/GetSpatialMap")
+    pub srv_type: String, // ROS2 service type (e.g., "robonix_sdk/srv/service/spatial_map/GetSpatialMap")
     pub entry: String,    // Actual ROS2 service name
     pub metadata: String, // JSON string: metadata for instance filtering
     pub provider: String, // Service provider identifier
+    pub version: String,  // Implementation version (e.g., "1.0.0", "1.0.0-alpha")
 }
 
 impl ros2_client::Message for RegisterServiceRequest {}
@@ -42,6 +43,7 @@ impl ros2_client::Message for QueryServiceRequest {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceInstance {
     pub provider: String,
+    pub version: String,
     pub entry: String,
     pub metadata: serde_json::Value,
 }
@@ -60,6 +62,7 @@ struct ServiceEntry {
     entry: String,
     metadata: serde_json::Value,
     provider: String,
+    version: String,
 }
 
 /// Service Registry - Manages service registration and querying
@@ -96,7 +99,8 @@ impl ServiceRegistry {
             }
         }
 
-        let key = format!("{}::{}", req.name, req.provider);
+        // Key includes name, provider, and version to distinguish different implementations
+        let key = format!("{}::{}::{}", req.name, req.provider, req.version);
 
         // Parse metadata JSON string
         let metadata: serde_json::Value = match serde_json::from_str(&req.metadata) {
@@ -118,6 +122,7 @@ impl ServiceRegistry {
             entry: req.entry.clone(),
             metadata,
             provider: req.provider.clone(),
+            version: req.version.clone(),
         };
 
         let mut services = self.services.write().await;
@@ -158,6 +163,7 @@ impl ServiceRegistry {
 
             instances.push(ServiceInstance {
                 provider: entry.provider.clone(),
+                version: entry.version.clone(),
                 entry: entry.entry.clone(),
                 metadata: entry.metadata.clone(),
             });

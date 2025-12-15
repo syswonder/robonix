@@ -105,7 +105,7 @@ impl Daemon {
                 package_type,
                 package_path,
                 start_script,
-                robonix_msg_path,
+                robonix_sdk_path,
             } => {
                 // Check if already running
                 if process_manager.is_running(&std_name, &package_type) {
@@ -121,7 +121,7 @@ impl Daemon {
                             &package_type,
                             &package_path,
                             &start_script,
-                            robonix_msg_path.as_ref(),
+                            robonix_sdk_path.as_ref(),
                         )
                         .await
                     {

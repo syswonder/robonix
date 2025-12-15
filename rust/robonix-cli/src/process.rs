@@ -201,7 +201,7 @@ impl ProcessManager {
         package_type: &str,
         package_path: &Path,
         start_script: &str,
-        robonix_msg_path: Option<&PathBuf>,
+        robonix_sdk_path: Option<&PathBuf>,
     ) -> Result<ProcessStartResult> {
         let key = format!("{}::{}", package_type, std_name);
 
@@ -291,10 +291,10 @@ impl ProcessManager {
         // This ensures logs are written immediately
         cmd.env("PYTHONUNBUFFERED", "1");
         
-        // Set ROBONIX_MSG_PATH from config or environment variable
-        if std::env::var("ROBONIX_MSG_PATH").is_err() {
-            if let Some(config_path) = robonix_msg_path {
-                cmd.env("ROBONIX_MSG_PATH", config_path);
+        // Set ROBONIX_SDK_PATH from config or environment variable
+        if std::env::var("ROBONIX_SDK_PATH").is_err() {
+            if let Some(config_path) = robonix_sdk_path {
+                cmd.env("ROBONIX_SDK_PATH", config_path);
             }
         }
 

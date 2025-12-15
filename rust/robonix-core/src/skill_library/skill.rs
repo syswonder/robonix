@@ -13,10 +13,12 @@ use tracing::{error, info, warn};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterSkillRequest {
     pub name: String,        // Skill name
+    pub r#type: String,      // Skill type: "basic" | "rtdl"
     pub start_topic: String, // Skill start topic
     pub status_topic: String, // Status feedback topic
-    pub skill_dir: String,  // Skill directory path
-    pub main_rtdl: String,  // Main RTDL file name
+    pub entry: String,       // Basic skill entry (required if type="basic")
+    pub skill_dir: String,   // Skill directory path (required if type="rtdl")
+    pub main_rtdl: String,    // Main RTDL file name (required if type="rtdl")
     pub start_args: String, // JSON string: input parameter schema
     pub status: String,     // JSON string: status feedback schema
     pub metadata: String,   // JSON string: metadata for instance filtering
@@ -48,13 +50,15 @@ pub struct SkillInstance {
     pub skill_id: String,
     pub provider: String,
     pub version: String,
+    pub r#type: String,      // Skill type: "basic" | "rtdl"
     pub start_topic: String,
     pub status_topic: String,
+    pub entry: String,       // Basic skill entry (if type="basic")
+    pub skill_dir: String,   // Skill directory path (if type="rtdl")
+    pub main_rtdl: String,    // Main RTDL file name (if type="rtdl")
     pub start_args: serde_json::Value,
     pub status: serde_json::Value,
     pub metadata: serde_json::Value,
-    pub skill_dir: String,
-    pub main_rtdl: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,10 +78,12 @@ pub struct SkillRegistry {
 struct SkillEntry {
     skill_id: String,
     name: String,
+    r#type: String,      // Skill type: "basic" | "rtdl"
     start_topic: String,
     status_topic: String,
-    skill_dir: String,
-    main_rtdl: String,
+    entry: String,       // Basic skill entry (if type="basic")
+    skill_dir: String,   // Skill directory path (if type="rtdl")
+    main_rtdl: String,    // Main RTDL file name (if type="rtdl")
     start_args: serde_json::Value,
     status: serde_json::Value,
     metadata: serde_json::Value,
@@ -146,6 +152,41 @@ impl SkillRegistry {
             }
         };
 
+        // Validate skill type
+        if req.r#type != "basic" && req.r#type != "rtdl" {
+            warn!(
+                skill_name = %req.name,
+                skill_type = %req.r#type,
+                "invalid skill type, must be 'basic' or 'rtdl'"
+            );
+            return RegisterSkillResponse {
+                ok: false,
+                skill_id: String::new(),
+            };
+        }
+
+        // Validate required fields based on type
+        if req.r#type == "basic" && req.entry.is_empty() {
+            warn!(
+                skill_name = %req.name,
+                "basic skill must provide entry field"
+            );
+            return RegisterSkillResponse {
+                ok: false,
+                skill_id: String::new(),
+            };
+        }
+        if req.r#type == "rtdl" && (req.skill_dir.is_empty() || req.main_rtdl.is_empty()) {
+            warn!(
+                skill_name = %req.name,
+                "rtdl skill must provide skill_dir and main_rtdl fields"
+            );
+            return RegisterSkillResponse {
+                ok: false,
+                skill_id: String::new(),
+            };
+        }
+
         // Generate unique skill_id
         let counter = self.skill_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let skill_id = format!("skl_{}_{}", req.name.replace("::", "_"), counter);
@@ -158,8 +199,10 @@ impl SkillRegistry {
         let entry = SkillEntry {
             skill_id: skill_id.clone(),
             name: req.name.clone(),
+            r#type: req.r#type.clone(),
             start_topic: req.start_topic.clone(),
             status_topic: req.status_topic.clone(),
+            entry: req.entry.clone(),
             skill_dir: req.skill_dir.clone(),
             main_rtdl: req.main_rtdl.clone(),
             start_args,
@@ -202,7 +245,25 @@ impl SkillRegistry {
                     Ok(v) => v,
                     Err(_) => continue, // Skip if filter is invalid JSON
                 };
-                if !self.matches_filter(&entry.metadata, &filter_value) {
+                
+                // Check if filter contains "type" field (special handling for skill type)
+                if let Some(filter_obj) = filter_value.as_object() {
+                    if let Some(type_value) = filter_obj.get("type") {
+                        if let Some(type_str) = type_value.as_str() {
+                            if entry.r#type != type_str {
+                                continue;
+                            }
+                        }
+                    }
+                }
+                
+                // Apply metadata filter (excluding "type" which is handled separately)
+                let mut metadata_filter = filter_value.clone();
+                if let Some(filter_obj) = metadata_filter.as_object_mut() {
+                    filter_obj.remove("type");
+                }
+                
+                if !metadata_filter.is_null() && !self.matches_filter(&entry.metadata, &metadata_filter) {
                     continue;
                 }
             }
@@ -211,13 +272,15 @@ impl SkillRegistry {
                 skill_id: entry.skill_id.clone(),
                 provider: entry.provider.clone(),
                 version: entry.version.clone(),
+                r#type: entry.r#type.clone(),
                 start_topic: entry.start_topic.clone(),
                 status_topic: entry.status_topic.clone(),
+                entry: entry.entry.clone(),
+                skill_dir: entry.skill_dir.clone(),
+                main_rtdl: entry.main_rtdl.clone(),
                 start_args: entry.start_args.clone(),
                 status: entry.status.clone(),
                 metadata: entry.metadata.clone(),
-                skill_dir: entry.skill_dir.clone(),
-                main_rtdl: entry.main_rtdl.clone(),
             });
         }
 
@@ -232,13 +295,15 @@ impl SkillRegistry {
                 skill_id: entry.skill_id.clone(),
                 provider: entry.provider.clone(),
                 version: entry.version.clone(),
+                r#type: entry.r#type.clone(),
                 start_topic: entry.start_topic.clone(),
                 status_topic: entry.status_topic.clone(),
+                entry: entry.entry.clone(),
+                skill_dir: entry.skill_dir.clone(),
+                main_rtdl: entry.main_rtdl.clone(),
                 start_args: entry.start_args.clone(),
                 status: entry.status.clone(),
                 metadata: entry.metadata.clone(),
-                skill_dir: entry.skill_dir.clone(),
-                main_rtdl: entry.main_rtdl.clone(),
             })
         } else {
             None

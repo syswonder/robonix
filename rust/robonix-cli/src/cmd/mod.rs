@@ -33,9 +33,9 @@ pub enum Commands {
         /// Set package storage path
         #[arg(short = 'p', long)]
         set_storage_path: Option<PathBuf>,
-        /// Set robonix-msg path
+        /// Set robonix-sdk path
         #[arg(short = 'm', long)]
-        set_msg_path: Option<PathBuf>,
+        set_sdk_path: Option<PathBuf>,
         /// Show current configuration
         #[arg(short, long)]
         show: bool,
@@ -223,9 +223,9 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         },
         Commands::Config {
             set_storage_path,
-            set_msg_path,
+            set_sdk_path,
             show,
-        } => config::execute(config, set_storage_path, set_msg_path, show).await,
+        } => config::execute(config, set_storage_path, set_sdk_path, show).await,
         Commands::Daemon(cmd) => match cmd {
             DaemonCommands::Start => daemon::start().await,
             DaemonCommands::Stop => daemon::stop().await,

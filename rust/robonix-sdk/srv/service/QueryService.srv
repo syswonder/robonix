@@ -2,5 +2,5 @@
 string name                    # Standard service name
 string filter                  # JSON string: filter by metadata (e.g., {"model":"deepseek"}). Empty string means no filter
 ---
-robonix_core/ServiceInstance[] instances
+robonix_sdk/ServiceInstance[] instances
 

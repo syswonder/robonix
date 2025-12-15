@@ -7,7 +7,7 @@ use std::path::PathBuf;
 pub struct Config {
     pub package_storage_path: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub robonix_msg_path: Option<PathBuf>,
+    pub robonix_sdk_path: Option<PathBuf>,
 }
 
 impl Config {
@@ -62,7 +62,7 @@ impl Config {
 
         Self {
             package_storage_path: default_path,
-            robonix_msg_path: None,
+            robonix_sdk_path: None,
         }
     }
 
