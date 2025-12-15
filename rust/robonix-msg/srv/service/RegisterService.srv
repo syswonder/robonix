@@ -1,0 +1,10 @@
+# RegisterService service (robonix spec)
+string name                    # Standard service name
+string srv_type                # ROS2 service type (e.g., "robonix_core/srv/spatial_map/GetSpatialMap")
+string entry                   # Actual ROS2 service name
+string metadata                # JSON: metadata for instance filtering
+string provider                # Service provider identifier
+string version                 # Implementation version (e.g., "1.0.0", "1.0.0-alpha")
+---
+bool ok
+

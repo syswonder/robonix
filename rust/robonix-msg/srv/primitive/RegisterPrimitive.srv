@@ -1,0 +1,10 @@
+# RegisterPrimitive service (robonix spec)
+string name                    # Standard primitive name
+string input_schema            # JSON: {"argname0":"/topic0", ...}
+string output_schema          # JSON: {"argname1":"/topic1", ...}
+string metadata                # JSON: metadata for instance filtering
+string provider                # Primitive provider identifier
+string version                 # Implementation version (e.g., "1.0.0", "1.0.0-alpha")
+---
+bool ok
+
