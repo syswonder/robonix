@@ -14,8 +14,8 @@ cargo build
 mkdir -p ~/.robonix; rm -rf ~/.robonix/packages; ln -s "$(realpath ../provider/)" ~/.robonix/packages;
 export FASTRTPS_DEFAULT_PROFILES_FILE=
 
-# then build the robonix-msg
-cd robonix-msg
+# then build the robonix-sdk
+cd robonix-sdk
 ./build_ros2.sh
 ```
 
@@ -43,8 +43,8 @@ cd robonix-cli
 # View current configuration
 cargo run -- config -s
 
-# Set robonix-msg path
-cargo run -- config --set-msg-path ../robonix-msg
+# Set robonix-sdk path
+cargo run -- config --set-sdk-path ../robonix-sdk
 cargo run -- config -s
 ```
 
@@ -161,9 +161,9 @@ cargo run -- task cancel <task_id>
 
 ## Notes
 
-1. **robonix-msg Setup**: robonix-msg setup will be automatically sourced by startup scripts. CLI will:
-   - First check configuration file (set via `rbnx config --set-msg-path`)
-   - Then check `ROBONIX_MSG_PATH` environment variable
+1. **robonix-sdk Setup**: robonix-sdk setup will be automatically sourced by startup scripts. CLI will:
+   - First check configuration file (set via `rbnx config --set-sdk-path`)
+   - Then check `ROBONIX_SDK_PATH` environment variable
 
 2. **Primitives, Services, and Skills**:
    - **Primitives**: Standardized hardware capability mapping (e.g., `prm::arm_move_ee`), must conform to specifications

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "Building robonix_core ROS2 interface package..."
+echo "Building robonix_sdk ROS2 interface package..."
 
 # Disable conda environment completely
 unset CONDA_DEFAULT_ENV
@@ -30,9 +30,9 @@ source /opt/ros/humble/setup.bash
 export PYTHON3_EXECUTABLE=/usr/bin/python3
 export PYTHON_EXECUTABLE=/usr/bin/python3
 
-# compile check robonix_core python package
-echo "Compiling robonix_core python package..."
-$PYTHON3_EXECUTABLE -m compileall robonix_core
+# compile check robonixpy python package
+echo "Compiling robonixpy python package..."
+$PYTHON3_EXECUTABLE -m compileall robonixpy
 
 # Build the package with explicit Python path and disable Python generator if needed
 echo "Building ROS2 package..."
@@ -40,26 +40,26 @@ colcon build --cmake-args \
   -DPYTHON3_EXECUTABLE=/usr/bin/python3 \
   -DCMAKE_PREFIX_PATH=/opt/ros/humble
 
-# # Install robonix_core to system site-packages for easy import
-# echo "Installing robonix_core to system site-packages..."
+# # Install robonixpy to system site-packages for easy import
+# echo "Installing robonixpy to system site-packages..."
 # # Use the same Python executable that was used for building
 # INSTALL_DIR=$($PYTHON3_EXECUTABLE -c "import site; print(site.getsitepackages()[0])")
-# ROBONIX_CORE_SOURCE="install/robonix_core/local/lib/python3.10/dist-packages/robonix_core"
-# ROBONIX_CORE_TARGET="$INSTALL_DIR/robonix_core"
+# ROBONIXPY_SOURCE="install/robonix_sdk/local/lib/python3.10/dist-packages/robonixpy"
+# ROBONIXPY_TARGET="$INSTALL_DIR/robonixpy"
 
-# if [ -d "$ROBONIX_CORE_SOURCE" ]; then
+# if [ -d "$ROBONIXPY_SOURCE" ]; then
 #     # Remove old installation if exists
-#     if [ -d "$ROBONIX_CORE_TARGET" ] || [ -L "$ROBONIX_CORE_TARGET" ]; then
-#         echo "Removing old robonix_core installation..."
-#         rm -rf "$ROBONIX_CORE_TARGET"
+#     if [ -d "$ROBONIXPY_TARGET" ] || [ -L "$ROBONIXPY_TARGET" ]; then
+#         echo "Removing old robonixpy installation..."
+#         rm -rf "$ROBONIXPY_TARGET"
 #     fi
     
 #     # Copy or symlink to system site-packages
-#     echo "Installing robonix_core to $ROBONIX_CORE_TARGET..."
-#     cp -r "$ROBONIX_CORE_SOURCE" "$ROBONIX_CORE_TARGET"
-#     echo "robonix_core installed successfully to system site-packages"
+#     echo "Installing robonixpy to $ROBONIXPY_TARGET..."
+#     cp -r "$ROBONIXPY_SOURCE" "$ROBONIXPY_TARGET"
+#     echo "robonixpy installed successfully to system site-packages"
 # else
-#     echo "Warning: robonix_core source directory not found at $ROBONIX_CORE_SOURCE"
+#     echo "Warning: robonixpy source directory not found at $ROBONIXPY_SOURCE"
 #     echo "Skipping system site-packages installation"
 # fi
 

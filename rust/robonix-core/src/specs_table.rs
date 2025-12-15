@@ -33,19 +33,19 @@ pub fn load_services() -> HashMap<String, ServiceSpec> {
 
     // Standard services
     SRV!(services, "spatial_map", "Spatial map service providing geometric structure information",
-         "robonix_core/srv/spatial_map/GetSpatialMap");
+         "robonix_sdk/srv/service/spatial_map/GetSpatialMap");
 
     SRV!(services, "semantic_map", "Semantic map service providing entity-level representation",
-         "robonix_core/srv/semantic_map/QuerySemanticMap");
+         "robonix_sdk/srv/service/semantic_map/QuerySemanticMap");
 
     SRV!(services, "task_plan", "Task planning service converting natural language to RTDL",
-         "robonix_core/srv/task_plan/PlanTask");
+         "robonix_sdk/srv/service/task_plan/PlanTask");
 
     SRV!(services, "plan_simulate", "Plan simulation service for feasibility and safety checking",
-         "robonix_core/srv/plan_simulate/SimulatePlan");
+         "robonix_sdk/srv/service/plan_simulate/SimulatePlan");
 
     SRV!(services, "result_feedback", "Result feedback service for execution verification",
-         "robonix_core/srv/result_feedback/ResultFeedback");
+         "robonix_sdk/srv/service/result_feedback/ResultFeedback");
 
     services
 }

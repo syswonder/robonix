@@ -1,9 +1,11 @@
 # RegisterSkill service (robonix spec)
 string name                    # Skill name
+string type                    # Skill type: "basic" | "rtdl"
 string start_topic             # Skill start topic
 string status_topic            # Status feedback topic
-string skill_dir               # Skill directory path
-string main_rtdl               # Main RTDL file name
+string entry                   # Basic skill entry (required if type="basic")
+string skill_dir               # Skill directory path (required if type="rtdl")
+string main_rtdl               # Main RTDL file name (required if type="rtdl")
 string start_args              # JSON: input parameter schema
 string status                  # JSON: status feedback schema
 string metadata                # JSON: metadata for instance filtering

@@ -52,10 +52,10 @@ ln -s "$(realpath ../provider/)" ~/.robonix/packages
 export FASTRTPS_DEFAULT_PROFILES_FILE=
 ```
 
-3. **Build robonix-msg**:
+3. **Build robonix-sdk**:
 
 ```bash
-cd rust/robonix-msg
+cd rust/robonix-sdk
 ./build_ros2.sh
 ```
 
@@ -76,7 +76,7 @@ robonix-core provides the following EAIOS API services:
 
 ```bash
 cd rust/robonix-cli
-cargo run -- config --set-msg-path ../robonix-msg
+cargo run -- config --set-sdk-path ../robonix-sdk
 cargo run -- config -s
 ```
 
@@ -124,78 +124,6 @@ cargo run -- task create "Pick up the red box on the table"
 
 # View task details
 cargo run -- task get task_0
-```
-
-### Task Execution Flow
-
-1. **Task Submission**: Task submitted via `/rbnx/task/submit`, status: `pending`
-2. **Task Planning**: Task manager calls planning service, converts to RTDL code, status: `planning`
-3. **Plan Simulation** (optional): Validates RTDL feasibility, status: `simulating`
-4. **Task Execution**: Executes RTDL code, status: `running`
-5. **Result Feedback** (optional): Validates execution results, status: `finished` or `failed`
-
-## Core Concepts
-
-### Primitives
-
-Standardized hardware capability mapping (e.g., `prm::arm_move_ee`, `prm::camera_capture`). Must conform to specifications defined in EAIOS.
-
-### Services
-
-Standardized algorithm capabilities:
-- **Spatial Map Service** (`spatial_map`): Geometric structure information
-- **Semantic Map Service** (`semantic_map`): Entity-level representation
-- **Task Planning Service** (`task_plan`): Natural language to RTDL conversion
-- **Plan Simulation Service** (`plan_simulate`): Feasibility validation
-- **Result Feedback Service** (`result_feedback`): Execution verification
-
-### Skills
-
-User-defined high-level action logic, written in RTDL (Robot Task Description Language). Skills are flexible and can call primitives, services, or other skills.
-
-Example RTDL:
-
-```python
-def skl::close_window(room: str):
-    skl::navigate_to(target_label = room)
-    srv::semantic_map.update(entity = room)
-    pose = srv::semantic_map.query_pose(
-        entity_type = "window",
-        parent_room = room
-    )
-    prm::arm_move_ee(pose = pose)
-    prm::gripper.close()
-    return True
-```
-
-## Project Structure
-
-```
-robonix/
-├── rust/
-│   ├── robonix-core/      # Core EAIOS implementation
-│   ├── robonix-cli/        # Command-line interface
-│   ├── robonix-msg/        # ROS2 message definitions
-│   └── provider/           # Example provider packages
-├── docker/                 # Docker configuration
-└── README.md              # This file
-```
-
-## Documentation
-
-- [Rust Quick Start Guide](rust/README.md)
-- [Package Specification](rust/PACKAGE_SPEC.md)
-- [Docker Setup](docker/README.md)
-
-## Troubleshooting
-
-```bash
-# Check if robonix-core is running
-ros2 service list | grep rbnx
-
-# Check service types
-ros2 service type /rbnx/prm/register
-ros2 service type /rbnx/task/submit
 ```
 
 ## License

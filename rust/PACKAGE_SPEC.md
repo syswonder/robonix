@@ -39,29 +39,37 @@ primitives:
     input_schema: string    # JSON string: {"argname0":"/topic0", ...}
     output_schema: string   # JSON string: {"argname1":"/topic1", ...}
     metadata: string        # JSON string: metadata for instance filtering (e.g., {"resolution":">=720p"}, {"index":0})
+    version: string         # Implementation version (e.g., "1.0.0", "1.0.0-alpha", "2.0.0-beta.1")
     start_script: string    # Optional: start script path (relative to package root, e.g., "rbnx/start_capture_rgb.sh")
     stop_script: string     # Optional: stop script path (relative to package root, e.g., "rbnx/stop_capture_rgb.sh")
     # Note: provider is automatically set to package name by CLI during registration
+    # Note: The same package can provide multiple implementations of the same standard primitive name, distinguished by different version values
 
 services:
   - name: string            # Standard service name (e.g., spatial_map, semantic_map, task_plan)
     srv_type: string        # ROS2 service type (e.g., "robonix_core/srv/service/spatial_map/GetSpatialMap")
     entry: string           # Actual ROS2 service name (e.g., "/mapping/get_spatial_map")
     metadata: string        # JSON string: metadata for instance filtering (e.g., {"model":"deepseek"}, {"backend":"webots"})
+    version: string         # Implementation version (e.g., "1.0.0", "1.0.0-alpha", "2.0.0-beta.1")
     start_script: string    # Optional: start script path (relative to package root, e.g., "rbnx/start_spatial_map.sh")
     stop_script: string     # Optional: stop script path (relative to package root, e.g., "rbnx/stop_spatial_map.sh")
     # Note: provider is automatically set to package name by CLI during registration
+    # Note: The same package can provide multiple implementations of the same standard service name, distinguished by different version values
 
 skills:
   - name: string            # Skill name (e.g., close_window)
+    type: string            # Skill type: "basic" | "rtdl"
     start_topic: string     # Skill start topic (e.g., "/robot1/skill/close_window/start")
     status_topic: string    # Status feedback topic (e.g., "/robot1/skill/close_window/status")
-    skill_dir: string       # Skill directory path (relative to package root, e.g., "skills/close_window")
-    main_rtdl: string       # Main RTDL file name (e.g., "close_window.rtdl")
+    # For basic skills:
+    entry: string           # Basic skill entry point (required if type="basic", e.g., "/path/to/skill_executable" or "python3 /path/to/skill.py")
+    # For RTDL skills:
+    skill_dir: string       # Skill directory path (required if type="rtdl", relative to package root, e.g., "skills/close_window")
+    main_rtdl: string       # Main RTDL file name (required if type="rtdl", e.g., "close_window.rtdl")
     start_args: string      # JSON string: input parameter schema (e.g., '{"room":"string"}')
     status: string          # JSON string: status feedback schema (e.g., '{"state":"string","result":"any"}')
     metadata: string         # JSON string: metadata for instance filtering (e.g., '{"domain":"indoor","robot":"arm6dof"}')
-    version: string         # Skill version (e.g., "1.0.0")
+    version: string         # Skill version (e.g., "1.0.0", "1.0.0-alpha")
     start_script: string    # Optional: start script path (relative to package root, e.g., "rbnx/start_pick.sh")
     stop_script: string     # Optional: stop script path (relative to package root, e.g., "rbnx/stop_pick.sh")
     # Note: provider is automatically set to package name by CLI during registration
@@ -70,9 +78,10 @@ skills:
 **Important Notes:**
 - **The `name` field for primitive/service is required**: Must specify the standard name in the manifest (e.g., `prm::arm_move_ee`, `spatial_map`) to identify which standard specification the primitive/service conforms to
 - **Primitives and services must conform to standard specifications**: The system will validate input/output schemas (for primitives) and service types (for services) against the spec during registration
-- **Skills are flexible**: Skills do not need to conform to a spec, but must provide proper start/status topics and RTDL files
+- **Multiple implementations**: The same package can provide multiple implementations of the same standard primitive/service name. All implementations share the same `provider` (package name), but are distinguished by different `version` values. Version can follow semantic versioning (e.g., "1.0.0") or include suffixes (e.g., "1.0.0-alpha", "2.0.0-beta.1")
+- **Skills are flexible**: Skills do not need to conform to a spec. Skills can be either "basic" (static program) or "rtdl" (RTDL-based). Basic skills require `entry` field, RTDL skills require `skill_dir` and `main_rtdl` fields
 - **JSON fields**: Fields like `input_schema`, `output_schema`, `metadata`, `start_args`, `status` must be valid JSON strings
-- **Multiple instances**: A package can provide multiple instances of the same primitive/service/skill (distinguished by different `provider` or `metadata`)
+- **Multiple instances**: A package can provide multiple instances of the same primitive/service/skill (distinguished by different `version` or `metadata`)
 
 #### Field Descriptions
 
@@ -90,6 +99,7 @@ skills:
 - `input_schema`: JSON string mapping input argument names to ROS2 topic channels, e.g., `'{"pose":"/arm/pose_goal"}'`
 - `output_schema`: JSON string mapping output argument names to ROS2 topic channels, e.g., `'{"success":"/arm/status"}'`
 - `metadata`: JSON string for instance filtering, e.g., `'{"resolution":">=720p"}'` or `'{"index":0}'`
+- `version`: Implementation version string. Can follow semantic versioning (e.g., "1.0.0") or include suffixes (e.g., "1.0.0-alpha", "2.0.0-beta.1"). Used to distinguish different implementations of the same standard primitive name from the same package
 - `start_script`: Optional. Start script path (relative to package root, e.g., `"rbnx/start_capture_rgb.sh"`). Used to start the primitive's ROS2 node or process. If not specified, the primitive will not be started via CLI
 - `stop_script`: Optional. Stop script path (relative to package root, e.g., `"rbnx/stop_capture_rgb.sh"`). Used for cleanup when stopping the primitive. CLI will also manage the process by PID
 - **Note**: `provider` is automatically set to the package name by CLI during registration (no need to specify in manifest)
@@ -99,20 +109,23 @@ skills:
 - `srv_type`: ROS2 service type, e.g., `"robonix_core/srv/service/spatial_map/GetSpatialMap"`
 - `entry`: Actual ROS2 service name that implements this service, e.g., `"/mapping/get_spatial_map"`
 - `metadata`: JSON string for instance filtering, e.g., `'{"model":"deepseek"}'` or `'{"backend":"webots"}'`
+- `version`: Implementation version string. Can follow semantic versioning (e.g., "1.0.0") or include suffixes (e.g., "1.0.0-alpha", "2.0.0-beta.1"). Used to distinguish different implementations of the same standard service name from the same package
 - `start_script`: Optional. Start script path (relative to package root, e.g., `"rbnx/start_spatial_map.sh"`). Used to start the service's ROS2 node or process. If not specified, the service will not be started via CLI
 - `stop_script`: Optional. Stop script path (relative to package root, e.g., `"rbnx/stop_spatial_map.sh"`). Used for cleanup when stopping the service. CLI will also manage the process by PID
 - **Note**: `provider` is automatically set to the package name by CLI during registration (no need to specify in manifest)
 
 **Skill Fields:**
 - `name`: Skill name (e.g., `close_window`, `pick_object`). Skills are flexible and do not need to conform to a spec
+- `type`: Skill type, must be either `"basic"` or `"rtdl"`. Basic skills are static programs provided by developers, RTDL skills are RTDL-based skills generated from task execution
 - `start_topic`: ROS2 topic name for starting the skill (triggering execution), e.g., `"/robot1/skill/close_window/start"`
 - `status_topic`: ROS2 topic name for receiving skill status updates, e.g., `"/robot1/skill/close_window/status"`
-- `skill_dir`: Directory path (relative to package root) containing the skill's RTDL files and data
-- `main_rtdl`: Main RTDL file name (e.g., `"close_window.rtdl"`)
+- `entry`: **Required for basic skills**. Basic skill entry point (e.g., executable path or command, e.g., `"/path/to/skill_executable"` or `"python3 /path/to/skill.py"`)
+- `skill_dir`: **Required for RTDL skills**. Directory path (relative to package root) containing the skill's RTDL files and data, e.g., `"skills/close_window"`
+- `main_rtdl`: **Required for RTDL skills**. Main RTDL file name, e.g., `"close_window.rtdl"`
 - `start_args`: JSON string describing the input parameter schema, e.g., `'{"room":"string"}'`
 - `status`: JSON string describing the status feedback schema, e.g., `'{"state":"string","result":"any"}'`
 - `metadata`: JSON string for instance filtering, e.g., `'{"domain":"indoor","robot":"arm6dof"}'`
-- `version`: Skill version (e.g., `"1.0.0"`)
+- `version`: Skill version (e.g., `"1.0.0"`, `"1.0.0-alpha"`)
 - `start_script`: Optional. Start script path (relative to package root, e.g., `"rbnx/start_pick.sh"`). Used to start the skill's process (e.g., Python script that listens to `start_topic`). If not specified, the skill will not be started via CLI
 - `stop_script`: Optional. Stop script path (relative to package root, e.g., `"rbnx/stop_pick.sh"`). Used for cleanup when stopping the skill. CLI will also manage the process by PID
 - **Note**: `provider` is automatically set to the package name by CLI during registration (no need to specify in manifest)
@@ -126,14 +139,25 @@ primitives:
     input_schema: '{"pose":"/arm/pose_goal"}'
     output_schema: '{"success":"/arm/status"}'
     metadata: '{"robot":"arm6dof"}'
+    version: 1.0.0
     start_script: rbnx/start_arm_move.sh
     stop_script: rbnx/stop_arm_move.sh
+
+  - name: prm::arm_move_ee
+    # Another implementation of the same standard primitive
+    input_schema: '{"pose":"/arm/pose_goal"}'
+    output_schema: '{"success":"/arm/status"}'
+    metadata: '{"robot":"arm7dof"}'
+    version: 2.0.0-beta.1
+    start_script: rbnx/start_arm_move_v2.sh
+    stop_script: rbnx/stop_arm_move_v2.sh
 
   - name: prm::camera_capture
     # Spec definition: OUTPUT: {"image":"sensor_msgs/Image"}
     input_schema: '{}'
     output_schema: '{"image":"/camera/image"}'
     metadata: '{"resolution":"720p","index":0}'
+    version: 1.0.0
     start_script: rbnx/start_camera_capture.sh
     stop_script: rbnx/stop_camera_capture.sh
 
@@ -142,6 +166,7 @@ services:
     srv_type: robonix_core/srv/service/spatial_map/GetSpatialMap
     entry: /mapping/get_spatial_map
     metadata: '{"supported_types":["2d","3d","cloud"]}'
+    version: 1.0.0
     start_script: rbnx/start_spatial_map.sh
     stop_script: rbnx/stop_spatial_map.sh
 
@@ -149,15 +174,16 @@ services:
     srv_type: robonix_core/srv/service/task_plan/PlanTask
     entry: /planner/plan
     metadata: '{"model":"qwen2.5-vl","capabilities":["navigation","manipulation"],"rtdl_type":"BT"}'
+    version: 1.0.0
     start_script: rbnx/start_task_plan.sh
     stop_script: rbnx/stop_task_plan.sh
 
 skills:
   - name: close_window
+    type: basic
     start_topic: /robot1/skill/close_window/start
     status_topic: /robot1/skill/close_window/status
-    skill_dir: skills/close_window
-    main_rtdl: close_window.rtdl
+    entry: python3 /path/to/close_window_skill.py
     start_args: '{"room":"string"}'
     status: '{"state":"string","result":"any"}'
     metadata: '{"domain":"indoor","capability":["navigation","manipulation"]}'
@@ -166,6 +192,7 @@ skills:
     stop_script: rbnx/stop_close_window.sh
 
   - name: pick_object
+    type: rtdl
     start_topic: /robot1/skill/pick_object/start
     status_topic: /robot1/skill/pick_object/status
     skill_dir: skills/pick_object
@@ -180,8 +207,9 @@ skills:
 
 **Multiple Instance Notes:**
 - The same package can provide multiple instances of the same primitive/service/skill
-- Each instance must use different `metadata` to distinguish (since `provider` is always the package name)
-- When querying, you can filter by `metadata` to select specific instances
+- For primitives and services: Multiple implementations of the same standard name are distinguished by different `version` values (all share the same `provider` which is the package name)
+- For skills: Multiple instances can be distinguished by different `version` or `metadata` values
+- When querying, you can filter by `metadata` or `version` to select specific instances
 
 ### 2. rbnx/ Directory
 
@@ -215,7 +243,7 @@ Start and stop scripts are used to manage primitive/service/skill processes. The
 - Used to launch the primitive/service/skill process (e.g., ROS2 nodes, Python scripts)
 - Must be an executable file (`chmod +x`)
 - Should use `exec` to start the target process so CLI can properly manage the process
-- Should set necessary environment variables (ROS2, Python paths, robonix-msg setup, etc.)
+- Should set necessary environment variables (ROS2, Python paths, robonix-sdk setup, etc.)
 - Should handle error cases and return appropriate exit codes
 - Script path is relative to package root directory (e.g., `"rbnx/start_capture_rgb.sh"`)
 - If `start_script` is not specified, the item will not be started via CLI
@@ -247,7 +275,9 @@ Primitives and standard services must conform to the standard specifications def
 
 3. **Skills**:
    - Skills are flexible and do not need to conform to a spec
-   - Skills must provide valid start/status topics and RTDL files
+   - Skills can be either "basic" (static program) or "rtdl" (RTDL-based)
+   - Basic skills must provide valid start/status topics and entry point
+   - RTDL skills must provide valid start/status topics and RTDL files
 
 ## Registration Process
 

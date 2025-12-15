@@ -13,7 +13,7 @@ pub enum DaemonCommand {
         package_type: String,
         package_path: PathBuf,
         start_script: String,
-        robonix_msg_path: Option<PathBuf>,
+        robonix_sdk_path: Option<PathBuf>,
     },
     Stop {
         std_name: String,

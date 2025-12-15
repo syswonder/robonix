@@ -52,7 +52,7 @@ fn main() {
         .create_server::<AService<RegisterPrimitiveRequest, RegisterPrimitiveResponse>>(
             ServiceMapping::Enhanced,
             &Name::new("/rbnx/prm", "register").unwrap(),
-            &ServiceTypeName::new("robonix_core", "RegisterPrimitive"),
+            &ServiceTypeName::new("robonix_sdk", "RegisterPrimitive"),
             service_qos.clone(),
             service_qos.clone(),
         )
@@ -64,7 +64,7 @@ fn main() {
         .create_server::<AService<QueryPrimitiveRequest, QueryPrimitiveResponse>>(
             ServiceMapping::Enhanced,
             &Name::new("/rbnx/prm", "query").unwrap(),
-            &ServiceTypeName::new("robonix_core", "QueryPrimitive"),
+            &ServiceTypeName::new("robonix_sdk", "QueryPrimitive"),
             service_qos.clone(),
             service_qos.clone(),
         )
@@ -76,7 +76,7 @@ fn main() {
         .create_server::<AService<RegisterServiceRequest, RegisterServiceResponse>>(
             ServiceMapping::Enhanced,
             &Name::new("/rbnx/srv", "register").unwrap(),
-            &ServiceTypeName::new("robonix_core", "RegisterService"),
+            &ServiceTypeName::new("robonix_sdk", "RegisterService"),
             service_qos.clone(),
             service_qos.clone(),
         )
@@ -88,7 +88,7 @@ fn main() {
         .create_server::<AService<QueryServiceRequest, QueryServiceResponse>>(
             ServiceMapping::Enhanced,
             &Name::new("/rbnx/srv", "query").unwrap(),
-            &ServiceTypeName::new("robonix_core", "QueryService"),
+            &ServiceTypeName::new("robonix_sdk", "QueryService"),
             service_qos.clone(),
             service_qos.clone(),
         )
@@ -100,7 +100,7 @@ fn main() {
         .create_server::<AService<RegisterSkillRequest, RegisterSkillResponse>>(
             ServiceMapping::Enhanced,
             &Name::new("/rbnx/skl", "register").unwrap(),
-            &ServiceTypeName::new("robonix_core", "RegisterSkill"),
+            &ServiceTypeName::new("robonix_sdk", "RegisterSkill"),
             service_qos.clone(),
             service_qos.clone(),
         )
@@ -112,7 +112,7 @@ fn main() {
         .create_server::<AService<QuerySkillRequest, QuerySkillResponse>>(
             ServiceMapping::Enhanced,
             &Name::new("/rbnx/skl", "query").unwrap(),
-            &ServiceTypeName::new("robonix_core", "QuerySkill"),
+            &ServiceTypeName::new("robonix_sdk", "QuerySkill"),
             service_qos.clone(),
             service_qos.clone(),
         )
@@ -124,7 +124,7 @@ fn main() {
         .create_server::<AService<SubmitTaskRequest, SubmitTaskResponse>>(
             ServiceMapping::Enhanced,
             &Name::new("/rbnx/task", "submit").unwrap(),
-            &ServiceTypeName::new("robonix_core", "SubmitTask"),
+            &ServiceTypeName::new("robonix_sdk", "SubmitTask"),
             service_qos.clone(),
             service_qos.clone(),
         )
@@ -136,7 +136,7 @@ fn main() {
         .create_server::<AService<TaskStatusRequest, TaskStatusResponse>>(
             ServiceMapping::Enhanced,
             &Name::new("/rbnx/task", "status").unwrap(),
-            &ServiceTypeName::new("robonix_core", "TaskStatus"),
+            &ServiceTypeName::new("robonix_sdk", "TaskStatus"),
             service_qos.clone(),
             service_qos.clone(),
         )
@@ -148,7 +148,7 @@ fn main() {
         .create_server::<AService<TaskResultRequest, TaskResultResponse>>(
             ServiceMapping::Enhanced,
             &Name::new("/rbnx/task", "result").unwrap(),
-            &ServiceTypeName::new("robonix_core", "TaskResult"),
+            &ServiceTypeName::new("robonix_sdk", "TaskResult"),
             service_qos.clone(),
             service_qos.clone(),
         )

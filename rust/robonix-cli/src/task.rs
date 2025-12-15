@@ -82,7 +82,7 @@ impl TaskClient {
                 .create_client::<AService<SubmitTaskRequest, SubmitTaskResponse>>(
                     ServiceMapping::Enhanced,
                     &Name::new("/rbnx/task", "submit").unwrap(),
-                    &ServiceTypeName::new("robonix_core", "SubmitTask"),
+                    &ServiceTypeName::new("robonix_sdk", "SubmitTask"),
                     service_qos.clone(),
                     service_qos.clone(),
                 )
@@ -92,7 +92,7 @@ impl TaskClient {
                 .create_client::<AService<TaskStatusRequest, TaskStatusResponse>>(
                     ServiceMapping::Enhanced,
                     &Name::new("/rbnx/task", "status").unwrap(),
-                    &ServiceTypeName::new("robonix_core", "TaskStatus"),
+                    &ServiceTypeName::new("robonix_sdk", "TaskStatus"),
                     service_qos.clone(),
                     service_qos.clone(),
                 )
@@ -102,7 +102,7 @@ impl TaskClient {
                 .create_client::<AService<TaskResultRequest, TaskResultResponse>>(
                     ServiceMapping::Enhanced,
                     &Name::new("/rbnx/task", "result").unwrap(),
-                    &ServiceTypeName::new("robonix_core", "TaskResult"),
+                    &ServiceTypeName::new("robonix_sdk", "TaskResult"),
                     service_qos.clone(),
                     service_qos,
                 )

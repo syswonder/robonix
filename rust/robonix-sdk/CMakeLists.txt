@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(robonix_core)
+project(robonix_sdk)
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
@@ -57,7 +57,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 # Install Python client library
 # Install to Python site-packages (local/lib/python3.10/dist-packages)
 # This ensures the package can be imported via PYTHONPATH
-install(DIRECTORY robonix_core
+install(DIRECTORY robonixpy
   DESTINATION local/lib/python3.10/dist-packages
   FILES_MATCHING
   PATTERN "*.py"

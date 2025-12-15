@@ -2,5 +2,5 @@
 string name                    # Skill name
 string filter                  # JSON string: filter by metadata (e.g., {"domain":"indoor"}, {"robot":"arm6dof"}). Empty string means no filter
 ---
-robonix_core/SkillInstance[] instances
+robonix_sdk/SkillInstance[] instances
 

@@ -153,7 +153,7 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
                 package_type: item.package_type.clone(),
                 package_path: item.package_path.clone(),
                 start_script: item.start_script.as_ref().unwrap().clone(),
-                robonix_msg_path: config.robonix_msg_path.clone(),
+                robonix_sdk_path: config.robonix_sdk_path.clone(),
             })
             .await;
         

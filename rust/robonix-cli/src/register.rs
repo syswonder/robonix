@@ -87,7 +87,7 @@ impl PackageRegistrar {
                 .create_client::<AService<RegisterPrimitiveRequest, RegisterPrimitiveResponse>>(
                     ServiceMapping::Enhanced,
                     &Name::new("/rbnx/prm", "register").unwrap(),
-                    &ServiceTypeName::new("robonix_core", "RegisterPrimitive"),
+                    &ServiceTypeName::new("robonix_sdk", "RegisterPrimitive"),
                     service_qos.clone(),
                     service_qos.clone(),
                 )
@@ -100,7 +100,7 @@ impl PackageRegistrar {
                 .create_client::<AService<RegisterServiceRequest, RegisterServiceResponse>>(
                     ServiceMapping::Enhanced,
                     &Name::new("/rbnx/srv", "register").unwrap(),
-                    &ServiceTypeName::new("robonix_core", "RegisterService"),
+                    &ServiceTypeName::new("robonix_sdk", "RegisterService"),
                     service_qos.clone(),
                     service_qos.clone(),
                 )
@@ -113,7 +113,7 @@ impl PackageRegistrar {
                 .create_client::<AService<RegisterSkillRequest, RegisterSkillResponse>>(
                     ServiceMapping::Enhanced,
                     &Name::new("/rbnx/skl", "register").unwrap(),
-                    &ServiceTypeName::new("robonix_core", "RegisterSkill"),
+                    &ServiceTypeName::new("robonix_sdk", "RegisterSkill"),
                     service_qos.clone(),
                     service_qos,
                 )
@@ -251,6 +251,11 @@ impl PackageRegistrar {
         serde_json::from_str::<serde_json::Value>(metadata_str)
             .map_err(|e| anyhow::anyhow!("Invalid metadata JSON: {}", e))?;
 
+        let version = primitive["version"]
+            .as_str()
+            .unwrap_or("1.0.0")
+            .to_string();
+
         // Use package name as provider
         let provider = package_name.to_string();
 
@@ -260,6 +265,7 @@ impl PackageRegistrar {
             output_schema: output_schema_str.to_string(),
             metadata: metadata_str.to_string(),
             provider: provider.clone(),
+            version,
         };
 
         self.call_primitive_register_service(request).await?;
@@ -299,6 +305,11 @@ impl PackageRegistrar {
         serde_json::from_str::<serde_json::Value>(metadata_str)
             .map_err(|e| anyhow::anyhow!("Invalid metadata JSON: {}", e))?;
 
+        let version = service["version"]
+            .as_str()
+            .unwrap_or("1.0.0")
+            .to_string();
+
         // Use package name as provider
         let provider = package_name.to_string();
 
@@ -308,6 +319,7 @@ impl PackageRegistrar {
             entry,
             metadata: metadata_str.to_string(),
             provider: provider.clone(),
+            version,
         };
 
         self.call_service_register_service(request).await?;
@@ -346,24 +358,49 @@ impl PackageRegistrar {
             .ok_or_else(|| anyhow::anyhow!("Skill status_topic not found"))?
             .to_string();
 
-        let skill_dir = skill["skill_dir"]
+        let skill_type = skill["type"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Skill skill_dir not found"))?
+            .ok_or_else(|| anyhow::anyhow!("Skill type not found (must be 'basic' or 'rtdl')"))?
             .to_string();
-        // Make skill_dir absolute path
-        let skill_dir = if skill_dir.starts_with('/') {
-            skill_dir
-        } else {
-            package_path.join(&skill_dir)
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("Invalid skill_dir path"))?
+
+        if skill_type != "basic" && skill_type != "rtdl" {
+            anyhow::bail!("Skill type must be 'basic' or 'rtdl', got: {}", skill_type);
+        }
+
+        // Handle entry (for basic skills) or skill_dir/main_rtdl (for RTDL skills)
+        let entry = if skill_type == "basic" {
+            skill["entry"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("Basic skill entry not found"))?
                 .to_string()
+        } else {
+            String::new()
         };
 
-        let main_rtdl = skill["main_rtdl"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Skill main_rtdl not found"))?
-            .to_string();
+        let (skill_dir, main_rtdl) = if skill_type == "rtdl" {
+            let skill_dir_str = skill["skill_dir"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("RTDL skill skill_dir not found"))?
+                .to_string();
+            // Make skill_dir absolute path
+            let skill_dir_abs = if skill_dir_str.starts_with('/') {
+                skill_dir_str
+            } else {
+                package_path.join(&skill_dir_str)
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid skill_dir path"))?
+                    .to_string()
+            };
+
+            let main_rtdl_str = skill["main_rtdl"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("RTDL skill main_rtdl not found"))?
+                .to_string();
+
+            (skill_dir_abs, main_rtdl_str)
+        } else {
+            (String::new(), String::new())
+        };
 
         let start_args_str = skill["start_args"]
             .as_str()
@@ -394,8 +431,10 @@ impl PackageRegistrar {
 
         let request = RegisterSkillRequest {
             name: name.clone(),
+            r#type: skill_type,
             start_topic,
             status_topic,
+            entry,
             skill_dir,
             main_rtdl,
             start_args: start_args_str.to_string(),
