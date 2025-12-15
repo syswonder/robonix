@@ -47,7 +47,7 @@ primitives:
 
 services:
   - name: string            # Standard service name (e.g., spatial_map, semantic_map, task_plan)
-    srv_type: string        # ROS2 service type (e.g., "robonix_core/srv/service/spatial_map/GetSpatialMap")
+    srv_type: string        # ROS2 service type (e.g., "robonix_sdk/srv/service/spatial_map/GetSpatialMap")
     entry: string           # Actual ROS2 service name (e.g., "/mapping/get_spatial_map")
     metadata: string        # JSON string: metadata for instance filtering (e.g., {"model":"deepseek"}, {"backend":"webots"})
     version: string         # Implementation version (e.g., "1.0.0", "1.0.0-alpha", "2.0.0-beta.1")
@@ -106,7 +106,7 @@ skills:
 
 **Service Fields:**
 - `name`: Standard service name (e.g., `spatial_map`, `semantic_map`, `task_plan`, `plan_simulate`, `result_feedback`). Name and service type are defined by the standard specification (spec)
-- `srv_type`: ROS2 service type, e.g., `"robonix_core/srv/service/spatial_map/GetSpatialMap"`
+- `srv_type`: ROS2 service type, e.g., `"robonix_sdk/srv/service/spatial_map/GetSpatialMap"`
 - `entry`: Actual ROS2 service name that implements this service, e.g., `"/mapping/get_spatial_map"`
 - `metadata`: JSON string for instance filtering, e.g., `'{"model":"deepseek"}'` or `'{"backend":"webots"}'`
 - `version`: Implementation version string. Can follow semantic versioning (e.g., "1.0.0") or include suffixes (e.g., "1.0.0-alpha", "2.0.0-beta.1"). Used to distinguish different implementations of the same standard service name from the same package
@@ -163,7 +163,7 @@ primitives:
 
 services:
   - name: spatial_map
-    srv_type: robonix_core/srv/service/spatial_map/GetSpatialMap
+    srv_type: robonix_sdk/srv/service/spatial_map/GetSpatialMap
     entry: /mapping/get_spatial_map
     metadata: '{"supported_types":["2d","3d","cloud"]}'
     version: 1.0.0
@@ -171,7 +171,7 @@ services:
     stop_script: rbnx/stop_spatial_map.sh
 
   - name: task_plan
-    srv_type: robonix_core/srv/service/task_plan/PlanTask
+    srv_type: robonix_sdk/srv/service/task_plan/PlanTask
     entry: /planner/plan
     metadata: '{"model":"qwen2.5-vl","capabilities":["navigation","manipulation"],"rtdl_type":"BT"}'
     version: 1.0.0
