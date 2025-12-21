@@ -6,6 +6,14 @@ wheatfox
 
 First, you need ROS2 environment and Rust.
 
+If you want to use the prebuilt robonix ROS2 dev container:
+
+```bash
+cd docker
+./run.sh # pull image and enter container, you can use CTRL+P CTRL+Q to detach
+./run.sh -b # build a local image if you modified some docker config
+```
+
 ```bash
 cd rust # at robonix src root folder
 cd robonix-cli
