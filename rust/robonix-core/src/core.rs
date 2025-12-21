@@ -1,6 +1,7 @@
 use crate::primitive::PrimitiveRegistry;
 use crate::service::ServiceRegistry;
 use crate::skill_library::SkillLibrary;
+use crate::spec::SpecRegistry;
 use crate::task_manager::TaskManager;
 use std::sync::Arc;
 
@@ -15,17 +16,20 @@ pub struct RobonixCore {
 
 impl RobonixCore {
     pub fn new() -> Self {
+        // Create shared spec registry (used by both primitive and service registries)
+        let spec_registry = Arc::new(SpecRegistry::new());
+
         // Create robonix core components
         let skill_library = Arc::new(SkillLibrary::new());
-        let service_registry = Arc::new(ServiceRegistry::new());
-        let primitive_registry = Arc::new(PrimitiveRegistry::new());
-        
-        let mut task_manager = TaskManager::new(
+        let service_registry = Arc::new(ServiceRegistry::new_with_spec(spec_registry.clone()));
+        let primitive_registry = Arc::new(PrimitiveRegistry::new_with_spec(spec_registry));
+
+        let task_manager = TaskManager::new(
             skill_library.clone(),
             service_registry.clone(),
             primitive_registry.clone(),
         );
-        
+
         let task_manager = Arc::new(task_manager);
 
         Self {

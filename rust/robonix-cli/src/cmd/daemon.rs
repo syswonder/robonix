@@ -6,7 +6,7 @@ use std::process::Stdio;
 
 pub async fn start() -> Result<()> {
     let client = DaemonClient::new()?;
-    
+
     if client.is_daemon_running().await {
         output::info("Daemon is already running");
         return Ok(());
@@ -42,7 +42,7 @@ pub async fn start() -> Result<()> {
 
 pub async fn stop() -> Result<()> {
     let client = DaemonClient::new()?;
-    
+
     if !client.is_daemon_running().await {
         output::info("Daemon is not running");
         return Ok(());
@@ -56,14 +56,14 @@ pub async fn stop() -> Result<()> {
     {
         use nix::sys::signal::{kill, Signal};
         use nix::unistd::Pid;
-        
+
         // Try to find daemon process by checking socket file's owner or by name
         // For simplicity, we'll use pkill or find the process
         let output = std::process::Command::new("pgrep")
             .arg("-f")
             .arg("rbnx-daemon")
             .output()?;
-        
+
         if output.status.success() {
             let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if let Ok(pid) = pid_str.parse::<i32>() {
@@ -71,7 +71,7 @@ pub async fn stop() -> Result<()> {
                 if let Err(e) = kill(pid, Signal::SIGTERM) {
                     anyhow::bail!("Failed to send SIGTERM to daemon (PID {}): {}", pid, e);
                 }
-                
+
                 // Wait for process to exit
                 for _ in 0..10 {
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -80,11 +80,11 @@ pub async fn stop() -> Result<()> {
                         return Ok(());
                     }
                 }
-                
+
                 // If still running, try SIGKILL
                 let _ = kill(pid, Signal::SIGKILL);
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                
+
                 if !client.is_daemon_running().await {
                     output::check("Daemon stopped successfully (force kill)");
                 } else {
@@ -107,12 +107,15 @@ pub async fn stop() -> Result<()> {
 
 pub async fn status() -> Result<()> {
     let client = DaemonClient::new()?;
-    
+
     if client.is_daemon_running().await {
         output::info("Daemon status: Running");
-        
+
         // Try to ping daemon
-        match client.send_command(crate::daemon_client::DaemonCommand::Ping).await {
+        match client
+            .send_command(crate::daemon_client::DaemonCommand::Ping)
+            .await
+        {
             Ok(crate::daemon_client::DaemonResponse::Ok(_)) => {
                 output::info("Daemon is responsive");
             }
@@ -133,11 +136,11 @@ pub async fn status() -> Result<()> {
 
 pub async fn restart() -> Result<()> {
     output::action("Restarting", "daemon");
-    
+
     stop().await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     start().await?;
-    
+
     Ok(())
 }
 
@@ -179,4 +182,3 @@ fn find_daemon_executable() -> Result<PathBuf> {
         "Daemon executable (rbnx-daemon) not found. Please build the project with 'cargo build' or install it."
     )
 }
-

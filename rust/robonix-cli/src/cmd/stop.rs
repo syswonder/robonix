@@ -9,9 +9,7 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
     client.ensure_daemon_running().await?;
 
     // Get status from daemon
-    let status_response = client
-        .send_command(DaemonCommand::Status)
-        .await?;
+    let status_response = client.send_command(DaemonCommand::Status).await?;
 
     let running_processes = match status_response {
         DaemonResponse::Status(procs) => procs,
@@ -77,20 +75,25 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
             proc.package_type, proc.std_name
         ));
         spinner.start();
-        
+
         let result = client
             .send_command(DaemonCommand::Stop {
                 std_name: proc.std_name.clone(),
                 package_type: proc.package_type.clone(),
             })
             .await;
-        
+
         match result {
             Ok(DaemonResponse::Ok(_)) => {
                 spinner.finish_success(&format!("Stopped {} {}", proc.package_type, proc.std_name));
                 stopped += 1;
             }
-            Ok(DaemonResponse::OkWithDetails { message, pid, pgid, pids }) => {
+            Ok(DaemonResponse::OkWithDetails {
+                message,
+                pid,
+                pgid,
+                pids,
+            }) => {
                 spinner.finish_success(&message);
                 if let Some(pgid) = pgid {
                     if let Some(ref pids_list) = pids {
@@ -99,7 +102,11 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
                                 "  Process group {} ({} processes): {}",
                                 pgid,
                                 pids_list.len(),
-                                pids_list.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+                                pids_list
+                                    .iter()
+                                    .map(|p| p.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
                             ));
                         } else {
                             output::sub_step(&format!("  PID: {}, PGID: {}", pid, pgid));

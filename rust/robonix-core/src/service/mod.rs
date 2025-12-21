@@ -18,9 +18,13 @@ pub struct ServiceRegistry {
 
 impl ServiceRegistry {
     pub fn new() -> Self {
+        Self::new_with_spec(Arc::new(SpecRegistry::new()))
+    }
+
+    pub fn new_with_spec(spec_registry: Arc<SpecRegistry>) -> Self {
         Self {
             registry: Arc::new(ServiceRegistryImpl::new()),
-            spec_registry: Arc::new(SpecRegistry::new()),
+            spec_registry,
         }
     }
 
@@ -28,12 +32,17 @@ impl ServiceRegistry {
         self.registry.clone()
     }
 
-    pub async fn register_service(&self, req: service::RegisterServiceRequest) -> service::RegisterServiceResponse {
+    pub async fn register_service(
+        &self,
+        req: service::RegisterServiceRequest,
+    ) -> service::RegisterServiceResponse {
         self.registry.register(req, &self.spec_registry).await
     }
 
-    pub async fn query_service(&self, req: service::QueryServiceRequest) -> service::QueryServiceResponse {
+    pub async fn query_service(
+        &self,
+        req: service::QueryServiceRequest,
+    ) -> service::QueryServiceResponse {
         self.registry.query(req).await
     }
 }
-

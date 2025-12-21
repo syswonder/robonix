@@ -7,7 +7,7 @@ use serde_yaml::Value;
 pub struct RecipeItem {
     pub package_name: String,
     pub std_name: String,
-    pub package_type: String, // "prm", "srv", or "skl"
+    pub package_type: String,         // "prm", "srv", or "skl"
     pub start_script: Option<String>, // Start script path (for primitives, services, and skills)
     pub package_path: std::path::PathBuf,
 }
@@ -150,6 +150,11 @@ pub fn filter_items(items: &[RecipeItem], pattern: &str) -> Vec<RecipeItem> {
 pub fn get_recipe_packages(config: &Config) -> Result<Vec<String>> {
     let recipe_state = RecipeState::load(&config.package_storage_path)?
         .ok_or_else(|| anyhow::anyhow!("No active recipe. Please register a recipe first."))?;
-    
-    Ok(recipe_state.recipe.packages.iter().map(|p| p.name.clone()).collect())
+
+    Ok(recipe_state
+        .recipe
+        .packages
+        .iter()
+        .map(|p| p.name.clone())
+        .collect())
 }

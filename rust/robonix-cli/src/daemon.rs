@@ -1,6 +1,6 @@
-use anyhow::{Context, Result};
-use crate::process::ProcessManager;
 use crate::daemon_client::{DaemonCommand, DaemonResponse, ProcessStatus};
+use crate::process::ProcessManager;
+use anyhow::{Context, Result};
 use dirs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,8 +22,12 @@ impl Daemon {
 
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
         let socket_dir = home_dir.join(".robonix");
-        std::fs::create_dir_all(&socket_dir)
-            .with_context(|| format!("Failed to create socket directory: {}", socket_dir.display()))?;
+        std::fs::create_dir_all(&socket_dir).with_context(|| {
+            format!(
+                "Failed to create socket directory: {}",
+                socket_dir.display()
+            )
+        })?;
         let socket_path = socket_dir.join("daemon.sock");
 
         // Remove old socket if exists
@@ -73,7 +77,10 @@ impl Daemon {
         }
     }
 
-    async fn handle_client(mut stream: UnixStream, process_manager: Arc<ProcessManager>) -> Result<()> {
+    async fn handle_client(
+        mut stream: UnixStream,
+        process_manager: Arc<ProcessManager>,
+    ) -> Result<()> {
         // Read command length
         let command_len = match stream.read_u32_le().await {
             Ok(len) => len,
@@ -138,20 +145,15 @@ impl Daemon {
             DaemonCommand::Stop {
                 std_name,
                 package_type,
-            } => {
-                match process_manager
-                    .stop_process(&std_name, &package_type)
-                    .await
-                {
-                    Ok(result) => DaemonResponse::OkWithDetails {
-                        message: format!("Stopped {} {}", package_type, std_name),
-                        pid: result.pid,
-                        pgid: result.pgid,
-                        pids: result.pids,
-                    },
-                    Err(e) => DaemonResponse::Error(format!("Failed to stop: {}", e)),
-                }
-            }
+            } => match process_manager.stop_process(&std_name, &package_type).await {
+                Ok(result) => DaemonResponse::OkWithDetails {
+                    message: format!("Stopped {} {}", package_type, std_name),
+                    pid: result.pid,
+                    pgid: result.pgid,
+                    pids: result.pids,
+                },
+                Err(e) => DaemonResponse::Error(format!("Failed to stop: {}", e)),
+            },
             DaemonCommand::Status => {
                 let processes = process_manager.get_running_processes();
                 let status: Vec<ProcessStatus> = processes
@@ -187,4 +189,3 @@ impl Daemon {
         Ok(())
     }
 }
-

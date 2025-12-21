@@ -11,7 +11,6 @@ pub mod skill;
 
 use skill::SkillRegistry;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Skill Library - Stores and manages reusable skills
 pub struct SkillLibrary {
@@ -29,7 +28,10 @@ impl SkillLibrary {
         self.registry.clone()
     }
 
-    pub async fn register_skill(&self, req: skill::RegisterSkillRequest) -> skill::RegisterSkillResponse {
+    pub async fn register_skill(
+        &self,
+        req: skill::RegisterSkillRequest,
+    ) -> skill::RegisterSkillResponse {
         self.registry.register(req).await
     }
 
@@ -45,4 +47,3 @@ impl SkillLibrary {
         self.registry.get_all_skill_names().await
     }
 }
-

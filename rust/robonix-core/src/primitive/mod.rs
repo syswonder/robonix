@@ -18,9 +18,13 @@ pub struct PrimitiveRegistry {
 
 impl PrimitiveRegistry {
     pub fn new() -> Self {
+        Self::new_with_spec(Arc::new(SpecRegistry::new()))
+    }
+
+    pub fn new_with_spec(spec_registry: Arc<SpecRegistry>) -> Self {
         Self {
             registry: Arc::new(PrimitiveRegistryImpl::new()),
-            spec_registry: Arc::new(SpecRegistry::new()),
+            spec_registry,
         }
     }
 
@@ -28,12 +32,17 @@ impl PrimitiveRegistry {
         self.registry.clone()
     }
 
-    pub async fn register_primitive(&self, req: primitive::RegisterPrimitiveRequest) -> primitive::RegisterPrimitiveResponse {
+    pub async fn register_primitive(
+        &self,
+        req: primitive::RegisterPrimitiveRequest,
+    ) -> primitive::RegisterPrimitiveResponse {
         self.registry.register(req, &self.spec_registry).await
     }
 
-    pub async fn query_primitive(&self, req: primitive::QueryPrimitiveRequest) -> primitive::QueryPrimitiveResponse {
+    pub async fn query_primitive(
+        &self,
+        req: primitive::QueryPrimitiveRequest,
+    ) -> primitive::QueryPrimitiveResponse {
         self.registry.query(req).await
     }
 }
-

@@ -22,13 +22,29 @@ pub struct PackageRegistrar {
     config: Config,
     node: Arc<Mutex<Option<Node>>>,
     primitive_client: Arc<
-        Mutex<Option<ros2_client::service::Client<AService<RegisterPrimitiveRequest, RegisterPrimitiveResponse>>>>,
+        Mutex<
+            Option<
+                ros2_client::service::Client<
+                    AService<RegisterPrimitiveRequest, RegisterPrimitiveResponse>,
+                >,
+            >,
+        >,
     >,
     service_client: Arc<
-        Mutex<Option<ros2_client::service::Client<AService<RegisterServiceRequest, RegisterServiceResponse>>>>,
+        Mutex<
+            Option<
+                ros2_client::service::Client<
+                    AService<RegisterServiceRequest, RegisterServiceResponse>,
+                >,
+            >,
+        >,
     >,
     skill_client: Arc<
-        Mutex<Option<ros2_client::service::Client<AService<RegisterSkillRequest, RegisterSkillResponse>>>>,
+        Mutex<
+            Option<
+                ros2_client::service::Client<AService<RegisterSkillRequest, RegisterSkillResponse>>,
+            >,
+        >,
     >,
     process_manager: Arc<ProcessManager>,
 }
@@ -92,7 +108,10 @@ impl PackageRegistrar {
                     service_qos.clone(),
                 )
                 .map_err(|e| {
-                    anyhow::anyhow!("Failed to create primitive register service client: {:?}", e)
+                    anyhow::anyhow!(
+                        "Failed to create primitive register service client: {:?}",
+                        e
+                    )
                 })?;
 
             // Service register client
@@ -245,16 +264,11 @@ impl PackageRegistrar {
         serde_json::from_str::<serde_json::Value>(output_schema_str)
             .map_err(|e| anyhow::anyhow!("Invalid output_schema JSON: {}", e))?;
 
-        let metadata_str = primitive["metadata"]
-            .as_str()
-            .unwrap_or("{}");
+        let metadata_str = primitive["metadata"].as_str().unwrap_or("{}");
         serde_json::from_str::<serde_json::Value>(metadata_str)
             .map_err(|e| anyhow::anyhow!("Invalid metadata JSON: {}", e))?;
 
-        let version = primitive["version"]
-            .as_str()
-            .unwrap_or("1.0.0")
-            .to_string();
+        let version = primitive["version"].as_str().unwrap_or("1.0.0").to_string();
 
         // Use package name as provider
         let provider = package_name.to_string();
@@ -271,8 +285,7 @@ impl PackageRegistrar {
         self.call_primitive_register_service(request).await?;
         output::check(&format!(
             "Registered primitive: {} (provider: {})",
-            name,
-            provider
+            name, provider
         ));
         Ok(())
     }
@@ -298,17 +311,12 @@ impl PackageRegistrar {
             .ok_or_else(|| anyhow::anyhow!("Service entry not found"))?
             .to_string();
 
-        let metadata_str = service["metadata"]
-            .as_str()
-            .unwrap_or("{}");
+        let metadata_str = service["metadata"].as_str().unwrap_or("{}");
         // Validate JSON but keep as string for ROS2 service
         serde_json::from_str::<serde_json::Value>(metadata_str)
             .map_err(|e| anyhow::anyhow!("Invalid metadata JSON: {}", e))?;
 
-        let version = service["version"]
-            .as_str()
-            .unwrap_or("1.0.0")
-            .to_string();
+        let version = service["version"].as_str().unwrap_or("1.0.0").to_string();
 
         // Use package name as provider
         let provider = package_name.to_string();
@@ -325,8 +333,7 @@ impl PackageRegistrar {
         self.call_service_register_service(request).await?;
         output::check(&format!(
             "Registered service: {} (provider: {})",
-            name,
-            provider
+            name, provider
         ));
         Ok(())
     }
@@ -386,7 +393,8 @@ impl PackageRegistrar {
             let skill_dir_abs = if skill_dir_str.starts_with('/') {
                 skill_dir_str
             } else {
-                package_path.join(&skill_dir_str)
+                package_path
+                    .join(&skill_dir_str)
                     .to_str()
                     .ok_or_else(|| anyhow::anyhow!("Invalid skill_dir path"))?
                     .to_string()
@@ -415,19 +423,14 @@ impl PackageRegistrar {
         serde_json::from_str::<serde_json::Value>(status_str)
             .map_err(|e| anyhow::anyhow!("Invalid status JSON: {}", e))?;
 
-        let metadata_str = skill["metadata"]
-            .as_str()
-            .unwrap_or("{}");
+        let metadata_str = skill["metadata"].as_str().unwrap_or("{}");
         serde_json::from_str::<serde_json::Value>(metadata_str)
             .map_err(|e| anyhow::anyhow!("Invalid metadata JSON: {}", e))?;
 
         // Use package name as provider
         let provider = package_name.to_string();
 
-        let version = skill["version"]
-            .as_str()
-            .unwrap_or("1.0.0")
-            .to_string();
+        let version = skill["version"].as_str().unwrap_or("1.0.0").to_string();
 
         let request = RegisterSkillRequest {
             name: name.clone(),
@@ -447,9 +450,7 @@ impl PackageRegistrar {
         let response = self.call_skill_register_service(request).await?;
         output::check(&format!(
             "Registered skill: {} (skill_id: {}, provider: {})",
-            name,
-            response.skill_id,
-            provider
+            name, response.skill_id, provider
         ));
         Ok(())
     }
@@ -563,7 +564,11 @@ impl PackageRegistrar {
 
         match call_result {
             Ok(Ok(response)) => {
-                tracing::info!("Received response: ok={}, skill_id={}", response.ok, response.skill_id);
+                tracing::info!(
+                    "Received response: ok={}, skill_id={}",
+                    response.ok,
+                    response.skill_id
+                );
                 if !response.ok {
                     anyhow::bail!("Skill registration failed");
                 }

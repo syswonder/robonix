@@ -1,10 +1,20 @@
 use ansi_term::Colour;
 use futures_util::stream::StreamExt;
 use robonix_core::core::RobonixCore;
-use robonix_core::primitive::primitive::{QueryPrimitiveRequest, QueryPrimitiveResponse, RegisterPrimitiveRequest, RegisterPrimitiveResponse};
-use robonix_core::service::service::{QueryServiceRequest, QueryServiceResponse, RegisterServiceRequest, RegisterServiceResponse};
-use robonix_core::skill_library::skill::{QuerySkillRequest, QuerySkillResponse, RegisterSkillRequest, RegisterSkillResponse};
-use robonix_core::task_manager::{SubmitTaskRequest, SubmitTaskResponse, TaskStatusRequest, TaskStatusResponse, TaskResultRequest, TaskResultResponse};
+use robonix_core::primitive::primitive::{
+    QueryPrimitiveRequest, QueryPrimitiveResponse, RegisterPrimitiveRequest,
+    RegisterPrimitiveResponse,
+};
+use robonix_core::service::service::{
+    QueryServiceRequest, QueryServiceResponse, RegisterServiceRequest, RegisterServiceResponse,
+};
+use robonix_core::skill_library::skill::{
+    QuerySkillRequest, QuerySkillResponse, RegisterSkillRequest, RegisterSkillResponse,
+};
+use robonix_core::task_manager::{
+    SubmitTaskRequest, SubmitTaskResponse, TaskResultRequest, TaskResultResponse,
+    TaskStatusRequest, TaskStatusResponse,
+};
 use ros2_client::{
     AService, Context, Name, Node, NodeName, NodeOptions, ServiceMapping, ServiceTypeName,
     rustdds::{
@@ -57,15 +67,15 @@ fn main() {
     info!("robonix core node started");
 
     let core = Arc::new(RobonixCore::new());
-    
+
     // Get robonix core components
     let task_manager = core.get_task_manager();
     let skill_library = core.get_skill_library();
     let service_registry = core.get_service_registry();
     let primitive_registry = core.get_primitive_registry();
-    
+
     // ===== robonix API Services =====
-    
+
     // Primitive API: /rbnx/prm/register
     let register_primitive_server = node
         .create_server::<AService<RegisterPrimitiveRequest, RegisterPrimitiveResponse>>(
@@ -230,7 +240,10 @@ fn main() {
                         Ok((req_id, req)) => {
                             debug!(primitive_name = %req.name, "received primitive query request");
                             let resp = primitive_registry_clone2.query_primitive(req).await;
-                            if let Err(e) = query_primitive_server.async_send_response(req_id, resp).await {
+                            if let Err(e) = query_primitive_server
+                                .async_send_response(req_id, resp)
+                                .await
+                            {
                                 error!("send primitive query response error: {e:?}");
                             }
                         }
@@ -268,7 +281,9 @@ fn main() {
                         Ok((req_id, req)) => {
                             debug!(service_name = %req.name, "received service query request");
                             let resp = service_registry_clone2.query_service(req).await;
-                            if let Err(e) = query_service_server.async_send_response(req_id, resp).await {
+                            if let Err(e) =
+                                query_service_server.async_send_response(req_id, resp).await
+                            {
                                 error!("send service query response error: {e:?}");
                             }
                         }
@@ -287,7 +302,10 @@ fn main() {
                         Ok((req_id, req)) => {
                             info!(skill_name = %req.name, "received skill registration request");
                             let resp = skill_library_clone1.register_skill(req).await;
-                            if let Err(e) = register_skill_server.async_send_response(req_id, resp).await {
+                            if let Err(e) = register_skill_server
+                                .async_send_response(req_id, resp)
+                                .await
+                            {
                                 error!("send skill registration response error: {e:?}");
                             }
                         }
@@ -306,7 +324,9 @@ fn main() {
                         Ok((req_id, req)) => {
                             debug!(skill_name = %req.name, "received skill query request");
                             let resp = skill_library_clone2.query_skill(req).await;
-                            if let Err(e) = query_skill_server.async_send_response(req_id, resp).await {
+                            if let Err(e) =
+                                query_skill_server.async_send_response(req_id, resp).await
+                            {
                                 error!("send skill query response error: {e:?}");
                             }
                         }
@@ -325,7 +345,9 @@ fn main() {
                         Ok((req_id, req)) => {
                             info!(description = %req.description, "received task submit request");
                             let resp = task_manager_clone1.submit_task(req).await;
-                            if let Err(e) = submit_task_server.async_send_response(req_id, resp).await {
+                            if let Err(e) =
+                                submit_task_server.async_send_response(req_id, resp).await
+                            {
                                 error!("send task submit response error: {e:?}");
                             }
                         }
@@ -344,7 +366,9 @@ fn main() {
                         Ok((req_id, req)) => {
                             debug!(task_id = %req.task_id, "received task status request");
                             let resp = task_manager_clone2.get_task_status(req).await;
-                            if let Err(e) = task_status_server.async_send_response(req_id, resp).await {
+                            if let Err(e) =
+                                task_status_server.async_send_response(req_id, resp).await
+                            {
                                 error!("send task status response error: {e:?}");
                             }
                         }
@@ -363,7 +387,9 @@ fn main() {
                         Ok((req_id, req)) => {
                             debug!(task_id = %req.task_id, "received task result request");
                             let resp = task_manager_clone3.get_task_result(req).await;
-                            if let Err(e) = task_result_server.async_send_response(req_id, resp).await {
+                            if let Err(e) =
+                                task_result_server.async_send_response(req_id, resp).await
+                            {
                                 error!("send task result response error: {e:?}");
                             }
                         }
@@ -412,7 +438,8 @@ fn main() {
             Box::pin(task_status_task),
             Box::pin(task_result_task),
             Box::pin(ping_pong_task),
-        ]).await;
+        ])
+        .await;
     });
 }
 

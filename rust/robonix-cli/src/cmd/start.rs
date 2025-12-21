@@ -45,7 +45,7 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
             item.package_type, item.std_name
         ));
         spinner.start();
-        
+
         let result = client
             .send_command(DaemonCommand::Start {
                 package_name: item.package_name.clone(),
@@ -56,15 +56,20 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
                 robonix_sdk_path: config.robonix_sdk_path.clone(),
             })
             .await;
-        
+
         match result {
             Ok(DaemonResponse::Ok(_)) => {
                 spinner.finish_success(&format!("Started {} {}", item.package_type, item.std_name));
                 started += 1;
             }
-            Ok(DaemonResponse::OkWithDetails { message, pid, pgid, pids }) => {
+            Ok(DaemonResponse::OkWithDetails {
+                message,
+                pid,
+                pgid,
+                pids,
+            }) => {
                 spinner.finish_success(&message);
-                
+
                 // Display process group info first
                 if let Some(pgid) = pgid {
                     if let Some(ref pids_list) = pids {
@@ -73,7 +78,11 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
                                 "  Process group {} ({} processes): {}",
                                 pgid,
                                 pids_list.len(),
-                                pids_list.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+                                pids_list
+                                    .iter()
+                                    .map(|p| p.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
                             ));
                         } else {
                             output::sub_step(&format!("  PID: {}, PGID: {}", pid, pgid));
@@ -84,10 +93,10 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
                 } else {
                     output::sub_step(&format!("  PID: {}", pid));
                 }
-                
+
                 // Wait a bit more for process to fully start and spawn children
                 tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-                
+
                 // Get and display process tree
                 #[cfg(unix)]
                 {
@@ -112,7 +121,7 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
                 {
                     // Already displayed above
                 }
-                
+
                 started += 1;
             }
             Ok(DaemonResponse::Error(e)) => {

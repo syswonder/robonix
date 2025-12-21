@@ -1,9 +1,8 @@
 use crate::config::Config;
 use anyhow::Result;
 use robonix_core::task_manager::api::{
-    SubmitTaskRequest, SubmitTaskResponse,
+    SubmitTaskRequest, SubmitTaskResponse, TaskResultRequest, TaskResultResponse,
     TaskStatusRequest, TaskStatusResponse,
-    TaskResultRequest, TaskResultResponse,
 };
 use ros2_client::{
     service::AService, Context, Name, Node, NodeName, NodeOptions, ServiceMapping, ServiceTypeName,
@@ -17,9 +16,7 @@ pub struct TaskClient {
     node: Arc<Mutex<Option<Node>>>,
     submit_client: Arc<
         Mutex<
-            Option<
-                ros2_client::service::Client<AService<SubmitTaskRequest, SubmitTaskResponse>>,
-            >,
+            Option<ros2_client::service::Client<AService<SubmitTaskRequest, SubmitTaskResponse>>>,
         >,
     >,
     status_client: Arc<
@@ -114,7 +111,7 @@ impl TaskClient {
             let wait_status = status_client.wait_for_service(&node);
             let wait_result = result_client.wait_for_service(&node);
             let timeout_future = tokio::time::sleep(tokio::time::Duration::from_secs(5));
-            
+
             tokio::select! {
                 _ = wait_submit => {
                     tracing::debug!("Submit task service is available");
@@ -149,14 +146,24 @@ impl TaskClient {
         Ok(())
     }
 
-    pub async fn submit(&self, description: String, params: serde_json::Value) -> Result<SubmitTaskResponse> {
+    pub async fn submit(
+        &self,
+        description: String,
+        params: serde_json::Value,
+    ) -> Result<SubmitTaskResponse> {
         self.ensure_clients().await?;
 
         // Serialize params to JSON string
         let params_str = serde_json::to_string(&params).unwrap_or_else(|_| "{}".to_string());
-        let request = SubmitTaskRequest { description, params: params_str };
+        let request = SubmitTaskRequest {
+            description,
+            params: params_str,
+        };
 
-        let client_guard: tokio::sync::MutexGuard<'_, Option<ros2_client::service::Client<AService<SubmitTaskRequest, SubmitTaskResponse>>>> = self.submit_client.lock().await;
+        let client_guard: tokio::sync::MutexGuard<
+            '_,
+            Option<ros2_client::service::Client<AService<SubmitTaskRequest, SubmitTaskResponse>>>,
+        > = self.submit_client.lock().await;
         let client = client_guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Submit client not initialized"))?;
@@ -197,7 +204,10 @@ impl TaskClient {
 
         let request = TaskStatusRequest { task_id };
 
-        let client_guard: tokio::sync::MutexGuard<'_, Option<ros2_client::service::Client<AService<TaskStatusRequest, TaskStatusResponse>>>> = self.status_client.lock().await;
+        let client_guard: tokio::sync::MutexGuard<
+            '_,
+            Option<ros2_client::service::Client<AService<TaskStatusRequest, TaskStatusResponse>>>,
+        > = self.status_client.lock().await;
         let client = client_guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Status client not initialized"))?;
@@ -235,7 +245,10 @@ impl TaskClient {
 
         let request = TaskResultRequest { task_id };
 
-        let client_guard: tokio::sync::MutexGuard<'_, Option<ros2_client::service::Client<AService<TaskResultRequest, TaskResultResponse>>>> = self.result_client.lock().await;
+        let client_guard: tokio::sync::MutexGuard<
+            '_,
+            Option<ros2_client::service::Client<AService<TaskResultRequest, TaskResultResponse>>>,
+        > = self.result_client.lock().await;
         let client = client_guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Result client not initialized"))?;
@@ -268,4 +281,3 @@ impl TaskClient {
         }
     }
 }
-

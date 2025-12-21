@@ -7,7 +7,11 @@ use std::process::Command;
 
 /// Build a single package (shared logic)
 fn build_package(pkg_info: &crate::database::PackageInfo) -> Result<()> {
-    println!("{} {}", format!("[{}]", "Building").green().bold(), pkg_info.name.bright_white().bold());
+    println!(
+        "{} {}",
+        format!("[{}]", "Building").green().bold(),
+        pkg_info.name.bright_white().bold()
+    );
 
     // Load manifest to check for build_script
     let manifest_path = &pkg_info.manifest_path;
@@ -52,12 +56,20 @@ fn build_package(pkg_info: &crate::database::PackageInfo) -> Result<()> {
     }
 
     // Execute build script
-    output::sub_step(&format!("Running build script: {}", build_script_path.display()));
+    output::sub_step(&format!(
+        "Running build script: {}",
+        build_script_path.display()
+    ));
 
     let build_result = Command::new(&build_script_path)
         .current_dir(&pkg_info.path)
         .status()
-        .with_context(|| format!("Failed to execute build script: {}", build_script_path.display()))?;
+        .with_context(|| {
+            format!(
+                "Failed to execute build script: {}",
+                build_script_path.display()
+            )
+        })?;
 
     if !build_result.success() {
         anyhow::bail!(
@@ -160,4 +172,3 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
 
     Ok(())
 }
-

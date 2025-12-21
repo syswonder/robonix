@@ -13,8 +13,8 @@ pub struct Recipe {
 pub struct RecipePackage {
     pub name: String,
     pub primitives: Option<Vec<String>>, // If None, register all primitives
-    pub services: Option<Vec<String>>, // If None, register all services
-    pub skills: Option<Vec<String>>,    // If None, register all skills
+    pub services: Option<Vec<String>>,   // If None, register all services
+    pub skills: Option<Vec<String>>,     // If None, register all skills
 }
 
 impl Recipe {
