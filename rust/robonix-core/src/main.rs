@@ -12,12 +12,31 @@ use ros2_client::{
         policy::{self, Deadline, Lifespan},
     },
 };
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 use tracing::{debug, error, info};
 use tracing_subscriber::fmt::FmtContext;
 use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
 use tracing_subscriber::registry::LookupSpan;
+
+// Ping Pong service types for testing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PingPongRequest {
+    pub message: String,
+    pub sequence: u64,
+}
+
+impl ros2_client::Message for PingPongRequest {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PingPongResponse {
+    pub message: String,
+    pub sequence: u64,
+    pub timestamp: u64,
+}
+
+impl ros2_client::Message for PingPongResponse {}
 
 fn main() {
     tracing_subscriber::fmt()
@@ -154,6 +173,18 @@ fn main() {
         )
         .unwrap();
     info!("task result service created at /rbnx/task/result");
+
+    // Ping Pong API: /rbnx/ping
+    let ping_pong_server = node
+        .create_server::<AService<PingPongRequest, PingPongResponse>>(
+            ServiceMapping::Enhanced,
+            &Name::new("/rbnx", "ping").unwrap(),
+            &ServiceTypeName::new("robonix_sdk", "PingPong"),
+            service_qos.clone(),
+            service_qos.clone(),
+        )
+        .unwrap();
+    info!("ping pong service created at /rbnx/ping");
 
     info!("all robonix modules initialized");
     info!("robonix core ready. waiting for requests...");
@@ -342,6 +373,33 @@ fn main() {
                 .await;
         });
 
+        // Handle ping pong requests
+        let ping_pong_task = smol::spawn(async move {
+            let stream = ping_pong_server.receive_request_stream();
+            stream
+                .for_each(|result| async {
+                    match result {
+                        Ok((req_id, req)) => {
+                            debug!(sequence = req.sequence, message = %req.message, "received ping request");
+                            let timestamp = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as u64;
+                            let resp = PingPongResponse {
+                                message: format!("pong: {}", req.message),
+                                sequence: req.sequence,
+                                timestamp,
+                            };
+                            if let Err(e) = ping_pong_server.async_send_response(req_id, resp).await {
+                                error!("send ping pong response error: {e:?}");
+                            }
+                        }
+                        Err(e) => error!("receive ping pong request error: {e:?}"),
+                    }
+                })
+                .await;
+        });
+
         // Wait for all tasks (all run indefinitely)
         futures_util::future::select_all(vec![
             Box::pin(register_primitive_task),
@@ -353,6 +411,7 @@ fn main() {
             Box::pin(submit_task_task),
             Box::pin(task_status_task),
             Box::pin(task_result_task),
+            Box::pin(ping_pong_task),
         ]).await;
     });
 }

@@ -81,6 +81,8 @@ class RobonixClient(Node):
             'submit_task': '/rbnx/task/submit',
             'task_status': '/rbnx/task/status',
             'task_result': '/rbnx/task/result',
+            # Ping pong service
+            'ping_pong': '/rbnx/ping',
         }
         
         # Create QoS profile matching server configuration

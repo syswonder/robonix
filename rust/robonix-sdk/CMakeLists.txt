@@ -46,6 +46,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/task/SubmitTask.srv"
   "srv/task/TaskStatus.srv"
   "srv/task/TaskResult.srv"
+  # Test services
+  "srv/PingPong.srv"
   DEPENDENCIES
     std_msgs
     geometry_msgs
