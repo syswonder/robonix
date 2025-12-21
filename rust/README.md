@@ -18,9 +18,13 @@ cd docker
 cd rust # at robonix src root folder
 cd robonix-cli
 cargo build
+
+#########################################################################################################################################
+# the command below will use the `provider` folder as tmp package storage target, DO NOT RUN THE BELOW COMMAND IN PRODUCTION ENVIRONMENT
 # in robonix-cli, run:
 mkdir -p ~/.robonix; rm -rf ~/.robonix/packages; ln -s "$(realpath ../provider/)" ~/.robonix/packages;
-export FASTRTPS_DEFAULT_PROFILES_FILE=
+# export FASTRTPS_DEFAULT_PROFILES_FILE=
+#########################################################################################################################################
 
 # then build the robonix-sdk
 cd robonix-sdk
