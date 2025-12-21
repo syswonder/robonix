@@ -7,23 +7,23 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Skill registration request (robonix spec)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterSkillRequest {
-    pub name: String,        // Skill name
-    pub r#type: String,      // Skill type: "basic" | "rtdl"
-    pub start_topic: String, // Skill start topic
+    pub name: String,         // Skill name
+    pub r#type: String,       // Skill type: "basic" | "rtdl"
+    pub start_topic: String,  // Skill start topic
     pub status_topic: String, // Status feedback topic
-    pub entry: String,       // Basic skill entry (required if type="basic")
-    pub skill_dir: String,   // Skill directory path (required if type="rtdl")
+    pub entry: String,        // Basic skill entry (required if type="basic")
+    pub skill_dir: String,    // Skill directory path (required if type="rtdl")
     pub main_rtdl: String,    // Main RTDL file name (required if type="rtdl")
-    pub start_args: String, // JSON string: input parameter schema
-    pub status: String,     // JSON string: status feedback schema
-    pub metadata: String,   // JSON string: metadata for instance filtering
-    pub provider: String,   // Skill provider identifier
-    pub version: String,    // Skill version
+    pub start_args: String,   // JSON string: input parameter schema
+    pub status: String,       // JSON string: status feedback schema
+    pub metadata: String,     // JSON string: metadata for instance filtering
+    pub provider: String,     // Skill provider identifier
+    pub version: String,      // Skill version
 }
 
 impl ros2_client::Message for RegisterSkillRequest {}
@@ -50,12 +50,12 @@ pub struct SkillInstance {
     pub skill_id: String,
     pub provider: String,
     pub version: String,
-    pub r#type: String,      // Skill type: "basic" | "rtdl"
+    pub r#type: String, // Skill type: "basic" | "rtdl"
     pub start_topic: String,
     pub status_topic: String,
-    pub entry: String,       // Basic skill entry (if type="basic")
-    pub skill_dir: String,   // Skill directory path (if type="rtdl")
-    pub main_rtdl: String,    // Main RTDL file name (if type="rtdl")
+    pub entry: String,     // Basic skill entry (if type="basic")
+    pub skill_dir: String, // Skill directory path (if type="rtdl")
+    pub main_rtdl: String, // Main RTDL file name (if type="rtdl")
     pub start_args: serde_json::Value,
     pub status: serde_json::Value,
     pub metadata: serde_json::Value,
@@ -78,12 +78,12 @@ pub struct SkillRegistry {
 struct SkillEntry {
     skill_id: String,
     name: String,
-    r#type: String,      // Skill type: "basic" | "rtdl"
+    r#type: String, // Skill type: "basic" | "rtdl"
     start_topic: String,
     status_topic: String,
-    entry: String,       // Basic skill entry (if type="basic")
-    skill_dir: String,   // Skill directory path (if type="rtdl")
-    main_rtdl: String,    // Main RTDL file name (if type="rtdl")
+    entry: String,     // Basic skill entry (if type="basic")
+    skill_dir: String, // Skill directory path (if type="rtdl")
+    main_rtdl: String, // Main RTDL file name (if type="rtdl")
     start_args: serde_json::Value,
     status: serde_json::Value,
     metadata: serde_json::Value,
@@ -101,10 +101,7 @@ impl SkillRegistry {
 
     /// Register a skill
     /// Note: Skills do not have specifications - they are user-defined and flexible
-    pub async fn register(
-        &self,
-        req: RegisterSkillRequest,
-    ) -> RegisterSkillResponse {
+    pub async fn register(&self, req: RegisterSkillRequest) -> RegisterSkillResponse {
         // Parse JSON strings
         let start_args: serde_json::Value = match serde_json::from_str(&req.start_args) {
             Ok(v) => v,
@@ -188,7 +185,9 @@ impl SkillRegistry {
         }
 
         // Generate unique skill_id
-        let counter = self.skill_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let counter = self
+            .skill_id_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let skill_id = format!("skl_{}_{}", req.name.replace("::", "_"), counter);
 
         // Basic validation: skill name should start with 'skl::'
@@ -222,10 +221,7 @@ impl SkillRegistry {
             "registered skill"
         );
 
-        RegisterSkillResponse {
-            ok: true,
-            skill_id,
-        }
+        RegisterSkillResponse { ok: true, skill_id }
     }
 
     /// Query skills
@@ -245,7 +241,7 @@ impl SkillRegistry {
                     Ok(v) => v,
                     Err(_) => continue, // Skip if filter is invalid JSON
                 };
-                
+
                 // Check if filter contains "type" field (special handling for skill type)
                 if let Some(filter_obj) = filter_value.as_object() {
                     if let Some(type_value) = filter_obj.get("type") {
@@ -256,14 +252,16 @@ impl SkillRegistry {
                         }
                     }
                 }
-                
+
                 // Apply metadata filter (excluding "type" which is handled separately)
                 let mut metadata_filter = filter_value.clone();
                 if let Some(filter_obj) = metadata_filter.as_object_mut() {
                     filter_obj.remove("type");
                 }
-                
-                if !metadata_filter.is_null() && !self.matches_filter(&entry.metadata, &metadata_filter) {
+
+                if !metadata_filter.is_null()
+                    && !self.matches_filter(&entry.metadata, &metadata_filter)
+                {
                     continue;
                 }
             }
@@ -340,4 +338,3 @@ impl SkillRegistry {
         }
     }
 }
-

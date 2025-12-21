@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Service registration request (robonix spec)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,4 +192,3 @@ impl ServiceRegistry {
         }
     }
 }
-

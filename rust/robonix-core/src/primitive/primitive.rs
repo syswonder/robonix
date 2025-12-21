@@ -9,12 +9,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Primitive registration request (robonix spec)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterPrimitiveRequest {
-    pub name: String,        // Standard primitive name
+    pub name: String,          // Standard primitive name
     pub input_schema: String,  // JSON string: {"argname0":"/topic0", ...}
     pub output_schema: String, // JSON string: {"argname1":"/topic1", ...}
     pub metadata: String,      // JSON string: metadata for instance filtering
@@ -123,11 +123,7 @@ impl PrimitiveRegistry {
         };
 
         // Validate against spec
-        match spec_registry.validate_primitive(
-            &req.name,
-            &input_schema,
-            &output_schema,
-        ) {
+        match spec_registry.validate_primitive(&req.name, &input_schema, &output_schema) {
             Ok(()) => {
                 // Validation passed
             }
@@ -209,8 +205,9 @@ impl PrimitiveRegistry {
                     // Check if filter_value is a string with comparison operator
                     if let Some(filter_str) = filter_value.as_str() {
                         if filter_str.starts_with(">=") {
-                            if let (Some(meta_num), Some(filter_num)) = 
-                                (meta_value.as_f64(), filter_str[2..].parse::<f64>().ok()) {
+                            if let (Some(meta_num), Some(filter_num)) =
+                                (meta_value.as_f64(), filter_str[2..].parse::<f64>().ok())
+                            {
                                 if meta_num < filter_num {
                                     return false;
                                 }
@@ -218,8 +215,9 @@ impl PrimitiveRegistry {
                                 return false;
                             }
                         } else if filter_str.starts_with("<=") {
-                            if let (Some(meta_num), Some(filter_num)) = 
-                                (meta_value.as_f64(), filter_str[2..].parse::<f64>().ok()) {
+                            if let (Some(meta_num), Some(filter_num)) =
+                                (meta_value.as_f64(), filter_str[2..].parse::<f64>().ok())
+                            {
                                 if meta_num > filter_num {
                                     return false;
                                 }
@@ -227,8 +225,9 @@ impl PrimitiveRegistry {
                                 return false;
                             }
                         } else if filter_str.starts_with(">") {
-                            if let (Some(meta_num), Some(filter_num)) = 
-                                (meta_value.as_f64(), filter_str[1..].parse::<f64>().ok()) {
+                            if let (Some(meta_num), Some(filter_num)) =
+                                (meta_value.as_f64(), filter_str[1..].parse::<f64>().ok())
+                            {
                                 if meta_num <= filter_num {
                                     return false;
                                 }
@@ -236,8 +235,9 @@ impl PrimitiveRegistry {
                                 return false;
                             }
                         } else if filter_str.starts_with("<") {
-                            if let (Some(meta_num), Some(filter_num)) = 
-                                (meta_value.as_f64(), filter_str[1..].parse::<f64>().ok()) {
+                            if let (Some(meta_num), Some(filter_num)) =
+                                (meta_value.as_f64(), filter_str[1..].parse::<f64>().ok())
+                            {
                                 if meta_num >= filter_num {
                                     return false;
                                 }
@@ -266,4 +266,3 @@ impl PrimitiveRegistry {
         }
     }
 }
-

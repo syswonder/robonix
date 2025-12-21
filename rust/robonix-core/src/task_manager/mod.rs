@@ -8,9 +8,9 @@
 pub mod api;
 pub mod task;
 
-use crate::skill_library::SkillLibrary;
-use crate::service::ServiceRegistry;
 use crate::primitive::PrimitiveRegistry;
+use crate::service::ServiceRegistry;
+use crate::skill_library::SkillLibrary;
 use std::sync::Arc;
 
 /// Task Manager - Global scheduling and control core
@@ -93,6 +93,8 @@ impl TaskManager {
 }
 
 // Re-export task types
+pub use api::{
+    SubmitTaskRequest, SubmitTaskResponse, TaskResultRequest, TaskResultResponse,
+    TaskStatusRequest, TaskStatusResponse,
+};
 pub use task::{Task, TaskState};
-pub use api::{SubmitTaskRequest, SubmitTaskResponse, TaskStatusRequest, TaskStatusResponse, TaskResultRequest, TaskResultResponse};
-

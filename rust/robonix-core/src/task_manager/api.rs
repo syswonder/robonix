@@ -50,4 +50,3 @@ pub struct TaskResultResponse {
 }
 
 impl ros2_client::Message for TaskResultResponse {}
-

@@ -10,36 +10,18 @@
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
-pub struct IOParameterSpec {
-    pub name: String,
-    pub ros_type: String, // ROS message type
-}
-
-#[derive(Debug, Clone)]
-pub struct ConfigSpec {
-    pub service: String,
-    pub name: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct CapabilitySpec {
-    pub description: String,
-    pub inputs: Vec<IOParameterSpec>,
-    pub outputs: Vec<IOParameterSpec>,
-    pub configs: Vec<ConfigSpec>,
-}
-
-#[derive(Debug, Clone)]
 pub struct PrimitiveSpec {
     pub description: String,
-    pub input_schema: serde_json::Value,  // Expected input schema format
-    pub output_schema: serde_json::Value, // Expected output schema format
+    // Input parameters: label -> ROS message type (e.g., {"pose": "geometry_msgs/msg/PoseStamped"})
+    pub input_params: HashMap<String, String>,
+    // Output parameters: label -> ROS message type (e.g., {"image": "sensor_msgs/msg/Image"})
+    pub output_params: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ServiceSpec {
     pub description: String,
-    pub srv_type: String,  // Expected ROS2 service type (e.g., "robonix_sdk/srv/service/spatial_map/GetSpatialMap")
+    pub srv_type: String, // Expected ROS2 service type (e.g., "robonix_sdk/srv/service/spatial_map/GetSpatialMap")
 }
 
 pub struct SpecRegistry {
@@ -47,55 +29,46 @@ pub struct SpecRegistry {
     pub services: HashMap<String, ServiceSpec>,
 }
 
-// Macro to define a single capability
-// Format: CAP!(capabilities, name, desc, [INPUT(name, type), ...], [OUTPUT(name, type), ...], [CONFIG(service, name), ...])
-#[macro_export]
-macro_rules! CAP {
-    ($capabilities:ident, $name:expr, $desc:expr,
-     INPUT: [$($input_name:expr => $input_type:expr),* $(,)?],
-     OUTPUT: [$($output_name:expr => $output_type:expr),* $(,)?],
-     CONFIG: [$($config_service:expr => $config_name:expr),* $(,)?]) => {
-        $capabilities.insert(
-            $name.to_string(),
-            $crate::spec::CapabilitySpec {
-                description: $desc.to_string(),
-                inputs: vec![$(
-                    $crate::spec::IOParameterSpec {
-                        name: $input_name.to_string(),
-                        ros_type: $input_type.to_string(),
-                    }
-                ),*],
-                outputs: vec![$(
-                    $crate::spec::IOParameterSpec {
-                        name: $output_name.to_string(),
-                        ros_type: $output_type.to_string(),
-                    }
-                ),*],
-                configs: vec![$(
-                    $crate::spec::ConfigSpec {
-                        service: $config_service.to_string(),
-                        name: $config_name.to_string(),
-                    }
-                ),*],
-            }
-        );
-    };
-}
-
 // Macro to define a single primitive
-// Format: PRM!(primitives, name, desc, input_schema_json, output_schema_json)
+// Format: PRM!(primitives, name, desc, input_params, output_params)
+// input_params/output_params: HashMap of label -> ROS message type
+// Example: PRM!(primitives, "prm::camera_capture", "Capture RGB image", {}, {"image": "sensor_msgs/msg/Image"})
 #[macro_export]
 macro_rules! PRM {
-    ($primitives:ident, $name:expr, $desc:expr, $input_schema:tt, $output_schema:tt) => {
+    ($primitives:ident, $name:expr, $desc:expr, $input_params:tt, $output_params:tt) => {{
+        use std::collections::HashMap;
+        let mut input_map = HashMap::new();
+        let mut output_map = HashMap::new();
+
+        // Parse input parameters: {label => ros_type, ...}
+        let input_json = serde_json::json!($input_params);
+        if let Some(input_obj) = input_json.as_object() {
+            for (label, ros_type) in input_obj {
+                if let Some(ros_type_str) = ros_type.as_str() {
+                    input_map.insert(label.clone(), ros_type_str.to_string());
+                }
+            }
+        }
+
+        // Parse output parameters: {label => ros_type, ...}
+        let output_json = serde_json::json!($output_params);
+        if let Some(output_obj) = output_json.as_object() {
+            for (label, ros_type) in output_obj {
+                if let Some(ros_type_str) = ros_type.as_str() {
+                    output_map.insert(label.clone(), ros_type_str.to_string());
+                }
+            }
+        }
+
         $primitives.insert(
             $name.to_string(),
             $crate::spec::PrimitiveSpec {
                 description: $desc.to_string(),
-                input_schema: serde_json::json!($input_schema),
-                output_schema: serde_json::json!($output_schema),
-            }
+                input_params: input_map,
+                output_params: output_map,
+            },
         );
-    };
+    }};
 }
 
 // Macro to define a single service
@@ -108,7 +81,7 @@ macro_rules! SRV {
             $crate::spec::ServiceSpec {
                 description: $desc.to_string(),
                 srv_type: $srv_type.to_string(),
-            }
+            },
         );
     };
 }
@@ -126,59 +99,64 @@ impl SpecRegistry {
     }
 
     /// Validate primitive registration against spec
+    ///
+    /// Validates that:
+    /// 1. Primitive name exists in spec
+    /// 2. All required input parameter labels from spec are present in the provided input_schema
+    /// 3. All required output parameter labels from spec are present in the provided output_schema
+    ///
+    /// Note: The provided schemas contain label -> topic mappings, while spec contains label -> ROS type mappings.
+    /// We only validate that the labels match, not the topics (topics are user-defined).
+    ///
+    /// TODO: Validate ROS message types match between spec and provided schema
     pub fn validate_primitive(
         &self,
         std_name: &str,
         input_schema: &serde_json::Value,
         output_schema: &serde_json::Value,
     ) -> Result<(), String> {
+        // Check if primitive name exists in spec
         let spec = self
             .primitives
             .get(std_name)
             .ok_or_else(|| format!("Unknown primitive: {}", std_name))?;
 
-        // Validate input schema structure
-        // Check that all required keys from spec are present
-        if let Some(spec_obj) = spec.input_schema.as_object() {
-            if let Some(provided_obj) = input_schema.as_object() {
-                for (key, _) in spec_obj {
-                    if !provided_obj.contains_key(key) {
-                        return Err(format!(
-                            "Missing required input parameter in schema: '{}'",
-                            key
-                        ));
-                    }
+        // Validate input schema: check that all required parameter labels from spec are present
+        if let Some(provided_obj) = input_schema.as_object() {
+            for label in spec.input_params.keys() {
+                if !provided_obj.contains_key(label) {
+                    return Err(format!(
+                        "Missing required input parameter label in schema: '{}'",
+                        label
+                    ));
                 }
-            } else {
-                return Err("Input schema must be a JSON object".to_string());
             }
+        } else if !spec.input_params.is_empty() {
+            return Err("Input schema must be a JSON object".to_string());
         }
 
-        // Validate output schema structure
-        if let Some(spec_obj) = spec.output_schema.as_object() {
-            if let Some(provided_obj) = output_schema.as_object() {
-                for (key, _) in spec_obj {
-                    if !provided_obj.contains_key(key) {
-                        return Err(format!(
-                            "Missing required output parameter in schema: '{}'",
-                            key
-                        ));
-                    }
+        // Validate output schema: check that all required parameter labels from spec are present
+        if let Some(provided_obj) = output_schema.as_object() {
+            for label in spec.output_params.keys() {
+                if !provided_obj.contains_key(label) {
+                    return Err(format!(
+                        "Missing required output parameter label in schema: '{}'",
+                        label
+                    ));
                 }
-            } else {
-                return Err("Output schema must be a JSON object".to_string());
             }
+        } else if !spec.output_params.is_empty() {
+            return Err("Output schema must be a JSON object".to_string());
         }
+
+        // TODO: Validate ROS message types match between spec and provided schema
+        // For now, we only check that labels are present, not that types match
 
         Ok(())
     }
 
     /// Validate service registration against spec
-    pub fn validate_service(
-        &self,
-        std_name: &str,
-        srv_type: &str,
-    ) -> Result<(), String> {
+    pub fn validate_service(&self, std_name: &str, srv_type: &str) -> Result<(), String> {
         let spec = self
             .services
             .get(std_name)

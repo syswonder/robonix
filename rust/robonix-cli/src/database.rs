@@ -12,10 +12,10 @@ pub struct PackageInfo {
     #[serde(default)]
     pub primitives: Vec<String>, // List of primitive names
     #[serde(default)]
-    pub services: Vec<String>,   // List of service names
+    pub services: Vec<String>, // List of service names
     #[serde(default)]
-    pub skills: Vec<String>,       // List of skill names
-    pub installed_at: String,      // ISO 8601 timestamp
+    pub skills: Vec<String>, // List of skill names
+    pub installed_at: String, // ISO 8601 timestamp
     pub source: PackageSource,
 }
 
@@ -89,7 +89,8 @@ impl PackageDatabase {
     }
 
     pub fn find_by_primitive(&self, primitive_name: &str) -> Vec<&PackageInfo> {
-        let mut packages: Vec<&PackageInfo> = self.packages
+        let mut packages: Vec<&PackageInfo> = self
+            .packages
             .values()
             .filter(|pkg| pkg.primitives.iter().any(|p| p == primitive_name))
             .collect();
@@ -98,7 +99,8 @@ impl PackageDatabase {
     }
 
     pub fn find_by_service(&self, service_name: &str) -> Vec<&PackageInfo> {
-        let mut packages: Vec<&PackageInfo> = self.packages
+        let mut packages: Vec<&PackageInfo> = self
+            .packages
             .values()
             .filter(|pkg| pkg.services.iter().any(|s| s == service_name))
             .collect();
@@ -107,7 +109,8 @@ impl PackageDatabase {
     }
 
     pub fn find_by_skill(&self, skill_name: &str) -> Vec<&PackageInfo> {
-        let mut packages: Vec<&PackageInfo> = self.packages
+        let mut packages: Vec<&PackageInfo> = self
+            .packages
             .values()
             .filter(|pkg| pkg.skills.iter().any(|s| s == skill_name))
             .collect();

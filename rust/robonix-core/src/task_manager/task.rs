@@ -5,32 +5,32 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 use tracing::info;
 
 // Task states according to robonix spec
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskState {
-    Pending,    // Task created, waiting for processing
-    Planning,   // Task planning phase
-    Running,    // Task execution phase
-    Finished,   // Task completed successfully
-    Failed,     // Task failed
-    Cancelled,  // Task cancelled
+    Pending,   // Task created, waiting for processing
+    Planning,  // Task planning phase
+    Running,   // Task execution phase
+    Finished,  // Task completed successfully
+    Failed,    // Task failed
+    Cancelled, // Task cancelled
 }
 
 // Task structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub task_id: String,
-    pub description: String,        // Natural language task description
+    pub description: String,       // Natural language task description
     pub params: serde_json::Value, // Optional parameters (JSON)
     pub state: TaskState,
     pub result: Option<serde_json::Value>, // Task result (JSON)
     pub error_message: Option<String>,
-    pub created_at: u64,  // Unix timestamp in nanoseconds
+    pub created_at: u64, // Unix timestamp in nanoseconds
     pub updated_at: u64,
 }
 
@@ -123,4 +123,3 @@ impl TaskStore {
         }
     }
 }
-

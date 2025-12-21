@@ -80,7 +80,7 @@ pub enum PackageCommands {
         name: String,
     },
     /// Build a package (compile, install dependencies, etc.)
-    /// 
+    ///
     /// Builds a package directly without requiring an active recipe.
     /// Can build a specific package by name or all installed packages.
     Build {
@@ -95,7 +95,7 @@ pub enum PackageCommands {
 #[derive(Subcommand)]
 pub enum DeployCommands {
     /// Register packages from a recipe file (only registers, does not start)
-    /// 
+    ///
     /// Workflow order: register -> start -> stop -> unregister
     /// You must register before starting processes.
     Register {
@@ -103,7 +103,7 @@ pub enum DeployCommands {
         recipe: PathBuf,
     },
     /// Start capability or skill processes from active recipe
-    /// 
+    ///
     /// Requires: recipe must be registered first (use 'deploy register')
     /// You can start/stop multiple times during deployment.
     Start {
@@ -115,7 +115,7 @@ pub enum DeployCommands {
         target: String,
     },
     /// Stop capability or skill processes from active recipe
-    /// 
+    ///
     /// Requires: processes must be running (use 'deploy start' first)
     /// You can start/stop multiple times during deployment.
     Stop {
@@ -127,7 +127,7 @@ pub enum DeployCommands {
         target: String,
     },
     /// Restart capability or skill processes from active recipe
-    /// 
+    ///
     /// This is equivalent to: stop -> wait -> start
     /// Stops the target processes (if running) and then starts them again.
     Restart {
@@ -141,7 +141,7 @@ pub enum DeployCommands {
     /// Show status of all running cap/skill processes from active recipe
     Status,
     /// Build packages (compile, install dependencies, etc.)
-    /// 
+    ///
     /// Builds packages before deployment. Can build all packages in recipe
     /// or a specific package by name.
     Build {
@@ -152,7 +152,7 @@ pub enum DeployCommands {
         target: String,
     },
     /// Unregister packages, capabilities, skills, or recipes
-    /// 
+    ///
     /// Requires: all processes must be stopped first (use 'deploy stop')
     /// This is the final step in the workflow: register -> start -> stop -> unregister
     Unregister {

@@ -10,9 +10,7 @@ pub async fn execute(config: Config) -> Result<()> {
     client.ensure_daemon_running().await?;
 
     // Get status from daemon
-    let status_response = client
-        .send_command(DaemonCommand::Status)
-        .await?;
+    let status_response = client.send_command(DaemonCommand::Status).await?;
 
     let running_processes = match status_response {
         DaemonResponse::Status(procs) => procs,
@@ -22,13 +20,14 @@ pub async fn execute(config: Config) -> Result<()> {
     };
 
     // Create a map for quick lookup
-    let running_map: std::collections::HashMap<(String, String), (u32, PathBuf)> = running_processes
-        .into_iter()
-        .map(|proc| {
-            let key = (proc.std_name.clone(), proc.package_type.clone());
-            (key, (proc.pid, proc.log_file))
-        })
-        .collect();
+    let running_map: std::collections::HashMap<(String, String), (u32, PathBuf)> =
+        running_processes
+            .into_iter()
+            .map(|proc| {
+                let key = (proc.std_name.clone(), proc.package_type.clone());
+                (key, (proc.pid, proc.log_file))
+            })
+            .collect();
     let db = PackageDatabase::load(&config.package_storage_path)?;
 
     // Show active recipe
@@ -79,55 +78,65 @@ pub async fn execute(config: Config) -> Result<()> {
 
         // Determine which primitives, services, and skills to show based on recipe
         // recipe_state is guaranteed to be Some at this point
-        let (prims_to_show, srvs_to_show, skills_to_show) = if let Some(recipe_state) = &recipe_state {
-            if let Some(recipe_pkg) = recipe_state
-                .recipe
-                .packages
-                .iter()
-                .find(|rp| rp.name == pkg_info.name)
-            {
-                let prims = if let Some(prims) = &recipe_pkg.primitives {
-                    prims.clone()
+        let (prims_to_show, srvs_to_show, skills_to_show) =
+            if let Some(recipe_state) = &recipe_state {
+                if let Some(recipe_pkg) = recipe_state
+                    .recipe
+                    .packages
+                    .iter()
+                    .find(|rp| rp.name == pkg_info.name)
+                {
+                    let prims = if let Some(prims) = &recipe_pkg.primitives {
+                        prims.clone()
+                    } else {
+                        pkg_info.primitives.clone()
+                    };
+                    let srvs = if let Some(srvs) = &recipe_pkg.services {
+                        srvs.clone()
+                    } else {
+                        pkg_info.services.clone()
+                    };
+                    let skills = if let Some(skills) = &recipe_pkg.skills {
+                        skills.clone()
+                    } else {
+                        pkg_info.skills.clone()
+                    };
+                    (prims, srvs, skills)
                 } else {
-                    pkg_info.primitives.clone()
-                };
-                let srvs = if let Some(srvs) = &recipe_pkg.services {
-                    srvs.clone()
-                } else {
-                    pkg_info.services.clone()
-                };
-                let skills = if let Some(skills) = &recipe_pkg.skills {
-                    skills.clone()
-                } else {
-                    pkg_info.skills.clone()
-                };
-                (prims, srvs, skills)
+                    (
+                        pkg_info.primitives.clone(),
+                        pkg_info.services.clone(),
+                        pkg_info.skills.clone(),
+                    )
+                }
             } else {
-                (pkg_info.primitives.clone(), pkg_info.services.clone(), pkg_info.skills.clone())
-            }
-        } else {
-            // This should never happen due to early return above
-            (pkg_info.primitives.clone(), pkg_info.services.clone(), pkg_info.skills.clone())
-        };
+                // This should never happen due to early return above
+                (
+                    pkg_info.primitives.clone(),
+                    pkg_info.services.clone(),
+                    pkg_info.skills.clone(),
+                )
+            };
 
         // Add primitives
         for prim_name in &prims_to_show {
             let key = (prim_name.clone(), "prm".to_string());
-            let (is_running, pid, log_file) = if let Some((proc_pid, proc_log_file)) = running_map.get(&key) {
-                (
-                    true,
-                    Some(*proc_pid),
-                    Some(
-                        proc_log_file
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|s| s.to_string())
-                            .unwrap_or_default(),
-                    ),
-                )
-            } else {
-                (false, None, None)
-            };
+            let (is_running, pid, log_file) =
+                if let Some((proc_pid, proc_log_file)) = running_map.get(&key) {
+                    (
+                        true,
+                        Some(*proc_pid),
+                        Some(
+                            proc_log_file
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|s| s.to_string())
+                                .unwrap_or_default(),
+                        ),
+                    )
+                } else {
+                    (false, None, None)
+                };
             all_items.push((
                 pkg_info.name.clone(),
                 prim_name.clone(),
@@ -141,21 +150,22 @@ pub async fn execute(config: Config) -> Result<()> {
         // Add services
         for srv_name in &srvs_to_show {
             let key = (srv_name.clone(), "srv".to_string());
-            let (is_running, pid, log_file) = if let Some((proc_pid, proc_log_file)) = running_map.get(&key) {
-                (
-                    true,
-                    Some(*proc_pid),
-                    Some(
-                        proc_log_file
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|s| s.to_string())
-                            .unwrap_or_default(),
-                    ),
-                )
-            } else {
-                (false, None, None)
-            };
+            let (is_running, pid, log_file) =
+                if let Some((proc_pid, proc_log_file)) = running_map.get(&key) {
+                    (
+                        true,
+                        Some(*proc_pid),
+                        Some(
+                            proc_log_file
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|s| s.to_string())
+                                .unwrap_or_default(),
+                        ),
+                    )
+                } else {
+                    (false, None, None)
+                };
             all_items.push((
                 pkg_info.name.clone(),
                 srv_name.clone(),
@@ -169,21 +179,22 @@ pub async fn execute(config: Config) -> Result<()> {
         // Add skills
         for skill_name in &skills_to_show {
             let key = (skill_name.clone(), "skl".to_string());
-            let (is_running, pid, log_file) = if let Some((proc_pid, proc_log_file)) = running_map.get(&key) {
-                (
-                    true,
-                    Some(*proc_pid),
-                    Some(
-                        proc_log_file
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|s| s.to_string())
-                            .unwrap_or_default(),
-                    ),
-                )
-            } else {
-                (false, None, None)
-            };
+            let (is_running, pid, log_file) =
+                if let Some((proc_pid, proc_log_file)) = running_map.get(&key) {
+                    (
+                        true,
+                        Some(*proc_pid),
+                        Some(
+                            proc_log_file
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|s| s.to_string())
+                                .unwrap_or_default(),
+                        ),
+                    )
+                } else {
+                    (false, None, None)
+                };
             all_items.push((
                 pkg_info.name.clone(),
                 skill_name.clone(),

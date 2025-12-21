@@ -6,8 +6,11 @@ pub async fn execute_cap(config: Config, name: String) -> Result<()> {
     // Try to find as primitive first, then as service
     let packages_prm = query.find_by_primitive(&name)?;
     let packages_srv = query.find_by_service(&name)?;
-    let packages: std::collections::HashSet<String> = packages_prm.into_iter().chain(packages_srv.into_iter()).collect();
-    
+    let packages: std::collections::HashSet<String> = packages_prm
+        .into_iter()
+        .chain(packages_srv.into_iter())
+        .collect();
+
     if packages.is_empty() {
         println!("No packages found with primitive or service: {}", name);
     } else {

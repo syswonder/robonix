@@ -73,7 +73,7 @@ impl Spinner {
         let message = self.message.clone();
         let mut frame = 0;
         let frames = self.frames.clone();
-        
+
         let handle = tokio::spawn(async move {
             loop {
                 let spinner_char = frames[frame % frames.len()];
@@ -84,7 +84,7 @@ impl Spinner {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         });
-        
+
         self.handle = Some(handle);
     }
 

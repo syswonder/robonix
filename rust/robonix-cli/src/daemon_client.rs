@@ -53,8 +53,12 @@ impl DaemonClient {
     pub fn new() -> Result<Self> {
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
         let socket_dir = home_dir.join(".robonix");
-        std::fs::create_dir_all(&socket_dir)
-            .with_context(|| format!("Failed to create socket directory: {}", socket_dir.display()))?;
+        std::fs::create_dir_all(&socket_dir).with_context(|| {
+            format!(
+                "Failed to create socket directory: {}",
+                socket_dir.display()
+            )
+        })?;
         let socket_path = socket_dir.join("daemon.sock");
         Ok(Self { socket_path })
     }
@@ -68,13 +72,18 @@ impl DaemonClient {
         // Connect to daemon socket
         let mut stream = UnixStream::connect(&self.socket_path)
             .await
-            .with_context(|| format!("Failed to connect to daemon socket: {}", self.socket_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "Failed to connect to daemon socket: {}",
+                    self.socket_path.display()
+                )
+            })?;
 
         // Serialize and send command
         let command_json = serde_json::to_string(&command)?;
         let command_bytes = command_json.as_bytes();
         let len = command_bytes.len() as u32;
-        
+
         // Send length prefix (little-endian)
         stream.write_u32_le(len).await?;
         // Send command
@@ -96,7 +105,7 @@ impl DaemonClient {
         if !self.socket_path.exists() {
             return false;
         }
-        
+
         // Try to connect and ping
         match UnixStream::connect(&self.socket_path).await {
             Ok(_) => true,
@@ -115,7 +124,7 @@ impl DaemonClient {
             #[cfg(unix)]
             {
                 use std::process::Stdio;
-                
+
                 // Spawn daemon process with null stdio
                 // The daemon will run in the background
                 let mut child = std::process::Command::new(&daemon_path)
@@ -123,12 +132,14 @@ impl DaemonClient {
                     .stderr(Stdio::null())
                     .stdin(Stdio::null())
                     .spawn()
-                    .with_context(|| format!("Failed to spawn daemon process: {}", daemon_path.display()))?;
+                    .with_context(|| {
+                        format!("Failed to spawn daemon process: {}", daemon_path.display())
+                    })?;
 
                 // Check if process started successfully
                 // If it exits immediately, there was an error
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                
+
                 // Try to wait for the process with a timeout to see if it exited immediately
                 // Note: This is a best-effort check - the process might have already started successfully
                 if let Ok(Some(status)) = child.try_wait() {
@@ -155,7 +166,7 @@ impl DaemonClient {
                 let home_dir = dirs::home_dir().context("Failed to get home directory")?;
                 let socket_dir = home_dir.join(".robonix");
                 let socket_path = socket_dir.join("daemon.sock");
-                
+
                 if !socket_dir.exists() {
                     anyhow::bail!(
                         "Failed to start daemon. Socket directory does not exist: {}. \
@@ -164,7 +175,7 @@ impl DaemonClient {
                         socket_dir.display()
                     );
                 }
-                
+
                 if !socket_path.exists() {
                     anyhow::bail!(
                         "Failed to start daemon. Socket file was not created at: {}. \
@@ -173,7 +184,7 @@ impl DaemonClient {
                         socket_path.display()
                     );
                 }
-                
+
                 anyhow::bail!(
                     "Failed to start daemon. Socket exists but daemon is not responding. \
                     Try running 'rbnx-daemon' manually to see error messages."
@@ -232,7 +243,8 @@ impl DaemonClient {
                     } else {
                         "release"
                     };
-                    let daemon_path = PathBuf::from(format!("{}{}/rbnx-daemon", base_path, profile));
+                    let daemon_path =
+                        PathBuf::from(format!("{}{}/rbnx-daemon", base_path, profile));
                     if daemon_path.exists() {
                         return Ok(daemon_path);
                     }
@@ -265,4 +277,3 @@ impl DaemonClient {
         )
     }
 }
-
