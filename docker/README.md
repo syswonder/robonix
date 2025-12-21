@@ -62,19 +62,6 @@ export DOCKER_TAG=v1.0.0
 ./upload.sh
 ```
 
-### GitHub Container Registry (ghcr.io)
-
-```bash
-cd docker
-
-# Set credentials
-export DOCKER_USERNAME=your_github_username
-export DOCKER_PASSWORD=ghp_your_github_token
-
-# Upload
-./upload.sh ghcr.io/username/robonix_ros latest
-```
-
 ### Using .env File
 
 1. Copy the template file:
@@ -95,11 +82,7 @@ DOCKER_PUSH=true
 ```
 
 **Important Notes:**
-- For Docker Hub: Use your Docker Hub username and password (or access token)
-  - Create access token at: https://hub.docker.com/settings/security
-- For GitHub Container Registry: Use a Personal Access Token (PAT) with `write:packages` permission
-  - Generate at: https://github.com/settings/tokens
-  - Token format: `ghp_xxxxxxxxxxxx`
+For Docker Hub: Use your Docker Hub username and password (or access token). Create access token at: https://hub.docker.com/settings/security.
 
 3. Run the upload script:
 ```bash

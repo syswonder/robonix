@@ -4,7 +4,6 @@ set -e
 # Script to build and upload Docker image to cloud registry
 # Usage: ./upload.sh [registry] [tag]
 # Example: ./upload.sh docker.io/username/robonix_ros latest
-# Example: ./upload.sh ghcr.io/username/robonix_ros v1.0.0
 
 # Default values
 DEFAULT_REGISTRY="docker.io"
