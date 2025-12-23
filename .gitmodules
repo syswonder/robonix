@@ -10,3 +10,12 @@
 [submodule "robonix/driver/ranger_ros2/src/ugv_sdk"]
 	path = robonix/driver/ranger_ros2/src/ugv_sdk
 	url = https://github.com/enkerewpo/ugv_sdk.git
+[submodule "ros2-client"]
+	path = rust/lib/ros2-client
+	url = https://github.com/enkerewpo/ros2-client
+[submodule "rcl_interfaces"]
+	path = rust/lib/rcl_interfaces
+	url = https://github.com/enkerewpo/rcl_interfaces
+[submodule "common_interfaces"]
+	path = rust/lib/common_interfaces
+	url = https://github.com/enkerewpo/common_interfaces

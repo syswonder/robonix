@@ -1,0 +1,14 @@
+# ResultFeedback service (robonix spec)
+# Result feedback service performs semantic analysis on execution process data using multimodal models after real execution
+string task_id          # Task identifier, assigned by task manager
+string execution_id     # Execution identifier, corresponding to data collection record
+string options_json     # Optional, verification strategy (JSON string)
+                        # Example:
+                        #   {"mode":"video-only",
+                        #    "required_checks":["all_rooms","all_windows"]}
+---
+bool   success          # Whether task passed verification
+string[] missing_goals  # Uncompleted goals (e.g., ["kitchen_window_closed"])
+string report           # Text report (natural language or structured summary)
+builtin_interfaces/Time stamp
+
