@@ -1,0 +1,13 @@
+# Robonix CLI Configuration
+# Copy this file to ~/.config/robonix/config.yaml or use 'rbnx config --set-storage-path <path>'
+# On Linux: ~/.config/robonix/config.yaml
+
+# Package storage path where all robonix packages will be installed
+# Default: ~/.robonix/packages
+package_storage_path: ~/.robonix/packages
+
+# Robonix SDK path (optional)
+# Set via: rbnx config --set-sdk-path <path>
+# If not set, will use ROBONIX_SDK_PATH environment variable
+# robonix_sdk_path: /path/to/robonix-sdk
+
