@@ -207,14 +207,3 @@ clean-all: clean
 	@if [ -d "$(SDK_DIR)/install" ]; then rm -rf $(SDK_DIR)/install; fi
 	@if [ -d "$(SDK_DIR)/log" ]; then rm -rf $(SDK_DIR)/log; fi
 	@echo "✓ All artifacts cleaned"
-
-# Quick start sequence
-quick-start: build-sdk build install setup-dev
-	@echo ""
-	@echo "✓ Quick start complete!"
-	@echo ""
-	@echo "Next steps:"
-	@echo "  1. Make sure ~/.local/bin is in your PATH"
-	@echo "  2. Start robonix-core: robonix-core"
-	@echo "  3. In another terminal, use robonix-cli: rbnx config --show"
-
