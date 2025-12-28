@@ -91,7 +91,7 @@ skills:
 - `description`: Package functionality description
 - `maintainer`: Maintainer name
 - `maintainer_email`: Maintainer email
-- `license`: License type (e.g., Apache-2.0)
+- `license`: License type (e.g., MulanPSL-2.0)
 - `build_script`: Build script path (optional), relative path to package root, e.g., `rbnx/build.sh`. If omitted, CLI will default to `rbnx/build.sh`. If neither exists, the build command will skip the package
 
 **Primitive Fields:**

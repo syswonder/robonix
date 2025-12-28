@@ -145,5 +145,5 @@ rbnx deploy stop all
 
 ## License
 
-Apache-2.0
+MulanPSL-2.0
 

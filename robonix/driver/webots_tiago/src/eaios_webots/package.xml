@@ -5,7 +5,7 @@
   <version>0.0.0</version>
   <description>TODO: Package description</description>
   <maintainer email="vuken@todo.todo">vuken</maintainer>
-  <license>Apache-2.0</license>
+  <license>MulanPSL-2.0</license>
 
   <depend>rclpy</depend>
   <depend>geometry_msgs</depend>

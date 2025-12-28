@@ -12,8 +12,8 @@ package:
   version: 0.0.1
   description: Demo package providing semantic_map and task_plan services
   maintainer: root
-  maintainer_email: root@todo.todo
-  license: Apache-2.0
+  maintainer_email: demo@demo.demo
+  license: MulanPSL-2.0
   # build_script: rbnx/build.sh  # Optional: build script path. If omitted, defaults to rbnx/build.sh
 
 # Services provided by this package

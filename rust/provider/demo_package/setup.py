@@ -19,9 +19,9 @@ setup(
     install_requires=['setuptools', 'numpy'],
     zip_safe=True,
     maintainer='root',
-    maintainer_email='root@todo.todo',
+    maintainer_email='demo@demo.demo',
     description='Demo RGB camera package that outputs random color images',
-    license='Apache-2.0',
+    license='MulanPSL-2.0',
     entry_points={
         'console_scripts': [
             'rgb_publisher = demo_rgb_provider.rgb_publisher:main',
