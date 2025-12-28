@@ -2,9 +2,20 @@
 
 wheatfox
 
-## Environment Setup
+## Overview
 
-First, you need ROS2 environment and Rust.
+Robonix is a robot task execution system that allows you to:
+- Register and manage robot capabilities (primitives, services, skills)
+- Submit natural language tasks
+- Automatically plan and execute tasks using registered capabilities
+
+This guide will walk you through setting up and using Robonix step by step.
+
+## Prerequisites
+
+- ROS2 environment (Humble recommended)
+- Rust toolchain
+- Python 3.10
 
 If you want to use the prebuilt robonix ROS2 dev container:
 
@@ -14,162 +25,259 @@ cd docker
 ./run.sh -b # build a local image if you modified some docker config
 ```
 
-```bash
-cd rust # at robonix src root folder
-cd robonix-cli
-cargo build
+## Step 1: Build and Install Robonix
 
-#########################################################################################################################################
-# the command below will use the `provider` folder as tmp package storage target, DO NOT RUN THE BELOW COMMAND IN PRODUCTION ENVIRONMENT
-# in robonix-cli, run:
-mkdir -p ~/.robonix; rm -rf ~/.robonix/packages; ln -s "$(realpath ../provider/)" ~/.robonix/packages;
-# export FASTRTPS_DEFAULT_PROFILES_FILE=
-#########################################################################################################################################
-
-# then build the robonix-sdk
-cd robonix-sdk
-./build_ros2.sh
-```
-
-## Start robonix-core
-
-Before starting everything, you need to start robonix-core first (in a separate terminal).
+Navigate to the rust directory and build all components:
 
 ```bash
-cd robonix-core
-cargo run --
+cd rust
+# View all available commands
+make help
+# Build SDK (ROS2 interface package)
+make build-sdk
+# Build CLI and Core
+make build
+# Install binaries to local rust folder, normally ~/.cargo/bin
+make install
 ```
 
-robonix-core will start the following EAIOS API services:
+After installation, you can run binaries directly (if rust toolchains are correctly installed and configured):
+- `rbnx` - Robonix CLI
+- `rbnx-daemon` - Robonix daemon
+- `robonix-core` - Robonix core service
+
+## Step 2: Setup Development Environment (Optional)
+
+**Important**: The `setup-dev` command creates a symbolic link from `~/.robonix/packages` to the `provider` directory. This is only needed if you want to use packages from the local `provider` folder for development/testing.
+
+**If you don't need to use local provider packages, skip this step.**
+
+```bash
+# This links ~/.robonix/packages to rust/provider/
+# Only run this if you need to use local provider packages
+make setup-dev
+```
+
+## Step 3: Start robonix-core
+
+robonix-core provides the core services for the system. You need to start it in a separate terminal before using the CLI.
+
+```bash
+# In terminal 1: Start robonix-core
+eval $(make source-sdk) # source robonix-sdk environment
+robonix-core
+```
+
+robonix-core will start the following services:
 - **Primitive API** (`/rbnx/prm/*`): Primitive registration and query
-- **Service API** (`/rbnx/srv/*`): Standard service registration and query (e.g., spatial map, semantic map, task planning, etc.)
+- **Service API** (`/rbnx/srv/*`): Standard service registration and query
 - **Skill API** (`/rbnx/skl/*`): Skill registration and query
 - **Task API** (`/rbnx/task/*`): Task submission, status query, and result retrieval
 
-Then you can use `robonix-cli` in another terminal.
+Keep this terminal running.
 
-## Configure robonix-cli
+### Configuring Log Levels
+
+You can control the verbosity of robonix-core logs by setting the `RUST_LOG` environment variable:
 
 ```bash
-cd robonix-cli
+# Show only info, warn, and error messages (default)
+robonix-core
+
+# Show debug messages for robonix-core module
+RUST_LOG=robonix_core=debug robonix-core
+# Show debug messages for all modules
+RUST_LOG=debug robonix-core
+# Show debug for task_manager only
+RUST_LOG=robonix_core::task_manager=debug robonix-core
+# Show trace messages (most verbose)
+RUST_LOG=robonix_core=trace robonix-core
+# Customize log levels for different modules
+RUST_LOG=robonix_core::task_manager=debug,robonix_core=info,rustdds=error robonix-core
+```
+## Step 4: Configure robonix-cli
+
+In a new terminal (terminal 2), configure the CLI:
+
+```bash
+cd rust
+
+eval $(make source-sdk) # source robonix-sdk environment for new terminal
+
 # View current configuration
-cargo run -- config -s
-
-# Set robonix-sdk path
-cargo run -- config --set-sdk-path ../robonix-sdk
-cargo run -- config -s
+rbnx config --show # or just -s
+# Set robonix-sdk path (if not already set)
+rbnx config --set-sdk-path $(realpath ./robonix-sdk)
+rbnx config --show
 ```
 
-## Install and Register Packages (Primitives, Services, Skills)
+## Step 5: Install and Build Packages
 
-### Install Packages
-
-```bash
-cd robonix-cli
-
-# Install package from GitHub
-cargo run -- package install --github https://github.com/enkerewpo/demo-package-01-robonix
-cargo run -- package list
-cargo run -- package info demo_package_01_github
-
-# Build all packages, or specify package name
-cargo run -- package build all
-```
-
-### Register Packages to robonix-core (using recipe)
-
-Use recipe files to register packages. The recipe specifies which primitives, services, and skills need to be registered.
+Install packages that provide primitives, services, and skills:
 
 ```bash
-cd robonix-cli
-
+# Install a package from GitHub (example)
+rbnx package install --github https://github.com/enkerewpo/demo-package-01-robonix
+# List installed packages
+rbnx package list
+# View package details
+rbnx package info <package_name>
 # Build all packages
-cargo build && cargo run -- daemon restart # if daemon code was modified
-cargo run -- package build all
+rbnx package build all
+```
 
-# Register recipe (will automatically register primitives, services, and skills specified in recipe)
-cargo run -- deploy register demo_recipe.yaml
+## Step 6: Register Packages
 
+Use a recipe file to register primitives, services, and skills to robonix-core:
+
+```bash
+# rbnx daemon restart # if anything went wrong
+
+# Register recipe (automatically registers primitives, services, and skills)
+rbnx deploy register demo_recipe.yaml
+# View registration status
+rbnx deploy status
+```
+
+## Step 7: Start Services and Skills
+
+Start the registered services and skills:
+
+```bash
 # Start all registered packages
-cargo run -- deploy start
-
+rbnx deploy start
 # View status
-cargo run -- deploy status
-
-# Restart/Stop
-cargo run -- deploy restart
-cargo run -- deploy stop
-
-# Clean up all ROS2 processes
-# pkill -9 -f "ros2|robonix|rclpy|rclcpp|demo_rgb_provider"
+rbnx deploy status
+# To stop all packages
+rbnx deploy stop
+# To restart
+rbnx deploy restart
 ```
 
-## Using Standard Services
+## Step 8: Create and Execute Tasks
 
-The system provides multiple standard services, including:
-
-- **Spatial Map Service** (`spatial_map`): Provides geometric structure information of the environment (2D/3D occupancy grids, point clouds, etc.)
-- **Semantic Map Service** (`semantic_map`): Provides entity-level environment representation (objects, rooms, robots, etc.)
-- **Task Planning Service** (`task_plan`): Converts natural language tasks to RTDL code
-- **Plan Simulation Service** (`plan_simulate`): Validates task plan feasibility in simulation environment
-- **Result Feedback Service** (`result_feedback`): Validates task execution results
-
-These services can be queried via `/rbnx/srv/query` and will be automatically called by the task manager during task execution.
+Now you can submit tasks in natural language:
 
 ```bash
-# View registered services
-# Call ROS2 service /rbnx/srv/query
-```
-
-## Create and Execute Tasks
-
-### Create Task (Natural Language Input)
-
-```bash
-cd robonix-cli
-
-# Create task
-cargo run -- task create "Pick up the red box on the table"
-
-# View task list
-cargo run -- task list
-
-# View task details
-cargo run -- task get task_0
+# wait several seconds for semantic map service to be able to provide an object graph, then you can issue a task
+# Create a task
+rbnx task create "Pick up the red box on the table"
+# View task status
+rbnx task get task_0
+# Cancel a task if needed
+rbnx task cancel task_0
 ```
 
 ### Task Execution Flow
 
-After creating a task, the system will automatically execute the following flow:
+When you create a task, the system automatically:
 
-1. **Task Submission**: Submit task via `/rbnx/task/submit`, task status is `pending`
-2. **Task Planning**: Task manager calls task planning service (`task_plan`), converts natural language description to RTDL code
-   - Planning service will query:
-     - All entities in semantic map and their supported skills
-     - All registered skills list
-     - Available primitives and services
-   - Task status changes to `planning`
-3. **Plan Simulation** (optional): Task manager calls plan simulation service (`plan_simulate`), validates RTDL code feasibility
-   - Task status changes to `simulating`
-4. **Task Execution**: Task manager parses RTDL code, executes each skill call in sequence
-   - Send parameters to skill's start_topic
-   - Receive status updates from skill's status_topic
-   - Task status changes to `running`
-5. **Result Feedback** (optional): Task manager calls result feedback service (`result_feedback`), validates execution results
-   - Task status changes to `finished` or `failed`
+1. **Submits** the task (status: `pending`)
+2. **Plans** the task by calling the task planning service, converting natural language to RTDL code (status: `planning`)
+3. **Simulates** the plan (optional, status: `simulating`)
+4. **Executes** the RTDL code, calling skills in sequence (status: `running`)
+5. **Completes** with result feedback (status: `finished` or `failed`)
 
-### View Task Status
+## Step 9: Using Standard Services
 
+The system provides standard services that can be queried:
+
+- **Spatial Map Service** (`spatial_map`): Geometric structure information
+- **Semantic Map Service** (`semantic_map`): Object-level environment representation
+- **Task Planning Service** (`task_plan`): Converts natural language to RTDL code
+- **Plan Simulation Service** (`plan_simulate`): Validates task plan feasibility
+- **Result Feedback Service** (`result_feedback`): Validates execution results
+
+These services are automatically called by the task manager during task execution. You can also query them directly via ROS2 services.
+
+## Common Commands Reference
+
+### Build Commands
 ```bash
-# List all tasks
-cargo run -- task list
-
-# Get task details (including generated RTDL code)
-cargo run -- task get <task_id>
-
-# Cancel task
-cargo run -- task cancel <task_id>
+make build          # Build robonix-cli and robonix-core
+make build-cli      # Build robonix-cli only
+make build-core     # Build robonix-core only
+make build-sdk      # Build robonix-sdk ROS2 interface package
 ```
+
+### Install Commands
+```bash
+make install        # Install all binaries to ~/.local/bin
+make install-cli    # Install robonix-cli binaries only
+make install-core   # Install robonix-core binary only
+```
+
+### Run Commands (after installation)
+```bash
+rbnx <command>      # Run CLI with any command
+rbnx-daemon <command>  # Run daemon
+robonix-core        # Run robonix-core
+```
+
+### Environment Commands
+```bash
+make env            # Show environment information
+eval $(make source-sdk)  # Source SDK environment in current shell
+```
+
+### Development Commands
+```bash
+make setup-dev      # Link provider directory (only if needed for local packages)
+make fmt            # Format code using cargo fmt
+make check          # Run cargo check
+make clean          # Clean build artifacts
+```
+
+## Troubleshooting
+
+### Check if robonix-core is running
+```bash
+ros2 service list | grep rbnx
+```
+
+### Check service availability
+```bash
+ros2 service type /rbnx/prm/register
+ros2 service type /rbnx/srv/register
+ros2 service type /rbnx/skl/register
+ros2 service type /rbnx/task/submit
+```
+
+### Clean up all ROS2 processes
+```bash
+pkill -9 -f "ros2|robonix|rclpy|rclcpp|demo_rgb_provider"
+```
+
+## System Architecture
+
+### Components
+
+- **Primitives**: Standardized hardware capability mapping (e.g., `prm::arm.move.ee`), must conform to specifications
+- **Services**: Standardized algorithm capabilities (e.g., `spatial_map`, `semantic_map`), must conform to specifications
+- **Skills**: User-defined high-level action logic, written in RTDL, flexible and do not need to conform to specifications
+- Skills can call primitives and services, and can also call other skills
+
+### RTDL Format
+
+RTDL (Robot Task Description Language) is the task description language. Example:
+
+```python
+def skl::close_window(room: str):
+    skl::navigate_to(target_label = room)
+    srv::semantic_map.update(entity = room)
+    pose = srv::semantic_map.query_pose(
+        entity_type = "window",
+        parent_room = room
+    )
+    prm::arm.move.ee(pose = pose)
+    prm::gripper.close()
+    return True
+```
+
+### Data Types
+
+- System supports Robonix custom message types (Point3D, Object, BoundingBox, etc.)
+- Also supports standard ROS2 message types (geometry_msgs, sensor_msgs, std_msgs, etc.)
 
 ## Notes
 
@@ -177,47 +285,4 @@ cargo run -- task cancel <task_id>
    - First check configuration file (set via `rbnx config --set-sdk-path`)
    - Then check `ROBONIX_SDK_PATH` environment variable
 
-2. **Primitives, Services, and Skills**:
-   - **Primitives**: Standardized hardware capability mapping (e.g., `prm::arm_move_ee`), must conform to specifications
-   - **Services**: Standardized algorithm capabilities (e.g., `spatial_map`, `semantic_map`), must conform to specifications
-   - **Skills**: User-defined high-level action logic, written in RTDL, flexible and do not need to conform to specifications
-   - Skills can call primitives and services, and can also call other skills
-
-3. **RTDL Format**:
-   - RTDL (Robot Task Description Language) is the task description language
-   - Format example:
-     ```python
-     def skl::close_window(room: str):
-         skl::navigate_to(target_label = room)
-         srv::semantic_map.update(entity = room)
-         pose = srv::semantic_map.query_pose(
-             entity_type = "window",
-             parent_room = room
-         )
-         prm::arm_move_ee(pose = pose)
-         prm::gripper.close()
-         return True
-     ```
-
-4. **Data Types**:
-   - System supports Robonix custom message types (Point3D, Entity, BoundingBox, etc.)
-   - Also supports standard ROS2 message types (geometry_msgs, sensor_msgs, std_msgs, etc.)
-
-## Troubleshooting
-
-```bash
-# Check if robonix-core is running
-ros2 service list | grep rbnx
-
-# Check if primitive register service is available
-ros2 service type /rbnx/prm/register
-
-# Check if service register service is available
-ros2 service type /rbnx/srv/register
-
-# Check if skill register service is available
-ros2 service type /rbnx/skl/register
-
-# Check if task submit service is available
-ros2 service type /rbnx/task/submit
-```
+2. **Development Setup**: The `make setup-dev` command creates a symbolic link from `~/.robonix/packages` to the local `provider` directory. This is useful for development but not required for normal usage. Only run it if you need to use packages from the local provider folder.

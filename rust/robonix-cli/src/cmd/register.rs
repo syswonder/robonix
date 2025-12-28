@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Register Command Module
+//
+// Register command implementation for robonix-cli
+
 use crate::{Config, PackageRegistrar};
 use anyhow::Result;
 use std::path::PathBuf;

@@ -19,7 +19,7 @@ package:
 # Primitives provided by this package
 # Primitives provide standardized hardware capability mapping
 primitives:
-  - name: prm::camera_capture
+  - name: prm::camera.capture
     # Spec defines: OUTPUT: {"image": "sensor_msgs/Image"}
     input_schema: '{}'
     output_schema: '{"image":"/demo_rgb/image"}'
@@ -28,7 +28,7 @@ primitives:
     start_script: rbnx/start_capture_rgb.sh
     stop_script: rbnx/stop_capture_rgb.sh
 
-  - name: prm::arm_move_ee
+  - name: prm::arm.move.ee
     # Spec defines: 
     #   INPUT: {"pose": "geometry_msgs/PoseStamped"}
     #   OUTPUT: {"status": "bool"}
@@ -39,20 +39,10 @@ primitives:
     start_script: rbnx/start_grasp_move.sh
     stop_script: rbnx/stop_grasp_move.sh
 
-# Services provided by this package
-# Services provide standardized algorithm capabilities
-# (This package doesn't provide any standard services, but here's an example format)
-# services:
-#   - name: spatial_map
-#     srv_type: robonix_sdk/srv/service/spatial_map/GetSpatialMap
-#     entry: /mapping/get_spatial_map
-#     metadata: '{"supported_types":["2d","3d"]}'
-#     provider: demo_rgb_provider
-
 # Skills provided by this package
 # Skills are user-defined and flexible, can be basic (static program) or rtdl (RTDL-based)
 skills:
-  - name: pick
+  - name: skl::pick
     type: basic
     start_topic: /robot1/skill/pick/start
     status_topic: /robot1/skill/pick/status

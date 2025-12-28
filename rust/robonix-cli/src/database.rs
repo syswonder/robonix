@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Database Module
+//
+// Package database management for robonix-cli
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -190,7 +195,7 @@ impl PackageDatabase {
                                 db.add_package(package_info);
                             }
                             Err(e) => {
-                                tracing::warn!(
+                                log::warn!(
                                     "Failed to parse manifest for package at {}: {}",
                                     path.display(),
                                     e
@@ -199,7 +204,7 @@ impl PackageDatabase {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(
+                        log::warn!(
                             "Failed to parse manifest at {}: {}",
                             manifest_path.display(),
                             e
@@ -214,7 +219,7 @@ impl PackageDatabase {
         for package_name in db_package_names {
             if !found_packages.contains(&package_name) {
                 if let Some(removed) = db.remove_package(&package_name) {
-                    tracing::info!(
+                    log::info!(
                         "Removed package '{}' from database (directory not found: {})",
                         package_name,
                         removed.path.display()

@@ -3,70 +3,14 @@
 //
 // Handles skill registration and querying according to robonix spec.
 
-use serde::{Deserialize, Serialize};
+use crate::ros_idl::skill::{
+    QuerySkillRequest, QuerySkillResponse, RegisterSkillRequest, RegisterSkillResponse,
+    SkillInstance,
+};
+use log::{info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
-
-/// Skill registration request (robonix spec)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegisterSkillRequest {
-    pub name: String,         // Skill name
-    pub r#type: String,       // Skill type: "basic" | "rtdl"
-    pub start_topic: String,  // Skill start topic
-    pub status_topic: String, // Status feedback topic
-    pub entry: String,        // Basic skill entry (required if type="basic")
-    pub skill_dir: String,    // Skill directory path (required if type="rtdl")
-    pub main_rtdl: String,    // Main RTDL file name (required if type="rtdl")
-    pub start_args: String,   // JSON string: input parameter schema
-    pub status: String,       // JSON string: status feedback schema
-    pub metadata: String,     // JSON string: metadata for instance filtering
-    pub provider: String,     // Skill provider identifier
-    pub version: String,      // Skill version
-}
-
-impl ros2_client::Message for RegisterSkillRequest {}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegisterSkillResponse {
-    pub ok: bool,
-    pub skill_id: String,
-}
-
-impl ros2_client::Message for RegisterSkillResponse {}
-
-/// Skill query request (robonix spec)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QuerySkillRequest {
-    pub name: String,
-    pub filter: String, // JSON string: filter by metadata. Empty string means no filter
-}
-
-impl ros2_client::Message for QuerySkillRequest {}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkillInstance {
-    pub skill_id: String,
-    pub provider: String,
-    pub version: String,
-    pub r#type: String, // Skill type: "basic" | "rtdl"
-    pub start_topic: String,
-    pub status_topic: String,
-    pub entry: String,     // Basic skill entry (if type="basic")
-    pub skill_dir: String, // Skill directory path (if type="rtdl")
-    pub main_rtdl: String, // Main RTDL file name (if type="rtdl")
-    pub start_args: serde_json::Value,
-    pub status: serde_json::Value,
-    pub metadata: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QuerySkillResponse {
-    pub instances: Vec<SkillInstance>,
-}
-
-impl ros2_client::Message for QuerySkillResponse {}
 
 /// Skill Registry - Manages skill registration and querying
 pub struct SkillRegistry {
@@ -107,10 +51,8 @@ impl SkillRegistry {
             Ok(v) => v,
             Err(e) => {
                 warn!(
-                    skill_name = %req.name,
-                    provider = %req.provider,
-                    error = %e,
-                    "failed to parse start_args json"
+                    "failed to parse start_args json: skill_name={}, provider={}, error={}",
+                    req.name, req.provider, e
                 );
                 return RegisterSkillResponse {
                     ok: false,
@@ -122,10 +64,8 @@ impl SkillRegistry {
             Ok(v) => v,
             Err(e) => {
                 warn!(
-                    skill_name = %req.name,
-                    provider = %req.provider,
-                    error = %e,
-                    "failed to parse status json"
+                    "failed to parse status json: skill_name={}, provider={}, error={}",
+                    req.name, req.provider, e
                 );
                 return RegisterSkillResponse {
                     ok: false,
@@ -137,10 +77,8 @@ impl SkillRegistry {
             Ok(v) => v,
             Err(e) => {
                 warn!(
-                    skill_name = %req.name,
-                    provider = %req.provider,
-                    error = %e,
-                    "failed to parse metadata json"
+                    "failed to parse metadata json: skill_name={}, provider={}, error={}",
+                    req.name, req.provider, e
                 );
                 return RegisterSkillResponse {
                     ok: false,
@@ -152,9 +90,8 @@ impl SkillRegistry {
         // Validate skill type
         if req.r#type != "basic" && req.r#type != "rtdl" {
             warn!(
-                skill_name = %req.name,
-                skill_type = %req.r#type,
-                "invalid skill type, must be 'basic' or 'rtdl'"
+                "invalid skill type, must be 'basic' or 'rtdl': skill_name={}, skill_type={}",
+                req.name, req.r#type
             );
             return RegisterSkillResponse {
                 ok: false,
@@ -165,8 +102,8 @@ impl SkillRegistry {
         // Validate required fields based on type
         if req.r#type == "basic" && req.entry.is_empty() {
             warn!(
-                skill_name = %req.name,
-                "basic skill must provide entry field"
+                "basic skill must provide entry field: skill_name={}",
+                req.name
             );
             return RegisterSkillResponse {
                 ok: false,
@@ -175,8 +112,8 @@ impl SkillRegistry {
         }
         if req.r#type == "rtdl" && (req.skill_dir.is_empty() || req.main_rtdl.is_empty()) {
             warn!(
-                skill_name = %req.name,
-                "rtdl skill must provide skill_dir and main_rtdl fields"
+                "rtdl skill must provide skill_dir and main_rtdl fields: skill_name={}",
+                req.name
             );
             return RegisterSkillResponse {
                 ok: false,
@@ -192,7 +129,10 @@ impl SkillRegistry {
 
         // Basic validation: skill name should start with 'skl::'
         if !req.name.starts_with("skl::") {
-            warn!(skill_name = %req.name, "skill name should start with 'skl::'");
+            warn!(
+                "skill name should start with 'skl::': skill_name={}",
+                req.name
+            );
         }
 
         let entry = SkillEntry {
@@ -215,10 +155,8 @@ impl SkillRegistry {
         skills.insert(skill_id.clone(), entry);
 
         info!(
-            skill_id = %skill_id,
-            skill_name = %req.name,
-            provider = %req.provider,
-            "registered skill"
+            "registered skill: skill_id={}, skill_name={}, provider={}",
+            skill_id, req.name, req.provider
         );
 
         RegisterSkillResponse { ok: true, skill_id }

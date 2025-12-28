@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Info Command Module
+//
+// Info command implementation for robonix-cli
+
 use crate::{Config, PackageQuery};
 use anyhow::Result;
 

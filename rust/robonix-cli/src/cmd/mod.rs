@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Command Module
+//
+// Command definitions and execution for robonix-cli
+
 use anyhow::Result;
 use clap::Subcommand;
 use std::path::PathBuf;
@@ -181,8 +186,9 @@ pub enum DaemonCommands {
 pub enum TaskCommands {
     /// Create a new task from natural language
     Create {
-        /// Natural language task description
-        natural_language: String,
+        /// Natural language task description (can be multiple words)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        natural_language: Vec<String>,
     },
     /// Get task by ID
     Get {
@@ -234,7 +240,8 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         },
         Commands::Task(cmd) => match cmd {
             TaskCommands::Create { natural_language } => {
-                task::execute_create(config, natural_language).await
+                let natural_language_str = natural_language.join(" ");
+                task::execute_create(config, natural_language_str).await
             }
             TaskCommands::Get { task_id } => task::execute_get(config, task_id).await,
             TaskCommands::List => task::execute_list(config).await,

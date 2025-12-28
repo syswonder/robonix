@@ -5,17 +5,17 @@
 // Note: Skills do not have specifications - they are user-defined and flexible.
 
 use crate::spec::{PrimitiveSpec, ServiceSpec};
+use log::info;
 use std::collections::HashMap;
-use tracing::info;
 
 pub fn load_primitives() -> HashMap<String, PrimitiveSpec> {
     let mut primitives = HashMap::new();
 
-    PRM!(primitives, "prm::camera_capture", "Capture RGB image from camera",
+    PRM!(primitives, "prm::camera.capture", "Capture RGB image from camera",
          {},  // No input parameters
          { "image": "sensor_msgs/msg/Image" });
 
-    PRM!(primitives, "prm::arm_move_ee", "Move end effector to target pose",
+    PRM!(primitives, "prm::arm.move.ee", "Move end effector to target pose",
          { "pose": "geometry_msgs/msg/PoseStamped" },
          { "status": "std_msgs/msg/Bool" });
 
@@ -24,7 +24,7 @@ pub fn load_primitives() -> HashMap<String, PrimitiveSpec> {
          { "status": "std_msgs/msg/Bool" });
 
     info!(
-        "Loaded primitives specs, number of primitives: {}",
+        "loaded primitives specs, number of primitives: {}",
         primitives.len()
     );
     primitives
@@ -69,7 +69,7 @@ pub fn load_services() -> HashMap<String, ServiceSpec> {
     );
 
     info!(
-        "Loaded services specs, number of services: {}",
+        "loaded services specs, number of services: {}",
         services.len()
     );
     services

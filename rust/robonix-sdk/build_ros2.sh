@@ -1,4 +1,9 @@
 #!/bin/bash
+# SPDX-License-Identifier: MulanPSL-2.0
+# Build ROS2 Interface Package Script
+#
+# Build script for robonix_sdk ROS2 interface package
+
 set -e
 
 echo "Building robonix_sdk ROS2 interface package..."

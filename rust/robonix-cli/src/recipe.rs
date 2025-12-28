@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Recipe Module
+//
+// Recipe file parsing and management for robonix-cli
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

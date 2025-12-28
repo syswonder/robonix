@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Recipe State Module
+//
+// Recipe state management for robonix-cli
+
 use crate::recipe::Recipe;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};

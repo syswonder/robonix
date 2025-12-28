@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Stop Command Module
+//
+// Stop command implementation for robonix-cli
+
 use super::recipe_utils;
 use crate::daemon_client::{DaemonClient, DaemonCommand, DaemonResponse};
 use crate::{output, Config};

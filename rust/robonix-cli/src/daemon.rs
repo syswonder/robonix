@@ -1,17 +1,28 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Daemon Module
+//
+// Daemon process management for robonix-cli
+
 use crate::daemon_client::{DaemonCommand, DaemonResponse, ProcessStatus};
+use crate::daemon_ros2::DaemonRos2Clients;
 use crate::process::ProcessManager;
 use anyhow::{Context, Result};
 use dirs;
+use log::{error, info, warn};
+use robonix_core::ros_idl::primitive::RegisterPrimitiveRequest;
+use robonix_core::ros_idl::service_registry::RegisterServiceRequest;
+use robonix_core::ros_idl::skill::RegisterSkillRequest;
+use robonix_core::ros_idl::task::{SubmitTaskRequest, TaskDataRequest};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal;
-use tracing::{error, info, warn};
 
 pub struct Daemon {
     process_manager: Arc<ProcessManager>,
+    ros2_clients: Arc<DaemonRos2Clients>,
     socket_path: PathBuf,
 }
 
@@ -19,6 +30,11 @@ impl Daemon {
     pub async fn new(config: crate::Config) -> Result<Self> {
         let log_dir = config.package_storage_path.join("logs");
         let process_manager = Arc::new(ProcessManager::new(log_dir)?);
+
+        // Initialize ROS2 clients (persistent node)
+        info!("Initializing ROS2 node and service clients...");
+        let ros2_clients = Arc::new(DaemonRos2Clients::new().await?);
+        info!("ROS2 node and service clients initialized");
 
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
         let socket_dir = home_dir.join(".robonix");
@@ -37,6 +53,7 @@ impl Daemon {
 
         Ok(Self {
             process_manager,
+            ros2_clients,
             socket_path,
         })
     }
@@ -64,8 +81,11 @@ impl Daemon {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let process_manager = self.process_manager.clone();
+                    let ros2_clients = self.ros2_clients.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_client(stream, process_manager).await {
+                        if let Err(e) =
+                            Self::handle_client(stream, process_manager, ros2_clients).await
+                        {
                             error!("Error handling client: {}", e);
                         }
                     });
@@ -80,6 +100,7 @@ impl Daemon {
     async fn handle_client(
         mut stream: UnixStream,
         process_manager: Arc<ProcessManager>,
+        ros2_clients: Arc<DaemonRos2Clients>,
     ) -> Result<()> {
         // Read command length
         let command_len = match stream.read_u32_le().await {
@@ -169,6 +190,61 @@ impl Daemon {
                 DaemonResponse::Status(status)
             }
             DaemonCommand::Ping => DaemonResponse::Ok("pong".to_string()),
+            DaemonCommand::CallRegisterPrimitive { request } => {
+                match serde_json::from_str::<RegisterPrimitiveRequest>(&request) {
+                    Ok(req) => match ros2_clients.call_register_primitive(req).await {
+                        Ok(resp) => DaemonResponse::RegisterPrimitiveResponse {
+                            response: serde_json::to_string(&resp)?,
+                        },
+                        Err(e) => DaemonResponse::Error(format!("Service call failed: {}", e)),
+                    },
+                    Err(e) => DaemonResponse::Error(format!("Invalid request: {}", e)),
+                }
+            }
+            DaemonCommand::CallRegisterService { request } => {
+                match serde_json::from_str::<RegisterServiceRequest>(&request) {
+                    Ok(req) => match ros2_clients.call_register_service(req).await {
+                        Ok(resp) => DaemonResponse::RegisterServiceResponse {
+                            response: serde_json::to_string(&resp)?,
+                        },
+                        Err(e) => DaemonResponse::Error(format!("Service call failed: {}", e)),
+                    },
+                    Err(e) => DaemonResponse::Error(format!("Invalid request: {}", e)),
+                }
+            }
+            DaemonCommand::CallRegisterSkill { request } => {
+                match serde_json::from_str::<RegisterSkillRequest>(&request) {
+                    Ok(req) => match ros2_clients.call_register_skill(req).await {
+                        Ok(resp) => DaemonResponse::RegisterSkillResponse {
+                            response: serde_json::to_string(&resp)?,
+                        },
+                        Err(e) => DaemonResponse::Error(format!("Service call failed: {}", e)),
+                    },
+                    Err(e) => DaemonResponse::Error(format!("Invalid request: {}", e)),
+                }
+            }
+            DaemonCommand::CallSubmitTask { request } => {
+                match serde_json::from_str::<SubmitTaskRequest>(&request) {
+                    Ok(req) => match ros2_clients.call_submit_task(req).await {
+                        Ok(resp) => DaemonResponse::SubmitTaskResponse {
+                            response: serde_json::to_string(&resp)?,
+                        },
+                        Err(e) => DaemonResponse::Error(format!("Service call failed: {}", e)),
+                    },
+                    Err(e) => DaemonResponse::Error(format!("Invalid request: {}", e)),
+                }
+            }
+            DaemonCommand::CallTaskData { request } => {
+                match serde_json::from_str::<TaskDataRequest>(&request) {
+                    Ok(req) => match ros2_clients.call_task_data(req).await {
+                        Ok(resp) => DaemonResponse::TaskDataResponse {
+                            response: serde_json::to_string(&resp)?,
+                        },
+                        Err(e) => DaemonResponse::Error(format!("Service call failed: {}", e)),
+                    },
+                    Err(e) => DaemonResponse::Error(format!("Invalid request: {}", e)),
+                }
+            }
         };
 
         // Send response

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Daemon Client Module
+//
+// Client for communicating with robonix daemon via Unix domain socket
+
 use anyhow::{Context, Result};
 use dirs;
 use serde::{Deserialize, Serialize};
@@ -21,6 +26,22 @@ pub enum DaemonCommand {
     },
     Status,
     Ping,
+    // Core service calls
+    CallRegisterPrimitive {
+        request: String, // JSON serialized RegisterPrimitiveRequest
+    },
+    CallRegisterService {
+        request: String, // JSON serialized RegisterServiceRequest
+    },
+    CallRegisterSkill {
+        request: String, // JSON serialized RegisterSkillRequest
+    },
+    CallSubmitTask {
+        request: String, // JSON serialized SubmitTaskRequest
+    },
+    CallTaskData {
+        request: String, // JSON serialized TaskDataRequest
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,6 +55,22 @@ pub enum DaemonResponse {
     },
     Error(String),
     Status(Vec<ProcessStatus>),
+    // Core service responses
+    RegisterPrimitiveResponse {
+        response: String, // JSON serialized RegisterPrimitiveResponse
+    },
+    RegisterServiceResponse {
+        response: String, // JSON serialized RegisterServiceResponse
+    },
+    RegisterSkillResponse {
+        response: String, // JSON serialized RegisterSkillResponse
+    },
+    SubmitTaskResponse {
+        response: String, // JSON serialized SubmitTaskResponse
+    },
+    TaskDataResponse {
+        response: String, // JSON serialized TaskDataResponse
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -113,12 +150,54 @@ impl DaemonClient {
         }
     }
 
+    pub async fn get_daemon_pid(&self) -> Result<Option<u32>> {
+        #[cfg(unix)]
+        {
+            // Try to find daemon process by checking socket file's owner or by name
+            let output = std::process::Command::new("pgrep")
+                .arg("-f")
+                .arg("rbnx-daemon")
+                .output();
+
+            match output {
+                Ok(output) if output.status.success() => {
+                    let pid_str_owned = String::from_utf8_lossy(&output.stdout).to_string();
+                    let pid_str = pid_str_owned.trim();
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        return Ok(Some(pid));
+                    }
+                }
+                _ => {}
+            }
+
+            // Alternative: try to get PID from socket file using lsof
+            // This is less reliable but can work if pgrep fails
+            let socket_path_str = self.socket_path.to_string_lossy().to_string();
+            let output = std::process::Command::new("lsof")
+                .arg("-t")
+                .arg(&socket_path_str)
+                .output();
+
+            if let Ok(output) = output {
+                if output.status.success() {
+                    let pid_str_owned = String::from_utf8_lossy(&output.stdout).to_string();
+                    let pid_str = pid_str_owned.trim();
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        return Ok(Some(pid));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     pub async fn ensure_daemon_running(&self) -> Result<()> {
         if !self.is_daemon_running().await {
             // Try to start daemon
-            tracing::info!("Daemon not running, attempting to start...");
+            log::info!("Daemon not running, attempting to start...");
             let daemon_path = Self::find_daemon_executable()?;
-            tracing::info!("Found daemon executable at: {}", daemon_path.display());
+            log::info!("Found daemon executable at: {}", daemon_path.display());
 
             // Start daemon in background
             #[cfg(unix)]

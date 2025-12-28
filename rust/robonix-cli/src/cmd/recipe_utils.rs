@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Recipe Utils Module
+//
+// Recipe utility functions for robonix-cli commands
+
 use crate::{Config, PackageDatabase, RecipeState};
 use anyhow::Result;
 use serde_yaml::Value;

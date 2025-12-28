@@ -35,7 +35,7 @@ package:
   build_script: string      # Optional: build script path (relative to package root, e.g., "rbnx/build.sh"). If omitted, defaults to "rbnx/build.sh"
 
 primitives:
-  - name: string            # Standard primitive name (e.g., prm::arm_move_ee)
+  - name: string            # Standard primitive name (e.g., prm::arm.move.ee)
     input_schema: string    # JSON string: {"argname0":"/topic0", ...}
     output_schema: string   # JSON string: {"argname1":"/topic1", ...}
     metadata: string        # JSON string: metadata for instance filtering (e.g., {"resolution":">=720p"}, {"index":0})
@@ -76,7 +76,7 @@ skills:
 ```
 
 **Important Notes:**
-- **The `name` field for primitive/service is required**: Must specify the standard name in the manifest (e.g., `prm::arm_move_ee`, `spatial_map`) to identify which standard specification the primitive/service conforms to
+- **The `name` field for primitive/service is required**: Must specify the standard name in the manifest (e.g., `prm::arm.move.ee`, `spatial_map`) to identify which standard specification the primitive/service conforms to
 - **Primitives and services must conform to standard specifications**: The system will validate input/output schemas (for primitives) and service types (for services) against the spec during registration
 - **Multiple implementations**: The same package can provide multiple implementations of the same standard primitive/service name. All implementations share the same `provider` (package name), but are distinguished by different `version` values. Version can follow semantic versioning (e.g., "1.0.0") or include suffixes (e.g., "1.0.0-alpha", "2.0.0-beta.1")
 - **Skills are flexible**: Skills do not need to conform to a spec. Skills can be either "basic" (static program) or "rtdl" (RTDL-based). Basic skills require `entry` field, RTDL skills require `skill_dir` and `main_rtdl` fields
@@ -95,7 +95,7 @@ skills:
 - `build_script`: Build script path (optional), relative path to package root, e.g., `rbnx/build.sh`. If omitted, CLI will default to `rbnx/build.sh`. If neither exists, the build command will skip the package
 
 **Primitive Fields:**
-- `name`: Standard primitive name, must start with `prm::`, format is `prm::category.action` (e.g., `prm::arm_move_ee`). Name and schema definitions are defined by the standard specification (spec)
+- `name`: Standard primitive name, must start with `prm::`, format is `prm::category.action` (e.g., `prm::arm.move.ee`). Name and schema definitions are defined by the standard specification (spec)
 - `input_schema`: JSON string mapping input argument names to ROS2 topic channels, e.g., `'{"pose":"/arm/pose_goal"}'`
 - `output_schema`: JSON string mapping output argument names to ROS2 topic channels, e.g., `'{"success":"/arm/status"}'`
 - `metadata`: JSON string for instance filtering, e.g., `'{"resolution":">=720p"}'` or `'{"index":0}'`
@@ -134,7 +134,7 @@ skills:
 
 ```yaml
 primitives:
-  - name: prm::arm_move_ee
+  - name: prm::arm.move.ee
     # Spec definition: INPUT: {"pose":"geometry_msgs/PoseStamped"}, OUTPUT: {"success":"bool"}
     input_schema: '{"pose":"/arm/pose_goal"}'
     output_schema: '{"success":"/arm/status"}'
@@ -143,7 +143,7 @@ primitives:
     start_script: rbnx/start_arm_move.sh
     stop_script: rbnx/stop_arm_move.sh
 
-  - name: prm::arm_move_ee
+  - name: prm::arm.move.ee
     # Another implementation of the same standard primitive
     input_schema: '{"pose":"/arm/pose_goal"}'
     output_schema: '{"success":"/arm/status"}'
@@ -152,14 +152,14 @@ primitives:
     start_script: rbnx/start_arm_move_v2.sh
     stop_script: rbnx/stop_arm_move_v2.sh
 
-  - name: prm::camera_capture
+  - name: prm::camera.capture
     # Spec definition: OUTPUT: {"image":"sensor_msgs/Image"}
     input_schema: '{}'
     output_schema: '{"image":"/camera/image"}'
     metadata: '{"resolution":"720p","index":0}'
     version: 1.0.0
-    start_script: rbnx/start_camera_capture.sh
-    stop_script: rbnx/stop_camera_capture.sh
+    start_script: rbnx/start_camera.capture.sh
+    stop_script: rbnx/stop_camera.capture.sh
 
 services:
   - name: spatial_map
@@ -294,7 +294,7 @@ description: Optional description
 packages:
   - name: package_name
     primitives:                # Optional, if not specified, register all primitives
-      - prm::arm_move_ee
+      - prm::arm.move.ee
     services:                  # Optional, if not specified, register all services
       - spatial_map
     skills:                    # Optional, if not specified, register all skills

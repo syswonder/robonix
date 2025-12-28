@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Unregister Command Module
+//
+// Unregister command implementation for robonix-cli
+
 use crate::{Config, PackageUnregistrar, ProcessManager};
 use anyhow::Result;
 use std::path::PathBuf;

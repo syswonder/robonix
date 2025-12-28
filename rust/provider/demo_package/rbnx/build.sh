@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-License-Identifier: MulanPSL-2.0
+# Build Demo RGB Provider Package Script
+#
 # Build script for demo_rgb_provider package
 # This script is executed by 'rbnx deploy build' command
 # It should compile, install dependencies, or perform any necessary build steps

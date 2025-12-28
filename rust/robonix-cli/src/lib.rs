@@ -1,6 +1,12 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Robonix CLI Library
+//
+// Core library module for robonix-cli
+
 pub mod config;
 pub mod daemon;
 pub mod daemon_client;
+pub mod daemon_ros2;
 pub mod database;
 pub mod install;
 pub mod output;

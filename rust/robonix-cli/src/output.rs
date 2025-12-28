@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Output Module
+//
+// Output formatting and display utilities for robonix-cli
+
 use colored::*;
 use std::io::{self, Write};
 

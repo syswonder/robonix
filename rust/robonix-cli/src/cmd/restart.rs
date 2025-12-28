@@ -1,4 +1,10 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Restart Command Module
+//
+// Restart command implementation for robonix-cli
+
 use super::recipe_utils;
+use super::start::wait_and_register_service;
 use crate::daemon_client::{DaemonClient, DaemonCommand, DaemonResponse};
 use crate::{output, Config};
 use anyhow::Result;
@@ -211,6 +217,35 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
 
                 // Wait a bit more for process to fully start and spawn children
                 tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+                // Sync state to core: wait for service to be available and register it
+                // This tells core that the service is now running and ready
+                // Note: Initial registration happens via 'register' command, this is just state sync
+                if item.package_type == "srv" {
+                    output::sub_step(&format!(
+                        "Syncing service {} state to core...",
+                        item.std_name
+                    ));
+                    if let Err(e) = wait_and_register_service(
+                        &client,
+                        &item.package_name,
+                        &item.std_name,
+                        &config,
+                    )
+                    .await
+                    {
+                        output::warning(&format!(
+                            "Failed to sync service {} state to core: {}",
+                            item.std_name, e
+                        ));
+                    } else {
+                        output::sub_step(&format!(
+                            "Successfully synced service {} state to core",
+                            item.std_name
+                        ));
+                    }
+                }
+                // Note: For primitives and skills, state sync can be added later if needed
 
                 // Get and display process tree
                 #[cfg(unix)]

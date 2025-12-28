@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-License-Identifier: MulanPSL-2.0
+# Start Grasp Move Capability Script
+#
 # Start script for cap::grasp.move
 
 set -e
