@@ -141,5 +141,5 @@ The task plan service generates RTDL code in JSON format:
 
 ## License
 
-Apache-2.0
+MulanPSL-2.0
 

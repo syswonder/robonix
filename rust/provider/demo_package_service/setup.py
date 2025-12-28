@@ -23,9 +23,9 @@ setup(
     ],
     zip_safe=True,
     maintainer='root',
-    maintainer_email='root@todo.todo',
+    maintainer_email='demo@demo.demo',
     description='Demo service provider package with semantic_map and task_plan services',
-    license='Apache-2.0',
+    license='MulanPSL-2.0',
     entry_points={
         'console_scripts': [
             'semantic_map_service = demo_service_provider.semantic_map_service:main',

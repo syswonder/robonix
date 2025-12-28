@@ -5,7 +5,7 @@
   <version>0.1.0</version>
   <description>Robonix SDK service definitions</description>
   <maintainer email="wheatfox17@icloud.com">wheatfox</maintainer>
-  <license>Apache-2.0</license>
+  <license>MulanPSL-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
