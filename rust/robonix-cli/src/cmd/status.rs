@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Status Command Module
+//
+// Status command implementation for robonix-cli
+
 use crate::daemon_client::{DaemonClient, DaemonCommand, DaemonResponse};
 use crate::{Config, PackageDatabase, RecipeState};
 use anyhow::Result;

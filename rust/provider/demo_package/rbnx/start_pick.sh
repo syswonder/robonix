@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-License-Identifier: MulanPSL-2.0
+# Start Pick Skill Script
+#
 # Start script for skl::pick
 
 set -e

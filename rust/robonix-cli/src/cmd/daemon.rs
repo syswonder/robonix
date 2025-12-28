@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Daemon Command Module
+//
+// Daemon command implementation for robonix-cli
+
 use crate::daemon_client::DaemonClient;
 use crate::output;
 use anyhow::{Context, Result};
@@ -23,8 +28,12 @@ pub async fn start() -> Result<()> {
         let mut cmd = std::process::Command::new(&daemon_path);
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
-        cmd.spawn()
+        let child = cmd
+            .spawn()
             .with_context(|| format!("Failed to start daemon: {}", daemon_path.display()))?;
+
+        // Note: We can't get PID from child after detaching, so we'll query it later
+        drop(child);
     }
 
     // Wait a bit for daemon to start
@@ -32,7 +41,11 @@ pub async fn start() -> Result<()> {
 
     // Check if daemon is now running
     if client.is_daemon_running().await {
-        output::check("Daemon started successfully");
+        if let Ok(Some(pid)) = client.get_daemon_pid().await {
+            output::check(&format!("Daemon started successfully, pid: {}", pid));
+        } else {
+            output::check("Daemon started successfully, but we couldn't get the PID");
+        }
     } else {
         anyhow::bail!("Failed to start daemon. Check logs for details.");
     }
@@ -109,7 +122,12 @@ pub async fn status() -> Result<()> {
     let client = DaemonClient::new()?;
 
     if client.is_daemon_running().await {
-        output::info("Daemon status: Running");
+        // Get and display PID
+        if let Ok(Some(pid)) = client.get_daemon_pid().await {
+            output::info(&format!("Daemon status: Running (PID: {})", pid));
+        } else {
+            output::info("Daemon status: Running");
+        }
 
         // Try to ping daemon
         match client

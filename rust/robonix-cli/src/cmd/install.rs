@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Install Command Module
+//
+// Install command implementation for robonix-cli
+
 use crate::{output, Config, PackageInstaller};
 use anyhow::Result;
 use std::path::PathBuf;

@@ -1,5 +1,0 @@
-# TaskResult service (robonix spec)
-string task_id
----
-string result                  # JSON: task result
-

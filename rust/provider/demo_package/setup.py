@@ -1,3 +1,8 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+# Setup Script for Demo RGB Provider Package
+#
+# Setup script for demo_rgb_provider ROS2 package
+
 from setuptools import find_packages, setup
 
 package_name = 'demo_rgb_provider'

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""
-Robonix Python Client - High-level client for Robonix Core services.
-
-This module provides a thread-safe, concurrent client for all Robonix Core services.
-It handles service discovery, connection management, and concurrent request handling.
-"""
+# SPDX-License-Identifier: MulanPSL-2.0
+# Robonix Python Client
+#
+# Robonix Python Client - High-level client for Robonix Core services.
+# This module provides a thread-safe, concurrent client for all Robonix Core services.
+# It handles service discovery, connection management, and concurrent request handling.
 
 import rclpy
 from rclpy.node import Node
@@ -33,7 +33,7 @@ class RobonixClient(Node):
         client = RobonixClient()
         
         # Query a primitive
-        result = client.query_primitive('prm::camera_capture')
+        result = client.query_primitive('prm::camera.capture')
         if result and result.instances:
             instance = result.instances[0]
             print(f"Found primitive: provider={instance.provider}, version={instance.version}")
@@ -170,7 +170,7 @@ class RobonixClient(Node):
         Query primitives by standard name.
         
         Args:
-            name: Standard primitive name (e.g., 'prm::camera_capture')
+            name: Standard primitive name (e.g., 'prm::camera.capture')
             filter: Optional filter dictionary for metadata (e.g., {'resolution': '>=720p'})
             timeout_sec: Timeout in seconds
             
@@ -197,7 +197,7 @@ class RobonixClient(Node):
         Register a primitive.
         
         Args:
-            name: Standard primitive name (e.g., 'prm::camera_capture')
+            name: Standard primitive name (e.g., 'prm::camera.capture')
             input_schema: Input schema mapping argument names to topic channels
             output_schema: Output schema mapping argument names to topic channels
             metadata: Optional metadata dictionary for instance filtering

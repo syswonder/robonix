@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""
-Demo RGB camera package that publishes random color images.
-"""
+# SPDX-License-Identifier: MulanPSL-2.0
+# RGB Publisher
+#
+# Demo RGB camera package that publishes random color images.
+""""""
 
 import rclpy
 from rclpy.node import Node

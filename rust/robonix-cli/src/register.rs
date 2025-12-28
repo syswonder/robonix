@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Register Module
+//
+// Package registration functionality for robonix-cli
+
 use crate::config::Config;
 use crate::database::PackageDatabase;
 use crate::output;
@@ -5,48 +10,17 @@ use crate::process::ProcessManager;
 use crate::recipe::Recipe;
 use crate::recipe_state::RecipeState;
 use anyhow::Result;
-use robonix_core::primitive::primitive::{RegisterPrimitiveRequest, RegisterPrimitiveResponse};
-use robonix_core::service::service::{RegisterServiceRequest, RegisterServiceResponse};
-use robonix_core::skill_library::skill::{RegisterSkillRequest, RegisterSkillResponse};
-use ros2_client::{
-    service::AService, Context, Name, Node, NodeName, NodeOptions, ServiceMapping, ServiceTypeName,
-};
-use rustdds::{policy, QosPolicyBuilder};
+use robonix_core::ros_idl::primitive::{RegisterPrimitiveRequest, RegisterPrimitiveResponse};
+use robonix_core::ros_idl::service_registry::{RegisterServiceRequest, RegisterServiceResponse};
+use robonix_core::ros_idl::skill::{RegisterSkillRequest, RegisterSkillResponse};
 use serde_json;
 use serde_yaml::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 pub struct PackageRegistrar {
     config: Config,
-    node: Arc<Mutex<Option<Node>>>,
-    primitive_client: Arc<
-        Mutex<
-            Option<
-                ros2_client::service::Client<
-                    AService<RegisterPrimitiveRequest, RegisterPrimitiveResponse>,
-                >,
-            >,
-        >,
-    >,
-    service_client: Arc<
-        Mutex<
-            Option<
-                ros2_client::service::Client<
-                    AService<RegisterServiceRequest, RegisterServiceResponse>,
-                >,
-            >,
-        >,
-    >,
-    skill_client: Arc<
-        Mutex<
-            Option<
-                ros2_client::service::Client<AService<RegisterSkillRequest, RegisterSkillResponse>>,
-            >,
-        >,
-    >,
-    process_manager: Arc<ProcessManager>,
+    _process_manager: Arc<ProcessManager>,
 }
 
 impl PackageRegistrar {
@@ -57,109 +31,8 @@ impl PackageRegistrar {
 
         Ok(Self {
             config,
-            node: Arc::new(Mutex::new(None)),
-            primitive_client: Arc::new(Mutex::new(None)),
-            service_client: Arc::new(Mutex::new(None)),
-            skill_client: Arc::new(Mutex::new(None)),
-            process_manager,
+            _process_manager: process_manager,
         })
-    }
-
-    async fn ensure_clients(&self) -> Result<()> {
-        let mut node_guard = self.node.lock().await;
-        let mut primitive_client_guard = self.primitive_client.lock().await;
-        let mut service_client_guard = self.service_client.lock().await;
-        let mut skill_client_guard = self.skill_client.lock().await;
-
-        if node_guard.is_none() {
-            let context = Context::new()
-                .map_err(|e| anyhow::anyhow!("Failed to create ROS2 context: {:?}", e))?;
-
-            let mut node = context
-                .new_node(
-                    NodeName::new("/rbnx", "rbnx_cli").unwrap(),
-                    NodeOptions::new().enable_rosout(false),
-                )
-                .map_err(|e| anyhow::anyhow!("Failed to create ROS2 node: {:?}", e))?;
-
-            // Start spinner in background
-            let spinner = node
-                .spinner()
-                .map_err(|e| anyhow::anyhow!("Failed to get node spinner: {:?}", e))?;
-            tokio::spawn(async move {
-                let _ = spinner.spin().await;
-            });
-
-            // Create service clients
-            let service_qos = QosPolicyBuilder::new()
-                .reliability(policy::Reliability::Reliable {
-                    max_blocking_time: rustdds::Duration::from_millis(100),
-                })
-                .history(policy::History::KeepLast { depth: 1 })
-                .build();
-
-            // Primitive register client
-            let primitive_client = node
-                .create_client::<AService<RegisterPrimitiveRequest, RegisterPrimitiveResponse>>(
-                    ServiceMapping::Enhanced,
-                    &Name::new("/rbnx/prm", "register").unwrap(),
-                    &ServiceTypeName::new("robonix_sdk", "RegisterPrimitive"),
-                    service_qos.clone(),
-                    service_qos.clone(),
-                )
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to create primitive register service client: {:?}",
-                        e
-                    )
-                })?;
-
-            // Service register client
-            let service_client = node
-                .create_client::<AService<RegisterServiceRequest, RegisterServiceResponse>>(
-                    ServiceMapping::Enhanced,
-                    &Name::new("/rbnx/srv", "register").unwrap(),
-                    &ServiceTypeName::new("robonix_sdk", "RegisterService"),
-                    service_qos.clone(),
-                    service_qos.clone(),
-                )
-                .map_err(|e| {
-                    anyhow::anyhow!("Failed to create service register service client: {:?}", e)
-                })?;
-
-            // Skill register client
-            let skill_client = node
-                .create_client::<AService<RegisterSkillRequest, RegisterSkillResponse>>(
-                    ServiceMapping::Enhanced,
-                    &Name::new("/rbnx/skl", "register").unwrap(),
-                    &ServiceTypeName::new("robonix_sdk", "RegisterSkill"),
-                    service_qos.clone(),
-                    service_qos,
-                )
-                .map_err(|e| {
-                    anyhow::anyhow!("Failed to create skill register service client: {:?}", e)
-                })?;
-
-            // Wait for services to be available (with timeout)
-            tracing::debug!("Waiting for register services to be available...");
-            let wait_future = primitive_client.wait_for_service(&node);
-            let timeout_future = tokio::time::sleep(tokio::time::Duration::from_secs(5));
-            tokio::select! {
-                _ = wait_future => {
-                    tracing::debug!("Register services are available");
-                }
-                _ = timeout_future => {
-                    tracing::warn!("Register services not available after 5 seconds, continuing anyway...");
-                }
-            }
-
-            *node_guard = Some(node);
-            *primitive_client_guard = Some(primitive_client);
-            *service_client_guard = Some(service_client);
-            *skill_client_guard = Some(skill_client);
-        }
-
-        Ok(())
     }
 
     pub async fn register_from_recipe(&self, recipe_path: &PathBuf) -> Result<()> {
@@ -240,7 +113,7 @@ impl PackageRegistrar {
     async fn register_primitive(
         &self,
         package_name: &str,
-        package_path: &PathBuf,
+        _package_path: &PathBuf,
         primitive: &Value,
     ) -> Result<()> {
         let name = primitive["name"]
@@ -248,9 +121,6 @@ impl PackageRegistrar {
             .ok_or_else(|| anyhow::anyhow!("Primitive name not found"))?
             .to_string();
 
-        let input_schema_str = primitive["input_schema"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Primitive input_schema not found"))?;
         // Validate JSON but keep as string for ROS2 service
         let input_schema_str = primitive["input_schema"]
             .as_str()
@@ -293,7 +163,7 @@ impl PackageRegistrar {
     async fn register_service(
         &self,
         package_name: &str,
-        package_path: &PathBuf,
+        _package_path: &PathBuf,
         service: &Value,
     ) -> Result<()> {
         let name = service["name"]
@@ -459,41 +329,28 @@ impl PackageRegistrar {
         &self,
         request: RegisterPrimitiveRequest,
     ) -> Result<RegisterPrimitiveResponse> {
-        self.ensure_clients().await?;
+        use crate::daemon_client::{DaemonClient, DaemonCommand, DaemonResponse};
 
-        let client_guard = self.primitive_client.lock().await;
-        let client = client_guard
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Primitive register client not initialized"))?;
+        let daemon_client = DaemonClient::new()?;
+        daemon_client.ensure_daemon_running().await?;
 
-        let node_guard = self.node.lock().await;
-        let _node = node_guard
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("ROS2 node not initialized"))?;
+        let request_json = serde_json::to_string(&request)?;
+        let response = daemon_client
+            .send_command(DaemonCommand::CallRegisterPrimitive {
+                request: request_json,
+            })
+            .await?;
 
-        tracing::info!("Calling primitive register service for: {}", request.name);
-        let call_result = tokio::time::timeout(
-            tokio::time::Duration::from_secs(10),
-            client.async_call_service(request),
-        )
-        .await;
-
-        match call_result {
-            Ok(Ok(response)) => {
-                tracing::info!("Received response: ok={}", response.ok);
-                if !response.ok {
+        match response {
+            DaemonResponse::RegisterPrimitiveResponse { response } => {
+                let resp: RegisterPrimitiveResponse = serde_json::from_str(&response)?;
+                if !resp.ok {
                     anyhow::bail!("Primitive registration failed");
                 }
-                Ok(response)
+                Ok(resp)
             }
-            Ok(Err(e)) => {
-                tracing::error!("Service call error: {:?}", e);
-                anyhow::bail!("Service call error: {:?}", e);
-            }
-            Err(_) => {
-                tracing::error!("Service call timeout after 10 seconds");
-                anyhow::bail!("Service call timeout after 10 seconds");
-            }
+            DaemonResponse::Error(e) => anyhow::bail!("Daemon error: {}", e),
+            _ => anyhow::bail!("Unexpected response type"),
         }
     }
 
@@ -501,41 +358,28 @@ impl PackageRegistrar {
         &self,
         request: RegisterServiceRequest,
     ) -> Result<RegisterServiceResponse> {
-        self.ensure_clients().await?;
+        use crate::daemon_client::{DaemonClient, DaemonCommand, DaemonResponse};
 
-        let client_guard = self.service_client.lock().await;
-        let client = client_guard
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Service register client not initialized"))?;
+        let daemon_client = DaemonClient::new()?;
+        daemon_client.ensure_daemon_running().await?;
 
-        let node_guard = self.node.lock().await;
-        let _node = node_guard
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("ROS2 node not initialized"))?;
+        let request_json = serde_json::to_string(&request)?;
+        let response = daemon_client
+            .send_command(DaemonCommand::CallRegisterService {
+                request: request_json,
+            })
+            .await?;
 
-        tracing::info!("Calling service register service for: {}", request.name);
-        let call_result = tokio::time::timeout(
-            tokio::time::Duration::from_secs(10),
-            client.async_call_service(request),
-        )
-        .await;
-
-        match call_result {
-            Ok(Ok(response)) => {
-                tracing::info!("Received response: ok={}", response.ok);
-                if !response.ok {
+        match response {
+            DaemonResponse::RegisterServiceResponse { response } => {
+                let resp: RegisterServiceResponse = serde_json::from_str(&response)?;
+                if !resp.ok {
                     anyhow::bail!("Service registration failed");
                 }
-                Ok(response)
+                Ok(resp)
             }
-            Ok(Err(e)) => {
-                tracing::error!("Service call error: {:?}", e);
-                anyhow::bail!("Service call error: {:?}", e);
-            }
-            Err(_) => {
-                tracing::error!("Service call timeout after 10 seconds");
-                anyhow::bail!("Service call timeout after 10 seconds");
-            }
+            DaemonResponse::Error(e) => anyhow::bail!("Daemon error: {}", e),
+            _ => anyhow::bail!("Unexpected response type"),
         }
     }
 
@@ -543,45 +387,28 @@ impl PackageRegistrar {
         &self,
         request: RegisterSkillRequest,
     ) -> Result<RegisterSkillResponse> {
-        self.ensure_clients().await?;
+        use crate::daemon_client::{DaemonClient, DaemonCommand, DaemonResponse};
 
-        let client_guard = self.skill_client.lock().await;
-        let client = client_guard
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Skill register client not initialized"))?;
+        let daemon_client = DaemonClient::new()?;
+        daemon_client.ensure_daemon_running().await?;
 
-        let node_guard = self.node.lock().await;
-        let _node = node_guard
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("ROS2 node not initialized"))?;
+        let request_json = serde_json::to_string(&request)?;
+        let response = daemon_client
+            .send_command(DaemonCommand::CallRegisterSkill {
+                request: request_json,
+            })
+            .await?;
 
-        tracing::info!("Calling skill register service for: {}", request.name);
-        let call_result = tokio::time::timeout(
-            tokio::time::Duration::from_secs(10),
-            client.async_call_service(request),
-        )
-        .await;
-
-        match call_result {
-            Ok(Ok(response)) => {
-                tracing::info!(
-                    "Received response: ok={}, skill_id={}",
-                    response.ok,
-                    response.skill_id
-                );
-                if !response.ok {
+        match response {
+            DaemonResponse::RegisterSkillResponse { response } => {
+                let resp: RegisterSkillResponse = serde_json::from_str(&response)?;
+                if !resp.ok {
                     anyhow::bail!("Skill registration failed");
                 }
-                Ok(response)
+                Ok(resp)
             }
-            Ok(Err(e)) => {
-                tracing::error!("Service call error: {:?}", e);
-                anyhow::bail!("Service call error: {:?}", e);
-            }
-            Err(_) => {
-                tracing::error!("Service call timeout after 10 seconds");
-                anyhow::bail!("Service call timeout after 10 seconds");
-            }
+            DaemonResponse::Error(e) => anyhow::bail!("Daemon error: {}", e),
+            _ => anyhow::bail!("Unexpected response type"),
         }
     }
 }

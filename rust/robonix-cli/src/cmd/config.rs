@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Config Command Module
+//
+// Config command implementation for robonix-cli
+
 use crate::Config;
 use anyhow::{Context, Result};
 use colored::*;

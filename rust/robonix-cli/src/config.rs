@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Configuration Module
+//
+// Configuration management for robonix-cli
+
 use anyhow::{Context, Result};
 use dirs;
 use serde::{Deserialize, Serialize};

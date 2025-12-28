@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""
-Demo pick skill that combines vision and grasp capabilities.
-Implements EAIOS skill interface with start_topic and status_topic.
-"""
+# SPDX-License-Identifier: MulanPSL-2.0
+# Pick Skill
+#
+# Demo pick skill that combines vision and grasp capabilities.
+# Implements EAIOS skill interface with start_topic and status_topic.
+""""""
 
 import rclpy
 from rclpy.node import Node
@@ -116,10 +118,10 @@ class PickSkill(Node):
             self._use_fallback_topics()
             return
         
-        # Query prm::camera_capture
-        self.get_logger().info('Querying prm::camera_capture...')
+        # Query prm::camera.capture
+        self.get_logger().info('Querying prm::camera.capture...')
         try:
-            response = self.robonix_client.query_primitive('prm::camera_capture')
+            response = self.robonix_client.query_primitive('prm::camera.capture')
             if response and response.instances:
                 instance = response.instances[0]
                 # Parse output_schema to get image topic
@@ -130,13 +132,13 @@ class PickSkill(Node):
                     self.get_logger().info(f'  Found vision primitive: {self.vision_image_topic}')
         except Exception as e:
             import traceback
-            self.get_logger().error(f'Error querying prm::camera_capture: {e}')
+            self.get_logger().error(f'Error querying prm::camera.capture: {e}')
             self.get_logger().error(f'Traceback:\n{traceback.format_exc()}')
         
-        # Query prm::arm_move_ee
-        self.get_logger().info('Querying prm::arm_move_ee...')
+        # Query prm::arm.move.ee
+        self.get_logger().info('Querying prm::arm.move.ee...')
         try:
-            response = self.robonix_client.query_primitive('prm::arm_move_ee')
+            response = self.robonix_client.query_primitive('prm::arm.move.ee')
             if response and response.instances:
                 instance = response.instances[0]
                 # Parse input_schema and output_schema to get topics
@@ -151,7 +153,7 @@ class PickSkill(Node):
                     self.get_logger().info(f'  Found grasp output topic: {self.grasp_status_topic}')
         except Exception as e:
             import traceback
-            self.get_logger().error(f'Error querying prm::arm_move_ee: {e}')
+            self.get_logger().error(f'Error querying prm::arm.move.ee: {e}')
             self.get_logger().error(f'Traceback:\n{traceback.format_exc()}')
         
         # Use fallback topics if query failed
@@ -201,7 +203,7 @@ class PickSkill(Node):
             self._publish_status(skill_id, 'running', {})
             
             # Step 1: Wait for image from vision primitive
-            self.get_logger().info('Step 1: Waiting for image from prm::camera_capture...')
+            self.get_logger().info('Step 1: Waiting for image from prm::camera.capture...')
             # In real implementation, we would process the image here
             # For demo, we simulate object detection
             
@@ -219,7 +221,7 @@ class PickSkill(Node):
             pose_goal.pose.position.z = 0.1
             pose_goal.pose.orientation.w = 1.0
             
-            self.get_logger().info('Step 3: Sending pose goal to prm::arm_move_ee...')
+            self.get_logger().info('Step 3: Sending pose goal to prm::arm.move.ee...')
             if self.pose_goal_publisher:
                 self.pose_goal_publisher.publish(pose_goal)
             else:

@@ -1,6 +1,8 @@
 #!/bin/bash
+# SPDX-License-Identifier: MulanPSL-2.0
+# Stop Pick Skill Script
+#
 # Stop script for skl::pick
-
 # This script is called to stop the pick skill process
 # CLI will also manage the process by PID, but this script can be used
 # for additional cleanup if needed

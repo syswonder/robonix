@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Process Module
+//
+// Process management for robonix-cli (start/stop/monitor processes)
+
 use anyhow::{Context, Result};
 use dirs;
 use serde::{Deserialize, Serialize};
@@ -129,7 +134,7 @@ impl ProcessManager {
                 let key = format!("{}::{}", process_info.package_type, process_info.std_name);
                 valid_processes.insert(key, process_info);
             } else {
-                tracing::info!(
+                log::info!(
                     "Process {} (PID: {}) is no longer running, removing from state",
                     process_info.std_name,
                     process_info.pid
@@ -209,7 +214,7 @@ impl ProcessManager {
         {
             let processes = self.processes.lock().unwrap();
             if let Some(existing) = processes.get(&key) {
-                tracing::warn!("Process for {} already running, skipping", key);
+                log::warn!("Process for {} already running, skipping", key);
                 // Return existing process info
                 #[cfg(unix)]
                 let (pgid, pids) = {
@@ -275,7 +280,7 @@ impl ProcessManager {
         log_writer.flush().await?;
 
         // Start the process
-        tracing::info!(
+        log::info!(
             "Starting process: {} (script: {})",
             key,
             script_path.display()
@@ -342,16 +347,16 @@ impl ProcessManager {
 
                     while let Ok(Some(line)) = lines.next_line().await {
                         if let Err(e) = file.write_all(line.as_bytes()).await {
-                            tracing::error!("Failed to write stdout to log: {}", e);
+                            log::error!("Failed to write stdout to log: {}", e);
                             break;
                         }
                         if let Err(e) = file.write_all(b"\n").await {
-                            tracing::error!("Failed to write newline: {}", e);
+                            log::error!("Failed to write newline: {}", e);
                             break;
                         }
                         // Flush after each line to ensure immediate persistence
                         if let Err(e) = file.flush().await {
-                            tracing::error!("Failed to flush stdout log: {}", e);
+                            log::error!("Failed to flush stdout log: {}", e);
                             break;
                         }
                     }
@@ -377,20 +382,20 @@ impl ProcessManager {
                         // Add prefix only at the start of each line
                         if is_new_line {
                             if let Err(e) = file.write_all(b"[STDERR] ").await {
-                                tracing::error!("Failed to write stderr prefix: {}", e);
+                                log::error!("Failed to write stderr prefix: {}", e);
                                 break;
                             }
                         }
                         if let Err(e) = file.write_all(line.as_bytes()).await {
-                            tracing::error!("Failed to write stderr to log: {}", e);
+                            log::error!("Failed to write stderr to log: {}", e);
                             break;
                         }
                         if let Err(e) = file.write_all(b"\n").await {
-                            tracing::error!("Failed to write newline: {}", e);
+                            log::error!("Failed to write newline: {}", e);
                             break;
                         }
                         if let Err(e) = file.flush().await {
-                            tracing::error!("Failed to flush stderr log: {}", e);
+                            log::error!("Failed to flush stderr log: {}", e);
                             break;
                         }
                         is_new_line = true;
@@ -407,15 +412,20 @@ impl ProcessManager {
             Ok(Some(status)) => {
                 // Process exited, wait a bit more for log capture to finish
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                // Read and print last part of log file for debugging
+                let log_tail = Self::read_log_tail(&log_file, 20).unwrap_or_default();
+
                 anyhow::bail!(
-                    "Process exited immediately with status: {:?}. Check log: {}",
+                    "Process exited immediately with status: {:?}.\nLog file: {}\nLast log lines:\n{}",
                     status,
-                    log_file.display()
+                    log_file.display(),
+                    log_tail
                 );
             }
             Ok(None) => {
                 // Process is still running, good
-                tracing::info!("Process started successfully: {}", key);
+                log::info!("Process started successfully: {}", key);
             }
             Err(e) => {
                 anyhow::bail!("Failed to check process status: {}", e);
@@ -498,6 +508,35 @@ impl ProcessManager {
         false
     }
 
+    /// Read last N lines from a log file
+    fn read_log_tail(log_file: &Path, lines: usize) -> Result<String> {
+        use std::fs::File;
+        use std::io::{BufRead, BufReader};
+
+        if !log_file.exists() {
+            return Ok(format!("Log file does not exist: {}", log_file.display()));
+        }
+
+        let file = File::open(log_file)
+            .with_context(|| format!("Failed to open log file: {}", log_file.display()))?;
+
+        let reader = BufReader::new(file);
+        let all_lines: Vec<String> = reader
+            .lines()
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| format!("Failed to read log file: {}", log_file.display()))?;
+
+        // Get last N lines
+        let start = if all_lines.len() > lines {
+            all_lines.len() - lines
+        } else {
+            0
+        };
+
+        let tail_lines = &all_lines[start..];
+        Ok(tail_lines.join("\n"))
+    }
+
     /// Kill a process group (more efficient than killing individual processes)
     #[cfg(unix)]
     fn kill_process_tree(&self, pid: u32) -> Result<()> {
@@ -515,7 +554,7 @@ impl ProcessManager {
                 let pgid_obj = Pid::from_raw(gid as i32);
                 // List all processes in the group before killing
                 if let Ok(pids) = Self::get_processes_in_group(gid) {
-                    tracing::info!(
+                    log::info!(
                         "Stopping process group {} (root PID: {}): found {} processes: {:?}",
                         gid,
                         pid,
@@ -523,24 +562,24 @@ impl ProcessManager {
                         pids
                     );
                 } else {
-                    tracing::info!("Stopping process group {} (root PID: {})", gid, pid);
+                    log::info!("Stopping process group {} (root PID: {})", gid, pid);
                 }
                 pgid_obj
             }
             Err(_) => {
                 // Fallback: assume PGID equals PID (true if we used setsid)
-                tracing::warn!(
+                log::warn!(
                     "Could not get process group ID for PID {}, assuming PGID=PID",
                     pid
                 );
-                tracing::info!("Stopping process (PID: {}, assumed PGID: {})", pid, pid);
+                log::info!("Stopping process (PID: {}, assumed PGID: {})", pid, pid);
                 pid_obj
             }
         };
 
         // First, send SIGTERM to the entire process group
         if let Err(e) = killpg(pgid, Signal::SIGTERM) {
-            tracing::warn!("Failed to send SIGTERM to process group {}: {:?}", pgid, e);
+            log::warn!("Failed to send SIGTERM to process group {}: {:?}", pgid, e);
             // Fallback: try killing the process directly
             let _ = kill(pid_obj, Signal::SIGTERM);
         }
@@ -567,7 +606,7 @@ impl ProcessManager {
                 }
 
                 if !still_alive.is_empty() {
-                    tracing::info!(
+                    log::info!(
                         "Process group still has {} processes alive, sending SIGKILL",
                         still_alive.len()
                     );
@@ -775,7 +814,7 @@ impl ProcessManager {
         };
 
         if let Some(process_info) = process_info {
-            tracing::info!("Stopping process: {} (PID: {})", key, process_info.pid);
+            log::info!("Stopping process: {} (PID: {})", key, process_info.pid);
 
             // Get process group information before killing
             #[cfg(unix)]
@@ -792,7 +831,7 @@ impl ProcessManager {
 
             // Kill the process tree (parent + all children)
             if let Err(e) = self.kill_process_tree(process_info.pid) {
-                tracing::warn!(
+                log::warn!(
                     "Failed to kill process tree for PID {}: {:?}",
                     process_info.pid,
                     e
@@ -832,7 +871,7 @@ impl ProcessManager {
                 let _ = file.write_all(stop_msg.as_bytes()).await;
             }
 
-            tracing::info!("Process stopped: {}", key);
+            log::info!("Process stopped: {}", key);
 
             // Save state to persistent storage (lock is already dropped, so this is safe)
             self.save_state()?;
@@ -843,7 +882,7 @@ impl ProcessManager {
                 pids,
             })
         } else {
-            tracing::warn!("Process not found: {}", key);
+            log::warn!("Process not found: {}", key);
             anyhow::bail!("Process not found: {}", key)
         }
     }

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Robonix CLI Main Entry
+//
+// Main entry point for robonix-cli command-line tool
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use robonix_cli::*;
@@ -14,14 +19,9 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new("info")
-                    .add_directive("rustdds=off".parse().unwrap())
-                    .add_directive("ros2_client=warn".parse().unwrap())
-            }),
-        )
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .filter_module("rustdds", log::LevelFilter::Off)
+        .filter_module("ros2_client", log::LevelFilter::Warn)
         .init();
 
     let cli = Cli::parse();

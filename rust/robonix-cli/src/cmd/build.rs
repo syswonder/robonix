@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Build Command Module
+//
+// Build command implementation for robonix-cli
+
 use super::recipe_utils;
 use crate::{output, Config, PackageDatabase};
 use anyhow::{Context, Result};

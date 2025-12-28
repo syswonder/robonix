@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Install Module
+//
+// Package installation functionality for robonix-cli
+
 use crate::config::Config;
 use crate::database::{PackageDatabase, PackageInfo, PackageSource};
 use crate::output;

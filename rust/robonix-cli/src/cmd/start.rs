@@ -1,7 +1,18 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Start Command Module
+//
+// Start command implementation for robonix-cli
+
 use super::recipe_utils;
 use crate::daemon_client::{DaemonClient, DaemonCommand, DaemonResponse};
-use crate::{output, Config};
+use crate::database::PackageDatabase;
+use crate::output;
+use crate::Config;
 use anyhow::Result;
+use robonix_core::ros_idl::service_registry::RegisterServiceRequest;
+use serde_yaml::Value;
+use std::process::Command;
+use std::time::Duration;
 
 pub async fn execute(config: Config, target: String) -> Result<()> {
     // Ensure daemon is running
@@ -97,6 +108,35 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
                 // Wait a bit more for process to fully start and spawn children
                 tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
+                // Sync state to core: wait for service to be available and register it
+                // This tells core that the service is now running and ready
+                // Note: Initial registration happens via 'register' command, this is just state sync
+                if item.package_type == "srv" {
+                    output::sub_step(&format!(
+                        "Syncing service {} state to core...",
+                        item.std_name
+                    ));
+                    if let Err(e) = wait_and_register_service(
+                        &client,
+                        &item.package_name,
+                        &item.std_name,
+                        &config,
+                    )
+                    .await
+                    {
+                        output::warning(&format!(
+                            "Failed to sync service {} state to core: {}",
+                            item.std_name, e
+                        ));
+                    } else {
+                        output::sub_step(&format!(
+                            "Successfully synced service {} state to core",
+                            item.std_name
+                        ));
+                    }
+                }
+                // Note: For primitives and skills, state sync can be added later if needed
+
                 // Get and display process tree
                 #[cfg(unix)]
                 {
@@ -162,4 +202,129 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
     ));
 
     Ok(())
+}
+
+/// Wait for ROS2 service to be available and register it to core
+pub async fn wait_and_register_service(
+    client: &DaemonClient,
+    package_name: &str,
+    service_name: &str,
+    config: &Config,
+) -> Result<()> {
+    // Load package database to get manifest path
+    let db = PackageDatabase::load(&config.package_storage_path)?;
+    let pkg_info = db
+        .find_by_name(package_name)
+        .ok_or_else(|| anyhow::anyhow!("Package not found: {}", package_name))?;
+
+    // Load manifest to get service entry
+    let manifest_content = std::fs::read_to_string(&pkg_info.manifest_path)?;
+    let manifest: Value = serde_yaml::from_str(&manifest_content)?;
+
+    // Find service in manifest
+    let service = find_service_in_manifest(&manifest, service_name)?
+        .ok_or_else(|| anyhow::anyhow!("Service {} not found in manifest", service_name))?;
+
+    let entry = service["entry"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Service entry not found"))?;
+
+    // Wait for ROS2 service to be available (check via ros2 service list)
+    output::sub_step(&format!("Waiting for service {} to be available...", entry));
+    let max_wait = Duration::from_secs(30);
+    let check_interval = Duration::from_millis(500);
+    let start_time = std::time::Instant::now();
+
+    let sdk_path = config
+        .robonix_sdk_path
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("robonix_sdk_path not configured"))?;
+
+    while start_time.elapsed() < max_wait {
+        // Check if service is available using ros2 service list
+        // Use bash -c to source SDK and run ros2 command
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "source {}/install/setup.bash && ros2 service list",
+                sdk_path.display()
+            ))
+            .output();
+
+        if let Ok(output) = output {
+            if let Ok(service_list) = String::from_utf8(output.stdout) {
+                if service_list.lines().any(|line| line.trim() == entry) {
+                    output::sub_step(&format!("Service {} is available", entry));
+                    break;
+                }
+            }
+        }
+
+        tokio::time::sleep(check_interval).await;
+    }
+
+    if start_time.elapsed() >= max_wait {
+        return Err(anyhow::anyhow!(
+            "Service {} did not become available within 30 seconds",
+            entry
+        ));
+    }
+
+    // Register service to core (this is the second registration to update status to "started")
+    let srv_type = service["srv_type"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Service srv_type not found"))?
+        .to_string();
+
+    let metadata_str = service["metadata"].as_str().unwrap_or("{}");
+    serde_json::from_str::<serde_json::Value>(metadata_str)
+        .map_err(|e| anyhow::anyhow!("Invalid metadata JSON: {}", e))?;
+
+    let version = service["version"].as_str().unwrap_or("1.0.0").to_string();
+
+    output::sub_step(&format!(
+        "Registering service {} to core to update status to 'started'...",
+        service_name
+    ));
+
+    let request = RegisterServiceRequest {
+        name: service_name.to_string(),
+        srv_type,
+        entry: entry.to_string(),
+        metadata: metadata_str.to_string(),
+        provider: package_name.to_string(),
+        version,
+    };
+
+    let request_json = serde_json::to_string(&request)?;
+    let response = client
+        .send_command(DaemonCommand::CallRegisterService {
+            request: request_json,
+        })
+        .await?;
+
+    match response {
+        DaemonResponse::RegisterServiceResponse { response: _ } => {
+            output::sub_step(&format!(
+                "Synced service {} state to core (service is now available)",
+                service_name
+            ));
+            Ok(())
+        }
+        DaemonResponse::Error(e) => Err(anyhow::anyhow!("State sync failed: {}", e)),
+        _ => Err(anyhow::anyhow!("Unexpected response from daemon")),
+    }
+}
+
+fn find_service_in_manifest<'a>(manifest: &'a Value, name: &str) -> Result<Option<&'a Value>> {
+    if let Some(services) = manifest["services"].as_sequence() {
+        for service in services {
+            if let Some(service_name) = service["name"].as_str() {
+                if service_name == name {
+                    return Ok(Some(service));
+                }
+            }
+        }
+    }
+    Ok(None)
 }

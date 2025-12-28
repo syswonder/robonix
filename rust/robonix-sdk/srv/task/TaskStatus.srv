@@ -1,5 +1,0 @@
-# TaskStatus service (robonix spec)
-string task_id
----
-string status                  # pending / planning / running / finished
-

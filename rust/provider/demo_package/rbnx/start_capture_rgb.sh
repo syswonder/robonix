@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-License-Identifier: MulanPSL-2.0
+# Start Capture RGB Capability Script
+#
 # Start script for cap::vision.capture_rgb
 
 set -e

@@ -19,7 +19,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/BoundingBox.msg"
   "msg/Point3D.msg"
   "msg/FrameMapping.msg"
-  "msg/Entity.msg"
+  "msg/Object.msg"
   "msg/SpatialMapEntry.msg"
   "msg/Dict.msg"
   "msg/Occupancy3D.msg"
@@ -44,8 +44,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/skill/QuerySkill.srv"
   # Task services
   "srv/task/SubmitTask.srv"
-  "srv/task/TaskStatus.srv"
-  "srv/task/TaskResult.srv"
+  "srv/task/TaskData.srv"
   # Test services
   "srv/PingPong.srv"
   DEPENDENCIES

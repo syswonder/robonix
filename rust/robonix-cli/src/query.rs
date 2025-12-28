@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Query Module
+//
+// Package query functionality for robonix-cli
+
 use crate::config::Config;
 use crate::database::PackageDatabase;
 use anyhow::Result;

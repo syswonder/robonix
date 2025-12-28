@@ -9,6 +9,10 @@
 
 pub mod skill;
 
+use crate::ros_idl::skill::{
+    QuerySkillRequest, QuerySkillResponse, RegisterSkillRequest, RegisterSkillResponse,
+    SkillInstance,
+};
 use skill::SkillRegistry;
 use std::sync::Arc;
 
@@ -28,18 +32,15 @@ impl SkillLibrary {
         self.registry.clone()
     }
 
-    pub async fn register_skill(
-        &self,
-        req: skill::RegisterSkillRequest,
-    ) -> skill::RegisterSkillResponse {
+    pub async fn register_skill(&self, req: RegisterSkillRequest) -> RegisterSkillResponse {
         self.registry.register(req).await
     }
 
-    pub async fn query_skill(&self, req: skill::QuerySkillRequest) -> skill::QuerySkillResponse {
+    pub async fn query_skill(&self, req: QuerySkillRequest) -> QuerySkillResponse {
         self.registry.query(req).await
     }
 
-    pub async fn get_skill(&self, skill_id: &str) -> Option<skill::SkillInstance> {
+    pub async fn get_skill(&self, skill_id: &str) -> Option<SkillInstance> {
         self.registry.get_skill_by_id(skill_id).await
     }
 

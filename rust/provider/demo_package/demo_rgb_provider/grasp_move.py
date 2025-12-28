@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""
-Demo grasp move capability package.
-Subscribes to pose goals and publishes status.
-"""
+# SPDX-License-Identifier: MulanPSL-2.0
+# Grasp Move Capability
+#
+# Demo grasp move capability package.
+# Subscribes to pose goals and publishes status.
+""""""
 
 import rclpy
 from rclpy.node import Node

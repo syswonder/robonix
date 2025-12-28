@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Core Module
+//
+// Core coordination module for robonix-core
+
 use crate::primitive::PrimitiveRegistry;
 use crate::service::ServiceRegistry;
 use crate::skill_library::SkillLibrary;
