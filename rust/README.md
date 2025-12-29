@@ -86,7 +86,7 @@ robonix-core
 
 # Show debug messages for robonix-core module
 RUST_LOG=robonix_core=debug robonix-core
-# Show debug messages for all modules
+# Show debug messages for all modules, you can see rustdds logs too for example
 RUST_LOG=debug robonix-core
 # Show debug for task_manager only
 RUST_LOG=robonix_core::task_manager=debug robonix-core

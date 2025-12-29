@@ -5,8 +5,8 @@
 // Currently supports simple list-style RTDL (skill invocation list)
 
 use crate::skill_library::SkillLibrary;
-use crate::task_manager::context::TaskContext;
 use crate::task_manager::exception::{ExceptionHandler, ExceptionType, RecoveryAction};
+use crate::task_manager::task::Task;
 use log::{debug, error, info, warn};
 use serde_json::Value;
 use std::sync::Arc;
@@ -110,30 +110,30 @@ impl RtdlExecutor {
     /// Execute a single RTDL instruction
     pub async fn execute_instruction(
         &self,
-        context: &mut TaskContext,
+        task: &mut Task,
         instruction: &RtdlInstruction,
     ) -> Result<(), ExceptionType> {
         debug!(
             "executing instruction: task_id={}, object_id={}, type={}, name={}, params={:?}",
-            context.task_id,
+            task.task_id,
             instruction.object_id,
             instruction.instruction_type,
             instruction.name,
             instruction.params
         );
         debug!(
-            "task {} context before instruction: state={:?}, retry_count={}, instruction_pointer={}",
-            context.task_id,
-            context.execution_state,
-            context.retry_count,
-            context.rtdl_instruction_pointer
+            "task {} before instruction: state={:?}, retry_count={}, instruction_pointer={}",
+            task.task_id,
+            task.state,
+            task.context.retry_count,
+            task.context.rtdl_instruction_pointer
         );
 
         match instruction.instruction_type.as_str() {
             "skill" => {
                 debug!("dispatching to skill execution handler");
                 let result = self
-                    .execute_skill(context, &instruction.name, &instruction.params)
+                    .execute_skill(task, &instruction.name, &instruction.params)
                     .await;
                 match &result {
                     Ok(_) => debug!("skill execution succeeded"),
@@ -171,7 +171,7 @@ impl RtdlExecutor {
     /// Execute a skill instruction
     async fn execute_skill(
         &self,
-        context: &mut TaskContext,
+        task: &mut Task,
         skill_name: &str,
         params: &Value,
     ) -> Result<(), ExceptionType> {
@@ -207,7 +207,7 @@ impl RtdlExecutor {
         // For now, we'll simulate skill execution
         info!(
             "executing skill: task_id={}, skill_name={}, skill_id={}",
-            context.task_id, skill_name, skill_instance.skill_id
+            task.task_id, skill_name, skill_instance.skill_id
         );
 
         debug!("skill execution params: {:?}", params);
@@ -225,23 +225,25 @@ impl RtdlExecutor {
     }
 
     /// Execute RTDL program step by step
-    pub async fn execute_step(&self, context: &mut TaskContext) -> Result<ExecutionResult, String> {
-        debug!("execute_step called for task {}", context.task_id);
+    pub async fn execute_step(&self, task: &mut Task) -> Result<ExecutionResult, String> {
+        debug!("execute_step called for task {}", task.task_id);
 
         // Parse RTDL if not already parsed
-        let rtdl = context
+        let rtdl = task
+            .context
             .rtdl
             .as_ref()
             .ok_or_else(|| "RTDL not set".to_string())?;
-        let rtdl_type = context
+        let rtdl_type = task
+            .context
             .rtdl_type
             .as_ref()
             .ok_or_else(|| "RTDL type not set".to_string())?;
 
         debug!(
             "executing step for task {}: instruction_pointer={}, rtdl_type={}, rtdl_length={}",
-            context.task_id,
-            context.rtdl_instruction_pointer,
+            task.task_id,
+            task.context.rtdl_instruction_pointer,
             rtdl_type,
             rtdl.len()
         );
@@ -250,51 +252,55 @@ impl RtdlExecutor {
         debug!(
             "parsed {} instructions for task {}",
             instructions.len(),
-            context.task_id
+            task.task_id
         );
 
         // Check if we've completed all instructions
-        if context.rtdl_instruction_pointer >= instructions.len() {
+        if task.context.rtdl_instruction_pointer >= instructions.len() {
             debug!(
                 "task {} completed all instructions ({}/{})",
-                context.task_id,
-                context.rtdl_instruction_pointer,
+                task.task_id,
+                task.context.rtdl_instruction_pointer,
                 instructions.len()
             );
             return Ok(ExecutionResult::Completed);
         }
 
         // Execute current instruction
-        let instruction = &instructions[context.rtdl_instruction_pointer];
+        let instruction = &instructions[task.context.rtdl_instruction_pointer];
         debug!(
             "executing instruction {}/{} for task {}: object_id={}, type={}, name={}, params={:?}",
-            context.rtdl_instruction_pointer + 1,
+            task.context.rtdl_instruction_pointer + 1,
             instructions.len(),
-            context.task_id,
+            task.task_id,
             instruction.object_id,
             instruction.instruction_type,
             instruction.name,
             instruction.params
         );
 
-        match self.execute_instruction(context, instruction).await {
+        match self.execute_instruction(task, instruction).await {
             Ok(()) => {
                 debug!(
                     "instruction {} succeeded for task {}",
-                    context.rtdl_instruction_pointer, context.task_id
+                    task.context.rtdl_instruction_pointer, task.task_id
                 );
                 // Instruction succeeded, advance pointer
-                context.advance_instruction_pointer();
+                task.context.advance_instruction_pointer();
+                task.updated_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as u64;
 
                 // Check if we've completed all instructions
-                if context.rtdl_instruction_pointer >= instructions.len() {
-                    debug!("task {} completed all instructions", context.task_id);
+                if task.context.rtdl_instruction_pointer >= instructions.len() {
+                    debug!("task {} completed all instructions", task.task_id);
                     Ok(ExecutionResult::Completed)
                 } else {
                     debug!(
                         "task {} has more instructions to execute ({}/{})",
-                        context.task_id,
-                        context.rtdl_instruction_pointer,
+                        task.task_id,
+                        task.context.rtdl_instruction_pointer,
                         instructions.len()
                     );
                     Ok(ExecutionResult::InProgress)
@@ -303,24 +309,31 @@ impl RtdlExecutor {
             Err(exception_type) => {
                 debug!(
                     "instruction {} failed for task {}: {:?}",
-                    context.rtdl_instruction_pointer, context.task_id, exception_type
+                    task.context.rtdl_instruction_pointer, task.task_id, exception_type
                 );
                 // Handle exception
                 let error_msg = format!(
                     "Instruction {} failed: type={}, name={}",
-                    context.rtdl_instruction_pointer,
+                    task.context.rtdl_instruction_pointer,
                     instruction.instruction_type,
                     instruction.name
                 );
 
-                let recovery_action =
-                    self.exception_handler
-                        .handle_exception(context, exception_type, error_msg);
+                let recovery_action = self.exception_handler.handle_exception(
+                    &mut task.context,
+                    exception_type,
+                    error_msg,
+                );
 
                 debug!(
                     "recovery action for task {}: {:?}, retry_count={}",
-                    context.task_id, recovery_action, context.retry_count
+                    task.task_id, recovery_action, task.context.retry_count
                 );
+
+                task.updated_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as u64;
 
                 Ok(ExecutionResult::Exception(recovery_action))
             }

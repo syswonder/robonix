@@ -3,7 +3,7 @@
 //
 // Manages task lifecycle and state.
 
-use log::{debug, info};
+use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,9 +16,118 @@ pub enum TaskState {
     Pending,   // Task created, waiting for processing
     Planning,  // Task planning phase
     Running,   // Task execution phase
+    Suspended, // Task suspended (preempted by higher priority task)
     Finished,  // Task completed successfully
     Failed,    // Task failed
     Cancelled, // Task cancelled
+}
+
+/// Task Context - Runtime execution context for a task
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskContext {
+    // Priority for scheduling
+    pub priority: i32, // Higher number = higher priority (for preemption)
+
+    // Object graph from semantic map (updated periodically)
+    pub object_graph: serde_json::Value,
+    pub object_graph_updated_at: u64, // Unix timestamp in nanoseconds
+
+    // RTDL program from task planning
+    pub rtdl: Option<String>,            // RTDL code
+    pub rtdl_type: Option<String>,       // RTDL style (e.g., "list")
+    pub rtdl_instruction_pointer: usize, // Current instruction index in RTDL
+
+    // Exception handling
+    pub last_exception: Option<String>,
+    pub retry_count: u32,
+}
+
+impl TaskContext {
+    pub fn new(priority: i32) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
+        Self {
+            priority,
+            object_graph: serde_json::json!([]), // Empty array initially
+            object_graph_updated_at: now,
+            rtdl: None,
+            rtdl_type: None,
+            rtdl_instruction_pointer: 0,
+            last_exception: None,
+            retry_count: 0,
+        }
+    }
+
+    /// Update object graph from semantic map service
+    pub fn update_object_graph(&mut self, object_graph: serde_json::Value) {
+        let old_obj_count = if let Some(arr) = self.object_graph.as_array() {
+            arr.len()
+        } else {
+            0
+        };
+        let new_obj_count = if let Some(arr) = object_graph.as_array() {
+            arr.len()
+        } else {
+            0
+        };
+
+        debug!(
+            "updating object graph: {} -> {} objects",
+            old_obj_count, new_obj_count
+        );
+
+        self.object_graph = object_graph;
+        self.object_graph_updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+    }
+
+    /// Set RTDL program from task planning
+    pub fn set_rtdl(&mut self, rtdl: String, rtdl_type: String) {
+        debug!(
+            "setting RTDL: type={}, length={} chars",
+            rtdl_type,
+            rtdl.len()
+        );
+        self.rtdl = Some(rtdl);
+        self.rtdl_type = Some(rtdl_type);
+        self.rtdl_instruction_pointer = 0; // Reset instruction pointer
+    }
+
+    /// Advance instruction pointer
+    pub fn advance_instruction_pointer(&mut self) {
+        let old_pointer = self.rtdl_instruction_pointer;
+        self.rtdl_instruction_pointer += 1;
+        debug!(
+            "instruction pointer advanced: {} -> {}",
+            old_pointer, self.rtdl_instruction_pointer
+        );
+    }
+
+    /// Set instruction pointer (for resuming after preemption)
+    pub fn set_instruction_pointer(&mut self, pointer: usize) {
+        self.rtdl_instruction_pointer = pointer;
+    }
+
+    /// Record exception
+    pub fn record_exception(&mut self, exception: String) {
+        let old_retry_count = self.retry_count;
+        self.last_exception = Some(exception.clone());
+        self.retry_count += 1;
+        debug!(
+            "exception recorded: retry_count {} -> {}, exception: {}",
+            old_retry_count, self.retry_count, exception
+        );
+    }
+
+    /// Clear exception
+    pub fn clear_exception(&mut self) {
+        self.last_exception = None;
+    }
 }
 
 // Task structure
@@ -32,6 +141,51 @@ pub struct Task {
     pub error_message: Option<String>,
     pub created_at: u64, // Unix timestamp in nanoseconds
     pub updated_at: u64,
+
+    // Execution context
+    pub context: TaskContext,
+}
+
+impl Task {
+    pub fn new(
+        task_id: String,
+        description: String,
+        params: serde_json::Value,
+        priority: i32,
+    ) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
+        Self {
+            task_id,
+            description,
+            params,
+            state: TaskState::Pending,
+            result: None,
+            error_message: None,
+            created_at: now,
+            updated_at: now,
+            context: TaskContext::new(priority),
+        }
+    }
+
+    /// Transition state
+    pub fn transition_state(&mut self, new_state: TaskState) {
+        let old_state = self.state.clone();
+        if old_state != new_state {
+            debug!(
+                "task {} state transition: {:?} -> {:?}",
+                self.task_id, old_state, new_state
+            );
+        }
+        self.state = new_state;
+        self.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+    }
 }
 
 /// Task Store - Manages task storage and lifecycle
@@ -49,52 +203,26 @@ impl TaskStore {
     }
 
     /// Create a new task from description and optional parameters
-    pub async fn create_task(&self, description: String, params: serde_json::Value) -> String {
+    pub async fn create_task(
+        &self,
+        description: String,
+        params: serde_json::Value,
+        priority: i32,
+    ) -> String {
         let counter = self.task_counter.fetch_add(1, Ordering::SeqCst);
         let task_id = format!("task_{}", counter);
         debug!(
-            "creating new task: task_id={}, counter={}",
-            task_id, counter
+            "creating new task: task_id={}, counter={}, priority={}",
+            task_id, counter, priority
         );
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-
-        let param_keys: Vec<String> = params
-            .as_object()
-            .map(|o| o.keys().cloned().collect())
-            .unwrap_or_default();
-        debug!(
-            "task {} params: {} keys, description_length={}",
-            task_id,
-            param_keys.len(),
-            description.len()
-        );
-
-        let task = Task {
-            task_id: task_id.clone(),
-            description: description.clone(),
-            params: params.clone(),
-            state: TaskState::Pending,
-            result: None,
-            error_message: None,
-            created_at: now,
-            updated_at: now,
-        };
+        let task = Task::new(task_id.clone(), description, params, priority);
 
         let mut tasks = self.tasks.write().await;
         let old_size = tasks.len();
         tasks.insert(task_id.clone(), task);
         let new_size = tasks.len();
         debug!("task store size: {} -> {}", old_size, new_size);
-
-        info!("created new task: task_id={}", task_id);
-        debug!(
-            "task {} created successfully: created_at={}, state=Pending",
-            task_id, now
-        );
         task_id
     }
 
@@ -120,34 +248,18 @@ impl TaskStore {
         result
     }
 
-    /// Update task state
-    pub async fn update_task_state(
-        &self,
-        task_id: &str,
-        state: TaskState,
-        error_message: Option<String>,
-    ) -> bool {
-        debug!(
-            "updating task state: task_id={}, new_state={:?}, error_message={:?}",
-            task_id, state, error_message
-        );
-
+    /// Update task with a closure
+    pub async fn update_task<F>(&self, task_id: &str, f: F) -> bool
+    where
+        F: FnOnce(&mut Task),
+    {
+        debug!("updating task: task_id={}", task_id);
         let mut tasks = self.tasks.write().await;
         if let Some(task) = tasks.get_mut(task_id) {
-            let old_state = task.state.clone();
-            task.state = state.clone();
-            task.error_message = error_message.clone();
-            task.updated_at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as u64;
-            debug!(
-                "task {} state updated: {:?} -> {:?}",
-                task_id, old_state, state
-            );
+            f(task);
             true
         } else {
-            debug!("task {} not found, cannot update state", task_id);
+            debug!("task {} not found, cannot update", task_id);
             false
         }
     }

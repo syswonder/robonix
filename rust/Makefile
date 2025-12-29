@@ -3,12 +3,15 @@
 #
 # Convenient commands for building and running Robonix components
 
-.PHONY: help build build-cli build-core build-sdk install install-cli install-core source-sdk env clean test check setup-dev fmt
+.PHONY: help build build-cli build-core build-sdk debug release install install-cli install-core source-sdk env clean test check setup-dev fmt
 .DEFAULT_GOAL := help
 
 # Default ROS2 distribution (can be overridden)
 ROS2_DISTRO ?= humble
 ROS2_SETUP ?= /opt/ros/$(ROS2_DISTRO)/setup.bash
+
+# Build mode: debug (default) or release
+BUILD_MODE ?= debug
 
 # Paths
 RUST_DIR := $(shell pwd)
@@ -22,10 +25,13 @@ help:
 	@echo "Robonix Makefile - Available commands:"
 	@echo ""
 	@echo "Build commands:"
-	@echo "  make build          - Build robonix-cli and robonix-core"
-	@echo "  make build-cli      - Build robonix-cli only"
-	@echo "  make build-core     - Build robonix-core only"
+	@echo "  make build          - Build robonix-cli and robonix-core (default: debug mode)"
+	@echo "  make debug          - Build in debug mode (default)"
+	@echo "  make release        - Build in release mode"
+	@echo "  make build-cli      - Build robonix-cli only (uses BUILD_MODE, default: debug)"
+	@echo "  make build-core     - Build robonix-core only (uses BUILD_MODE, default: debug)"
 	@echo "  make build-sdk      - Build robonix-sdk ROS2 interface package"
+	@echo "  Note: Set BUILD_MODE=release to build in release mode, or use 'make release'"
 	@echo ""
 	@echo "Install commands:"
 	@echo "  make install        - Install robonix-cli and robonix-core binaries via cargo install"
@@ -50,19 +56,34 @@ help:
 	@echo "  rbnx package list"
 	@echo "  eval \$$(make source-sdk)"
 
+# Build mode helper: determine cargo build flags
+ifeq ($(BUILD_MODE),release)
+CARGO_BUILD_FLAGS = --release
+BUILD_MODE_DESC = release
+else
+CARGO_BUILD_FLAGS = 
+BUILD_MODE_DESC = debug
+endif
+
 # Build commands
 build: build-cli build-core
-	@echo "✓ All components built successfully"
+	@echo "✓ All components built successfully ($(BUILD_MODE_DESC) mode)"
+
+debug:
+	@$(MAKE) BUILD_MODE=debug build
+
+release:
+	@$(MAKE) BUILD_MODE=release build
 
 build-cli:
-	@echo "Building robonix-cli..."
-	cd $(CLI_DIR) && cargo build --release
-	@echo "✓ robonix-cli built successfully"
+	@echo "Building robonix-cli ($(BUILD_MODE_DESC) mode)..."
+	cd $(CLI_DIR) && cargo build $(CARGO_BUILD_FLAGS)
+	@echo "✓ robonix-cli built successfully ($(BUILD_MODE_DESC) mode)"
 
 build-core:
-	@echo "Building robonix-core..."
-	cd $(CORE_DIR) && cargo build --release
-	@echo "✓ robonix-core built successfully"
+	@echo "Building robonix-core ($(BUILD_MODE_DESC) mode)..."
+	cd $(CORE_DIR) && cargo build $(CARGO_BUILD_FLAGS)
+	@echo "✓ robonix-core built successfully ($(BUILD_MODE_DESC) mode)"
 
 build-sdk:
 	@echo "Building robonix-sdk ROS2 interface package..."
@@ -121,6 +142,9 @@ env:
 	@echo "CORE_DIR: $(CORE_DIR)"
 	@echo "SDK_DIR: $(SDK_DIR)"
 	@echo "PROVIDER_DIR: $(PROVIDER_DIR)"
+	@echo ""
+	@echo "Build Configuration:"
+	@echo "  BUILD_MODE: $(BUILD_MODE)"
 	@echo ""
 	@echo "ROS2 Configuration:"
 	@echo "  ROS2_DISTRO: $(ROS2_DISTRO)"
