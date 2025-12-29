@@ -405,7 +405,7 @@ impl ProcessManager {
         }
 
         // Wait a bit to check if process started successfully and let initial output be captured
-        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         // Check if process is still running
         match child.try_wait() {
@@ -584,8 +584,25 @@ impl ProcessManager {
             let _ = kill(pid_obj, Signal::SIGTERM);
         }
 
-        // Wait a bit for processes to terminate gracefully
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // Wait for processes to terminate gracefully, but check periodically
+        let max_wait = std::time::Duration::from_secs(1);
+        let check_interval = std::time::Duration::from_millis(100);
+        let start_time = std::time::Instant::now();
+
+        while start_time.elapsed() < max_wait {
+            // Check if process group still has any processes alive
+            if let Ok(output) = SyncCommand::new("pgrep")
+                .arg("-g")
+                .arg(pgid.as_raw().to_string())
+                .output()
+            {
+                if !output.status.success() {
+                    // No processes in group, they've all terminated
+                    break;
+                }
+            }
+            std::thread::sleep(check_interval);
+        }
 
         // Check if process group still has any processes alive
         // Use pgrep to find processes in the group

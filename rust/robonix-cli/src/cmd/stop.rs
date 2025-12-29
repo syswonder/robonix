@@ -71,80 +71,108 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
         &format!("{} process(es)", processes_to_stop.len()),
     );
 
-    let mut stopped = 0;
-    let mut errors = 0;
-
+    // Process stops in parallel for better performance
+    let mut stop_tasks = Vec::new();
     for proc in &processes_to_stop {
-        let mut spinner = output::Spinner::new(format!(
-            "Stopping {} {}...",
-            proc.package_type, proc.std_name
-        ));
-        spinner.start();
+        let proc = proc.clone();
+        let task = tokio::spawn(async move {
+            let client = match DaemonClient::new() {
+                Ok(c) => c,
+                Err(_) => {
+                    return (false, true);
+                }
+            };
+            let mut spinner = output::Spinner::new(format!(
+                "Stopping {} {}...",
+                proc.package_type, proc.std_name
+            ));
+            spinner.start();
 
-        let result = client
-            .send_command(DaemonCommand::Stop {
-                std_name: proc.std_name.clone(),
-                package_type: proc.package_type.clone(),
-            })
-            .await;
+            let result = client
+                .send_command(DaemonCommand::Stop {
+                    std_name: proc.std_name.clone(),
+                    package_type: proc.package_type.clone(),
+                })
+                .await;
 
-        match result {
-            Ok(DaemonResponse::Ok(_)) => {
-                spinner.finish_success(&format!("Stopped {} {}", proc.package_type, proc.std_name));
-                stopped += 1;
-            }
-            Ok(DaemonResponse::OkWithDetails {
-                message,
-                pid,
-                pgid,
-                pids,
-            }) => {
-                spinner.finish_success(&message);
-                if let Some(pgid) = pgid {
-                    if let Some(ref pids_list) = pids {
-                        if pids_list.len() > 1 {
-                            output::sub_step(&format!(
-                                "  Process group {} ({} processes): {}",
-                                pgid,
-                                pids_list.len(),
-                                pids_list
-                                    .iter()
-                                    .map(|p| p.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ));
+            let (success, error) = match result {
+                Ok(DaemonResponse::Ok(_)) => {
+                    spinner.finish_success(&format!(
+                        "Stopped {} {}",
+                        proc.package_type, proc.std_name
+                    ));
+                    (true, false)
+                }
+                Ok(DaemonResponse::OkWithDetails {
+                    message,
+                    pid,
+                    pgid,
+                    pids,
+                }) => {
+                    spinner.finish_success(&message);
+                    if let Some(pgid) = pgid {
+                        if let Some(ref pids_list) = pids {
+                            if pids_list.len() > 1 {
+                                output::sub_step(&format!(
+                                    "  Process group {} ({} processes): {}",
+                                    pgid,
+                                    pids_list.len(),
+                                    pids_list
+                                        .iter()
+                                        .map(|p| p.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ));
+                            } else {
+                                output::sub_step(&format!("  PID: {}, PGID: {}", pid, pgid));
+                            }
                         } else {
                             output::sub_step(&format!("  PID: {}, PGID: {}", pid, pgid));
                         }
                     } else {
-                        output::sub_step(&format!("  PID: {}, PGID: {}", pid, pgid));
+                        output::sub_step(&format!("  PID: {}", pid));
                     }
-                } else {
-                    output::sub_step(&format!("  PID: {}", pid));
+                    (true, false)
                 }
+                Ok(DaemonResponse::Error(e)) => {
+                    spinner.finish_error(&format!(
+                        "Failed to stop {} {}: {}",
+                        proc.package_type, proc.std_name, e
+                    ));
+                    (false, true)
+                }
+                Err(e) => {
+                    spinner.finish_error(&format!(
+                        "Failed to stop {} {}: {}",
+                        proc.package_type, proc.std_name, e
+                    ));
+                    (false, true)
+                }
+                _ => {
+                    spinner.finish_error(&format!(
+                        "Unexpected response when stopping {} {}",
+                        proc.package_type, proc.std_name
+                    ));
+                    (false, true)
+                }
+            };
+            (success, error)
+        });
+        stop_tasks.push(task);
+    }
+
+    let mut stopped = 0;
+    let mut errors = 0;
+    for task in stop_tasks {
+        if let Ok((success, error)) = task.await {
+            if success {
                 stopped += 1;
             }
-            Ok(DaemonResponse::Error(e)) => {
-                spinner.finish_error(&format!(
-                    "Failed to stop {} {}: {}",
-                    proc.package_type, proc.std_name, e
-                ));
+            if error {
                 errors += 1;
             }
-            Err(e) => {
-                spinner.finish_error(&format!(
-                    "Failed to stop {} {}: {}",
-                    proc.package_type, proc.std_name, e
-                ));
-                errors += 1;
-            }
-            _ => {
-                spinner.finish_error(&format!(
-                    "Unexpected response when stopping {} {}",
-                    proc.package_type, proc.std_name
-                ));
-                errors += 1;
-            }
+        } else {
+            errors += 1;
         }
     }
 
