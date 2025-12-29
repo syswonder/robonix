@@ -9,10 +9,10 @@
 // - Exception handling
 
 use crate::service::ServiceRegistry;
-use crate::task_manager::context::{ExecutionState, TaskContextStore};
 use crate::task_manager::exception::{RecoveryAction, apply_recovery_action};
 use crate::task_manager::executor::{ExecutionResult, RtdlExecutor};
 use crate::task_manager::queue::TaskQueue;
+use crate::task_manager::task::{TaskState, TaskStore};
 use log::{debug, error, info, trace};
 use ros2_client::{AService, Name, Node, ServiceMapping, ServiceTypeName};
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use tokio::time::{Duration, interval, timeout};
 
 /// Task Runtime - Main runtime loop for task execution
 pub struct TaskRuntime {
-    context_store: Arc<TaskContextStore>,
+    task_store: Arc<TaskStore>,
     task_queue: Arc<TaskQueue>,
     executor: Arc<RtdlExecutor>,
     service_registry: Arc<ServiceRegistry>,
@@ -44,14 +44,14 @@ pub struct TaskRuntime {
 
 impl TaskRuntime {
     pub fn new(
-        context_store: Arc<TaskContextStore>,
+        task_store: Arc<TaskStore>,
         task_queue: Arc<TaskQueue>,
         executor: Arc<RtdlExecutor>,
         service_registry: Arc<ServiceRegistry>,
         node: Arc<Mutex<Node>>,
     ) -> Self {
         Self {
-            context_store,
+            task_store,
             task_queue,
             executor,
             service_registry,
@@ -113,12 +113,12 @@ impl TaskRuntime {
         // Check if there's a higher priority task that should preempt current task
         if let Some(current_task_id) = self.task_queue.get_running_task().await {
             debug!("checking preemption for current task: {}", current_task_id);
-            if let Some(context) = self.context_store.get_context(&current_task_id).await {
+            if let Some(task) = self.task_store.get_task(&current_task_id).await {
                 debug!(
-                    "current task {} context: priority={}, state={:?}",
-                    current_task_id, context.priority, context.execution_state
+                    "current task {}: priority={}, state={:?}",
+                    current_task_id, task.context.priority, task.state
                 );
-                let should_preempt = self.task_queue.should_preempt(context.priority).await;
+                let should_preempt = self.task_queue.should_preempt(task.context.priority).await;
                 debug!(
                     "preemption check result for task {}: {}",
                     current_task_id, should_preempt
@@ -133,11 +133,11 @@ impl TaskRuntime {
                 } else {
                     trace!(
                         "no preemption needed for task {} (priority: {})",
-                        current_task_id, context.priority
+                        current_task_id, task.context.priority
                     );
                 }
             } else {
-                debug!("current task {} context not found", current_task_id);
+                debug!("current task {} not found", current_task_id);
             }
         } else {
             trace!("no current running task");
@@ -165,10 +165,10 @@ impl TaskRuntime {
             if let Err(e) = self.process_task(&task_id).await {
                 error!("error processing task {}: {}", task_id, e);
                 // Mark task as failed
-                self.context_store
-                    .update_context(&task_id, |ctx| {
-                        ctx.transition_state(ExecutionState::Failed);
-                        ctx.record_exception(e.clone());
+                self.task_store
+                    .update_task(&task_id, |task| {
+                        task.transition_state(TaskState::Failed);
+                        task.context.record_exception(e.clone());
                     })
                     .await;
             }
@@ -181,37 +181,37 @@ impl TaskRuntime {
 
     /// Process a single task based on its execution state
     async fn process_task(&self, task_id: &str) -> Result<(), String> {
-        let context = self
-            .context_store
-            .get_context(task_id)
+        let task = self
+            .task_store
+            .get_task(task_id)
             .await
-            .ok_or_else(|| format!("Task context not found: {}", task_id))?;
+            .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
-        debug!(
-            "processing task {} in state: {:?}",
-            task_id, context.execution_state
-        );
+        debug!("processing task {} in state: {:?}", task_id, task.state);
 
-        match context.execution_state {
-            ExecutionState::Init => {
-                debug!("task {} transitioning from Init to Plan", task_id);
-                // Transition to Plan state
-                self.context_store
-                    .update_context(task_id, |ctx| {
-                        ctx.transition_state(ExecutionState::Plan);
+        match task.state {
+            TaskState::Pending => {
+                debug!("task {} transitioning from Pending to Planning", task_id);
+                // Transition to Planning state
+                self.task_store
+                    .update_task(task_id, |task| {
+                        task.transition_state(TaskState::Planning);
                     })
                     .await;
             }
-            ExecutionState::Plan => {
-                debug!("task {} in Plan state, calling task_plan service", task_id);
+            TaskState::Planning => {
+                debug!(
+                    "task {} in Planning state, calling task_plan service",
+                    task_id
+                );
                 // Check if object_graph is empty, if so, update from cache
-                let context = self
-                    .context_store
-                    .get_context(task_id)
+                let task = self
+                    .task_store
+                    .get_task(task_id)
                     .await
-                    .ok_or_else(|| format!("Task context not found: {}", task_id))?;
+                    .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
-                let obj_count = if let Some(arr) = context.object_graph.as_array() {
+                let obj_count = if let Some(arr) = task.context.object_graph.as_array() {
                     arr.len()
                 } else {
                     0
@@ -222,36 +222,40 @@ impl TaskRuntime {
                         "task {} object_graph is empty, updating from semantic_map cache",
                         task_id
                     );
-                    // Update context from system cache
+                    // Update task from system cache
                     let cache = self.semantic_map_cache.lock().await;
                     let object_graph = cache.clone();
                     drop(cache);
 
-                    self.context_store
-                        .update_context(task_id, |ctx| {
-                            ctx.update_object_graph(object_graph);
+                    self.task_store
+                        .update_task(task_id, |task| {
+                            task.context.update_object_graph(object_graph);
                         })
                         .await;
                 }
 
-                // Call task_plan service (using the snapshot in context)
+                // Call task_plan service
                 self.plan_task(task_id).await?;
             }
-            ExecutionState::Execute => {
-                debug!("task {} in Execute state, executing RTDL step", task_id);
+            TaskState::Running => {
+                debug!("task {} in Running state, executing RTDL step", task_id);
                 // Execute RTDL step
                 self.execute_rtdl_step(task_id).await?;
             }
-            ExecutionState::Suspended => {
+            TaskState::Suspended => {
                 // Task is suspended, don't process
                 debug!("task {} is suspended, skipping", task_id);
             }
-            ExecutionState::Finish | ExecutionState::Failed => {
+            TaskState::Finished | TaskState::Failed => {
                 debug!(
                     "task {} finished (state: {:?}), removing from running",
-                    task_id, context.execution_state
+                    task_id, task.state
                 );
                 // Task is done, remove from running
+                self.task_queue.set_running_task(None).await;
+            }
+            TaskState::Cancelled => {
+                debug!("task {} is cancelled, removing from running", task_id);
                 self.task_queue.set_running_task(None).await;
             }
         }
@@ -264,30 +268,30 @@ impl TaskRuntime {
         info!("Task Planning: Starting planning for task {}", task_id);
         debug!("plan_task called for task {}", task_id);
 
-        let context = self
-            .context_store
-            .get_context(task_id)
+        let task = self
+            .task_store
+            .get_task(task_id)
             .await
-            .ok_or_else(|| format!("Task context not found: {}", task_id))?;
+            .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
         debug!(
-            "retrieved task context: task_id={}, state={:?}, priority={}, retry_count={}",
-            context.task_id, context.execution_state, context.priority, context.retry_count
+            "retrieved task: task_id={}, state={:?}, priority={}, retry_count={}",
+            task.task_id, task.state, task.context.priority, task.context.retry_count
         );
 
-        debug!("Task Context:");
-        debug!("  Description: {}", context.description);
+        debug!("Task:");
+        debug!("  Description: {}", task.description);
         debug!(
             "  Object Graph: {}",
-            serde_json::to_string_pretty(&context.object_graph)
+            serde_json::to_string_pretty(&task.context.object_graph)
                 .unwrap_or_else(|_| "{}".to_string())
         );
         debug!(
             "  Object Graph Updated At: {}",
-            context.object_graph_updated_at
+            task.context.object_graph_updated_at
         );
 
-        let obj_count = if let Some(arr) = context.object_graph.as_array() {
+        let obj_count = if let Some(arr) = task.context.object_graph.as_array() {
             arr.len()
         } else {
             0
@@ -346,7 +350,7 @@ impl TaskRuntime {
 
         // Serialize object_graph to JSON string for Dict value
         let object_graph_str =
-            serde_json::to_string(&context.object_graph).unwrap_or_else(|_| "[]".to_string());
+            serde_json::to_string(&task.context.object_graph).unwrap_or_else(|_| "[]".to_string());
 
         // Create Dict with keys and values arrays
         let params = crate::ros_idl::object::Dict {
@@ -354,7 +358,7 @@ impl TaskRuntime {
             values: vec![object_graph_str],
         };
 
-        let obj_count = if let Some(arr) = context.object_graph.as_array() {
+        let obj_count = if let Some(arr) = task.context.object_graph.as_array() {
             arr.len()
         } else {
             0
@@ -365,15 +369,15 @@ impl TaskRuntime {
         );
 
         debug!("Step 2: Preparing task_plan request...");
-        debug!("  Description: {}", context.description);
+        debug!("  Description: {}", task.description);
         debug!("  Params: Dict with {} key(s)", params.keys.len());
         debug!(
             "task_plan request prepared: description_length={}, params_keys={:?}",
-            context.description.len(),
+            task.description.len(),
             params.keys
         );
         // Print object_graph content (from semantic map service)
-        let object_graph_pretty = serde_json::to_string_pretty(&context.object_graph)
+        let object_graph_pretty = serde_json::to_string_pretty(&task.context.object_graph)
             .unwrap_or_else(|_| "failed to serialize".to_string());
         debug!(
             "  object_graph (from semantic map service):\n{}",
@@ -449,7 +453,7 @@ impl TaskRuntime {
             };
 
             let request = crate::ros_idl::service_types::PlanTaskRequest {
-                description: context.description.clone(),
+                description: task.description.clone(),
                 params,
             };
 
@@ -504,27 +508,27 @@ impl TaskRuntime {
             }
         };
 
-        // Update context with RTDL and transition to Execute
-        debug!("updating task context with RTDL and transitioning to Execute state");
-        self.context_store
-            .update_context(task_id, |ctx| {
+        // Update task with RTDL and transition to Running
+        debug!("updating task with RTDL and transitioning to Running state");
+        self.task_store
+            .update_task(task_id, |task| {
                 debug!(
                     "setting RTDL for task {}: type={}, length={} chars",
                     task_id,
                     &rtdl_type,
                     rtdl.len()
                 );
-                ctx.set_rtdl(rtdl.clone(), rtdl_type.clone());
+                task.context.set_rtdl(rtdl.clone(), rtdl_type.clone());
                 debug!(
-                    "transitioning task {} from {:?} to Execute",
-                    task_id, ctx.execution_state
+                    "transitioning task {} from {:?} to Running",
+                    task_id, task.state
                 );
-                ctx.transition_state(ExecutionState::Execute);
+                task.transition_state(TaskState::Running);
             })
             .await;
 
         info!(
-            "Task planning completed for task {}. Transitioned to Execute state.",
+            "Task planning completed for task {}. Transitioned to Running state.",
             task_id
         );
         debug!("plan_task completed successfully for task {}", task_id);
@@ -535,28 +539,34 @@ impl TaskRuntime {
     async fn execute_rtdl_step(&self, task_id: &str) -> Result<(), String> {
         debug!("executing RTDL step for task {}", task_id);
 
-        let result = {
-            let mut context = self
-                .context_store
-                .get_context(task_id)
-                .await
-                .ok_or_else(|| format!("Task context not found: {}", task_id))?;
+        // Get task, execute step, then update task in store
+        let mut task = self
+            .task_store
+            .get_task(task_id)
+            .await
+            .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
-            debug!(
-                "task {} context: instruction_pointer={}, rtdl_type={:?}",
-                task_id, context.rtdl_instruction_pointer, context.rtdl_type
-            );
+        debug!(
+            "task {}: instruction_pointer={}, rtdl_type={:?}",
+            task_id, task.context.rtdl_instruction_pointer, task.context.rtdl_type
+        );
 
-            self.executor.execute_step(&mut context).await?
-        };
+        let result = self.executor.execute_step(&mut task).await?;
+
+        // Update task in store with changes from execution
+        self.task_store
+            .update_task(task_id, |t| {
+                *t = task;
+            })
+            .await;
 
         match result {
             ExecutionResult::Completed => {
                 debug!("task {} execution completed", task_id);
                 // Task completed successfully
-                self.context_store
-                    .update_context(task_id, |ctx| {
-                        ctx.transition_state(ExecutionState::Finish);
+                self.task_store
+                    .update_task(task_id, |task| {
+                        task.transition_state(TaskState::Finished);
                     })
                     .await;
                 self.task_queue.set_running_task(None).await;
@@ -572,9 +582,26 @@ impl TaskRuntime {
                     task_id, recovery_action
                 );
                 // Apply recovery action
-                self.context_store
-                    .update_context(task_id, |ctx| {
-                        apply_recovery_action(ctx, recovery_action.clone());
+                self.task_store
+                    .update_task(task_id, |task| {
+                        apply_recovery_action(&mut task.context, recovery_action.clone());
+                        // Handle state transitions based on recovery action
+                        match recovery_action {
+                            RecoveryAction::Replan => {
+                                task.transition_state(TaskState::Planning);
+                            }
+                            RecoveryAction::Fail => {
+                                task.transition_state(TaskState::Failed);
+                            }
+                            _ => {
+                                // Retry and Continue stay in Running state
+                            }
+                        }
+                        // Update task.updated_at when context changes
+                        task.updated_at = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos() as u64;
                     })
                     .await;
 
@@ -603,10 +630,10 @@ impl TaskRuntime {
     async fn suspend_task(&self, task_id: &str) -> Result<(), String> {
         debug!("suspending task {} for preemption", task_id);
 
-        self.context_store
-            .update_context(task_id, |ctx| {
+        self.task_store
+            .update_task(task_id, |task| {
                 debug!("task {} transitioning to Suspended state", task_id);
-                ctx.transition_state(ExecutionState::Suspended);
+                task.transition_state(TaskState::Suspended);
             })
             .await;
 
@@ -614,18 +641,18 @@ impl TaskRuntime {
         self.task_queue.set_running_task(None).await;
 
         // Re-enqueue the task so it can be resumed later
-        let context = self
-            .context_store
-            .get_context(task_id)
+        let task = self
+            .task_store
+            .get_task(task_id)
             .await
-            .ok_or_else(|| format!("Task context not found: {}", task_id))?;
+            .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
         debug!(
             "re-enqueuing suspended task {} with priority={}, instruction_pointer={}",
-            task_id, context.priority, context.rtdl_instruction_pointer
+            task_id, task.context.priority, task.context.rtdl_instruction_pointer
         );
         self.task_queue
-            .enqueue(task_id.to_string(), context.priority, context.created_at)
+            .enqueue(task_id.to_string(), task.context.priority, task.created_at)
             .await;
 
         debug!("task {} suspended and re-enqueued successfully", task_id);

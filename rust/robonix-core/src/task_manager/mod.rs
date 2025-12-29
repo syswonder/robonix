@@ -6,7 +6,6 @@
 // and coordinating task execution in the "planning-deduction-decision-execution-feedback" loop.
 
 pub mod api;
-pub mod context;
 pub mod exception;
 pub mod executor;
 pub mod queue;
@@ -23,7 +22,6 @@ use tokio::sync::Mutex;
 /// Task Manager - Global scheduling and control core
 pub struct TaskManager {
     task_store: Arc<task::TaskStore>,
-    context_store: Arc<context::TaskContextStore>,
     task_queue: Arc<queue::TaskQueue>,
     #[allow(dead_code)] // Runtime runs in background, needs to be kept alive
     executor: Arc<executor::RtdlExecutor>,
@@ -42,13 +40,13 @@ impl TaskManager {
         service_registry: Arc<ServiceRegistry>,
         primitive_registry: Arc<PrimitiveRegistry>,
     ) -> Self {
-        let context_store = Arc::new(context::TaskContextStore::new());
+        let task_store = Arc::new(task::TaskStore::new());
         let task_queue = Arc::new(queue::TaskQueue::new());
         let executor = Arc::new(executor::RtdlExecutor::new(skill_library.clone()));
         let node = Arc::new(Mutex::new(create_node()));
 
         let runtime = Arc::new(runtime::TaskRuntime::new(
-            context_store.clone(),
+            task_store.clone(),
             task_queue.clone(),
             executor.clone(),
             service_registry.clone(),
@@ -62,8 +60,7 @@ impl TaskManager {
         });
 
         Self {
-            task_store: Arc::new(task::TaskStore::new()),
-            context_store,
+            task_store,
             task_queue,
             executor,
             runtime,
@@ -115,18 +112,12 @@ impl TaskManager {
         let priority = params.get("priority").and_then(|p| p.as_i64()).unwrap_or(0) as i32;
         debug!("task priority: {}", priority);
 
-        // Create task in store
+        // Create task in store (with priority)
         let task_id = self
             .task_store
-            .create_task(req.description.clone(), params)
+            .create_task(req.description.clone(), params, priority)
             .await;
         debug!("created task in store: task_id={}", task_id);
-
-        // Create task context
-        self.context_store
-            .create_context(task_id.clone(), req.description, priority)
-            .await;
-        debug!("created task context: task_id={}", task_id);
 
         // Enqueue task
         let task = self
@@ -135,7 +126,7 @@ impl TaskManager {
             .await
             .expect("Task should exist after creation");
         self.task_queue
-            .enqueue(task_id.clone(), priority, task.created_at)
+            .enqueue(task_id.clone(), task.context.priority, task.created_at)
             .await;
         debug!(
             "enqueued task: task_id={}, priority={}, queue_size={}",
@@ -161,51 +152,45 @@ impl TaskManager {
             debug!("found task {} in task store", req.task_id);
             task_info["task_id"] = serde_json::json!(task.task_id);
             task_info["description"] = serde_json::json!(task.description);
+            task_info["params"] = task.params.clone();
             task_info["state"] = serde_json::json!(format!("{:?}", task.state));
             task_info["created_at"] = serde_json::json!(task.created_at);
             task_info["updated_at"] = serde_json::json!(task.updated_at);
+            task_info["priority"] = serde_json::json!(task.context.priority);
+            task_info["retry_count"] = serde_json::json!(task.context.retry_count);
+            task_info["rtdl_instruction_pointer"] =
+                serde_json::json!(task.context.rtdl_instruction_pointer);
+
             if let Some(ref error_msg) = task.error_message {
                 task_info["error_message"] = serde_json::json!(error_msg);
             }
             if let Some(ref result) = task.result {
                 task_info["result"] = result.clone();
             }
-        } else {
-            debug!("task {} not found in task store", req.task_id);
-            task_info["error"] = serde_json::json!("Task not found");
-        }
-
-        // Get context information (more detailed runtime info)
-        if let Some(context) = self.context_store.get_context(&req.task_id).await {
-            debug!("found task {} in context store", req.task_id);
-            task_info["execution_state"] =
-                serde_json::json!(format!("{:?}", context.execution_state));
-            task_info["priority"] = serde_json::json!(context.priority);
-            task_info["retry_count"] = serde_json::json!(context.retry_count);
-            task_info["rtdl_instruction_pointer"] =
-                serde_json::json!(context.rtdl_instruction_pointer);
-
-            if let Some(ref rtdl) = context.rtdl {
+            if let Some(ref rtdl) = task.context.rtdl {
                 task_info["rtdl"] = serde_json::json!(rtdl);
             }
-            if let Some(ref rtdl_type) = context.rtdl_type {
+            if let Some(ref rtdl_type) = task.context.rtdl_type {
                 task_info["rtdl_type"] = serde_json::json!(rtdl_type);
             }
 
             // Object graph information
-            task_info["object_graph"] = context.object_graph.clone();
+            task_info["object_graph"] = task.context.object_graph.clone();
             task_info["object_graph_updated_at"] =
-                serde_json::json!(context.object_graph_updated_at);
-            if let Some(arr) = context.object_graph.as_array() {
+                serde_json::json!(task.context.object_graph_updated_at);
+            if let Some(arr) = task.context.object_graph.as_array() {
                 task_info["object_graph_count"] = serde_json::json!(arr.len());
             } else {
                 task_info["object_graph_count"] = serde_json::json!(0);
             }
 
             // Exception information
-            if let Some(ref exception) = context.last_exception {
+            if let Some(ref exception) = task.context.last_exception {
                 task_info["last_exception"] = serde_json::json!(exception);
             }
+        } else {
+            debug!("task {} not found in task store", req.task_id);
+            task_info["error"] = serde_json::json!("Task not found");
         }
 
         // Serialize to JSON string
@@ -221,4 +206,4 @@ impl TaskManager {
 
 // Re-export task types (from ros_idl)
 pub use api::{SubmitTaskRequest, SubmitTaskResponse, TaskDataRequest, TaskDataResponse};
-pub use task::{Task, TaskState};
+pub use task::{Task, TaskContext, TaskState};
