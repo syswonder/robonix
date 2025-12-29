@@ -106,7 +106,7 @@ pub async fn execute(config: Config, target: String) -> Result<()> {
                 }
 
                 // Wait a bit more for process to fully start and spawn children
-                tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
                 // Sync state to core: wait for service to be available and register it
                 // This tells core that the service is now running and ready
@@ -231,8 +231,8 @@ pub async fn wait_and_register_service(
 
     // Wait for ROS2 service to be available (check via ros2 service list)
     output::sub_step(&format!("Waiting for service {} to be available...", entry));
-    let max_wait = Duration::from_secs(30);
-    let check_interval = Duration::from_millis(500);
+    let max_wait = Duration::from_secs(10);
+    let check_interval = Duration::from_millis(200);
     let start_time = std::time::Instant::now();
 
     let sdk_path = config
@@ -265,7 +265,7 @@ pub async fn wait_and_register_service(
 
     if start_time.elapsed() >= max_wait {
         return Err(anyhow::anyhow!(
-            "Service {} did not become available within 30 seconds",
+            "Service {} did not become available within 10 seconds",
             entry
         ));
     }
