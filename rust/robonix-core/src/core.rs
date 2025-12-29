@@ -35,8 +35,6 @@ impl RobonixCore {
             primitive_registry.clone(),
         );
 
-        let task_manager = Arc::new(task_manager);
-
         Self {
             task_manager,
             skill_library,

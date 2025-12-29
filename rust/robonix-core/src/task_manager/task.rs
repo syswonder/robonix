@@ -6,6 +6,7 @@
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
@@ -20,6 +21,12 @@ pub enum TaskState {
     Finished,  // Task completed successfully
     Failed,    // Task failed
     Cancelled, // Task cancelled
+}
+
+impl Display for TaskState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 /// Task Context - Runtime execution context for a task
@@ -176,8 +183,10 @@ impl Task {
         let old_state = self.state.clone();
         if old_state != new_state {
             debug!(
-                "task {} state transition: {:?} -> {:?}",
-                self.task_id, old_state, new_state
+                "task {}: [{}] -> [{}]",
+                self.task_id,
+                format!("{:?}", old_state).to_uppercase(),
+                format!("{:?}", new_state).to_uppercase()
             );
         }
         self.state = new_state;
