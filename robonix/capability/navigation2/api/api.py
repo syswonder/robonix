@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import os
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Iterable
 import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
@@ -123,7 +123,8 @@ def set_goal(x, y, yaw) -> str:
         y: Target Y coordinate
         yaw: Target yaw angle
     """
-    # rclpy.init()
+    if not rclpy.ok():
+        rclpy.init()
     import yaml
     plugin_name = "simple_navigation"
     config_path = os.path.join(os.path.dirname(

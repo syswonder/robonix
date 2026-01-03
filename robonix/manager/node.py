@@ -1,7 +1,7 @@
 import os
 import yaml
-from log import logger
-from constant import BASE_PATH
+from robonix.manager.log import logger
+from robonix.manager.constant import BASE_PATH
 
 
 class BaseNode:
