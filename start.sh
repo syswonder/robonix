@@ -1,4 +1,4 @@
-#make sure script run in root of robonix
+# make sure the script runs in the root of robonix
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
 

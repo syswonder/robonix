@@ -13,8 +13,6 @@ from robonix.manager.eaios_decorators import eaios
 class NavWithUltrasonicSafety(Node):
     def __init__(self,safety_threshold=0.5):
         super().__init__('nav_with_ultrasonic_safety')
-        if not rclpy.ok():
-            rclpy.init()
         self.navigator = BasicNavigator()
         self.safety_threshold = safety_threshold
         self.cancelled = False

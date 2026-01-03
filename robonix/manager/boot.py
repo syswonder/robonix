@@ -10,10 +10,9 @@ import os
 from robonix.manager.constant import BASE_SKILL_PATH, INIT_FILE, BASE_PATH
 import sys
 
-from robonix.manager.eaios_decorators import package_init, mcp_start
+from robonix.manager.eaios_decorators import package_init
 
 # Ensure the root directory is in the Python path for skill import
-sys.path.insert(0, BASE_PATH)
 # import skill
 
 

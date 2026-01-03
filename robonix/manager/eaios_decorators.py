@@ -9,9 +9,7 @@ import sys
 import inspect
 from robonix.manager.node import get_entry_name
 
-if os.path.abspath(os.path.dirname(__file__)) not in sys.path:
-    sys.path.append(os.path.abspath(os.path.dirname(__file__)))
-from constant import BASE_SKILL_PATH, INIT_FILE, EXPORT_FILE, BASE_PATH
+from robonix.manager.constant import BASE_SKILL_PATH, INIT_FILE, EXPORT_FILE, BASE_PATH
 
 if os.path.dirname(BASE_PATH) not in sys.path:
     sys.path.append(os.path.dirname(BASE_PATH))

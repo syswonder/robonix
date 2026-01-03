@@ -12,10 +12,6 @@ import os
 import time
 
 import sys
-root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-if root_dir not in sys.path:
-    sys.path.append(root_dir)
-print(root_dir)
 from robonix.manager.eaios_decorators import package_init, mcp_start,eaios
 
 
