@@ -13,6 +13,8 @@ from robonix.manager.eaios_decorators import eaios
 class NavWithUltrasonicSafety(Node):
     def __init__(self,safety_threshold=0.5):
         super().__init__('nav_with_ultrasonic_safety')
+        if not rclpy.ok():
+            rclpy.init()
         self.navigator = BasicNavigator()
         self.safety_threshold = safety_threshold
         self.cancelled = False
@@ -70,7 +72,8 @@ def nv_test():
 
 @eaios.plugin("navigation2","ros2_navigation")
 def set_goal(x, y, yaw) -> str:
-    # rclpy.init()
+    if not rclpy.ok():
+        rclpy.init()
     res = nv_controller.set_goal(x,y,yaw)
     func_status = f"Service set_goal response: {res}"
     # rclpy.shutdown()

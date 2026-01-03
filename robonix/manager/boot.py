@@ -1,19 +1,16 @@
 import asyncio
 import signal
 import argparse
-import process_manage
-import node
-from log import logger
-from cmdline import CLI
-import depend
+from robonix.manager import process_manage
+from robonix.manager import node
+from robonix.manager.log import logger
+from robonix.manager.cmdline import CLI
+from robonix.manager import depend
 import os
-from constant import BASE_SKILL_PATH, INIT_FILE, BASE_PATH
+from robonix.manager.constant import BASE_SKILL_PATH, INIT_FILE, BASE_PATH
 import sys
 
-if os.path.dirname(BASE_PATH) not in sys.path:
-    sys.path.append(os.path.dirname(BASE_PATH))
-
-from eaios_decorators import package_init, mcp_start
+from robonix.manager.eaios_decorators import package_init, mcp_start
 
 # Ensure the root directory is in the Python path for skill import
 sys.path.insert(0, BASE_PATH)

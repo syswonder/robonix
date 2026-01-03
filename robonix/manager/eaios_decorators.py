@@ -7,7 +7,7 @@ from mcp.server.fastmcp import FastMCP
 import yaml
 import sys
 import inspect
-from node import get_entry_name
+from robonix.manager.node import get_entry_name
 
 if os.path.abspath(os.path.dirname(__file__)) not in sys.path:
     sys.path.append(os.path.abspath(os.path.dirname(__file__)))
