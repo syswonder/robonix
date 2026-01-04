@@ -10,7 +10,7 @@ use robonix_core::node::create_node;
 use robonix_core::server::{create_qos, create_servers, run_servers};
 use robonix_core::web_gui::{
     LogBuffer, create_web_gui_state, index, logs_handler, primitives_handler, services_handler,
-    skills_handler, status_handler, tasks_handler, tf_tree_handler,
+    skills_handler, status_handler, tasks_handler, tf_tree_handler, topics_handler,
 };
 use rocket::fs::FileServer;
 use rocket::routes;
@@ -66,8 +66,25 @@ fn main() {
         }
     });
 
+    // Create topic monitor and start monitoring
+    let topic_monitor = Arc::new(robonix_core::topic_monitor::TopicMonitor::new());
+    let topic_monitor_clone = topic_monitor.clone();
+    let node_for_topics = node_arc.clone();
+    rt.spawn(async move {
+        let mut node_guard = node_for_topics.lock().await;
+        if let Err(e) = topic_monitor_clone.start_monitoring(&mut *node_guard).await {
+            eprintln!("Failed to start topic monitoring: {}", e);
+        }
+    });
+
     // Create web GUI state
-    let web_gui_state = create_web_gui_state(core.clone(), node_arc, tf_monitor, log_buffer);
+    let web_gui_state = create_web_gui_state(
+        core.clone(),
+        node_arc,
+        tf_monitor,
+        topic_monitor,
+        log_buffer,
+    );
 
     // Get static directory path from environment or use default
     let static_dir = std::env::var("ROBONIX_WEB_STATIC_DIR")
@@ -129,6 +146,7 @@ fn main() {
                     index,
                     status_handler,
                     tf_tree_handler,
+                    topics_handler,
                     tasks_handler,
                     skills_handler,
                     services_handler,

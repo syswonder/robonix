@@ -34,15 +34,25 @@
 
         <div class="panel">
             <div class="panel-header">
-                <div class="panel-title">TF Tree</div>
+                <div class="panel-title">TF Tree & Topics</div>
                 <div class="controls">
                     <label>
                         <input type="checkbox" id="auto-refresh" checked> Auto (2s)
                     </label>
-                    <button onclick="loadTfTree()">Refresh</button>
+                    <button onclick="loadTfTree()">Refresh TF</button>
+                    <button onclick="loadTopics()">Refresh Topics</button>
                 </div>
             </div>
-            <div id="tf-tree-container">Loading...</div>
+            <div class="split-panel">
+                <div class="split-panel-left">
+                    <div class="sub-panel-header">TF Tree</div>
+                    <div id="tf-tree-container">Loading...</div>
+                </div>
+                <div class="split-panel-right">
+                    <div class="sub-panel-header">Topics</div>
+                    <div id="topics-container">Loading...</div>
+                </div>
+            </div>
         </div>
 
         <div class="panel">

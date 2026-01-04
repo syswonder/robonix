@@ -87,6 +87,8 @@ pub struct TfTreeResponse {
 
 pub struct TfTreeCache {
     pub frames: HashMap<String, TfFrame>,
+    pub frame_last_seen: HashMap<String, std::time::Instant>,
+    pub static_frames: std::collections::HashSet<String>,
     pub last_update: std::time::Instant,
 }
 
@@ -94,6 +96,8 @@ impl Default for TfTreeCache {
     fn default() -> Self {
         Self {
             frames: HashMap::new(),
+            frame_last_seen: HashMap::new(),
+            static_frames: std::collections::HashSet::new(),
             last_update: std::time::Instant::now(),
         }
     }
@@ -174,7 +178,7 @@ impl TfMonitor {
                             message_count,
                             msg.transforms.len()
                         );
-                        Self::process_tf_message(&msg, &cache_static).await;
+                        Self::process_tf_message(&msg, &cache_static, true).await;
                     }
                     Err(e) => {
                         debug!("Error receiving /tf_static message: {:?}", e);
@@ -207,7 +211,7 @@ impl TfMonitor {
                                 transform_names
                             );
                         }
-                        Self::process_tf_message(&msg, &cache_dynamic).await;
+                        Self::process_tf_message(&msg, &cache_dynamic, false).await;
                     }
                     Err(e) => {
                         debug!("Error receiving /tf message: {:?}", e);
@@ -216,15 +220,61 @@ impl TfMonitor {
             }
         });
 
-        // Spawn task to periodically log TF tree statistics
+        // Spawn task to periodically log TF tree statistics and clean up stale frames
         let cache_stats = cache.clone();
         tokio::spawn(async move {
             // Wait a bit before first check to allow some transforms to be collected
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             loop {
                 interval.tick().await;
-                let cache_guard = cache_stats.lock().await;
+                let mut cache_guard = cache_stats.lock().await;
+                let now = std::time::Instant::now();
+
+                // Clean up frames that haven't been seen for a while
+                // Static frames: use longer threshold (5 minutes) or don't clean at all
+                // Dynamic frames: use shorter threshold (30 seconds)
+                let dynamic_stale_threshold = std::time::Duration::from_secs(30);
+                let static_stale_threshold = std::time::Duration::from_secs(300); // 5 minutes
+
+                let frames_to_remove: Vec<String> = cache_guard
+                    .frame_last_seen
+                    .iter()
+                    .filter(|(frame_id, last_seen)| {
+                        let age = now.duration_since(**last_seen);
+                        let is_static = cache_guard.static_frames.contains(*frame_id);
+                        if is_static {
+                            // For static frames, use longer threshold
+                            age > static_stale_threshold
+                        } else {
+                            // For dynamic frames, use shorter threshold
+                            age > dynamic_stale_threshold
+                        }
+                    })
+                    .map(|(frame_id, _)| frame_id.clone())
+                    .collect();
+
+                for frame_id in &frames_to_remove {
+                    debug!("Removing stale TF frame: {}", frame_id);
+
+                    // Remove the frame itself
+                    cache_guard.frames.remove(frame_id);
+                    cache_guard.frame_last_seen.remove(frame_id);
+                    cache_guard.static_frames.remove(frame_id);
+
+                    // Remove references to this frame from other frames' child_frames lists
+                    for frame in cache_guard.frames.values_mut() {
+                        frame.child_frames.retain(|child| child != frame_id);
+                    }
+
+                    // Remove this frame as parent from other frames
+                    for frame in cache_guard.frames.values_mut() {
+                        if frame.parent_frame.as_ref() == Some(frame_id) {
+                            frame.parent_frame = None;
+                        }
+                    }
+                }
+
                 let frame_count = cache_guard.frames.len();
                 let frame_names: Vec<String> = cache_guard.frames.keys().cloned().collect();
                 let mut sorted_frames = frame_names.clone();
@@ -239,7 +289,7 @@ impl TfMonitor {
         Ok(())
     }
 
-    async fn process_tf_message(msg: &TFMessage, cache: &Arc<Mutex<TfTreeCache>>) {
+    async fn process_tf_message(msg: &TFMessage, cache: &Arc<Mutex<TfTreeCache>>, is_static: bool) {
         let mut cache_guard = cache.lock().await;
 
         let total_frames_before = cache_guard.frames.len();
@@ -269,6 +319,19 @@ impl TfMonitor {
                     transform_stamped.transform.rotation.w,
                 ],
             };
+
+            // Update last seen time for both frames
+            let now = std::time::Instant::now();
+            cache_guard.frame_last_seen.insert(child_frame.clone(), now);
+            cache_guard
+                .frame_last_seen
+                .insert(parent_frame.clone(), now);
+
+            // Mark frames as static if they come from /tf_static
+            if is_static {
+                cache_guard.static_frames.insert(child_frame.clone());
+                cache_guard.static_frames.insert(parent_frame.clone());
+            }
 
             // Update or create child frame
             let child_frame_entry = cache_guard

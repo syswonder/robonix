@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 
 use crate::core::RobonixCore;
 use crate::tf_monitor::{TfMonitor, TfTreeResponse};
+use crate::topic_monitor::{TopicMonitor, TopicsResponse};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct LogEntry {
@@ -53,6 +54,7 @@ pub struct WebGuiState {
     pub core: Arc<RobonixCore>,
     pub node: Arc<Mutex<ros2_client::Node>>,
     pub tf_monitor: Arc<TfMonitor>,
+    pub topic_monitor: Arc<TopicMonitor>,
     pub log_buffer: Arc<LogBuffer>,
 }
 
@@ -69,12 +71,14 @@ pub fn create_web_gui_state(
     core: Arc<RobonixCore>,
     node: Arc<Mutex<ros2_client::Node>>,
     tf_monitor: Arc<TfMonitor>,
+    topic_monitor: Arc<TopicMonitor>,
     log_buffer: Arc<LogBuffer>,
 ) -> WebGuiState {
     WebGuiState {
         core,
         node,
         tf_monitor,
+        topic_monitor,
         log_buffer,
     }
 }
@@ -109,6 +113,14 @@ pub async fn tf_tree_handler(state: &State<WebGuiState>) -> Json<TfTreeResponse>
     let tree = state.tf_monitor.get_tree().await;
 
     Json(tree)
+}
+
+#[rocket::get("/api/topics")]
+pub async fn topics_handler(state: &State<WebGuiState>) -> Json<TopicsResponse> {
+    // Get topics from monitor
+    let topics = state.topic_monitor.get_topics().await;
+
+    Json(topics)
 }
 
 #[rocket::get("/api/tasks")]
