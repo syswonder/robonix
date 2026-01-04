@@ -37,6 +37,14 @@ class CameraRGBDGetter(Node):
         self.sync.registerCallback(self.callback)
 
     def callback(self, rgb_msg, depth_msg):
+        
+        # # Print the timestamps of rgb_msg and depth_msg, as well as the total byte size of the entire msg object.
+        # import sys
+        # rgb_msg_size = sys.getsizeof(rgb_msg)
+        # depth_msg_size = sys.getsizeof(depth_msg)
+        # self.get_logger().info(f"RGB timestamp: {rgb_msg.header.stamp.sec}.{rgb_msg.header.stamp.nanosec}, total msg bytes: {rgb_msg_size}")
+        # self.get_logger().info(f"Depth timestamp: {depth_msg.header.stamp.sec}.{depth_msg.header.stamp.nanosec}, total msg bytes: {depth_msg_size}")
+
         self.rgb_image = self.cv_bridge.imgmsg_to_cv2(rgb_msg, desired_encoding='bgr8')
         self.depth_image = self.cv_bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough')
         self.get_logger().info("Got synchronized RGB and depth images.")

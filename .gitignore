@@ -19,6 +19,9 @@ frames_*
 __export__.py
 skill/__init__.py
 *.log
+
 tmp/
+test_performance
+publish_camera_tf.py
 tailscale/
 target
