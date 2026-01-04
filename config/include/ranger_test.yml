@@ -17,7 +17,8 @@ skill:
   - vision
   - semantic_map
   - test_skill
-  - pointcloud
+  - spatial
+  - asr
 brain:
   - test_brian
 

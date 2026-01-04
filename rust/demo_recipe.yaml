@@ -1,0 +1,18 @@
+# Robonix Recipe Example
+# A recipe defines which packages and their primitives/services/skills should be registered
+# when running 'rbnx deploy register <recipe_file>'
+#
+# Since a package can provide multiple primitives, services, and skills, recipes allow
+# arbitrary selection of which primitives, services, and skills to register.
+
+name: demo_recipe
+description: Demo recipe showing how to selectively register primitives, services, and skills from packages
+
+packages:
+  # Example 1: Register all primitives, services, and skills from a package
+  # (when primitives, services, and skills are not specified, all will be registered)
+  - name: demo_rgb_provider
+    # primitives: []  # If not specified, all primitives will be registered
+    # services: []    # If not specified, all services will be registered
+    # skills: []      # If not specified, all skills will be registered
+  - name: demo_service_provider

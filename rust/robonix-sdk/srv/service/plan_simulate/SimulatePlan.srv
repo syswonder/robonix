@@ -1,0 +1,14 @@
+# SimulatePlan service (robonix spec)
+# Plan simulation service performs feasibility and safety checks on skill sequences in simulation environment or other offline evaluators
+string rtdl_code        # RTDL task description to be evaluated
+string context_id       # Optional, environment context snapshot identifier (semantic/spatial map version, etc.)
+string options_json     # Optional, evaluation options in JSON string format
+                        # Example:
+                        #   {"check":["collision","limits"],
+                        #    "max_sim_time": 120.0}
+---
+bool   feasible         # Whether physical and safety constraints are satisfied
+string[] violations     # Unsatisfied constraint items, e.g., ["collision","joint_limit"]
+string diagnostics_json # Diagnostic information (JSON string)
+builtin_interfaces/Time stamp
+
