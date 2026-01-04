@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Robonix Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Source+Code+Pro:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Robonix Console</h1>
+        
+        <div class="status">
+            <div class="status-item">
+                <span class="status-label">Status:</span>
+                <span id="core-status">-</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Tasks:</span>
+                <span id="active-tasks">-</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Skills:</span>
+                <span id="skills-count">-</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Services:</span>
+                <span id="services-count">-</span>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <div class="panel-title">TF Tree</div>
+                <div class="controls">
+                    <label>
+                        <input type="checkbox" id="auto-refresh" checked> Auto (2s)
+                    </label>
+                    <button onclick="loadTfTree()">Refresh</button>
+                </div>
+            </div>
+            <div id="tf-tree-container">Loading...</div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <div class="panel-title">System Logs</div>
+                <div class="controls">
+                    <label>
+                        <input type="checkbox" id="auto-refresh-logs" checked> Auto (2s)
+                    </label>
+                    <button onclick="loadLogs()">Refresh</button>
+                </div>
+            </div>
+            <div id="logs-container">Loading...</div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

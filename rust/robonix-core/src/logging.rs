@@ -6,8 +6,21 @@
 use ansi_term::{Colour, Style};
 use env_logger::{Builder, Env, Target};
 use std::io::Write;
+use std::sync::{Arc, OnceLock};
+
+use crate::web_gui::{LogBuffer, LogEntry};
+
+static LOG_BUFFER: OnceLock<Arc<LogBuffer>> = OnceLock::new();
 
 pub fn init_logger() {
+    init_logger_with_buffer(None);
+}
+
+pub fn init_logger_with_buffer(log_buffer: Option<Arc<LogBuffer>>) {
+    if let Some(buffer) = log_buffer {
+        let _ = LOG_BUFFER.set(buffer);
+    }
+
     let env = Env::default()
         .filter_or("RUST_LOG", "robonix_core=info,rustdds=error")
         .write_style_or("RUST_LOG_STYLE", "auto");
@@ -44,10 +57,26 @@ pub fn init_logger() {
             // Info messages are white (default), debug messages are dimmed gray, other levels use their level color
             let message = format!("{}", record.args());
             let painted_message = match record.level() {
-                log::Level::Info => Style::new().paint(message), // White (default)
-                log::Level::Debug => Style::new().dimmed().paint(message), // Dimmed gray (less prominent)
-                _ => level_color.paint(message),
+                log::Level::Info => Style::new().paint(message.clone()), // White (default)
+                log::Level::Debug => Style::new().dimmed().paint(message.clone()), // Dimmed gray (less prominent)
+                _ => level_color.paint(message.clone()),
             };
+
+            // Add log to buffer if available
+            if let Some(buffer) = LOG_BUFFER.get() {
+                let level_str = match record.level() {
+                    log::Level::Error => "ERROR",
+                    log::Level::Warn => "WARN",
+                    log::Level::Info => "INFO",
+                    log::Level::Debug => "DEBUG",
+                    log::Level::Trace => "TRACE",
+                };
+                buffer.add_log(LogEntry {
+                    timestamp: timestamp.clone(),
+                    level: level_str.to_string(),
+                    message: message.clone(),
+                });
+            }
 
             write!(
                 buf,
