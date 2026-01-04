@@ -15,4 +15,4 @@ packages:
     # primitives: []  # If not specified, all primitives will be registered
     # services: []    # If not specified, all services will be registered
     # skills: []      # If not specified, all skills will be registered
-  - name: demo_service
+  - name: demo_service_provider

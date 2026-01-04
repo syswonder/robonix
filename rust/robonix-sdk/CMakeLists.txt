@@ -55,14 +55,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
     builtin_interfaces
 )
 
-# Install Python client library
-# Install to Python site-packages (local/lib/python3.10/dist-packages)
-# This ensures the package can be imported via PYTHONPATH
-install(DIRECTORY robonixpy
-  DESTINATION local/lib/python3.10/dist-packages
-  FILES_MATCHING
-  PATTERN "*.py"
-)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

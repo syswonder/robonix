@@ -71,5 +71,7 @@ else
     exit 1
 fi
 
+# sudo apt install ros-humble-rmw-cyclonedds-cpp
+
 echo "Build completed successfully!"
 

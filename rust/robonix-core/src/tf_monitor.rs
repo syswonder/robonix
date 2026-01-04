@@ -255,24 +255,27 @@ impl TfMonitor {
                     .collect();
 
                 for frame_id in &frames_to_remove {
-                    debug!("Removing stale TF frame: {}", frame_id);
+                    debug!(
+                        "TODO: remove stale TF frame: {}, but we keep it for now since the monitor algorithm has some issues",
+                        frame_id
+                    );
 
-                    // Remove the frame itself
-                    cache_guard.frames.remove(frame_id);
-                    cache_guard.frame_last_seen.remove(frame_id);
-                    cache_guard.static_frames.remove(frame_id);
+                    // // Remove the frame itself
+                    // cache_guard.frames.remove(frame_id);
+                    // cache_guard.frame_last_seen.remove(frame_id);
+                    // cache_guard.static_frames.remove(frame_id);
 
-                    // Remove references to this frame from other frames' child_frames lists
-                    for frame in cache_guard.frames.values_mut() {
-                        frame.child_frames.retain(|child| child != frame_id);
-                    }
+                    // // Remove references to this frame from other frames' child_frames lists
+                    // for frame in cache_guard.frames.values_mut() {
+                    //     frame.child_frames.retain(|child| child != frame_id);
+                    // }
 
-                    // Remove this frame as parent from other frames
-                    for frame in cache_guard.frames.values_mut() {
-                        if frame.parent_frame.as_ref() == Some(frame_id) {
-                            frame.parent_frame = None;
-                        }
-                    }
+                    // // Remove this frame as parent from other frames
+                    // for frame in cache_guard.frames.values_mut() {
+                    //     if frame.parent_frame.as_ref() == Some(frame_id) {
+                    //         frame.parent_frame = None;
+                    //     }
+                    // }
                 }
 
                 let frame_count = cache_guard.frames.len();

@@ -30,8 +30,9 @@ use ros2_client::{
 use std::sync::Arc;
 
 pub fn create_qos() -> QosPolicies {
+    // Match official ros2_client demo QoS settings
     QosPolicyBuilder::new()
-        .history(policy::History::KeepLast { depth: 1000 })
+        .history(policy::History::KeepLast { depth: 10 })
         .reliability(policy::Reliability::Reliable {
             max_blocking_time: Duration::from_millis(100),
         })
@@ -138,10 +139,20 @@ pub fn create_servers(
     info!("task data service created at /rbnx/task/data");
 
     // Ping Pong API: /rbnx/ping
+    // WARNING: AService with custom Rust structs uses serde serialization,
+    // which is incompatible with standard ROS2 clients that send CDR format.
+    // This service will work with other ros2_client clients using AService,
+    // but NOT with standard ROS2 clients (ros2 CLI, Python rclpy, C++ rclcpp).
+    // 
+    // To support standard ROS2 clients, we would need to:
+    // 1. Use generated ROS2 service types from .srv files (requires code generation)
+    // 2. Or implement CDR serialization for custom message types
+    //
+    // For now, this service only works with robonix-cli (which also uses AService).
     let ping_pong_server = node.create_server::<AService<PingPongRequest, PingPongResponse>>(
         ServiceMapping::Enhanced,
         &Name::new("/rbnx", "ping")?,
-        &ServiceTypeName::new("robonix_sdk", "PingPong"),
+        &ServiceTypeName::new("robonix_sdk", "PingPong"), // Matches robonix_sdk/srv/PingPong.srv
         service_qos.clone(),
         service_qos.clone(),
     )?;
@@ -416,7 +427,17 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
                             error!("send ping pong response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive ping pong request error: {e:?}"),
+                    Err(e) => {
+                        error!("receive ping pong request error: {e:?}");
+                        // Note: This error occurs when standard ROS2 clients (ros2 CLI, Python, C++)
+                        // send CDR-serialized data, but AService with custom Rust structs uses serde format.
+                        // The service is visible but requests fail to deserialize.
+                        // 
+                        // Possible solutions:
+                        // 1. Use generated ROS2 service types from .srv files (requires code generation)
+                        // 2. Ensure both client and server use the same ServiceMapping mode
+                        // 3. Check if service type name format is correct: "robonix_sdk/PingPong"
+                    }
                 }
             })
             .await;
