@@ -47,12 +47,12 @@ pub struct SkillInstance {
     pub r#type: String, // Skill type: "basic" | "rtdl"
     pub start_topic: String,
     pub status_topic: String,
-    pub entry: String,     // Basic skill entry (if type="basic")
-    pub skill_dir: String, // Skill directory path (if type="rtdl")
-    pub main_rtdl: String, // Main RTDL file name (if type="rtdl")
-    pub start_args: serde_json::Value,
-    pub status: serde_json::Value,
-    pub metadata: serde_json::Value,
+    pub entry: String,      // Basic skill entry (if type="basic")
+    pub skill_dir: String,  // Skill directory path (if type="rtdl")
+    pub main_rtdl: String,  // Main RTDL file name (if type="rtdl")
+    pub start_args: String, // JSON string: input parameter schema
+    pub status: String,     // JSON string: status feedback schema
+    pub metadata: String,   // JSON string: metadata for instance filtering
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

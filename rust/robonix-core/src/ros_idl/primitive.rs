@@ -36,9 +36,9 @@ impl ros2_client::Message for QueryPrimitiveRequest {}
 pub struct PrimitiveInstance {
     pub provider: String,
     pub version: String,
-    pub input_schema: serde_json::Value,
-    pub output_schema: serde_json::Value,
-    pub metadata: serde_json::Value,
+    pub input_schema: String,  // JSON string: {"argname0":"/topic0", ...}
+    pub output_schema: String, // JSON string: {"argname1":"/topic1", ...}
+    pub metadata: String,      // JSON string: metadata for instance filtering
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -143,7 +143,7 @@ pub fn create_servers(
     // which is incompatible with standard ROS2 clients that send CDR format.
     // This service will work with other ros2_client clients using AService,
     // but NOT with standard ROS2 clients (ros2 CLI, Python rclpy, C++ rclcpp).
-    // 
+    //
     // To support standard ROS2 clients, we would need to:
     // 1. Use generated ROS2 service types from .srv files (requires code generation)
     // 2. Or implement CDR serialization for custom message types
@@ -208,19 +208,20 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
                 match result {
                     Ok((req_id, req)) => {
                         info!(
-                            "received primitive registration request: primitive_name={}",
+                            "received primitive [registration] request: primitive_name={}",
                             req.name
                         );
                         let resp = primitive_registry_clone1.register_primitive(req).await;
+                        info!("sending primitive [registration] response: {resp:?}");
                         if let Err(e) = servers
                             .register_primitive_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send primitive registration response error: {e:?}");
+                            error!("send primitive [registration] response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive primitive registration request error: {e:?}"),
+                    Err(e) => error!("receive primitive [registration] request error: {e:?}"),
                 }
             })
             .await;
@@ -233,20 +234,21 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
             .for_each(|result| async {
                 match result {
                     Ok((req_id, req)) => {
-                        debug!(
-                            "received primitive query request: primitive_name={}",
+                        info!(
+                            "received primitive [query] request: primitive_name={}",
                             req.name
                         );
                         let resp = primitive_registry_clone2.query_primitive(req).await;
+                        info!("sending primitive [query] response: {resp:?}");
                         if let Err(e) = servers
                             .query_primitive_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send primitive query response error: {e:?}");
+                            error!("send primitive [query] response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive primitive query request error: {e:?}"),
+                    Err(e) => error!("receive primitive [query] request error: {e:?}"),
                 }
             })
             .await;
@@ -260,19 +262,20 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
                 match result {
                     Ok((req_id, req)) => {
                         info!(
-                            "received service registration request: service_name={}",
+                            "received service [registration] request: service_name={}",
                             req.name
                         );
                         let resp = service_registry_clone1.register_service(req).await;
+                        info!("sending service [registration] response: {resp:?}");
                         if let Err(e) = servers
                             .register_service_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send service registration response error: {e:?}");
+                            error!("send service [registration] response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive service registration request error: {e:?}"),
+                    Err(e) => error!("receive service [registration] request error: {e:?}"),
                 }
             })
             .await;
@@ -285,17 +288,21 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
             .for_each(|result| async {
                 match result {
                     Ok((req_id, req)) => {
-                        debug!("received service query request: service_name={}", req.name);
+                        info!(
+                            "received service [query] request: service_name={}",
+                            req.name
+                        );
                         let resp = service_registry_clone2.query_service(req).await;
+                        info!("sending service [query] response: {resp:?}");
                         if let Err(e) = servers
                             .query_service_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send service query response error: {e:?}");
+                            error!("send service [query] response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive service query request error: {e:?}"),
+                    Err(e) => error!("receive service [query] request error: {e:?}"),
                 }
             })
             .await;
@@ -309,19 +316,20 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
                 match result {
                     Ok((req_id, req)) => {
                         info!(
-                            "received skill registration request: skill_name={}",
+                            "received skill [registration] request: skill_name={}",
                             req.name
                         );
                         let resp = skill_library_clone1.register_skill(req).await;
+                        info!("sending skill [registration] response: {resp:?}");
                         if let Err(e) = servers
                             .register_skill_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send skill registration response error: {e:?}");
+                            error!("send skill [registration] response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive skill registration request error: {e:?}"),
+                    Err(e) => error!("receive skill [registration] request error: {e:?}"),
                 }
             })
             .await;
@@ -334,17 +342,18 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
             .for_each(|result| async {
                 match result {
                     Ok((req_id, req)) => {
-                        debug!("received skill query request: skill_name={}", req.name);
+                        info!("received skill [query] request: skill_name={}", req.name);
                         let resp = skill_library_clone2.query_skill(req).await;
+                        info!("sending skill [query] response: {resp:?}");
                         if let Err(e) = servers
                             .query_skill_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send skill query response error: {e:?}");
+                            error!("send skill [query] response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive skill query request error: {e:?}"),
+                    Err(e) => error!("receive skill [query] request error: {e:?}"),
                 }
             })
             .await;
@@ -358,19 +367,20 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
                 match result {
                     Ok((req_id, req)) => {
                         info!(
-                            "received task submit request: description={}",
+                            "received task [submit] request: description={}",
                             req.description
                         );
                         let resp = task_manager_clone1.submit_task(req).await;
+                        info!("sending task [submit] response: {resp:?}");
                         if let Err(e) = servers
                             .submit_task_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send task submit response error: {e:?}");
+                            error!("send task [submit] response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive task submit request error: {e:?}"),
+                    Err(e) => error!("receive task [submit] request error: {e:?}"),
                 }
             })
             .await;
@@ -383,17 +393,18 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
             .for_each(|result| async {
                 match result {
                     Ok((req_id, req)) => {
-                        debug!("received task data request: task_id={}", req.task_id);
+                        info!("received task [data] request: task_id={}", req.task_id);
                         let resp = task_manager_clone3.get_task_data(req).await;
+                        info!("sending task [data] response: {resp:?}");
                         if let Err(e) = servers
                             .task_data_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send task data response error: {e:?}");
+                            error!("send task [data] response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive task data request error: {e:?}"),
+                    Err(e) => error!("receive task [data] request error: {e:?}"),
                 }
             })
             .await;
@@ -406,10 +417,7 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
             .for_each(|result| async {
                 match result {
                     Ok((req_id, req)) => {
-                        debug!(
-                            "received ping request: sequence={}, message={}",
-                            req.sequence, req.message
-                        );
+                        info!("received ping request: {req:?}");
                         let timestamp = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
@@ -419,24 +427,17 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
                             sequence: req.sequence,
                             timestamp,
                         };
+                        info!("sending pong response: {resp:?}",);
                         if let Err(e) = servers
                             .ping_pong_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send ping pong response error: {e:?}");
+                            error!("send pong response error: {e:?}");
                         }
                     }
                     Err(e) => {
-                        error!("receive ping pong request error: {e:?}");
-                        // Note: This error occurs when standard ROS2 clients (ros2 CLI, Python, C++)
-                        // send CDR-serialized data, but AService with custom Rust structs uses serde format.
-                        // The service is visible but requests fail to deserialize.
-                        // 
-                        // Possible solutions:
-                        // 1. Use generated ROS2 service types from .srv files (requires code generation)
-                        // 2. Ensure both client and server use the same ServiceMapping mode
-                        // 3. Check if service type name format is correct: "robonix_sdk/PingPong"
+                        error!("receive pong request error: {e:?}");
                     }
                 }
             })
