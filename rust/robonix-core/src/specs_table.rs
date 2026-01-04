@@ -23,6 +23,18 @@ pub fn load_primitives() -> HashMap<String, PrimitiveSpec> {
          {},  // No input parameters
          { "status": "std_msgs/msg/Bool" });
 
+    PRM!(primitives, "prm::base.move", "Move mobile base with velocity command",
+         { "cmd_vel": "geometry_msgs/msg/Twist" },
+         { "odom": "nav_msgs/msg/Odometry" });
+
+    PRM!(primitives, "prm::lidar.scan", "Scan environment with lidar",
+         {},  // No input parameters
+         { "scan": "sensor_msgs/msg/LaserScan" });
+
+    PRM!(primitives, "prm::camera.depth", "Capture depth image from depth camera",
+         {},  // No input parameters
+         { "depth": "sensor_msgs/msg/Image" });
+
     info!(
         "loaded primitives specs, number of primitives: {}",
         primitives.len()

@@ -1,0 +1,7 @@
+diff_drive_controller:
+  ros__parameters:
+    wheel_base: 1.42
+    wheel_track: 1.22
+    wheel_radius: 0.3495
+    distance_steering_to_wheel: 0.11
+    steering_gear_transmission_ratio: 1.671232877
