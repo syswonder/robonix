@@ -41,16 +41,16 @@ function renderTfTree(data) {
         const frame = frameMap.get(frameId);
         if (!frame) return '';
 
-        let output = prefix + (isLast ? '└── ' : '├── ') + '<strong>' + frameId + '</strong>';
+        let output = prefix + '<span style="color: #999;">' + (isLast ? '└── ' : '├── ') + '</span>' + '<strong>' + frameId + '</strong>';
         
         if (frame.transform) {
             const t = frame.transform.translation;
-            output += ` [${t[0].toFixed(2)}, ${t[1].toFixed(2)}, ${t[2].toFixed(2)}]`;
+            output += ` <span style="color: #999;">[${t[0].toFixed(2)}, ${t[1].toFixed(2)}, ${t[2].toFixed(2)}]</span>`;
         }
         output += '\n';
 
         if (frame.child_frames && frame.child_frames.length > 0) {
-            const childPrefix = prefix + (isLast ? '    ' : '│   ');
+            const childPrefix = prefix + '<span style="color: #999;">' + (isLast ? '    ' : '│   ') + '</span>';
             // Sort child frames alphabetically
             const sortedChildren = [...frame.child_frames].sort();
             sortedChildren.forEach((childId, index) => {
@@ -91,6 +91,59 @@ async function loadTfTree() {
     }
 }
 
+let currentTopicsData = null;
+
+function renderTopics(data) {
+    const container = document.getElementById('topics-container');
+    
+    if (!data || !data.topics || data.topics.length === 0) {
+        if (!currentTopicsData) {
+            container.innerHTML = 'No topics available';
+        }
+        return;
+    }
+
+    // Only update if data changed
+    const dataStr = JSON.stringify(data);
+    if (currentTopicsData === dataStr) {
+        return; // No change, skip update
+    }
+    currentTopicsData = dataStr;
+
+    let topicsHtml = '';
+    data.topics.forEach(topic => {
+        const freqText = topic.frequency !== null && topic.frequency !== undefined
+            ? `${topic.frequency.toFixed(2)} Hz`
+            : '-';
+        
+        topicsHtml += `<div class="topic-entry">`;
+        topicsHtml += `<span class="topic-name">${topic.name}</span>`;
+        topicsHtml += `<span class="topic-type">${topic.message_type}</span>`;
+        topicsHtml += `<span class="topic-frequency">${freqText}</span>`;
+        topicsHtml += `</div>`;
+    });
+
+    container.innerHTML = topicsHtml || 'No topics found';
+}
+
+async function loadTopics() {
+    const container = document.getElementById('topics-container');
+    
+    try {
+        const response = await fetch('/api/topics');
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const data = await response.json();
+        renderTopics(data);
+    } catch (error) {
+        console.error('Failed to load topics:', error);
+        if (!currentTopicsData) {
+            container.innerHTML = `Error: ${error.message}`;
+        }
+    }
+}
+
 function setupAutoRefresh() {
     const checkbox = document.getElementById('auto-refresh');
     checkbox.addEventListener('change', (e) => {
@@ -111,6 +164,7 @@ function startAutoRefresh() {
     }
     autoRefreshInterval = setInterval(() => {
         loadTfTree();
+        loadTopics();
         loadStatus();
     }, 2000);
 }
@@ -256,6 +310,7 @@ function stopAutoRefreshLogs() {
 // Initialize on page load
 loadStatus();
 loadTfTree();
+loadTopics();
 loadLogs();
 setupAutoRefresh();
 setupAutoRefreshLogs();

@@ -16,4 +16,5 @@ pub mod skill_library;
 pub mod specs_table;
 pub mod task_manager;
 pub mod tf_monitor;
+pub mod topic_monitor;
 pub mod web_gui;
