@@ -81,9 +81,12 @@ Keep this terminal running.
 You can control the verbosity of robonix-core logs by setting the `RUST_LOG` environment variable:
 
 ```bash
-# Show only info, warn, and error messages (default)
-robonix-core
+# preferred way to start robonix-core with debug logs and web GUI
+ROBONIX_WEB_STATIC_DIR="$(pwd)/robonix-core/web_gui/static" \
+ROBONIX_WEB_PORT=8000 \
+RUST_LOG=robonix_core=debug robonix-core
 
+# alternative ways for RUST_LOG options
 # Show debug messages for robonix-core module
 RUST_LOG=robonix_core=debug robonix-core
 # Show debug messages for all modules, you can see rustdds logs too for example
