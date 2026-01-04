@@ -12,6 +12,10 @@ data_files.append(('share/' + package_name + '/resource', [
     'resource/ranger_mini_v3_webots.urdf',
     'resource/ros2_control.yml',
     'resource/default.rviz',
+    'resource/nav2_params.yaml',
+    'resource/slam_toolbox_params.yaml',
+    'resource/map.yaml',
+    'resource/map.pgm',
 ]))
 data_files.append(('share/' + package_name, ['package.xml']))
 data_files.append(('share/' + package_name + '/worlds', [

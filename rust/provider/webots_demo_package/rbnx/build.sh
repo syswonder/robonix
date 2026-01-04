@@ -56,6 +56,7 @@ DEPS=(
     "ros-humble-webots-ros2-control"
     "ros-humble-webots-ros2"
     "ros-humble-nav2-bringup"
+    "ros-humble-nav2-map-server"
     "ros-humble-slam-toolbox"
     "ros-humble-rviz2"
 )

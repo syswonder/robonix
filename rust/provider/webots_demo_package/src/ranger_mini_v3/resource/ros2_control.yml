@@ -32,7 +32,7 @@ four_wheel_steering_controller:
     odom_frame_id: odom
     base_frame_id: base_footprint
     wait_for_angle: false
-    min_steering_diff: 0.1
+    min_steering_diff: 0.01
     stop_no_adjust_steering: true
 
     # Velocity and acceleration limits

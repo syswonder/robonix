@@ -650,7 +650,7 @@ controller_interface::return_type FourWheelSteeringController::updateCommand(con
     last1_cmd_ = last0_cmd_;
     last0_cmd_ = curr_cmd_twist;
 	  
-  	// Stop command: when cmd_vel is (0,0,0), stop without resetting steering angles
+  	// 收到速度cmd_vel(0,0,0)，仅停车，不复位舵角
   	if (fabs(curr_cmd_twist->lin_x) < POSITIVE_ZERO 
   	 && fabs(curr_cmd_twist->lin_y) < POSITIVE_ZERO 
   	 && fabs(curr_cmd_twist->ang) < POSITIVE_ZERO)
@@ -667,7 +667,7 @@ controller_interface::return_type FourWheelSteeringController::updateCommand(con
 
       stop_cmd = true;
   	}
-    // Lateral movement (In-phase): All-Wheel Driving (crab motion)
+    // 横移 In-phase // All-Wheel Driving (crab motion)  螃蟹横着走
   	else if (fabs(curr_cmd_twist->ang) < POSITIVE_ZERO)
   	{
       // Compute wheels velocities:
@@ -677,31 +677,17 @@ controller_interface::return_type FourWheelSteeringController::updateCommand(con
       vel_left_rear = vel_left_front;
       vel_right_rear = vel_right_front;
       
-      // Compute steering angle: if only forward/backward (lin_y == 0), wheels should be straight (0)
-      double steering = 0.0;
-      if (fabs(curr_cmd_twist->lin_y) > POSITIVE_ZERO)
-      {
-        // Lateral movement: compute steering angle based on direction
-        if (fabs(curr_cmd_twist->lin_x) < POSITIVE_ZERO)
-        {
-          // Pure lateral movement (only lin_y)
-          steering = copysign(M_PI_2, curr_cmd_twist->lin_y);
-        }
-        else
-        {
-          // Combined forward/backward and lateral movement
-          steering = atan(curr_cmd_twist->lin_y / curr_cmd_twist->lin_x);
-        }
-      }
-      // If lin_y == 0, steering remains 0.0 (wheels straight)
+      double steering = (fabs(curr_cmd_twist->lin_x) < POSITIVE_ZERO) 
+        ? copysign(M_PI_2, curr_cmd_twist->lin_x*curr_cmd_twist->lin_y)
+        : atan(curr_cmd_twist->lin_y / curr_cmd_twist->lin_x);
       
       // Compute steering angles:
       front_left_steering = steering;
-      front_right_steering = steering;
-      rear_left_steering = steering;
-      rear_right_steering = steering;      
+      front_right_steering = front_left_steering;
+      rear_left_steering = front_left_steering;
+      rear_right_steering = front_right_steering;      
   	}
-  	// Spin task: x=0, y=0, w>0
+  	// 自旋任务 x=0,y=0,w>0
   	else if (fabs(curr_cmd_twist->lin_x) < POSITIVE_ZERO 
   	 && fabs(curr_cmd_twist->lin_y) < POSITIVE_ZERO 
   	 && fabs(curr_cmd_twist->ang) > POSITIVE_ZERO)
@@ -718,31 +704,9 @@ controller_interface::return_type FourWheelSteeringController::updateCommand(con
     }
     else // fabs(curr_cmd_twist->ang) > POSITIVE_ZERO
     {
-      // Instantaneous Center of Rotation (ICR) in body frame
-      // Prevent division by zero or numerical instability: when ang is very small, ICR becomes very large
-      const double min_ang_threshold = 0.01;  // Minimum angular velocity threshold (rad/s)
-      const double max_icr_distance = 100.0;  // Maximum ICR distance (meters), prevent abnormally large values
-      
-      double safe_ang = curr_cmd_twist->ang;
-      if (fabs(curr_cmd_twist->ang) < min_ang_threshold)
-      {
-        // If angular velocity is too small, treat it as lateral movement mode to avoid ICR calculation anomalies
-        safe_ang = copysign(min_ang_threshold, curr_cmd_twist->ang);
-      }
-      
-      double ICR_Y = curr_cmd_twist->lin_x / safe_ang;
-      double ICR_X = -curr_cmd_twist->lin_y / safe_ang;
-      
-      // Limit ICR distance to prevent abnormal calculated values
-      const double icr_distance = std::hypot(ICR_X, ICR_Y);
-      if (icr_distance > max_icr_distance)
-      {
-        const double scale = max_icr_distance / icr_distance;
-        ICR_X *= scale;
-        ICR_Y *= scale;
-        RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
-          "ICR distance too large (%.2f m), clamped to %.2f m", icr_distance, max_icr_distance);
-      }
+      // 车体坐标系下的瞬时旋转中心ICR
+      double ICR_Y = curr_cmd_twist->lin_x / curr_cmd_twist->ang;
+      double ICR_X = -curr_cmd_twist->lin_y / curr_cmd_twist->ang;
       
       vel_left_front = curr_cmd_twist->ang * std::hypot(steering_track/2-ICR_Y, wheel_base_/2.0-ICR_X) / wheel_radius_;
       vel_right_front = curr_cmd_twist->ang * std::hypot(-steering_track/2-ICR_Y, wheel_base_/2.0-ICR_X) / wheel_radius_;
@@ -755,7 +719,7 @@ controller_interface::return_type FourWheelSteeringController::updateCommand(con
       rear_right_steering = normalize(atan2(-steering_track/2-ICR_Y, -wheel_base_/2.0-ICR_X) + M_PI_2);
     }
     
-    // Check if steering angles are in position and output control values
+    // 判断舵角是否到位，并输出控制量
     if (wait_for_angle_)
     {
       double fl_steering = front_left_steering_handle_->position_state.get().get_value(); // in radians
@@ -763,106 +727,21 @@ controller_interface::return_type FourWheelSteeringController::updateCommand(con
       double rl_steering = rear_left_steering_handle_->position_state.get().get_value();  // in radians
       double rr_steering = rear_right_steering_handle_->position_state.get().get_value(); // in radians
       
-      // Check if steering angles are valid (not NaN or infinity)
-      bool steering_valid = std::isfinite(fl_steering) && std::isfinite(fr_steering) && 
-                            std::isfinite(rl_steering) && std::isfinite(rr_steering) &&
-                            std::isfinite(front_left_steering) && std::isfinite(front_right_steering) &&
-                            std::isfinite(rear_left_steering) && std::isfinite(rear_right_steering);
-      
-      // Check if computed steering angles are within reasonable physical limits (e.g., ±90 degrees)
-      const double max_steering_angle = M_PI_2;  // 90 degrees
-      bool steering_in_range = (fabs(front_left_steering) <= max_steering_angle) &&
-                               (fabs(front_right_steering) <= max_steering_angle) &&
-                               (fabs(rear_left_steering) <= max_steering_angle) &&
-                               (fabs(rear_right_steering) <= max_steering_angle);
-      
-      if (steering_valid && steering_in_range)
+      if ((fabs(front_left_steering-fl_steering)>min_steering_diff_)
+        ||(fabs(front_right_steering-fr_steering)>min_steering_diff_)
+        ||(fabs(rear_left_steering-rl_steering)>min_steering_diff_)
+        ||(fabs(rear_right_steering-rr_steering)>min_steering_diff_))
       {
-        // Use normalized angle difference for comparison (angles are periodic)
-        double fl_diff = normalize(front_left_steering - fl_steering);
-        double fr_diff = normalize(front_right_steering - fr_steering);
-        double rl_diff = normalize(rear_left_steering - rl_steering);
-        double rr_diff = normalize(rear_right_steering - rr_steering);
-        
-        // Check if any steering angle difference is significant
-        bool angles_not_ready = (fabs(fl_diff) > min_steering_diff_) ||
-                                (fabs(fr_diff) > min_steering_diff_) ||
-                                (fabs(rl_diff) > min_steering_diff_) ||
-                                (fabs(rr_diff) > min_steering_diff_);
-        
-        if (angles_not_ready)
-        {
-          // Start or continue waiting for angles
-          if (!steering_waiting_)
-          {
-            steering_wait_start_time_ = time;
-            steering_waiting_ = true;
-          }
-          
-          // Check timeout: if waiting for more than 0.5 seconds, allow movement to prevent freeze
-          const double steering_wait_timeout = 0.5;  // seconds
-          auto wait_duration = time - steering_wait_start_time_;
-          
-          if (wait_duration.seconds() > steering_wait_timeout)
-          {
-            // Timeout: allow movement even if angles are not ready
-            RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 2000,
-              "Steering angle wait timeout (%.2f s), allowing movement. Differences: fl=%.3f, fr=%.3f, rl=%.3f, rr=%.3f",
-              wait_duration.seconds(), fl_diff, fr_diff, rl_diff, rr_diff);
-            steering_waiting_ = false;
-            // Allow movement by not zeroing velocities
-          }
-          else
-          {
-            // Still waiting: stop movement
-            vel_left_front = 0.0;
-            vel_right_front = 0.0;
-            vel_left_rear = 0.0;
-            vel_right_rear = 0.0;
-          }
-        }
-        else
-        {
-          // Angles are ready: reset waiting state
-          steering_waiting_ = false;
-        }
+        vel_left_front = 0.0;
+        vel_right_front = 0.0;
+        vel_left_rear = 0.0;
+        vel_right_rear = 0.0;
       }
-      else
-      {
-        // Invalid or out-of-range steering values: allow movement to prevent freeze
-        // (invalid values will be caught by the validation check later)
-        steering_waiting_ = false;
-        if (!steering_in_range)
-        {
-          RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
-            "Computed steering angles out of range, allowing movement. fl=%.3f, fr=%.3f, rl=%.3f, rr=%.3f",
-            front_left_steering, front_right_steering, rear_left_steering, rear_right_steering);
-        }
-      }
-    }
-    else
-    {
-      // wait_for_angle is disabled: reset waiting state
-      steering_waiting_ = false;
     }
   }
   
   RCLCPP_DEBUG(get_node()->get_logger(), "cmd_vel velocity fl: %.3f, fr: %.3f, rl: %.3f, rr: %.3f", vel_left_front, vel_right_front, vel_left_rear, vel_right_rear);
   RCLCPP_DEBUG(get_node()->get_logger(), "cmd_vel steering fl: %.3f, fr: %.3f, rl: %.3f, rr: %.3f", front_left_steering, front_right_steering, rear_left_steering, rear_right_steering);
-  
-  // Check if computed values are valid to prevent NaN or infinity from causing system freeze
-  if (std::isnan(vel_left_front) || std::isnan(vel_right_front) || std::isnan(vel_left_rear) || std::isnan(vel_right_rear) ||
-      std::isnan(front_left_steering) || std::isnan(front_right_steering) || std::isnan(rear_left_steering) || std::isnan(rear_right_steering) ||
-      !std::isfinite(vel_left_front) || !std::isfinite(vel_right_front) || !std::isfinite(vel_left_rear) || !std::isfinite(vel_right_rear) ||
-      !std::isfinite(front_left_steering) || !std::isfinite(front_right_steering) || !std::isfinite(rear_left_steering) || !std::isfinite(rear_right_steering))
-  {
-    RCLCPP_ERROR_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
-      "Invalid computed values detected! Setting all to zero. vel: [%.3f, %.3f, %.3f, %.3f], steering: [%.3f, %.3f, %.3f, %.3f]",
-      vel_left_front, vel_right_front, vel_left_rear, vel_right_rear,
-      front_left_steering, front_right_steering, rear_left_steering, rear_right_steering);
-    vel_left_front = vel_right_front = vel_left_rear = vel_right_rear = 0.0;
-    front_left_steering = front_right_steering = rear_left_steering = rear_right_steering = 0.0;
-  }
   
   front_left_traction_handle_->velocity_command.get().set_value(vel_left_front);
   front_right_traction_handle_->velocity_command.get().set_value(vel_right_front);

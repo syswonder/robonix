@@ -163,8 +163,6 @@ protected:
   bool wait_for_angle_;
   double min_steering_diff_;
   bool stop_no_adjust_steering_;
-  rclcpp::Time steering_wait_start_time_{0, 0, RCL_CLOCK_UNINITIALIZED};
-  bool steering_waiting_ = false;
 
   /// Speed limiters:
   std::shared_ptr<CommandTwist> last1_cmd_;
