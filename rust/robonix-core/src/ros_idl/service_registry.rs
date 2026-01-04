@@ -40,7 +40,7 @@ pub struct ServiceInstance {
     pub provider: String,
     pub version: String,
     pub entry: String,
-    pub metadata: serde_json::Value,
+    pub metadata: String, // JSON string: metadata for instance filtering
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

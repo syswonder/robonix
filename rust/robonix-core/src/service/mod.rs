@@ -20,7 +20,7 @@ struct ServiceEntry {
     #[allow(dead_code)] // Used for validation and future queries
     srv_type: String,
     entry: String,
-    metadata: serde_json::Value,
+    metadata: String, // JSON string: stored as string internally
     provider: String,
     version: String,
 }
@@ -64,8 +64,8 @@ impl ServiceRegistry {
         // Key includes name, provider, and version to distinguish different implementations
         let key = format!("{}::{}::{}", req.name, req.provider, req.version);
 
-        // Parse metadata JSON string
-        let mut metadata: serde_json::Value = match serde_json::from_str(&req.metadata) {
+        // Validate metadata is valid JSON
+        let _metadata_value: serde_json::Value = match serde_json::from_str(&req.metadata) {
             Ok(v) => v,
             Err(e) => {
                 warn!(
@@ -96,8 +96,14 @@ impl ServiceRegistry {
             "registered"
         };
 
+        // Parse, update status, and serialize back to string
+        let mut metadata_value: serde_json::Value = match serde_json::from_str(&req.metadata) {
+            Ok(v) => v,
+            Err(_) => serde_json::json!({}), // Default to empty object if invalid
+        };
+
         // Set status in metadata
-        if let Some(meta_obj) = metadata.as_object_mut() {
+        if let Some(meta_obj) = metadata_value.as_object_mut() {
             meta_obj.insert(
                 "status".to_string(),
                 serde_json::Value::String(status.to_string()),
@@ -110,19 +116,23 @@ impl ServiceRegistry {
                 serde_json::Value::String(status.to_string()),
             );
             // Try to merge existing metadata if it's an object
-            if let Some(existing_obj) = metadata.as_object() {
+            if let Some(existing_obj) = metadata_value.as_object() {
                 for (k, v) in existing_obj {
                     new_meta.insert(k.clone(), v.clone());
                 }
             }
-            metadata = serde_json::Value::Object(new_meta);
+            metadata_value = serde_json::Value::Object(new_meta);
         }
+
+        // Serialize back to JSON string for storage
+        let metadata_string =
+            serde_json::to_string(&metadata_value).unwrap_or_else(|_| "{}".to_string());
 
         let entry = ServiceEntry {
             name: req.name.clone(),
             srv_type: req.srv_type.clone(),
             entry: req.entry.clone(),
-            metadata,
+            metadata: metadata_string,
             provider: req.provider.clone(),
             version: req.version.clone(),
         };
@@ -153,7 +163,13 @@ impl ServiceRegistry {
                     Ok(v) => v,
                     Err(_) => continue, // Skip if filter is invalid JSON
                 };
-                if !self.matches_filter(&entry.metadata, &filter_value) {
+                // Parse metadata for filtering
+                let metadata_value: serde_json::Value = match serde_json::from_str(&entry.metadata)
+                {
+                    Ok(v) => v,
+                    Err(_) => continue, // Skip if metadata is invalid JSON
+                };
+                if !self.matches_filter(&metadata_value, &filter_value) {
                     continue;
                 }
             }
@@ -183,8 +199,12 @@ impl ServiceRegistry {
             .instances
             .into_iter()
             .filter(|inst| {
-                let status = inst
-                    .metadata
+                // Parse metadata JSON string to check status
+                let metadata_value: serde_json::Value = match serde_json::from_str(&inst.metadata) {
+                    Ok(v) => v,
+                    Err(_) => return false, // Skip if metadata is invalid JSON
+                };
+                let status = metadata_value
                     .get("status")
                     .and_then(|v| v.as_str())
                     .unwrap_or("registered");

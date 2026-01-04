@@ -14,7 +14,8 @@ from pathlib import Path
 from datetime import datetime
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy, LivelinessPolicy
+from rclpy.duration import Duration
 from robonix_sdk.srv import QuerySemanticMap
 from robonix_sdk.msg import Object, Relation, RelationType, FrameMapping, Point3D, BoundingBox
 from builtin_interfaces.msg import Time
@@ -68,12 +69,20 @@ class SemanticMapService(Node):
             raise
         
         # Create service client for querying primitives with QoS matching server
+        # Match Rust server QoS configuration exactly:
+        # - KeepLast(depth=10), Reliable, Volatile
+        # - INFINITE deadline/lifespan, Automatic liveliness
         service_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
-            depth=1000,
+            depth=10,
             durability=DurabilityPolicy.VOLATILE
         )
+        # Set additional QoS policies to match server (INFINITE = Duration(seconds=0))
+        service_qos.deadline = Duration(seconds=0)  # INFINITE
+        service_qos.lifespan = Duration(seconds=0)  # INFINITE
+        service_qos.liveliness = LivelinessPolicy.AUTOMATIC
+        service_qos.liveliness_lease_duration = Duration(seconds=0)  # INFINITE
         self.query_primitive_client = self.create_client(
             QueryPrimitive,
             '/rbnx/prm/query',

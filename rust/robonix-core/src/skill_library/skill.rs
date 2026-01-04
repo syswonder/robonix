@@ -25,12 +25,12 @@ struct SkillEntry {
     r#type: String, // Skill type: "basic" | "rtdl"
     start_topic: String,
     status_topic: String,
-    entry: String,     // Basic skill entry (if type="basic")
-    skill_dir: String, // Skill directory path (if type="rtdl")
-    main_rtdl: String, // Main RTDL file name (if type="rtdl")
-    start_args: serde_json::Value,
-    status: serde_json::Value,
-    metadata: serde_json::Value,
+    entry: String,      // Basic skill entry (if type="basic")
+    skill_dir: String,  // Skill directory path (if type="rtdl")
+    main_rtdl: String,  // Main RTDL file name (if type="rtdl")
+    start_args: String, // JSON string: stored as string internally
+    status: String,     // JSON string: stored as string internally
+    metadata: String,   // JSON string: stored as string internally
     provider: String,
     version: String,
 }
@@ -46,46 +46,37 @@ impl SkillRegistry {
     /// Register a skill
     /// Note: Skills do not have specifications - they are user-defined and flexible
     pub async fn register(&self, req: RegisterSkillRequest) -> RegisterSkillResponse {
-        // Parse JSON strings
-        let start_args: serde_json::Value = match serde_json::from_str(&req.start_args) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(
-                    "failed to parse start_args json: skill_name={}, provider={}, error={}",
-                    req.name, req.provider, e
-                );
-                return RegisterSkillResponse {
-                    ok: false,
-                    skill_id: String::new(),
-                };
-            }
-        };
-        let status: serde_json::Value = match serde_json::from_str(&req.status) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(
-                    "failed to parse status json: skill_name={}, provider={}, error={}",
-                    req.name, req.provider, e
-                );
-                return RegisterSkillResponse {
-                    ok: false,
-                    skill_id: String::new(),
-                };
-            }
-        };
-        let metadata: serde_json::Value = match serde_json::from_str(&req.metadata) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(
-                    "failed to parse metadata json: skill_name={}, provider={}, error={}",
-                    req.name, req.provider, e
-                );
-                return RegisterSkillResponse {
-                    ok: false,
-                    skill_id: String::new(),
-                };
-            }
-        };
+        // Validate JSON format
+        if serde_json::from_str::<serde_json::Value>(&req.start_args).is_err() {
+            warn!(
+                "failed to parse start_args json: skill_name={}, provider={}",
+                req.name, req.provider
+            );
+            return RegisterSkillResponse {
+                ok: false,
+                skill_id: String::new(),
+            };
+        }
+        if serde_json::from_str::<serde_json::Value>(&req.status).is_err() {
+            warn!(
+                "failed to parse status json: skill_name={}, provider={}",
+                req.name, req.provider
+            );
+            return RegisterSkillResponse {
+                ok: false,
+                skill_id: String::new(),
+            };
+        }
+        if serde_json::from_str::<serde_json::Value>(&req.metadata).is_err() {
+            warn!(
+                "failed to parse metadata json: skill_name={}, provider={}",
+                req.name, req.provider
+            );
+            return RegisterSkillResponse {
+                ok: false,
+                skill_id: String::new(),
+            };
+        }
 
         // Validate skill type
         if req.r#type != "basic" && req.r#type != "rtdl" {
@@ -135,6 +126,7 @@ impl SkillRegistry {
             );
         }
 
+        // Store as JSON strings internally
         let entry = SkillEntry {
             skill_id: skill_id.clone(),
             name: req.name.clone(),
@@ -144,9 +136,9 @@ impl SkillRegistry {
             entry: req.entry.clone(),
             skill_dir: req.skill_dir.clone(),
             main_rtdl: req.main_rtdl.clone(),
-            start_args,
-            status,
-            metadata,
+            start_args: req.start_args.clone(),
+            status: req.status.clone(),
+            metadata: req.metadata.clone(),
             provider: req.provider.clone(),
             version: req.version.clone(),
         };
@@ -197,8 +189,15 @@ impl SkillRegistry {
                     filter_obj.remove("type");
                 }
 
+                // Parse metadata for filtering
+                let metadata_value: serde_json::Value = match serde_json::from_str(&entry.metadata)
+                {
+                    Ok(v) => v,
+                    Err(_) => continue, // Skip if metadata is invalid JSON
+                };
+
                 if !metadata_filter.is_null()
-                    && !self.matches_filter(&entry.metadata, &metadata_filter)
+                    && !self.matches_filter(&metadata_value, &metadata_filter)
                 {
                     continue;
                 }

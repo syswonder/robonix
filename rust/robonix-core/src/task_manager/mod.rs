@@ -468,8 +468,10 @@ impl TaskManager {
 
         let service_instance = &query_resp.instances[0];
         let service_name = &service_instance.entry;
-        let service_type = service_instance
-            .metadata
+        // Parse metadata JSON string to get srv_type
+        let metadata_value: serde_json::Value = serde_json::from_str(&service_instance.metadata)
+            .unwrap_or_else(|_| serde_json::json!({}));
+        let service_type = metadata_value
             .get("srv_type")
             .and_then(|v| v.as_str())
             .unwrap_or("robonix_sdk/srv/service/task_plan/PlanTask");
@@ -749,8 +751,10 @@ impl TaskManager {
 
         let service_instance = &query_resp.instances[0]; // TODO: we are choosing the first one here for now
         let service_name = &service_instance.entry;
-        let service_type = service_instance
-            .metadata
+        // Parse metadata JSON string to get srv_type
+        let metadata_value: serde_json::Value = serde_json::from_str(&service_instance.metadata)
+            .unwrap_or_else(|_| serde_json::json!({}));
+        let service_type = metadata_value
             .get("srv_type")
             .and_then(|v| v.as_str())
             .unwrap_or("robonix_sdk/srv/service/semantic_map/QuerySemanticMap");
