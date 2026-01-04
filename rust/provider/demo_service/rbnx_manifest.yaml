@@ -1,0 +1,37 @@
+# Robonix Package Manifest
+# This file defines the primitives, services, and skills provided by this package
+# Format version: 2.0 (EAIOS Architecture)
+#
+# Note: 
+# - Primitives and services must conform to standard specifications
+# - Skills are flexible and user-defined
+# - JSON fields (input_schema, output_schema, metadata, start_args, status) must be valid JSON strings
+
+package:
+  name: demo_service_provider
+  version: 0.0.1
+  description: Demo package providing semantic_map and task_plan services
+  maintainer: root
+  maintainer_email: demo@demo.demo
+  license: MulanPSL-2.0
+  # build_script: rbnx/build.sh  # Optional: build script path. If omitted, defaults to rbnx/build.sh
+
+# Services provided by this package
+# Services provide standardized algorithm capabilities
+services:
+  - name: semantic_map
+    srv_type: robonix_sdk/srv/service/semantic_map/QuerySemanticMap
+    entry: /demo_service/semantic_map/query
+    metadata: '{"model":"demo","backend":"simulated"}'
+    version: 0.0.1
+    start_script: rbnx/start_semantic_map.sh
+    stop_script: rbnx/stop_semantic_map.sh
+
+  - name: task_plan
+    srv_type: robonix_sdk/srv/service/task_plan/PlanTask
+    entry: /demo_service/task_plan/plan
+    metadata: '{"model":"demo","capabilities":["navigation","manipulation"],"rtdl_type":"list"}'
+    version: 0.0.1
+    start_script: rbnx/start_task_plan.sh
+    stop_script: rbnx/stop_task_plan.sh
+

@@ -1,0 +1,77 @@
+# Robonix Package Manifest
+# This file defines the primitives, services, and skills provided by this package
+# Format version: 2.0 (EAIOS Architecture)
+#
+# Note: 
+# - Primitives and services must conform to standard specifications
+# - Skills are flexible and user-defined
+# - JSON fields (input_schema, output_schema, metadata, start_args, status) must be valid JSON strings
+
+package:
+  name: webots_demo_package
+  version: 0.0.1
+  description: Webots demo package with Ranger Mini V3 robot providing camera, lidar, and mobile base primitives
+  maintainer: root
+  maintainer_email: demo@demo.demo
+  license: MulanPSL-2.0
+  # build_script: rbnx/build.sh  # Optional: build script path. If omitted, defaults to rbnx/build.sh
+
+# Primitives provided by this package
+# Primitives provide standardized hardware capability mapping
+primitives:
+  - name: prm::camera.capture
+    # Spec defines: OUTPUT: {"image": "sensor_msgs/msg/Image"}
+    input_schema: '{}'
+    output_schema: '{"image":"/head_front_camera/rgb/image_raw"}'
+    metadata: '{"camera":"front","robot":"ranger_mini_v3","simulator":"webots"}'
+    version: 0.0.1
+    start_script: rbnx/start_camera_front.sh
+    stop_script: rbnx/stop_camera_front.sh
+
+  - name: prm::camera.capture
+    # Spec defines: OUTPUT: {"image": "sensor_msgs/msg/Image"}
+    input_schema: '{}'
+    output_schema: '{"image":"/head_back_camera/rgb/image_raw"}'
+    metadata: '{"camera":"back","robot":"ranger_mini_v3","simulator":"webots"}'
+    version: 0.0.1
+    start_script: rbnx/start_camera_back.sh
+    stop_script: rbnx/stop_camera_back.sh
+
+  - name: prm::camera.depth
+    # Spec defines: OUTPUT: {"depth": "sensor_msgs/msg/Image"}
+    input_schema: '{}'
+    output_schema: '{"depth":"/head_front_camera/depth_registered/image_raw"}'
+    metadata: '{"camera":"front_depth","robot":"ranger_mini_v3","simulator":"webots"}'
+    version: 0.0.1
+    start_script: rbnx/start_depth_front.sh
+    stop_script: rbnx/stop_depth_front.sh
+
+  - name: prm::camera.depth
+    # Spec defines: OUTPUT: {"depth": "sensor_msgs/msg/Image"}
+    input_schema: '{}'
+    output_schema: '{"depth":"/head_back_camera/depth_registered/image_raw"}'
+    metadata: '{"camera":"back_depth","robot":"ranger_mini_v3","simulator":"webots"}'
+    version: 0.0.1
+    start_script: rbnx/start_depth_back.sh
+    stop_script: rbnx/stop_depth_back.sh
+
+  - name: prm::lidar.scan
+    # Spec defines: OUTPUT: {"scan": "sensor_msgs/msg/LaserScan"}
+    input_schema: '{}'
+    output_schema: '{"scan":"/scan"}'
+    metadata: '{"sensor":"hokuyo","robot":"ranger_mini_v3","simulator":"webots"}'
+    version: 0.0.1
+    start_script: rbnx/start_lidar.sh
+    stop_script: rbnx/stop_lidar.sh
+
+  - name: prm::base.move
+    # Spec defines: 
+    #   INPUT: {"cmd_vel": "geometry_msgs/msg/Twist"}
+    #   OUTPUT: {"odom": "nav_msgs/msg/Odometry"}
+    input_schema: '{"cmd_vel":"/cmd_vel"}'
+    output_schema: '{"odom":"/odom"}'
+    metadata: '{"robot":"ranger_mini_v3","controller":"four_wheel_steering","simulator":"webots"}'
+    version: 0.0.1
+    start_script: rbnx/start_base_move.sh
+    stop_script: rbnx/stop_base_move.sh
+

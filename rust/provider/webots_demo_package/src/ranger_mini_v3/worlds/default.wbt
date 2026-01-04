@@ -1,0 +1,143 @@
+#VRML_SIM R2025a utf8
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/floors/protos/RectangleArena.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/appearances/protos/Parquetry.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/apartment_structure/protos/Wall.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/apartment_structure/protos/Door.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/apartment_structure/protos/Window.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/living_room_furniture/protos/Sofa.proto"
+EXTERNPROTO "./RangerMiniV3.proto"
+WorldInfo {
+  contactProperties [
+    ContactProperties {
+      coulombFriction [
+        0.5
+      ]
+      forceDependentSlip [
+        0.5
+      ]
+    }
+  ]
+}
+Viewpoint {
+  orientation 0.273 0.00932 -0.961873 3.07601
+  position 4.63054 1.98739 1.42643
+}
+TexturedBackground {
+  luminosity 0.5
+  skybox FALSE
+}
+TexturedBackgroundLight {
+  castShadows FALSE
+}
+RectangleArena {
+  translation 0 0 0.04
+  floorSize 1000 1000
+  floorAppearance Parquetry {
+    type "light strip"
+  }
+}
+Wall {
+  translation 2.95 0.06 0.04
+  name "wall_0"
+  size 5.5 0.01 2.56
+}
+Wall {
+  translation 0.236162 1.71493 0.04
+  rotation 0 0 1 1.57614
+  name "wall_1"
+  size 3.32 0.01 2.56
+}
+Wall {
+  translation 5.7 1.09 0.04
+  rotation 0 0 1 1.5707996938995747
+  name "wall_2"
+  size 2.06 0.01 2.56
+}
+Wall {
+  translation 6.77 2.12 0.04
+  name "wall_3"
+  size 2.14 0.01 2.56
+}
+Wall {
+  translation 7.84 2.58 0.04
+  rotation 0 0 1 1.5707996938995747
+  name "wall_4"
+  size 0.92 0.01 2.56
+}
+Wall {
+  translation 5.81 2.96 0.04
+  name "wall_5"
+  size 0.22 0.01 2.56
+}
+Wall {
+  translation 5.7 3.17 0.04
+  rotation 0 0 1 1.5707996938995747
+  name "wall_6"
+  size 0.42 0.01 2.56
+}
+Wall {
+  translation 5.92 3.17 0.04
+  rotation 0 0 1 1.5707996938995747
+  name "wall_7"
+  size 0.42 0.01 2.56
+}
+Wall {
+  translation 7.65 3.04 0.04
+  name "wall_8"
+  size 0.38 0.01 2.56
+}
+Wall {
+  translation 7.46 3.21 0.04
+  rotation 0 0 1 1.5707996938995747
+  name "wall_9"
+  size 0.34 0.01 2.56
+}
+Wall {
+  translation 2.95 3.38 0.04
+  name "wall_10"
+  size 5.5 0.01 2.56
+}
+Wall {
+  translation 6.69 3.38 0.04
+  name "wall_11"
+  size 1.54 0.01 2.56
+}
+Door {
+  hidden translation_4 0.0015363712422879344 4.079244451116182e-05 8.881784197001252e-16
+  hidden rotation_4 0 0 -1 0.0009327863966025198
+  translation 0.3 1.14 0.04
+  rotation 0 0 1 3.141592653589793
+  name "door_0"
+  size 0.05 1.2 2.16
+  position -0.0009327863966578995
+  frameHeight 2.16
+  frameSize 0.02 0.05 0.05
+}
+Window {
+  translation 0.2 2.8 0.65
+  name "window_0"
+  size 0.1 1 1.87
+  bottomWallHeight 0
+  windowHeight 0.5
+  frameSize 0.001 0.06 0.016
+}
+Sofa {
+  translation 3.08 0.74 0.04
+  rotation 0 0 1 1.5708
+  name "bbox_0"
+}
+Sofa {
+  translation 2.04 3.1 0.04
+  rotation 0 0 1 1.5708
+  name "bbox_1"
+}
+
+RangerMiniV3 {
+  translation 2 2 0.34587527241212246
+  rotation -0.034355905202500356 -0.9994096599624175 5.789232710707548e-05 0.0010137218047144932
+  name "RangerMiniV3"
+  controller "<extern>"
+  supervisor TRUE
+}

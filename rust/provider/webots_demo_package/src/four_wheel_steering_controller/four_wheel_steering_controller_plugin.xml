@@ -1,0 +1,5 @@
+<library path="four_wheel_steering_controller">
+    <class name="four_wheel_steering_controller/FourWheelSteeringController" type="four_wheel_steering_controller::FourWheelSteeringController" base_class_type="controller_interface::ControllerInterface">
+        <description>The four wheel steering controller applies a total speed and front/rear steering angle commands to a 4WD motor base with independently steered axes.</description>
+    </class>
+</library>
