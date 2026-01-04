@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+# Copyright (c) 2025, wheatfox <wheatfox17@icloud.com>
+
 """
 Skill Specifications Module
 ===========================
@@ -12,8 +15,6 @@ The specifications follow a standardized format where:
 - Input/output types are strictly defined for type checking
 """
 
-# SPDX-License-Identifier: MulanPSL-2.0
-# Copyright (c) 2025, wheatfox <wheatfox17@icloud.com>
 
 from typing import Tuple, Dict, Any, Optional
 from .types import *
@@ -218,7 +219,7 @@ EOS_SKILL_SPECS = {
         "description": "Update the semantic map",
         "type": EOS_SkillType.SKILL,
         "input": {"camera_name": str},
-        "output": bool,
+        "output": bool, # TODO: if we want to assign each skill a grpc definition, we have to name the output as Dict - wheatfox 2025.10.25
         "dependencies": ["skl_detect_objs"],
     },
     "skl_spatiallm_to_world_pose": {
@@ -227,5 +228,11 @@ EOS_SKILL_SPECS = {
         "input": {"spatiallm_txt": str},
         "output": EOS_TYPE_SpatialLM_WorldResult,
         "dependencies": ["cap_get_pose"],
+    },
+    "skl_speech_recognize": {
+        "description": "Recognize speech from audio using NVIDIA Riva (ASR) service",
+        "type": EOS_SkillType.SKILL,
+        "input": {"audio": bytes},
+        "output": {"success": bool, "text": str},
     },
 }

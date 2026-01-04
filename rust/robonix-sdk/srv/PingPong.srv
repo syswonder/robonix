@@ -1,0 +1,8 @@
+# PingPong service for testing
+string message
+uint64 sequence
+---
+string message
+uint64 sequence
+uint64 timestamp
+
