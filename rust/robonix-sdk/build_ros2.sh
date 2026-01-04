@@ -35,10 +35,6 @@ source /opt/ros/humble/setup.bash
 export PYTHON3_EXECUTABLE=/usr/bin/python3
 export PYTHON_EXECUTABLE=/usr/bin/python3
 
-# compile check robonixpy python package
-echo "Compiling robonixpy python package..."
-$PYTHON3_EXECUTABLE -m compileall robonixpy
-
 # Build the package with explicit Python path and disable Python generator if needed
 echo "Building ROS2 package..."
 colcon build --cmake-args \

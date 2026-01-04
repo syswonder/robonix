@@ -3,17 +3,23 @@
 SPDX-License-Identifier: MulanPSL-2.0
 
 This package provides demo implementations of Robonix services:
-- **semantic_map**: Provides object-level representation of the environment
+- **semantic_map**: Provides object-level representation of the environment using front camera and Qwen3-VL VLM
 - **task_plan**: Converts natural language task descriptions to RTDL code using DeepSeek LLM
 
 ## Services
 
 ### Semantic Map Service
 
-The semantic map service (`semantic_map_service`) simulates an object graph by constructing mock objects. It provides an object-level representation on top of spatial maps.
+The semantic map service (`semantic_map_service`) uses the front camera primitive to capture RGB images and camera info, then uses Qwen3-VL VLM to detect objects and estimate their 3D coordinates in camera frame. It provides an object-level representation of the environment.
 
 **Service Interface**: `/demo_service/semantic_map/query`
 **Service Type**: `robonix_sdk/srv/service/semantic_map/QuerySemanticMap`
+
+**Features**:
+- Queries front camera primitive from OS using robonixpy client
+- Subscribes to RGB images and camera_info topics
+- Uses Qwen3-VL VLM to detect objects and estimate 3D positions in camera coordinate system
+- Returns objects with camera frame coordinates (world coordinates are empty for now)
 
 ### Task Plan Service
 
@@ -23,6 +29,37 @@ The task plan service (`task_plan_service`) converts natural language task descr
 **Service Type**: `robonix_sdk/srv/service/task_plan/PlanTask`
 
 ## Configuration
+
+### API Keys Configuration
+
+Both services require API keys to function. Create a `.env` file in the package root directory (same level as `setup.py`) with the following content:
+
+```
+DEEPSEEK_API_KEY=sk-your-deepseek-api-key-here
+QWEN3_VL_API_KEY=sk-your-qwen3-vl-api-key-here
+```
+
+### Qwen3-VL API Configuration
+
+The semantic map service requires a Qwen3-VL API key to function. Follow these steps to configure it:
+
+1. **Get a Qwen3-VL API Key**
+   - Visit [DashScope Platform](https://dashscope.aliyun.com/)
+   - Sign up or log in to your account
+   - Navigate to API keys section
+   - Create a new API key
+
+2. **Configure the API Key**
+   - Add `QWEN3_VL_API_KEY` to your `.env` file:
+     ```
+     QWEN3_VL_API_KEY=sk-your-actual-api-key-here
+     ```
+   - The service uses model `qwen-vl-plus` with base URL `https://dashscope.aliyuncs.com/compatible-mode/v1`
+
+3. **Verify Configuration**
+   - The service will automatically load the `.env` file on startup
+   - Check service logs to confirm Qwen3-VL API is initialized
+   - Ensure front camera primitive is registered and running
 
 ### DeepSeek API Configuration
 
@@ -35,15 +72,10 @@ The task plan service requires a DeepSeek API key to function. Follow these step
    - Create a new API key
 
 2. **Configure the API Key**
-   - Copy the `.env.example` file to `.env` in this package directory:
-     ```bash
-     cp .env.example .env
-     ```
-   - Edit `.env` and replace `your_deepseek_api_key_here` with your actual API key:
+   - Add `DEEPSEEK_API_KEY` to your `.env` file:
      ```
      DEEPSEEK_API_KEY=sk-your-actual-api-key-here
      ```
-   - Make sure `.env` file is in the package root directory (same level as `setup.py`)
 
 3. **Verify Configuration**
    - The service will automatically load the `.env` file on startup
@@ -58,6 +90,8 @@ The task plan service requires a DeepSeek API key to function. Follow these step
 - Python 3.8+
 - colcon build tools
 - DeepSeek API key (for task planning service)
+- Qwen3-VL API key (for semantic map service)
+- Front camera primitive registered and running (for semantic map service)
 
 ### Build
 
@@ -76,7 +110,11 @@ rbnx deploy build
 
 The package requires the following Python packages (automatically installed via setup.py):
 - `python-dotenv`: For loading environment variables from .env file
-- `openai`: For DeepSeek API client (compatible with DeepSeek API)
+- `openai`: For DeepSeek and Qwen3-VL API clients (OpenAI-compatible)
+- `robonixpy`: For querying primitives from Robonix OS
+- `cv-bridge`: For converting ROS images to OpenCV format
+- `numpy`: For numerical operations
+- `Pillow`: For image processing
 
 ## Usage
 
@@ -125,8 +163,15 @@ The task plan service generates RTDL code in JSON format:
 
 ## Troubleshooting
 
-### DeepSeek API Not Working
+### API Not Working
 
+**Qwen3-VL API Issues:**
+1. Check that `.env` file exists and contains `QWEN3_VL_API_KEY`
+2. Verify the API key is correct and has sufficient credits
+3. Check service logs for API errors
+4. Ensure front camera primitive is registered and publishing images
+
+**DeepSeek API Issues:**
 1. Check that `.env` file exists and contains `DEEPSEEK_API_KEY`
 2. Verify the API key is correct and has sufficient credits
 3. Check service logs for API errors

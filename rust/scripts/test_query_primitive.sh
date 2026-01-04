@@ -1,12 +1,12 @@
 #!/bin/bash
-# SPDX-License-Identifier: MulanPSL-2.0
-# Start Task Plan Service Script
+# Test script for querying primitive service
+
+# https://docs.ros.org/en/foxy/Concepts/About-Different-Middleware-Vendors.html
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PACKAGE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$PACKAGE_DIR"
+cd "$SCRIPT_DIR"
 
 # Source ROS2 setup
 [ -f /opt/ros/humble/setup.bash ] && source /opt/ros/humble/setup.bash
@@ -16,7 +16,8 @@ ROBONIX_SDK_DIR=""
 if [ -n "$ROBONIX_SDK_PATH" ] && [ -f "$ROBONIX_SDK_PATH/install/setup.bash" ]; then
     ROBONIX_SDK_DIR="$ROBONIX_SDK_PATH"
 else
-    SEARCH_DIR="$PACKAGE_DIR"
+    # Search upward from script directory
+    SEARCH_DIR="$SCRIPT_DIR"
     while [ "$SEARCH_DIR" != "/" ]; do
         if [ -d "$SEARCH_DIR/robonix-sdk" ] && [ -f "$SEARCH_DIR/robonix-sdk/install/setup.bash" ]; then
             ROBONIX_SDK_DIR="$SEARCH_DIR/robonix-sdk"
@@ -26,17 +27,16 @@ else
     done
 fi
 
-# Source robonix-sdk setup if found
-if [ -n "$ROBONIX_SDK_DIR" ]; then
-    source "$ROBONIX_SDK_DIR/install/setup.bash" 2>/dev/null || true
+if [ -z "$ROBONIX_SDK_DIR" ]; then
+    echo "ERROR: robonix-sdk not found"
+    echo "Please set ROBONIX_SDK_PATH or ensure robonix-sdk is in parent directory"
+    exit 1
 fi
 
-# Source local setup if available
-export COLCON_CURRENT_PREFIX="$PACKAGE_DIR"
-[ -f "install/setup.bash" ] && source install/setup.bash 2>/dev/null || true
+echo "Sourcing robonix-sdk from: $ROBONIX_SDK_DIR"
+source "$ROBONIX_SDK_DIR/install/setup.bash"
 
-# Add source directory to PYTHONPATH
-export PYTHONPATH="$PACKAGE_DIR:${PYTHONPATH}"
+# Run test script
+echo "Running test script..."
+python3 "$SCRIPT_DIR/test_query_primitive.py"
 
-# Start service - directly run Python module
-exec python3 -m demo_service_provider.task_plan_service

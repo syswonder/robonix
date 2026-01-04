@@ -80,6 +80,7 @@ if command -v ss >/dev/null 2>&1; then
 fi
 
 make install
+
 ROBONIX_WEB_STATIC_DIR="$(pwd)/robonix-core/web_gui/static" \
 ROBONIX_WEB_PORT=8000 \
 RUST_LOG=robonix_core=debug robonix-core

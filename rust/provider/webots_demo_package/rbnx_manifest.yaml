@@ -19,6 +19,7 @@ package:
 # Primitives provided by this package
 # Primitives provide standardized hardware capability mapping
 primitives:
+  # Front camera RGB
   - name: prm::camera.capture
     # Spec defines: OUTPUT: {"image": "sensor_msgs/msg/Image"}
     input_schema: '{}'
@@ -28,15 +29,7 @@ primitives:
     start_script: rbnx/start_camera_front.sh
     stop_script: rbnx/stop_camera_front.sh
 
-  - name: prm::camera.capture
-    # Spec defines: OUTPUT: {"image": "sensor_msgs/msg/Image"}
-    input_schema: '{}'
-    output_schema: '{"image":"/head_back_camera/rgb/image_raw"}'
-    metadata: '{"camera":"back","robot":"ranger_mini_v3","simulator":"webots"}'
-    version: 0.0.1
-    start_script: rbnx/start_camera_back.sh
-    stop_script: rbnx/stop_camera_back.sh
-
+  # Front camera depth
   - name: prm::camera.depth
     # Spec defines: OUTPUT: {"depth": "sensor_msgs/msg/Image"}
     input_schema: '{}'
@@ -46,24 +39,7 @@ primitives:
     start_script: rbnx/start_depth_front.sh
     stop_script: rbnx/stop_depth_front.sh
 
-  - name: prm::camera.depth
-    # Spec defines: OUTPUT: {"depth": "sensor_msgs/msg/Image"}
-    input_schema: '{}'
-    output_schema: '{"depth":"/head_back_camera/depth_registered/image_raw"}'
-    metadata: '{"camera":"back_depth","robot":"ranger_mini_v3","simulator":"webots"}'
-    version: 0.0.1
-    start_script: rbnx/start_depth_back.sh
-    stop_script: rbnx/stop_depth_back.sh
-
-  - name: prm::lidar.scan
-    # Spec defines: OUTPUT: {"scan": "sensor_msgs/msg/LaserScan"}
-    input_schema: '{}'
-    output_schema: '{"scan":"/scan"}'
-    metadata: '{"sensor":"hokuyo","robot":"ranger_mini_v3","simulator":"webots"}'
-    version: 0.0.1
-    start_script: rbnx/start_lidar.sh
-    stop_script: rbnx/stop_lidar.sh
-
+  # Base movement (cmd_vel)
   - name: prm::base.move
     # Spec defines: 
     #   INPUT: {"cmd_vel": "geometry_msgs/msg/Twist"}
