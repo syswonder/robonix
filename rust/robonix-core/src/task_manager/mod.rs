@@ -100,6 +100,10 @@ impl TaskManager {
         self.primitive_registry.clone()
     }
 
+    pub fn get_semantic_map_cache(&self) -> Arc<Mutex<serde_json::Value>> {
+        self.semantic_map_cache.clone()
+    }
+
     /// Submit a new task
     pub async fn submit_task(&self, req: api::SubmitTaskRequest) -> api::SubmitTaskResponse {
         use log::debug;

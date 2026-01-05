@@ -2,6 +2,8 @@
 
 set -e
 
+make fmt
+
 make build-sdk
 eval $(make source-sdk)
 

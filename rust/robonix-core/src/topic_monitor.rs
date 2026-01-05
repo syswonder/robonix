@@ -7,9 +7,9 @@ use log::debug;
 use ros2_client::Node;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::process::Command;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
+use tokio::process::Command;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +38,12 @@ impl TopicMonitor {
         }
     }
 
+    /// Get ROS2 setup.bash path, checking ROS_DISTRO environment variable first
+    fn get_ros2_setup_path() -> String {
+        let distro = std::env::var("ROS_DISTRO").unwrap_or_else(|_| "humble".to_string());
+        format!("/opt/ros/{}/setup.bash", distro)
+    }
+
     pub async fn get_topics(&self) -> TopicsResponse {
         let topics = self.topics.lock().await;
         let mut topics_vec: Vec<TopicInfo> = topics.values().cloned().collect();
@@ -49,14 +55,35 @@ impl TopicMonitor {
     /// Discover topics using ROS2 command line tools
     pub async fn discover_topics(&self) -> Result<(), Box<dyn std::error::Error>> {
         // Get list of topics using ros2 topic list
-        let output = Command::new("ros2").args(&["topic", "list"]).output()?;
+        // Source ROS2 environment first and add timeout to prevent hanging
+        let setup_path = Self::get_ros2_setup_path();
+        let output = tokio::time::timeout(
+            tokio::time::Duration::from_secs(3),
+            Command::new("bash")
+                .arg("-c")
+                .arg(format!(
+                    "source {} && timeout 2 ros2 topic list",
+                    setup_path
+                ))
+                .output(),
+        )
+        .await;
+
+        let output = match output {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                return Err(format!("Failed to run ros2 topic list: {}", e).into());
+            }
+            Err(_) => {
+                debug!("ros2 topic list timed out");
+                return Ok(()); // Return empty result instead of error
+            }
+        };
 
         if !output.status.success() {
-            return Err(format!(
-                "Failed to run ros2 topic list: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            debug!("ros2 topic list failed: {}", stderr);
+            return Ok(()); // Return empty result instead of error
         }
 
         let topic_list = String::from_utf8_lossy(&output.stdout);
@@ -94,12 +121,23 @@ impl TopicMonitor {
             }
 
             // Get topic type using ros2 topic type
-            let type_output = Command::new("ros2")
-                .args(&["topic", "type", &topic_name])
-                .output();
+            // Source ROS2 environment first and add timeout to prevent hanging
+            let setup_path = Self::get_ros2_setup_path();
+            let topic_name_clone = topic_name.clone();
+            let type_output = tokio::time::timeout(
+                tokio::time::Duration::from_secs(2),
+                Command::new("bash")
+                    .arg("-c")
+                    .arg(format!(
+                        "source {} && timeout 1 ros2 topic type {}",
+                        setup_path, &topic_name_clone
+                    ))
+                    .output(),
+            )
+            .await;
 
             let message_type = match type_output {
-                Ok(output) if output.status.success() => {
+                Ok(Ok(output)) if output.status.success() => {
                     // Some topics have multiple types, collect all of them
                     let types: Vec<String> = String::from_utf8_lossy(&output.stdout)
                         .lines()
@@ -113,7 +151,13 @@ impl TopicMonitor {
                         types.join(", ")
                     }
                 }
-                _ => "unknown".to_string(),
+                _ => {
+                    debug!(
+                        "Failed to get type for topic {} (timeout or error)",
+                        topic_name
+                    );
+                    "unknown".to_string()
+                }
             };
 
             debug!("Topic {} has type {}", topic_name, message_type);
@@ -186,8 +230,14 @@ impl TopicMonitor {
 
             // Use timeout command to limit execution time (6 seconds)
             // This gives enough time for ros2 topic hz to collect messages and calculate frequency
-            let output = tokio::process::Command::new("timeout")
-                .args(&["6", "ros2", "topic", "hz", &topic_name, "--window", "10"])
+            // Source ROS2 environment first
+            let setup_path = Self::get_ros2_setup_path();
+            let output = tokio::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!(
+                    "source {} && timeout 6 ros2 topic hz {} --window 10",
+                    setup_path, &topic_name
+                ))
                 .output()
                 .await;
 

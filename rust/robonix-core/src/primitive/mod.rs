@@ -94,7 +94,7 @@ impl PrimitiveRegistry {
         }
 
         // Key includes name, provider, and version to distinguish different implementations
-        let key = format!("{}::{}::{}", req.name, req.provider, req.version);
+        let key = format!("{}${}${}", req.name, req.provider, req.version);
 
         // Store as JSON strings internally
         let entry = PrimitiveEntry {
@@ -154,6 +154,25 @@ impl PrimitiveRegistry {
         }
 
         QueryPrimitiveResponse { instances }
+    }
+
+    /// Get all registered primitives (for web UI)
+    pub async fn get_all_primitives(&self) -> Vec<(String, PrimitiveInstance)> {
+        let primitives = self.primitives.read().await;
+        let mut result = Vec::new();
+        for (key, entry) in primitives.iter() {
+            result.push((
+                key.clone(),
+                PrimitiveInstance {
+                    provider: entry.provider.clone(),
+                    version: entry.version.clone(),
+                    input_schema: entry.input_schema.clone(),
+                    output_schema: entry.output_schema.clone(),
+                    metadata: entry.metadata.clone(),
+                },
+            ));
+        }
+        result
     }
 
     /// Check if metadata matches filter

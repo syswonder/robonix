@@ -126,6 +126,7 @@ rbnx package list
 # View package details
 rbnx package info <package_name>
 # Build all packages
+rbnx package build
 rbnx package build all
 ```
 

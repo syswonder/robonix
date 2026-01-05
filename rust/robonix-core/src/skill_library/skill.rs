@@ -255,6 +255,32 @@ impl SkillRegistry {
         names.into_iter().collect()
     }
 
+    /// Get all registered skills (for web UI)
+    pub async fn get_all_skills(&self) -> Vec<(String, SkillInstance)> {
+        let skills = self.skills.read().await;
+        let mut result = Vec::new();
+        for (skill_id, entry) in skills.iter() {
+            result.push((
+                skill_id.clone(),
+                SkillInstance {
+                    skill_id: entry.skill_id.clone(),
+                    provider: entry.provider.clone(),
+                    version: entry.version.clone(),
+                    r#type: entry.r#type.clone(),
+                    start_topic: entry.start_topic.clone(),
+                    status_topic: entry.status_topic.clone(),
+                    entry: entry.entry.clone(),
+                    skill_dir: entry.skill_dir.clone(),
+                    main_rtdl: entry.main_rtdl.clone(),
+                    start_args: entry.start_args.clone(),
+                    status: entry.status.clone(),
+                    metadata: entry.metadata.clone(),
+                },
+            ));
+        }
+        result
+    }
+
     /// Check if metadata matches filter
     fn matches_filter(&self, metadata: &serde_json::Value, filter: &serde_json::Value) -> bool {
         if let (Some(meta_obj), Some(filter_obj)) = (metadata.as_object(), filter.as_object()) {
