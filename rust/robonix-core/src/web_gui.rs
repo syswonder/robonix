@@ -15,6 +15,7 @@ use crate::image_monitor::ImageMonitor;
 use crate::tf_monitor::{TfMonitor, TfTreeResponse};
 use crate::topic_monitor::{TopicMonitor, TopicsResponse};
 
+use log::{debug, trace, warn};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub timestamp: String,
@@ -323,12 +324,10 @@ pub async fn image_handler(
     state: &State<WebGuiState>,
     filename: String,
 ) -> Result<rocket::fs::NamedFile, rocket::http::Status> {
-    use log::{debug, warn};
-
     let storage_dir = state.image_monitor.get_storage_dir();
     let image_path = storage_dir.join(&filename);
 
-    debug!(
+    trace!(
         "Image handler: looking for file '{}' in storage dir {:?}, full path: {:?}",
         filename, storage_dir, image_path
     );
@@ -343,14 +342,14 @@ pub async fn image_handler(
                 .take(5)
                 .filter_map(|e| e.file_name().into_string().ok())
                 .collect();
-            debug!("Sample files in storage dir: {:?}", sample_files);
+            trace!("Sample files in storage dir: {:?}", sample_files);
         }
         return Err(rocket::http::Status::NotFound);
     }
 
     match rocket::fs::NamedFile::open(&image_path).await {
         Ok(file) => {
-            debug!("Image file found and opened: {:?}", image_path);
+            trace!("Image file found and opened: {:?}", image_path);
             Ok(file)
         }
         Err(e) => {
