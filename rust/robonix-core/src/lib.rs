@@ -6,6 +6,7 @@
 #[macro_use]
 pub mod spec;
 pub mod core;
+pub mod image_monitor;
 pub mod logging;
 pub mod node;
 pub mod primitive;

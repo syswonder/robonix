@@ -62,7 +62,7 @@ impl ServiceRegistry {
         }
 
         // Key includes name, provider, and version to distinguish different implementations
-        let key = format!("{}::{}::{}", req.name, req.provider, req.version);
+        let key = format!("{}${}${}", req.name, req.provider, req.version);
 
         // Validate metadata is valid JSON
         let _metadata_value: serde_json::Value = match serde_json::from_str(&req.metadata) {
@@ -215,6 +215,24 @@ impl ServiceRegistry {
         QueryServiceResponse {
             instances: started_instances,
         }
+    }
+
+    /// Get all registered services (for web UI)
+    pub async fn get_all_services(&self) -> Vec<(String, ServiceInstance)> {
+        let services = self.services.read().await;
+        let mut result = Vec::new();
+        for (key, entry) in services.iter() {
+            result.push((
+                key.clone(),
+                ServiceInstance {
+                    provider: entry.provider.clone(),
+                    version: entry.version.clone(),
+                    entry: entry.entry.clone(),
+                    metadata: entry.metadata.clone(),
+                },
+            ));
+        }
+        result
     }
 
     /// Check if metadata matches filter

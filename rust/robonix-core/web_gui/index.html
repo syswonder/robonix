@@ -6,7 +6,9 @@
     <title>Robonix Console</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Source+Code+Pro:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Bootstrap 5 CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-T3c6CoIi6uLrA9TneNEoa7RxnatzjcDSCmG1MXxSR1GAsXEV/Dwwykc2MPK8M2HN" crossorigin="anonymous">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -57,6 +59,58 @@
 
         <div class="panel">
             <div class="panel-header">
+                <div class="panel-title">System Components</div>
+                <div class="controls">
+                    <label>
+                        <input type="checkbox" id="auto-refresh-components" checked> Auto (2s)
+                    </label>
+                    <button onclick="loadComponents()">Refresh</button>
+                </div>
+            </div>
+            <div class="components-grid">
+                <div class="component-column">
+                    <div class="component-header" onclick="showComponentListModal('primitive')" style="cursor: pointer;">Primitives</div>
+                    <div id="primitives-container">Loading...</div>
+                </div>
+                <div class="component-column">
+                    <div class="component-header" onclick="showComponentListModal('service')" style="cursor: pointer;">Services</div>
+                    <div id="services-container">Loading...</div>
+                </div>
+                <div class="component-column">
+                    <div class="component-header" onclick="showComponentListModal('skill')" style="cursor: pointer;">Skills</div>
+                    <div id="skills-container">Loading...</div>
+                </div>
+                <div class="component-column">
+                    <div class="component-header" onclick="showComponentListModal('task')" style="cursor: pointer;">Tasks</div>
+                    <div id="tasks-container">Loading...</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <div class="panel-title">Visualization</div>
+                <div class="controls">
+                    <label>
+                        <input type="checkbox" id="auto-refresh-viz" checked> Auto (2s)
+                    </label>
+                    <button onclick="loadVisualization()">Refresh</button>
+                </div>
+            </div>
+            <div class="viz-grid">
+                <div class="viz-card">
+                    <div class="viz-header">Semantic Map</div>
+                    <div id="semantic-map-container">Loading...</div>
+                </div>
+                <div class="viz-card">
+                    <div class="viz-header">Image Monitor</div>
+                    <div id="image-monitor-container" class="image-monitor-wrapper">Loading...</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
                 <div class="panel-title">System Logs</div>
                 <div class="controls">
                     <label>
@@ -67,8 +121,43 @@
             </div>
             <div id="logs-container">Loading...</div>
         </div>
+
+        <!-- RTDL Modal -->
+        <div id="rtdl-modal" class="modal">
+            <div class="modal-content">
+                <span class="close" onclick="closeRtdlModal()">&times;</span>
+                <h2>RTDL Program</h2>
+                <pre id="rtdl-content"></pre>
+            </div>
+        </div>
+
+        <!-- Component Detail Modal (for single item) -->
+        <div id="component-modal" class="modal">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h2 id="component-modal-title"></h2>
+                    <span class="close" onclick="closeComponentModal()">&times;</span>
+                </div>
+                <div id="component-modal-content"></div>
+            </div>
+        </div>
+
+        <!-- Component List Modal (for entire card) -->
+        <div id="component-list-modal" class="modal">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h2 id="component-list-modal-title"></h2>
+                    <span class="close" onclick="closeComponentListModal()">&times;</span>
+                </div>
+                <div id="component-list-modal-content"></div>
+            </div>
+        </div>
     </div>
 
+    <!-- Alpine.js for reactive UI -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.3/dist/cdn.min.js"></script>
+    <!-- Bootstrap 5 JS Bundle -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js" integrity="sha384-C6RzsynM9kWDrMNeT87bh95OGNyZPhcTNXj1NW7RuBCsyN/o0jlpcV8Qyq46cDfL" crossorigin="anonymous"></script>
     <script src="/static/app.js"></script>
 </body>
 </html>

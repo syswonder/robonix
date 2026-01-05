@@ -14,11 +14,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PACKAGE_DIR"
 
-# Source ROS2 setup if available
-if [ -f /opt/ros/humble/setup.bash ]; then
-    source /opt/ros/humble/setup.bash
-fi
-
 # Fix conda environment issues
 if [ -n "$CONDA_PREFIX" ]; then
     export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
@@ -71,16 +66,48 @@ done
 
 if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
     echo "Installing missing dependencies: ${MISSING_DEPS[*]}"
-    apt-get update -qq
-    apt-get install -y "${MISSING_DEPS[@]}" || {
-        echo "Warning: Some dependencies could not be installed. Build may fail."
-    }
-    # Re-source ROS2 environment after installing new packages
-    if [ -f /opt/ros/humble/setup.bash ]; then
-        source /opt/ros/humble/setup.bash
+    # Update package lists and retry on failure
+    apt-get update -qq || apt-get update
+    # Try to install with retry logic
+    MAX_RETRIES=3
+    RETRY_COUNT=0
+    while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+        if apt-get install -y "${MISSING_DEPS[@]}" 2>&1; then
+            break
+        fi
+        RETRY_COUNT=$((RETRY_COUNT + 1))
+        if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+            echo "Installation attempt $RETRY_COUNT failed, retrying..."
+            sleep 2
+            apt-get update -qq || apt-get update
+        else
+            echo "Warning: Some dependencies could not be installed after $MAX_RETRIES attempts."
+            echo "Attempting to continue with build..."
+        fi
+    done
+fi
+
+# Verify critical dependencies are installed
+CRITICAL_DEPS=("ros-humble-controller-interface" "ros-humble-hardware-interface" "ros-humble-controller-manager")
+MISSING_CRITICAL=()
+for dep in "${CRITICAL_DEPS[@]}"; do
+    if ! dpkg -l | grep -q "^ii.*${dep}"; then
+        MISSING_CRITICAL+=("${dep}")
     fi
+done
+
+if [ ${#MISSING_CRITICAL[@]} -gt 0 ]; then
+    echo "Error: Critical dependencies are missing: ${MISSING_CRITICAL[*]}"
+    echo "Please install them manually: apt-get install -y ${MISSING_CRITICAL[*]}"
+    exit 1
+fi
+
+# Source ROS2 environment (must be done after installing packages)
+if [ -f /opt/ros/humble/setup.bash ]; then
+    source /opt/ros/humble/setup.bash
 else
-    echo "All required dependencies are already installed."
+    echo "Error: ROS2 Humble setup.bash not found at /opt/ros/humble/setup.bash"
+    exit 1
 fi
 
 # Clean previous build if it exists (to ensure fresh build with new dependencies)
@@ -91,16 +118,20 @@ fi
 
 # Build packages using colcon
 echo "Building webots_demo_package with colcon..."
-if command -v colcon > /dev/null 2>&1; then
-    colcon build \
-        --cmake-args \
-        -DPYTHON3_EXECUTABLE=/usr/bin/python3 \
-        -DCMAKE_PREFIX_PATH=/opt/ros/humble
-    echo "Package built successfully!"
-else
+if ! command -v colcon > /dev/null 2>&1; then
     echo "Error: colcon not found. Please install colcon-common-extensions."
     exit 1
 fi
 
+# Ensure ROS2 environment is sourced before building
+source /opt/ros/humble/setup.bash
+
+# Build with proper environment
+colcon build \
+    --cmake-args \
+    -DPYTHON3_EXECUTABLE=/usr/bin/python3 \
+    -DCMAKE_PREFIX_PATH=/opt/ros/humble
+
+echo "Package built successfully!"
 echo "Build completed successfully!"
 
