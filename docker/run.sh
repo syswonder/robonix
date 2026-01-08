@@ -101,7 +101,27 @@ echo "[*] XAUTHORITY=$XAUTHORITY"
 echo "[*] XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
 xhost +local:docker 2>/dev/null || xhost + 2>/dev/null || echo "[*] Warning: Could not set xhost permissions"
 
-docker run -it --rm \
+# Check if container already exists
+if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    echo "[*] Container ${CONTAINER_NAME} already exists"
+    
+    # Check if container is running
+    if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+        echo "[*] Container is already running, attaching..."
+        docker exec -it $CONTAINER_NAME bash /docker-entrypoint.sh
+    else
+        echo "[*] Container exists but is stopped, starting and attaching..."
+        docker start $CONTAINER_NAME
+        sleep 2
+        docker exec -it $CONTAINER_NAME bash /docker-entrypoint.sh
+    fi
+    exit 0
+fi
+
+# If container doesn't exist, create new one
+echo "[*] Creating new container..."
+
+docker run -it \
   --name $CONTAINER_NAME \
   --hostname docker-ub \
   $NETWORK_ARGS \
