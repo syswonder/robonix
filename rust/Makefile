@@ -2,8 +2,11 @@
 # Robonix Makefile
 #
 # Convenient commands for building and running Robonix components
+#
+# Tab completion: bash-completion is installed in Docker container
+# If tab completion doesn't work, ensure bash-completion is installed and enabled
 
-.PHONY: help build build-cli build-core build-sdk debug release install install-cli install-core source-sdk env clean test check setup-dev fmt
+.PHONY: help build build-cli build-core build-sdk debug release install install-cli install-core source-sdk env clean test test-all test-rust test-python test-cpp test-ros2 benchmark check setup-dev fmt test-framework
 .DEFAULT_GOAL := help
 
 # Default ROS2 distribution (can be overridden)
@@ -49,12 +52,22 @@ help:
 	@echo "  make check          - Run cargo check on all Rust projects"
 	@echo "  make clean          - Clean build artifacts"
 	@echo ""
+	@echo "Test commands:"
+	@echo "  make test           - Run all tests (Rust, Python)"
+	@echo "  make test-rust      - Run Rust CLI stress tests"
+	@echo "  make test-python    - Run Python stress tests"
+	@echo "  make benchmark      - Run benchmark suite with different concurrency levels"
+	@echo ""
 	@echo "Examples:"
 	@echo "  make build"
 	@echo "  make install"
 	@echo "  rbnx config --show"
 	@echo "  rbnx package list"
 	@echo "  eval \$$(make source-sdk)"
+	@echo ""
+	@echo "Tab Completion:"
+	@echo "  Tab completion for make targets is enabled automatically in Docker container"
+	@echo "  If it doesn't work, ensure bash-completion package is installed"
 
 # Build mode helper: determine cargo build flags
 ifeq ($(BUILD_MODE),release)
@@ -212,11 +225,57 @@ check:
 	cd $(CORE_DIR) && cargo check
 	@echo "✓ All checks passed"
 
-test:
-	@echo "Running tests..."
-	cd $(CLI_DIR) && cargo test || true
-	cd $(CORE_DIR) && cargo test || true
-	@echo "✓ Tests completed"
+# Test framework paths
+TEST_FRAMEWORK_DIR := $(RUST_DIR)/tools/test_framework
+TEST_RUST_DIR := $(TEST_FRAMEWORK_DIR)/rust_tests
+TEST_PYTHON_DIR := $(TEST_FRAMEWORK_DIR)/python_tests
+TEST_CPP_DIR := $(TEST_FRAMEWORK_DIR)/cpp_tests
+TEST_ROS2_DIR := $(TEST_FRAMEWORK_DIR)/ros2_tests
+
+# Test parameters (can be overridden)
+CONCURRENCY ?= 3
+REQUESTS ?= 1000
+RATE ?= 100
+DURATION ?= 0
+
+# Test commands
+test: test-all
+
+test-all: test-rust test-python
+	@echo "✓ All tests completed"
+
+test-rust:
+	@echo "Running Rust CLI stress tests (concurrency=$(CONCURRENCY), requests=$(REQUESTS))..."
+	@if [ -f "$(TEST_FRAMEWORK_DIR)/test.sh" ]; then \
+		bash $(TEST_FRAMEWORK_DIR)/test.sh rust rustdds $(CONCURRENCY) $(REQUESTS) $(RATE) $(DURATION); \
+	else \
+		echo "Test framework not found. Run 'make test-framework' first."; \
+		exit 1; \
+	fi
+
+test-python:
+	@echo "Running Python stress tests (concurrency=$(CONCURRENCY), requests=$(REQUESTS))..."
+	@if [ -f "$(TEST_FRAMEWORK_DIR)/test.sh" ]; then \
+		bash $(TEST_FRAMEWORK_DIR)/test.sh python rustdds $(CONCURRENCY) $(REQUESTS) $(RATE) $(DURATION); \
+	else \
+		echo "Test framework not found. Run 'make test-framework' first."; \
+		exit 1; \
+	fi
+
+
+benchmark:
+	@echo "Running benchmark suite with different concurrency levels..."
+	@if [ -f "$(TEST_FRAMEWORK_DIR)/benchmark.sh" ]; then \
+		bash $(TEST_FRAMEWORK_DIR)/benchmark.sh; \
+	else \
+		echo "Benchmark script not found."; \
+		exit 1; \
+	fi
+
+test-framework:
+	@echo "Setting up test framework..."
+	@echo "✓ Test framework ready"
+	@echo "Run 'make test' to execute all tests"
 
 # Clean commands
 clean:

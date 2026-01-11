@@ -22,3 +22,4 @@ skill/__init__.py
 tmp/
 tailscale/
 target
+stress_test
