@@ -30,12 +30,12 @@ cargo run --release
 3. In separate terminals, run the test clients:
 ```bash
 # Terminal 1
-cd /root/workspace/rust/scripts/service_load_test
+cd /root/workspace/rust/tools/service_load_test
 source /root/workspace/rust/robonix-sdk/install/setup.bash
 python3 ping_client_1.py
 
 # Terminal 2
-cd /root/workspace/rust/scripts/service_load_test
+cd /root/workspace/rust/tools/service_load_test
 source /root/workspace/rust/robonix-sdk/install/setup.bash
 python3 ping_client_2.py
 ```

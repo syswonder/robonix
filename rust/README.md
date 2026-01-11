@@ -249,7 +249,7 @@ ros2 service type /rbnx/task/submit
 
 ### Clean up all ROS2 processes
 ```bash
-pkill -9 -f "ros2|robonix|rclpy|rclcpp|demo_rgb_provider"
+pkill -9 -f "ros2|robonix|rclpy|rclcpp|demo_rgb_provider|stress"
 rm -f /dev/shm/sem.fastrtps_* /dev/shm/fastrtps_*
 ```
 
