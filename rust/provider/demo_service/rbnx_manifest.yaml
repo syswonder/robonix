@@ -34,4 +34,3 @@ services:
     version: 0.0.1
     start_script: rbnx/start_task_plan.sh
     stop_script: rbnx/stop_task_plan.sh
-

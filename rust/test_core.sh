@@ -2,6 +2,23 @@
 
 set -e
 
+# Cleanup function to kill robonix-core
+cleanup() {
+    if [ -n "$ROBONIX_PID" ]; then
+        echo ""
+        echo "Cleaning up: killing robonix-core (PID: $ROBONIX_PID)..."
+        kill -9 "$ROBONIX_PID" 2>/dev/null || true
+    else
+        echo ""
+        echo "Cleaning up: killing robonix-core..."
+        pkill -9 -f "robonix-core" 2>/dev/null || true
+    fi
+    exit 0
+}
+
+# Set up signal handlers for Ctrl-C and script termination
+trap cleanup SIGINT SIGTERM
+
 make fmt
 
 make build-sdk
@@ -83,6 +100,11 @@ fi
 
 make install
 
+# Start robonix-core in background and save PID
 ROBONIX_WEB_STATIC_DIR="$(pwd)/robonix-core/web_gui/static" \
 ROBONIX_WEB_PORT=8000 \
-RUST_LOG=robonix_core=debug robonix-core
+RUST_LOG=robonix_core=debug robonix-core &
+ROBONIX_PID=$!
+
+# Wait for robonix-core, so we can catch Ctrl-C and clean up
+wait $ROBONIX_PID
