@@ -29,33 +29,40 @@ fn main() {
     info!("robonix core starting...");
 
     // Create Tokio runtime for async task execution
-    // This must be created before RobonixCore::new() because TaskManager spawns background tasks
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
 
+    // Create ROS2 node first (before creating RobonixCore)
+    // Context must be kept alive for the node to work
+    let (node, context) = create_node();
+    let _context_arc = Arc::new(context); // Keep context alive
+    let node_arc = Arc::new(Mutex::new(node));
+    let service_qos = create_qos();
+    info!("robonix core node started");
+
     // Initialize core within runtime context (spawns background tasks)
+    // Pass the node to RobonixCore so TaskManager can use it
     let core = rt.block_on(async {
-        let core = Arc::new(RobonixCore::new());
+        let core = Arc::new(RobonixCore::new(node_arc.clone()));
         info!("robonix core initialized");
         core
     });
 
-    let mut node = create_node();
-    let service_qos = create_qos();
-    info!("robonix core node started");
-
-    let servers = match create_servers(&mut node, &service_qos) {
-        Ok(servers) => servers,
-        Err(e) => {
-            eprintln!("failed to create servers: {}", e);
-            std::process::exit(1);
+    // Get the node from the Arc for use in servers
+    let servers = rt.block_on(async {
+        let mut node_guard = node_arc.lock().await;
+        match create_servers(&mut *node_guard, &service_qos) {
+            Ok(servers) => servers,
+            Err(e) => {
+                eprintln!("failed to create servers: {}", e);
+                std::process::exit(1);
+            }
         }
-    };
+    });
 
     info!("all robonix modules initialized");
 
     // Create TF monitor and start monitoring
     let tf_monitor = Arc::new(robonix_core::tf_monitor::TfMonitor::new());
-    let node_arc = Arc::new(Mutex::new(node));
 
     // Start TF monitoring in background
     let tf_monitor_clone = tf_monitor.clone();

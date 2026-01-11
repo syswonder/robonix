@@ -11,7 +11,6 @@ pub mod executor;
 pub mod queue;
 pub mod task;
 
-use crate::node::create_node;
 use crate::primitive::PrimitiveRegistry;
 use crate::service::ServiceRegistry;
 use crate::skill_library::SkillLibrary;
@@ -56,11 +55,11 @@ impl TaskManager {
         skill_library: Arc<SkillLibrary>,
         service_registry: Arc<ServiceRegistry>,
         primitive_registry: Arc<PrimitiveRegistry>,
+        node: Arc<Mutex<Node>>,
     ) -> Arc<Self> {
         let task_store = Arc::new(task::TaskStore::new());
         let task_queue = Arc::new(queue::TaskQueue::new());
         let executor = Arc::new(executor::RtdlExecutor::new(skill_library.clone()));
-        let node = Arc::new(Mutex::new(create_node()));
 
         let manager = Arc::new(Self {
             task_store: task_store.clone(),
