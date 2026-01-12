@@ -5,7 +5,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 import time, sys, argparse, json
 
 try:
-    from robonix_sdk.srv import SubmitTask
+    from robonix_sdk.srv import PingPong
 except ImportError:
     print("Error: robonix_sdk not found.")
     sys.exit(1)
@@ -21,7 +21,7 @@ def main():
     rclpy.init()
     node = Node(f'stress_test_python_{args.client_id}')
     qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10, durability=DurabilityPolicy.VOLATILE)
-    client = node.create_client(SubmitTask, '/rbnx/task/submit', qos_profile=qos)
+    client = node.create_client(PingPong, '/rbnx/ping', qos_profile=qos)
     
     if not client.wait_for_service(timeout_sec=10.0):
         print("Service not available")
@@ -39,7 +39,7 @@ def main():
         if elapsed < interval: time.sleep(interval - elapsed)
         last_req = time.time()
         
-        req = SubmitTask.Request(description=f'task {i}', params='{}')
+        req = PingPong.Request(message='ping', sequence=i)
         call_start = time.time()
         
         future = client.call_async(req)
@@ -50,7 +50,7 @@ def main():
             try:
                 future.result()
                 stats['success'] += 1
-                stats['latencies'].append((time.time() - call_start) * 1000.0)
+                stats['latencies'].append((time.time() - call_start) * 1_000_000.0)
             except:
                 stats['failed'] += 1
         else:
@@ -61,7 +61,7 @@ def main():
     p = lambda pct: lats[int(len(lats) * pct / 100.0)] if lats else 0
     
     print(f"\nOverall Statistics:\nTotal: {total}, Success: {stats['success']}, Failed: {stats['failed']}")
-    print(f"Latency (ms): Avg: {sum(lats)/len(lats) if lats else 0:.2f}, Min: {lats[0] if lats else 0:.2f}, Max: {lats[-1] if lats else 0:.2f}, P50: {p(50):.2f}, P95: {p(95):.2f}, P99: {p(99):.2f}, P999: {p(99.9):.2f}")
+    print(f"Latency (us): Avg: {sum(lats)/len(lats) if lats else 0:.2f}, Min: {lats[0] if lats else 0:.2f}, Max: {lats[-1] if lats else 0:.2f}, P50: {p(50):.2f}, P95: {p(95):.2f}, P99: {p(99):.2f}, P999: {p(99.9):.2f}")
     
     node.destroy_node()
     rclpy.shutdown()

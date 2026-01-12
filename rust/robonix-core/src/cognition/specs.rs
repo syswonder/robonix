@@ -10,6 +10,7 @@ pub fn load_services(services: &mut HashMap<String, ServiceSpec>) {
     );
 
     SRV!(
+        // TODO
         services,
         "plan_simulate",
         "Plan simulation service for feasibility and safety checking",
@@ -17,6 +18,7 @@ pub fn load_services(services: &mut HashMap<String, ServiceSpec>) {
     );
 
     SRV!(
+        // TODO
         services,
         "memory",
         "Cognitive memory service providing long-term and short-term knowledge",
@@ -24,6 +26,7 @@ pub fn load_services(services: &mut HashMap<String, ServiceSpec>) {
     );
 
     SRV!(
+        // TODO
         services,
         "result_feedback",
         "Result feedback service for execution verification",

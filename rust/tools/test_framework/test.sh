@@ -4,6 +4,9 @@
 
 set -e
 
+# Set timezone to Asia/Shanghai (UTC+8)
+export TZ=Asia/Shanghai
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TEST_DIR="$SCRIPT_DIR"
@@ -280,7 +283,7 @@ run_rust_tests() {
             RUST_PID=$!
             RUST_PIDS+=($RUST_PID)
             echo "$RUST_PID" >> "$PID_FILE"
-            sleep 0.5
+            # sleep 0.5
         done
         
         # Wait for all Rust tests
@@ -308,7 +311,7 @@ run_python_tests() {
         PYTHON_PID=$!
         PYTHON_PIDS+=($PYTHON_PID)
         echo "$PYTHON_PID" >> "$PID_FILE"
-        sleep 0.5
+        # sleep 0.5
     done
     
     # Wait for all Python tests (with timeout)
@@ -343,25 +346,26 @@ run_cpp_tests() {
         echo "Building C++ stress test..."
         mkdir -p build
         cd build
-        cmake .. 2>&1 | tee "$LOG_DIR/cpp_build.log"
-        make 2>&1 | tee -a "$LOG_DIR/cpp_build.log"
+        cmake .. > "$DDS_LOG_DIR/cpp_build.log" 2>&1
+        make -j$(nproc) >> "$DDS_LOG_DIR/cpp_build.log" 2>&1
         cd ..
     fi
     
     if [ -f "build/stress_test" ]; then
+        echo "✓ Found C++ stress test binary"
         # Run multiple C++ test clients concurrently
         CPP_PIDS=()
         for i in $(seq 1 $CONCURRENCY); do
-            ./build/stress_test --client-id $i --requests 1000 --rate 100 > "$DDS_LOG_DIR/cpp_test_$i.log" 2>&1 &
+            ./build/stress_test --client-id $i --requests $REQUESTS --rate $RATE --duration $DURATION > "$DDS_LOG_DIR/cpp_test_$i.log" 2>&1 &
             CPP_PID=$!
             CPP_PIDS+=($CPP_PID)
             echo "$CPP_PID" >> "$PID_FILE"
-            sleep 0.5
+            # sleep 0.5
         done
         
         # Wait for all C++ tests
         for pid in "${CPP_PIDS[@]}"; do
-            wait $pid || true
+            wait $pid 2>/dev/null || true
         done
         echo "✓ C++ tests completed"
     else
@@ -372,6 +376,7 @@ run_cpp_tests() {
 
 # Main execution
 main() {
+    START_TIME_RUN=$(date +%s)
     echo "=========================================="
     echo "Robonix Test Framework"
     echo "=========================================="
@@ -383,9 +388,6 @@ main() {
     echo "=========================================="
     
     # Set DDS implementation for ROS2 CLI tools
-    # Note: robonix-core uses RustDDS (rustdds crate) via ros2-client, which is a Rust implementation
-    # ROS2 CLI tools (ros2 service list, etc.) need C++ RMW implementations (rmw_fastrtps_cpp, etc.)
-    # RustDDS is a Rust crate, not an RMW implementation, so CLI tools always use fastrtps
     export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
     if [ "$DDS_TYPE" = "fastdds" ]; then
         echo "Testing FastDDS: robonix-core and CLI tools both use FastDDS (rmw_fastrtps_cpp)"
@@ -415,24 +417,37 @@ main() {
         python)
             run_python_tests
             ;;
+        cpp)
+            run_cpp_tests
+            ;;
         all)
             run_rust_tests || true
+            run_cpp_tests || true
             run_python_tests || true
             ;;
         *)
             echo "Unknown test type: $TEST_TYPE"
-            echo "Valid types: rust, python, all"
+            echo "Valid types: rust, python, cpp, all"
             exit 1
             ;;
     esac
     
+    END_TIME_RUN=$(date +%s)
+    DURATION_RUN=$((END_TIME_RUN - START_TIME_RUN))
+
     echo ""
     echo "=========================================="
-    echo "✓ All tests completed"
+    echo "✓ Test run completed in ${DURATION_RUN}s"
     echo "Check logs in: $DDS_LOG_DIR"
     echo ""
     echo "Generating benchmark report..."
-    python3 "$TEST_DIR/report.py" --log-dir "$DDS_LOG_DIR" --output "$DDS_LOG_DIR/benchmark_report.json"
+    python3 "$TEST_DIR/report.py" \
+        --log-dir "$DDS_LOG_DIR" \
+        --output "$DDS_LOG_DIR/benchmark_report.json" \
+        --requests "$REQUESTS" \
+        --rate "$RATE" \
+        --duration "$DURATION" \
+        --concurrency "$CONCURRENCY"
     echo ""
     echo "Benchmark report saved to: $DDS_LOG_DIR/benchmark_report.json"
     echo "=========================================="
