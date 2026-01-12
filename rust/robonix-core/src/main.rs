@@ -62,7 +62,7 @@ fn main() {
     info!("all robonix modules initialized");
 
     // Create TF monitor and start monitoring
-    let tf_monitor = Arc::new(robonix_core::tf_monitor::TfMonitor::new());
+    let tf_monitor = Arc::new(robonix_core::perception::tf_monitor::TfMonitor::new());
 
     // Start TF monitoring in background
     let tf_monitor_clone = tf_monitor.clone();
@@ -75,7 +75,7 @@ fn main() {
     });
 
     // Create topic monitor and start monitoring
-    let topic_monitor = Arc::new(robonix_core::topic_monitor::TopicMonitor::new());
+    let topic_monitor = Arc::new(robonix_core::perception::topic_monitor::TopicMonitor::new());
     let topic_monitor_clone = topic_monitor.clone();
     let node_for_topics = node_arc.clone();
     rt.spawn(async move {
@@ -87,7 +87,7 @@ fn main() {
 
     // Create image monitor
     let image_storage_dir = std::path::PathBuf::from("/tmp/robonix_images");
-    let image_monitor = Arc::new(robonix_core::image_monitor::ImageMonitor::new(
+    let image_monitor = Arc::new(robonix_core::perception::image_monitor::ImageMonitor::new(
         image_storage_dir,
     ));
 
