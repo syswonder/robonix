@@ -30,30 +30,27 @@ def setup_font():
     try:
         import matplotlib.font_manager as fm
         
-        # Check for Latin Modern Sans in different possible names
-        target_fonts = ["Latin Modern Sans", "LM Sans 10", "LMSans10"]
-        available_fonts = [f.name for f in fm.fontManager.ttflist]
-        
-        # Try finding by name first
-        for font_name in target_fonts:
-            if font_name in available_fonts:
-                plt.rcParams['font.family'] = font_name
-                print(f"Using font: {font_name}")
-                return True
-        
-        # If not found by name, try to find by file patterns in system paths
-        font_paths = fm.findSystemFonts()
-        for path in font_paths:
-            path_lower = path.lower()
-            if 'lmsans' in path_lower and (path_lower.endswith('.otf') or path_lower.endswith('.ttf')):
-                try:
+        # Specific font file to ensure consistency (Regular, not oblique or bold)
+        fixed_font_path = "/usr/share/texmf/fonts/opentype/public/lm/lmsans10-regular.otf"
+        if Path(fixed_font_path).exists():
+            fm.fontManager.addfont(fixed_font_path)
+            # Get the actual font name as registered in matplotlib
+            font_prop = fm.FontProperties(fname=fixed_font_path)
+            font_name = font_prop.get_name()
+            plt.rcParams['font.family'] = font_name
+            print(f"Fixed font to: {fixed_font_path} (Name: {font_name})")
+            return True
+        else:
+            # Fallback to general detection if the fixed path doesn't exist
+            font_paths = fm.findSystemFonts()
+            for path in font_paths:
+                path_lower = path.lower()
+                if 'lmsans10-regular' in path_lower and path_lower.endswith('.otf'):
                     fm.fontManager.addfont(path)
                     new_font = fm.FontProperties(fname=path).get_name()
                     plt.rcParams['font.family'] = new_font
                     print(f"Added and using font from: {path} (Name: {new_font})")
                     return True
-                except:
-                    continue
     except Exception as e:
         print(f"Warning: Font setup failed: {e}")
     
@@ -157,6 +154,12 @@ def main():
     
     metrics = ['p50', 'p99']
     types = ['rust', 'cpp', 'python']
+    # Mapping internal types to professional labels
+    labels_map = {
+        'rust': 'ros2-client (RustDDS)',
+        'cpp': 'rclcpp (FastDDS)',
+        'python': 'rclpy (FastDDS)'
+    }
     colors = {'rust': '#3498db', 'cpp': '#2ecc71', 'python': '#e74c3c'}
     
     x = np.arange(len(concurrencies))
@@ -173,16 +176,20 @@ def main():
             offset = (i - 1) * width
             
             # Plot the mean bar
-            bars = ax.bar(x + offset, means, width, label=t.upper(), 
+            bars = ax.bar(x + offset, means, width, label=labels_map[t], 
                           color=colors[t], alpha=0.7, edgecolor='black', linewidth=1.5)
             
             # Plot min-max whiskers (OS paper style)
             yerr = [np.array(means) - np.array(mins), np.array(maxs) - np.array(means)]
-            ax.errorbar(x + offset, means, yerr=yerr, fmt='none', ecolor='black', 
+            ax.errorbar(x + offset, means, yerr=yerr, fmt='none', ecolor='#555555', 
                         capsize=5, capthick=1.5, elinewidth=1.5)
             
-            # Bar label (integer mean)
-            ax.bar_label(bars, fmt='%d', padding=5, fontsize=11, fontweight='bold')
+            # Bar label at the base (just above x-axis)
+            for bar in bars:
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., 2, 
+                        f'{int(height)}', ha='center', va='bottom', 
+                        fontsize=11, fontweight='normal', color='black')
         
         ax.set_xticks(x)
         ax.set_xticklabels(concurrencies)
@@ -208,12 +215,6 @@ def main():
     # Plot Failure Rate Comparison - Bar Charts
     plt.figure(figsize=(12, 8))
     
-    types = ['rust', 'cpp', 'python']
-    colors = {'rust': '#3498db', 'cpp': '#2ecc71', 'python': '#e74c3c'}
-    
-    x = np.arange(len(concurrencies))
-    width = 0.25
-    
     for i, t in enumerate(types):
         means = plot_data[t]['fail_rate']
         mins = plot_data[t]['fail_rate_min']
@@ -222,20 +223,21 @@ def main():
         offset = (i - 1) * width
         
         # Plot the mean bar
-        bars = plt.bar(x + offset, means, width, label=t.upper(), 
+        bars = plt.bar(x + offset, means, width, label=labels_map[t], 
                       color=colors[t], alpha=0.7, edgecolor='black', linewidth=1.5)
         
         # Plot min-max whiskers (OS paper style)
         yerr = [np.array(means) - np.array(mins), np.array(maxs) - np.array(means)]
-        plt.errorbar(x + offset, means, yerr=yerr, fmt='none', ecolor='black', 
+        plt.errorbar(x + offset, means, yerr=yerr, fmt='none', ecolor='#555555', 
                     capsize=5, capthick=1.5, elinewidth=1.5)
         
-        # Bar label (precision reduced if very small)
+        # Bar label at the base (just above x-axis)
         for bar in bars:
             height = bar.get_height()
             if height > 0:
-                plt.text(bar.get_x() + bar.get_width()/2., height + 0.1,
-                        f'{height:.1f}%', ha='center', va='bottom', fontsize=10, fontweight='bold')
+                plt.text(bar.get_x() + bar.get_width()/2., 0.1,
+                        f'{height:.1f}%', ha='center', va='bottom', 
+                        fontsize=11, fontweight='normal', color='black')
 
     plt.xticks(x, concurrencies)
     plt.xlabel('Concurrency (Concurrent Clients)')
@@ -264,12 +266,18 @@ def generate_text_report(all_results, output_dir):
         if key not in groups: groups[key] = []
         groups[key].append(r)
 
+    labels_map = {
+        'rust': 'ros2-client (RustDDS)',
+        'cpp': 'rclcpp (FastDDS)',
+        'python': 'rclpy (FastDDS)'
+    }
+
     report_lines = []
-    report_lines.append("=" * 110)
-    report_lines.append(f"{'Robonix Benchmark Summary Report (Averages across Repeats)':^110}")
-    report_lines.append("=" * 110)
-    report_lines.append(f"{'Conc':<6} {'Type':<10} {'Reps':>5} {'Total':>8} {'Succ':>8} {'Fail':>8} {'Rate':>8} {'Avg':>10} {'P50':>10} {'P99':>10}")
-    report_lines.append("-" * 110)
+    report_lines.append("=" * 135)
+    report_lines.append(f"{'Robonix Benchmark Summary Report (Averages across Repeats)':^135}")
+    report_lines.append("=" * 135)
+    report_lines.append(f"{'Conc':<6} {'Type':<30} {'Reps':>5} {'Total':>8} {'Succ':>8} {'Fail':>8} {'Rate':>8} {'Avg':>10} {'P50':>10} {'P99':>10}")
+    report_lines.append("-" * 135)
 
     for c in sorted(list(set(k[0] for k in groups.keys()))):
         for t in ['rust', 'cpp', 'python']:
@@ -288,8 +296,8 @@ def generate_text_report(all_results, output_dir):
             p50 = np.mean([r['stats'].get('p50', 0) for r in matches])
             p99 = np.mean([r['stats'].get('p99', 0) for r in matches])
             
-            report_lines.append(f"{c:<6} {t:<10} {reps:>5} {total:>8.0f} {success:>8.0f} {failed:>8.0f} {rate:>7.1f}% {avg:>10.2f} {p50:>10.2f} {p99:>10.2f}")
-        report_lines.append("-" * 110)
+            report_lines.append(f"{c:<6} {labels_map[t]:<30} {reps:>5} {total:>8.0f} {success:>8.0f} {failed:>8.0f} {rate:>7.1f}% {avg:>10.2f} {p50:>10.2f} {p99:>10.2f}")
+        report_lines.append("-" * 135)
 
     report_text = "\n".join(report_lines)
     print(report_text)
