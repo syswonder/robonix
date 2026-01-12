@@ -10,13 +10,6 @@ from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from sensor_msgs.msg import Range
 import sys
 
-import sys
-root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-if root_dir not in sys.path:
-    sys.path.append(root_dir)
-
-print(root_dir)
-
 from robonix.manager.eaios_decorators import eaios
 from robonix.uapi.graph.entity import Entity
 
