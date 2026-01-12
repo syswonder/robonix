@@ -2,7 +2,7 @@
 // Rust CLI Stress Test - Single Client Process
 use anyhow::Result;
 use clap::Parser;
-use robonix_core::ros_idl::task::{SubmitTaskRequest, SubmitTaskResponse};
+use robonix_core::ros_idl::test::{PingPongRequest, PingPongResponse};
 use ros2_client::{
     service::AService, Context, Name, NodeName, NodeOptions, ServiceMapping, ServiceTypeName,
 };
@@ -41,10 +41,10 @@ async fn main() -> Result<()> {
         .build();
 
     let client = node
-        .create_client::<AService<SubmitTaskRequest, SubmitTaskResponse>>(
+        .create_client::<AService<PingPongRequest, PingPongResponse>>(
             ServiceMapping::Enhanced,
-            &Name::new("/rbnx/task", "submit").unwrap(),
-            &ServiceTypeName::new("robonix_sdk", "SubmitTask"),
+            &Name::new("/rbnx", "ping").unwrap(),
+            &ServiceTypeName::new("robonix_sdk", "PingPong"),
             qos.clone(),
             qos.clone(),
         )
@@ -79,9 +79,9 @@ async fn main() -> Result<()> {
         }
         last_req = Instant::now();
 
-        let req = SubmitTaskRequest {
-            description: format!("task {}", i),
-            params: "{}".to_string(),
+        let req = PingPongRequest {
+            message: "ping".to_string(),
+            sequence: i as u64,
         };
         let call_start = Instant::now();
 
@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
         {
             Ok(Ok(_)) => {
                 success += 1;
-                latencies.push(call_start.elapsed().as_secs_f64() * 1000.0);
+                latencies.push(call_start.elapsed().as_secs_f64() * 1_000_000.0);
             }
             _ => failed += 1,
         }
@@ -119,7 +119,7 @@ async fn main() -> Result<()> {
         (success as f64 / total as f64) * 100.0
     );
     println!(
-        "Latency (ms): Avg: {:.2}, Min: {:.2}, Max: {:.2}, P50: {:.2}, P95: {:.2}, P99: {:.2}, P999: {:.2}",
+        "Latency (us): Avg: {:.2}, Min: {:.2}, Max: {:.2}, P50: {:.2}, P95: {:.2}, P99: {:.2}, P999: {:.2}",
         avg,
         p(0.0),
         p(100.0),
