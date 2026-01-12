@@ -88,9 +88,19 @@ macro_rules! SRV {
 
 impl SpecRegistry {
     pub fn new() -> Self {
-        // Load specifications from the table
-        let primitives = crate::specs_table::load_primitives();
-        let services = crate::specs_table::load_services();
+        let mut primitives = HashMap::new();
+        let mut services = HashMap::new();
+
+        // Load perception specs (primitives + services)
+        crate::perception::specs::load_primitives(&mut primitives);
+        crate::perception::specs::load_services(&mut services);
+
+        // Load cognition specs (services only)
+        crate::cognition::specs::load_services(&mut services);
+
+        // Load action specs (primitives + services)
+        crate::action::specs::load_primitives(&mut primitives);
+        crate::action::specs::load_services(&mut services);
 
         Self {
             primitives,

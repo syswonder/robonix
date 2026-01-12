@@ -11,11 +11,11 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::core::RobonixCore;
-use crate::image_monitor::ImageMonitor;
-use crate::tf_monitor::{TfMonitor, TfTreeResponse};
-use crate::topic_monitor::{TopicMonitor, TopicsResponse};
+use crate::perception::image_monitor::ImageMonitor;
+use crate::perception::tf_monitor::{TfMonitor, TfTreeResponse};
+use crate::perception::topic_monitor::{TopicMonitor, TopicsResponse};
 
-use log::{debug, trace, warn};
+use log::{trace, warn};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub timestamp: String,

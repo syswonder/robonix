@@ -199,9 +199,9 @@ env:
 setup-dev:
 	@echo "Setting up development environment..."
 	@mkdir -p ~/.robonix
-	@if [ -L ~/.robonix/packages ]; then \
-		echo "Removing existing provider link..."; \
-		rm -f ~/.robonix/packages; \
+	@if [ -e ~/.robonix/packages ]; then \
+		echo "Removing existing packages path..."; \
+		rm -rf ~/.robonix/packages; \
 	fi
 	@ln -sf "$(PROVIDER_DIR)" ~/.robonix/packages
 	@echo "✓ Linked $(PROVIDER_DIR) to ~/.robonix/packages"

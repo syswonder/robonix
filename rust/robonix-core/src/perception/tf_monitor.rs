@@ -228,7 +228,7 @@ impl TfMonitor {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             loop {
                 interval.tick().await;
-                let mut cache_guard = cache_stats.lock().await;
+                let cache_guard = cache_stats.lock().await;
                 let now = std::time::Instant::now();
 
                 // Clean up frames that haven't been seen for a while

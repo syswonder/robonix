@@ -4,7 +4,7 @@
 // Executes RTDL (Real-Time Decision Logic) programs
 // Currently supports simple list-style RTDL (skill invocation list)
 
-use crate::skill_library::SkillLibrary;
+use crate::action::skill_library::SkillLibrary;
 use crate::task_manager::exception::{ExceptionHandler, ExceptionType, RecoveryAction};
 use crate::task_manager::task::Task;
 use log::{debug, error, info, warn};

@@ -19,7 +19,7 @@ use crate::ros_idl::task::{
 };
 use crate::ros_idl::test::{PingPongRequest, PingPongResponse};
 use futures_util::stream::StreamExt;
-use log::{debug, error, info};
+use log::{error, info};
 use ros2_client::{
     AService, Name, Node, Server, ServiceMapping, ServiceTypeName,
     rustdds::{

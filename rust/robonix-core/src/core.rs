@@ -3,9 +3,9 @@
 //
 // Core coordination module for robonix-core
 
+use crate::action::skill_library::SkillLibrary;
 use crate::primitive::PrimitiveRegistry;
 use crate::service::ServiceRegistry;
-use crate::skill_library::SkillLibrary;
 use crate::spec::SpecRegistry;
 use crate::task_manager::TaskManager;
 use ros2_client::Node;

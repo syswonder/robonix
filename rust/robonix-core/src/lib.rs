@@ -5,17 +5,17 @@
 
 #[macro_use]
 pub mod spec;
+
+pub mod action;
+pub mod cognition;
+pub mod perception;
+
 pub mod core;
-pub mod image_monitor;
 pub mod logging;
 pub mod node;
 pub mod primitive;
 pub mod ros_idl;
 pub mod server;
 pub mod service;
-pub mod skill_library;
-pub mod specs_table;
 pub mod task_manager;
-pub mod tf_monitor;
-pub mod topic_monitor;
 pub mod web_gui;

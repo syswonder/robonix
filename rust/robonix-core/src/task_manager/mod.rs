@@ -11,9 +11,9 @@ pub mod executor;
 pub mod queue;
 pub mod task;
 
+use crate::action::skill_library::SkillLibrary;
 use crate::primitive::PrimitiveRegistry;
 use crate::service::ServiceRegistry;
-use crate::skill_library::SkillLibrary;
 use crate::task_manager::exception::{RecoveryAction, apply_recovery_action};
 use crate::task_manager::executor::ExecutionResult;
 use log::{debug, error, info, trace};
