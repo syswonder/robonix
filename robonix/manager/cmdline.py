@@ -8,7 +8,7 @@ import atexit
 from typing import List, Dict, Any, Optional, Callable
 import traceback
 import aioconsole
-from log import logger
+from robonix.manager.log import logger
 
 
 class Colors:

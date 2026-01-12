@@ -5,11 +5,7 @@ Test script for semantic map skills
 
 import sys
 import os
-
-# Add the project root to Python path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-from skill.semantic_map.api.api import skl_update_map, skl_query_map_all, skl_query_map, skl_add_map_obj
+from robonix.skill.semantic_map.api.api import skl_update_map, skl_query_map_all, skl_query_map, skl_add_map_obj
 
 def test_semantic_map():
     print("Testing semantic map skills...")

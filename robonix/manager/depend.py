@@ -1,9 +1,9 @@
 import os
 import yaml
 from collections import defaultdict
-from constant import BASE_PATH
-from log import logger
-from node import get_entry_name
+from robonix.manager.constant import BASE_PATH
+from robonix.manager.log import logger
+from robonix.manager.node import get_entry_name
 
 
 def scan_dir(base_path, feature_set, feature_sources, all_dependencies, all_params):
