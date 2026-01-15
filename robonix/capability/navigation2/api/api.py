@@ -177,7 +177,8 @@ def set_goal(x, y, yaw) -> str:
         y: Target Y coordinate
         yaw: Target yaw angle
     """
-    # rclpy.init()
+    if not rclpy.ok():
+        rclpy.init()
     import yaml
     plugin_name = "simple_navigation"
     config_path = os.path.join(os.path.dirname(

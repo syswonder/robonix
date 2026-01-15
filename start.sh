@@ -1,3 +1,8 @@
+# make sure the script runs in the root of robonix
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$SCRIPT_DIR"
+
+export PYTHONPATH="$PWD:$PYTHONPATH"
 bash init.sh
 source /opt/ros/humble/setup.sh
 

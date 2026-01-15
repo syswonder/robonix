@@ -5,7 +5,7 @@ import threading
 import pty
 import select
 import signal
-from log import logger
+from robonix.manager.log import logger
 import shlex
 
 def build_cli_args(params: dict, *, normalize_dash: bool = True) -> str:
