@@ -162,6 +162,8 @@ protected:
   bool enable_odom_tf_; /// Whether to publish odometry to tf or not  
   bool wait_for_angle_;
   double min_steering_diff_;
+  double min_steering_angle_; /// Minimum steering angle limit (radians)
+  double max_steering_angle_; /// Maximum steering angle limit (radians)
   bool stop_no_adjust_steering_;
 
   /// Speed limiters:

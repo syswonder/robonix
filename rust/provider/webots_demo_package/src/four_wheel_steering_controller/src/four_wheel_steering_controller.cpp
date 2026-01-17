@@ -62,7 +62,9 @@ FourWheelSteeringController::FourWheelSteeringController()
   cmd_vel_timeout_(0.5), 
   base_frame_id_("base_link"), 
   odom_frame_id_("odom"), 
-  enable_odom_tf_(true)
+  enable_odom_tf_(true),
+  min_steering_angle_(-2.1),
+  max_steering_angle_(2.1)
 {
 }
 
@@ -143,6 +145,8 @@ CallbackReturn FourWheelSteeringController::on_init()
     auto_declare<bool>("wait_for_angle", true);
     auto_declare<bool>("stop_no_adjust_steering", true);
     auto_declare<double>("min_steering_diff", 0.05);
+    auto_declare<double>("min_steering_angle", -2.1);
+    auto_declare<double>("max_steering_angle", 2.1);
 
     auto_declare<std::string>("front_left_wheel", "fl_wheel_joint");
     auto_declare<std::string>("front_right_wheel", "fr_wheel_joint");
@@ -197,6 +201,8 @@ CallbackReturn FourWheelSteeringController::on_configure(const rclcpp_lifecycle:
   wait_for_angle_ = get_node()->get_parameter("wait_for_angle").as_bool();
   stop_no_adjust_steering_ = get_node()->get_parameter("stop_no_adjust_steering").as_bool();
   min_steering_diff_ = get_node()->get_parameter("min_steering_diff").as_double();
+  min_steering_angle_ = get_node()->get_parameter("min_steering_angle").as_double();
+  max_steering_angle_ = get_node()->get_parameter("max_steering_angle").as_double();
   cmd_vel_timeout_ = get_node()->get_parameter("cmd_vel_timeout").as_double();
   odom_frame_id_ = get_node()->get_parameter("odom_frame_id").as_string();
   base_frame_id_ = get_node()->get_parameter("base_frame_id").as_string();
@@ -754,6 +760,12 @@ controller_interface::return_type FourWheelSteeringController::updateCommand(con
   }
   else  
   {
+    // Clamp steering angles to Webots joint limits
+    front_left_steering = rcppmath::clamp(front_left_steering, min_steering_angle_, max_steering_angle_);
+    front_right_steering = rcppmath::clamp(front_right_steering, min_steering_angle_, max_steering_angle_);
+    rear_left_steering = rcppmath::clamp(rear_left_steering, min_steering_angle_, max_steering_angle_);
+    rear_right_steering = rcppmath::clamp(rear_right_steering, min_steering_angle_, max_steering_angle_);
+    
     front_left_steering_handle_->position_command.get().set_value(front_left_steering);
     front_right_steering_handle_->position_command.get().set_value(front_right_steering);
     rear_left_steering_handle_->position_command.get().set_value(rear_left_steering);
