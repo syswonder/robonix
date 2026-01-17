@@ -80,7 +80,7 @@ namespace four_wheel_steering_controller
   // all-四舵轮(全)
   bool Odometry::update_all(double fl_speed, double fr_speed, double rl_speed, double rr_speed, double fl_steering, double fr_steering, double rl_steering, double rr_steering, const rclcpp::Time &time)
   {
-    // std::cout << "update_all" << std::endl;
+    std::cout << "update_all" << std::endl;
   
     double front_steering = 0.0;
     if(fabs(fl_steering) > 0.001 || fabs(fr_steering) > 0.001)

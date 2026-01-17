@@ -32,17 +32,9 @@ def generate_launch_description():
             description="Start RViz2 automatically with this launch file.",
         )
     )
-    declared_arguments.append(
-        DeclareLaunchArgument(
-            "use_sim_time",
-            default_value="true",
-            description="Use simulation time.",
-        )
-    )
 
     # Initialize Arguments
     gui = LaunchConfiguration("gui")
-    use_sim_time = LaunchConfiguration("use_sim_time")
 
     # Get URDF via xacro
     robot_description_content = Command(
@@ -81,7 +73,7 @@ def generate_launch_description():
         package="robot_state_publisher",
         executable="robot_state_publisher",
         output="both",
-        parameters=[robot_description, {'use_sim_time': use_sim_time}],
+        parameters=[robot_description],
     )
     # rviz_node = Node(
     #     package="rviz2",

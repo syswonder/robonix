@@ -28,18 +28,6 @@ WorldInfo {
     "An office break room, surrounded by office desks."
   ]
   basicTimeStep 20
-  contactProperties [
-    ContactProperties {
-      material1 "default"
-      material2 "default"
-      coulombFriction [
-        -1
-      ]
-      forceDependentSlip [
-        0.01
-      ]
-    }
-  ]
 }
 Viewpoint {
   fieldOfView 0.5
