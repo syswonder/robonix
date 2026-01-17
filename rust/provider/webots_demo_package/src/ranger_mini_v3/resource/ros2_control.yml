@@ -31,8 +31,8 @@ four_wheel_steering_controller:
     cmd_vel_timeout: 1.0
     odom_frame_id: odom
     base_frame_id: base_footprint
-    wait_for_angle: true
-    min_steering_diff: 0.05
+    wait_for_angle: false
+    min_steering_diff: 0.1
     stop_no_adjust_steering: true
 
     # Velocity and acceleration limits
