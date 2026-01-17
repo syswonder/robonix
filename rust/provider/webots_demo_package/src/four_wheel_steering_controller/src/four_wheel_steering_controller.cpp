@@ -537,7 +537,7 @@ controller_interface::return_type FourWheelSteeringController::updateOdometry(co
     return controller_interface::return_type::ERROR;
   }
 
-  RCLCPP_DEBUG(get_node()->get_logger(), "odom fl_speed: %.3f, fr_speed: %.3f, rl_speed: %f, rr_speed: %.3f", fl_speed, fr_speed, rl_speed, rr_speed);
+  RCLCPP_INFO(get_node()->get_logger(), "odom fl_speed: %.3f, fr_speed: %.3f, rl_speed: %f, rr_speed: %.3f", fl_speed, fr_speed, rl_speed, rr_speed);
 
   double fl_steering = front_left_steering_handle_->position_state.get().get_value(); // in radians
   double fr_steering = front_right_steering_handle_->position_state.get().get_value();// in radians
@@ -550,7 +550,7 @@ controller_interface::return_type FourWheelSteeringController::updateOdometry(co
     return controller_interface::return_type::ERROR;
   }
 
-  RCLCPP_DEBUG(get_node()->get_logger(), "odom fl_steering: %.3f, fr_steering: %.3f, rl_steering: %.3f, rr_steering: %.3f", fl_steering, fr_steering, rl_steering, rr_steering);
+  RCLCPP_INFO(get_node()->get_logger(), "odom fl_steering: %.3f, fr_steering: %.3f, rl_steering: %.3f, rr_steering: %.3f", fl_steering, fr_steering, rl_steering, rr_steering);
 
   // Estimate linear and angular velocity using joint information
   odometry_.update(fl_speed, fr_speed, rl_speed, rr_speed, fl_steering, fr_steering, rl_steering, rr_steering, time);
@@ -627,14 +627,14 @@ controller_interface::return_type FourWheelSteeringController::updateCommand(con
     curr_cmd_twist->ang = 0.0;
   }
   
-  RCLCPP_DEBUG(get_node()->get_logger(), "do cmd_vel(X:%.3f, Y:%.3f, W:%.3f)", curr_cmd_twist->lin_x, curr_cmd_twist->lin_y, curr_cmd_twist->ang);
+  RCLCPP_INFO(get_node()->get_logger(), "do cmd_vel(X:%.3f, Y:%.3f, W:%.3f)", curr_cmd_twist->lin_x, curr_cmd_twist->lin_y, curr_cmd_twist->ang);
   
   const double cmd_dt(period.seconds());
 
   const double angular_speed = odometry_.getAngular();
   const double steering_track = track_ - 2*wheel_steering_y_offset_;
   
-  RCLCPP_DEBUG(get_node()->get_logger(), "angular_speed:%.3f wheel_radius_:%.3f", angular_speed, wheel_radius_);
+  RCLCPP_INFO(get_node()->get_logger(), "angular_speed:%.3f wheel_radius_:%.3f", angular_speed, wheel_radius_);
   
   double vel_left_front = 0, vel_right_front = 0;
   double vel_left_rear = 0, vel_right_rear = 0;
@@ -740,8 +740,8 @@ controller_interface::return_type FourWheelSteeringController::updateCommand(con
     }
   }
   
-  RCLCPP_DEBUG(get_node()->get_logger(), "cmd_vel velocity fl: %.3f, fr: %.3f, rl: %.3f, rr: %.3f", vel_left_front, vel_right_front, vel_left_rear, vel_right_rear);
-  RCLCPP_DEBUG(get_node()->get_logger(), "cmd_vel steering fl: %.3f, fr: %.3f, rl: %.3f, rr: %.3f", front_left_steering, front_right_steering, rear_left_steering, rear_right_steering);
+  RCLCPP_INFO(get_node()->get_logger(), "cmd_vel velocity fl: %.3f, fr: %.3f, rl: %.3f, rr: %.3f", vel_left_front, vel_right_front, vel_left_rear, vel_right_rear);
+  RCLCPP_INFO(get_node()->get_logger(), "cmd_vel steering fl: %.3f, fr: %.3f, rl: %.3f, rr: %.3f", front_left_steering, front_right_steering, rear_left_steering, rear_right_steering);
   
   front_left_traction_handle_->velocity_command.get().set_value(vel_left_front);
   front_right_traction_handle_->velocity_command.get().set_value(vel_right_front);
@@ -750,7 +750,7 @@ controller_interface::return_type FourWheelSteeringController::updateCommand(con
   
   if (stop_no_adjust_steering_ && stop_cmd)
   {
-    RCLCPP_DEBUG(get_node()->get_logger(), "Receive a stop cmd without adjusting the steering wheel. stop_no_adjust_steering_: %d, stop_cmd: %d", stop_no_adjust_steering_, stop_cmd);
+    RCLCPP_INFO(get_node()->get_logger(), "Receive a stop cmd without adjusting the steering wheel. stop_no_adjust_steering_: %d, stop_cmd: %d", stop_no_adjust_steering_, stop_cmd);
   }
   else  
   {

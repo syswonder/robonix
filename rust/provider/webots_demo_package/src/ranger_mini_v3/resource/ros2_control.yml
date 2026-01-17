@@ -31,8 +31,8 @@ four_wheel_steering_controller:
     cmd_vel_timeout: 1.0
     odom_frame_id: odom
     base_frame_id: base_footprint
-    wait_for_angle: false
-    min_steering_diff: 0.01
+    wait_for_angle: true
+    min_steering_diff: 0.05
     stop_no_adjust_steering: true
 
     # Velocity and acceleration limits
@@ -43,13 +43,13 @@ four_wheel_steering_controller:
         max_velocity           : 1.667  # m/s
         min_velocity           : -1.667 # m/s
         has_acceleration_limits: true
-        max_acceleration       : 2.0  # m/s^2 (increased for better responsiveness)
-        min_acceleration       : -2.0 # m/s^2
+        max_acceleration       : 1.0  # m/s^2
+        min_acceleration       : -1.0 # m/s^2
     angular:
       z:
         has_velocity_limits    : true
         max_velocity           : 3.14  # rad/s
         min_velocity           : -3.14
         has_acceleration_limits: true
-        max_acceleration       : 2.0  # rad/s^2 (increased for better responsiveness)
-        min_acceleration       : -2.0
+        max_acceleration       : 1.0  # rad/s^2
+        min_acceleration       : -1.0

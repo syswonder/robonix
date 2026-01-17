@@ -36,8 +36,7 @@ def generate_launch_description():
         executable='robot_state_publisher',
         output='screen',
         parameters=[{
-            'robot_description': '<robot name=""><link name=""/></robot>',
-            'use_sim_time': use_sim_time
+            'robot_description': '<robot name=""><link name=""/></robot>'
         }],
     )
 
@@ -46,22 +45,6 @@ def generate_launch_description():
         executable='static_transform_publisher',
         output='screen',
         arguments=['0', '0', '0', '0', '0', '0', 'base_link', 'base_footprint'],
-    )
-
-    # World frame - the unique common frame for all robots and packages
-    world_to_map_publisher = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        output='screen',
-        arguments=['0', '0', '0', '0', '0', '0', 'world', 'map'],
-    )
-
-    # Map frame publisher - initial map->odom transform (AMCL will update this later)
-    map_to_odom_publisher = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        output='screen',
-        arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom'],
     )
 
     # ROS control spawners
@@ -87,9 +70,9 @@ def generate_launch_description():
     ros2_control_params = os.path.join(package_dir, 'resource', 'ros2_control.yml')
     use_twist_stamped = 'ROS_DISTRO' in os.environ and (os.environ['ROS_DISTRO'] in ['rolling', 'jazzy', 'kilted'])
     if use_twist_stamped:
-        mappings = [('/cmd_vel', '/four_wheel_steering_controller/cmd_vel'), ('/four_wheel_steering_controller/odom', '/odom')]
+        mappings = [('/four_wheel_steering_controller/cmd_vel', '/cmd_vel'), ('/four_wheel_steering_controller/odom', '/odom')]
     else:
-        mappings = [('/cmd_vel', '/four_wheel_steering_controller/cmd_vel_unstamped'), ('/four_wheel_steering_controller/odom', '/odom')]
+        mappings = [('/four_wheel_steering_controller/cmd_vel_unstamped', '/cmd_vel'), ('/four_wheel_steering_controller/odom', '/odom')]
     ranger_driver = WebotsController(
         robot_name='RangerMiniV3',
         parameters=[
@@ -115,26 +98,19 @@ def generate_launch_description():
 
     # Navigation
     navigation_nodes = []
+    nav2_params_file = 'nav2_params.yaml'
+    nav2_params = os.path.join(package_dir, 'resource', nav2_params_file)
     nav2_map = os.path.join(package_dir, 'resource', 'map.yaml')
-    
     if 'nav2_bringup' in get_packages_with_prefixes():
-        nav2_params_file = 'nav2_params.yaml'
-        nav2_params = os.path.join(package_dir, 'resource', nav2_params_file)
-        # Only include navigation if params file exists and use_nav is True
-        if os.path.exists(nav2_params):
-            nav2_launch_args = [
+        navigation_nodes.append(IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(os.path.join(
+                get_package_share_directory('nav2_bringup'), 'launch', 'bringup_launch.py')),
+            launch_arguments=[
+                ('map', nav2_map),
                 ('params_file', nav2_params),
                 ('use_sim_time', use_sim_time),
-            ]
-            # Only add map argument if map file exists
-            if os.path.exists(nav2_map):
-                nav2_launch_args.append(('map', nav2_map))
-            
-            navigation_nodes.append(IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(os.path.join(
-                    get_package_share_directory('nav2_bringup'), 'launch', 'bringup_launch.py')),
-                launch_arguments=nav2_launch_args,
-                condition=launch.conditions.IfCondition(use_nav)))
+            ],
+            condition=launch.conditions.IfCondition(use_nav)))
 
     # SLAM
     cartographer_config_dir = os.path.join(package_dir, 'resource')
@@ -195,8 +171,6 @@ def generate_launch_description():
 
         robot_state_publisher,
         footprint_publisher,
-        world_to_map_publisher,
-        map_to_odom_publisher,
 
         ranger_driver,
         waiting_nodes,
