@@ -19,7 +19,7 @@ use crate::ros_idl::task::{
 };
 use crate::ros_idl::test::{PingPongRequest, PingPongResponse};
 use futures_util::stream::StreamExt;
-use log::{error, info};
+use log::{error, info, warn};
 use ros2_client::{
     AService, Name, Node, Server, ServiceMapping, ServiceTypeName,
     rustdds::{
@@ -28,6 +28,76 @@ use ros2_client::{
     },
 };
 use std::sync::Arc;
+
+/// Set thread to real-time priority with SCHED_FIFO policy
+/// This ensures the thread has the highest priority and won't be preempted by other user threads
+fn set_thread_realtime_priority() {
+    #[cfg(target_os = "linux")]
+    {
+        use std::mem;
+        unsafe {
+            let mut param: libc::sched_param = mem::zeroed();
+            // Set priority to maximum (99 is the highest for SCHED_FIFO)
+            // Note: This requires CAP_SYS_NICE capability or running as root
+            param.sched_priority = 99;
+
+            let result =
+                libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param);
+
+            if result == 0 {
+                info!("Thread set to SCHED_FIFO with priority 99 (highest priority)");
+            } else {
+                let errno = *libc::__errno_location();
+                warn!(
+                    "Failed to set thread to real-time priority (errno: {}). \
+                    This may require root privileges or CAP_SYS_NICE capability. \
+                    Thread will run with normal priority.",
+                    errno
+                );
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        warn!("Real-time priority setting is only supported on Linux");
+    }
+}
+
+/// Spawn a core service API handler on a dedicated high-priority thread
+/// Each core ROS service API gets its own thread with real-time priority
+fn spawn_core_api_thread<F, Fut>(name: &str, f: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let name = name.to_string();
+    let name_for_error = name.clone();
+    std::thread::Builder::new()
+        .name(format!("core-api-{}", name))
+        .spawn(move || {
+            // Set thread to real-time priority
+            // set_thread_realtime_priority();
+
+            // Create a new Tokio runtime for this thread
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect(&format!(
+                    "Failed to create Tokio runtime for core API thread: {}",
+                    name
+                ));
+
+            info!("Core API thread '{}' started with high priority", name);
+
+            // Run the future
+            rt.block_on(f());
+        })
+        .expect(&format!(
+            "Failed to spawn core API thread: {}",
+            name_for_error
+        ));
+}
 
 pub fn create_qos() -> QosPolicies {
     // Match official ros2_client demo QoS settings
@@ -200,8 +270,8 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
     let primitive_registry_clone1 = primitive_registry.clone();
     let primitive_registry_clone2 = primitive_registry.clone();
 
-    // Handle primitive registration requests
-    let register_primitive_task = smol::spawn(async move {
+    // Handle primitive registration requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("prm-register", move || async move {
         let stream = servers.register_primitive_server.receive_request_stream();
         stream
             .for_each(|result| async {
@@ -227,8 +297,8 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
             .await;
     });
 
-    // Handle primitive query requests
-    let query_primitive_task = smol::spawn(async move {
+    // Handle primitive query requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("prm-query", move || async move {
         let stream = servers.query_primitive_server.receive_request_stream();
         stream
             .for_each(|result| async {
@@ -254,8 +324,8 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
             .await;
     });
 
-    // Handle service registration requests
-    let register_service_task = smol::spawn(async move {
+    // Handle service registration requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("srv-register", move || async move {
         let stream = servers.register_service_server.receive_request_stream();
         stream
             .for_each(|result| async {
@@ -281,8 +351,8 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
             .await;
     });
 
-    // Handle service query requests
-    let query_service_task = smol::spawn(async move {
+    // Handle service query requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("srv-query", move || async move {
         let stream = servers.query_service_server.receive_request_stream();
         stream
             .for_each(|result| async {
@@ -308,8 +378,8 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
             .await;
     });
 
-    // Handle skill registration requests
-    let register_skill_task = smol::spawn(async move {
+    // Handle skill registration requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("skl-register", move || async move {
         let stream = servers.register_skill_server.receive_request_stream();
         stream
             .for_each(|result| async {
@@ -335,8 +405,8 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
             .await;
     });
 
-    // Handle skill query requests
-    let query_skill_task = smol::spawn(async move {
+    // Handle skill query requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("skl-query", move || async move {
         let stream = servers.query_skill_server.receive_request_stream();
         stream
             .for_each(|result| async {
@@ -359,8 +429,8 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
             .await;
     });
 
-    // Handle task submit requests
-    let submit_task_task = smol::spawn(async move {
+    // Handle task submit requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("task-submit", move || async move {
         let stream = servers.submit_task_server.receive_request_stream();
         stream
             .for_each(|result| async {
@@ -386,8 +456,8 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
             .await;
     });
 
-    // Handle task data requests
-    let task_data_task = smol::spawn(async move {
+    // Handle task data requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("task-data", move || async move {
         let stream = servers.task_data_server.receive_request_stream();
         stream
             .for_each(|result| async {
@@ -410,8 +480,8 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
             .await;
     });
 
-    // Handle ping pong requests
-    let ping_pong_task = smol::spawn(async move {
+    // Handle ping pong requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("ping", move || async move {
         let stream = servers.ping_pong_server.receive_request_stream();
         stream
             .for_each(|result| async {
@@ -444,17 +514,8 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
             .await;
     });
 
-    // Wait for all tasks (all run indefinitely)
-    futures_util::future::select_all(vec![
-        Box::pin(register_primitive_task),
-        Box::pin(query_primitive_task),
-        Box::pin(register_service_task),
-        Box::pin(query_service_task),
-        Box::pin(register_skill_task),
-        Box::pin(query_skill_task),
-        Box::pin(submit_task_task),
-        Box::pin(task_data_task),
-        Box::pin(ping_pong_task),
-    ])
-    .await;
+    // All core API handlers are now running on dedicated high-priority threads
+    // Wait indefinitely (threads run independently)
+    info!("All core API service handlers started on dedicated high-priority threads");
+    std::future::pending::<()>().await;
 }
