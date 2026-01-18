@@ -95,7 +95,8 @@ impl SpecRegistry {
         crate::perception::specs::load_primitives(&mut primitives);
         crate::perception::specs::load_services(&mut services);
 
-        // Load cognition specs (services only)
+        // Load cognition specs (primitives + services)
+        crate::cognition::specs::load_primitives(&mut primitives);
         crate::cognition::specs::load_services(&mut services);
 
         // Load action specs (primitives + services)

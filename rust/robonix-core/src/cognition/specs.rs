@@ -1,5 +1,11 @@
-use crate::spec::ServiceSpec;
+use crate::spec::{PrimitiveSpec, ServiceSpec};
 use std::collections::HashMap;
+
+pub fn load_primitives(primitives: &mut HashMap<String, PrimitiveSpec>) {
+    PRM!(primitives, "prm::base.pose", "Get robot pose in map frame (using AMCL)",
+         {},  // No input parameters
+         { "pose": "geometry_msgs/msg/PoseStamped" });
+}
 
 pub fn load_services(services: &mut HashMap<String, ServiceSpec>) {
     SRV!(
