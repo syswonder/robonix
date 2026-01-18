@@ -20,8 +20,8 @@ def generate_launch_description():
     world = LaunchConfiguration('world')
     mode = LaunchConfiguration('mode')
     use_rviz = LaunchConfiguration('rviz', default=False)
-    use_nav = LaunchConfiguration('nav', default=False)
-    use_slam_toolbox = LaunchConfiguration('slam_toolbox', default=False)
+    use_nav = LaunchConfiguration('nav', default=False)  # Disable nav2 for now
+    use_rtabmap = LaunchConfiguration('rtabmap', default=True)  # Enable rtabmap by default
     use_slam_cartographer = LaunchConfiguration('slam_cartographer', default=False)
     use_sim_time = LaunchConfiguration('use_sim_time', default=True)
 
@@ -45,6 +45,27 @@ def generate_launch_description():
         executable='static_transform_publisher',
         output='screen',
         arguments=['0', '0', '0', '0', '0', '0', 'base_link', 'base_footprint'],
+    )
+    
+    # Camera info publisher for RGBD cameras
+    camera_info_publisher = Node(
+        package='ranger_mini_v3',
+        executable='camera_info_publisher',
+        name='camera_info_publisher',
+        output='screen',
+        parameters=[{'use_sim_time': use_sim_time}],
+        condition=launch.conditions.IfCondition(use_rtabmap)
+    )
+    
+    # Temporary static transform from map to odom to bootstrap SLAM
+    # This will be overridden by rtabmap once it initializes and starts publishing
+    # The static transform ensures map frame exists immediately for other nodes
+    map_to_odom_publisher = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        output='screen',
+        arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom'],
+        condition=launch.conditions.IfCondition(use_rtabmap)
     )
 
     # ROS control spawners
@@ -96,21 +117,24 @@ def generate_launch_description():
         condition=launch.conditions.IfCondition(use_rviz)
     )
 
-    # Navigation
+    # Navigation - Disabled for SLAM-only mode
     navigation_nodes = []
-    nav2_params_file = 'nav2_params.yaml'
-    nav2_params = os.path.join(package_dir, 'resource', nav2_params_file)
-    nav2_map = os.path.join(package_dir, 'resource', 'map.yaml')
-    if 'nav2_bringup' in get_packages_with_prefixes():
-        navigation_nodes.append(IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(os.path.join(
-                get_package_share_directory('nav2_bringup'), 'launch', 'bringup_launch.py')),
-            launch_arguments=[
-                ('map', nav2_map),
-                ('params_file', nav2_params),
-                ('use_sim_time', use_sim_time),
-            ],
-            condition=launch.conditions.IfCondition(use_nav)))
+    # Nav2 is disabled by default, only enable if explicitly requested
+    # if 'nav2_bringup' in get_packages_with_prefixes():
+    #     nav2_params_file = 'nav2_params.yaml'
+    #     nav2_params = os.path.join(package_dir, 'resource', nav2_params_file)
+    #     nav2_map = os.path.join(package_dir, 'resource', 'map.yaml')
+    #     navigation_nodes.append(IncludeLaunchDescription(
+    #         PythonLaunchDescriptionSource(os.path.join(
+    #             get_package_share_directory('nav2_bringup'), 'launch', 'bringup_launch.py')),
+    #         launch_arguments={
+    #             'map': nav2_map,
+    #             'params_file': nav2_params,
+    #             'use_sim_time': use_sim_time,
+    #             'autostart': 'true',
+    #             'slam': 'True',
+    #         }.items(),
+    #         condition=launch.conditions.IfCondition(use_nav)))
 
     # SLAM
     cartographer_config_dir = os.path.join(package_dir, 'resource')
@@ -136,23 +160,104 @@ def generate_launch_description():
         arguments=['-resolution', '0.05'],
         condition=launch.conditions.IfCondition(use_slam_cartographer))
     navigation_nodes.append(cartographer_grid)
-
-    toolbox_params = os.path.join(package_dir, 'resource', 'slam_toolbox_params.yaml')
-    slam_toolbox = Node(
-        parameters=[toolbox_params,
-                    {'use_sim_time': use_sim_time}],
-        package='slam_toolbox',
-        executable='async_slam_toolbox_node',
-        name='slam_toolbox',
+    
+    # RTAB-Map for RGBD SLAM
+    # RGBD Odometry node
+    rtabmap_rgbd_odometry = Node(
+        package='rtabmap_odom',
+        executable='rgbd_odometry',
+        name='rgbd_odometry',
         output='screen',
-        condition=launch.conditions.IfCondition(use_slam_toolbox)
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'frame_id': 'head_front_camera_rgb_optical_frame',
+            'odom_frame_id': 'odom',
+            'ground_truth_frame_id': '',
+            'wait_imu_to_init': False,
+            'approx_sync': True,
+            'queue_size': 30,
+        }],
+        remappings=[
+            ('rgb/image', '/head_front_camera/rgb/image_raw'),
+            ('depth/image', '/head_front_camera/depth_registered/image_raw'),
+            ('rgb/camera_info', '/head_front_camera/rgb/camera_info'),
+        ],
+        condition=launch.conditions.IfCondition(use_rtabmap)
     )
-    navigation_nodes.append(slam_toolbox)
+    navigation_nodes.append(rtabmap_rgbd_odometry)
+    
+    # RTAB-Map main node
+    # Note: All rtabmap-specific parameters (RGBD/*, Grid/*, Vis/*) are string types in ROS2
+    # They must be passed as strings, not as their native types
+    rtabmap_node = Node(
+        package='rtabmap_slam',
+        executable='rtabmap',
+        name='rtabmap',
+        output='screen',
+        respawn=True,  # Auto-respawn if node crashes
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'frame_id': 'base_footprint',
+            'odom_frame_id': 'odom',
+            'map_frame_id': 'map',
+            'queue_size': 10,
+            'approx_sync': True,
+            'wait_for_transform_duration': 0.2,
+            'publish_tf': True,
+            'publish_tf_map': True,
+            'odom_sensor_sync': False,
+            # Subscribe settings - use depth, not scan
+            'subscribe_scan': False,  # Disable scan subscription to use depth images
+            'subscribe_scan_cloud': False,
+            'subscribe_depth': True,
+            'subscribe_rgb': True,
+            # rtabmap-specific parameters (as strings)
+            'RGBD/CreateOccupancyGrid': 'true',  # Enable occupancy grid (string)
+            'RGBD/ImagesAlreadyRectified': 'false',  # Images need rectification (string)
+            'Grid/FromDepth': 'true',  # Use depth images for grid (string)
+            'RGBD/LinearUpdate': '0.01',  # Update when robot moves 1cm (string)
+            'RGBD/AngularUpdate': '0.01',  # Update when robot rotates 0.01 rad (string)
+        }],
+        remappings=[
+            ('rgb/image', '/head_front_camera/rgb/image_raw'),
+            ('depth/image', '/head_front_camera/depth_registered/image_raw'),
+            ('rgb/camera_info', '/head_front_camera/rgb/camera_info'),
+            ('odom', '/rgbd_odometry/odom'),  # Use RGBD odometry instead of wheel odometry
+        ],
+        condition=launch.conditions.IfCondition(use_rtabmap)
+    )
+    navigation_nodes.append(rtabmap_node)
+    
+    # RTAB-Map visualization node (optional, for rtabmapviz)
+    rtabmap_viz = Node(
+        package='rtabmap_viz',
+        executable='rtabmap_viz',
+        name='rtabmap_viz',
+        output='screen',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'frame_id': 'base_footprint',
+            'odom_frame_id': 'odom',
+            'map_frame_id': 'map',
+            'queue_size': 10,
+            'approx_sync': True,
+            'wait_for_transform_duration': 0.2,
+        }],
+        remappings=[
+            ('rgb/image', '/head_front_camera/rgb/image_raw'),
+            ('depth/image', '/head_front_camera/depth_registered/image_raw'),
+            ('rgb/camera_info', '/head_front_camera/rgb/camera_info'),
+            ('odom', '/rgbd_odometry/odom'),  # Use RGBD odometry
+        ],
+        condition=launch.conditions.IfCondition(use_rtabmap)
+    )
+    navigation_nodes.append(rtabmap_viz)
 
-    # Wait for the simulation to be ready to start RViz, the navigation and spawners
+    # Start rtabmap nodes directly (they don't need to wait for controller)
+    # Only wait for controller for rviz and ros_control_spawners
     waiting_nodes = WaitForControllerConnection(
         target_driver=ranger_driver,
-        nodes_to_start=[rviz] + navigation_nodes + ros_control_spawners
+        nodes_to_start=[rviz] + ros_control_spawners
     )
 
     return LaunchDescription([
@@ -171,8 +276,12 @@ def generate_launch_description():
 
         robot_state_publisher,
         footprint_publisher,
+        camera_info_publisher,
+        map_to_odom_publisher,
 
         ranger_driver,
+        # Start navigation nodes (rtabmap) directly, they don't need to wait
+        *navigation_nodes,
         waiting_nodes,
 
         # This action will kill all nodes once the Webots simulation has exited

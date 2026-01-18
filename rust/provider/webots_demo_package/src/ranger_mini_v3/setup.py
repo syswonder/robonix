@@ -36,6 +36,9 @@ setup(
     license='TODO: License declaration',
     tests_require=['pytest'],
     entry_points={
-        'launch.frontend.launch_extension': ['launch_ros = launch_ros']
+        'launch.frontend.launch_extension': ['launch_ros = launch_ros'],
+        'console_scripts': [
+            'camera_info_publisher = ranger_mini_v3.camera_info_publisher:main',
+        ],
     }
 )

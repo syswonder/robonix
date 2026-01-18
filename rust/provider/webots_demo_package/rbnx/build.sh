@@ -52,8 +52,13 @@ DEPS=(
     "ros-humble-webots-ros2"
     "ros-humble-nav2-bringup"
     "ros-humble-nav2-map-server"
-    "ros-humble-slam-toolbox"
     "ros-humble-rviz2"
+    "ros-humble-rtabmap-slam"
+    "ros-humble-rtabmap-odom"
+    "ros-humble-rtabmap-viz"
+    "ros-humble-image-transport"
+    "ros-humble-image-transport-plugins"
+    "ros-humble-sensor-msgs"
 )
 
 # Check and install missing dependencies
