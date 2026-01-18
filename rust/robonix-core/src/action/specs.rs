@@ -13,6 +13,10 @@ pub fn load_primitives(primitives: &mut HashMap<String, PrimitiveSpec>) {
     PRM!(primitives, "prm::base.move", "Move mobile base with velocity command",
          { "cmd_vel": "geometry_msgs/msg/Twist" },
          { "odom": "nav_msgs/msg/Odometry" });
+
+    PRM!(primitives, "prm::base.navigate", "Navigate to target pose in map frame",
+         { "goal": "geometry_msgs/msg/PoseStamped" },
+         { "status": "std_msgs/msg/Bool" });
 }
 
 pub fn load_services(services: &mut HashMap<String, ServiceSpec>) {

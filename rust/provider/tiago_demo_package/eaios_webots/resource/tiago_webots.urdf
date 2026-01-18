@@ -12,7 +12,7 @@
         </device>
         <device reference="Astra rgb" type="Camera">
             <ros>
-                <enabled>false</enabled>
+                <enabled>true</enabled>
                 <topicName>/head_front_camera/rgb</topicName>
                 <imageSuffix>/image_raw</imageSuffix>
                 <alwaysOn>true</alwaysOn>
@@ -21,7 +21,7 @@
         </device>
         <device reference="Astra depth" type="RangeFinder">
             <ros>
-                <enabled>false</enabled>
+                <enabled>true</enabled>
                 <topicName>/head_front_camera/depth_registered</topicName>
                 <imageSuffix>/image_raw</imageSuffix>
                 <pointCloudSuffix>/points</pointCloudSuffix>
