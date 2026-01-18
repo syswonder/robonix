@@ -47,17 +47,31 @@ else
     echo "[WARN] robonix-sdk not found, robonix_sdk messages may not be available" >&2
 fi
 
-# Try ros2 run first, fallback to Python module if not available
-if command -v ros2 > /dev/null 2>&1 && ros2 pkg list 2>/dev/null | grep -q "^navigation_skills_provider$"; then
-    echo "Starting move_to_object skill via ros2 run..."
-    exec ros2 run navigation_skills_provider move_to_object_skill
-else
-    # Use Python module directly
-    SKILL_SCRIPT="$PACKAGE_DIR/navigation_skills_provider/move_to_object_skill.py"
-    if [ ! -f "$SKILL_SCRIPT" ]; then
-        echo "Error: Skill script not found: $SKILL_SCRIPT"
-        exit 1
-    fi
-    echo "Starting move_to_object skill via Python script..."
-    exec python3 "$SKILL_SCRIPT"
+# Try to find and run the executable directly
+EXECUTABLE_PATH=""
+if [ -f "install/navigation_skills_provider/bin/move_to_object_skill" ]; then
+    EXECUTABLE_PATH="install/navigation_skills_provider/bin/move_to_object_skill"
+elif command -v move_to_object_skill > /dev/null 2>&1; then
+    EXECUTABLE_PATH="$(which move_to_object_skill)"
 fi
+
+if [ -n "$EXECUTABLE_PATH" ] && [ -f "$EXECUTABLE_PATH" ]; then
+    echo "Starting move_to_object skill via executable: $EXECUTABLE_PATH"
+    exec "$EXECUTABLE_PATH"
+fi
+
+# Try ros2 run as fallback
+if command -v ros2 > /dev/null 2>&1; then
+    echo "Warning: Direct executable not found, trying ros2 run..."
+    # Note: ros2 run may fail for ament_python console_scripts, but we try anyway
+    exec ros2 run navigation_skills_provider move_to_object_skill || true
+fi
+
+# Final fallback: Use Python module directly
+SKILL_SCRIPT="$PACKAGE_DIR/navigation_skills_provider/move_to_object_skill.py"
+if [ ! -f "$SKILL_SCRIPT" ]; then
+    echo "Error: Skill script not found: $SKILL_SCRIPT"
+    exit 1
+fi
+echo "Starting move_to_object skill via Python script: $SKILL_SCRIPT"
+exec python3 "$SKILL_SCRIPT"

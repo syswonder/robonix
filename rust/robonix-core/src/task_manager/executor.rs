@@ -5,7 +5,6 @@
 // Currently supports simple list-style RTDL (skill invocation list)
 
 use crate::action::skill_library::SkillLibrary;
-use crate::ros_idl::std_msgs::String as StdString;
 use crate::task_manager::exception::{ExceptionHandler, ExceptionType, RecoveryAction};
 use crate::task_manager::task::Task;
 use futures_util::stream::StreamExt;
@@ -273,7 +272,7 @@ impl RtdlExecutor {
                 ))
             })?;
 
-        let start_publisher: Publisher<StdString> = node_guard
+        let start_publisher: Publisher<String> = node_guard
             .create_publisher(&start_topic, None)
             .map_err(|e| {
                 ExceptionType::Unknown(format!(
@@ -302,7 +301,7 @@ impl RtdlExecutor {
                 ))
             })?;
 
-        let status_subscription: Subscription<StdString> = node_guard
+        let status_subscription: Subscription<String> = node_guard
             .create_subscription(&status_topic, None)
             .map_err(|e| {
                 ExceptionType::Unknown(format!(
@@ -322,7 +321,7 @@ impl RtdlExecutor {
             while let Some(result) = stream.next().await {
                 match result {
                     Ok((msg, _msg_info)) => {
-                        let status_str = msg.data.clone();
+                        let status_str = msg.clone();
                         // Filter messages for this skill execution
                         if let Ok(status_json) =
                             serde_json::from_str::<serde_json::Value>(&status_str)
@@ -331,7 +330,7 @@ impl RtdlExecutor {
                                 status_json.get("skill_id").and_then(|v| v.as_str())
                             {
                                 if msg_skill_id == skill_exec_id_clone {
-                                    let _ = status_tx.send(status_str).await;
+                                    let _ = status_tx.send(status_str.clone()).await;
                                 }
                             }
                         }
@@ -344,9 +343,7 @@ impl RtdlExecutor {
         });
 
         // Publish start message
-        let start_msg = StdString {
-            data: start_msg_data,
-        };
+        let start_msg = start_msg_data.clone();
         start_publisher.publish(start_msg).map_err(|e| {
             ExceptionType::Unknown(format!("Failed to publish start message: {}", e))
         })?;
