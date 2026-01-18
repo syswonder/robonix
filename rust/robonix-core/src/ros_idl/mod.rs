@@ -9,6 +9,7 @@ pub mod primitive;
 pub mod service;
 pub mod service_registry;
 pub mod skill;
+pub mod std_msgs;
 pub mod task;
 pub mod test;
 

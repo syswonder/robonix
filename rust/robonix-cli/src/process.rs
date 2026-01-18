@@ -250,13 +250,12 @@ impl ProcessManager {
             std::fs::set_permissions(&script_path, perms)?;
         }
 
-        // Create log file path
-        let log_filename = format!(
-            "{}_{}_{}.log",
-            package_name,
-            package_type,
-            std_name.replace("::", "_")
-        );
+        // Create log file path with simplified naming
+        // Format: {package_name}_{name}.log
+        // e.g., tiago_demo_package_camera_capture.log
+        let clean_name = std_name.replace("::", "_").replace(".", "_");
+
+        let log_filename = format!("{}_{}.log", package_name, clean_name);
         let log_file = self.log_dir.join(&log_filename);
 
         // Open log file for writing

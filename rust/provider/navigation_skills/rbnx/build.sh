@@ -20,7 +20,7 @@ else
     exit 1
 fi
 
-# Find robonix-sdk directory (robonixpy is provided by robonix-sdk, not pip)
+# Find robonix-sdk directory (for robonix_sdk ROS2 messages)
 ROBONIX_SDK_DIR=""
 if [ -n "$ROBONIX_SDK_PATH" ] && [ -d "$ROBONIX_SDK_PATH" ]; then
     ROBONIX_SDK_DIR="$ROBONIX_SDK_PATH"
@@ -38,11 +38,11 @@ fi
 
 if [ -n "$ROBONIX_SDK_DIR" ] && [ -f "$ROBONIX_SDK_DIR/install/setup.bash" ]; then
     echo "Found robonix-sdk at: $ROBONIX_SDK_DIR"
-    # Source robonix-sdk setup to ensure robonixpy is available
+    # Source robonix-sdk setup to ensure robonix_sdk messages are available
     source "$ROBONIX_SDK_DIR/install/setup.bash" 2>/dev/null || true
 else
-    echo "Warning: robonix-sdk not found, robonixpy may not be available at build time"
-    echo "Note: robonixpy will be available at runtime if robonix-sdk setup.bash is sourced"
+    echo "Warning: robonix-sdk not found, robonix_sdk messages may not be available at build time"
+    echo "Note: robonix_sdk will be available at runtime if robonix-sdk setup.bash is sourced"
 fi
 
 # Clean previous build if it exists

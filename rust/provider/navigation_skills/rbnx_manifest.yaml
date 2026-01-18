@@ -18,26 +18,26 @@ package:
 
 # Skills provided by this package
 skills:
-  # Wandering skill - randomly wanders and collects semantic objects
-  - name: wandering
+  # Wandering skill - randomly wanders and explores the environment
+  - name: skl::wandering
     type: basic
     start_topic: /robot1/skill/wandering/start
     status_topic: /robot1/skill/wandering/status
     entry: bash rbnx/start_wandering.sh
-    start_args: '{}'
+    start_args: '{"wander_radius":"number (optional, default 5.0m)"}'
     status: '{"state":"string","result":"any"}'
-    metadata: '{"domain":"indoor","capability":["navigation","semantic_mapping"]}'
+    metadata: '{"domain":"indoor","capability":["navigation"]}'
     version: 0.0.1
     start_script: rbnx/start_wandering.sh
     stop_script: rbnx/stop_wandering.sh
 
-  # Move to object skill - navigates to a specific object nearby
-  - name: move_to_object
+  # Move to object skill - navigates to a specific object nearby, stopping at safe distance
+  - name: skl::move_to_object
     type: basic
     start_topic: /robot1/skill/move_to_object/start
     status_topic: /robot1/skill/move_to_object/status
     entry: bash rbnx/start_move_to_object.sh
-    start_args: '{"target_label":"string"}'
+    start_args: '{"target_label":"string","stop_radius":"number (optional, default 0.5m)"}'
     status: '{"state":"string","result":"any"}'
     metadata: '{"domain":"indoor","capability":["navigation","semantic_mapping"]}'
     version: 0.0.1

@@ -16,7 +16,7 @@ use crate::primitive::PrimitiveRegistry;
 use crate::service::ServiceRegistry;
 use crate::task_manager::exception::{RecoveryAction, apply_recovery_action};
 use crate::task_manager::executor::ExecutionResult;
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 use ros2_client::{AService, Name, Node, ServiceMapping, ServiceTypeName};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -59,7 +59,10 @@ impl TaskManager {
     ) -> Arc<Self> {
         let task_store = Arc::new(task::TaskStore::new());
         let task_queue = Arc::new(queue::TaskQueue::new());
-        let executor = Arc::new(executor::RtdlExecutor::new(skill_library.clone()));
+        let executor = Arc::new(executor::RtdlExecutor::new(
+            skill_library.clone(),
+            node.clone(),
+        ));
 
         let manager = Arc::new(Self {
             task_store: task_store.clone(),
@@ -458,7 +461,7 @@ impl TaskManager {
         // Query task_plan service
         let query_resp = self
             .service_registry
-            .query_started_service("task_plan")
+            .query_started_service("srv::task_plan")
             .await;
 
         if query_resp.instances.is_empty() {
@@ -528,9 +531,34 @@ impl TaskManager {
 
             let object_graph_str = serde_json::to_string(&task.context.object_graph)
                 .unwrap_or_else(|_| "[]".to_string());
+
+            // Query all skills to get their names and start_args (input parameter schemas)
+            let all_skills = self.skill_library.get_registry().get_all_skills().await;
+            let skill_specs: Vec<serde_json::Value> = all_skills
+                .into_iter()
+                .map(|(_skill_id, instance)| {
+                    // Parse start_args to get parameter schema
+                    let start_args_schema: serde_json::Value =
+                        serde_json::from_str(&instance.start_args)
+                            .unwrap_or_else(|_| serde_json::json!({}));
+
+                    serde_json::json!({
+                        "name": instance.name,
+                        "type": instance.r#type,
+                        "start_topic": instance.start_topic,
+                        "status_topic": instance.status_topic,
+                        "start_args": start_args_schema,  // Input parameter schema
+                        "provider": instance.provider,
+                        "version": instance.version,
+                    })
+                })
+                .collect();
+            let skill_specs_str =
+                serde_json::to_string(&skill_specs).unwrap_or_else(|_| "[]".to_string());
+
             let params = crate::ros_idl::object::Dict {
-                keys: vec!["object_graph".to_string()],
-                values: vec![object_graph_str.clone()],
+                keys: vec!["object_graph".to_string(), "skill_specs".to_string()],
+                values: vec![object_graph_str.clone(), skill_specs_str],
             };
 
             let request = crate::ros_idl::service_types::PlanTaskRequest {
@@ -745,7 +773,9 @@ impl TaskManager {
     ) {
         debug!("updating semantic map cache from service");
 
-        let query_resp = service_registry.query_started_service("semantic_map").await;
+        let query_resp = service_registry
+            .query_started_service("srv::semantic_map")
+            .await;
 
         if query_resp.instances.is_empty() {
             debug!("no semantic_map service instances with status='started' found");
@@ -805,15 +835,18 @@ impl TaskManager {
 
             let request = crate::ros_idl::service_types::QuerySemanticMapRequest { types: vec![] };
 
+            // Semantic map service may take longer due to VLM API calls (10-30 seconds)
             let response =
-                match timeout(Duration::from_secs(5), client.async_call_service(request)).await {
+                match timeout(Duration::from_secs(60), client.async_call_service(request)).await {
                     Ok(Ok(response)) => response,
                     Ok(Err(e)) => {
                         debug!("[semantic_map] service call failed: {:?}", e);
                         return;
                     }
                     Err(_) => {
-                        debug!("[semantic_map] service call timeout after 5s");
+                        warn!(
+                            "[semantic_map] service call timeout after 60s (VLM API may be slow)"
+                        );
                         return;
                     }
                 };
@@ -839,18 +872,53 @@ impl TaskManager {
         } else {
             0
         };
-        *cache_guard = object_graph;
+        *cache_guard = object_graph.clone();
         drop(cache_guard);
+
+        // Print brief summary
+        if object_count > 0 {
+            info!(
+                "[semantic_map] cache updated: {} objects total",
+                object_count
+            );
+
+            // Print first 10 objects
+            if let Some(arr) = object_graph.as_array() {
+                let print_count = std::cmp::min(10, arr.len());
+                let mut object_summaries = Vec::new();
+
+                for i in 0..print_count {
+                    if let Some(obj) = arr.get(i) {
+                        let id = obj
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let label = obj
+                            .get("label")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        object_summaries.push(format!("{}:{}", id, label));
+                    }
+                }
+
+                if !object_summaries.is_empty() {
+                    info!(
+                        "[semantic_map] first {} objects: {}",
+                        print_count,
+                        object_summaries.join(", ")
+                    );
+                }
+            }
+        } else {
+            debug!("[semantic_map] cache updated: 0 objects");
+        }
 
         if object_count != old_count {
             info!(
-                "[semantic_map] cache updated: {} -> {} objects",
+                "[semantic_map] object count changed: {} -> {}",
                 old_count, object_count
-            );
-        } else {
-            debug!(
-                "[semantic_map] cache updated: {} objects (number of objects unchanged)",
-                object_count
             );
         }
     }

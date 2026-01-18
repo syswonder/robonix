@@ -98,6 +98,7 @@ class TaskPlanService(Node):
         object_graph = None
         rtdl_syntax = None
         skill_primitive_specs = None
+        skill_specs = None
         
         if request.params:
             # Extract all params from Dict (keys and values arrays)
@@ -118,13 +119,19 @@ class TaskPlanService(Node):
                         elif key == 'skill_primitive_specs':
                             skill_primitive_specs = json.loads(request.params.values[i])
                             self.get_logger().info('Skill/Primitive Specs: Received')
+                        elif key == 'skill_specs':
+                            skill_specs = json.loads(request.params.values[i])
+                            skill_count = len(skill_specs) if isinstance(skill_specs, list) else "unknown"
+                            self.get_logger().info(f'Skill Specs: Found {skill_count} skills')
+                            if skill_specs:
+                                self.get_logger().info(f'Available Skills:\n{json.dumps(skill_specs, indent=2)}')
                     except Exception as e:
                         self.get_logger().warn(f'Failed to parse {key} from params: {e}')
         
         # Generate RTDL code
         self.get_logger().info('-' * 80)
         self.get_logger().info('Generating RTDL code...')
-        rtdl_code = self._generate_rtdl(request.description, object_graph, rtdl_syntax, skill_primitive_specs)
+        rtdl_code = self._generate_rtdl(request.description, object_graph, rtdl_syntax, skill_primitive_specs, skill_specs)
         
         response.rtdl = rtdl_code
         response.rtdl_type = 'list'  # Simple list-style RTDL
@@ -136,7 +143,7 @@ class TaskPlanService(Node):
         self.get_logger().info('=' * 80)
         return response
 
-    def _generate_rtdl(self, description, object_graph=None, rtdl_syntax=None, skill_primitive_specs=None):
+    def _generate_rtdl(self, description, object_graph=None, rtdl_syntax=None, skill_primitive_specs=None, skill_specs=None):
         """
         Generate simple list-style RTDL code from description using DeepSeek LLM.
         Format: JSON array of instructions, each with type, name, and params.
@@ -144,9 +151,9 @@ class TaskPlanService(Node):
         if not self.deepseek_client:
             raise RuntimeError('DeepSeek client not initialized')
         
-        return self._generate_rtdl_with_deepseek(description, object_graph, rtdl_syntax, skill_primitive_specs)
+        return self._generate_rtdl_with_deepseek(description, object_graph, rtdl_syntax, skill_primitive_specs, skill_specs)
     
-    def _generate_rtdl_with_deepseek(self, description, object_graph=None, rtdl_syntax=None, skill_primitive_specs=None):
+    def _generate_rtdl_with_deepseek(self, description, object_graph=None, rtdl_syntax=None, skill_primitive_specs=None, skill_specs=None):
         """Generate RTDL using DeepSeek LLM API."""
         self.get_logger().info('Using DeepSeek LLM for task planning')
         
@@ -217,6 +224,19 @@ Important:
             user_prompt += f"\nAvailable Skills and Primitives:\n{json.dumps(skill_primitive_specs, indent=2)}\n\n"
             user_prompt += "When generating RTDL, use the input/output parameter types from the specifications above.\n"
             user_prompt += "Ensure all parameters match the expected types (string, float, bool, geometry_msgs/msg/PoseStamped, etc.).\n"
+        
+        # Add skill specs from system API (preferred over skill_primitive_specs)
+        if skill_specs:
+            user_prompt += f"\nAvailable Skills (from system API):\n{json.dumps(skill_specs, indent=2)}\n\n"
+            user_prompt += "IMPORTANT: Use ONLY the skills listed above. Each skill has:\n"
+            user_prompt += "- name: The skill name (e.g., 'skl::wandering', 'skl::move_to_object')\n"
+            user_prompt += "- start_args: The input parameter schema (JSON object describing required/optional parameters)\n"
+            user_prompt += "- start_topic: The topic to publish to start the skill\n"
+            user_prompt += "When generating RTDL:\n"
+            user_prompt += "1. Use the exact skill name from the 'name' field (e.g., 'skl::wandering')\n"
+            user_prompt += "2. Use the 'start_args' schema to determine what parameters to include in 'params'\n"
+            user_prompt += "3. Ensure all parameters in 'params' match the types specified in 'start_args'\n"
+            user_prompt += "4. Only use skills that are listed above\n"
         
         user_prompt += "\nGenerate RTDL code for this task:"
         

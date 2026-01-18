@@ -8,14 +8,15 @@
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy, LivelinessPolicy
+from rclpy.duration import Duration
 from std_msgs.msg import String, Bool
 from geometry_msgs.msg import PoseStamped
 import json
 import time
 import signal
 import math
-from robonixpy import RobonixClient
-from robonix_sdk.srv import QuerySemanticMap
+from robonix_sdk.srv import QuerySemanticMap, QueryPrimitive, QueryService
 from robonix_sdk.msg import Object
 
 
@@ -35,19 +36,36 @@ class MoveToObjectSkill(Node):
         self.navigate_goal_topic = None
         self.navigate_status_topic = None
         
-        # Create Robonix client for service calls
-        try:
-            self.get_logger().info('Creating RobonixClient...')
-            self.robonix_client = RobonixClient(node_name='move_to_object_skill_client', max_workers=20)
-            self.get_logger().info('RobonixClient created successfully, querying services and primitives...')
-            # Query services and primitives
-            self._query_services_and_primitives()
-        except Exception as e:
-            import traceback
-            error_traceback = traceback.format_exc()
-            self.get_logger().error(f'Failed to create RobonixClient: {e}')
-            self.get_logger().error(f'Full traceback:\n{error_traceback}')
-            self.robonix_client = None
+        # Create service clients for querying primitives and services
+        # Match Rust server QoS configuration exactly:
+        # - KeepLast(depth=10), Reliable, Volatile, INFINITE deadline/lifespan, Automatic liveliness
+        service_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+            durability=DurabilityPolicy.VOLATILE
+        )
+        service_qos.deadline = Duration(seconds=0)  # INFINITE
+        service_qos.lifespan = Duration(seconds=0)  # INFINITE
+        service_qos.liveliness = LivelinessPolicy.AUTOMATIC
+        service_qos.liveliness_lease_duration = Duration(seconds=0)  # INFINITE
+        
+        self.query_primitive_client = self.create_client(
+            QueryPrimitive,
+            '/rbnx/prm/query',
+            qos_profile=service_qos
+        )
+        self.get_logger().info('QueryPrimitive service client created')
+        
+        self.query_service_client = self.create_client(
+            QueryService,
+            '/rbnx/srv/query',
+            qos_profile=service_qos
+        )
+        self.get_logger().info('QueryService service client created')
+        
+        # Query services and primitives
+        self._query_services_and_primitives()
         
         # Subscribe to skill start topic
         self.start_subscriber = self.create_subscription(
@@ -103,7 +121,6 @@ class MoveToObjectSkill(Node):
         
         # Create semantic map service client
         if self.semantic_map_service_entry:
-            from robonix_sdk.srv import QuerySemanticMap
             self.semantic_map_client = self.create_client(
                 QuerySemanticMap,
                 self.semantic_map_service_entry
@@ -116,6 +133,7 @@ class MoveToObjectSkill(Node):
         self.current_skill_id = None
         self.moving_in_progress = False
         self.target_object_label = None
+        self.stop_radius = 0.5  # Default stop radius in meters (distance from object to stop)
         self.navigation_complete = False
         self.latest_pose = None
         
@@ -123,50 +141,144 @@ class MoveToObjectSkill(Node):
     
     def _query_services_and_primitives(self):
         """Query robonix core for required services and primitives."""
-        if not self.robonix_client:
-            self.get_logger().error('RobonixClient not available')
-            return
+        max_retries = 5
+        retry_delay = 2.0
         
         # Query semantic_map service
-        self.get_logger().info('Querying semantic_map service...')
-        try:
-            response = self.robonix_client.query_service('semantic_map')
-            if response and response.instances:
-                instance = response.instances[0]
-                self.semantic_map_service_entry = instance.entry
-                self.get_logger().info(f'  Found semantic_map service: {self.semantic_map_service_entry}')
-        except Exception as e:
-            self.get_logger().error(f'Error querying semantic_map service: {e}')
+        self.get_logger().info('Querying srv::semantic_map service...')
+        for attempt in range(max_retries):
+            try:
+                wait_timeout = 10.0 if attempt < 2 else 5.0
+                if not self.query_service_client.wait_for_service(timeout_sec=wait_timeout):
+                    self.get_logger().warn(f'  query_service not available (attempt {attempt + 1}/{max_retries})')
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        self.get_logger().error('  query_service not available after all retries')
+                        break
+                
+                request = QueryService.Request()
+                request.name = 'srv::semantic_map'
+                request.filter = '{}'
+                
+                future = self.query_service_client.call_async(request)
+                start_time = time.time()
+                timeout_sec = 3.0
+                while not future.done() and (time.time() - start_time) < timeout_sec:
+                    rclpy.spin_once(self, timeout_sec=0.01)
+                
+                if not future.done():
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        break
+                
+                response = future.result()
+                if response and response.instances:
+                    instance = response.instances[0]
+                    self.semantic_map_service_entry = instance.entry
+                    self.get_logger().info(f'  Found semantic_map service: {self.semantic_map_service_entry}')
+                    break
+            except Exception as e:
+                self.get_logger().error(f'Error querying srv::semantic_map service: {e}')
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                else:
+                    break
         
         # Query prm::base.pose
         self.get_logger().info('Querying prm::base.pose...')
-        try:
-            response = self.robonix_client.query_primitive('prm::base.pose')
-            if response and response.instances:
-                instance = response.instances[0]
-                output_schema = json.loads(instance.output_schema)
-                if 'pose' in output_schema:
-                    self.pose_topic = output_schema['pose']
-                    self.get_logger().info(f'  Found pose topic: {self.pose_topic}')
-        except Exception as e:
-            self.get_logger().error(f'Error querying prm::base.pose: {e}')
+        for attempt in range(max_retries):
+            try:
+                wait_timeout = 10.0 if attempt < 2 else 5.0
+                if not self.query_primitive_client.wait_for_service(timeout_sec=wait_timeout):
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        break
+                
+                request = QueryPrimitive.Request()
+                request.name = 'prm::base.pose'
+                request.filter = '{}'
+                
+                future = self.query_primitive_client.call_async(request)
+                start_time = time.time()
+                timeout_sec = 3.0
+                while not future.done() and (time.time() - start_time) < timeout_sec:
+                    rclpy.spin_once(self, timeout_sec=0.01)
+                
+                if not future.done():
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        break
+                
+                response = future.result()
+                if response and response.instances:
+                    instance = response.instances[0]
+                    output_schema = json.loads(instance.output_schema) if isinstance(instance.output_schema, str) else instance.output_schema
+                    if 'pose' in output_schema:
+                        self.pose_topic = output_schema['pose']
+                        self.get_logger().info(f'  Found pose topic: {self.pose_topic}')
+                        break
+            except Exception as e:
+                self.get_logger().error(f'Error querying prm::base.pose: {e}')
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                else:
+                    break
         
         # Query prm::base.navigate
         self.get_logger().info('Querying prm::base.navigate...')
-        try:
-            response = self.robonix_client.query_primitive('prm::base.navigate')
-            if response and response.instances:
-                instance = response.instances[0]
-                input_schema = json.loads(instance.input_schema)
-                output_schema = json.loads(instance.output_schema)
-                if 'goal' in input_schema:
-                    self.navigate_goal_topic = input_schema['goal']
-                    self.get_logger().info(f'  Found navigate goal topic: {self.navigate_goal_topic}')
-                if 'status' in output_schema:
-                    self.navigate_status_topic = output_schema['status']
-                    self.get_logger().info(f'  Found navigate status topic: {self.navigate_status_topic}')
-        except Exception as e:
-            self.get_logger().error(f'Error querying prm::base.navigate: {e}')
+        for attempt in range(max_retries):
+            try:
+                wait_timeout = 10.0 if attempt < 2 else 5.0
+                if not self.query_primitive_client.wait_for_service(timeout_sec=wait_timeout):
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        break
+                
+                request = QueryPrimitive.Request()
+                request.name = 'prm::base.navigate'
+                request.filter = '{}'
+                
+                future = self.query_primitive_client.call_async(request)
+                start_time = time.time()
+                timeout_sec = 3.0
+                while not future.done() and (time.time() - start_time) < timeout_sec:
+                    rclpy.spin_once(self, timeout_sec=0.01)
+                
+                if not future.done():
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        break
+                
+                response = future.result()
+                if response and response.instances:
+                    instance = response.instances[0]
+                    input_schema = json.loads(instance.input_schema) if isinstance(instance.input_schema, str) else instance.input_schema
+                    output_schema = json.loads(instance.output_schema) if isinstance(instance.output_schema, str) else instance.output_schema
+                    if 'goal' in input_schema:
+                        self.navigate_goal_topic = input_schema['goal']
+                        self.get_logger().info(f'  Found navigate goal topic: {self.navigate_goal_topic}')
+                    if 'status' in output_schema:
+                        self.navigate_status_topic = output_schema['status']
+                        self.get_logger().info(f'  Found navigate status topic: {self.navigate_status_topic}')
+                    break
+            except Exception as e:
+                self.get_logger().error(f'Error querying prm::base.navigate: {e}')
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                else:
+                    break
     
     def start_callback(self, msg):
         """Handle skill start request."""
@@ -176,27 +288,38 @@ class MoveToObjectSkill(Node):
             params = data.get('params', {})
             target_label = params.get('target_label', '')
             
-            self.get_logger().info(f'Received move_to_object request: skill_id={skill_id}, target_label={target_label}')
+            # Parse optional stop_radius parameter (distance in meters to stop before object)
+            if 'stop_radius' in params:
+                self.stop_radius = float(params['stop_radius'])
+            elif 'radius' in params:
+                self.stop_radius = float(params['radius'])
+            else:
+                self.stop_radius = 0.5  # Default 0.5 meters
+            
+            self.get_logger().info(
+                f'Received move_to_object request: skill_id={skill_id}, '
+                f'target_label={target_label}, stop_radius={self.stop_radius}m'
+            )
             
             if self.moving_in_progress:
                 self.get_logger().warn('Move operation already in progress, ignoring request')
-                self._publish_status(skill_id, 'error', {'error': 'Operation already in progress'})
+                self._publish_status(skill_id, 'error', {'error': 'Operation already in progress'}, errno=1)
                 return
             
             if not target_label:
                 self.get_logger().error('target_label parameter is required!')
-                self._publish_status(skill_id, 'error', {'error': 'target_label parameter is required'})
+                self._publish_status(skill_id, 'error', {'error': 'target_label parameter is required'}, errno=2)
                 return
             
             # Check if required services/primitives are available
             if not self.semantic_map_client:
                 self.get_logger().error('Semantic map service not available!')
-                self._publish_status(skill_id, 'error', {'error': 'Semantic map service not available'})
+                self._publish_status(skill_id, 'error', {'error': 'Semantic map service not available'}, errno=3)
                 return
             
             if not self.navigate_goal_publisher:
                 self.get_logger().error('Navigation primitive not available!')
-                self._publish_status(skill_id, 'error', {'error': 'Navigation primitive not available'})
+                self._publish_status(skill_id, 'error', {'error': 'Navigation primitive not available'}, errno=4)
                 return
             
             self.current_skill_id = skill_id
@@ -204,18 +327,19 @@ class MoveToObjectSkill(Node):
             self.moving_in_progress = True
             
             # Publish running status
-            self._publish_status(skill_id, 'running', {'message': f'Searching for object: {target_label}'})
+            self._publish_status(skill_id, 'running', {'message': f'Searching for object: {target_label}'}, errno=0)
             
             # Start move operation in a separate thread
             self._start_move_operation()
             
         except json.JSONDecodeError as e:
             self.get_logger().error(f'Failed to parse start message JSON: {e}')
-            self._publish_status('unknown', 'error', {'error': f'Invalid JSON: {e}'})
+            self._publish_status('unknown', 'error', {'error': f'Invalid JSON: {e}'}, errno=5)
         except Exception as e:
             self.get_logger().error(f'Error in start_callback: {e}')
             import traceback
             self.get_logger().error(f'Traceback:\n{traceback.format_exc()}')
+            self._publish_status('unknown', 'error', {'error': str(e)}, errno=6)
     
     def _start_move_operation(self):
         """Start the move operation in a separate thread."""
@@ -235,7 +359,8 @@ class MoveToObjectSkill(Node):
                 self._publish_status(
                     self.current_skill_id,
                     'error',
-                    {'error': 'No objects found in semantic map'}
+                    {'error': 'No objects found in semantic map'},
+                    errno=7
                 )
                 self.moving_in_progress = False
                 return
@@ -256,7 +381,8 @@ class MoveToObjectSkill(Node):
                     {
                         'error': f'Object with label "{self.target_object_label}" not found',
                         'available_labels': available_labels
-                    }
+                    },
+                    errno=8
                 )
                 self.moving_in_progress = False
                 return
@@ -270,18 +396,25 @@ class MoveToObjectSkill(Node):
                 self._publish_status(
                     self.current_skill_id,
                     'error',
-                    {'error': f'Could not get pose for object {target_object.id}'}
+                    {'error': f'Could not get pose for object {target_object.id}'},
+                    errno=9
                 )
                 self.moving_in_progress = False
                 return
             
-            # Calculate goal pose near object
-            offset_distance = 0.5  # meters
-            goal_pose = self._calculate_goal_pose_near_object(object_pose, offset_distance)
+            # Calculate goal pose near object (with stop_radius to avoid collision)
+            goal_pose = self._calculate_goal_pose_near_object(object_pose, self.stop_radius)
+            
+            # Calculate actual distance to object
+            actual_distance = math.sqrt(
+                (goal_pose.pose.position.x - object_pose.pose.position.x) ** 2 +
+                (goal_pose.pose.position.y - object_pose.pose.position.y) ** 2
+            )
             
             self.get_logger().info(
-                f'Navigating to near object {target_object.id} at '
-                f'({goal_pose.pose.position.x:.2f}, {goal_pose.pose.position.y:.2f})'
+                f'Navigating to object {target_object.id} ({target_object.label}) - '
+                f'Goal at ({goal_pose.pose.position.x:.2f}, {goal_pose.pose.position.y:.2f}), '
+                f'will stop {actual_distance:.2f}m from object (requested: {self.stop_radius:.2f}m)'
             )
             
             # Publish navigation goal
@@ -295,23 +428,46 @@ class MoveToObjectSkill(Node):
                 time.sleep(0.5)
             
             if self.navigation_complete:
+                # Calculate final distance to object
+                final_distance = None
+                if self.latest_pose:
+                    final_distance = math.sqrt(
+                        (self.latest_pose.pose.position.x - object_pose.pose.position.x) ** 2 +
+                        (self.latest_pose.pose.position.y - object_pose.pose.position.y) ** 2
+                    )
+                
                 result = {
                     'message': f'Successfully navigated to object: {target_object.label}',
                     'object_id': target_object.id,
                     'object_label': target_object.label,
+                    'object_position': {
+                        'x': object_pose.pose.position.x,
+                        'y': object_pose.pose.position.y,
+                        'z': object_pose.pose.position.z
+                    },
                     'goal_position': {
                         'x': goal_pose.pose.position.x,
                         'y': goal_pose.pose.position.y,
                         'z': goal_pose.pose.position.z
-                    }
+                    },
+                    'stop_radius': self.stop_radius
                 }
-                self._publish_status(self.current_skill_id, 'finished', result)
-                self.get_logger().info(f'Successfully navigated to object: {target_object.label}')
+                if final_distance is not None:
+                    result['final_distance_to_object'] = final_distance
+                
+                self._publish_status(self.current_skill_id, 'finished', result, errno=0)
+                self.get_logger().info(
+                    f'Successfully navigated to object: {target_object.label} '
+                    f'(stopped {final_distance:.2f}m away, requested: {self.stop_radius:.2f}m)'
+                    if final_distance is not None
+                    else f'Successfully navigated to object: {target_object.label}'
+                )
             else:
                 self._publish_status(
                     self.current_skill_id,
                     'error',
-                    {'error': 'Navigation timeout'}
+                    {'error': 'Navigation timeout'},
+                    errno=10
                 )
                 self.get_logger().error('Navigation timeout')
             
@@ -324,7 +480,8 @@ class MoveToObjectSkill(Node):
             self._publish_status(
                 self.current_skill_id,
                 'error',
-                {'error': str(e)}
+                {'error': str(e)},
+                errno=11
             )
             self.moving_in_progress = False
     
@@ -381,38 +538,65 @@ class MoveToObjectSkill(Node):
         # If no map frame, return None
         return None
     
-    def _calculate_goal_pose_near_object(self, object_pose, offset_distance):
-        """Calculate goal pose near object (offset by distance)."""
+    def _calculate_goal_pose_near_object(self, object_pose, stop_radius):
+        """
+        Calculate goal pose near object, stopping at specified radius to avoid collision.
+        
+        Args:
+            object_pose: PoseStamped of the object in map frame
+            stop_radius: Distance in meters to stop before reaching the object
+        
+        Returns:
+            PoseStamped: Goal pose that is stop_radius meters away from the object
+        """
         goal_pose = PoseStamped()
         goal_pose.header = object_pose.header
+        goal_pose.header.stamp = self.get_clock().now().to_msg()
         
-        # Use current robot pose if available to calculate better offset direction
+        object_x = object_pose.pose.position.x
+        object_y = object_pose.pose.position.y
+        
+        # Use current robot pose if available to calculate approach direction
         if self.latest_pose:
-            # Calculate direction from robot to object
-            dx = object_pose.pose.position.x - self.latest_pose.pose.position.x
-            dy = object_pose.pose.position.y - self.latest_pose.pose.position.y
-            distance = math.sqrt(dx*dx + dy*dy)
+            robot_x = self.latest_pose.pose.position.x
+            robot_y = self.latest_pose.pose.position.y
             
-            if distance > 0:
-                # Normalize and apply offset
-                goal_pose.pose.position.x = object_pose.pose.position.x - (dx / distance) * offset_distance
-                goal_pose.pose.position.y = object_pose.pose.position.y - (dy / distance) * offset_distance
+            # Calculate direction vector from robot to object
+            dx = object_x - robot_x
+            dy = object_y - robot_y
+            distance_to_object = math.sqrt(dx*dx + dy*dy)
+            
+            if distance_to_object > stop_radius:
+                # Normalize direction vector and apply stop_radius offset
+                # Goal is stop_radius meters away from object, along the line from robot to object
+                unit_dx = dx / distance_to_object
+                unit_dy = dy / distance_to_object
+                
+                goal_pose.pose.position.x = object_x - unit_dx * stop_radius
+                goal_pose.pose.position.y = object_y - unit_dy * stop_radius
             else:
-                # Fallback: offset in negative x direction
-                goal_pose.pose.position.x = object_pose.pose.position.x - offset_distance
-                goal_pose.pose.position.y = object_pose.pose.position.y
+                # Robot is already within stop_radius, stay at current position
+                # or move slightly away
+                if distance_to_object > 0.1:  # If not too close, stay
+                    goal_pose.pose.position.x = robot_x
+                    goal_pose.pose.position.y = robot_y
+                else:
+                    # Too close, move away
+                    goal_pose.pose.position.x = object_x - stop_radius
+                    goal_pose.pose.position.y = object_y
         else:
-            # Fallback: offset in negative x direction
-            goal_pose.pose.position.x = object_pose.pose.position.x - offset_distance
-            goal_pose.pose.position.y = object_pose.pose.position.y
+            # No current pose available, use default approach (from negative x direction)
+            goal_pose.pose.position.x = object_x - stop_radius
+            goal_pose.pose.position.y = object_y
         
         goal_pose.pose.position.z = object_pose.pose.position.z
         
-        # Face the object
-        dx = object_pose.pose.position.x - goal_pose.pose.position.x
-        dy = object_pose.pose.position.y - goal_pose.pose.position.y
-        yaw = math.atan2(dy, dx)
+        # Face the object (calculate yaw to point towards object)
+        dx_to_object = object_x - goal_pose.pose.position.x
+        dy_to_object = object_y - goal_pose.pose.position.y
+        yaw = math.atan2(dy_to_object, dx_to_object)
         
+        # Convert yaw to quaternion
         goal_pose.pose.orientation.z = math.sin(yaw / 2.0)
         goal_pose.pose.orientation.w = math.cos(yaw / 2.0)
         
@@ -430,19 +614,31 @@ class MoveToObjectSkill(Node):
                 self.navigation_complete = True
                 self.get_logger().info('Navigation completed successfully')
     
-    def _publish_status(self, skill_id, state, result):
-        """Publish skill status to status_topic."""
+    def _publish_status(self, skill_id, state, result, errno=0):
+        """
+        Publish skill status to status_topic.
+        
+        Standard status format:
+        {
+            "skill_id": string,      # Skill execution ID
+            "state": string,         # "running" | "finished" | "error"
+            "result": any,           # Result data (any JSON-serializable value)
+            "errno": int,            # Error number (0 = success, non-zero = error)
+            "diagnostics": object    # Optional diagnostics information
+        }
+        """
         status_msg = {
             'skill_id': skill_id,
             'state': state,
             'result': result,
+            'errno': errno,  # 0 = success, non-zero = error
             'diagnostics': {}
         }
         
         msg = String()
         msg.data = json.dumps(status_msg)
         self.status_publisher.publish(msg)
-        self.get_logger().info(f'Published status: skill_id={skill_id}, state={state}')
+        self.get_logger().info(f'Published status: skill_id={skill_id}, state={state}, errno={errno}')
 
 
 def main(args=None):
@@ -466,8 +662,6 @@ def main(args=None):
         shutdown_requested = True
         move_to_object_skill.get_logger().info('Received KeyboardInterrupt, shutting down...')
     finally:
-        if move_to_object_skill.robonix_client:
-            move_to_object_skill.robonix_client.shutdown()
         move_to_object_skill.destroy_node()
         rclpy.shutdown()
         if shutdown_requested:

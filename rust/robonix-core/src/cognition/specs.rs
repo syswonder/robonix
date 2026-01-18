@@ -10,7 +10,7 @@ pub fn load_primitives(primitives: &mut HashMap<String, PrimitiveSpec>) {
 pub fn load_services(services: &mut HashMap<String, ServiceSpec>) {
     SRV!(
         services,
-        "task_plan",
+        "srv::task_plan",
         "Task planning service converting natural language to RTDL",
         "robonix_sdk/srv/service/task_plan/PlanTask"
     );
@@ -18,7 +18,7 @@ pub fn load_services(services: &mut HashMap<String, ServiceSpec>) {
     SRV!(
         // TODO
         services,
-        "plan_simulate",
+        "srv::plan_simulate",
         "Plan simulation service for feasibility and safety checking",
         "robonix_sdk/srv/service/plan_simulate/SimulatePlan"
     );
@@ -26,7 +26,7 @@ pub fn load_services(services: &mut HashMap<String, ServiceSpec>) {
     SRV!(
         // TODO
         services,
-        "memory",
+        "srv::memory",
         "Cognitive memory service providing long-term and short-term knowledge",
         "robonix_sdk/srv/service/memory/QueryMemory"
     );
@@ -34,7 +34,7 @@ pub fn load_services(services: &mut HashMap<String, ServiceSpec>) {
     SRV!(
         // TODO
         services,
-        "result_feedback",
+        "srv::result_feedback",
         "Result feedback service for execution verification",
         "robonix_sdk/srv/service/result_feedback/ResultFeedback"
     );

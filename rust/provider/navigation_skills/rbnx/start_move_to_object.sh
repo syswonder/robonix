@@ -20,7 +20,7 @@ if [ -f "install/setup.bash" ]; then
     source install/setup.bash 2>/dev/null || true
 fi
 
-# Find and source robonix-sdk setup to make robonixpy available
+# Find and source robonix-sdk setup to make robonix_sdk ROS2 messages available
 ROBONIX_SDK_DIR=""
 if [ -n "$ROBONIX_SDK_PATH" ] && [ -f "$ROBONIX_SDK_PATH/install/setup.bash" ]; then
     ROBONIX_SDK_DIR="$ROBONIX_SDK_PATH"
@@ -36,18 +36,15 @@ else
     done
 fi
 
-# Source robonix-sdk setup AFTER local setup to ensure robonixpy is in PYTHONPATH
+# Source robonix-sdk setup AFTER local setup to ensure robonix_sdk messages are available
 if [ -n "$ROBONIX_SDK_DIR" ] && [ -f "$ROBONIX_SDK_DIR/install/setup.bash" ]; then
-    OLD_PYTHONPATH="$PYTHONPATH"
     if source "$ROBONIX_SDK_DIR/install/setup.bash" 2>&1; then
-        export PYTHONPATH="$PYTHONPATH:$OLD_PYTHONPATH"
-        echo "[INFO] Sourced robonix-sdk setup.bash, PYTHONPATH includes robonixpy" >&2
+        echo "[INFO] Sourced robonix-sdk setup.bash, robonix_sdk messages available" >&2
     else
         echo "[WARN] Failed to source robonix-sdk setup.bash" >&2
-        export PYTHONPATH="$OLD_PYTHONPATH"
     fi
 else
-    echo "[WARN] robonix-sdk not found, robonixpy may not be available" >&2
+    echo "[WARN] robonix-sdk not found, robonix_sdk messages may not be available" >&2
 fi
 
 # Try ros2 run first, fallback to Python module if not available

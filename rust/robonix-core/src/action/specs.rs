@@ -23,7 +23,7 @@ pub fn load_services(services: &mut HashMap<String, ServiceSpec>) {
     SRV!(
         // TODO
         services,
-        "control",
+        "srv::control",
         "Body control service providing motion control and safety management",
         "robonix_sdk/srv/service/control/Control"
     );
