@@ -2,6 +2,7 @@
 
 # make build-sdk
 eval $(make source-sdk)
+rbnx package build
 rbnx deploy register demo_recipe.yaml
 rbnx deploy restart
 # rbnx deploy restart
