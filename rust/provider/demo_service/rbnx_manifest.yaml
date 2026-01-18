@@ -19,7 +19,7 @@ package:
 # Services provided by this package
 # Services provide standardized algorithm capabilities
 services:
-  - name: semantic_map
+  - name: srv::semantic_map
     srv_type: robonix_sdk/srv/service/semantic_map/QuerySemanticMap
     entry: /demo_service/semantic_map/query
     metadata: '{"model":"demo","backend":"simulated"}'
@@ -27,7 +27,7 @@ services:
     start_script: rbnx/start_semantic_map.sh
     stop_script: rbnx/stop_semantic_map.sh
 
-  - name: task_plan
+  - name: srv::task_plan
     srv_type: robonix_sdk/srv/service/task_plan/PlanTask
     entry: /demo_service/task_plan/plan
     metadata: '{"model":"demo","capabilities":["navigation","manipulation"],"rtdl_type":"list"}'

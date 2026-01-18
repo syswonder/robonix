@@ -13,7 +13,6 @@
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>robonix_sdk</depend>
-  <depend>robonixpy</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

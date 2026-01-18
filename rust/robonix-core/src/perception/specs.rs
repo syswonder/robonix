@@ -18,14 +18,14 @@ pub fn load_primitives(primitives: &mut HashMap<String, PrimitiveSpec>) {
 pub fn load_services(services: &mut HashMap<String, ServiceSpec>) {
     SRV!(
         services,
-        "spatial_map",
+        "srv::spatial_map",
         "Spatial map service providing geometric structure information",
         "robonix_sdk/srv/service/spatial_map/GetSpatialMap"
     );
 
     SRV!(
         services,
-        "semantic_map",
+        "srv::semantic_map",
         "Semantic map service providing entity-level representation",
         "robonix_sdk/srv/service/semantic_map/QuerySemanticMap"
     );

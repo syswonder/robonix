@@ -20,11 +20,11 @@ packages:
   # Demo service provider - provides semantic_map and task_plan services
   - name: demo_service_provider
     services:
-      - semantic_map
-      - task_plan
+      - srv::semantic_map
+      - srv::task_plan
 
   # Navigation skills provider - provides wandering and move_to_object skills
   - name: navigation_skills_provider
     skills:
-      - wandering
-      - move_to_object
+      - skl::wandering
+      - skl::move_to_object

@@ -214,16 +214,10 @@ impl PackageRegistrar {
         package_path: &PathBuf,
         skill: &Value,
     ) -> Result<()> {
-        let name_raw = skill["name"]
+        let name = skill["name"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Skill name not found"))?
             .to_string();
-        // Automatically add 'skl::' prefix if not present
-        let name = if name_raw.starts_with("skl::") {
-            name_raw
-        } else {
-            format!("skl::{}", name_raw)
-        };
 
         let start_topic = skill["start_topic"]
             .as_str()

@@ -112,14 +112,9 @@ function renderTopics(data) {
 
     let topicsHtml = '';
     data.topics.forEach(topic => {
-        const freqText = topic.frequency !== null && topic.frequency !== undefined
-            ? `${topic.frequency.toFixed(2)} Hz`
-            : '-';
-        
         topicsHtml += `<div class="topic-entry">`;
         topicsHtml += `<span class="topic-name">${topic.name}</span>`;
         topicsHtml += `<span class="topic-type">${topic.message_type}</span>`;
-        topicsHtml += `<span class="topic-frequency">${freqText}</span>`;
         topicsHtml += `</div>`;
     });
 

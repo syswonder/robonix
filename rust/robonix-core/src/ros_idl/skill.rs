@@ -42,6 +42,7 @@ impl ros2_client::Message for QuerySkillRequest {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillInstance {
     pub skill_id: String,
+    pub name: String, // Standard skill name (e.g., "skl::wandering")
     pub provider: String,
     pub version: String,
     pub r#type: String, // Skill type: "basic" | "rtdl"

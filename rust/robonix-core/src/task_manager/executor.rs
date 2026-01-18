@@ -5,11 +5,20 @@
 // Currently supports simple list-style RTDL (skill invocation list)
 
 use crate::action::skill_library::SkillLibrary;
+use crate::ros_idl::std_msgs::String as StdString;
 use crate::task_manager::exception::{ExceptionHandler, ExceptionType, RecoveryAction};
 use crate::task_manager::task::Task;
+use futures_util::stream::StreamExt;
 use log::{debug, error, info, warn};
+use ros2_client::rustdds::{
+    Duration as RustddsDuration, QosPolicyBuilder,
+    policy::{self, Reliability},
+};
+use ros2_client::{MessageTypeName, Name, Publisher, Subscription};
 use serde_json::Value;
 use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio::time::{Duration, timeout};
 
 /// RTDL Instruction - Represents a single instruction in RTDL
 #[derive(Debug, Clone)]
@@ -24,13 +33,18 @@ pub struct RtdlInstruction {
 pub struct RtdlExecutor {
     skill_library: Arc<SkillLibrary>,
     exception_handler: ExceptionHandler,
+    node: Arc<tokio::sync::Mutex<ros2_client::Node>>,
 }
 
 impl RtdlExecutor {
-    pub fn new(skill_library: Arc<SkillLibrary>) -> Self {
+    pub fn new(
+        skill_library: Arc<SkillLibrary>,
+        node: Arc<tokio::sync::Mutex<ros2_client::Node>>,
+    ) -> Self {
         Self {
             skill_library,
             exception_handler: ExceptionHandler,
+            node,
         }
     }
 
@@ -203,25 +217,250 @@ impl RtdlExecutor {
             skill_instance.skill_id, skill_instance.provider, skill_instance.entry
         );
 
-        // TODO: Actually invoke the skill via ROS2
-        // For now, we'll simulate skill execution
+        // Actually invoke the skill via ROS2 topics
         info!(
-            "executing skill: task_id={}, skill_name={}, skill_id={}",
-            task.task_id, skill_name, skill_instance.skill_id
+            "executing skill: task_id={}, skill_name={}, skill_id={}, start_topic={}, status_topic={}",
+            task.task_id,
+            skill_name,
+            skill_instance.skill_id,
+            skill_instance.start_topic,
+            skill_instance.status_topic
         );
 
         debug!("skill execution params: {:?}", params);
 
-        // Simulate skill execution (replace with actual ROS2 skill invocation)
-        // This is a placeholder - actual implementation would:
-        // 1. Create ROS2 service client for the skill
-        // 2. Call the skill service with params
-        // 3. Wait for skill completion
-        // 4. Handle errors/timeouts
+        // Generate unique skill execution ID
+        let skill_exec_id = format!("{}_{}", skill_instance.skill_id, task.task_id);
 
-        // For now, just return success
-        debug!("skill {} execution completed successfully", skill_name);
-        Ok(())
+        // Prepare start message: JSON with skill_id and params
+        let start_msg_json = serde_json::json!({
+            "skill_id": skill_exec_id,
+            "params": params
+        });
+        let start_msg_data = serde_json::to_string(&start_msg_json).map_err(|e| {
+            ExceptionType::Unknown(format!("Failed to serialize start message: {}", e))
+        })?;
+
+        // Get node for publishing/subscribing
+        let mut node_guard = self.node.lock().await;
+
+        // Create QoS for skill topics
+        let topic_qos = QosPolicyBuilder::new()
+            .history(policy::History::KeepLast { depth: 10 })
+            .reliability(Reliability::Reliable {
+                max_blocking_time: RustddsDuration::from_millis(100),
+            })
+            .durability(policy::Durability::Volatile)
+            .build();
+
+        // Create publisher for start_topic (std_msgs/msg/String)
+        let start_topic_name = Name::parse(&skill_instance.start_topic).map_err(|e| {
+            ExceptionType::Unknown(format!(
+                "Failed to parse start_topic '{}': {}",
+                skill_instance.start_topic, e
+            ))
+        })?;
+        let start_topic = node_guard
+            .create_topic(
+                &start_topic_name,
+                MessageTypeName::new("std_msgs", "String"),
+                &topic_qos,
+            )
+            .map_err(|e| {
+                ExceptionType::Unknown(format!(
+                    "Failed to create start_topic '{}': {}",
+                    skill_instance.start_topic, e
+                ))
+            })?;
+
+        let start_publisher: Publisher<StdString> = node_guard
+            .create_publisher(&start_topic, None)
+            .map_err(|e| {
+                ExceptionType::Unknown(format!(
+                    "Failed to create publisher for start_topic '{}': {}",
+                    skill_instance.start_topic, e
+                ))
+            })?;
+
+        // Create subscription for status_topic (std_msgs/msg/String)
+        let status_topic_name = Name::parse(&skill_instance.status_topic).map_err(|e| {
+            ExceptionType::Unknown(format!(
+                "Failed to parse status_topic '{}': {}",
+                skill_instance.status_topic, e
+            ))
+        })?;
+        let status_topic = node_guard
+            .create_topic(
+                &status_topic_name,
+                MessageTypeName::new("std_msgs", "String"),
+                &topic_qos,
+            )
+            .map_err(|e| {
+                ExceptionType::Unknown(format!(
+                    "Failed to create status_topic '{}': {}",
+                    skill_instance.status_topic, e
+                ))
+            })?;
+
+        let status_subscription: Subscription<StdString> = node_guard
+            .create_subscription(&status_topic, None)
+            .map_err(|e| {
+                ExceptionType::Unknown(format!(
+                    "Failed to create subscription for status_topic '{}': {}",
+                    skill_instance.status_topic, e
+                ))
+            })?;
+
+        drop(node_guard); // Release node lock
+
+        // Spawn task to monitor status messages
+        let skill_exec_id_clone = skill_exec_id.clone();
+        let (status_tx, mut status_rx) = mpsc::channel::<std::string::String>(10);
+        let status_subscription_arc = Arc::new(status_subscription);
+        tokio::spawn(async move {
+            let mut stream = Box::pin(status_subscription_arc.async_stream());
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok((msg, _msg_info)) => {
+                        let status_str = msg.data.clone();
+                        // Filter messages for this skill execution
+                        if let Ok(status_json) =
+                            serde_json::from_str::<serde_json::Value>(&status_str)
+                        {
+                            if let Some(msg_skill_id) =
+                                status_json.get("skill_id").and_then(|v| v.as_str())
+                            {
+                                if msg_skill_id == skill_exec_id_clone {
+                                    let _ = status_tx.send(status_str).await;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Error receiving status message: {}", e);
+                    }
+                }
+            }
+        });
+
+        // Publish start message
+        let start_msg = StdString {
+            data: start_msg_data,
+        };
+        start_publisher.publish(start_msg).map_err(|e| {
+            ExceptionType::Unknown(format!("Failed to publish start message: {}", e))
+        })?;
+
+        info!(
+            "Published skill start message to {}: skill_exec_id={}",
+            skill_instance.start_topic, skill_exec_id
+        );
+
+        // Wait for skill completion (monitor status_topic)
+        // Standard status format: {"skill_id": "...", "state": "running"|"finished"|"error", "result": {...}, "errno": 0, ...}
+        let timeout_duration = Duration::from_secs(300); // 5 minutes timeout
+        let start_time = std::time::Instant::now();
+
+        loop {
+            let remaining_timeout = timeout_duration.saturating_sub(start_time.elapsed());
+            if remaining_timeout.is_zero() {
+                error!(
+                    "Skill {} execution timeout after {:?}",
+                    skill_name, timeout_duration
+                );
+                return Err(ExceptionType::SkillFailed);
+            }
+
+            match timeout(remaining_timeout, status_rx.recv()).await {
+                Ok(Some(status_str)) => {
+                    debug!("Received status message: {}", status_str);
+
+                    // Parse status JSON
+                    let status_json: serde_json::Value = match serde_json::from_str(&status_str) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!(
+                                "Failed to parse status message as JSON: {}, message: {}",
+                                e, status_str
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Check skill_id matches
+                    if let Some(msg_skill_id) = status_json.get("skill_id").and_then(|v| v.as_str())
+                    {
+                        if msg_skill_id != skill_exec_id {
+                            continue; // Not for this execution
+                        }
+                    }
+
+                    // Check state
+                    let state = status_json
+                        .get("state")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+
+                    // Check errno if present (0 = success, non-zero = error)
+                    let errno = status_json
+                        .get("errno")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+
+                    match state {
+                        "finished" => {
+                            if errno == 0 {
+                                info!(
+                                    "Skill {} execution completed successfully: skill_exec_id={}",
+                                    skill_name, skill_exec_id
+                                );
+                                return Ok(());
+                            } else {
+                                error!(
+                                    "Skill {} execution finished with error: errno={}, skill_exec_id={}",
+                                    skill_name, errno, skill_exec_id
+                                );
+                                return Err(ExceptionType::SkillFailed);
+                            }
+                        }
+                        "error" => {
+                            error!(
+                                "Skill {} execution failed: skill_exec_id={}, errno={}",
+                                skill_name, skill_exec_id, errno
+                            );
+                            return Err(ExceptionType::SkillFailed);
+                        }
+                        "running" => {
+                            debug!(
+                                "Skill {} still running: skill_exec_id={}",
+                                skill_name, skill_exec_id
+                            );
+                            // Continue waiting
+                        }
+                        _ => {
+                            debug!(
+                                "Skill {} status: state={}, skill_exec_id={}",
+                                skill_name, state, skill_exec_id
+                            );
+                            // Continue waiting
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // Channel closed
+                    error!("Status channel closed for skill {}", skill_name);
+                    return Err(ExceptionType::SkillFailed);
+                }
+                Err(_) => {
+                    // Timeout
+                    error!(
+                        "Skill {} execution timeout: skill_exec_id={}",
+                        skill_name, skill_exec_id
+                    );
+                    return Err(ExceptionType::SkillFailed);
+                }
+            }
+        }
     }
 
     /// Execute RTDL program step by step

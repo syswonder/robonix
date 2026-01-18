@@ -112,19 +112,16 @@ impl SkillRegistry {
             };
         }
 
-        // Generate unique skill_id
+        // Generate unique skill_id (similar to primitive, no automatic prefix)
         let counter = self
             .skill_id_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let skill_id = format!("skl_{}_{}", req.name.replace("::", "_"), counter);
-
-        // Basic validation: skill name should start with 'skl::'
-        if !req.name.starts_with("skl::") {
-            warn!(
-                "skill name should start with 'skl::': skill_name={}",
-                req.name
-            );
-        }
+        // Use name directly, replace special characters for ID
+        let skill_id = format!(
+            "{}_{}",
+            req.name.replace("::", "_").replace("-", "_"),
+            counter
+        );
 
         // Store as JSON strings internally
         let entry = SkillEntry {
@@ -205,6 +202,7 @@ impl SkillRegistry {
 
             instances.push(SkillInstance {
                 skill_id: entry.skill_id.clone(),
+                name: entry.name.clone(),
                 provider: entry.provider.clone(),
                 version: entry.version.clone(),
                 r#type: entry.r#type.clone(),
@@ -228,6 +226,7 @@ impl SkillRegistry {
         if let Some(entry) = skills.get(skill_id) {
             Some(SkillInstance {
                 skill_id: entry.skill_id.clone(),
+                name: entry.name.clone(),
                 provider: entry.provider.clone(),
                 version: entry.version.clone(),
                 r#type: entry.r#type.clone(),
@@ -264,6 +263,7 @@ impl SkillRegistry {
                 skill_id.clone(),
                 SkillInstance {
                     skill_id: entry.skill_id.clone(),
+                    name: entry.name.clone(),
                     provider: entry.provider.clone(),
                     version: entry.version.clone(),
                     r#type: entry.r#type.clone(),

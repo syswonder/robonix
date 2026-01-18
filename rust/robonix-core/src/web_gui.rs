@@ -169,7 +169,7 @@ pub async fn skills_handler(state: &State<WebGuiState>) -> Json<serde_json::Valu
         .map(|(skill_id, instance)| {
             serde_json::json!({
                 "skill_id": skill_id,
-                "name": instance.skill_id,
+                "name": instance.name,
                 "provider": instance.provider,
                 "version": instance.version,
                 "type": instance.r#type,
