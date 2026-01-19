@@ -62,3 +62,11 @@ pub struct QuerySkillResponse {
 }
 
 impl ros2_client::Message for QuerySkillResponse {}
+
+// https://docs.ros.org/en/melodic/api/std_msgs/html/msg/String.html
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StdString {
+    pub data: String,
+}
+
+impl ros2_client::Message for StdString {}

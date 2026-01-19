@@ -272,7 +272,7 @@ impl RtdlExecutor {
                 ))
             })?;
 
-        let start_publisher: Publisher<String> = node_guard
+        let start_publisher: Publisher<crate::ros_idl::skill::StdString> = node_guard
             .create_publisher(&start_topic, None)
             .map_err(|e| {
                 ExceptionType::Unknown(format!(
@@ -301,7 +301,7 @@ impl RtdlExecutor {
                 ))
             })?;
 
-        let status_subscription: Subscription<String> = node_guard
+        let status_subscription: Subscription<crate::ros_idl::skill::StdString> = node_guard
             .create_subscription(&status_topic, None)
             .map_err(|e| {
                 ExceptionType::Unknown(format!(
@@ -321,7 +321,7 @@ impl RtdlExecutor {
             while let Some(result) = stream.next().await {
                 match result {
                     Ok((msg, _msg_info)) => {
-                        let status_str = msg.clone();
+                        let status_str = msg.data.clone();
                         // Filter messages for this skill execution
                         if let Ok(status_json) =
                             serde_json::from_str::<serde_json::Value>(&status_str)
@@ -343,14 +343,16 @@ impl RtdlExecutor {
         });
 
         // Publish start message
-        let start_msg = start_msg_data.clone();
+        let start_msg = crate::ros_idl::skill::StdString {
+            data: start_msg_data.clone(),
+        };
         start_publisher.publish(start_msg).map_err(|e| {
             ExceptionType::Unknown(format!("Failed to publish start message: {}", e))
         })?;
 
         info!(
-            "Published skill start message to {}: skill_exec_id={}",
-            skill_instance.start_topic, skill_exec_id
+            "Published skill start message to {}: skill_exec_id={}, start_msg_data={}",
+            skill_instance.start_topic, skill_exec_id, &start_msg_data
         );
 
         // Wait for skill completion (monitor status_topic)
