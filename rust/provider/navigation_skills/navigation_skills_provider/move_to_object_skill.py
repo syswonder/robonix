@@ -625,22 +625,48 @@ class MoveToObjectSkill(Node):
         """
         Publish skill status to status_topic.
         
-        Standard status format:
+        Standard status format (matching executor expectations):
         {
             "skill_id": string,      # Skill execution ID
             "state": string,         # "running" | "finished" | "error"
             "result": any,           # Result data (any JSON-serializable value)
             "errno": int,            # Error number (0 = success, non-zero = error)
-            "diagnostics": object    # Optional diagnostics information
+            "error": string,         # Optional: Error message (extracted from result if present)
+            "message": string,       # Optional: Status message (extracted from result if present)
+            "error_message": string  # Optional: Alternative error message field
         }
+        
+        The executor extracts error information from these fields in order:
+        1. "error"
+        2. "message"
+        3. "error_message"
+        4. If none found and errno != 0, generates: "Skill execution failed with errno={errno}"
         """
         status_msg = {
             'skill_id': skill_id,
             'state': state,
             'result': result,
             'errno': errno,  # 0 = success, non-zero = error
-            'diagnostics': {}
         }
+        
+        # Extract error/message from result if present and add to top level
+        # This ensures executor can find error information easily
+        if isinstance(result, dict):
+            # Extract error message from result
+            if 'error' in result:
+                status_msg['error'] = result['error']
+            if 'message' in result:
+                status_msg['message'] = result['message']
+            if 'error_message' in result:
+                status_msg['error_message'] = result['error_message']
+        
+        # If state is "error" or errno != 0, ensure error field is set
+        if (state == 'error' or errno != 0) and 'error' not in status_msg:
+            # Try to get error from result, or generate a default message
+            if isinstance(result, dict) and 'error' in result:
+                status_msg['error'] = result['error']
+            else:
+                status_msg['error'] = f'Skill execution failed: state={state}, errno={errno}'
         
         msg = String()
         msg.data = json.dumps(status_msg)
