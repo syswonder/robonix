@@ -120,11 +120,24 @@ class MoveToObjectSkill(Node):
         else:
             self.navigate_status_subscriber = None
         
-        # Create semantic map service client
+        # Create semantic map service client with QoS matching the service
+        # Match semantic_map service QoS: Reliable, KeepLast(10), Volatile
         if self.semantic_map_service_entry:
+            semantic_map_qos = QoSProfile(
+                reliability=ReliabilityPolicy.RELIABLE,
+                history=HistoryPolicy.KEEP_LAST,
+                depth=10,
+                durability=DurabilityPolicy.VOLATILE
+            )
+            semantic_map_qos.deadline = Duration(seconds=0)  # INFINITE
+            semantic_map_qos.lifespan = Duration(seconds=0)  # INFINITE
+            semantic_map_qos.liveliness = LivelinessPolicy.AUTOMATIC
+            semantic_map_qos.liveliness_lease_duration = Duration(seconds=0)  # INFINITE
+            
             self.semantic_map_client = self.create_client(
                 QuerySemanticMap,
-                self.semantic_map_service_entry
+                self.semantic_map_service_entry,
+                qos_profile=semantic_map_qos
             )
             self.get_logger().info(f'Semantic map service client created: {self.semantic_map_service_entry}')
         else:
@@ -353,14 +366,41 @@ class MoveToObjectSkill(Node):
         try:
             # Query semantic map for objects
             self.get_logger().info(f'Querying semantic map for object with ID: {self.target_object_id}')
-            objects = self._query_semantic_map()
-            
-            if not objects:
-                self.get_logger().error('No objects found in semantic map')
+            try:
+                objects = self._query_semantic_map()
+            except TimeoutError as e:
+                # Query timeout - distinguish from "no objects"
+                error_msg = f'Semantic map query timeout: {str(e)}'
+                self.get_logger().error(error_msg)
                 self._publish_status(
                     self.current_skill_id,
                     'error',
-                    {'error': 'No objects found in semantic map'},
+                    {'error': error_msg, 'error_type': 'timeout'},
+                    errno=7
+                )
+                self.moving_in_progress = False
+                return
+            except RuntimeError as e:
+                # Service unavailable or other runtime errors
+                error_msg = f'Semantic map service error: {str(e)}'
+                self.get_logger().error(error_msg)
+                self._publish_status(
+                    self.current_skill_id,
+                    'error',
+                    {'error': error_msg, 'error_type': 'service_error'},
+                    errno=7
+                )
+                self.moving_in_progress = False
+                return
+            
+            # Check if query returned empty (genuinely no objects)
+            if not objects:
+                error_msg = 'Semantic map query returned no objects (map may be empty)'
+                self.get_logger().error(error_msg)
+                self._publish_status(
+                    self.current_skill_id,
+                    'error',
+                    {'error': error_msg, 'error_type': 'empty_map'},
                     errno=7
                 )
                 self.moving_in_progress = False
@@ -374,14 +414,21 @@ class MoveToObjectSkill(Node):
                     break
             
             if not target_object:
-                self.get_logger().error(f'Object with ID "{self.target_object_id}" not found')
+                self.get_logger().error(f'Object with ID "{self.target_object_id}" not found in semantic map')
                 available_ids = [obj.id for obj in objects]
                 available_labels = [obj.label for obj in objects]
+                error_msg = (
+                    f'Object with ID "{self.target_object_id}" not found in semantic map. '
+                    f'Available object IDs: {available_ids[:10]}{"..." if len(available_ids) > 10 else ""}. '
+                    f'This may happen if the object was removed or the ID from planning is incorrect.'
+                )
+                self.get_logger().error(error_msg)
                 self._publish_status(
                     self.current_skill_id,
                     'error',
                     {
-                        'error': f'Object with ID "{self.target_object_id}" not found',
+                        'error': error_msg,
+                        'requested_object_id': self.target_object_id,
                         'available_object_ids': available_ids,
                         'available_labels': available_labels
                     },
@@ -489,14 +536,21 @@ class MoveToObjectSkill(Node):
             self.moving_in_progress = False
     
     def _query_semantic_map(self):
-        """Query semantic map service for objects."""
+        """Query semantic map service for objects.
+        
+        Returns:
+            list: List of objects from semantic map
+            
+        Raises:
+            TimeoutError: If the query times out
+            RuntimeError: If the service is not available or other errors occur
+        """
         if not self.semantic_map_client:
-            return []
+            raise RuntimeError('Semantic map client not initialized')
         
         # Wait for service
         if not self.semantic_map_client.wait_for_service(timeout_sec=5.0):
-            self.get_logger().warn('Semantic map service not available')
-            return []
+            raise RuntimeError('Semantic map service not available')
         
         # Create request (empty types means all objects)
         request = QuerySemanticMap.Request()
@@ -505,22 +559,32 @@ class MoveToObjectSkill(Node):
         # Call service
         future = self.semantic_map_client.call_async(request)
         
-        # Wait for response
+        # Wait for response (increase timeout to handle slow responses)
         start_time = time.time()
-        timeout = 5.0
+        timeout = 10.0  # Increased from 5.0 to 10.0 seconds
         while not future.done() and (time.time() - start_time) < timeout:
             rclpy.spin_once(self, timeout_sec=0.1)
         
         if not future.done():
-            self.get_logger().warn('Semantic map query timeout')
-            return []
+            error_msg = f'Semantic map query timeout after {timeout}s'
+            self.get_logger().error(error_msg)
+            raise TimeoutError(error_msg)
         
         try:
             response = future.result()
-            return list(response.objects)
+            objects = list(response.objects)
+            self.get_logger().info(f'Query semantic map returned {len(objects)} objects')
+            if objects:
+                object_ids = [obj.id for obj in objects]
+                object_labels = [obj.label for obj in objects]
+                self.get_logger().debug(f'Available objects: {list(zip(object_ids[:10], object_labels[:10]))}{"..." if len(object_ids) > 10 else ""}')
+            return objects
         except Exception as e:
-            self.get_logger().error(f'Error querying semantic map: {e}')
-            return []
+            error_msg = f'Error querying semantic map: {e}'
+            self.get_logger().error(error_msg)
+            import traceback
+            self.get_logger().error(f'Traceback:\n{traceback.format_exc()}')
+            raise RuntimeError(error_msg) from e
     
     def _get_object_pose_in_map(self, obj):
         """Get object pose in map frame."""
