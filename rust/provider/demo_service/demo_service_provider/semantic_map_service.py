@@ -121,6 +121,10 @@ class SemanticMapService(Node):
         # Objects are never deleted once they have map coordinates
         self.semantic_map_memory = {}  # Maps object ID to Object
         
+        # Counter for periodic Qwen-assisted merging
+        self.query_count = 0
+        self.qwen_merge_interval = 3  # Trigger Qwen merge every 3 queries
+        
         # Query camera primitives - exit if failed
         self._query_camera_primitives()
         
@@ -504,6 +508,12 @@ class SemanticMapService(Node):
                 seen_ids.add(obj.id)
             else:
                 self.get_logger().warn(f'Duplicate object detected: {obj.label} (id={obj.id}), skipping')
+        
+        # Periodically use Qwen to help merge objects in memory
+        self.query_count += 1
+        if self.query_count >= self.qwen_merge_interval:
+            self.query_count = 0
+            self._qwen_assisted_merge()
         
         # Debug: Log frame mappings for each object
         for obj in unique_objects:
@@ -1057,6 +1067,145 @@ Only include objects that are clearly visible. Estimate distance as accurately a
         # Objects are never deleted, only updated through merging
         self.semantic_map_memory[obj.id] = obj
         self.get_logger().info(f'Added object "{obj.label}" (id={obj.id}) to memory at map position [{map_pos[0]:.2f}, {map_pos[1]:.2f}, {map_pos[2]:.2f}]')
+    
+    def _qwen_assisted_merge(self):
+        """Use Qwen to help identify and merge duplicate objects in memory."""
+        if len(self.semantic_map_memory) < 2:
+            return  # Need at least 2 objects to merge
+        
+        # Collect all objects with map coordinates
+        objects_info = []
+        for obj_id, obj in self.semantic_map_memory.items():
+            map_pos = None
+            for fm in obj.frame_mapping:
+                if fm.frame_id == 'map':
+                    map_pos = [fm.center.x, fm.center.y, fm.center.z]
+                    break
+            
+            if map_pos:
+                objects_info.append({
+                    'id': obj_id,
+                    'label': obj.label,
+                    'position': map_pos
+                })
+        
+        if len(objects_info) < 2:
+            return
+        
+        # Construct prompt for Qwen
+        objects_text = "Objects in semantic map:\n"
+        for i, obj_info in enumerate(objects_info):
+            pos = obj_info['position']
+            objects_text += f"{i+1}. {obj_info['label']} (ID: {obj_info['id']}) at position [{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}]\n"
+        
+        prompt = f"""Analyze the following objects in a semantic map and identify which objects are likely duplicates (the same physical object detected multiple times).
+
+{objects_text}
+
+Consider:
+1. Objects with the same or similar labels that are close in 3D space (within 1.5m) are likely duplicates
+2. Objects with similar labels (e.g., "monitor" and "computer monitor", "chair" and "office chair") should be considered the same type
+3. Objects far apart (>2m) are likely different objects, even with the same label
+4. Consider the context: multiple chairs in a room are different objects, but the same chair detected from different angles is a duplicate
+
+Return a JSON array of merge suggestions, where each suggestion has:
+{{
+    "object_ids": ["id1", "id2", ...],  // IDs of objects that should be merged
+    "reason": "brief explanation"        // Why these should be merged
+}}
+
+Only suggest merges for objects that are clearly duplicates. If no merges are needed, return an empty array [].
+"""
+        
+        try:
+            # Call Qwen3-VL API (text-only, no image needed for this task)
+            api_response = self.qwen_client.chat.completions.create(
+                model=self.qwen_model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                max_tokens=1000
+            )
+            
+            # Parse response
+            response_text = api_response.choices[0].message.content
+            self.get_logger().info(f'Qwen merge suggestion: {response_text[:200]}...')
+            
+            # Extract JSON from response
+            import re
+            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            if json_match:
+                merge_suggestions = json.loads(json_match.group())
+            else:
+                # Try to parse entire response as JSON
+                merge_suggestions = json.loads(response_text)
+            
+            # Apply merge suggestions
+            merged_count = 0
+            for suggestion in merge_suggestions:
+                object_ids = suggestion.get('object_ids', [])
+                reason = suggestion.get('reason', 'No reason provided')
+                
+                if len(object_ids) < 2:
+                    continue
+                
+                # Find the objects to merge
+                objects_to_merge = []
+                for obj_id in object_ids:
+                    if obj_id in self.semantic_map_memory:
+                        obj = self.semantic_map_memory[obj_id]
+                        map_pos = None
+                        for fm in obj.frame_mapping:
+                            if fm.frame_id == 'map':
+                                map_pos = [fm.center.x, fm.center.y, fm.center.z]
+                                break
+                        if map_pos:
+                            objects_to_merge.append((obj, map_pos, obj_id))
+                
+                if len(objects_to_merge) < 2:
+                    continue
+                
+                # Merge: use the first object as the base, merge others into it
+                base_obj, base_pos, base_id = objects_to_merge[0]
+                
+                # Calculate average position
+                all_positions = [base_pos] + [pos for _, pos, _ in objects_to_merge[1:]]
+                avg_pos = [
+                    sum(p[0] for p in all_positions) / len(all_positions),
+                    sum(p[1] for p in all_positions) / len(all_positions),
+                    sum(p[2] for p in all_positions) / len(all_positions)
+                ]
+                
+                # Update base object's position
+                for fm in base_obj.frame_mapping:
+                    if fm.frame_id == 'map':
+                        fm.center.x = avg_pos[0]
+                        fm.center.y = avg_pos[1]
+                        fm.center.z = avg_pos[2]
+                        break
+                
+                # Update other objects' IDs to match base (so they won't appear as duplicates)
+                for obj, _, obj_id in objects_to_merge[1:]:
+                    obj.id = base_id
+                    # Remove from memory (they're now merged into base)
+                    if obj_id != base_id and obj_id in self.semantic_map_memory:
+                        del self.semantic_map_memory[obj_id]
+                
+                merged_count += len(objects_to_merge) - 1
+                self.get_logger().info(f'Qwen-assisted merge: merged {len(objects_to_merge)} objects ({", ".join([obj.label for obj, _, _ in objects_to_merge])}) into one. Reason: {reason}')
+            
+            if merged_count > 0:
+                self.get_logger().info(f'Qwen-assisted merge completed: {merged_count} objects merged')
+            else:
+                self.get_logger().debug('Qwen-assisted merge: no merges suggested')
+                
+        except Exception as e:
+            self.get_logger().warn(f'Error in Qwen-assisted merge: {e}')
+            import traceback
+            self.get_logger().debug(f'Traceback:\n{traceback.format_exc()}')
     
     def _get_all_objects_from_memory(self, type_filter, snapshot_pose=None):
         """Get all objects from memory, optionally filtered by type. Includes robot object if pose is available.
