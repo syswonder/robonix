@@ -1,9 +1,10 @@
 #!/bin/bash
 # SPDX-License-Identifier: MulanPSL-2.0
-# Start Base Pose Primitive Script
+# Start Base Pose AMCL Primitive Script
 #
-# Start script for prm::base.pose (robot pose in map frame using AMCL)
-# This script verifies that AMCL is running and the pose topic is available.
+# Start script for prm::base.pose.amcl (robot pose in map frame directly from AMCL)
+# This script verifies that AMCL is running and the /amcl_pose topic is available.
+# No converter needed - uses PoseWithCovarianceStamped directly.
 
 set -e
 
@@ -28,7 +29,7 @@ ELAPSED=0
 while [ $ELAPSED -lt $TIMEOUT ]; do
     if ros2 topic list 2>/dev/null | grep -q "^/amcl_pose$"; then
         echo "AMCL pose topic is available!"
-        break
+        exit 0
     fi
     sleep 1
     ELAPSED=$((ELAPSED + 1))
@@ -38,25 +39,3 @@ if [ $ELAPSED -ge $TIMEOUT ]; then
     echo "Warning: AMCL pose topic not found. Make sure AMCL is running (e.g., via nav2 launch)"
     exit 1
 fi
-
-# Start pose converter node to convert PoseWithCovarianceStamped to PoseStamped
-echo "Starting pose converter node..."
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-python3 "$SCRIPT_DIR/pose_converter.py" &
-CONVERTER_PID=$!
-echo $CONVERTER_PID > /tmp/pose_converter.pid
-
-# Wait for converted pose topic to be available
-echo "Waiting for converted pose topic /robot_pose..."
-ELAPSED=0
-while [ $ELAPSED -lt 10 ]; do
-    if ros2 topic list 2>/dev/null | grep -q "^/robot_pose$"; then
-        echo "Pose converter is running and /robot_pose topic is available!"
-        exit 0
-    fi
-    sleep 1
-    ELAPSED=$((ELAPSED + 1))
-done
-
-echo "Warning: Converted pose topic /robot_pose not found"
-exit 1

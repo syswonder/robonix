@@ -16,7 +16,7 @@ pub fn load_primitives(primitives: &mut HashMap<String, PrimitiveSpec>) {
 
     PRM!(primitives, "prm::base.navigate", "Navigate to target pose in map frame",
          { "goal": "geometry_msgs/msg/PoseStamped" },
-         { "status": "std_msgs/msg/Bool" });
+         {}); // No output - Nav2 uses action server, status should be monitored via action feedback
 }
 
 pub fn load_services(services: &mut HashMap<String, ServiceSpec>) {

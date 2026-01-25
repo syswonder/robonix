@@ -39,24 +39,26 @@ primitives:
     start_script: rbnx/start_camera_depth.sh
     stop_script: rbnx/stop_camera_depth.sh
 
-  # Robot pose in map frame (using AMCL)
-  - name: prm::base.pose
-    # Spec defines: OUTPUT: {"pose": "geometry_msgs/msg/PoseStamped"}
+  # Robot pose in map frame directly from AMCL - PoseWithCovarianceStamped version
+  - name: prm::base.pose.amcl
+    # Spec defines: OUTPUT: {"pose": "geometry_msgs/msg/PoseWithCovarianceStamped"}
     input_schema: '{}'
-    output_schema: '{"pose":"/robot_pose"}'
-    metadata: '{"robot":"tiago","localization":"amcl","simulator":"webots"}'
+    output_schema: '{"pose":"/amcl_pose"}'
+    metadata: '{"robot":"tiago","localization":"amcl","simulator":"webots","pose_type":"PoseWithCovarianceStamped"}'
     version: 0.0.1
-    start_script: rbnx/start_base_pose.sh
-    stop_script: rbnx/stop_base_pose.sh
+    start_script: rbnx/start_base_pose_amcl.sh
+    stop_script: rbnx/stop_base_pose_amcl.sh
 
   # Navigate to target pose
   - name: prm::base.navigate
     # Spec defines: 
     #   INPUT: {"goal": "geometry_msgs/msg/PoseStamped"}
     #   OUTPUT: {"status": "std_msgs/msg/Bool"}
+    # Note: Nav2 uses action server, status topic is not available
+    # Skills should monitor navigation completion through other means
     input_schema: '{"goal":"/goal_pose"}'
-    output_schema: '{"status":"/navigation_status"}'
-    metadata: '{"robot":"tiago","navigation":"nav2","simulator":"webots"}'
+    output_schema: '{}'
+    metadata: '{"robot":"tiago","navigation":"nav2","simulator":"webots","action_server":"/navigate_to_pose"}'
     version: 0.0.1
     start_script: rbnx/start_base_navigate.sh
     stop_script: rbnx/stop_base_navigate.sh

@@ -835,21 +835,22 @@ impl TaskManager {
 
             let request = crate::ros_idl::service_types::QuerySemanticMapRequest { types: vec![] };
 
-            // Semantic map service may take longer due to VLM API calls (10-30 seconds)
-            let response =
-                match timeout(Duration::from_secs(60), client.async_call_service(request)).await {
-                    Ok(Ok(response)) => response,
-                    Ok(Err(e)) => {
-                        debug!("[semantic_map] service call failed: {:?}", e);
-                        return;
-                    }
-                    Err(_) => {
-                        warn!(
-                            "[semantic_map] service call timeout after 60s (VLM API may be slow)"
-                        );
-                        return;
-                    }
-                };
+            let timeout_duration = Duration::from_secs(30);
+            let response = match timeout(timeout_duration, client.async_call_service(request)).await
+            {
+                Ok(Ok(response)) => response,
+                Ok(Err(e)) => {
+                    debug!("[semantic_map] service call failed: {:?}", e);
+                    return;
+                }
+                Err(_) => {
+                    warn!(
+                        "[semantic_map] service call timeout after {:?}",
+                        timeout_duration.as_secs()
+                    );
+                    return;
+                }
+            };
 
             match serde_json::to_value(&response.objects) {
                 Ok(v) => v,

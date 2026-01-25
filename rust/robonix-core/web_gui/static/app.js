@@ -825,6 +825,7 @@ async function loadVisualization() {
     await Promise.all([
         loadSemanticMap(),
         loadImageMonitor(),
+        loadSemanticMap2D(),
     ]);
 }
 
@@ -861,6 +862,218 @@ function renderSemanticMap(objects) {
         html += `</div>`;
     });
     container.innerHTML = html;
+}
+
+// Semantic Map 2D View
+let autoRefreshMap2DInterval = null;
+let map2DState = {
+    scale: 1.0,
+    offsetX: 0,
+    offsetY: 0,
+    minX: 0,
+    maxX: 0,
+    minY: 0,
+    maxY: 0,
+};
+
+async function loadSemanticMap2D() {
+    try {
+        const response = await fetch('/api/semantic-map');
+        const data = await response.json();
+        renderSemanticMap2D(data.objects || []);
+    } catch (error) {
+        console.error('Failed to load semantic map 2D:', error);
+    }
+}
+
+function renderSemanticMap2D(objects) {
+    const canvas = document.getElementById('semantic-map-2d-canvas');
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    
+    // Set canvas size
+    const container = canvas.parentElement;
+    const containerWidth = container.clientWidth || container.offsetWidth || 800;
+    const containerHeight = container.clientHeight || container.offsetHeight || 400;
+    
+    // Support high DPI displays (Retina)
+    const dpr = window.devicePixelRatio || 1;
+    const displayWidth = containerWidth - 20;
+    const displayHeight = Math.max(380, containerHeight - 20);
+    
+    // Set canvas CSS size
+    canvas.style.width = displayWidth + 'px';
+    canvas.style.height = displayHeight + 'px';
+    
+    // Set canvas actual size (scaled for high DPI)
+    canvas.width = displayWidth * dpr;
+    canvas.height = displayHeight * dpr;
+    
+    // Scale context to match device pixel ratio
+    ctx.scale(dpr, dpr);
+    
+    // Clear canvas
+    ctx.clearRect(0, 0, displayWidth, displayHeight);
+    
+    if (!Array.isArray(objects) || objects.length === 0) {
+        ctx.fillStyle = '#999';
+        ctx.font = '16px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('No objects detected', displayWidth / 2, displayHeight / 2);
+        return;
+    }
+    
+    // Extract objects with map frame coordinates
+    const mapObjects = [];
+    objects.forEach(obj => {
+        if (!obj.frame_mapping) return;
+        
+        // Find map frame mapping
+        let mapFrame = null;
+        for (const fm of obj.frame_mapping) {
+            if (fm.frame_id === 'map' && fm.center) {
+                mapFrame = fm;
+                break;
+            }
+        }
+        
+        if (mapFrame) {
+            // Extract yaw from bbox if available
+            let yaw = 0.0;
+            if (mapFrame.bbox && mapFrame.bbox.length > 0 && mapFrame.bbox[0].yaw !== undefined) {
+                yaw = mapFrame.bbox[0].yaw;
+            }
+            
+            mapObjects.push({
+                id: obj.id,
+                label: obj.label,
+                x: mapFrame.center.x,
+                y: mapFrame.center.y,
+                z: mapFrame.center.z,
+                yaw: yaw,
+                isRobot: obj.id === 'robot_self' || obj.label === 'robot',
+            });
+        }
+    });
+    
+    if (mapObjects.length === 0) {
+        ctx.fillStyle = '#999';
+        ctx.font = '16px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('No objects with map coordinates', displayWidth / 2, displayHeight / 2);
+        return;
+    }
+    
+    // Calculate bounds
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+    
+    mapObjects.forEach(obj => {
+        minX = Math.min(minX, obj.x);
+        maxX = Math.max(maxX, obj.x);
+        minY = Math.min(minY, obj.y);
+        maxY = Math.max(maxY, obj.y);
+    });
+    
+    // Add padding
+    const padding = 2.0; // meters
+    minX -= padding;
+    maxX += padding;
+    minY -= padding;
+    maxY += padding;
+    
+    // Calculate scale to fit all objects (use display dimensions, not canvas dimensions)
+    const rangeX = maxX - minX;
+    const rangeY = maxY - minY;
+    const scaleX = (displayWidth - 40) / rangeX;
+    const scaleY = (displayHeight - 40) / rangeY;
+    const scale = Math.min(scaleX, scaleY);
+    
+    // Helper function to convert world coordinates to canvas coordinates
+    const worldToCanvas = (wx, wy) => {
+        const cx = 20 + (wx - minX) * scale;
+        const cy = displayHeight - 20 - (wy - minY) * scale; // Flip Y axis
+        return { x: cx, y: cy };
+    };
+    
+    // Draw grid
+    ctx.strokeStyle = '#e0e0e0';
+    ctx.lineWidth = 0.5;
+    
+    const gridStep = Math.max(1.0, Math.ceil(Math.max(rangeX, rangeY) / 10));
+    for (let x = Math.floor(minX / gridStep) * gridStep; x <= maxX; x += gridStep) {
+        const pos = worldToCanvas(x, minY);
+        ctx.beginPath();
+        ctx.moveTo(pos.x, 0);
+        ctx.lineTo(pos.x, displayHeight);
+        ctx.stroke();
+    }
+    for (let y = Math.floor(minY / gridStep) * gridStep; y <= maxY; y += gridStep) {
+        const pos = worldToCanvas(minX, y);
+        ctx.beginPath();
+        ctx.moveTo(0, pos.y);
+        ctx.lineTo(displayWidth, pos.y);
+        ctx.stroke();
+    }
+    
+    // Draw coordinate axes
+    ctx.strokeStyle = '#999';
+    ctx.lineWidth = 1;
+    const origin = worldToCanvas(0, 0);
+    ctx.beginPath();
+    ctx.moveTo(origin.x, 0);
+    ctx.lineTo(origin.x, displayHeight);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, origin.y);
+    ctx.lineTo(displayWidth, origin.y);
+    ctx.stroke();
+    
+    // Draw origin marker
+    ctx.fillStyle = '#666';
+    ctx.fillText('(0,0)', origin.x + 5, origin.y - 5);
+    
+    // Simple drawing - no collision avoidance
+    mapObjects.forEach((obj) => {
+        const pos = worldToCanvas(obj.x, obj.y);
+        const labelText = obj.label || (obj.isRobot ? 'robot' : 'object');
+        const coordText = `[${obj.x.toFixed(1)}, ${obj.y.toFixed(1)}]`;
+        
+        // Draw object as a circle (including robot)
+        if (obj.isRobot) {
+            ctx.fillStyle = '#1976d2';
+            ctx.strokeStyle = '#0d47a1';
+        } else {
+            ctx.fillStyle = '#4caf50';
+            ctx.strokeStyle = '#2e7d32';
+        }
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, 6, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.stroke();
+        
+        // Draw label
+        ctx.fillStyle = obj.isRobot ? '#1976d2' : '#333';
+        ctx.font = obj.isRobot ? 'bold 12px Arial' : '11px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText(labelText, pos.x, pos.y - 10);
+        
+        // Draw coordinates
+        ctx.fillStyle = '#666';
+        ctx.font = '9px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText(coordText, pos.x, pos.y + 20);
+    });
+    
+    // Draw legend
+    ctx.fillStyle = '#333';
+    ctx.font = '11px Arial';
+    ctx.textAlign = 'left';
+    ctx.fillText('Scale: ' + scale.toFixed(2) + ' px/m', 10, 20);
+    ctx.fillText('Objects: ' + mapObjects.length, 10, 35);
 }
 
 async function loadImageMonitor() {
@@ -1329,6 +1542,38 @@ function setupAutoRefreshViz() {
     }
 }
 
+function setupAutoRefreshMap2D() {
+    const checkbox = document.getElementById('auto-refresh-map2d');
+    if (!checkbox) return;
+    
+    checkbox.addEventListener('change', (e) => {
+        if (e.target.checked) {
+            startAutoRefreshMap2D();
+        } else {
+            stopAutoRefreshMap2D();
+        }
+    });
+    if (checkbox.checked) {
+        startAutoRefreshMap2D();
+    }
+}
+
+function startAutoRefreshMap2D() {
+    if (autoRefreshMap2DInterval) {
+        clearInterval(autoRefreshMap2DInterval);
+    }
+    autoRefreshMap2DInterval = setInterval(() => {
+        loadSemanticMap2D();
+    }, 2000);
+}
+
+function stopAutoRefreshMap2D() {
+    if (autoRefreshMap2DInterval) {
+        clearInterval(autoRefreshMap2DInterval);
+        autoRefreshMap2DInterval = null;
+    }
+}
+
 function startAutoRefreshViz() {
     if (autoRefreshVizInterval) {
         clearInterval(autoRefreshVizInterval);
@@ -1430,7 +1675,9 @@ loadTopics();
 loadLogs();
 loadComponents();
 loadVisualization();
+loadSemanticMap2D();
 setupAutoRefresh();
 setupAutoRefreshLogs();
 setupAutoRefreshComponents();
 setupAutoRefreshViz();
+setupAutoRefreshMap2D();

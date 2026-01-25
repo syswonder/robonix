@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // RTDL Executor Module
 //
-// Executes RTDL (Real-Time Decision Logic) programs
+// Executes RTDL (Robot Task Description Langauge) programs
 // Currently supports simple list-style RTDL (skill invocation list)
 
 use crate::action::skill_library::SkillLibrary;

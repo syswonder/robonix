@@ -88,7 +88,7 @@ where
                     name
                 ));
 
-            info!("Core API thread '{}' started with high priority", name);
+            info!("Core API thread '{}' started", name);
 
             // Run the future
             rt.block_on(f());

@@ -159,7 +159,7 @@ class TaskPlanService(Node):
         
         # Build system prompt with RTDL syntax if provided
         if rtdl_syntax:
-            system_prompt = f"""You are a robot task planning expert. Your task is to convert natural language task descriptions into RTDL (Real-Time Decision Logic) code.
+            system_prompt = f"""You are a robot task planning expert. Your task is to convert natural language task descriptions into RTDL (Robot Task Description Langauge) code.
 
 RTDL Syntax Specification:
 {json.dumps(rtdl_syntax, indent=2)}
@@ -174,7 +174,7 @@ Important:
 - Keep instructions simple and sequential"""
         else:
             # Default RTDL format
-            system_prompt = """You are a robot task planning expert. Your task is to convert natural language task descriptions into RTDL (Real-Time Decision Logic) code.
+            system_prompt = """You are a robot task planning expert. Your task is to convert natural language task descriptions into RTDL (Robot Task Description Langauge) code.
 
 RTDL Format:
 - Output a JSON array of instructions

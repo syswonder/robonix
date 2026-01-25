@@ -10,6 +10,8 @@
 import os
 import json
 import base64
+import uuid
+import math
 from pathlib import Path
 from datetime import datetime
 import rclpy
@@ -20,6 +22,7 @@ from robonix_sdk.srv import QuerySemanticMap
 from robonix_sdk.msg import Object, Relation, RelationType, FrameMapping, Point3D, BoundingBox
 from builtin_interfaces.msg import Time
 from sensor_msgs.msg import Image, CameraInfo
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from cv_bridge import CvBridge
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -62,7 +65,7 @@ class SemanticMapService(Node):
                 base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
                 api_key=self.qwen_api_key,
             )
-            self.qwen_model = "qwen-vl-plus"  # Model name
+            self.qwen_model = "qwen3-vl-plus"  # Model name
             self.get_logger().info(f'Qwen3-VL API client initialized with model: {self.qwen_model}')
         except Exception as e:
             self.get_logger().error(f'Failed to initialize Qwen3-VL API client: {e}')
@@ -109,8 +112,20 @@ class SemanticMapService(Node):
         self.latest_camera_info = None
         self.image_counter = 0  # Counter for saved images
         
+        # Robot pose (will be queried from primitives)
+        self.pose_topic = None
+        self.latest_pose = None
+        
+        # Semantic map memory: store objects with map coordinates for clustering
+        # Key: object.id -> Object with map frame
+        # Objects are never deleted once they have map coordinates
+        self.semantic_map_memory = {}  # Maps object ID to Object
+        
         # Query camera primitives - exit if failed
         self._query_camera_primitives()
+        
+        # Query robot pose primitive (prefer AMCL version)
+        self._query_pose_primitive()
         
         # Subscribe to camera topics
         self.rgb_subscriber = self.create_subscription(
@@ -142,6 +157,38 @@ class SemanticMapService(Node):
             10
         )
         self.get_logger().info(f'Subscribed to camera info: {self.camera_info_topic}')
+        
+        # Subscribe to robot pose topic if available
+        # prm::base.pose.amcl outputs PoseWithCovarianceStamped per spec
+        # AMCL uses RELIABLE QoS with TRANSIENT_LOCAL durability
+        if self.pose_topic:
+            pose_qos = QoSProfile(
+                reliability=ReliabilityPolicy.RELIABLE,
+                history=HistoryPolicy.KEEP_LAST,
+                depth=10,
+                durability=DurabilityPolicy.VOLATILE  # Compatible with TRANSIENT_LOCAL publisher
+            )
+            self.pose_subscriber = self.create_subscription(
+                PoseWithCovarianceStamped,
+                self.pose_topic,
+                self.pose_cov_callback,
+                pose_qos
+            )
+            self.get_logger().info(f'Subscribed to robot pose (PoseWithCovarianceStamped from prm::base.pose.amcl): {self.pose_topic} with RELIABLE QoS')
+            
+            # Wait a bit for first pose message to arrive (AMCL may take time to initialize)
+            # But don't block - pose will be received asynchronously via callback
+            import time
+            wait_start = time.time()
+            wait_timeout = 2.0  # Short wait to check if pose is immediately available
+            while not self.latest_pose and (time.time() - wait_start) < wait_timeout:
+                rclpy.spin_once(self, timeout_sec=0.1)
+            if self.latest_pose:
+                self.get_logger().info(f'Received initial pose: x={self.latest_pose.pose.position.x:.2f}, y={self.latest_pose.pose.position.y:.2f}')
+            else:
+                self.get_logger().info(f'No pose message received yet - will continue listening. Robot object will be created when pose becomes available.')
+        else:
+            self.get_logger().warn('No pose topic available - robot object will use default position (0,0,0)')
         
         # Create service
         self.service = self.create_service(
@@ -249,6 +296,92 @@ class SemanticMapService(Node):
         # Should never reach here, but just in case
         raise RuntimeError('Failed to query camera primitive: unknown error')
     
+    def _query_pose_primitive(self):
+        """Query robot pose primitive from OS with retry logic."""
+        max_retries = 5
+        retry_delay = 2.0  # seconds
+        primitive_name = 'prm::base.pose.amcl'
+        
+        for attempt in range(max_retries):
+            self.get_logger().info(f'Querying {primitive_name}... (attempt {attempt + 1}/{max_retries})')
+            try:
+                wait_timeout = 10.0 if attempt < 2 else 5.0
+                if not self.query_primitive_client.wait_for_service(timeout_sec=wait_timeout):
+                    self.get_logger().warn(f'  query_primitive service not available (attempt {attempt + 1}/{max_retries})')
+                    if attempt < max_retries - 1:
+                        import time
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        break
+                
+                # Create request
+                request = QueryPrimitive.Request()
+                request.name = primitive_name
+                request.filter = '{}'
+                
+                # Call service
+                future = self.query_primitive_client.call_async(request)
+                
+                # Wait for response
+                import time
+                start_time = time.time()
+                timeout_sec = 3.0
+                while not future.done() and (time.time() - start_time) < timeout_sec:
+                    rclpy.spin_once(self, timeout_sec=0.01)
+                
+                if not future.done():
+                    elapsed = time.time() - start_time
+                    self.get_logger().warn(f'  Service call timeout after {elapsed:.1f}s (attempt {attempt + 1}/{max_retries})')
+                    try:
+                        future.cancel()
+                    except:
+                        pass
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        break
+                
+                # Get response
+                response = future.result()
+                
+                if response and response.instances:
+                    instance = response.instances[0]
+                    if isinstance(instance.output_schema, str):
+                        output_schema = json.loads(instance.output_schema)
+                    else:
+                        output_schema = instance.output_schema
+                    
+                    if 'pose' in output_schema:
+                        self.pose_topic = output_schema['pose']
+                        self.get_logger().info(f'  Found pose topic: {self.pose_topic} (from {primitive_name})')
+                        return  # Success
+                    else:
+                        self.get_logger().warn(f'  {primitive_name} found but no "pose" in output_schema')
+                        break
+                else:
+                    self.get_logger().warn(f'  No {primitive_name} primitive found (attempt {attempt + 1}/{max_retries})')
+                    if attempt < max_retries - 1:
+                        import time
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        break
+                        
+            except Exception as e:
+                self.get_logger().warn(f'Error querying {primitive_name}: {e}')
+                if attempt < max_retries - 1:
+                    import time
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    break
+        
+        # If we reach here, pose primitive was not found
+        self.get_logger().warn('Failed to query pose primitive after all retries, continuing without pose')
+        return
+    
     def rgb_image_callback(self, msg):
         """Callback for RGB image messages."""
         self.latest_rgb_image = msg
@@ -282,6 +415,19 @@ class SemanticMapService(Node):
         """Callback for camera info messages."""
         self.latest_camera_info = msg
     
+    def pose_cov_callback(self, msg):
+        """Callback for PoseWithCovarianceStamped messages."""
+        # Convert PoseWithCovarianceStamped to PoseStamped format for internal use
+        pose_stamped = PoseStamped()
+        pose_stamped.header = msg.header
+        pose_stamped.pose = msg.pose.pose
+        was_none = self.latest_pose is None
+        self.latest_pose = pose_stamped
+        if was_none:
+            self.get_logger().info(f'Received first pose update (PoseWithCovarianceStamped): x={msg.pose.pose.position.x:.2f}, y={msg.pose.pose.position.y:.2f}, z={msg.pose.pose.position.z:.2f} - robot object will now be available')
+        else:
+            self.get_logger().debug(f'Received pose update (PoseWithCovarianceStamped): x={msg.pose.pose.position.x:.2f}, y={msg.pose.pose.position.y:.2f}, z={msg.pose.pose.position.z:.2f}')
+    
     def query_callback(self, request, response):
         """Handle semantic map query request."""
         self.get_logger().info(f'Received query with types filter: {request.types}')
@@ -289,23 +435,36 @@ class SemanticMapService(Node):
         # Check if we have latest image and camera info
         if not self.latest_rgb_image:
             self.get_logger().warn('No RGB image available yet')
-            response.objects = []
+            response.objects = self._get_all_objects_from_memory(request.types, snapshot_pose=None)
             response.stamp = self.get_clock().now().to_msg()
             return response
         
         if not self.latest_camera_info:
             self.get_logger().warn('No camera info available yet')
-            response.objects = []
+            response.objects = self._get_all_objects_from_memory(request.types, snapshot_pose=None)
             response.stamp = self.get_clock().now().to_msg()
             return response
         
+        # Create snapshot: capture current image, camera info, and pose at the same time
+        # This ensures all objects use the same pose for coordinate transformation
+        snapshot_image = self.latest_rgb_image
+        snapshot_camera_info = self.latest_camera_info
+        snapshot_pose = self.latest_pose  # May be None if no pose available
+        snapshot_stamp = snapshot_image.header.stamp  # Use image timestamp for snapshot
+        
+        # Debug: Check pose availability
+        if snapshot_pose:
+            self.get_logger().info(f'Snapshot pose: x={snapshot_pose.pose.position.x:.2f}, y={snapshot_pose.pose.position.y:.2f}, z={snapshot_pose.pose.position.z:.2f}')
+        else:
+            self.get_logger().warn('No robot pose available in snapshot - objects will not have map coordinates')
+        
         # Convert ROS image to OpenCV format
         try:
-            cv_image = self.cv_bridge.imgmsg_to_cv2(self.latest_rgb_image, "rgb8")
+            cv_image = self.cv_bridge.imgmsg_to_cv2(snapshot_image, "rgb8")
         except Exception as e:
             self.get_logger().error(f'Failed to convert image: {e}')
-            response.objects = []
-            response.stamp = self.get_clock().now().to_msg()
+            response.objects = self._get_all_objects_from_memory(request.types, snapshot_pose=None)
+            response.stamp = snapshot_stamp
             return response
         
         # Convert image to base64 for API
@@ -317,16 +476,45 @@ class SemanticMapService(Node):
         image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
         
         # Prepare camera info for VLM
-        camera_info_text = self._format_camera_info(self.latest_camera_info)
+        camera_info_text = self._format_camera_info(snapshot_camera_info)
         
-        # Call Qwen3-VL API to detect objects and estimate 3D coordinates
-        objects = self._detect_objects_with_vlm(image_base64, camera_info_text, request.types)
+        # Call Qwen3-VL API to detect objects and estimate distance
+        detected_objects = self._detect_objects_with_vlm(image_base64, camera_info_text, request.types)
         
-        # Set response
-        response.objects = objects
-        response.stamp = self.get_clock().now().to_msg()
+        # Process detected objects: convert to map frame using snapshot pose and merge with memory
+        processed_objects = self._process_detected_objects(detected_objects, snapshot_pose=snapshot_pose)
         
-        self.get_logger().info(f'Returning {len(objects)} objects detected by VLM')
+        # Get all objects from memory (includes robot if pose available)
+        # This ensures we return all objects with map coordinates, avoiding duplicates
+        memory_objects = self._get_all_objects_from_memory(request.types, snapshot_pose=snapshot_pose)
+        
+        # Combine: use memory objects as base (they have map coordinates and are deduplicated)
+        # Only add newly processed objects that aren't already in memory
+        memory_object_ids = {obj.id for obj in memory_objects}
+        for obj in processed_objects:
+            if obj.id not in memory_object_ids:
+                memory_objects.append(obj)
+        
+        # Ensure no duplicates by ID (safety check)
+        seen_ids = set()
+        unique_objects = []
+        for obj in memory_objects:
+            if obj.id not in seen_ids:
+                unique_objects.append(obj)
+                seen_ids.add(obj.id)
+            else:
+                self.get_logger().warn(f'Duplicate object detected: {obj.label} (id={obj.id}), skipping')
+        
+        # Debug: Log frame mappings for each object
+        for obj in unique_objects:
+            frame_ids = [fm.frame_id for fm in obj.frame_mapping] if obj.frame_mapping else []
+            self.get_logger().info(f'Object "{obj.label}" (id={obj.id}) has frame_mappings: {frame_ids}')
+        
+        # Set response - use snapshot timestamp to ensure consistency
+        response.objects = unique_objects
+        response.stamp = snapshot_stamp
+        
+        self.get_logger().info(f'Returning {len(unique_objects)} objects (snapshot at {snapshot_stamp.sec}.{snapshot_stamp.nanosec:09d})')
         return response
     
     def _format_camera_info(self, camera_info):
@@ -342,32 +530,52 @@ class SemanticMapService(Node):
         return f"Camera parameters: fx={fx:.2f}, fy={fy:.2f}, cx={cx:.2f}, cy={cy:.2f}, resolution={width}x{height}"
     
     def _detect_objects_with_vlm(self, image_base64, camera_info_text, type_filter):
-        """Use Qwen3-VL to detect objects and estimate 3D coordinates in camera frame."""
-        # Prepare prompt for VLM
+        """Use Qwen3-VL to detect objects and estimate distance only."""
+        # Prepare prompt for VLM - ask for distance and relative position
         prompt = f"""Analyze this image and detect all visible objects. For each object, provide:
 1. Object label/name
 2. 2D bounding box coordinates (x_min, y_min, x_max, y_max) in pixels
-3. Estimated 3D position in camera coordinate system (x, y, z in meters). 
-   Camera coordinate system: x-right, y-down, z-forward (ROS convention).
-   Use visual cues, object size, and perspective to estimate depth.
+3. Estimated distance from camera in meters (straight-line 3D distance to object center, NOT just depth along z-axis)
 4. Estimated object size (width, height, depth in meters)
 
 Camera info: {camera_info_text}
+
+IMPORTANT: Only detect actual objects/items, NOT structural elements or surfaces. 
+DO NOT include:
+- Walls, walls, wall surfaces
+- Floor, floor surfaces, ground
+- Ceiling, ceiling surfaces
+- Doors, windows (unless they are the focus as movable objects)
+- Any architectural elements or room structures
+
+Only include discrete, movable, or identifiable objects such as:
+- Furniture (tables, chairs, sofas, cabinets, etc.)
+- Appliances (refrigerators, ovens, microwaves, etc.)
+- Electronics (TVs, computers, monitors, etc.)
+- Containers (boxes, bags, bottles, etc.)
+- People, animals
+- Other tangible items that can be interacted with
+
+CRITICAL for distance estimation:
+- The "distance" should be the actual 3D straight-line distance from the camera to the object center
+- Consider the object's position in the image: objects on the left/right sides are further away in 3D space
+- Use visual cues: object size, perspective, shadows, and relative positions to estimate accurate 3D distance
+- For objects at the image edges, the distance should account for the horizontal offset (objects on the left/right are further in 3D)
 
 Return the results as a JSON array, where each object has:
 {{
     "label": "object_name",
     "bbox_2d": [x_min, y_min, x_max, y_max],
-    "position_cam": [x, y, z],
+    "distance": <actual_3d_distance_in_meters>,
     "size": [width, height, depth]
 }}
 
-Only include objects that are clearly visible. Estimate coordinates as accurately as possible based on visual cues."""
+Only include objects that are clearly visible. Estimate distance as accurately as possible based on visual cues, object size, and perspective."""
         
         try:
             # Call Qwen3-VL API
             api_response = self.qwen_client.chat.completions.create(
-                model=self.qwen_model,  # "qwen-vl-plus"
+                model=self.qwen_model,  # "qwen3-vl-plus"
                 messages=[
                     {
                         "role": "user",
@@ -401,9 +609,19 @@ Only include objects that are clearly visible. Estimate coordinates as accuratel
                 # Try to parse entire response as JSON
                 objects_data = json.loads(response_text)
             
-            # Convert to Object messages
+            # Convert to Object messages with camera frame coordinates
             objects = []
+            # Keywords to filter out non-object concepts
+            excluded_keywords = ['wall', 'floor', 'ceiling', 'ground', 'surface', 'door', 'window']
+            
             for idx, obj_data in enumerate(objects_data):
+                label = obj_data.get('label', '').lower()
+                
+                # Filter out structural elements and surfaces
+                if any(keyword in label for keyword in excluded_keywords):
+                    self.get_logger().debug(f'Filtered out non-object: {obj_data.get("label", "unknown")}')
+                    continue
+                
                 # Apply type filter if specified
                 if type_filter and len(type_filter) > 0:
                     # Simple type matching based on label (can be improved)
@@ -412,22 +630,32 @@ Only include objects that are clearly visible. Estimate coordinates as accuratel
                         continue
                 
                 obj = Object()
-                obj.id = f"object_{idx:03d}"
+                # Generate short UUID for object ID
+                obj.id = self._generate_short_uuid()
                 obj.label = obj_data.get('label', 'unknown')
                 obj.registered_skills = []
                 obj.registered_primitives = []
                 obj.relations = []
                 
+                # Get distance from VLM
+                distance = float(obj_data.get('distance', 1.0))
+                bbox_2d = obj_data.get('bbox_2d', [0, 0, 640, 480])
+                
+                # Calculate camera frame coordinates from distance and bbox
+                # Camera frame: x-right, y-down, z-forward (ROS convention)
+                pos_cam = self._calculate_camera_coords_from_distance(
+                    distance, bbox_2d, self.latest_camera_info
+                )
+                
                 # Create frame mapping with camera frame coordinates
                 frame_mapping = FrameMapping()
                 frame_mapping.frame_id = 'head_front_camera_rgb_optical_frame'  # Camera frame
                 
-                # Set center position from VLM estimate (camera coordinates)
-                pos_cam = obj_data.get('position_cam', [0.0, 0.0, 1.0])
+                # Set center position in camera frame
                 frame_mapping.center = Point3D()
-                frame_mapping.center.x = float(pos_cam[0]) if len(pos_cam) > 0 else 0.0
-                frame_mapping.center.y = float(pos_cam[1]) if len(pos_cam) > 1 else 0.0
-                frame_mapping.center.z = float(pos_cam[2]) if len(pos_cam) > 2 else 1.0
+                frame_mapping.center.x = pos_cam[0]
+                frame_mapping.center.y = pos_cam[1]
+                frame_mapping.center.z = pos_cam[2]
                 
                 # Create bounding box from VLM size estimate
                 size = obj_data.get('size', [0.1, 0.1, 0.1])
@@ -448,6 +676,501 @@ Only include objects that are clearly visible. Estimate coordinates as accuratel
             import traceback
             self.get_logger().error(f'Traceback:\n{traceback.format_exc()}')
             return []
+    
+    def _generate_short_uuid(self):
+        """Generate a short UUID (8 characters)."""
+        return uuid.uuid4().hex[:8]
+    
+    def _calculate_camera_coords_from_distance(self, distance, bbox_2d, camera_info):
+        """Calculate camera frame coordinates from distance and 2D bbox.
+        
+        Args:
+            distance: Actual 3D straight-line distance from camera to object center (in meters)
+            bbox_2d: 2D bounding box [x_min, y_min, x_max, y_max] in pixels
+            camera_info: Camera info message with intrinsics
+        
+        Returns:
+            [camera_x, camera_y, camera_z] in camera frame (meters)
+        
+        Note:
+            The distance is the actual 3D distance, not just depth along z-axis.
+            We use the bbox center position to calculate the direction vector,
+            then scale it to match the given distance.
+        """
+        # Get camera center from bbox
+        x_min, y_min, x_max, y_max = bbox_2d
+        center_x = (x_min + x_max) / 2.0
+        center_y = (y_min + y_max) / 2.0
+        
+        # Get camera intrinsics
+        fx = camera_info.k[0] if len(camera_info.k) > 0 else 1.0
+        fy = camera_info.k[4] if len(camera_info.k) > 4 else 1.0
+        cx = camera_info.k[2] if len(camera_info.k) > 2 else camera_info.width / 2.0
+        cy = camera_info.k[5] if len(camera_info.k) > 5 else camera_info.height / 2.0
+        
+        # Convert pixel coordinates to normalized coordinates (direction vector)
+        # (u - cx) / fx = X / Z, (v - cy) / fy = Y / Z
+        normalized_x = (center_x - cx) / fx
+        normalized_y = (center_y - cy) / fy
+        
+        # The normalized coordinates represent a direction vector (X/Z, Y/Z, 1)
+        # We need to scale this vector to have the given distance magnitude
+        # Direction vector: [normalized_x, normalized_y, 1]
+        # Magnitude of direction vector: sqrt(normalized_x^2 + normalized_y^2 + 1)
+        direction_magnitude = math.sqrt(normalized_x**2 + normalized_y**2 + 1.0)
+        
+        # Scale the direction vector to match the actual distance
+        # camera_coords = (direction_vector / direction_magnitude) * distance
+        scale_factor = distance / direction_magnitude
+        
+        # Camera frame: x-right, y-down, z-forward (ROS convention)
+        camera_x = normalized_x * scale_factor
+        camera_y = normalized_y * scale_factor
+        camera_z = 1.0 * scale_factor  # Forward direction component
+        
+        return [camera_x, camera_y, camera_z]
+    
+    def _transform_camera_to_map(self, camera_pos, robot_pose_stamped=None):
+        """Transform coordinates from camera frame to map frame.
+        
+        Args:
+            camera_pos: [x, y, z] in camera frame
+            robot_pose_stamped: PoseStamped message for robot pose (if None, uses self.latest_pose)
+        """
+        # Use provided pose or fall back to latest_pose
+        pose_to_use = robot_pose_stamped if robot_pose_stamped is not None else self.latest_pose
+        if not pose_to_use:
+            return None
+        
+        # Get robot pose in map frame
+        robot_pose = pose_to_use.pose
+        robot_x = robot_pose.position.x
+        robot_y = robot_pose.position.y
+        robot_z = robot_pose.position.z
+        
+        # Get robot orientation (quaternion)
+        qx = robot_pose.orientation.x
+        qy = robot_pose.orientation.y
+        qz = robot_pose.orientation.z
+        qw = robot_pose.orientation.w
+        
+        # Convert quaternion to yaw (rotation around z-axis)
+        # Simplified: assuming robot mainly rotates around z-axis
+        yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+        
+        # Camera offset from robot base (assuming camera is mounted at front)
+        # These values should ideally come from TF, but we use defaults
+        camera_offset_x = 0.3  # 30cm forward from robot center
+        camera_offset_y = 0.0  # No lateral offset
+        camera_offset_z = 0.2  # 20cm above robot center
+        
+        # Transform camera position to robot base frame
+        # Camera frame: x-right, y-down, z-forward
+        # Robot base frame: x-forward, y-left, z-up
+        # So we need to transform: camera (x,y,z) -> base (x,y,z)
+        # Camera z (forward) -> Base x (forward)
+        # Camera -x (left) -> Base y (left)
+        # Camera -y (up) -> Base z (up)
+        base_x = camera_pos[2] + camera_offset_x  # camera z -> base x
+        base_y = -camera_pos[0] + camera_offset_y  # -camera x -> base y
+        base_z = -camera_pos[1] + camera_offset_z  # -camera y -> base z
+        
+        # Transform from robot base frame to map frame
+        cos_yaw = math.cos(yaw)
+        sin_yaw = math.sin(yaw)
+        
+        map_x = robot_x + cos_yaw * base_x - sin_yaw * base_y
+        map_y = robot_y + sin_yaw * base_x + cos_yaw * base_y
+        map_z = robot_z + base_z
+        
+        return [map_x, map_y, map_z]
+    
+    def _cluster_same_label_objects(self, objects_with_map_pos):
+        """Cluster objects with the same label that are close to each other.
+        
+        Args:
+            objects_with_map_pos: List of tuples (obj, map_pos) where obj has map coordinates
+        
+        Returns:
+            List of clustered objects with updated positions (averaged for clusters)
+        """
+        CLUSTER_DISTANCE_THRESHOLD = 1.5  # 1.5m - objects within this distance are clustered
+        
+        if not objects_with_map_pos:
+            return []
+        
+        # Group objects by normalized label (to handle variations like "monitor" vs "computer monitor")
+        objects_by_label = {}
+        for obj, map_pos in objects_with_map_pos:
+            normalized_label = self._normalize_label(obj.label)
+            if normalized_label not in objects_by_label:
+                objects_by_label[normalized_label] = []
+            objects_by_label[normalized_label].append((obj, map_pos))
+        
+        clustered_objects = []
+        
+        # For each label, cluster nearby objects
+        for label, obj_list in objects_by_label.items():
+            if len(obj_list) == 1:
+                # Single object, no clustering needed
+                clustered_objects.append(obj_list[0])
+                continue
+            
+            # Cluster objects by proximity
+            clusters = []
+            for obj, map_pos in obj_list:
+                # Find existing cluster within threshold
+                assigned = False
+                for cluster in clusters:
+                    # Check distance to cluster center
+                    cluster_center = cluster['center']
+                    distance = math.sqrt(
+                        (map_pos[0] - cluster_center[0]) ** 2 +
+                        (map_pos[1] - cluster_center[1]) ** 2 +
+                        (map_pos[2] - cluster_center[2]) ** 2
+                    )
+                    if distance < CLUSTER_DISTANCE_THRESHOLD:
+                        # Add to existing cluster
+                        cluster['objects'].append((obj, map_pos))
+                        # Update cluster center (average of all positions)
+                        n = len(cluster['objects'])
+                        cluster['center'] = [
+                            sum(p[1][0] for p in cluster['objects']) / n,
+                            sum(p[1][1] for p in cluster['objects']) / n,
+                            sum(p[1][2] for p in cluster['objects']) / n
+                        ]
+                        assigned = True
+                        break
+                
+                if not assigned:
+                    # Create new cluster
+                    clusters.append({
+                        'objects': [(obj, map_pos)],
+                        'center': map_pos
+                    })
+            
+            # Create clustered objects with averaged positions
+            for cluster in clusters:
+                if len(cluster['objects']) == 1:
+                    # Single object in cluster, use as-is
+                    clustered_objects.append(cluster['objects'][0])
+                else:
+                    # Multiple objects, use the first one with averaged position
+                    obj, _ = cluster['objects'][0]
+                    avg_pos = cluster['center']
+                    
+                    # Update object's map frame mapping with averaged position
+                    for fm in obj.frame_mapping:
+                        if fm.frame_id == 'map':
+                            fm.center.x = avg_pos[0]
+                            fm.center.y = avg_pos[1]
+                            fm.center.z = avg_pos[2]
+                            break
+                    
+                    self.get_logger().info(f'Clustered {len(cluster["objects"])} objects with label "{obj.label}" at average position [{avg_pos[0]:.2f}, {avg_pos[1]:.2f}, {avg_pos[2]:.2f}]')
+                    clustered_objects.append((obj, avg_pos))
+        
+        return clustered_objects
+    
+    def _process_detected_objects(self, detected_objects, snapshot_pose=None):
+        """Process detected objects: convert to map frame, cluster same-label objects, and merge with memory.
+        
+        Args:
+            detected_objects: List of detected objects
+            snapshot_pose: PoseStamped message for snapshot pose (if None, uses self.latest_pose)
+        """
+        # First pass: convert all objects to map frame
+        objects_with_map_pos = []
+        objects_without_map = []
+        
+        for obj in detected_objects:
+            # Get camera frame position
+            if not obj.frame_mapping or len(obj.frame_mapping) == 0:
+                continue
+            
+            camera_frame = obj.frame_mapping[0]
+            camera_pos = [
+                camera_frame.center.x,
+                camera_frame.center.y,
+                camera_frame.center.z
+            ]
+            
+            # Transform to map frame if pose is available (use snapshot pose)
+            pose_to_use = snapshot_pose if snapshot_pose is not None else self.latest_pose
+            if pose_to_use:
+                map_pos = self._transform_camera_to_map(camera_pos, robot_pose_stamped=pose_to_use)
+                if map_pos:
+                    # Create map frame mapping
+                    map_frame = FrameMapping()
+                    map_frame.frame_id = 'map'
+                    map_frame.center = Point3D()
+                    map_frame.center.x = map_pos[0]
+                    map_frame.center.y = map_pos[1]
+                    map_frame.center.z = map_pos[2]
+                    map_frame.bbox = camera_frame.bbox.copy() if camera_frame.bbox else []
+                    map_frame.texture = camera_frame.texture.copy() if camera_frame.texture else []
+                    
+                    # Add map frame mapping
+                    obj.frame_mapping.append(map_frame)
+                    objects_with_map_pos.append((obj, map_pos))
+                else:
+                    objects_without_map.append(obj)
+            else:
+                # No pose available - create map frame mapping using relative coordinates for display
+                # But do NOT add to memory - only objects with real map coordinates are stored permanently
+                # Use camera frame coordinates as relative to robot origin (0,0,0)
+                # Camera frame: x-right, y-down, z-forward
+                # Map frame: x-forward, y-left, z-up (ROS convention)
+                # Transform: camera z -> map x (forward), -camera x -> map y (left), -camera y -> map z (up)
+                map_pos = [
+                    camera_pos[2],   # camera z (forward) -> map x
+                    -camera_pos[0],   # -camera x (right) -> map y (left)
+                    -camera_pos[1]    # -camera y (down) -> map z (up)
+                ]
+                
+                # Create map frame mapping with relative coordinates (temporary, not stored in memory)
+                map_frame = FrameMapping()
+                map_frame.frame_id = 'map'
+                map_frame.center = Point3D()
+                map_frame.center.x = map_pos[0]
+                map_frame.center.y = map_pos[1]
+                map_frame.center.z = map_pos[2]
+                map_frame.bbox = camera_frame.bbox.copy() if camera_frame.bbox else []
+                map_frame.texture = camera_frame.texture.copy() if camera_frame.texture else []
+                
+                # Add map frame mapping
+                obj.frame_mapping.append(map_frame)
+                objects_without_map.append(obj)
+        
+        # Cluster objects with same label that are close to each other
+        clustered_objects = self._cluster_same_label_objects(objects_with_map_pos)
+        
+        # Process clustered objects: merge with memory or add to memory
+        processed_objects = []
+        for obj, map_pos in clustered_objects:
+            # Try to merge with existing objects in memory
+            merged = self._merge_with_memory(obj, map_pos)
+            if not merged:
+                # New object, add to memory
+                self._add_to_memory(obj, map_pos)
+            
+            processed_objects.append(obj)
+        
+        # Add objects without map coordinates (for display only, not stored in memory)
+        processed_objects.extend(objects_without_map)
+        
+        # Return only newly processed objects (not from memory)
+        # Memory objects will be retrieved separately in query_callback
+        return processed_objects
+    
+    def _normalize_label(self, label):
+        """Normalize label to handle variations (e.g., 'computer monitor' -> 'monitor')."""
+        label_lower = label.lower()
+        # Handle common variations
+        if 'monitor' in label_lower or 'computer monitor' in label_lower:
+            return 'monitor'
+        if 'office chair' in label_lower or 'chair' in label_lower:
+            return 'chair'
+        if 'desk' in label_lower or 'table' in label_lower:
+            return 'desk'
+        if 'cabinet' in label_lower or 'shelf' in label_lower:
+            return 'cabinet'
+        return label_lower
+    
+    def _merge_with_memory(self, obj, map_pos):
+        """Try to merge object with existing objects in memory based on label and position.
+        Uses clustering algorithm: objects with same/similar label within 1.5m are considered the same.
+        Objects are never deleted once they have map coordinates."""
+        MERGE_DISTANCE_THRESHOLD = 1.5  # 1.5m - objects within this distance are considered the same
+        
+        obj_label_normalized = self._normalize_label(obj.label)
+        
+        # Find closest matching object with same/similar label
+        best_match = None
+        best_distance = float('inf')
+        
+        for existing_id, existing_obj in self.semantic_map_memory.items():
+            existing_label_normalized = self._normalize_label(existing_obj.label)
+            
+            # Check if labels match (after normalization)
+            if existing_label_normalized != obj_label_normalized:
+                continue
+            
+            # Check if existing object has map coordinates
+            existing_map_pos = None
+            for fm in existing_obj.frame_mapping:
+                if fm.frame_id == 'map':
+                    existing_map_pos = [fm.center.x, fm.center.y, fm.center.z]
+                    break
+            
+            if not existing_map_pos:
+                continue
+            
+            # Calculate distance
+            distance = math.sqrt(
+                (map_pos[0] - existing_map_pos[0]) ** 2 +
+                (map_pos[1] - existing_map_pos[1]) ** 2 +
+                (map_pos[2] - existing_map_pos[2]) ** 2
+            )
+            
+            if distance < MERGE_DISTANCE_THRESHOLD and distance < best_distance:
+                best_match = existing_obj
+                best_distance = distance
+        
+        if best_match:
+            # Merge: update existing object with new information using weighted average
+            # Give more weight to existing position (more stable)
+            weight_new = 0.3
+            weight_existing = 0.7
+            
+            # Get existing position
+            existing_map_pos = None
+            for fm in best_match.frame_mapping:
+                if fm.frame_id == 'map':
+                    existing_map_pos = [fm.center.x, fm.center.y, fm.center.z]
+                    break
+            
+            if existing_map_pos:
+                merged_x = weight_existing * existing_map_pos[0] + weight_new * map_pos[0]
+                merged_y = weight_existing * existing_map_pos[1] + weight_new * map_pos[1]
+                merged_z = weight_existing * existing_map_pos[2] + weight_new * map_pos[2]
+                
+                # Update existing object's map frame
+                for fm in best_match.frame_mapping:
+                    if fm.frame_id == 'map':
+                        fm.center.x = merged_x
+                        fm.center.y = merged_y
+                        fm.center.z = merged_z
+                        break
+                
+                # Update new object's ID to match existing (so it won't be added as duplicate)
+                obj.id = best_match.id
+                
+                self.get_logger().info(f'Merged object "{obj.label}" with existing object (id={best_match.id}) at distance {best_distance:.2f}m')
+                return True
+        
+        return False
+    
+    def _add_to_memory(self, obj, map_pos):
+        """Add object to memory. Objects are never deleted once they have map coordinates."""
+        # Use object ID as key - ensures each object is stored only once
+        # Objects are never deleted, only updated through merging
+        self.semantic_map_memory[obj.id] = obj
+        self.get_logger().info(f'Added object "{obj.label}" (id={obj.id}) to memory at map position [{map_pos[0]:.2f}, {map_pos[1]:.2f}, {map_pos[2]:.2f}]')
+    
+    def _get_all_objects_from_memory(self, type_filter, snapshot_pose=None):
+        """Get all objects from memory, optionally filtered by type. Includes robot object if pose is available.
+        All objects with map coordinates are returned - objects are never deleted.
+        Objects with same/similar label within 1.5m are clustered before returning.
+        
+        Args:
+            type_filter: List of object types to filter
+            snapshot_pose: PoseStamped message for snapshot pose (if None, uses self.latest_pose for robot)
+        """
+        objects_with_map_pos = []
+        seen_ids = set()  # Track IDs to avoid duplicates
+        
+        # Get objects from memory
+        for obj_id, obj in self.semantic_map_memory.items():
+            # Skip if already seen (shouldn't happen, but safety check)
+            if obj_id in seen_ids:
+                continue
+            
+            # Only return objects that have map coordinates
+            map_pos = None
+            for fm in obj.frame_mapping:
+                if fm.frame_id == 'map':
+                    map_pos = [fm.center.x, fm.center.y, fm.center.z]
+                    break
+            
+            if not map_pos:
+                continue
+            
+            # Apply type filter if specified
+            if type_filter and len(type_filter) > 0:
+                obj_type = self._infer_object_type(obj.label)
+                if obj_type not in type_filter:
+                    continue
+            
+            objects_with_map_pos.append((obj, map_pos))
+            seen_ids.add(obj_id)
+        
+        # Cluster objects with same/similar label that are close to each other
+        clustered_objects = self._cluster_same_label_objects(objects_with_map_pos)
+        
+        # Extract objects from clustered results
+        objects = []
+        for item in clustered_objects:
+            if isinstance(item, tuple):
+                obj, _ = item
+            else:
+                obj = item
+            objects.append(obj)
+        
+        # Add robot object if pose is available (only once, check ID)
+        # Use snapshot pose to ensure robot position matches the image snapshot
+        robot_object = self._create_robot_object(snapshot_pose=snapshot_pose)
+        if robot_object and robot_object.id not in seen_ids:
+            # Apply type filter to robot if specified
+            if not type_filter or len(type_filter) == 0 or 'robot' in type_filter:
+                objects.append(robot_object)
+                seen_ids.add(robot_object.id)
+        
+        return objects
+    
+    def _create_robot_object(self, snapshot_pose=None):
+        """Create robot object for semantic map. Only creates if pose is available.
+        
+        Args:
+            snapshot_pose: PoseStamped message for snapshot pose (if None, uses self.latest_pose)
+        """
+        # Use snapshot pose or fall back to latest_pose
+        pose_to_use = snapshot_pose if snapshot_pose is not None else self.latest_pose
+        if not pose_to_use:
+            return None
+        
+        obj = Object()
+        obj.id = "robot_self"  # Fixed ID for robot
+        obj.label = "robot"
+        obj.registered_skills = []
+        obj.registered_primitives = []
+        obj.relations = []
+        
+        # Create map frame mapping
+        map_frame = FrameMapping()
+        map_frame.frame_id = 'map'
+        map_frame.center = Point3D()
+        
+        robot_pose = pose_to_use.pose
+        map_frame.center.x = robot_pose.position.x
+        map_frame.center.y = robot_pose.position.y
+        map_frame.center.z = robot_pose.position.z
+        
+        # Extract yaw from quaternion (rotation around z-axis)
+        # Standard formula: yaw = atan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
+        qx = robot_pose.orientation.x
+        qy = robot_pose.orientation.y
+        qz = robot_pose.orientation.z
+        qw = robot_pose.orientation.w
+        # Yaw is rotation around z-axis: from +X axis, counter-clockwise is positive
+        siny_cosp = 2.0 * (qw * qz + qx * qy)
+        cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+        
+        self.get_logger().info(f'Created robot object with pose: x={map_frame.center.x:.2f}, y={map_frame.center.y:.2f}, z={map_frame.center.z:.2f}, yaw={math.degrees(yaw):.1f}°')
+        
+        # Create bounding box for robot (approximate size)
+        bbox = BoundingBox()
+        bbox.scale_x = 0.5  # Robot width
+        bbox.scale_y = 0.5  # Robot depth
+        bbox.scale_z = 1.0  # Robot height
+        bbox.yaw = yaw  # Set yaw from pose orientation
+        map_frame.bbox = [bbox]
+        map_frame.texture = []  # Initialize empty texture list
+        
+        obj.frame_mapping = [map_frame]
+        
+        return obj
     
     def _infer_object_type(self, label):
         """Infer object type from label (simple heuristic)."""

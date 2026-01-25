@@ -111,6 +111,23 @@
 
         <div class="panel">
             <div class="panel-header">
+                <div class="panel-title">Semantic Map 2D View</div>
+                <div class="controls">
+                    <label>
+                        <input type="checkbox" id="auto-refresh-map2d" checked> Auto (2s)
+                    </label>
+                    <button onclick="loadSemanticMap2D()">Refresh</button>
+                </div>
+            </div>
+            <div class="map2d-card-full">
+                <div id="semantic-map-2d-container">
+                    <canvas id="semantic-map-2d-canvas"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
                 <div class="panel-title">System Logs</div>
                 <div class="controls">
                     <label>
