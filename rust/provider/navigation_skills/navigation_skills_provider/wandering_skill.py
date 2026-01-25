@@ -11,12 +11,13 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy, LivelinessPolicy
 from rclpy.duration import Duration
 from std_msgs.msg import String, Bool
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 import json
 import random
 import time
 import signal
 import math
+import sys
 from robonix_sdk.srv import QueryPrimitive
 
 
@@ -77,14 +78,15 @@ class WanderingSkill(Node):
         self.get_logger().info(f'Publishing to status topic: {self.status_topic}')
         
         # Subscribe to pose topic (if available)
+        # prm::base.pose.amcl outputs PoseWithCovarianceStamped per spec
         if self.pose_topic:
             self.pose_subscriber = self.create_subscription(
-                PoseStamped,
+                PoseWithCovarianceStamped,
                 self.pose_topic,
-                self.pose_callback,
+                self.pose_cov_callback,
                 10
             )
-            self.get_logger().info(f'Subscribing to pose topic: {self.pose_topic}')
+            self.get_logger().info(f'Subscribing to pose topic (PoseWithCovarianceStamped from prm::base.pose.amcl): {self.pose_topic}')
         else:
             self.pose_subscriber = None
         
@@ -124,12 +126,13 @@ class WanderingSkill(Node):
         self.get_logger().info('Wandering skill initialized')
     
     def _query_primitives(self):
-        """Query robonix core for required primitives."""
+        """Query robonix core for required primitives. Exits if any required primitive is not found."""
         max_retries = 5
         retry_delay = 2.0
         
-        # Query prm::base.pose
-        self.get_logger().info('Querying prm::base.pose...')
+        # Query prm::base.pose.amcl (PoseWithCovarianceStamped from AMCL)
+        self.get_logger().info('Querying prm::base.pose.amcl...')
+        pose_found = False
         for attempt in range(max_retries):
             try:
                 wait_timeout = 10.0 if attempt < 2 else 5.0
@@ -141,7 +144,7 @@ class WanderingSkill(Node):
                         break
                 
                 request = QueryPrimitive.Request()
-                request.name = 'prm::base.pose'
+                request.name = 'prm::base.pose.amcl'
                 request.filter = '{}'
                 
                 future = self.query_primitive_client.call_async(request)
@@ -163,17 +166,23 @@ class WanderingSkill(Node):
                     output_schema = json.loads(instance.output_schema) if isinstance(instance.output_schema, str) else instance.output_schema
                     if 'pose' in output_schema:
                         self.pose_topic = output_schema['pose']
-                        self.get_logger().info(f'  Found pose topic: {self.pose_topic}')
+                        self.get_logger().info(f'  Found pose topic: {self.pose_topic} (from prm::base.pose.amcl)')
+                        pose_found = True
                         break
             except Exception as e:
-                self.get_logger().error(f'Error querying prm::base.pose: {e}')
+                self.get_logger().error(f'Error querying prm::base.pose.amcl: {e}')
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                 else:
                     break
         
+        if not pose_found:
+            self.get_logger().error('Failed to query prm::base.pose.amcl after all retries. Exiting.')
+            sys.exit(1)
+        
         # Query prm::base.navigate
         self.get_logger().info('Querying prm::base.navigate...')
+        navigate_found = False
         for attempt in range(max_retries):
             try:
                 wait_timeout = 10.0 if attempt < 2 else 5.0
@@ -209,16 +218,22 @@ class WanderingSkill(Node):
                     if 'goal' in input_schema:
                         self.navigate_goal_topic = input_schema['goal']
                         self.get_logger().info(f'  Found navigate goal topic: {self.navigate_goal_topic}')
+                        navigate_found = True
                     if 'status' in output_schema:
                         self.navigate_status_topic = output_schema['status']
                         self.get_logger().info(f'  Found navigate status topic: {self.navigate_status_topic}')
-                    break
+                    if navigate_found:
+                        break
             except Exception as e:
                 self.get_logger().error(f'Error querying prm::base.navigate: {e}')
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                 else:
                     break
+        
+        if not navigate_found:
+            self.get_logger().error('Failed to query prm::base.navigate after all retries. Exiting.')
+            sys.exit(1)
     
     def start_callback(self, msg):
         """Handle skill start request."""
@@ -387,9 +402,13 @@ class WanderingSkill(Node):
         self._publish_status(self.current_skill_id, 'finished', result, errno=0)
         self.get_logger().info(f'Wandering completed after {iteration} iterations.')
     
-    def pose_callback(self, msg):
-        """Handle pose updates."""
-        self.latest_pose = msg
+    def pose_cov_callback(self, msg):
+        """Handle PoseWithCovarianceStamped updates and convert to PoseStamped."""
+        # Convert PoseWithCovarianceStamped to PoseStamped for internal use
+        pose_stamped = PoseStamped()
+        pose_stamped.header = msg.header
+        pose_stamped.pose = msg.pose.pose
+        self.latest_pose = pose_stamped
     
     def navigate_status_callback(self, msg):
         """Handle navigation status updates."""

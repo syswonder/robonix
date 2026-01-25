@@ -23,7 +23,7 @@ The semantic map service (`semantic_map_service`) uses the front camera primitiv
 
 ### Task Plan Service
 
-The task plan service (`task_plan_service`) converts natural language task descriptions into RTDL (Real-Time Decision Logic) code. It uses DeepSeek LLM API for intelligent task planning.
+The task plan service (`task_plan_service`) converts natural language task descriptions into RTDL (Robot Task Description Langauge) code. It uses DeepSeek LLM API for intelligent task planning.
 
 **Service Interface**: `/demo_service/task_plan/plan`
 **Service Type**: `robonix_sdk/srv/service/task_plan/PlanTask`
