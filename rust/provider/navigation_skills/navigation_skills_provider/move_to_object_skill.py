@@ -133,7 +133,7 @@ class MoveToObjectSkill(Node):
         # State
         self.current_skill_id = None
         self.moving_in_progress = False
-        self.target_object_label = None
+        self.target_object_id = None
         self.stop_radius = 0.5  # Default stop radius in meters (distance from object to stop)
         self.navigation_complete = False
         self.latest_pose = None
@@ -287,7 +287,7 @@ class MoveToObjectSkill(Node):
             data = json.loads(msg.data)
             skill_id = data.get('skill_id', 'unknown')
             params = data.get('params', {})
-            target_label = params.get('target_label', '')
+            target_object_id = params.get('target_object_id', '')
             
             # Parse optional stop_radius parameter (distance in meters to stop before object)
             if 'stop_radius' in params:
@@ -299,7 +299,7 @@ class MoveToObjectSkill(Node):
             
             self.get_logger().info(
                 f'Received move_to_object request: skill_id={skill_id}, '
-                f'target_label={target_label}, stop_radius={self.stop_radius}m'
+                f'target_object_id={target_object_id}, stop_radius={self.stop_radius}m'
             )
             
             if self.moving_in_progress:
@@ -307,9 +307,9 @@ class MoveToObjectSkill(Node):
                 self._publish_status(skill_id, 'error', {'error': 'Operation already in progress'}, errno=1)
                 return
             
-            if not target_label:
-                self.get_logger().error('target_label parameter is required!')
-                self._publish_status(skill_id, 'error', {'error': 'target_label parameter is required'}, errno=2)
+            if not target_object_id:
+                self.get_logger().error('target_object_id parameter is required!')
+                self._publish_status(skill_id, 'error', {'error': 'target_object_id parameter is required'}, errno=2)
                 return
             
             # Check if required services/primitives are available
@@ -324,11 +324,11 @@ class MoveToObjectSkill(Node):
                 return
             
             self.current_skill_id = skill_id
-            self.target_object_label = target_label
+            self.target_object_id = target_object_id
             self.moving_in_progress = True
             
             # Publish running status
-            self._publish_status(skill_id, 'running', {'message': f'Searching for object: {target_label}'}, errno=0)
+            self._publish_status(skill_id, 'running', {'message': f'Searching for object with ID: {target_object_id}'}, errno=0)
             
             # Start move operation in a separate thread
             self._start_move_operation()
@@ -351,8 +351,8 @@ class MoveToObjectSkill(Node):
     def _move_operation(self):
         """Main move operation that finds and navigates to the target object."""
         try:
-            # Query semantic map for objects matching the label
-            self.get_logger().info(f'Querying semantic map for object with label: {self.target_object_label}')
+            # Query semantic map for objects
+            self.get_logger().info(f'Querying semantic map for object with ID: {self.target_object_id}')
             objects = self._query_semantic_map()
             
             if not objects:
@@ -366,21 +366,23 @@ class MoveToObjectSkill(Node):
                 self.moving_in_progress = False
                 return
             
-            # Find object with matching label
+            # Find object with matching ID (UUID is unique identifier)
             target_object = None
             for obj in objects:
-                if obj.label.lower() == self.target_object_label.lower():
+                if obj.id == self.target_object_id:
                     target_object = obj
                     break
             
             if not target_object:
-                self.get_logger().error(f'Object with label "{self.target_object_label}" not found')
+                self.get_logger().error(f'Object with ID "{self.target_object_id}" not found')
+                available_ids = [obj.id for obj in objects]
                 available_labels = [obj.label for obj in objects]
                 self._publish_status(
                     self.current_skill_id,
                     'error',
                     {
-                        'error': f'Object with label "{self.target_object_label}" not found',
+                        'error': f'Object with ID "{self.target_object_id}" not found',
+                        'available_object_ids': available_ids,
                         'available_labels': available_labels
                     },
                     errno=8

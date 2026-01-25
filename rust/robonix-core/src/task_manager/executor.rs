@@ -150,7 +150,16 @@ impl RtdlExecutor {
                     .await;
                 match &result {
                     Ok(_) => debug!("skill execution succeeded"),
-                    Err(e) => debug!("skill execution failed: {:?}", e),
+                    Err((exception_type, error_msg)) => {
+                        debug!(
+                            "skill execution failed: {:?}, error={:?}",
+                            exception_type, error_msg
+                        );
+                        // Save error message to task if available
+                        if let Some(msg) = error_msg {
+                            task.error_message = Some(msg.clone());
+                        }
+                    }
                 }
                 result
             }
@@ -158,36 +167,37 @@ impl RtdlExecutor {
                 debug!("service execution requested but not implemented");
                 // TODO: Implement service execution
                 error!("service execution not yet implemented");
-                Err(ExceptionType::Unknown(
-                    "Service execution not implemented".to_string(),
-                ))
+                let error_msg = "Service execution not implemented".to_string();
+                task.error_message = Some(error_msg.clone());
+                Err((ExceptionType::ServiceUnavailable, Some(error_msg)))
             }
             "primitive" => {
                 debug!("primitive execution requested but not implemented");
                 // TODO: Implement primitive execution
                 error!("primitive execution not yet implemented");
-                Err(ExceptionType::Unknown(
-                    "Primitive execution not implemented".to_string(),
-                ))
+                let error_msg = "Primitive execution not implemented".to_string();
+                task.error_message = Some(error_msg.clone());
+                Err((ExceptionType::PrimitiveFailed, Some(error_msg)))
             }
             _ => {
                 debug!("unknown instruction type: {}", instruction.instruction_type);
                 warn!("unknown instruction type: {}", instruction.instruction_type);
-                Err(ExceptionType::Unknown(format!(
-                    "Unknown instruction type: {}",
-                    instruction.instruction_type
-                )))
+                let error_msg =
+                    format!("Unknown instruction type: {}", instruction.instruction_type);
+                task.error_message = Some(error_msg.clone());
+                Err((ExceptionType::Unknown(error_msg.clone()), Some(error_msg)))
             }
         }
     }
 
     /// Execute a skill instruction
+    /// Returns (ExceptionType, Option<error_message>) on failure
     async fn execute_skill(
         &self,
-        task: &mut Task,
+        task: &Task,
         skill_name: &str,
         params: &Value,
-    ) -> Result<(), ExceptionType> {
+    ) -> Result<(), (ExceptionType, Option<String>)> {
         debug!("querying skill library for skill: {}", skill_name);
 
         // Query skill from skill library
@@ -200,7 +210,10 @@ impl RtdlExecutor {
 
         if query_resp.instances.is_empty() {
             debug!("skill {} not found in skill library", skill_name);
-            return Err(ExceptionType::SkillFailed);
+            return Err((
+                ExceptionType::SkillFailed,
+                Some(format!("Skill '{}' not found in skill library", skill_name)),
+            ));
         }
 
         debug!(
@@ -406,6 +419,21 @@ impl RtdlExecutor {
                         .and_then(|v| v.as_i64())
                         .unwrap_or(0);
 
+                    // Extract error message from status JSON
+                    let error_msg = status_json
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| status_json.get("message").and_then(|v| v.as_str()))
+                        .or_else(|| status_json.get("error_message").and_then(|v| v.as_str()))
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| {
+                            if errno != 0 {
+                                format!("Skill execution failed with errno={}", errno)
+                            } else {
+                                format!("Skill execution failed: state={}", state)
+                            }
+                        });
+
                     match state {
                         "finished" => {
                             if errno == 0 {
@@ -416,18 +444,18 @@ impl RtdlExecutor {
                                 return Ok(());
                             } else {
                                 error!(
-                                    "Skill {} execution finished with error: errno={}, skill_exec_id={}",
-                                    skill_name, errno, skill_exec_id
+                                    "Skill {} execution finished with error: errno={}, skill_exec_id={}, error={}",
+                                    skill_name, errno, skill_exec_id, error_msg
                                 );
-                                return Err(ExceptionType::SkillFailed);
+                                return Err((ExceptionType::SkillFailed, Some(error_msg)));
                             }
                         }
                         "error" => {
                             error!(
-                                "Skill {} execution failed: skill_exec_id={}, errno={}",
-                                skill_name, skill_exec_id, errno
+                                "Skill {} execution failed: skill_exec_id={}, errno={}, error={}",
+                                skill_name, skill_exec_id, errno, error_msg
                             );
-                            return Err(ExceptionType::SkillFailed);
+                            return Err((ExceptionType::SkillFailed, Some(error_msg)));
                         }
                         "running" => {
                             debug!(
@@ -447,16 +475,18 @@ impl RtdlExecutor {
                 }
                 Ok(None) => {
                     // Channel closed
-                    error!("Status channel closed for skill {}", skill_name);
-                    return Err(ExceptionType::SkillFailed);
+                    let error_msg = format!("Status channel closed for skill {}", skill_name);
+                    error!("{}", error_msg);
+                    return Err((ExceptionType::SkillFailed, Some(error_msg)));
                 }
                 Err(_) => {
                     // Timeout
-                    error!(
-                        "Skill {} execution timeout: skill_exec_id={}",
+                    let error_msg = format!(
+                        "Skill {} execution timeout after 5 minutes: skill_exec_id={}",
                         skill_name, skill_exec_id
                     );
-                    return Err(ExceptionType::SkillFailed);
+                    error!("{}", error_msg);
+                    return Err((ExceptionType::Timeout, Some(error_msg)));
                 }
             }
         }
@@ -544,18 +574,26 @@ impl RtdlExecutor {
                     Ok(ExecutionResult::InProgress)
                 }
             }
-            Err(exception_type) => {
+            Err((exception_type, error_message)) => {
                 debug!(
-                    "instruction {} failed for task {}: {:?}",
-                    task.context.rtdl_instruction_pointer, task.task_id, exception_type
+                    "instruction {} failed for task {}: {:?}, error={:?}",
+                    task.context.rtdl_instruction_pointer,
+                    task.task_id,
+                    exception_type,
+                    error_message
                 );
                 // Handle exception
-                let error_msg = format!(
-                    "Instruction {} failed: type={}, name={}",
-                    task.context.rtdl_instruction_pointer,
-                    instruction.instruction_type,
-                    instruction.name
-                );
+                let error_msg = error_message.unwrap_or_else(|| {
+                    format!(
+                        "Instruction {} failed: type={}, name={}",
+                        task.context.rtdl_instruction_pointer,
+                        instruction.instruction_type,
+                        instruction.name
+                    )
+                });
+
+                // Save error message to task
+                task.error_message = Some(error_msg.clone());
 
                 let recovery_action = self.exception_handler.handle_exception(
                     &mut task.context,

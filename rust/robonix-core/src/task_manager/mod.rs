@@ -337,6 +337,10 @@ impl TaskManager {
                     .update_task(&task_id, |task| {
                         task.transition_state(task::TaskState::Failed);
                         task.context.record_exception(e.clone());
+                        // Ensure error_message is set
+                        if task.error_message.is_none() {
+                            task.error_message = Some(e.clone());
+                        }
                     })
                     .await;
             }
@@ -705,6 +709,10 @@ impl TaskManager {
                             }
                             RecoveryAction::Fail => {
                                 task.transition_state(task::TaskState::Failed);
+                                // Ensure error_message is set if task failed
+                                if task.error_message.is_none() {
+                                    task.error_message = Some("Task execution failed".to_string());
+                                }
                             }
                             _ => {
                                 // Retry and Continue stay in Running state

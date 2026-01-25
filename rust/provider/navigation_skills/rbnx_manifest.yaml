@@ -37,7 +37,7 @@ skills:
     start_topic: /robot1/skill/move_to_object/start
     status_topic: /robot1/skill/move_to_object/status
     entry: bash rbnx/start_move_to_object.sh
-    start_args: '{"target_label":"string","stop_radius":"number (optional, default 0.5m)"}'
+    start_args: '{"target_object_id":"string (required, UUID of target object)","stop_radius":"number (optional, default 0.5m)"}'
     status: '{"state":"string","result":"any"}'
     metadata: '{"domain":"indoor","capability":["navigation","semantic_mapping"]}'
     version: 0.0.1

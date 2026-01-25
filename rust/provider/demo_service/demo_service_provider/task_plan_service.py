@@ -170,7 +170,9 @@ Important:
 - ALWAYS include "object_id" field in each instruction (required to specify which object executes the instruction)
 - Use object_id from the object graph (usually the robot object)
 - Use skills/primitives available in the specified object's registered_skills/registered_primitives
-- Extract object IDs and locations from the description and object graph
+- When task description mentions an object, find the best matching object from object_graph by label
+- Use the object's 'id' (UUID) to reference it in params - this is the unique identifier
+- Labels may not exactly match (e.g., 'plant' vs 'potted plant') - use semantic understanding to find the best match
 - Keep instructions simple and sequential"""
         else:
             # Default RTDL format
@@ -195,7 +197,9 @@ Important:
 - ALWAYS include "object_id" field in each instruction (required)
 - Use object_id from the object graph (usually the robot object)
 - Use skills/primitives available in the specified object's registered_skills/registered_primitives
-- Extract object IDs and locations from the description and object graph
+- When task description mentions an object, find the best matching object from object_graph by label
+- Use the object's 'id' (UUID) to reference it in params - this is the unique identifier
+- Labels may not exactly match (e.g., 'plant' vs 'potted plant') - use semantic understanding
 - Keep instructions simple and sequential"""
 
         user_prompt = f"Task description: {description}\n\n"
@@ -203,21 +207,47 @@ Important:
         # Add object graph information
         if object_graph:
             user_prompt += f"Available objects in environment:\n{json.dumps(object_graph, indent=2)}\n\n"
+            
+            # CRITICAL: Object selection instructions
+            user_prompt += "=" * 80 + "\n"
+            user_prompt += "OBJECT SELECTION RULES:\n"
+            user_prompt += "=" * 80 + "\n"
+            user_prompt += "1. Each object has a unique 'id' (UUID) and a 'label' (name).\n"
+            user_prompt += "2. When the task description mentions an object (e.g., 'go to the plant at corner'):\n"
+            user_prompt += "   - Find the BEST MATCHING object by comparing the description with object labels\n"
+            user_prompt += "   - Labels may not exactly match (e.g., task says 'plant' but object is 'potted plant')\n"
+            user_prompt += "   - Use semantic understanding to find the most relevant object\n"
+            user_prompt += "   - Consider location hints (e.g., 'at corner', 'on the table')\n"
+            user_prompt += "3. To reference an object in RTDL params, use BOTH:\n"
+            user_prompt += "   - The object's 'id' (UUID) as the unique identifier\n"
+            user_prompt += "   - The object's 'label' for human readability\n"
+            user_prompt += "4. Example: If task is 'go to the plant' and object graph has:\n"
+            user_prompt += "   {\"id\": \"abc123\", \"label\": \"potted plant\", ...}\n"
+            user_prompt += "   Then in RTDL params, use: {\"target_object_id\": \"abc123\", \"target_object_label\": \"potted plant\"}\n"
+            user_prompt += "   OR if the skill accepts just an ID: {\"target\": \"abc123\"}\n"
+            user_prompt += "5. The 'id' (UUID) is the UNIQUE identifier - always use it to specify which object to interact with.\n"
+            user_prompt += "=" * 80 + "\n\n"
+            
             # Extract robot object and its skills/primitives
-            robot_objects = [obj for obj in object_graph if 'robot' in obj.get('label', '').lower() or 'robot' in obj.get('id', '').lower()]
+            robot_objects = [obj for obj in object_graph if 'robot' in obj.get('label', '').lower() or 'robot' in obj.get('id', '').lower() or obj.get('id') == 'robot_self']
             if robot_objects:
                 robot = robot_objects[0]
-                robot_id = robot.get('id', 'robot_001')
+                robot_id = robot.get('id', 'robot_self')
                 robot_skills = robot.get('registered_skills', [])
                 robot_primitives = robot.get('registered_primitives', [])
                 user_prompt += f"Robot object ID: {robot_id}\n"
                 user_prompt += f"Robot registered skills: {robot_skills}\n"
                 user_prompt += f"Robot registered primitives: {robot_primitives}\n"
                 user_prompt += f"IMPORTANT: Use object_id='{robot_id}' in all RTDL instructions to specify that this robot executes them.\n"
-                user_prompt += "Use object IDs from the object graph when referencing objects in the task.\n"
             else:
                 user_prompt += "WARNING: No robot object found in object graph. You must still include 'object_id' field in each instruction.\n"
-                user_prompt += "Use object IDs from the object graph when referencing objects in the task.\n"
+            
+            user_prompt += "\n"
+            user_prompt += "When the task description mentions an object:\n"
+            user_prompt += "- Search through the object graph to find the best matching object by label\n"
+            user_prompt += "- Use the object's 'id' (UUID) to reference it in RTDL params\n"
+            user_prompt += "- If multiple objects match, choose based on context (location, description hints)\n"
+            user_prompt += "\n"
         
         # Add skill and primitive specifications
         if skill_primitive_specs:
@@ -228,15 +258,26 @@ Important:
         # Add skill specs from system API (preferred over skill_primitive_specs)
         if skill_specs:
             user_prompt += f"\nAvailable Skills (from system API):\n{json.dumps(skill_specs, indent=2)}\n\n"
+            user_prompt += "=" * 80 + "\n"
+            user_prompt += "SKILL USAGE INSTRUCTIONS:\n"
+            user_prompt += "=" * 80 + "\n"
             user_prompt += "IMPORTANT: Use ONLY the skills listed above. Each skill has:\n"
             user_prompt += "- name: The skill name (e.g., 'skl::wandering', 'skl::move_to_object')\n"
             user_prompt += "- start_args: The input parameter schema (JSON object describing required/optional parameters)\n"
+            user_prompt += "  * This schema tells you what parameters the skill expects\n"
+            user_prompt += "  * Required parameters MUST be included in 'params'\n"
+            user_prompt += "  * Optional parameters can be included if needed\n"
             user_prompt += "- start_topic: The topic to publish to start the skill\n"
+            user_prompt += "\n"
             user_prompt += "When generating RTDL:\n"
-            user_prompt += "1. Use the exact skill name from the 'name' field (e.g., 'skl::wandering')\n"
-            user_prompt += "2. Use the 'start_args' schema to determine what parameters to include in 'params'\n"
-            user_prompt += "3. Ensure all parameters in 'params' match the types specified in 'start_args'\n"
-            user_prompt += "4. Only use skills that are listed above\n"
+            user_prompt += "1. Use the exact skill name from the 'name' field (e.g., 'skl::wandering', 'skl::move_to_object')\n"
+            user_prompt += "2. Read the 'start_args' schema carefully to understand what parameters the skill expects\n"
+            user_prompt += "3. For object-related skills (e.g., 'skl::move_to_object'):\n"
+            user_prompt += "   - Use 'target_object_id' parameter with the object's UUID (from object_graph)\n"
+            user_prompt += "   - The UUID is the unique identifier for the object\n"
+            user_prompt += "4. Ensure all required parameters in 'params' match the types specified in 'start_args'\n"
+            user_prompt += "5. Only use skills that are listed above\n"
+            user_prompt += "=" * 80 + "\n\n"
         
         user_prompt += "\nGenerate RTDL code for this task:"
         
