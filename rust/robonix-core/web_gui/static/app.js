@@ -874,6 +874,11 @@ let map2DState = {
     maxX: 0,
     minY: 0,
     maxY: 0,
+    isDragging: false,
+    dragStartX: 0,
+    dragStartY: 0,
+    dragStartOffsetX: 0,
+    dragStartOffsetY: 0,
 };
 
 async function loadSemanticMap2D() {
@@ -984,34 +989,71 @@ function renderSemanticMap2D(objects) {
     minY -= padding;
     maxY += padding;
     
-    // Calculate scale to fit all objects (use display dimensions, not canvas dimensions)
+    // Update map2DState bounds
+    map2DState.minX = minX;
+    map2DState.maxX = maxX;
+    map2DState.minY = minY;
+    map2DState.maxY = maxY;
+    
+    // Calculate initial scale to fit all objects (only if scale is 1.0, i.e., first render)
     const rangeX = maxX - minX;
     const rangeY = maxY - minY;
-    const scaleX = (displayWidth - 40) / rangeX;
-    const scaleY = (displayHeight - 40) / rangeY;
-    const scale = Math.min(scaleX, scaleY);
+    if (map2DState.scale === 1.0 && rangeX > 0 && rangeY > 0) {
+        const scaleX = (displayWidth - 40) / rangeX;
+        const scaleY = (displayHeight - 40) / rangeY;
+        map2DState.scale = Math.min(scaleX, scaleY);
+    }
+    
+    const scale = map2DState.scale;
+    const offsetX = map2DState.offsetX;
+    const offsetY = map2DState.offsetY;
     
     // Helper function to convert world coordinates to canvas coordinates
     const worldToCanvas = (wx, wy) => {
-        const cx = 20 + (wx - minX) * scale;
-        const cy = displayHeight - 20 - (wy - minY) * scale; // Flip Y axis
+        const cx = 20 + (wx - minX) * scale + offsetX;
+        const cy = displayHeight - 20 - (wy - minY) * scale - offsetY; // Flip Y axis
         return { x: cx, y: cy };
     };
     
-    // Draw grid
+    // Draw grid - cover entire canvas
     ctx.strokeStyle = '#e0e0e0';
     ctx.lineWidth = 0.5;
     
     const gridStep = Math.max(1.0, Math.ceil(Math.max(rangeX, rangeY) / 10));
-    for (let x = Math.floor(minX / gridStep) * gridStep; x <= maxX; x += gridStep) {
-        const pos = worldToCanvas(x, minY);
+    
+    // Calculate world coordinates for canvas edges (considering offset)
+    const canvasToWorld = (cx, cy) => {
+        const wx = (cx - 20 - offsetX) / scale + minX;
+        const wy = (displayHeight - 20 - cy - offsetY) / scale + minY; // Flip Y axis
+        return { x: wx, y: wy };
+    };
+    
+    // Get world bounds for visible area (considering offset and scale)
+    const topLeft = canvasToWorld(0, 0);
+    const bottomRight = canvasToWorld(displayWidth, displayHeight);
+    const visibleMinX = Math.min(topLeft.x, bottomRight.x);
+    const visibleMaxX = Math.max(topLeft.x, bottomRight.x);
+    const visibleMinY = Math.min(topLeft.y, bottomRight.y);
+    const visibleMaxY = Math.max(topLeft.y, bottomRight.y);
+    
+    // Draw vertical grid lines - extend beyond visible area to ensure full coverage
+    const gridStartX = Math.floor(visibleMinX / gridStep) * gridStep - gridStep * 2;
+    const gridEndX = Math.ceil(visibleMaxX / gridStep) * gridStep + gridStep * 2;
+    for (let x = gridStartX; x <= gridEndX; x += gridStep) {
+        const pos = worldToCanvas(x, 0);
+        // Draw line from top to bottom of canvas
         ctx.beginPath();
         ctx.moveTo(pos.x, 0);
         ctx.lineTo(pos.x, displayHeight);
         ctx.stroke();
     }
-    for (let y = Math.floor(minY / gridStep) * gridStep; y <= maxY; y += gridStep) {
-        const pos = worldToCanvas(minX, y);
+    
+    // Draw horizontal grid lines - extend beyond visible area to ensure full coverage
+    const gridStartY = Math.floor(visibleMinY / gridStep) * gridStep - gridStep * 2;
+    const gridEndY = Math.ceil(visibleMaxY / gridStep) * gridStep + gridStep * 2;
+    for (let y = gridStartY; y <= gridEndY; y += gridStep) {
+        const pos = worldToCanvas(0, y);
+        // Draw line from left to right of canvas
         ctx.beginPath();
         ctx.moveTo(0, pos.y);
         ctx.lineTo(displayWidth, pos.y);
@@ -1668,6 +1710,97 @@ if ('scrollRestoration' in history) {
     }
 })();
 
+// Initialize 2D map canvas interaction
+function setupMap2DInteraction() {
+    const canvas = document.getElementById('semantic-map-2d-canvas');
+    if (!canvas) return;
+    
+    // Mouse drag
+    canvas.addEventListener('mousedown', (e) => {
+        map2DState.isDragging = true;
+        map2DState.dragStartX = e.clientX;
+        map2DState.dragStartY = e.clientY;
+        map2DState.dragStartOffsetX = map2DState.offsetX;
+        map2DState.dragStartOffsetY = map2DState.offsetY;
+        canvas.style.cursor = 'grabbing';
+    });
+    
+    canvas.addEventListener('mousemove', (e) => {
+        if (map2DState.isDragging) {
+            const dx = e.clientX - map2DState.dragStartX;
+            const dy = e.clientY - map2DState.dragStartY;
+            map2DState.offsetX = map2DState.dragStartOffsetX + dx;
+            map2DState.offsetY = map2DState.dragStartOffsetY - dy; // Flip Y
+            loadSemanticMap2D(); // Re-render
+        }
+    });
+    
+    canvas.addEventListener('mouseup', () => {
+        map2DState.isDragging = false;
+        canvas.style.cursor = 'crosshair';
+    });
+    
+    canvas.addEventListener('mouseleave', () => {
+        map2DState.isDragging = false;
+        canvas.style.cursor = 'crosshair';
+    });
+}
+
+// Zoom functions for 2D map
+function zoomMap2D(action) {
+    const canvas = document.getElementById('semantic-map-2d-canvas');
+    if (!canvas) return;
+    
+    if (action === 'reset') {
+        // Reset to fit all objects
+        map2DState.scale = 1.0;
+        map2DState.offsetX = 0;
+        map2DState.offsetY = 0;
+        // Recalculate initial scale
+        const rangeX = map2DState.maxX - map2DState.minX;
+        const rangeY = map2DState.maxY - map2DState.minY;
+        if (rangeX > 0 && rangeY > 0) {
+            const container = canvas.parentElement;
+            const containerWidth = container.clientWidth || container.offsetWidth || 800;
+            const containerHeight = container.clientHeight || container.offsetHeight || 400;
+            const displayWidth = containerWidth - 20;
+            const displayHeight = Math.max(380, containerHeight - 20);
+            const scaleX = (displayWidth - 40) / rangeX;
+            const scaleY = (displayHeight - 40) / rangeY;
+            map2DState.scale = Math.min(scaleX, scaleY);
+        }
+    } else {
+        // Zoom in/out at canvas center
+        const container = canvas.parentElement;
+        const containerWidth = container.clientWidth || container.offsetWidth || 800;
+        const containerHeight = container.clientHeight || container.offsetHeight || 400;
+        const displayWidth = containerWidth - 20;
+        const displayHeight = Math.max(380, containerHeight - 20);
+        const centerX = displayWidth / 2;
+        const centerY = displayHeight / 2;
+        
+        // Calculate world coordinates at canvas center before zoom
+        const scaleBefore = map2DState.scale;
+        const worldX = (centerX - 20 - map2DState.offsetX) / scaleBefore + map2DState.minX;
+        const worldY = (displayHeight - 20 - centerY - map2DState.offsetY) / scaleBefore + map2DState.minY;
+        
+        // Zoom
+        const zoomFactor = action === 'in' ? 1.2 : 0.833; // 1/1.2 ≈ 0.833
+        map2DState.scale = Math.max(0.1, Math.min(10.0, map2DState.scale * zoomFactor));
+        
+        // Calculate world coordinates at canvas center after zoom
+        const scaleAfter = map2DState.scale;
+        const newCanvasX = 20 + (worldX - map2DState.minX) * scaleAfter;
+        const newCanvasY = displayHeight - 20 - (worldY - map2DState.minY) * scaleAfter;
+        
+        // Adjust offset to keep canvas center fixed in world coordinates
+        map2DState.offsetX += centerX - newCanvasX;
+        map2DState.offsetY += (displayHeight - centerY) - newCanvasY;
+    }
+    
+    loadSemanticMap2D(); // Re-render
+}
+
 // Initialize on page load
 loadStatus();
 loadTfTree();
@@ -1681,3 +1814,4 @@ setupAutoRefreshLogs();
 setupAutoRefreshComponents();
 setupAutoRefreshViz();
 setupAutoRefreshMap2D();
+setupMap2DInteraction();

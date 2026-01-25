@@ -11,8 +11,10 @@ amcl:
     global_frame_id: "map"
     laser_max_range: -1.0
     laser_min_range: -1.0
-    update_min_d: 0.05
-    update_min_a: 0.05
+    # Set to negative values to enable continuous pose publishing even when robot is stationary
+    # This causes AMCL to publish amcl_pose on every scan arrival
+    update_min_d: -1.0
+    update_min_a: -1.0
     resample_interval: 1
     set_initial_pose: true
     initial_pose:

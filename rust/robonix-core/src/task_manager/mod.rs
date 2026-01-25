@@ -792,6 +792,14 @@ impl TaskManager {
 
         let service_instance = &query_resp.instances[0]; // TODO: we are choosing the first one here for now
         let service_name = &service_instance.entry;
+        debug!(
+            "[semantic_map] found service instance: entry={}, provider={}, version={}, metadata={}",
+            service_name,
+            service_instance.provider,
+            service_instance.version,
+            service_instance.metadata
+        );
+
         // Parse metadata JSON string to get srv_type
         let metadata_value: serde_json::Value = serde_json::from_str(&service_instance.metadata)
             .unwrap_or_else(|_| serde_json::json!({}));
@@ -799,6 +807,11 @@ impl TaskManager {
             .get("srv_type")
             .and_then(|v| v.as_str())
             .unwrap_or("robonix_sdk/srv/service/semantic_map/QuerySemanticMap");
+
+        debug!(
+            "[semantic_map] calling service: name={}, type={}",
+            service_name, service_type
+        );
 
         let object_graph = {
             let mut node_guard = node.lock().await;
@@ -843,18 +856,72 @@ impl TaskManager {
 
             let request = crate::ros_idl::service_types::QuerySemanticMapRequest { types: vec![] };
 
-            let timeout_duration = Duration::from_secs(30);
-            let response = match timeout(timeout_duration, client.async_call_service(request)).await
-            {
-                Ok(Ok(response)) => response,
-                Ok(Err(e)) => {
-                    debug!("[semantic_map] service call failed: {:?}", e);
-                    return;
+            // Semantic map service now returns immediately from memory, but we need to wait for service discovery
+            // ROS2 service discovery can take a few seconds, especially on first call
+            let timeout_duration = Duration::from_secs(10); // Increased timeout to allow for service discovery
+            debug!(
+                "[semantic_map] calling service with timeout: {}s",
+                timeout_duration.as_secs()
+            );
+            let call_start = std::time::Instant::now();
+
+            // Retry logic: ROS2 service discovery can be slow, especially on first call
+            let max_retries = 2;
+            let mut last_error = None;
+            let mut response_opt = None;
+
+            for attempt in 0..max_retries {
+                if attempt > 0 {
+                    // Wait a bit before retry to allow service discovery
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    debug!(
+                        "[semantic_map] retrying service call (attempt {}/{})",
+                        attempt + 1,
+                        max_retries
+                    );
                 }
-                Err(_) => {
+
+                let result =
+                    timeout(timeout_duration, client.async_call_service(request.clone())).await;
+
+                match result {
+                    Ok(Ok(response)) => {
+                        let elapsed = call_start.elapsed();
+                        debug!(
+                            "[semantic_map] service call succeeded in {:?} (attempt {})",
+                            elapsed,
+                            attempt + 1
+                        );
+                        response_opt = Some(response);
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        last_error = Some(format!("Service call error: {:?}", e));
+                        if attempt < max_retries - 1 {
+                            continue; // Retry
+                        }
+                    }
+                    Err(_) => {
+                        let elapsed = call_start.elapsed();
+                        last_error = Some(format!(
+                            "Service call timeout after {}s (elapsed: {:?})",
+                            timeout_duration.as_secs(),
+                            elapsed
+                        ));
+                        if attempt < max_retries - 1 {
+                            continue; // Retry
+                        }
+                    }
+                }
+            }
+
+            let response = match response_opt {
+                Some(r) => r,
+                None => {
                     warn!(
-                        "[semantic_map] service call timeout after {:?}",
-                        timeout_duration.as_secs()
+                        "[semantic_map] service call failed after {} attempts: {}",
+                        max_retries,
+                        last_error.unwrap_or_else(|| "Unknown error".to_string())
                     );
                     return;
                 }
@@ -913,7 +980,7 @@ impl TaskManager {
                 }
 
                 if !object_summaries.is_empty() {
-                    info!(
+                    debug!(
                         "[semantic_map] first {} objects: {}",
                         print_count,
                         object_summaries.join(", ")
@@ -922,13 +989,6 @@ impl TaskManager {
             }
         } else {
             debug!("[semantic_map] cache updated: 0 objects");
-        }
-
-        if object_count != old_count {
-            info!(
-                "[semantic_map] object count changed: {} -> {}",
-                old_count, object_count
-            );
         }
     }
 }
