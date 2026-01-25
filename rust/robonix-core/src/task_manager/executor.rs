@@ -121,11 +121,12 @@ impl RtdlExecutor {
     }
 
     /// Execute a single RTDL instruction
+    /// Returns (ExceptionType, Option<error_message>) on failure
     pub async fn execute_instruction(
         &self,
         task: &mut Task,
         instruction: &RtdlInstruction,
-    ) -> Result<(), ExceptionType> {
+    ) -> Result<(), (ExceptionType, Option<String>)> {
         debug!(
             "executing instruction: task_id={}, object_id={}, type={}, name={}, params={:?}",
             task.task_id,
@@ -210,10 +211,8 @@ impl RtdlExecutor {
 
         if query_resp.instances.is_empty() {
             debug!("skill {} not found in skill library", skill_name);
-            return Err((
-                ExceptionType::SkillFailed,
-                Some(format!("Skill '{}' not found in skill library", skill_name)),
-            ));
+            let error_msg = format!("Skill '{}' not found in skill library", skill_name);
+            return Err((ExceptionType::SkillFailed, Some(error_msg)));
         }
 
         debug!(
@@ -250,7 +249,8 @@ impl RtdlExecutor {
             "params": params
         });
         let start_msg_data = serde_json::to_string(&start_msg_json).map_err(|e| {
-            ExceptionType::Unknown(format!("Failed to serialize start message: {}", e))
+            let error_msg = format!("Failed to serialize start message: {}", e);
+            (ExceptionType::Unknown(error_msg.clone()), Some(error_msg))
         })?;
 
         // Get node for publishing/subscribing
@@ -267,10 +267,11 @@ impl RtdlExecutor {
 
         // Create publisher for start_topic (std_msgs/msg/String)
         let start_topic_name = Name::parse(&skill_instance.start_topic).map_err(|e| {
-            ExceptionType::Unknown(format!(
+            let error_msg = format!(
                 "Failed to parse start_topic '{}': {}",
                 skill_instance.start_topic, e
-            ))
+            );
+            (ExceptionType::Unknown(error_msg.clone()), Some(error_msg))
         })?;
         let start_topic = node_guard
             .create_topic(
@@ -279,27 +280,30 @@ impl RtdlExecutor {
                 &topic_qos,
             )
             .map_err(|e| {
-                ExceptionType::Unknown(format!(
+                let error_msg = format!(
                     "Failed to create start_topic '{}': {}",
                     skill_instance.start_topic, e
-                ))
+                );
+                (ExceptionType::Unknown(error_msg.clone()), Some(error_msg))
             })?;
 
         let start_publisher: Publisher<crate::ros_idl::skill::StdString> = node_guard
             .create_publisher(&start_topic, None)
             .map_err(|e| {
-                ExceptionType::Unknown(format!(
+                let error_msg = format!(
                     "Failed to create publisher for start_topic '{}': {}",
                     skill_instance.start_topic, e
-                ))
+                );
+                (ExceptionType::Unknown(error_msg.clone()), Some(error_msg))
             })?;
 
         // Create subscription for status_topic (std_msgs/msg/String)
         let status_topic_name = Name::parse(&skill_instance.status_topic).map_err(|e| {
-            ExceptionType::Unknown(format!(
+            let error_msg = format!(
                 "Failed to parse status_topic '{}': {}",
                 skill_instance.status_topic, e
-            ))
+            );
+            (ExceptionType::Unknown(error_msg.clone()), Some(error_msg))
         })?;
         let status_topic = node_guard
             .create_topic(
@@ -308,19 +312,21 @@ impl RtdlExecutor {
                 &topic_qos,
             )
             .map_err(|e| {
-                ExceptionType::Unknown(format!(
+                let error_msg = format!(
                     "Failed to create status_topic '{}': {}",
                     skill_instance.status_topic, e
-                ))
+                );
+                (ExceptionType::Unknown(error_msg.clone()), Some(error_msg))
             })?;
 
         let status_subscription: Subscription<crate::ros_idl::skill::StdString> = node_guard
             .create_subscription(&status_topic, None)
             .map_err(|e| {
-                ExceptionType::Unknown(format!(
+                let error_msg = format!(
                     "Failed to create subscription for status_topic '{}': {}",
                     skill_instance.status_topic, e
-                ))
+                );
+                (ExceptionType::Unknown(error_msg.clone()), Some(error_msg))
             })?;
 
         drop(node_guard); // Release node lock
@@ -360,7 +366,8 @@ impl RtdlExecutor {
             data: start_msg_data.clone(),
         };
         start_publisher.publish(start_msg).map_err(|e| {
-            ExceptionType::Unknown(format!("Failed to publish start message: {}", e))
+            let error_msg = format!("Failed to publish start message: {}", e);
+            (ExceptionType::Unknown(error_msg.clone()), Some(error_msg))
         })?;
 
         info!(
@@ -380,7 +387,11 @@ impl RtdlExecutor {
                     "Skill {} execution timeout after {:?}",
                     skill_name, timeout_duration
                 );
-                return Err(ExceptionType::SkillFailed);
+                let error_msg = format!(
+                    "Skill {} execution timeout after {:?}",
+                    skill_name, timeout_duration
+                );
+                return Err((ExceptionType::SkillFailed, Some(error_msg)));
             }
 
             match timeout(remaining_timeout, status_rx.recv()).await {
