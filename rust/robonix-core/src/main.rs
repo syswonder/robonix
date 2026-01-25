@@ -74,13 +74,13 @@ fn main() {
         }
     });
 
-    // Create topic monitor and start monitoring
+    // Create topic monitor (no periodic task - topics discovered on-demand)
     let topic_monitor = Arc::new(robonix_core::perception::topic_monitor::TopicMonitor::new());
-    let topic_monitor_clone = topic_monitor.clone();
-    let node_for_topics = node_arc.clone();
-    rt.spawn(async move {
-        let mut node_guard = node_for_topics.lock().await;
-        if let Err(e) = topic_monitor_clone.start_monitoring(&mut *node_guard).await {
+    // Initial discovery (synchronous, no spawn needed)
+    let topic_monitor_init = topic_monitor.clone();
+    rt.block_on(async {
+        let mut node_guard = node_arc.lock().await;
+        if let Err(e) = topic_monitor_init.start_monitoring(&mut *node_guard).await {
             eprintln!("Failed to start topic monitoring: {}", e);
         }
     });

@@ -67,22 +67,36 @@ class MoveToObjectSkill(Node):
         # Query services and primitives
         self._query_services_and_primitives()
         
-        # Subscribe to skill start topic
+        # Subscribe to skill start topic with QoS matching robonix-core publisher
+        # robonix-core uses: Reliable, KeepLast(10), Volatile
+        start_topic_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+            durability=DurabilityPolicy.VOLATILE
+        )
         self.start_subscriber = self.create_subscription(
             String,
             self.start_topic,
             self.start_callback,
-            10
+            start_topic_qos
         )
-        self.get_logger().info(f'Subscribing to start topic: {self.start_topic}')
+        self.get_logger().info(f'Subscribing to start topic: {self.start_topic} with RELIABLE QoS')
         
-        # Publish to skill status topic
+        # Publish to skill status topic with QoS matching robonix-core subscriber
+        # robonix-core uses: Reliable, KeepLast(10), Volatile
+        status_topic_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+            durability=DurabilityPolicy.VOLATILE
+        )
         self.status_publisher = self.create_publisher(
             String,
             self.status_topic,
-            10
+            status_topic_qos
         )
-        self.get_logger().info(f'Publishing to status topic: {self.status_topic}')
+        self.get_logger().info(f'Publishing to status topic: {self.status_topic} with RELIABLE QoS')
         
         # Subscribe to pose topic (if available)
         # prm::base.pose.amcl outputs PoseWithCovarianceStamped per spec
@@ -150,6 +164,9 @@ class MoveToObjectSkill(Node):
         self.stop_radius = 0.5  # Default stop radius in meters (distance from object to stop)
         self.navigation_complete = False
         self.latest_pose = None
+        # Status reporting timer
+        self.status_timer = None
+        self.status_timer_running = False
         
         self.get_logger().info('Move to object skill initialized')
     
@@ -340,8 +357,11 @@ class MoveToObjectSkill(Node):
             self.target_object_id = target_object_id
             self.moving_in_progress = True
             
-            # Publish running status
-            self._publish_status(skill_id, 'running', {'message': f'Searching for object with ID: {target_object_id}'}, errno=0)
+            # Publish initial running status immediately
+            self._publish_status(skill_id, 'running', {'message': f'Received request, searching for object with ID: {target_object_id}'}, errno=0)
+            
+            # Start periodic status reporting (every 1 second)
+            self._start_status_timer(skill_id)
             
             # Start move operation in a separate thread
             self._start_move_operation()
@@ -354,6 +374,33 @@ class MoveToObjectSkill(Node):
             import traceback
             self.get_logger().error(f'Traceback:\n{traceback.format_exc()}')
             self._publish_status('unknown', 'error', {'error': str(e)}, errno=6)
+    
+    def _start_status_timer(self, skill_id):
+        """Start periodic status reporting (every 1 second)."""
+        import threading
+        self.status_timer_running = True
+        
+        def status_timer_loop():
+            while self.status_timer_running and self.moving_in_progress:
+                time.sleep(1.0)
+                if self.status_timer_running and self.moving_in_progress:
+                    # Get current status message
+                    if self.navigation_complete:
+                        # Navigation completed, timer will be stopped by _move_operation
+                        break
+                    else:
+                        # Still running, send periodic status
+                        current_message = f'Processing: searching for object {self.target_object_id}'
+                        if self.latest_pose:
+                            current_message = f'Processing: navigating to object {self.target_object_id}'
+                        self._publish_status(skill_id, 'running', {'message': current_message}, errno=0)
+        
+        self.status_timer = threading.Thread(target=status_timer_loop, daemon=True)
+        self.status_timer.start()
+    
+    def _stop_status_timer(self):
+        """Stop periodic status reporting."""
+        self.status_timer_running = False
     
     def _start_move_operation(self):
         """Start the move operation in a separate thread."""
@@ -372,6 +419,7 @@ class MoveToObjectSkill(Node):
                 # Query timeout - distinguish from "no objects"
                 error_msg = f'Semantic map query timeout: {str(e)}'
                 self.get_logger().error(error_msg)
+                self._stop_status_timer()
                 self._publish_status(
                     self.current_skill_id,
                     'error',
@@ -384,6 +432,7 @@ class MoveToObjectSkill(Node):
                 # Service unavailable or other runtime errors
                 error_msg = f'Semantic map service error: {str(e)}'
                 self.get_logger().error(error_msg)
+                self._stop_status_timer()
                 self._publish_status(
                     self.current_skill_id,
                     'error',
@@ -397,6 +446,7 @@ class MoveToObjectSkill(Node):
             if not objects:
                 error_msg = 'Semantic map query returned no objects (map may be empty)'
                 self.get_logger().error(error_msg)
+                self._stop_status_timer()
                 self._publish_status(
                     self.current_skill_id,
                     'error',
@@ -423,6 +473,7 @@ class MoveToObjectSkill(Node):
                     f'This may happen if the object was removed or the ID from planning is incorrect.'
                 )
                 self.get_logger().error(error_msg)
+                self._stop_status_timer()
                 self._publish_status(
                     self.current_skill_id,
                     'error',
@@ -443,6 +494,7 @@ class MoveToObjectSkill(Node):
             object_pose = self._get_object_pose_in_map(target_object)
             if not object_pose:
                 self.get_logger().error(f'Could not get pose for object {target_object.id}')
+                self._stop_status_timer()
                 self._publish_status(
                     self.current_skill_id,
                     'error',
@@ -505,6 +557,7 @@ class MoveToObjectSkill(Node):
                 if final_distance is not None:
                     result['final_distance_to_object'] = final_distance
                 
+                self._stop_status_timer()
                 self._publish_status(self.current_skill_id, 'finished', result, errno=0)
                 self.get_logger().info(
                     f'Successfully navigated to object: {target_object.label} '
@@ -512,7 +565,9 @@ class MoveToObjectSkill(Node):
                     if final_distance is not None
                     else f'Successfully navigated to object: {target_object.label}'
                 )
+                self.moving_in_progress = False
             else:
+                self._stop_status_timer()
                 self._publish_status(
                     self.current_skill_id,
                     'error',
@@ -520,10 +575,10 @@ class MoveToObjectSkill(Node):
                     errno=10
                 )
                 self.get_logger().error('Navigation timeout')
-            
-            self.moving_in_progress = False
+                self.moving_in_progress = False
             
         except Exception as e:
+            self._stop_status_timer()
             self.get_logger().error(f'Error in move operation: {e}')
             import traceback
             self.get_logger().error(f'Traceback:\n{traceback.format_exc()}')

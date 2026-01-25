@@ -40,6 +40,10 @@ impl TopicMonitor {
     }
 
     pub async fn get_topics(&self) -> TopicsResponse {
+        // Refresh topics list on each call (on-demand discovery)
+        // This avoids maintaining a periodic async task
+        let _ = self.discover_topics().await; // Ignore errors, use cached data if discovery fails
+
         let topics = self.topics.lock().await;
         let mut topics_vec: Vec<TopicInfo> = topics.values().cloned().collect();
         // Sort by topic name
@@ -48,8 +52,9 @@ impl TopicMonitor {
     }
 
     /// Discover topics using ROS2 command line tools
+    /// Uses `ros2 topic list -t` to get all topics and their types in one command
     pub async fn discover_topics(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // Get list of topics using ros2 topic list
+        // Get list of topics with types using ros2 topic list -t
         // Source ROS2 environment first and add timeout to prevent hanging
         let setup_path = Self::get_ros2_setup_path();
         let output = tokio::time::timeout(
@@ -57,7 +62,7 @@ impl TopicMonitor {
             Command::new("bash")
                 .arg("-c")
                 .arg(format!(
-                    "source {} && timeout 2 ros2 topic list",
+                    "source {} && timeout 2 ros2 topic list -t",
                     setup_path
                 ))
                 .output(),
@@ -67,35 +72,65 @@ impl TopicMonitor {
         let output = match output {
             Ok(Ok(output)) => output,
             Ok(Err(e)) => {
-                return Err(format!("Failed to run ros2 topic list: {}", e).into());
+                return Err(format!("Failed to run ros2 topic list -t: {}", e).into());
             }
             Err(_) => {
-                debug!("ros2 topic list timed out");
+                debug!("ros2 topic list -t timed out");
                 return Ok(()); // Return empty result instead of error
             }
         };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            debug!("ros2 topic list failed: {}", stderr);
+            debug!("ros2 topic list -t failed: {}", stderr);
             return Ok(()); // Return empty result instead of error
         }
 
         let topic_list = String::from_utf8_lossy(&output.stdout);
-        // Get all topics (filter out empty lines)
-        let topic_names: Vec<String> = topic_list
-            .lines()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
 
-        debug!("Discovered {} topics", topic_names.len());
-
-        // Get type for each topic
+        // Parse output: each line is "topic_name [message_type]"
+        // Example: "/amcl_pose [geometry_msgs/msg/PoseWithCovarianceStamped]"
         let mut topics_map = self.topics.lock().await;
+        let mut current_topics_set = HashSet::new();
 
-        // Create a set of currently existing topics for comparison
-        let current_topics_set: HashSet<String> = topic_names.iter().cloned().collect();
+        for line in topic_list.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            // Parse line: "topic_name [message_type1, message_type2, ...]" or just "topic_name"
+            // Example: "/clock [builtin_interfaces/msg/Time, rosgraph_msgs/msg/Clock]"
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.is_empty() {
+                continue;
+            }
+
+            let topic_name = parts[0].to_string();
+            let message_type = if parts.len() >= 2 {
+                // Join all parts after topic name (handles multiple types in brackets)
+                // Example: "[builtin_interfaces/msg/Time," "rosgraph_msgs/msg/Clock]"
+                let types_str = parts[1..].join(" ");
+                // Remove brackets and trim
+                types_str
+                    .trim_matches(|c| c == '[' || c == ']')
+                    .trim()
+                    .to_string()
+            } else {
+                "unknown".to_string()
+            };
+
+            current_topics_set.insert(topic_name.clone());
+
+            // Update or insert topic
+            topics_map.insert(
+                topic_name.clone(),
+                TopicInfo {
+                    name: topic_name.clone(),
+                    message_type: message_type.clone(),
+                },
+            );
+        }
 
         // Remove topics that no longer exist
         let topics_to_remove: Vec<String> = topics_map
@@ -109,88 +144,20 @@ impl TopicMonitor {
             topics_map.remove(topic_name);
         }
 
-        for topic_name in topic_names {
-            // Skip if already exists
-            if topics_map.contains_key(&topic_name) {
-                continue;
-            }
-
-            // Get topic type using ros2 topic type
-            // Source ROS2 environment first and add timeout to prevent hanging
-            let setup_path = Self::get_ros2_setup_path();
-            let topic_name_clone = topic_name.clone();
-            let type_output = tokio::time::timeout(
-                tokio::time::Duration::from_secs(2),
-                Command::new("bash")
-                    .arg("-c")
-                    .arg(format!(
-                        "source {} && timeout 1 ros2 topic type {}",
-                        setup_path, &topic_name_clone
-                    ))
-                    .output(),
-            )
-            .await;
-
-            let message_type = match type_output {
-                Ok(Ok(output)) if output.status.success() => {
-                    // Some topics have multiple types, collect all of them
-                    let types: Vec<String> = String::from_utf8_lossy(&output.stdout)
-                        .lines()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-
-                    if types.is_empty() {
-                        "unknown".to_string()
-                    } else {
-                        types.join(", ")
-                    }
-                }
-                _ => {
-                    debug!(
-                        "Failed to get type for topic {} (timeout or error)",
-                        topic_name
-                    );
-                    "unknown".to_string()
-                }
-            };
-
-            debug!("Topic {} has type {}", topic_name, message_type);
-
-            let topic_name_clone = topic_name.clone();
-            topics_map.insert(
-                topic_name,
-                TopicInfo {
-                    name: topic_name_clone,
-                    message_type: message_type.clone(),
-                },
-            );
-        }
+        debug!("Discovered {} topics", topics_map.len());
         drop(topics_map);
 
         Ok(())
     }
 
-    /// Start monitoring topics by subscribing to them
+    /// Start monitoring topics by discovering them once
+    /// No periodic task - topics are discovered on-demand when get_topics() is called
     pub async fn start_monitoring(
         &self,
         _node: &mut Node,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // First discover topics (this will also start monitoring for new topics)
+        // Initial discovery
         self.discover_topics().await?;
-
-        // Spawn task to periodically discover new topics
-        let monitor = Arc::new(self.clone());
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                if let Err(e) = monitor.discover_topics().await {
-                    debug!("Error discovering topics: {:?}", e);
-                }
-            }
-        });
-
         Ok(())
     }
 }

@@ -12,6 +12,8 @@ import json
 import base64
 import uuid
 import math
+import threading
+import time
 from pathlib import Path
 from datetime import datetime
 import rclpy
@@ -115,15 +117,21 @@ class SemanticMapService(Node):
         # Robot pose (will be queried from primitives)
         self.pose_topic = None
         self.latest_pose = None
+        # Pose history for timestamp matching (stores up to 100 poses with timestamps)
+        self.pose_history = []  # List of (stamp, pose) tuples, sorted by stamp
+        self.pose_history_lock = threading.Lock()  # Thread-safe access to pose history
         
         # Semantic map memory: store objects with map coordinates for clustering
         # Key: object.id -> Object with map frame
         # Objects are never deleted once they have map coordinates
         self.semantic_map_memory = {}  # Maps object ID to Object
+        self.memory_lock = threading.Lock()  # Thread-safe access to memory
         
-        # Counter for periodic Qwen-assisted merging
-        self.query_count = 0
-        self.qwen_merge_interval = 3  # Trigger Qwen merge every 3 queries
+        
+        # Background update thread control
+        self.update_thread = None
+        self.update_thread_running = False
+        self.update_interval = 5.0  # Update every 5 seconds
         
         # Query camera primitives - exit if failed
         self._query_camera_primitives()
@@ -194,16 +202,22 @@ class SemanticMapService(Node):
         else:
             self.get_logger().warn('No pose topic available - robot object will use default position (0,0,0)')
         
-        # Create service
+        # Create service (use default QoS - let ROS2 handle compatibility)
         self.service = self.create_service(
             QuerySemanticMap,
             '/demo_service/semantic_map/query',
             self.query_callback
         )
         
+        # Start background update thread
+        self.update_thread_running = True
+        self.update_thread = threading.Thread(target=self._background_update_loop, daemon=True)
+        self.update_thread.start()
+        self.get_logger().info('Started background semantic map update thread')
+        
         self.get_logger().info('Semantic map service started')
         self.get_logger().info('  Service: /demo_service/semantic_map/query')
-        self.get_logger().info('  Using Qwen3-VL for object detection')
+        self.get_logger().info('  Using Qwen3-VL for object detection (background updates)')
     
     def _query_camera_primitives(self):
         """Query front camera primitives from OS with retry logic. Exits if failed."""
@@ -427,77 +441,36 @@ class SemanticMapService(Node):
         pose_stamped.pose = msg.pose.pose
         was_none = self.latest_pose is None
         self.latest_pose = pose_stamped
+        
+        # Add to pose history for timestamp matching
+        with self.pose_history_lock:
+            # Convert stamp to seconds (for comparison)
+            stamp_sec = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) / 1e9
+            self.pose_history.append((stamp_sec, pose_stamped))
+            # Keep only last 100 poses to avoid memory growth
+            if len(self.pose_history) > 100:
+                self.pose_history.pop(0)
+        
         if was_none:
             self.get_logger().info(f'Received first pose update (PoseWithCovarianceStamped): x={msg.pose.pose.position.x:.2f}, y={msg.pose.pose.position.y:.2f}, z={msg.pose.pose.position.z:.2f} - robot object will now be available')
         else:
             self.get_logger().debug(f'Received pose update (PoseWithCovarianceStamped): x={msg.pose.pose.position.x:.2f}, y={msg.pose.pose.position.y:.2f}, z={msg.pose.pose.position.z:.2f}')
     
     def query_callback(self, request, response):
-        """Handle semantic map query request."""
+        """Handle semantic map query request - returns latest memory state immediately."""
         self.get_logger().info(f'Received query with types filter: {request.types}')
         
-        # Check if we have latest image and camera info
-        if not self.latest_rgb_image:
-            self.get_logger().warn('No RGB image available yet')
-            response.objects = self._get_all_objects_from_memory(request.types, snapshot_pose=None)
-            response.stamp = self.get_clock().now().to_msg()
-            return response
-        
-        if not self.latest_camera_info:
-            self.get_logger().warn('No camera info available yet')
-            response.objects = self._get_all_objects_from_memory(request.types, snapshot_pose=None)
-            response.stamp = self.get_clock().now().to_msg()
-            return response
-        
-        # Create snapshot: capture current image, camera info, and pose at the same time
-        # This ensures all objects use the same pose for coordinate transformation
-        snapshot_image = self.latest_rgb_image
-        snapshot_camera_info = self.latest_camera_info
+        # Get current pose snapshot (thread-safe, no lock needed for read)
         snapshot_pose = self.latest_pose  # May be None if no pose available
-        snapshot_stamp = snapshot_image.header.stamp  # Use image timestamp for snapshot
         
-        # Debug: Check pose availability
-        if snapshot_pose:
-            self.get_logger().info(f'Snapshot pose: x={snapshot_pose.pose.position.x:.2f}, y={snapshot_pose.pose.position.y:.2f}, z={snapshot_pose.pose.position.z:.2f}')
-        else:
-            self.get_logger().warn('No robot pose available in snapshot - objects will not have map coordinates')
+        # Quickly copy memory data (minimize lock time)
+        memory_copy = {}
+        with self.memory_lock:
+            # Fast shallow copy of memory dict
+            memory_copy = dict(self.semantic_map_memory)
         
-        # Convert ROS image to OpenCV format
-        try:
-            cv_image = self.cv_bridge.imgmsg_to_cv2(snapshot_image, "rgb8")
-        except Exception as e:
-            self.get_logger().error(f'Failed to convert image: {e}')
-            response.objects = self._get_all_objects_from_memory(request.types, snapshot_pose=None)
-            response.stamp = snapshot_stamp
-            return response
-        
-        # Convert image to base64 for API
-        from PIL import Image as PILImage
-        pil_image = PILImage.fromarray(cv_image)
-        import io
-        buffer = io.BytesIO()
-        pil_image.save(buffer, format='JPEG')
-        image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-        
-        # Prepare camera info for VLM
-        camera_info_text = self._format_camera_info(snapshot_camera_info)
-        
-        # Call Qwen3-VL API to detect objects and estimate distance
-        detected_objects = self._detect_objects_with_vlm(image_base64, camera_info_text, request.types)
-        
-        # Process detected objects: convert to map frame using snapshot pose and merge with memory
-        processed_objects = self._process_detected_objects(detected_objects, snapshot_pose=snapshot_pose)
-        
-        # Get all objects from memory (includes robot if pose available)
-        # This ensures we return all objects with map coordinates, avoiding duplicates
-        memory_objects = self._get_all_objects_from_memory(request.types, snapshot_pose=snapshot_pose)
-        
-        # Combine: use memory objects as base (they have map coordinates and are deduplicated)
-        # Only add newly processed objects that aren't already in memory
-        memory_object_ids = {obj.id for obj in memory_objects}
-        for obj in processed_objects:
-            if obj.id not in memory_object_ids:
-                memory_objects.append(obj)
+        # Process outside the lock (clustering and filtering can take time)
+        memory_objects = self._get_all_objects_from_memory_unlocked(memory_copy, request.types, snapshot_pose=snapshot_pose)
         
         # Ensure no duplicates by ID (safety check)
         seen_ids = set()
@@ -506,26 +479,103 @@ class SemanticMapService(Node):
             if obj.id not in seen_ids:
                 unique_objects.append(obj)
                 seen_ids.add(obj.id)
-            else:
-                self.get_logger().warn(f'Duplicate object detected: {obj.label} (id={obj.id}), skipping')
         
-        # Periodically use Qwen to help merge objects in memory
-        self.query_count += 1
-        if self.query_count >= self.qwen_merge_interval:
-            self.query_count = 0
-            self._qwen_assisted_merge()
-        
-        # Debug: Log frame mappings for each object
-        for obj in unique_objects:
-            frame_ids = [fm.frame_id for fm in obj.frame_mapping] if obj.frame_mapping else []
-            self.get_logger().info(f'Object "{obj.label}" (id={obj.id}) has frame_mappings: {frame_ids}')
-        
-        # Set response - use snapshot timestamp to ensure consistency
+        # Use current time as stamp (since we're returning latest state)
         response.objects = unique_objects
-        response.stamp = snapshot_stamp
+        response.stamp = self.get_clock().now().to_msg()
         
-        self.get_logger().info(f'Returning {len(unique_objects)} objects (snapshot at {snapshot_stamp.sec}.{snapshot_stamp.nanosec:09d})')
+        self.get_logger().debug(f'Returning {len(unique_objects)} objects from memory (immediate response)')
         return response
+    
+    def _background_update_loop(self):
+        """Background thread that continuously updates semantic map by calling VLM."""
+        self.get_logger().info('Background update loop started')
+        
+        while self.update_thread_running:
+            try:
+                # Wait for image and camera info
+                if not self.latest_rgb_image or not self.latest_camera_info:
+                    self.get_logger().debug('Waiting for image/camera_info...')
+                    time.sleep(1.0)
+                    continue
+                
+                # Create snapshot: capture current image, camera info, and pose at the same time
+                snapshot_image = self.latest_rgb_image
+                snapshot_camera_info = self.latest_camera_info
+                snapshot_stamp = snapshot_image.header.stamp
+                
+                # Find pose that matches image timestamp (CRITICAL: must use pose from image capture time)
+                # Convert image stamp to seconds for comparison
+                image_stamp_sec = float(snapshot_stamp.sec) + float(snapshot_stamp.nanosec) / 1e9
+                snapshot_pose = self._find_pose_by_timestamp(image_stamp_sec)
+                
+                if snapshot_pose:
+                    # Extract pose timestamp for logging
+                    pose_stamp_sec = float(snapshot_pose.header.stamp.sec) + float(snapshot_pose.header.stamp.nanosec) / 1e9
+                    time_diff = abs(pose_stamp_sec - image_stamp_sec)
+                    self.get_logger().info(
+                        f'Using synchronized pose: image_t={image_stamp_sec:.3f}, pose_t={pose_stamp_sec:.3f}, '
+                        f'diff={time_diff*1000:.1f}ms, robot_pos=[{snapshot_pose.pose.position.x:.2f}, '
+                        f'{snapshot_pose.pose.position.y:.2f}, {snapshot_pose.pose.position.z:.2f}]'
+                    )
+                else:
+                    # CRITICAL: Without matching pose, we cannot accurately compute map coordinates
+                    # Skip this update cycle to ensure synchronization
+                    self.get_logger().warn(
+                        f'No matching pose found for image timestamp {image_stamp_sec:.3f} '
+                        f'(tolerance: 0.5s). Skipping this update to ensure pose-image synchronization. '
+                        f'Latest pose available: {self.latest_pose is not None}'
+                    )
+                    time.sleep(self.update_interval)
+                    continue  # Skip this update cycle
+                
+                # Convert ROS image to OpenCV format
+                try:
+                    cv_image = self.cv_bridge.imgmsg_to_cv2(snapshot_image, "rgb8")
+                except Exception as e:
+                    self.get_logger().error(f'Failed to convert image: {e}')
+                    time.sleep(self.update_interval)
+                    continue
+                
+                # Convert image to base64 for API
+                from PIL import Image as PILImage
+                pil_image = PILImage.fromarray(cv_image)
+                import io
+                buffer = io.BytesIO()
+                pil_image.save(buffer, format='JPEG')
+                image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                
+                # Prepare camera info for VLM
+                camera_info_text = self._format_camera_info(snapshot_camera_info)
+                
+                # Call Qwen3-VL API to detect objects and get distance + direction vector
+                self.get_logger().info('Calling VLM for object detection with distance and direction...')
+                detected_objects = self._detect_objects_with_vlm(
+                    image_base64, 
+                    camera_info_text, 
+                    snapshot_camera_info, 
+                    []
+                )
+                
+                # Process detected objects: convert to map frame using snapshot pose and merge with memory
+                # This function already updates memory internally, but we need to do it thread-safely
+                with self.memory_lock:
+                    processed_objects = self._process_detected_objects(detected_objects, snapshot_pose=snapshot_pose)
+                    
+                    # Log update
+                    memory_count = len(self.semantic_map_memory)
+                    self.get_logger().info(f'Updated semantic map: {len(processed_objects)} new objects processed, {memory_count} total objects in memory')
+                
+                # Wait before next update
+                time.sleep(self.update_interval)
+                
+            except Exception as e:
+                self.get_logger().error(f'Error in background update loop: {e}')
+                import traceback
+                self.get_logger().error(f'Traceback:\n{traceback.format_exc()}')
+                time.sleep(self.update_interval)  # Wait before retrying
+        
+        self.get_logger().info('Background update loop stopped')
     
     def _format_camera_info(self, camera_info):
         """Format camera info as text for VLM prompt."""
@@ -539,13 +589,20 @@ class SemanticMapService(Node):
         
         return f"Camera parameters: fx={fx:.2f}, fy={fy:.2f}, cx={cx:.2f}, cy={cy:.2f}, resolution={width}x{height}"
     
-    def _detect_objects_with_vlm(self, image_base64, camera_info_text, type_filter):
-        """Use Qwen3-VL to detect objects and estimate distance only."""
-        # Prepare prompt for VLM - ask for distance and relative position
+    def _detect_objects_with_vlm(self, image_base64, camera_info_text, camera_info, type_filter):
+        """Use Qwen3-VL to detect objects and estimate distance + direction vector.
+        
+        Args:
+            image_base64: Base64-encoded image
+            camera_info_text: Formatted camera info text for VLM prompt
+            camera_info: CameraInfo message (for coordinate calculation)
+            type_filter: List of object types to filter
+        """
+        # Prepare prompt for VLM - ask for distance and direction vector
         prompt = f"""Analyze this image and detect all visible objects. For each object, provide:
 1. Object label/name
 2. 2D bounding box coordinates (x_min, y_min, x_max, y_max) in pixels
-3. Estimated distance from camera in meters (straight-line 3D distance to object center, NOT just depth along z-axis)
+3. Estimated distance from camera in meters (straight-line 3D distance to object center)
 4. Estimated object size (width, height, depth in meters)
 
 Camera info: {camera_info_text}
@@ -647,14 +704,15 @@ Only include objects that are clearly visible. Estimate distance as accurately a
                 obj.registered_primitives = []
                 obj.relations = []
                 
-                # Get distance from VLM
-                distance = float(obj_data.get('distance', 1.0))
+                # Get bbox and distance from VLM
                 bbox_2d = obj_data.get('bbox_2d', [0, 0, 640, 480])
+                distance = float(obj_data.get('distance', 1.0))
                 
                 # Calculate camera frame coordinates from distance and bbox
                 # Camera frame: x-right, y-down, z-forward (ROS convention)
+                # bbox center position determines direction vector, VLM distance determines magnitude
                 pos_cam = self._calculate_camera_coords_from_distance(
-                    distance, bbox_2d, self.latest_camera_info
+                    distance, bbox_2d, camera_info
                 )
                 
                 # Create frame mapping with camera frame coordinates
@@ -695,7 +753,7 @@ Only include objects that are clearly visible. Estimate distance as accurately a
         """Calculate camera frame coordinates from distance and 2D bbox.
         
         Args:
-            distance: Actual 3D straight-line distance from camera to object center (in meters)
+            distance: Actual 3D straight-line distance from camera to object center (in meters, from VLM)
             bbox_2d: 2D bounding box [x_min, y_min, x_max, y_max] in pixels
             camera_info: Camera info message with intrinsics
         
@@ -703,9 +761,9 @@ Only include objects that are clearly visible. Estimate distance as accurately a
             [camera_x, camera_y, camera_z] in camera frame (meters)
         
         Note:
-            The distance is the actual 3D distance, not just depth along z-axis.
-            We use the bbox center position to calculate the direction vector,
-            then scale it to match the given distance.
+            The bbox center position determines the direction vector.
+            The VLM-estimated distance is used to scale the direction vector to the correct magnitude.
+            Camera frame: x-right, y-down, z-forward (ROS convention)
         """
         # Get camera center from bbox
         x_min, y_min, x_max, y_max = bbox_2d
@@ -887,8 +945,20 @@ Only include objects that are clearly visible. Estimate distance as accurately a
         
         Args:
             detected_objects: List of detected objects
-            snapshot_pose: PoseStamped message for snapshot pose (if None, uses self.latest_pose)
+            snapshot_pose: PoseStamped message for snapshot pose (MUST be from image capture time, not None)
+        
+        Note:
+            snapshot_pose is REQUIRED for accurate coordinate transformation.
+            Objects without a valid synchronized pose will NOT be stored in memory.
         """
+        # CRITICAL: snapshot_pose must be provided (from image capture time)
+        if not snapshot_pose:
+            self.get_logger().error(
+                'snapshot_pose is None - cannot process objects without synchronized pose. '
+                'Skipping object processing to ensure accuracy.'
+            )
+            return []  # Return empty list - no objects processed without pose
+        
         # First pass: convert all objects to map frame
         objects_with_map_pos = []
         objects_without_map = []
@@ -905,40 +975,13 @@ Only include objects that are clearly visible. Estimate distance as accurately a
                 camera_frame.center.z
             ]
             
-            # Transform to map frame if pose is available (use snapshot pose)
-            pose_to_use = snapshot_pose if snapshot_pose is not None else self.latest_pose
-            if pose_to_use:
-                map_pos = self._transform_camera_to_map(camera_pos, robot_pose_stamped=pose_to_use)
-                if map_pos:
-                    # Create map frame mapping
-                    map_frame = FrameMapping()
-                    map_frame.frame_id = 'map'
-                    map_frame.center = Point3D()
-                    map_frame.center.x = map_pos[0]
-                    map_frame.center.y = map_pos[1]
-                    map_frame.center.z = map_pos[2]
-                    map_frame.bbox = camera_frame.bbox.copy() if camera_frame.bbox else []
-                    map_frame.texture = camera_frame.texture.copy() if camera_frame.texture else []
-                    
-                    # Add map frame mapping
-                    obj.frame_mapping.append(map_frame)
-                    objects_with_map_pos.append((obj, map_pos))
-                else:
-                    objects_without_map.append(obj)
-            else:
-                # No pose available - create map frame mapping using relative coordinates for display
-                # But do NOT add to memory - only objects with real map coordinates are stored permanently
-                # Use camera frame coordinates as relative to robot origin (0,0,0)
-                # Camera frame: x-right, y-down, z-forward
-                # Map frame: x-forward, y-left, z-up (ROS convention)
-                # Transform: camera z -> map x (forward), -camera x -> map y (left), -camera y -> map z (up)
-                map_pos = [
-                    camera_pos[2],   # camera z (forward) -> map x
-                    -camera_pos[0],   # -camera x (right) -> map y (left)
-                    -camera_pos[1]    # -camera y (down) -> map z (up)
-                ]
-                
-                # Create map frame mapping with relative coordinates (temporary, not stored in memory)
+            # Transform to map frame using snapshot pose (synchronized with image)
+            # snapshot_pose is guaranteed to be non-None here (checked above)
+            # Use snapshot_pose directly (it's the synchronized pose from image capture time)
+            # Transform to map frame using snapshot pose (synchronized with image capture time)
+            map_pos = self._transform_camera_to_map(camera_pos, robot_pose_stamped=snapshot_pose)
+            if map_pos:
+                # Create map frame mapping
                 map_frame = FrameMapping()
                 map_frame.frame_id = 'map'
                 map_frame.center = Point3D()
@@ -950,6 +993,10 @@ Only include objects that are clearly visible. Estimate distance as accurately a
                 
                 # Add map frame mapping
                 obj.frame_mapping.append(map_frame)
+                objects_with_map_pos.append((obj, map_pos))
+            else:
+                # Transform failed (shouldn't happen if snapshot_pose is valid, but handle gracefully)
+                self.get_logger().warn(f'Transform failed for object {obj.label} (id={obj.id}), skipping')
                 objects_without_map.append(obj)
         
         # Cluster objects with same label that are close to each other
@@ -1068,159 +1115,21 @@ Only include objects that are clearly visible. Estimate distance as accurately a
         self.semantic_map_memory[obj.id] = obj
         self.get_logger().info(f'Added object "{obj.label}" (id={obj.id}) to memory at map position [{map_pos[0]:.2f}, {map_pos[1]:.2f}, {map_pos[2]:.2f}]')
     
-    def _qwen_assisted_merge(self):
-        """Use Qwen to help identify and merge duplicate objects in memory."""
-        if len(self.semantic_map_memory) < 2:
-            return  # Need at least 2 objects to merge
-        
-        # Collect all objects with map coordinates
-        objects_info = []
-        for obj_id, obj in self.semantic_map_memory.items():
-            map_pos = None
-            for fm in obj.frame_mapping:
-                if fm.frame_id == 'map':
-                    map_pos = [fm.center.x, fm.center.y, fm.center.z]
-                    break
-            
-            if map_pos:
-                objects_info.append({
-                    'id': obj_id,
-                    'label': obj.label,
-                    'position': map_pos
-                })
-        
-        if len(objects_info) < 2:
-            return
-        
-        # Construct prompt for Qwen
-        objects_text = "Objects in semantic map:\n"
-        for i, obj_info in enumerate(objects_info):
-            pos = obj_info['position']
-            objects_text += f"{i+1}. {obj_info['label']} (ID: {obj_info['id']}) at position [{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}]\n"
-        
-        prompt = f"""Analyze the following objects in a semantic map and identify which objects are likely duplicates (the same physical object detected multiple times).
-
-{objects_text}
-
-Consider:
-1. Objects with the same or similar labels that are close in 3D space (within 1.5m) are likely duplicates
-2. Objects with similar labels (e.g., "monitor" and "computer monitor", "chair" and "office chair") should be considered the same type
-3. Objects far apart (>2m) are likely different objects, even with the same label
-4. Consider the context: multiple chairs in a room are different objects, but the same chair detected from different angles is a duplicate
-
-Return a JSON array of merge suggestions, where each suggestion has:
-{{
-    "object_ids": ["id1", "id2", ...],  // IDs of objects that should be merged
-    "reason": "brief explanation"        // Why these should be merged
-}}
-
-Only suggest merges for objects that are clearly duplicates. If no merges are needed, return an empty array [].
-"""
-        
-        try:
-            # Call Qwen3-VL API (text-only, no image needed for this task)
-            api_response = self.qwen_client.chat.completions.create(
-                model=self.qwen_model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                max_tokens=1000
-            )
-            
-            # Parse response
-            response_text = api_response.choices[0].message.content
-            self.get_logger().info(f'Qwen merge suggestion: {response_text[:200]}...')
-            
-            # Extract JSON from response
-            import re
-            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
-            if json_match:
-                merge_suggestions = json.loads(json_match.group())
-            else:
-                # Try to parse entire response as JSON
-                merge_suggestions = json.loads(response_text)
-            
-            # Apply merge suggestions
-            merged_count = 0
-            for suggestion in merge_suggestions:
-                object_ids = suggestion.get('object_ids', [])
-                reason = suggestion.get('reason', 'No reason provided')
-                
-                if len(object_ids) < 2:
-                    continue
-                
-                # Find the objects to merge
-                objects_to_merge = []
-                for obj_id in object_ids:
-                    if obj_id in self.semantic_map_memory:
-                        obj = self.semantic_map_memory[obj_id]
-                        map_pos = None
-                        for fm in obj.frame_mapping:
-                            if fm.frame_id == 'map':
-                                map_pos = [fm.center.x, fm.center.y, fm.center.z]
-                                break
-                        if map_pos:
-                            objects_to_merge.append((obj, map_pos, obj_id))
-                
-                if len(objects_to_merge) < 2:
-                    continue
-                
-                # Merge: use the first object as the base, merge others into it
-                base_obj, base_pos, base_id = objects_to_merge[0]
-                
-                # Calculate average position
-                all_positions = [base_pos] + [pos for _, pos, _ in objects_to_merge[1:]]
-                avg_pos = [
-                    sum(p[0] for p in all_positions) / len(all_positions),
-                    sum(p[1] for p in all_positions) / len(all_positions),
-                    sum(p[2] for p in all_positions) / len(all_positions)
-                ]
-                
-                # Update base object's position
-                for fm in base_obj.frame_mapping:
-                    if fm.frame_id == 'map':
-                        fm.center.x = avg_pos[0]
-                        fm.center.y = avg_pos[1]
-                        fm.center.z = avg_pos[2]
-                        break
-                
-                # Update other objects' IDs to match base (so they won't appear as duplicates)
-                for obj, _, obj_id in objects_to_merge[1:]:
-                    obj.id = base_id
-                    # Remove from memory (they're now merged into base)
-                    if obj_id != base_id and obj_id in self.semantic_map_memory:
-                        del self.semantic_map_memory[obj_id]
-                
-                merged_count += len(objects_to_merge) - 1
-                self.get_logger().info(f'Qwen-assisted merge: merged {len(objects_to_merge)} objects ({", ".join([obj.label for obj, _, _ in objects_to_merge])}) into one. Reason: {reason}')
-            
-            if merged_count > 0:
-                self.get_logger().info(f'Qwen-assisted merge completed: {merged_count} objects merged')
-            else:
-                self.get_logger().debug('Qwen-assisted merge: no merges suggested')
-                
-        except Exception as e:
-            self.get_logger().warn(f'Error in Qwen-assisted merge: {e}')
-            import traceback
-            self.get_logger().debug(f'Traceback:\n{traceback.format_exc()}')
-    
-    def _get_all_objects_from_memory(self, type_filter, snapshot_pose=None):
-        """Get all objects from memory, optionally filtered by type. Includes robot object if pose is available.
+    def _get_all_objects_from_memory_unlocked(self, memory_dict, type_filter, snapshot_pose=None):
+        """Get all objects from memory dict (unlocked version for query_callback).
         All objects with map coordinates are returned - objects are never deleted.
         Objects with same/similar label within 1.5m are clustered before returning.
         
         Args:
+            memory_dict: Dictionary of objects (copy of self.semantic_map_memory)
             type_filter: List of object types to filter
             snapshot_pose: PoseStamped message for snapshot pose (if None, uses self.latest_pose for robot)
         """
         objects_with_map_pos = []
         seen_ids = set()  # Track IDs to avoid duplicates
         
-        # Get objects from memory
-        for obj_id, obj in self.semantic_map_memory.items():
+        # Get objects from memory dict (not self.semantic_map_memory)
+        for obj_id, obj in memory_dict.items():
             # Skip if already seen (shouldn't happen, but safety check)
             if obj_id in seen_ids:
                 continue
@@ -1320,6 +1229,48 @@ Only suggest merges for objects that are clearly duplicates. If no merges are ne
         obj.frame_mapping = [map_frame]
         
         return obj
+    
+    def _find_pose_by_timestamp(self, target_stamp_sec):
+        """Find pose closest to target timestamp from pose history.
+        
+        Args:
+            target_stamp_sec: Target timestamp in seconds (float)
+        
+        Returns:
+            PoseStamped message closest to target timestamp, or None if no pose found
+        
+        Note:
+            This ensures pose-image synchronization for accurate coordinate transformation.
+            Only returns poses within tolerance to guarantee accuracy.
+        """
+        with self.pose_history_lock:
+            if not self.pose_history:
+                return None
+            
+            # Find closest pose by timestamp (within 0.5 second tolerance)
+            # Use tighter tolerance for better synchronization
+            best_pose = None
+            best_diff = float('inf')
+            TOLERANCE_SEC = 0.5  # 500ms tolerance - tight enough for accurate sync
+            
+            for stamp_sec, pose in self.pose_history:
+                diff = abs(stamp_sec - target_stamp_sec)
+                if diff < best_diff and diff <= TOLERANCE_SEC:
+                    best_diff = diff
+                    best_pose = pose
+            
+            if best_pose:
+                self.get_logger().debug(
+                    f'Found matching pose: target_t={target_stamp_sec:.3f}, '
+                    f'pose_t={best_diff + target_stamp_sec:.3f}, diff={best_diff*1000:.1f}ms'
+                )
+            else:
+                self.get_logger().debug(
+                    f'No pose within tolerance: target_t={target_stamp_sec:.3f}, '
+                    f'history_size={len(self.pose_history)}, tolerance={TOLERANCE_SEC*1000:.0f}ms'
+                )
+            
+            return best_pose
     
     def _infer_object_type(self, label):
         """Infer object type from label (simple heuristic)."""

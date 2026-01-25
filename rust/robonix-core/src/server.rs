@@ -514,8 +514,8 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
             .await;
     });
 
-    // All core API handlers are now running on dedicated high-priority threads
+    // All core API handlers are now running
     // Wait indefinitely (threads run independently)
-    info!("All core API service handlers started on dedicated high-priority threads");
+    info!("All core API service handlers started");
     std::future::pending::<()>().await;
 }

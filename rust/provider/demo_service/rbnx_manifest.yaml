@@ -22,7 +22,7 @@ services:
   - name: srv::semantic_map
     srv_type: robonix_sdk/srv/service/semantic_map/QuerySemanticMap
     entry: /demo_service/semantic_map/query
-    metadata: '{"model":"demo","backend":"simulated"}'
+    metadata: '{"model":"qwen3-vl-plus","backend":"vlm","depth_camera":"prm::camera.depth","rgb_camera":"prm::camera.capture","pose":"prm::base.pose.amcl"}'
     version: 0.0.1
     start_script: rbnx/start_semantic_map.sh
     stop_script: rbnx/stop_semantic_map.sh

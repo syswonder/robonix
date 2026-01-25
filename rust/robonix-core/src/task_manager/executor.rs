@@ -349,6 +349,7 @@ impl RtdlExecutor {
                                 status_json.get("skill_id").and_then(|v| v.as_str())
                             {
                                 if msg_skill_id == skill_exec_id_clone {
+                                    // Send to channel (non-blocking - channel has buffer)
                                     let _ = status_tx.send(status_str.clone()).await;
                                 }
                             }
@@ -361,24 +362,148 @@ impl RtdlExecutor {
             }
         });
 
-        // Publish start message
-        let start_msg = crate::ros_idl::skill::StdString {
-            data: start_msg_data.clone(),
-        };
-        start_publisher.publish(start_msg).map_err(|e| {
-            let error_msg = format!("Failed to publish start message: {}", e);
-            (ExceptionType::Unknown(error_msg.clone()), Some(error_msg))
-        })?;
+        // Wait a short time for ROS2 discovery to establish connection with skill subscriber
+        // This ensures the message is not lost if the subscriber hasn't fully connected yet
+        debug!("Waiting for skill subscriber connection...");
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
-        info!(
-            "Published skill start message to {}: skill_exec_id={}, start_msg_data={}",
-            skill_instance.start_topic, skill_exec_id, &start_msg_data
-        );
+        // Retry logic: publish start message and wait for status response
+        // If no status received within 2 seconds, retry (up to 3 attempts)
+        let max_start_retries = 3;
+        let status_wait_timeout = Duration::from_secs(2);
+        let mut start_attempt = 0;
+        let mut status_received = false;
+        let mut first_status: Option<String> = None;
+
+        while start_attempt < max_start_retries && !status_received {
+            start_attempt += 1;
+
+            // Publish start message
+            let start_msg = crate::ros_idl::skill::StdString {
+                data: start_msg_data.clone(),
+            };
+            start_publisher.publish(start_msg.clone()).map_err(|e| {
+                let error_msg = format!("Failed to publish start message: {}", e);
+                (ExceptionType::Unknown(error_msg.clone()), Some(error_msg))
+            })?;
+
+            info!(
+                "Published skill start message (attempt {}/{}): skill_exec_id={}, start_topic={}",
+                start_attempt, max_start_retries, skill_exec_id, skill_instance.start_topic
+            );
+
+            // Wait for status response (with timeout)
+            // Use select! to wait for either status or timeout
+            use tokio::select;
+            select! {
+                status_result = status_rx.recv() => {
+                    match status_result {
+                        Some(status_str) => {
+                            // Check if this status is for our skill execution
+                            if let Ok(status_json) = serde_json::from_str::<serde_json::Value>(&status_str) {
+                                if let Some(msg_skill_id) = status_json.get("skill_id").and_then(|v| v.as_str()) {
+                                    if msg_skill_id == skill_exec_id {
+                                        debug!("Received initial status from skill: {}", status_str);
+                                        status_received = true;
+                                        first_status = Some(status_str);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        None => {
+                            // Channel closed
+                            warn!("Status channel closed before receiving response");
+                            break;
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(status_wait_timeout) => {
+                    // Timeout - no status received
+                    if start_attempt < max_start_retries {
+                        warn!(
+                            "No status received from skill within {:?} (attempt {}/{}), retrying...",
+                            status_wait_timeout, start_attempt, max_start_retries
+                        );
+                        tokio::time::sleep(Duration::from_millis(500)).await; // Brief delay before retry
+                    } else {
+                        error!(
+                            "No status received from skill after {} attempts, giving up",
+                            max_start_retries
+                        );
+                        let error_msg = format!(
+                            "Skill {} did not respond with status after {} start attempts",
+                            skill_name, max_start_retries
+                        );
+                        return Err((ExceptionType::SkillFailed, Some(error_msg)));
+                    }
+                }
+            }
+        }
+
+        if !status_received {
+            let error_msg = format!(
+                "Skill {} did not respond with status after {} start attempts",
+                skill_name, max_start_retries
+            );
+            return Err((ExceptionType::SkillFailed, Some(error_msg)));
+        }
+
+        // If we received the first status, process it in the main loop
+        // We'll handle it in the main loop below
 
         // Wait for skill completion (monitor status_topic)
         // Standard status format: {"skill_id": "...", "state": "running"|"finished"|"error", "result": {...}, "errno": 0, ...}
         let timeout_duration = Duration::from_secs(300); // 5 minutes timeout
         let start_time = std::time::Instant::now();
+
+        // Process first status if we received it during retry loop
+        if let Some(first_status_str) = first_status {
+            // Process the first status message
+            if let Ok(status_json) = serde_json::from_str::<serde_json::Value>(&first_status_str) {
+                // Check state and handle accordingly
+                if let Some(state) = status_json.get("state").and_then(|v| v.as_str()) {
+                    let errno = status_json
+                        .get("errno")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+
+                    match state {
+                        "finished" => {
+                            if errno == 0 {
+                                info!(
+                                    "Skill {} execution completed successfully: skill_exec_id={}",
+                                    skill_name, skill_exec_id
+                                );
+                                return Ok(());
+                            }
+                        }
+                        "error" => {
+                            // Extract error message
+                            let error_msg = status_json
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .or_else(|| status_json.get("message").and_then(|v| v.as_str()))
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| {
+                                    format!("Skill execution failed with errno={}", errno)
+                                });
+
+                            error!("Skill {} execution failed: {}", skill_name, error_msg);
+                            return Err((ExceptionType::SkillFailed, Some(error_msg)));
+                        }
+                        _ => {
+                            // Still running, continue to main loop
+                        }
+                    }
+                }
+            } else {
+                warn!(
+                    "Failed to parse first status message as JSON: {}",
+                    first_status_str
+                );
+            }
+        }
 
         loop {
             let remaining_timeout = timeout_duration.saturating_sub(start_time.elapsed());

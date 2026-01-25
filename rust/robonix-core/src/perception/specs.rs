@@ -26,7 +26,7 @@ pub fn load_services(services: &mut HashMap<String, ServiceSpec>) {
     SRV!(
         services,
         "srv::semantic_map",
-        "Semantic map service providing entity-level representation",
+        "Semantic map service providing entity-level representation using VLM for object detection and depth camera for accurate distance measurement",
         "robonix_sdk/srv/service/semantic_map/QuerySemanticMap"
     );
 }
