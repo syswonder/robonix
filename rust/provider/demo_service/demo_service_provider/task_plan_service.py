@@ -341,12 +341,30 @@ Important:
                     inst_type = inst.get('type', 'skill')
                     inst_name = inst.get('name', 'unknown')
                     inst_params = inst.get('params', {})
+                    
+                    # Validate object IDs in params (for skills like move_to_object)
+                    if inst_name == 'skl::move_to_object' and 'target_object_id' in inst_params:
+                        target_id = inst_params['target_object_id']
+                        # Verify the object ID exists in object_graph
+                        if object_graph:
+                            object_ids = [obj.get('id') for obj in object_graph if isinstance(obj, dict)]
+                            if target_id not in object_ids:
+                                self.get_logger().warn(
+                                    f'Generated RTDL references object ID "{target_id}" which is not in object_graph. '
+                                    f'Available IDs: {object_ids[:10]}{"..." if len(object_ids) > 10 else ""}'
+                                )
+                    
                     formatted_instructions.append({
                         'object_id': inst_object_id,  # REQUIRED: object that executes this instruction
                         'type': inst_type,
                         'name': inst_name,
                         'params': inst_params
                     })
+            
+            # Log the generated RTDL for debugging
+            self.get_logger().info('Generated RTDL instructions:')
+            for idx, inst in enumerate(formatted_instructions):
+                self.get_logger().info(f'  [{idx}] {inst.get("type")} {inst.get("name")} with params: {inst.get("params")}')
             
             # Convert to JSON string (RTDL format)
             return json.dumps(formatted_instructions, indent=2)
