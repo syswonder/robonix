@@ -36,6 +36,10 @@ fi
 echo "Sourcing robonix-sdk from: $ROBONIX_SDK_DIR"
 source "$ROBONIX_SDK_DIR/install/setup.bash"
 
+# Set DDS implementation to FastDDS
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+echo "Using FastDDS (rmw_fastrtps_cpp) for ROS2 CLI tools"
+
 # Run test script
 echo "Running test script..."
 python3 "$SCRIPT_DIR/test_query_primitive.py"
