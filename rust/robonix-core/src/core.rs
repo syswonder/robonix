@@ -7,7 +7,7 @@ use crate::action::skill_library::SkillLibrary;
 use crate::primitive::PrimitiveRegistry;
 use crate::service::ServiceRegistry;
 use crate::spec::SpecRegistry;
-use crate::task_manager::TaskManager;
+use crate::task::TaskManager;
 use ros2_client::Node;
 use std::sync::Arc;
 use tokio::sync::Mutex;

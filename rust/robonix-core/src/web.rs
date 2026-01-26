@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// Web GUI Module
+// Web Module
 //
 // Modern web-based management interface for robonix-core
 
@@ -14,6 +14,7 @@ use crate::core::RobonixCore;
 use crate::perception::image_monitor::ImageMonitor;
 use crate::perception::tf_monitor::{TfMonitor, TfTreeResponse};
 use crate::perception::topic_monitor::{TopicMonitor, TopicsResponse};
+use crate::task::task::TaskState;
 
 use log::{trace, warn};
 #[derive(Clone, Serialize, Deserialize)]
@@ -52,13 +53,14 @@ impl LogBuffer {
 }
 
 #[derive(Clone)]
-pub struct WebGuiState {
+pub struct WebState {
     pub core: Arc<RobonixCore>,
     pub node: Arc<Mutex<ros2_client::Node>>,
     pub tf_monitor: Arc<TfMonitor>,
     pub topic_monitor: Arc<TopicMonitor>,
     pub log_buffer: Arc<LogBuffer>,
     pub image_monitor: Arc<ImageMonitor>,
+    pub web_dir: std::path::PathBuf,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -70,50 +72,82 @@ pub struct SystemStatus {
     pub registered_primitives: u32,
 }
 
-pub fn create_web_gui_state(
+pub fn create_web_state(
     core: Arc<RobonixCore>,
     node: Arc<Mutex<ros2_client::Node>>,
     tf_monitor: Arc<TfMonitor>,
     topic_monitor: Arc<TopicMonitor>,
     log_buffer: Arc<LogBuffer>,
     image_monitor: Arc<ImageMonitor>,
-) -> WebGuiState {
-    WebGuiState {
+    web_dir: std::path::PathBuf,
+) -> WebState {
+    WebState {
         core,
         node,
         tf_monitor,
         topic_monitor,
         log_buffer,
         image_monitor,
+        web_dir,
     }
 }
 
 #[rocket::get("/")]
-pub fn index() -> RawHtml<&'static str> {
-    RawHtml(include_str!("../web_gui/index.html"))
+pub async fn index(state: &State<WebState>) -> Result<RawHtml<String>, rocket::http::Status> {
+    let index_path = state.web_dir.join("index.html");
+    match tokio::fs::read_to_string(&index_path).await {
+        Ok(content) => Ok(RawHtml(content)),
+        Err(e) => {
+            warn!("Failed to read index.html from {:?}: {}", index_path, e);
+            Err(rocket::http::Status::InternalServerError)
+        }
+    }
 }
 
 #[rocket::get("/api/status")]
-pub fn status_handler(state: &State<WebGuiState>) -> Json<SystemStatus> {
+pub async fn status_handler(state: &State<WebState>) -> Json<SystemStatus> {
     // Get status from core components
-    let _task_manager = state.core.get_task_manager();
-    let _skill_library = state.core.get_skill_library();
-    let _service_registry = state.core.get_service_registry();
-    let _primitive_registry = state.core.get_primitive_registry();
+    let task_manager = state.core.get_task_manager();
+    let skill_library = state.core.get_skill_library();
+    let service_registry = state.core.get_service_registry();
+    let primitive_registry = state.core.get_primitive_registry();
+
+    // Get all tasks and count active ones (not finished, failed, or cancelled)
+    let task_store = task_manager.get_task_store();
+    let all_tasks = task_store.get_all_tasks().await;
+    let active_tasks = all_tasks
+        .iter()
+        .filter(|task| {
+            !matches!(
+                task.state,
+                TaskState::Finished | TaskState::Failed | TaskState::Cancelled
+            )
+        })
+        .count() as u32;
+
+    // Get counts from registries
+    let skills = skill_library.get_registry().get_all_skills().await;
+    let registered_skills = skills.len() as u32;
+
+    let services = service_registry.get_all_services().await;
+    let registered_services = services.len() as u32;
+
+    let primitives = primitive_registry.get_all_primitives().await;
+    let registered_primitives = primitives.len() as u32;
 
     let status = SystemStatus {
         core_initialized: true,
-        active_tasks: 0,
-        registered_skills: 0,
-        registered_services: 0,
-        registered_primitives: 0,
+        active_tasks,
+        registered_skills,
+        registered_services,
+        registered_primitives,
     };
 
     Json(status)
 }
 
 #[rocket::get("/api/tf-tree")]
-pub async fn tf_tree_handler(state: &State<WebGuiState>) -> Json<TfTreeResponse> {
+pub async fn tf_tree_handler(state: &State<WebState>) -> Json<TfTreeResponse> {
     // Get tree from monitor (automatically updated by subscriptions)
     let tree = state.tf_monitor.get_tree().await;
 
@@ -121,7 +155,7 @@ pub async fn tf_tree_handler(state: &State<WebGuiState>) -> Json<TfTreeResponse>
 }
 
 #[rocket::get("/api/topics")]
-pub async fn topics_handler(state: &State<WebGuiState>) -> Json<TopicsResponse> {
+pub async fn topics_handler(state: &State<WebState>) -> Json<TopicsResponse> {
     // Get topics from monitor
     let topics = state.topic_monitor.get_topics().await;
 
@@ -129,7 +163,7 @@ pub async fn topics_handler(state: &State<WebGuiState>) -> Json<TopicsResponse> 
 }
 
 #[rocket::get("/api/tasks")]
-pub async fn tasks_handler(state: &State<WebGuiState>) -> Json<serde_json::Value> {
+pub async fn tasks_handler(state: &State<WebState>) -> Json<serde_json::Value> {
     let task_manager = state.core.get_task_manager();
     let task_store = task_manager.get_task_store();
     let tasks = task_store.get_all_tasks().await;
@@ -159,7 +193,7 @@ pub async fn tasks_handler(state: &State<WebGuiState>) -> Json<serde_json::Value
 }
 
 #[rocket::get("/api/skills")]
-pub async fn skills_handler(state: &State<WebGuiState>) -> Json<serde_json::Value> {
+pub async fn skills_handler(state: &State<WebState>) -> Json<serde_json::Value> {
     let skill_library = state.core.get_skill_library();
     let registry = skill_library.get_registry();
     let skills = registry.get_all_skills().await;
@@ -189,7 +223,7 @@ pub async fn skills_handler(state: &State<WebGuiState>) -> Json<serde_json::Valu
 }
 
 #[rocket::get("/api/services")]
-pub async fn services_handler(state: &State<WebGuiState>) -> Json<serde_json::Value> {
+pub async fn services_handler(state: &State<WebState>) -> Json<serde_json::Value> {
     let service_registry = state.core.get_service_registry();
     let services = service_registry.get_all_services().await;
 
@@ -225,7 +259,7 @@ pub async fn services_handler(state: &State<WebGuiState>) -> Json<serde_json::Va
 }
 
 #[rocket::get("/api/primitives")]
-pub async fn primitives_handler(state: &State<WebGuiState>) -> Json<serde_json::Value> {
+pub async fn primitives_handler(state: &State<WebState>) -> Json<serde_json::Value> {
     let primitive_registry = state.core.get_primitive_registry();
     let primitives = primitive_registry.get_all_primitives().await;
 
@@ -265,14 +299,14 @@ pub async fn primitives_handler(state: &State<WebGuiState>) -> Json<serde_json::
 }
 
 #[rocket::get("/api/logs?<limit>")]
-pub async fn logs_handler(state: &State<WebGuiState>, limit: Option<usize>) -> Json<Vec<LogEntry>> {
+pub async fn logs_handler(state: &State<WebState>, limit: Option<usize>) -> Json<Vec<LogEntry>> {
     let limit = limit.unwrap_or(100);
     let logs = state.log_buffer.get_logs(limit).await;
     Json(logs)
 }
 
 #[rocket::get("/api/semantic-map")]
-pub async fn semantic_map_handler(state: &State<WebGuiState>) -> Json<serde_json::Value> {
+pub async fn semantic_map_handler(state: &State<WebState>) -> Json<serde_json::Value> {
     let task_manager = state.core.get_task_manager();
     let cache = task_manager.get_semantic_map_cache();
     let cache_guard = cache.lock().await;
@@ -285,7 +319,7 @@ pub async fn semantic_map_handler(state: &State<WebGuiState>) -> Json<serde_json
 }
 
 #[rocket::get("/api/image-topics")]
-pub async fn image_topics_handler(state: &State<WebGuiState>) -> Json<serde_json::Value> {
+pub async fn image_topics_handler(state: &State<WebState>) -> Json<serde_json::Value> {
     let image_topics = state.image_monitor.get_image_topics().await;
     let topics_json: Vec<serde_json::Value> = image_topics
         .into_iter()
@@ -321,7 +355,7 @@ pub async fn image_topics_handler(state: &State<WebGuiState>) -> Json<serde_json
 
 #[rocket::get("/api/images/<filename>")]
 pub async fn image_handler(
-    state: &State<WebGuiState>,
+    state: &State<WebState>,
     filename: String,
 ) -> Result<rocket::fs::NamedFile, rocket::http::Status> {
     let storage_dir = state.image_monitor.get_storage_dir();

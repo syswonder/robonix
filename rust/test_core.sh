@@ -101,7 +101,7 @@ fi
 make install
 
 # Start robonix-core in background and save PID
-ROBONIX_WEB_STATIC_DIR="$(pwd)/robonix-core/web_gui/static" \
+ROBONIX_WEB_ASSETS_DIR="$(pwd)/robonix-core/web" \
 ROBONIX_WEB_PORT=8000 \
 RUST_LOG=robonix_core=info robonix-core &
 ROBONIX_PID=$!

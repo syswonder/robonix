@@ -364,9 +364,12 @@ button:active {
 }
 
 @keyframes pulse {
-    0%, 100% {
+
+    0%,
+    100% {
         opacity: 1;
     }
+
     50% {
         opacity: 0.85;
     }
@@ -557,10 +560,14 @@ button:active {
     flex-direction: column;
     align-items: center;
     gap: 2px;
-    width: 70px; /* Fixed width */
-    height: 80px; /* Fixed height */
-    flex-shrink: 0; /* Prevent shrinking */
-    position: relative; /* For absolute positioning of fallback placeholder */
+    width: 70px;
+    /* Fixed width */
+    height: 80px;
+    /* Fixed height */
+    flex-shrink: 0;
+    /* Prevent shrinking */
+    position: relative;
+    /* For absolute positioning of fallback placeholder */
     transition: transform 0.3s ease-out, opacity 0.2s ease-out;
 }
 
@@ -590,6 +597,7 @@ button:active {
         opacity: 0;
         transform: translateX(-20px);
     }
+
     to {
         opacity: 1;
         transform: translateX(0);
@@ -638,8 +646,10 @@ button:active {
     font-size: 8px;
     color: #666;
     text-align: center;
-    width: 100%; /* Use full width of parent */
-    height: 12px; /* Fixed height */
+    width: 100%;
+    /* Use full width of parent */
+    height: 12px;
+    /* Fixed height */
     line-height: 12px;
     white-space: nowrap;
     overflow: hidden;
@@ -992,4 +1002,3 @@ button:active {
     line-height: 1.6;
     box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
 }
-
