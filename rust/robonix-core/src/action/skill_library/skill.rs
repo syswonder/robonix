@@ -25,14 +25,36 @@ struct SkillEntry {
     r#type: String, // Skill type: "basic" | "rtdl"
     start_topic: String,
     status_topic: String,
-    entry: String,      // Basic skill entry (if type="basic")
-    skill_dir: String,  // Skill directory path (if type="rtdl")
-    main_rtdl: String,  // Main RTDL file name (if type="rtdl")
-    start_args: String, // JSON string: stored as string internally
-    status: String,     // JSON string: stored as string internally
-    metadata: String,   // JSON string: stored as string internally
+    entry: String,                 // Basic skill entry (if type="basic")
+    skill_dir: String,             // Skill directory path (if type="rtdl")
+    main_rtdl: String,             // Main RTDL file name (if type="rtdl")
+    start_args: serde_json::Value, // JSON: structured data for internal use
+    status: serde_json::Value,     // JSON: structured data for internal use
+    metadata: serde_json::Value,   // JSON: structured data for internal use
     provider: String,
     version: String,
+}
+
+impl SkillEntry {
+    /// Convert to ROS2 message format (SkillInstance)
+    fn to_skill_instance(&self) -> SkillInstance {
+        SkillInstance {
+            skill_id: self.skill_id.clone(),
+            name: self.name.clone(),
+            provider: self.provider.clone(),
+            version: self.version.clone(),
+            r#type: self.r#type.clone(),
+            start_topic: self.start_topic.clone(),
+            status_topic: self.status_topic.clone(),
+            entry: self.entry.clone(),
+            skill_dir: self.skill_dir.clone(),
+            main_rtdl: self.main_rtdl.clone(),
+            start_args: serde_json::to_string(&self.start_args)
+                .unwrap_or_else(|_| "{}".to_string()),
+            status: serde_json::to_string(&self.status).unwrap_or_else(|_| "{}".to_string()),
+            metadata: serde_json::to_string(&self.metadata).unwrap_or_else(|_| "{}".to_string()),
+        }
+    }
 }
 
 impl SkillRegistry {
@@ -46,37 +68,46 @@ impl SkillRegistry {
     /// Register a skill
     /// Note: Skills do not have specifications - they are user-defined and flexible
     pub async fn register(&self, req: RegisterSkillRequest) -> RegisterSkillResponse {
-        // Validate JSON format
-        if serde_json::from_str::<serde_json::Value>(&req.start_args).is_err() {
-            warn!(
-                "failed to parse start_args json: skill_name={}, provider={}",
-                req.name, req.provider
-            );
-            return RegisterSkillResponse {
-                ok: false,
-                skill_id: String::new(),
-            };
-        }
-        if serde_json::from_str::<serde_json::Value>(&req.status).is_err() {
-            warn!(
-                "failed to parse status json: skill_name={}, provider={}",
-                req.name, req.provider
-            );
-            return RegisterSkillResponse {
-                ok: false,
-                skill_id: String::new(),
-            };
-        }
-        if serde_json::from_str::<serde_json::Value>(&req.metadata).is_err() {
-            warn!(
-                "failed to parse metadata json: skill_name={}, provider={}",
-                req.name, req.provider
-            );
-            return RegisterSkillResponse {
-                ok: false,
-                skill_id: String::new(),
-            };
-        }
+        // Parse and validate JSON format
+        let start_args: serde_json::Value = match serde_json::from_str(&req.start_args) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    "failed to parse start_args json: skill_name={}, provider={}, error={}",
+                    req.name, req.provider, e
+                );
+                return RegisterSkillResponse {
+                    ok: false,
+                    skill_id: String::new(),
+                };
+            }
+        };
+        let status: serde_json::Value = match serde_json::from_str(&req.status) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    "failed to parse status json: skill_name={}, provider={}, error={}",
+                    req.name, req.provider, e
+                );
+                return RegisterSkillResponse {
+                    ok: false,
+                    skill_id: String::new(),
+                };
+            }
+        };
+        let metadata: serde_json::Value = match serde_json::from_str(&req.metadata) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    "failed to parse metadata json: skill_name={}, provider={}, error={}",
+                    req.name, req.provider, e
+                );
+                return RegisterSkillResponse {
+                    ok: false,
+                    skill_id: String::new(),
+                };
+            }
+        };
 
         // Validate skill type
         if req.r#type != "basic" && req.r#type != "rtdl" {
@@ -123,7 +154,7 @@ impl SkillRegistry {
             counter
         );
 
-        // Store as JSON strings internally
+        // Store with structured JSON internally
         let entry = SkillEntry {
             skill_id: skill_id.clone(),
             name: req.name.clone(),
@@ -133,9 +164,9 @@ impl SkillRegistry {
             entry: req.entry.clone(),
             skill_dir: req.skill_dir.clone(),
             main_rtdl: req.main_rtdl.clone(),
-            start_args: req.start_args.clone(),
-            status: req.status.clone(),
-            metadata: req.metadata.clone(),
+            start_args,
+            status,
+            metadata,
             provider: req.provider.clone(),
             version: req.version.clone(),
         };
@@ -186,35 +217,16 @@ impl SkillRegistry {
                     filter_obj.remove("type");
                 }
 
-                // Parse metadata for filtering
-                let metadata_value: serde_json::Value = match serde_json::from_str(&entry.metadata)
-                {
-                    Ok(v) => v,
-                    Err(_) => continue, // Skip if metadata is invalid JSON
-                };
-
+                // Use structured metadata directly (no need to parse)
                 if !metadata_filter.is_null()
-                    && !self.matches_filter(&metadata_value, &metadata_filter)
+                    && !self.matches_filter(&entry.metadata, &metadata_filter)
                 {
                     continue;
                 }
             }
 
-            instances.push(SkillInstance {
-                skill_id: entry.skill_id.clone(),
-                name: entry.name.clone(),
-                provider: entry.provider.clone(),
-                version: entry.version.clone(),
-                r#type: entry.r#type.clone(),
-                start_topic: entry.start_topic.clone(),
-                status_topic: entry.status_topic.clone(),
-                entry: entry.entry.clone(),
-                skill_dir: entry.skill_dir.clone(),
-                main_rtdl: entry.main_rtdl.clone(),
-                start_args: entry.start_args.clone(),
-                status: entry.status.clone(),
-                metadata: entry.metadata.clone(),
-            });
+            // Convert to ROS2 message format (serialize JSON fields to strings)
+            instances.push(entry.to_skill_instance());
         }
 
         QuerySkillResponse { instances }
@@ -223,25 +235,7 @@ impl SkillRegistry {
     /// Get skill by ID (returns SkillInstance)
     pub async fn get_skill_by_id(&self, skill_id: &str) -> Option<SkillInstance> {
         let skills = self.skills.read().await;
-        if let Some(entry) = skills.get(skill_id) {
-            Some(SkillInstance {
-                skill_id: entry.skill_id.clone(),
-                name: entry.name.clone(),
-                provider: entry.provider.clone(),
-                version: entry.version.clone(),
-                r#type: entry.r#type.clone(),
-                start_topic: entry.start_topic.clone(),
-                status_topic: entry.status_topic.clone(),
-                entry: entry.entry.clone(),
-                skill_dir: entry.skill_dir.clone(),
-                main_rtdl: entry.main_rtdl.clone(),
-                start_args: entry.start_args.clone(),
-                status: entry.status.clone(),
-                metadata: entry.metadata.clone(),
-            })
-        } else {
-            None
-        }
+        skills.get(skill_id).map(|entry| entry.to_skill_instance())
     }
 
     /// Get all skill names
@@ -257,28 +251,10 @@ impl SkillRegistry {
     /// Get all registered skills (for web UI)
     pub async fn get_all_skills(&self) -> Vec<(String, SkillInstance)> {
         let skills = self.skills.read().await;
-        let mut result = Vec::new();
-        for (skill_id, entry) in skills.iter() {
-            result.push((
-                skill_id.clone(),
-                SkillInstance {
-                    skill_id: entry.skill_id.clone(),
-                    name: entry.name.clone(),
-                    provider: entry.provider.clone(),
-                    version: entry.version.clone(),
-                    r#type: entry.r#type.clone(),
-                    start_topic: entry.start_topic.clone(),
-                    status_topic: entry.status_topic.clone(),
-                    entry: entry.entry.clone(),
-                    skill_dir: entry.skill_dir.clone(),
-                    main_rtdl: entry.main_rtdl.clone(),
-                    start_args: entry.start_args.clone(),
-                    status: entry.status.clone(),
-                    metadata: entry.metadata.clone(),
-                },
-            ));
-        }
-        result
+        skills
+            .iter()
+            .map(|(skill_id, entry)| (skill_id.clone(), entry.to_skill_instance()))
+            .collect()
     }
 
     /// Check if metadata matches filter
