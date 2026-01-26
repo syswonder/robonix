@@ -22,9 +22,7 @@ from rclpy.qos import (
     ReliabilityPolicy,
     HistoryPolicy,
     DurabilityPolicy,
-    LivelinessPolicy,
 )
-from rclpy.duration import Duration
 from robonix_sdk.srv import QuerySemanticMap
 from robonix_sdk.msg import (
     Object,
@@ -37,7 +35,7 @@ from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from cv_bridge import CvBridge
 from dotenv import load_dotenv
 from openai import OpenAI
-from robonix_sdk.srv import QueryPrimitive
+from .robonixpy import RobonixClient  # type: ignore
 
 
 class SemanticMapService(Node):
@@ -77,20 +75,9 @@ class SemanticMapService(Node):
             self.get_logger().error(f"Failed to initialize Qwen3-VL API client: {e}")
             raise
 
-        service_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=10,
-            durability=DurabilityPolicy.VOLATILE,
-        )
-        service_qos.deadline = Duration(seconds=0)
-        service_qos.lifespan = Duration(seconds=0)
-        service_qos.liveliness = LivelinessPolicy.AUTOMATIC
-        service_qos.liveliness_lease_duration = Duration(seconds=0)
-        self.query_primitive_client = self.create_client(
-            QueryPrimitive, "/rbnx/prm/query", qos_profile=service_qos
-        )
-        self.get_logger().info("QueryPrimitive service client created")
+        # Initialize Robonix client helper
+        self.robonix = RobonixClient(self, self.get_logger())
+        self.query_primitive_client = self.robonix.create_query_primitive_client()
 
         self.cv_bridge = CvBridge()
         self.cache_dir = package_root / "cache"
@@ -215,210 +202,32 @@ class SemanticMapService(Node):
 
     def _query_camera_primitives(self):
         """Query front camera primitives from OS with retry logic. Exits if failed."""
-        max_retries = 5
-        retry_delay = 2.0
-
-        for attempt in range(max_retries):
-            self.get_logger().info(
-                f"Querying prm::camera.capture (front camera)... (attempt {attempt + 1}/{max_retries})"
-            )
-            try:
-                wait_timeout = 10.0 if attempt < 2 else 5.0
-                if not self.query_primitive_client.wait_for_service(
-                    timeout_sec=wait_timeout
-                ):
-                    self.get_logger().warn(
-                        f"  query_primitive service not available (attempt {attempt + 1}/{max_retries})"
-                    )
-                    if attempt < max_retries - 1:
-                        import time
-
-                        time.sleep(retry_delay)
-                        continue
-                    else:
-                        self.get_logger().error(
-                            "  query_primitive service not available after all retries"
-                        )
-                        raise RuntimeError(
-                            "query_primitive service not available after all retries"
-                        )
-
-                request = QueryPrimitive.Request()
-                request.name = "prm::camera.capture"
-                request.filter = json.dumps({"camera": "front"})
-                future = self.query_primitive_client.call_async(request)
-
-                import time
-
-                start_time = time.time()
-                timeout_sec = 3.0
-                while not future.done() and (time.time() - start_time) < timeout_sec:
-                    rclpy.spin_once(self, timeout_sec=0.01)
-
-                if not future.done():
-                    elapsed = time.time() - start_time
-                    self.get_logger().warn(
-                        f"  Service call timeout after {elapsed:.1f}s (attempt {attempt + 1}/{max_retries})"
-                    )
-                    try:
-                        future.cancel()
-                    except Exception:
-                        pass
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay)
-                        continue
-                    else:
-                        raise RuntimeError(
-                            f"Service call timeout after {elapsed:.1f}s after all retries"
-                        )
-
-                response = future.result()
-                if response and response.instances:
-                    instance = response.instances[0]
-                    output_schema = (
-                        json.loads(instance.output_schema)
-                        if isinstance(instance.output_schema, str)
-                        else instance.output_schema
-                    )
-                    if "image" in output_schema:
-                        self.rgb_image_topic = output_schema["image"]
-                        self.get_logger().info(
-                            f"  Found front camera RGB topic: {self.rgb_image_topic}"
-                        )
-                        return
-                    else:
-                        raise ValueError(
-                            'Front camera primitive found but no "image" in output_schema'
-                        )
-                else:
-                    self.get_logger().warn(
-                        f"  No front camera primitive found (attempt {attempt + 1}/{max_retries})"
-                    )
-                    if attempt < max_retries - 1:
-                        import time
-
-                        time.sleep(retry_delay)
-                        continue
-                    else:
-                        raise RuntimeError(
-                            "No front camera primitive found after all retries"
-                        )
-
-            except (RuntimeError, ValueError):
-                raise
-            except Exception as e:
-                self.get_logger().error(f"Error querying camera primitive: {e}")
-                import traceback
-
-                self.get_logger().error(f"Traceback:\n{traceback.format_exc()}")
-                if attempt < max_retries - 1:
-                    import time
-
-                    time.sleep(retry_delay)
-                    continue
-                else:
-                    raise RuntimeError(
-                        f"Failed to query camera primitive after all retries: {e}"
-                    )
-
-        raise RuntimeError("Failed to query camera primitive: unknown error")
+        self.rgb_image_topic = self.robonix.query_primitive_and_extract_field(
+            "prm::camera.capture",
+            field_name="image",
+            filter_dict={"camera": "front"},
+            max_retries=5,
+            retry_delay=2.0,
+            wait_timeout=10.0,
+            call_timeout=3.0,
+            raise_on_error=True,
+            raise_on_missing_field=True,
+            log_success=True,
+        )
 
     def _query_pose_primitive(self):
         """Query robot pose primitive from OS with retry logic."""
-        max_retries = 5
-        retry_delay = 2.0
-        primitive_name = "prm::base.pose.amcl"
-
-        for attempt in range(max_retries):
-            self.get_logger().info(
-                f"Querying {primitive_name}... (attempt {attempt + 1}/{max_retries})"
-            )
-            try:
-                wait_timeout = 10.0 if attempt < 2 else 5.0
-                if not self.query_primitive_client.wait_for_service(
-                    timeout_sec=wait_timeout
-                ):
-                    self.get_logger().warn(
-                        f"  query_primitive service not available (attempt {attempt + 1}/{max_retries})"
-                    )
-                    if attempt < max_retries - 1:
-                        import time
-
-                        time.sleep(retry_delay)
-                        continue
-                    else:
-                        break
-
-                request = QueryPrimitive.Request()
-                request.name = primitive_name
-                request.filter = "{}"
-                future = self.query_primitive_client.call_async(request)
-
-                import time
-
-                start_time = time.time()
-                timeout_sec = 3.0
-                while not future.done() and (time.time() - start_time) < timeout_sec:
-                    rclpy.spin_once(self, timeout_sec=0.01)
-
-                if not future.done():
-                    elapsed = time.time() - start_time
-                    self.get_logger().warn(
-                        f"  Service call timeout after {elapsed:.1f}s (attempt {attempt + 1}/{max_retries})"
-                    )
-                    try:
-                        future.cancel()
-                    except Exception:
-                        pass
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay)
-                        continue
-                    else:
-                        break
-
-                response = future.result()
-                if response and response.instances:
-                    instance = response.instances[0]
-                    output_schema = (
-                        json.loads(instance.output_schema)
-                        if isinstance(instance.output_schema, str)
-                        else instance.output_schema
-                    )
-                    if "pose" in output_schema:
-                        self.pose_topic = output_schema["pose"]
-                        self.get_logger().info(
-                            f"  Found pose topic: {self.pose_topic} (from {primitive_name})"
-                        )
-                        return
-                    else:
-                        self.get_logger().warn(
-                            f'  {primitive_name} found but no "pose" in output_schema'
-                        )
-                        break
-                else:
-                    self.get_logger().warn(
-                        f"  No {primitive_name} primitive found (attempt {attempt + 1}/{max_retries})"
-                    )
-                    if attempt < max_retries - 1:
-                        import time
-
-                        time.sleep(retry_delay)
-                        continue
-                    else:
-                        break
-
-            except Exception as e:
-                self.get_logger().warn(f"Error querying {primitive_name}: {e}")
-                if attempt < max_retries - 1:
-                    import time
-
-                    time.sleep(retry_delay)
-                    continue
-                else:
-                    break
-
-        self.get_logger().warn(
-            "Failed to query pose primitive after all retries, continuing without pose"
+        self.pose_topic = self.robonix.query_primitive_and_extract_field(
+            "prm::base.pose.amcl",
+            field_name="pose",
+            filter_dict=None,
+            max_retries=5,
+            retry_delay=2.0,
+            wait_timeout=10.0,
+            call_timeout=3.0,
+            raise_on_error=False,  # Don't raise, just log warning
+            raise_on_missing_field=False,  # Don't raise, just log warning
+            log_success=True,
         )
 
     def rgb_image_callback(self, msg):
