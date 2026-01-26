@@ -17,7 +17,7 @@ let currentTfTreeData = null;
 
 function renderTfTree(data) {
     const container = document.getElementById('tf-tree-container');
-    
+
     if (!data || !data.frames || data.frames.length === 0) {
         if (!currentTfTreeData) {
             container.innerHTML = 'No TF frames available';
@@ -42,7 +42,7 @@ function renderTfTree(data) {
         if (!frame) return '';
 
         let output = prefix + '<span style="color: #999;">' + (isLast ? '└── ' : '├── ') + '</span>' + '<strong>' + frameId + '</strong>';
-        
+
         if (frame.transform) {
             const t = frame.transform.translation;
             output += ` <span style="color: #999;">[${t[0].toFixed(2)}, ${t[1].toFixed(2)}, ${t[2].toFixed(2)}]</span>`;
@@ -75,7 +75,7 @@ function renderTfTree(data) {
 
 async function loadTfTree() {
     const container = document.getElementById('tf-tree-container');
-    
+
     try {
         const response = await fetch('/api/tf-tree');
         if (!response.ok) {
@@ -95,7 +95,7 @@ let currentTopicsData = null;
 
 function renderTopics(data) {
     const container = document.getElementById('topics-container');
-    
+
     if (!data || !data.topics || data.topics.length === 0) {
         if (!currentTopicsData) {
             container.innerHTML = 'No topics available';
@@ -123,7 +123,7 @@ function renderTopics(data) {
 
 async function loadTopics() {
     const container = document.getElementById('topics-container');
-    
+
     try {
         const response = await fetch('/api/topics');
         if (!response.ok) {
@@ -175,7 +175,7 @@ let autoRefreshLogsInterval = null;
 
 async function loadLogs() {
     const container = document.getElementById('logs-container');
-    
+
     try {
         const response = await fetch('/api/logs?limit=200');
         if (!response.ok) {
@@ -196,7 +196,7 @@ let logEntriesMap = new Map();
 
 function renderLogs(logs) {
     const container = document.getElementById('logs-container');
-    
+
     if (!logs || logs.length === 0) {
         if (logEntriesMap.size === 0) {
             container.innerHTML = 'No logs available';
@@ -262,12 +262,12 @@ function renderLogs(logs) {
 
         const wasAtBottom = container.scrollHeight - container.scrollTop <= container.clientHeight + 10;
         container.innerHTML = logsHtml;
-        
+
         // Auto-scroll to bottom only if user was already at bottom
         if (wasAtBottom) {
             container.scrollTop = container.scrollHeight;
         }
-        
+
         lastLogTimestamp = latestTimestamp;
     }
 }
@@ -335,12 +335,12 @@ let tasksData = [];
 function renderPrimitives(primitives) {
     const container = document.getElementById('primitives-container');
     primitivesData = primitives; // Store for modal
-    
+
     if (primitives.length === 0) {
         container.innerHTML = '<div class="component-item">No primitives registered</div>';
         return;
     }
-    
+
     let html = '';
     primitives.forEach((prim, index) => {
         // Key format is "name$provider$version", so we need to extract name properly
@@ -375,19 +375,19 @@ function showComponentListModal(type) {
     const modal = document.getElementById('component-list-modal');
     const title = document.getElementById('component-list-modal-title');
     const content = document.getElementById('component-list-modal-content');
-    
+
     if (!modal || !title || !content) {
         console.error('Modal elements not found');
         return;
     }
-    
+
     currentListModalType = type;
     currentListModalView = 'list';
-    
+
     let data = [];
     let titleText = '';
-    
-    switch(type) {
+
+    switch (type) {
         case 'primitive':
             data = primitivesData;
             titleText = 'Primitives';
@@ -405,12 +405,12 @@ function showComponentListModal(type) {
             titleText = 'Tasks';
             break;
     }
-    
+
     title.textContent = titleText;
-    
+
     // Render list view
     let html = '';
-    
+
     if (data.length === 0) {
         html = '<div class="component-list-empty">No items registered</div>';
     } else {
@@ -420,7 +420,7 @@ function showComponentListModal(type) {
         });
         html += '</div>';
     }
-    
+
     content.innerHTML = html;
     modal.style.display = 'block';
     // Trigger animation
@@ -431,15 +431,15 @@ function showComponentListModal(type) {
 
 function renderComponentListItem(type, item, index) {
     let itemClass = 'component-list-item';
-    
+
     // Add state class for tasks
     if (type === 'task') {
         const stateClass = `task-state-${item.state.toLowerCase()}`;
         itemClass += ` ${stateClass}`;
     }
-    
+
     let html = `<div class="${itemClass}" onclick="showComponentDetailInListModal('${type}', ${index})">`;
-    
+
     if (type === 'primitive') {
         let name = item.name;
         if (!name && item.key) {
@@ -459,7 +459,7 @@ function renderComponentListItem(type, item, index) {
         let metadata = {};
         try {
             metadata = JSON.parse(item.metadata || '{}');
-        } catch (e) {}
+        } catch (e) { }
         const status = metadata.status || 'unknown';
         html += `<div class="component-list-item-name">${escapeHtml(name)}</div>`;
         html += `<div class="component-list-item-meta">Status: ${escapeHtml(status)} | Provider: ${escapeHtml(item.provider)}</div>`;
@@ -470,7 +470,7 @@ function renderComponentListItem(type, item, index) {
         html += `<div class="component-list-item-name">${escapeHtml(item.task_id)}</div>`;
         html += `<div class="component-list-item-meta">${escapeHtml(item.description)} | State: ${item.state}</div>`;
     }
-    
+
     html += '<div class="component-list-item-arrow">→</div>';
     html += '</div>';
     return html;
@@ -479,13 +479,13 @@ function renderComponentListItem(type, item, index) {
 function showComponentDetailInListModal(type, index) {
     const content = document.getElementById('component-list-modal-content');
     const title = document.getElementById('component-list-modal-title');
-    
+
     currentListModalView = 'detail';
-    
+
     let data = null;
     let titleText = '';
-    
-    switch(type) {
+
+    switch (type) {
         case 'primitive':
             if (index >= 0 && index < primitivesData.length) {
                 data = primitivesData[index];
@@ -521,17 +521,17 @@ function showComponentDetailInListModal(type, index) {
             }
             break;
     }
-    
+
     if (!data) {
         console.error('Data not found for type:', type, 'index:', index);
         return;
     }
-    
+
     title.textContent = titleText;
-    
+
     let html = '<div class="component-detail-back" onclick="backToComponentList()">← Back to List</div>';
     html += renderComponentItemDetail(type, data, index);
-    
+
     content.innerHTML = html;
 }
 
@@ -542,7 +542,7 @@ function backToComponentList() {
 
 function renderComponentItemDetail(type, item, index) {
     let html = '<div class="component-detail-section">';
-    
+
     if (type === 'primitive') {
         let name = item.name;
         if (!name && item.key) {
@@ -550,12 +550,12 @@ function renderComponentItemDetail(type, item, index) {
             name = keyParts.length >= 3 ? keyParts.slice(0, keyParts.length - 2).join('$') : (keyParts[0] || item.key);
         }
         name = name || item.key || 'Unknown';
-        
+
         html += `<h3>${escapeHtml(name)}</h3>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Provider:</span><span class="component-detail-value">${escapeHtml(item.provider)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Version:</span><span class="component-detail-value">${escapeHtml(item.version)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Key:</span><span class="component-detail-value">${escapeHtml(item.key)}</span></div>`;
-        
+
         html += `<div class="component-detail-field"><span class="component-detail-label">Input Schema:</span></div>`;
         try {
             const inputSchema = JSON.parse(item.input_schema || '{}');
@@ -563,7 +563,7 @@ function renderComponentItemDetail(type, item, index) {
         } catch (e) {
             html += `<div class="component-detail-value">${escapeHtml(item.input_schema || 'N/A')}</div>`;
         }
-        
+
         html += `<div class="component-detail-field"><span class="component-detail-label">Output Schema:</span></div>`;
         try {
             const outputSchema = JSON.parse(item.output_schema || '{}');
@@ -571,7 +571,7 @@ function renderComponentItemDetail(type, item, index) {
         } catch (e) {
             html += `<div class="component-detail-value">${escapeHtml(item.output_schema || 'N/A')}</div>`;
         }
-        
+
         html += `<div class="component-detail-field"><span class="component-detail-label">Metadata:</span></div>`;
         try {
             const metadata = JSON.parse(item.metadata || '{}');
@@ -586,20 +586,20 @@ function renderComponentItemDetail(type, item, index) {
             name = keyParts.length >= 3 ? keyParts.slice(0, keyParts.length - 2).join('$') : (keyParts[0] || item.key);
         }
         name = name || item.key || 'Unknown';
-        
+
         let metadata = {};
         try {
             metadata = JSON.parse(item.metadata || '{}');
-        } catch (e) {}
+        } catch (e) { }
         const status = metadata.status || 'unknown';
-        
+
         html += `<h3>${escapeHtml(name)}</h3>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Status:</span><span class="component-detail-value">${escapeHtml(status)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Provider:</span><span class="component-detail-value">${escapeHtml(item.provider)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Version:</span><span class="component-detail-value">${escapeHtml(item.version)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Entry:</span><span class="component-detail-value">${escapeHtml(item.entry)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Key:</span><span class="component-detail-value">${escapeHtml(item.key)}</span></div>`;
-        
+
         html += `<div class="component-detail-field"><span class="component-detail-label">Metadata:</span></div>`;
         html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(metadata, null, 2))}</div>`;
     } else if (type === 'skill') {
@@ -659,7 +659,7 @@ function renderComponentItemDetail(type, item, index) {
             html += `<div class="component-detail-value" style="color: #d32f2f;">${escapeHtml(item.error_message)}</div>`;
         }
     }
-    
+
     html += '</div>';
     return html;
 }
@@ -690,18 +690,18 @@ async function loadServices() {
 function renderServices(services) {
     const container = document.getElementById('services-container');
     servicesData = services; // Store for modal
-    
+
     // Update status bar
     const servicesCountEl = document.getElementById('services-count');
     if (servicesCountEl) {
         servicesCountEl.textContent = services.length;
     }
-    
+
     if (services.length === 0) {
         container.innerHTML = '<div class="component-item">No services registered</div>';
         return;
     }
-    
+
     let html = '';
     services.forEach((srv, index) => {
         // Key format is "name$provider$version"
@@ -745,18 +745,18 @@ async function loadSkills() {
 function renderSkills(skills) {
     const container = document.getElementById('skills-container');
     skillsData = skills; // Store for modal
-    
+
     // Update status bar
     const skillsCountEl = document.getElementById('skills-count');
     if (skillsCountEl) {
         skillsCountEl.textContent = skills.length;
     }
-    
+
     if (skills.length === 0) {
         container.innerHTML = '<div class="component-item">No skills registered</div>';
         return;
     }
-    
+
     let html = '';
     skills.forEach((skill, index) => {
         html += `<div class="component-item" onclick="showComponentModal('skill', ${index})">`;
@@ -782,7 +782,7 @@ async function loadTasks() {
 function renderTasks(tasks) {
     const container = document.getElementById('tasks-container');
     tasksData = tasks; // Store for modal
-    
+
     // Update status bar - count active tasks (not finished, failed, or cancelled)
     const activeTasks = tasks.filter(task => {
         const state = task.state.toLowerCase();
@@ -792,12 +792,12 @@ function renderTasks(tasks) {
     if (activeTasksEl) {
         activeTasksEl.textContent = activeTasks.length;
     }
-    
+
     if (tasks.length === 0) {
         container.innerHTML = '<div class="component-item">No tasks</div>';
         return;
     }
-    
+
     let html = '';
     tasks.forEach((task, index) => {
         const stateClass = `task-state-${task.state.toLowerCase()}`;
@@ -847,7 +847,7 @@ function renderSemanticMap(objects) {
         container.innerHTML = '<div class="semantic-object">No objects detected</div>';
         return;
     }
-    
+
     let html = '';
     objects.forEach((obj, idx) => {
         html += `<div class="semantic-object">`;
@@ -894,34 +894,34 @@ async function loadSemanticMap2D() {
 function renderSemanticMap2D(objects) {
     const canvas = document.getElementById('semantic-map-2d-canvas');
     if (!canvas) return;
-    
+
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    
+
     // Set canvas size
     const container = canvas.parentElement;
     const containerWidth = container.clientWidth || container.offsetWidth || 800;
     const containerHeight = container.clientHeight || container.offsetHeight || 400;
-    
+
     // Support high DPI displays (Retina)
     const dpr = window.devicePixelRatio || 1;
     const displayWidth = containerWidth - 20;
     const displayHeight = Math.max(380, containerHeight - 20);
-    
+
     // Set canvas CSS size
     canvas.style.width = displayWidth + 'px';
     canvas.style.height = displayHeight + 'px';
-    
+
     // Set canvas actual size (scaled for high DPI)
     canvas.width = displayWidth * dpr;
     canvas.height = displayHeight * dpr;
-    
+
     // Scale context to match device pixel ratio
     ctx.scale(dpr, dpr);
-    
+
     // Clear canvas
     ctx.clearRect(0, 0, displayWidth, displayHeight);
-    
+
     if (!Array.isArray(objects) || objects.length === 0) {
         ctx.fillStyle = '#999';
         ctx.font = '16px Arial';
@@ -929,12 +929,12 @@ function renderSemanticMap2D(objects) {
         ctx.fillText('No objects detected', displayWidth / 2, displayHeight / 2);
         return;
     }
-    
+
     // Extract objects with map frame coordinates
     const mapObjects = [];
     objects.forEach(obj => {
         if (!obj.frame_mapping) return;
-        
+
         // Find map frame mapping
         let mapFrame = null;
         for (const fm of obj.frame_mapping) {
@@ -943,14 +943,14 @@ function renderSemanticMap2D(objects) {
                 break;
             }
         }
-        
+
         if (mapFrame) {
             // Extract yaw from bbox if available
             let yaw = 0.0;
             if (mapFrame.bbox && mapFrame.bbox.length > 0 && mapFrame.bbox[0].yaw !== undefined) {
                 yaw = mapFrame.bbox[0].yaw;
             }
-            
+
             mapObjects.push({
                 id: obj.id,
                 label: obj.label,
@@ -962,7 +962,7 @@ function renderSemanticMap2D(objects) {
             });
         }
     });
-    
+
     if (mapObjects.length === 0) {
         ctx.fillStyle = '#999';
         ctx.font = '16px Arial';
@@ -970,31 +970,31 @@ function renderSemanticMap2D(objects) {
         ctx.fillText('No objects with map coordinates', displayWidth / 2, displayHeight / 2);
         return;
     }
-    
+
     // Calculate bounds
     let minX = Infinity, maxX = -Infinity;
     let minY = Infinity, maxY = -Infinity;
-    
+
     mapObjects.forEach(obj => {
         minX = Math.min(minX, obj.x);
         maxX = Math.max(maxX, obj.x);
         minY = Math.min(minY, obj.y);
         maxY = Math.max(maxY, obj.y);
     });
-    
+
     // Add padding
     const padding = 2.0; // meters
     minX -= padding;
     maxX += padding;
     minY -= padding;
     maxY += padding;
-    
+
     // Update map2DState bounds
     map2DState.minX = minX;
     map2DState.maxX = maxX;
     map2DState.minY = minY;
     map2DState.maxY = maxY;
-    
+
     // Calculate initial scale to fit all objects (only if scale is 1.0, i.e., first render)
     const rangeX = maxX - minX;
     const rangeY = maxY - minY;
@@ -1003,31 +1003,31 @@ function renderSemanticMap2D(objects) {
         const scaleY = (displayHeight - 40) / rangeY;
         map2DState.scale = Math.min(scaleX, scaleY);
     }
-    
+
     const scale = map2DState.scale;
     const offsetX = map2DState.offsetX;
     const offsetY = map2DState.offsetY;
-    
+
     // Helper function to convert world coordinates to canvas coordinates
     const worldToCanvas = (wx, wy) => {
         const cx = 20 + (wx - minX) * scale + offsetX;
         const cy = displayHeight - 20 - (wy - minY) * scale - offsetY; // Flip Y axis
         return { x: cx, y: cy };
     };
-    
+
     // Draw grid - cover entire canvas
     ctx.strokeStyle = '#e0e0e0';
     ctx.lineWidth = 0.5;
-    
+
     const gridStep = Math.max(1.0, Math.ceil(Math.max(rangeX, rangeY) / 10));
-    
+
     // Calculate world coordinates for canvas edges (considering offset)
     const canvasToWorld = (cx, cy) => {
         const wx = (cx - 20 - offsetX) / scale + minX;
         const wy = (displayHeight - 20 - cy - offsetY) / scale + minY; // Flip Y axis
         return { x: wx, y: wy };
     };
-    
+
     // Get world bounds for visible area (considering offset and scale)
     const topLeft = canvasToWorld(0, 0);
     const bottomRight = canvasToWorld(displayWidth, displayHeight);
@@ -1035,7 +1035,7 @@ function renderSemanticMap2D(objects) {
     const visibleMaxX = Math.max(topLeft.x, bottomRight.x);
     const visibleMinY = Math.min(topLeft.y, bottomRight.y);
     const visibleMaxY = Math.max(topLeft.y, bottomRight.y);
-    
+
     // Draw vertical grid lines - extend beyond visible area to ensure full coverage
     const gridStartX = Math.floor(visibleMinX / gridStep) * gridStep - gridStep * 2;
     const gridEndX = Math.ceil(visibleMaxX / gridStep) * gridStep + gridStep * 2;
@@ -1047,7 +1047,7 @@ function renderSemanticMap2D(objects) {
         ctx.lineTo(pos.x, displayHeight);
         ctx.stroke();
     }
-    
+
     // Draw horizontal grid lines - extend beyond visible area to ensure full coverage
     const gridStartY = Math.floor(visibleMinY / gridStep) * gridStep - gridStep * 2;
     const gridEndY = Math.ceil(visibleMaxY / gridStep) * gridStep + gridStep * 2;
@@ -1059,7 +1059,7 @@ function renderSemanticMap2D(objects) {
         ctx.lineTo(displayWidth, pos.y);
         ctx.stroke();
     }
-    
+
     // Draw coordinate axes
     ctx.strokeStyle = '#999';
     ctx.lineWidth = 1;
@@ -1072,17 +1072,17 @@ function renderSemanticMap2D(objects) {
     ctx.moveTo(0, origin.y);
     ctx.lineTo(displayWidth, origin.y);
     ctx.stroke();
-    
+
     // Draw origin marker
     ctx.fillStyle = '#666';
     ctx.fillText('(0,0)', origin.x + 5, origin.y - 5);
-    
+
     // Simple drawing - no collision avoidance
     mapObjects.forEach((obj) => {
         const pos = worldToCanvas(obj.x, obj.y);
         const labelText = obj.label || (obj.isRobot ? 'robot' : 'object');
         const coordText = `[${obj.x.toFixed(1)}, ${obj.y.toFixed(1)}]`;
-        
+
         // Draw object as a circle (including robot)
         if (obj.isRobot) {
             ctx.fillStyle = '#1976d2';
@@ -1096,20 +1096,20 @@ function renderSemanticMap2D(objects) {
         ctx.arc(pos.x, pos.y, 6, 0, 2 * Math.PI);
         ctx.fill();
         ctx.stroke();
-        
+
         // Draw label
         ctx.fillStyle = obj.isRobot ? '#1976d2' : '#333';
         ctx.font = obj.isRobot ? 'bold 12px Arial' : '11px Arial';
         ctx.textAlign = 'center';
         ctx.fillText(labelText, pos.x, pos.y - 10);
-        
+
         // Draw coordinates
         ctx.fillStyle = '#666';
         ctx.font = '9px Arial';
         ctx.textAlign = 'center';
         ctx.fillText(coordText, pos.x, pos.y + 20);
     });
-    
+
     // Draw legend
     ctx.fillStyle = '#333';
     ctx.font = '11px Arial';
@@ -1165,35 +1165,35 @@ let imageMonitorState = {
 
 function renderImageMonitor(imageTopics) {
     const container = document.getElementById('image-monitor-container');
-    
+
     // Clear loading text if present
     if (container.textContent.trim() === 'Loading...') {
         container.textContent = '';
     }
-    
+
     if (imageTopics.length === 0) {
         return;
     }
-    
+
     // Update state
     imageTopics.forEach(topic => {
         const topicName = topic.topic_name;
         const imagePaths = topic.image_paths || [];
         const latestImage = imagePaths.length > 0 ? imagePaths[0] : null;
-        
+
         if (latestImage) {
             imageMonitorState.updateTopic(topicName, latestImage.path, latestImage.timestamp);
         } else {
             imageMonitorState.updateTopic(topicName, null, null);
         }
     });
-    
+
     // Render using simple DOM updates
     imageTopics.forEach(topic => {
         const topicName = topic.topic_name;
         const imagePaths = topic.image_paths || [];
         const latestImage = imagePaths.length > 0 ? imagePaths[0] : null;
-        
+
         // Find or create topic entry
         let topicEntry = container.querySelector(`[data-topic="${CSS.escape(topicName)}"]`);
         if (!topicEntry) {
@@ -1202,7 +1202,7 @@ function renderImageMonitor(imageTopics) {
             topicEntry.setAttribute('data-topic', topicName);
             container.appendChild(topicEntry);
         }
-        
+
         // Update topic name (shorten if too long)
         let nameEl = topicEntry.querySelector('.image-topic-name');
         if (!nameEl) {
@@ -1213,7 +1213,7 @@ function renderImageMonitor(imageTopics) {
         // Display full topic name
         nameEl.textContent = topicName;
         nameEl.title = topicName;
-        
+
         // Update gallery
         let gallery = topicEntry.querySelector('.image-gallery');
         if (!gallery) {
@@ -1221,14 +1221,14 @@ function renderImageMonitor(imageTopics) {
             gallery.className = 'image-gallery';
             topicEntry.appendChild(gallery);
         }
-        
+
         let item = gallery.querySelector('.image-gallery-item-single');
         if (!item) {
             item = document.createElement('div');
             item.className = 'image-gallery-item image-gallery-item-single';
             gallery.appendChild(item);
         }
-        
+
         let img = item.querySelector('img');
         if (!img) {
             img = document.createElement('img');
@@ -1236,24 +1236,24 @@ function renderImageMonitor(imageTopics) {
             img.alt = topicName;
             item.insertBefore(img, item.firstChild);
         }
-        
+
         let timestampEl = item.querySelector('.image-timestamp');
         if (!timestampEl) {
             timestampEl = document.createElement('div');
             timestampEl.className = 'image-timestamp';
             item.appendChild(timestampEl);
         }
-        
+
         if (latestImage) {
             const url = imageMonitorState.getTopicUrl(topicName);
             const timeStr = imageMonitorState.getTopicTimestamp(topicName);
-            
+
             // Only update src if changed
             if (img.src !== url && url) {
                 img.src = url;
                 img.style.display = 'block';
             }
-            
+
             if (timestampEl && timeStr) {
                 timestampEl.textContent = timeStr;
                 timestampEl.title = timeStr;
@@ -1265,7 +1265,7 @@ function renderImageMonitor(imageTopics) {
             }
         }
     });
-    
+
     // Remove topics that no longer exist
     const currentTopicNames = new Set(imageTopics.map(t => t.topic_name));
     const existingEntries = container.querySelectorAll('.image-topic-entry');
@@ -1304,16 +1304,16 @@ function showComponentModal(type, index) {
     const modal = document.getElementById('component-modal');
     const title = document.getElementById('component-modal-title');
     const content = document.getElementById('component-modal-content');
-    
+
     if (!modal || !title || !content) {
         console.error('Modal elements not found');
         return;
     }
-    
+
     let data = null;
     let titleText = '';
-    
-    switch(type) {
+
+    switch (type) {
         case 'primitive':
             if (index >= 0 && index < primitivesData.length) {
                 data = primitivesData[index];
@@ -1349,16 +1349,16 @@ function showComponentModal(type, index) {
             }
             break;
     }
-    
+
     if (!data) {
         console.error('Data not found for type:', type, 'index:', index);
         return;
     }
-    
+
     title.textContent = titleText;
-    
+
     let html = '';
-    
+
     if (type === 'primitive') {
         html += `<div class="component-detail-section">`;
         html += `<h3>Basic Information</h3>`;
@@ -1367,7 +1367,7 @@ function showComponentModal(type, index) {
         html += `<div class="component-detail-field"><span class="component-detail-label">Version:</span><span class="component-detail-value">${escapeHtml(data.version)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Key:</span><span class="component-detail-value">${escapeHtml(data.key)}</span></div>`;
         html += `</div>`;
-        
+
         html += `<div class="component-detail-section">`;
         html += `<h3>Input Schema</h3>`;
         try {
@@ -1377,7 +1377,7 @@ function showComponentModal(type, index) {
             html += `<div class="component-detail-value">${escapeHtml(data.input_schema || 'N/A')}</div>`;
         }
         html += `</div>`;
-        
+
         html += `<div class="component-detail-section">`;
         html += `<h3>Output Schema</h3>`;
         try {
@@ -1387,7 +1387,7 @@ function showComponentModal(type, index) {
             html += `<div class="component-detail-value">${escapeHtml(data.output_schema || 'N/A')}</div>`;
         }
         html += `</div>`;
-        
+
         html += `<div class="component-detail-section">`;
         html += `<h3>Metadata</h3>`;
         try {
@@ -1406,7 +1406,7 @@ function showComponentModal(type, index) {
         html += `<div class="component-detail-field"><span class="component-detail-label">Entry:</span><span class="component-detail-value">${escapeHtml(data.entry)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Key:</span><span class="component-detail-value">${escapeHtml(data.key)}</span></div>`;
         html += `</div>`;
-        
+
         html += `<div class="component-detail-section">`;
         html += `<h3>Metadata</h3>`;
         try {
@@ -1433,7 +1433,7 @@ function showComponentModal(type, index) {
             html += `<div class="component-detail-field"><span class="component-detail-label">Main RTDL:</span><span class="component-detail-value">${escapeHtml(data.main_rtdl)}</span></div>`;
         }
         html += `</div>`;
-        
+
         if (data.start_args) {
             html += `<div class="component-detail-section">`;
             html += `<h3>Start Args</h3>`;
@@ -1445,7 +1445,7 @@ function showComponentModal(type, index) {
             }
             html += `</div>`;
         }
-        
+
         if (data.metadata) {
             html += `<div class="component-detail-section">`;
             html += `<h3>Metadata</h3>`;
@@ -1466,7 +1466,7 @@ function showComponentModal(type, index) {
         html += `<div class="component-detail-field"><span class="component-detail-label">Priority:</span><span class="component-detail-value">${data.priority}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Instruction Pointer:</span><span class="component-detail-value">${data.rtdl_instruction_pointer || 0}</span></div>`;
         html += `</div>`;
-        
+
         if (data.rtdl) {
             html += `<div class="component-detail-section">`;
             html += `<h3>RTDL Program</h3>`;
@@ -1474,21 +1474,21 @@ function showComponentModal(type, index) {
             html += `<div class="component-detail-json">${escapeHtml(data.rtdl)}</div>`;
             html += `</div>`;
         }
-        
+
         if (data.params) {
             html += `<div class="component-detail-section">`;
             html += `<h3>Parameters</h3>`;
             html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(data.params, null, 2))}</div>`;
             html += `</div>`;
         }
-        
+
         if (data.result) {
             html += `<div class="component-detail-section">`;
             html += `<h3>Result</h3>`;
             html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(data.result, null, 2))}</div>`;
             html += `</div>`;
         }
-        
+
         if (data.error_message) {
             html += `<div class="component-detail-section">`;
             html += `<h3>Error Message</h3>`;
@@ -1496,7 +1496,7 @@ function showComponentModal(type, index) {
             html += `</div>`;
         }
     }
-    
+
     content.innerHTML = html;
     modal.style.display = 'block';
     // Trigger animation
@@ -1515,7 +1515,7 @@ function closeComponentModal() {
 }
 
 // Close modal when clicking outside
-window.onclick = function(event) {
+window.onclick = function (event) {
     const rtdlModal = document.getElementById('rtdl-modal');
     const componentModal = document.getElementById('component-modal');
     const componentListModal = document.getElementById('component-list-modal');
@@ -1587,7 +1587,7 @@ function setupAutoRefreshViz() {
 function setupAutoRefreshMap2D() {
     const checkbox = document.getElementById('auto-refresh-map2d');
     if (!checkbox) return;
-    
+
     checkbox.addEventListener('change', (e) => {
         if (e.target.checked) {
             startAutoRefreshMap2D();
@@ -1639,12 +1639,12 @@ if ('scrollRestoration' in history) {
     history.scrollRestoration = 'manual';
 }
 
-(function() {
+(function () {
     'use strict';
     const SCROLL_KEY = 'robonix_scroll_pos';
     let scrollTimeout = null;
     let isRestoring = false;
-    
+
     function saveScrollPosition() {
         if (isRestoring) return;
         try {
@@ -1653,7 +1653,7 @@ if ('scrollRestoration' in history) {
             // Ignore
         }
     }
-    
+
     function restoreScrollPosition() {
         try {
             const saved = sessionStorage.getItem(SCROLL_KEY);
@@ -1661,23 +1661,23 @@ if ('scrollRestoration' in history) {
                 const y = parseInt(saved, 10);
                 if (!isNaN(y) && y > 0) {
                     isRestoring = true;
-                    
+
                     // Multiple attempts to ensure restoration
                     const attemptRestore = () => {
                         window.scrollTo(0, y);
                         document.documentElement.scrollTop = y;
                         document.body.scrollTop = y;
                     };
-                    
+
                     // Try immediately
                     attemptRestore();
-                    
+
                     // Try after a short delay
                     setTimeout(attemptRestore, 10);
                     setTimeout(attemptRestore, 50);
                     setTimeout(attemptRestore, 100);
                     setTimeout(attemptRestore, 200);
-                    
+
                     setTimeout(() => {
                         isRestoring = false;
                     }, 300);
@@ -1687,20 +1687,20 @@ if ('scrollRestoration' in history) {
             isRestoring = false;
         }
     }
-    
+
     // Throttled scroll save
-    window.addEventListener('scroll', function() {
+    window.addEventListener('scroll', function () {
         if (isRestoring) return;
         if (scrollTimeout) {
             clearTimeout(scrollTimeout);
         }
         scrollTimeout = setTimeout(saveScrollPosition, 250);
     }, { passive: true });
-    
+
     // Save on page unload
     window.addEventListener('beforeunload', saveScrollPosition);
     window.addEventListener('pagehide', saveScrollPosition);
-    
+
     // Restore on load
     if (document.readyState === 'complete') {
         restoreScrollPosition();
@@ -1714,7 +1714,7 @@ if ('scrollRestoration' in history) {
 function setupMap2DInteraction() {
     const canvas = document.getElementById('semantic-map-2d-canvas');
     if (!canvas) return;
-    
+
     // Mouse drag
     canvas.addEventListener('mousedown', (e) => {
         map2DState.isDragging = true;
@@ -1724,7 +1724,7 @@ function setupMap2DInteraction() {
         map2DState.dragStartOffsetY = map2DState.offsetY;
         canvas.style.cursor = 'grabbing';
     });
-    
+
     canvas.addEventListener('mousemove', (e) => {
         if (map2DState.isDragging) {
             const dx = e.clientX - map2DState.dragStartX;
@@ -1734,71 +1734,16 @@ function setupMap2DInteraction() {
             loadSemanticMap2D(); // Re-render
         }
     });
-    
+
     canvas.addEventListener('mouseup', () => {
         map2DState.isDragging = false;
         canvas.style.cursor = 'crosshair';
     });
-    
+
     canvas.addEventListener('mouseleave', () => {
         map2DState.isDragging = false;
         canvas.style.cursor = 'crosshair';
     });
-}
-
-// Zoom functions for 2D map
-function zoomMap2D(action) {
-    const canvas = document.getElementById('semantic-map-2d-canvas');
-    if (!canvas) return;
-    
-    if (action === 'reset') {
-        // Reset to fit all objects
-        map2DState.scale = 1.0;
-        map2DState.offsetX = 0;
-        map2DState.offsetY = 0;
-        // Recalculate initial scale
-        const rangeX = map2DState.maxX - map2DState.minX;
-        const rangeY = map2DState.maxY - map2DState.minY;
-        if (rangeX > 0 && rangeY > 0) {
-            const container = canvas.parentElement;
-            const containerWidth = container.clientWidth || container.offsetWidth || 800;
-            const containerHeight = container.clientHeight || container.offsetHeight || 400;
-            const displayWidth = containerWidth - 20;
-            const displayHeight = Math.max(380, containerHeight - 20);
-            const scaleX = (displayWidth - 40) / rangeX;
-            const scaleY = (displayHeight - 40) / rangeY;
-            map2DState.scale = Math.min(scaleX, scaleY);
-        }
-    } else {
-        // Zoom in/out at canvas center
-        const container = canvas.parentElement;
-        const containerWidth = container.clientWidth || container.offsetWidth || 800;
-        const containerHeight = container.clientHeight || container.offsetHeight || 400;
-        const displayWidth = containerWidth - 20;
-        const displayHeight = Math.max(380, containerHeight - 20);
-        const centerX = displayWidth / 2;
-        const centerY = displayHeight / 2;
-        
-        // Calculate world coordinates at canvas center before zoom
-        const scaleBefore = map2DState.scale;
-        const worldX = (centerX - 20 - map2DState.offsetX) / scaleBefore + map2DState.minX;
-        const worldY = (displayHeight - 20 - centerY - map2DState.offsetY) / scaleBefore + map2DState.minY;
-        
-        // Zoom
-        const zoomFactor = action === 'in' ? 1.2 : 0.833; // 1/1.2 ≈ 0.833
-        map2DState.scale = Math.max(0.1, Math.min(10.0, map2DState.scale * zoomFactor));
-        
-        // Calculate world coordinates at canvas center after zoom
-        const scaleAfter = map2DState.scale;
-        const newCanvasX = 20 + (worldX - map2DState.minX) * scaleAfter;
-        const newCanvasY = displayHeight - 20 - (worldY - map2DState.minY) * scaleAfter;
-        
-        // Adjust offset to keep canvas center fixed in world coordinates
-        map2DState.offsetX += centerX - newCanvasX;
-        map2DState.offsetY += (displayHeight - centerY) - newCanvasY;
-    }
-    
-    loadSemanticMap2D(); // Re-render
 }
 
 // Initialize on page load

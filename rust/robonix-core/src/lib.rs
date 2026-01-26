@@ -17,5 +17,5 @@ pub mod primitive;
 pub mod ros_idl;
 pub mod server;
 pub mod service;
-pub mod task_manager;
-pub mod web_gui;
+pub mod task;
+pub mod web;

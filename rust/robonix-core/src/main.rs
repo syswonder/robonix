@@ -8,8 +8,8 @@ use robonix_core::core::RobonixCore;
 use robonix_core::logging::init_logger_with_buffer;
 use robonix_core::node::create_node;
 use robonix_core::server::{create_qos, create_servers, run_servers};
-use robonix_core::web_gui::{
-    LogBuffer, create_web_gui_state, image_handler, image_topics_handler, index, logs_handler,
+use robonix_core::web::{
+    LogBuffer, create_web_state, image_handler, image_topics_handler, index, logs_handler,
     primitives_handler, semantic_map_handler, services_handler, skills_handler, status_handler,
     tasks_handler, tf_tree_handler, topics_handler,
 };
@@ -125,23 +125,36 @@ fn main() {
         }
     });
 
-    // Check if both web GUI environment variables are set
-    let static_dir_opt = std::env::var("ROBONIX_WEB_STATIC_DIR").ok();
+    // Check if both web environment variables are set
+    let web_dir_opt = std::env::var("ROBONIX_WEB_ASSETS_DIR").ok();
     let port_opt = std::env::var("ROBONIX_WEB_PORT")
         .ok()
         .and_then(|p| p.parse::<u16>().ok());
 
-    // Only start web GUI if both environment variables are set
-    if let (Some(static_dir_str), Some(base_port)) = (static_dir_opt, port_opt) {
-        let static_dir = std::path::PathBuf::from(static_dir_str);
+    // Only start web server if both environment variables are set
+    if let (Some(web_dir_str), Some(base_port)) = (web_dir_opt, port_opt) {
+        let web_dir = std::path::PathBuf::from(web_dir_str);
 
-        // Verify static directory exists
+        // Verify web directory exists
+        if !web_dir.exists() || !web_dir.is_dir() {
+            eprintln!(
+                "Error: Web directory does not exist or is not a directory: {:?}",
+                web_dir
+            );
+            eprintln!(
+                "Please set ROBONIX_WEB_ASSETS_DIR to the web directory path (e.g., /path/to/robonix-core/web)."
+            );
+            std::process::exit(1);
+        }
+
+        // Verify static subdirectory exists
+        let static_dir = web_dir.join("static");
         if !static_dir.exists() || !static_dir.is_dir() {
             eprintln!(
                 "Error: Static directory does not exist or is not a directory: {:?}",
                 static_dir
             );
-            eprintln!("Please set ROBONIX_WEB_STATIC_DIR to a valid directory path.");
+            eprintln!("Please ensure the web directory contains a 'static' subdirectory.");
             std::process::exit(1);
         }
 
@@ -156,20 +169,21 @@ fn main() {
             std::process::exit(1);
         };
 
-        // Create web GUI state
-        let web_gui_state = create_web_gui_state(
+        // Create web state
+        let web_state = create_web_state(
             core.clone(),
             node_arc.clone(),
             tf_monitor.clone(),
             topic_monitor.clone(),
             log_buffer.clone(),
             image_monitor.clone(),
+            web_dir.clone(),
         );
 
-        info!("starting web GUI server on http://localhost:{}", port);
+        info!("starting web server on http://localhost:{}", port);
 
         // Start Rocket web server in a separate task
-        let web_gui_state_clone = web_gui_state.clone();
+        let web_state_clone = web_state.clone();
         let static_dir_clone = static_dir.clone();
         let port_for_log = port;
         rt.spawn(async move {
@@ -178,7 +192,7 @@ fn main() {
                 .merge(("address", "0.0.0.0"));
 
             let result = rocket::custom(config)
-                .manage(web_gui_state_clone)
+                .manage(web_state_clone)
                 .mount(
                     "/",
                     routes![
@@ -201,15 +215,15 @@ fn main() {
                 .await;
 
             if let Err(e) = result {
-                eprintln!("Web GUI server error: {}", e);
+                eprintln!("Web server error: {}", e);
             }
         });
 
         info!("robonix core ready. waiting for requests...");
-        info!("web GUI available at http://localhost:{}", port_for_log);
+        info!("web available at http://localhost:{}", port_for_log);
     } else {
         info!("robonix core ready. waiting for requests...");
-        info!("web GUI disabled (set ROBONIX_WEB_STATIC_DIR and ROBONIX_WEB_PORT to enable)");
+        info!("web disabled (set ROBONIX_WEB_ASSETS_DIR and ROBONIX_WEB_PORT to enable)");
     }
 
     // Run servers in Tokio runtime
