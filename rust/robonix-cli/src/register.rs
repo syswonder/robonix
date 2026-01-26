@@ -98,9 +98,23 @@ impl PackageRegistrar {
             }
         }
 
-        // Save recipe state
+        // Save recipe state with absolute path (realpath)
+        let abs_recipe_path = recipe_path.canonicalize().unwrap_or_else(|_| {
+            // If canonicalize fails (e.g., file doesn't exist), try to make it absolute
+            // by joining with current directory
+            std::env::current_dir()
+                .ok()
+                .and_then(|cwd| {
+                    if recipe_path.is_absolute() {
+                        Some(recipe_path.clone())
+                    } else {
+                        Some(cwd.join(recipe_path))
+                    }
+                })
+                .unwrap_or_else(|| recipe_path.clone())
+        });
         let recipe_state = RecipeState {
-            recipe_path: recipe_path.clone(),
+            recipe_path: abs_recipe_path,
             recipe: recipe.clone(),
             registered_at: chrono::Utc::now().to_rfc3339(),
         };

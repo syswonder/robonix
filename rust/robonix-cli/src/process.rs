@@ -295,6 +295,9 @@ impl ProcessManager {
         // This ensures logs are written immediately
         cmd.env("PYTHONUNBUFFERED", "1");
 
+        // Force FastDDS for all started processes
+        cmd.env("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp");
+
         // Set ROBONIX_SDK_PATH from config or environment variable
         if std::env::var("ROBONIX_SDK_PATH").is_err() {
             if let Some(config_path) = robonix_sdk_path {

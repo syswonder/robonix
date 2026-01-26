@@ -34,6 +34,9 @@ fi
 echo "Sourcing robonix-sdk from: $ROBONIX_SDK_DIR"
 source "$ROBONIX_SDK_DIR/install/setup.bash"
 
+# Set DDS implementation to FastDDS
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+
 # Service name
 SERVICE_NAME="/rbnx/ping"
 SERVICE_TYPE="robonix_sdk/srv/PingPong"
@@ -41,6 +44,7 @@ SERVICE_TYPE="robonix_sdk/srv/PingPong"
 echo "=========================================="
 echo "Testing Ping Service"
 echo "=========================================="
+echo "Using FastDDS (rmw_fastrtps_cpp) for ROS2 CLI tools"
 echo "Service: $SERVICE_NAME"
 echo "Type: $SERVICE_TYPE"
 echo ""
