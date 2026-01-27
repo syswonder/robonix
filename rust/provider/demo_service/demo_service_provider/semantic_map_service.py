@@ -161,7 +161,7 @@ class SemanticMapService(Node):
                 pose_qos,
             )
             self.get_logger().info(
-                f"Subscribed to robot pose (PoseWithCovarianceStamped from prm::base.pose.amcl): {self.pose_topic} with RELIABLE QoS"
+                f"Subscribed to robot pose (PoseWithCovarianceStamped from prm::base.pose.cov): {self.pose_topic} with RELIABLE QoS"
             )
 
             import time
@@ -218,7 +218,7 @@ class SemanticMapService(Node):
     def _query_pose_primitive(self):
         """Query robot pose primitive from OS with retry logic."""
         self.pose_topic = self.robonix.query_primitive_and_extract_field(
-            "prm::base.pose.amcl",
+            "prm::base.pose.cov",
             field_name="pose",
             filter_dict=None,
             max_retries=5,

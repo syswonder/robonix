@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 # Start Base Pose AMCL Primitive Script
 #
-# Start script for prm::base.pose.amcl (robot pose in map frame directly from AMCL)
+# Start script for prm::base.pose.cov (robot pose in map frame directly from AMCL)
 # This script verifies that AMCL is running and the /amcl_pose topic is available.
 # No converter needed - uses PoseWithCovarianceStamped directly.
 

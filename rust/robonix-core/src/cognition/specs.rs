@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 pub fn load_primitives(primitives: &mut HashMap<String, PrimitiveSpec>) {
     // AMCL pose primitive - provides PoseWithCovarianceStamped directly from AMCL
-    PRM!(primitives, "prm::base.pose.amcl", "Get robot pose in map frame from AMCL (PoseWithCovarianceStamped)",
+    PRM!(primitives, "prm::base.pose.cov", "Get robot pose in map frame from AMCL (PoseWithCovarianceStamped)",
          {},  // No input parameters
          { "pose": "geometry_msgs/msg/PoseWithCovarianceStamped" });
 }
