@@ -11,8 +11,8 @@ package:
   name: demo_service_provider
   version: 0.0.1
   description: Demo package providing semantic_map and task_plan services
-  maintainer: root
-  maintainer_email: demo@demo.demo
+  maintainer: wheatfox
+  maintainer_email: wheatfox17@icloud.com
   license: MulanPSL-2.0
   # build_script: rbnx/build.sh  # Optional: build script path. If omitted, defaults to rbnx/build.sh
 
