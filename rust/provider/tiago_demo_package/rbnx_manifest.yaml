@@ -40,7 +40,7 @@ primitives:
     stop_script: rbnx/stop_camera_depth.sh
 
   # Robot pose in map frame directly from AMCL - PoseWithCovarianceStamped version
-  - name: prm::base.pose.amcl
+  - name: prm::base.pose.cov
     # Spec defines: OUTPUT: {"pose": "geometry_msgs/msg/PoseWithCovarianceStamped"}
     input_schema: '{}'
     output_schema: '{"pose":"/amcl_pose"}'

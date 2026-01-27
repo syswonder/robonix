@@ -12,12 +12,12 @@ description: Demo recipe for Tiago robot with semantic map service and navigatio
 
 packages:
   # Tiago demo package - provides camera, depth, pose, and navigation primitives
-  # prm::base.pose.amcl uses AMCL directly (PoseWithCovarianceStamped from /amcl_pose)
+  # prm::base.pose.cov uses AMCL directly (PoseWithCovarianceStamped from /amcl_pose)
   - name: tiago_demo_package
     primitives:
       - prm::camera.rgb
       - prm::camera.depth
-      - prm::base.pose.amcl  # Direct AMCL pose (PoseWithCovarianceStamped from /amcl_pose)
+      - prm::base.pose.cov  # Direct AMCL pose (PoseWithCovarianceStamped from /amcl_pose)
       - prm::base.navigate
 
   # Demo service provider - provides semantic_map and task_plan services
