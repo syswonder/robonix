@@ -113,6 +113,44 @@ impl FunctionRegistry {
                     }
                 }
             }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "list_tasks",
+                    "description": "Get a list of all submitted tasks. Returns task IDs, descriptions, states, and basic information.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "state_filter": {
+                                "type": "string",
+                                "description": "Optional filter by task state: 'active' (pending/planning/running/suspended), 'finished', 'failed', 'cancelled', or 'all' (default: 'all')",
+                                "enum": ["all", "active", "finished", "failed", "cancelled"]
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of tasks to return (default: 50, max: 100)"
+                            }
+                        }
+                    }
+                }
+            }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "get_task_details",
+                    "description": "Get detailed information about a specific task, including RTDL understanding, execution status, results, and error messages.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": {
+                                "type": "string",
+                                "description": "The task ID to get details for"
+                            }
+                        },
+                        "required": ["task_id"]
+                    }
+                }
+            }),
         ]
     }
 
@@ -125,6 +163,8 @@ impl FunctionRegistry {
             "query_services" => self.query_services().await,
             "query_primitives" => self.query_primitives().await,
             "get_system_status" => self.get_system_status().await,
+            "list_tasks" => self.list_tasks(arguments).await,
+            "get_task_details" => self.get_task_details(arguments).await,
             _ => anyhow::bail!("Unknown function: {}", name),
         }
     }
@@ -383,5 +423,139 @@ impl FunctionRegistry {
             "registered_services": services.len(),
             "registered_primitives": primitives.len(),
         }))
+    }
+
+    async fn list_tasks(&self, arguments: Value) -> Result<Value> {
+        let task_manager = self.core.get_task_manager();
+        let task_store = task_manager.get_task_store();
+        let all_tasks = task_store.get_all_tasks().await;
+
+        // Parse filter
+        let state_filter = arguments
+            .get("state_filter")
+            .and_then(|s| s.as_str())
+            .unwrap_or("all");
+
+        let limit = arguments
+            .get("limit")
+            .and_then(|l| l.as_u64())
+            .map(|l| l.min(100) as usize)
+            .unwrap_or(50);
+
+        // Filter tasks by state
+        let filtered_tasks: Vec<_> = all_tasks
+            .into_iter()
+            .filter(|task| {
+                match state_filter {
+                    "active" => {
+                        matches!(
+                            task.state,
+                            crate::task::task::TaskState::Pending
+                                | crate::task::task::TaskState::Planning
+                                | crate::task::task::TaskState::Running
+                                | crate::task::task::TaskState::Suspended
+                        )
+                    }
+                    "finished" => matches!(task.state, crate::task::task::TaskState::Finished),
+                    "failed" => matches!(task.state, crate::task::task::TaskState::Failed),
+                    "cancelled" => matches!(task.state, crate::task::task::TaskState::Cancelled),
+                    _ => true, // "all"
+                }
+            })
+            .take(limit)
+            .collect();
+
+        // Sort by created_at (newest first)
+        let mut sorted_tasks = filtered_tasks;
+        sorted_tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        let tasks_json: Vec<Value> = sorted_tasks
+            .into_iter()
+            .map(|task| {
+                json!({
+                    "task_id": task.task_id,
+                    "description": task.description,
+                    "state": format!("{:?}", task.state),
+                    "priority": task.context.priority,
+                    "created_at": task.created_at,
+                    "updated_at": task.updated_at,
+                    "has_rtdl": task.context.rtdl.is_some(),
+                    "has_result": task.result.is_some(),
+                    "has_error": task.error_message.is_some(),
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "tasks": tasks_json,
+            "count": tasks_json.len(),
+            "filter": state_filter
+        }))
+    }
+
+    async fn get_task_details(&self, arguments: Value) -> Result<Value> {
+        let task_id = arguments
+            .get("task_id")
+            .and_then(|id| id.as_str())
+            .context("Missing task_id parameter")?;
+
+        let task_manager = self.core.get_task_manager();
+        let task_store = task_manager.get_task_store();
+
+        if let Some(task) = task_store.get_task(task_id).await {
+            // Build comprehensive task details
+            let mut details = json!({
+                "task_id": task.task_id,
+                "description": task.description,
+                "params": task.params,
+                "state": format!("{:?}", task.state),
+                "priority": task.context.priority,
+                "created_at": task.created_at,
+                "updated_at": task.updated_at,
+                "retry_count": task.context.retry_count,
+                "rtdl_instruction_pointer": task.context.rtdl_instruction_pointer,
+            });
+
+            // RTDL information
+            if let Some(ref rtdl) = task.context.rtdl {
+                details["rtdl"] = json!(rtdl);
+            }
+            if let Some(ref rtdl_type) = task.context.rtdl_type {
+                details["rtdl_type"] = json!(rtdl_type);
+            }
+
+            // Execution status
+            details["execution_status"] = json!({
+                "state": format!("{:?}", task.state),
+                "current_instruction_index": task.context.rtdl_instruction_pointer,
+                "retry_count": task.context.retry_count,
+            });
+
+            if let Some(ref exception) = task.context.last_exception {
+                details["last_exception"] = json!(exception);
+            }
+
+            // Task results
+            if let Some(ref result) = task.result {
+                details["result"] = result.clone();
+            }
+
+            if let Some(ref error_msg) = task.error_message {
+                details["error_message"] = json!(error_msg);
+            }
+
+            // Object graph information
+            details["object_graph"] = task.context.object_graph.clone();
+            details["object_graph_updated_at"] = json!(task.context.object_graph_updated_at);
+            if let Some(arr) = task.context.object_graph.as_array() {
+                details["object_graph_count"] = json!(arr.len());
+            } else {
+                details["object_graph_count"] = json!(0);
+            }
+
+            Ok(details)
+        } else {
+            anyhow::bail!("Task not found: {}", task_id)
+        }
     }
 }

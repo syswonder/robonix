@@ -10,10 +10,11 @@ use robonix_core::logging::init_logger_with_buffer;
 use robonix_core::node::create_node;
 use robonix_core::server::{create_qos, create_servers, run_servers};
 use robonix_core::web::{
-    LogBuffer, agent_chat_handler, create_web_state, get_config_handler, image_handler,
-    image_topics_handler, index, logs_handler, primitives_handler, semantic_map_handler,
-    services_handler, settings_page, skills_handler, status_handler, tasks_handler,
-    tf_tree_handler, topics_handler, update_config_handler,
+    LogBuffer, agent_chat_handler, agent_reset_handler, create_web_state, get_config_handler,
+    image_handler, image_topics_handler, index, logs_handler, primitives_handler,
+    semantic_map_handler, services_handler, settings_page, skills_handler, status_handler,
+    stt_handler, tasks_handler, tf_tree_handler, topics_handler, tts_handler,
+    update_config_handler,
 };
 use rocket::fs::FileServer;
 use rocket::routes;
@@ -171,14 +172,17 @@ fn main() {
             std::process::exit(1);
         };
 
-        // Load agent config and create agent
-        let agent_config = rt.block_on(async {
+        // Load config and create services
+        let (agent_config, speech_config) = rt.block_on(async {
             use robonix_core::config::CoreConfig;
             match CoreConfig::load() {
-                Ok(config) => config.agent,
+                Ok(config) => (config.agent, config.speech),
                 Err(e) => {
                     warn!("Failed to load core config, using defaults: {}", e);
-                    LLMAgentConfig::default()
+                    (
+                        LLMAgentConfig::default(),
+                        robonix_core::config::SpeechConfig::default(),
+                    )
                 }
             }
         });
@@ -187,6 +191,10 @@ fn main() {
             core.clone(),
             agent_config,
         )));
+
+        // Create TTS and STT services
+        let tts_service = Arc::new(robonix_core::speech::TtsService::new(speech_config.clone()));
+        let stt_service = Arc::new(robonix_core::speech::SttService::new(speech_config));
 
         // Create web state
         let web_state = create_web_state(
@@ -197,6 +205,8 @@ fn main() {
             log_buffer.clone(),
             image_monitor.clone(),
             agent,
+            tts_service,
+            stt_service,
             web_dir.clone(),
         );
 
@@ -232,6 +242,9 @@ fn main() {
                         get_config_handler,
                         update_config_handler,
                         agent_chat_handler,
+                        agent_reset_handler,
+                        tts_handler,
+                        stt_handler,
                     ],
                 )
                 .mount("/static", FileServer::from(static_dir_clone))

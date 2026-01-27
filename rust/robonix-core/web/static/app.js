@@ -818,6 +818,35 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+// Remove markdown formatting from text
+function stripMarkdown(text) {
+    if (!text) return '';
+    return text
+        // Remove code blocks
+        .replace(/```[\s\S]*?```/g, '')
+        // Remove inline code
+        .replace(/`([^`]+)`/g, '$1')
+        // Remove bold/italic
+        .replace(/\*\*([^*]+)\*\*/g, '$1')
+        .replace(/\*([^*]+)\*/g, '$1')
+        .replace(/__([^_]+)__/g, '$1')
+        .replace(/_([^_]+)_/g, '$1')
+        // Remove headers
+        .replace(/^#{1,6}\s+(.+)$/gm, '$1')
+        // Remove links
+        .replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1')
+        // Remove images
+        .replace(/!\[([^\]]*)\]\([^\)]+\)/g, '$1')
+        // Remove horizontal rules
+        .replace(/^---$/gm, '')
+        // Remove list markers
+        .replace(/^[\*\-\+]\s+/gm, '')
+        .replace(/^\d+\.\s+/gm, '')
+        // Clean up extra whitespace
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
+
 // Visualization loading
 let autoRefreshVizInterval = null;
 
@@ -1746,6 +1775,646 @@ function setupMap2DInteraction() {
     });
 }
 
+// Agent card toggle
+function toggleAgentChat() {
+    const card = document.querySelector('.agent-card');
+    if (card) {
+        card.classList.toggle('expanded');
+    }
+}
+
+// Voice input state
+let isRecording = false;
+let mediaRecorder = null;
+let audioStream = null;
+let audioChunks = [];
+let currentUtterance = null;
+
+// Initialize MediaRecorder for audio recording
+async function initAudioRecording() {
+    try {
+        // Stop existing stream if any
+        if (audioStream) {
+            audioStream.getTracks().forEach(track => track.stop());
+            audioStream = null;
+        }
+        
+        // Get new stream
+        audioStream = await navigator.mediaDevices.getUserMedia({ 
+            audio: {
+                sampleRate: 16000,
+                channelCount: 1,
+                echoCancellation: true,
+                noiseSuppression: true
+            }
+        });
+        
+        // Use webm format (will convert to WAV later)
+        const options = {
+            mimeType: 'audio/webm;codecs=opus',
+            audioBitsPerSecond: 16000
+        };
+        
+        // Check if mimeType is supported
+        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+            console.warn('WebM with Opus not supported, using default');
+            options.mimeType = '';
+        }
+        
+        mediaRecorder = new MediaRecorder(audioStream, options);
+        
+        mediaRecorder.ondataavailable = function(event) {
+            if (event.data.size > 0) {
+                audioChunks.push(event.data);
+            }
+        };
+        
+        mediaRecorder.onstop = async function() {
+            // Don't stop stream here, we'll reuse it
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+            audioChunks = [];
+            
+            // Convert to WAV format for Aliyun STT
+            try {
+                const wavBlob = await convertToWav(audioBlob);
+                console.log('Audio converted to WAV:', {
+                    originalSize: audioBlob.size,
+                    wavSize: wavBlob.size,
+                    originalType: audioBlob.type,
+                    wavType: wavBlob.type
+                });
+                
+                // Send to backend (backend will save both original and converted files)
+                await sendAudioToSTT(wavBlob, audioBlob);
+            } catch (error) {
+                console.error('Failed to process audio:', error);
+                alert('Failed to process audio: ' + error.message);
+            }
+        };
+        
+        mediaRecorder.onerror = function(event) {
+            console.error('MediaRecorder error:', event.error);
+            stopVoiceInput();
+            alert('Audio recording error: ' + event.error);
+        };
+        
+        return true;
+    } catch (error) {
+        console.error('Failed to initialize audio recording:', error);
+        alert('Failed to access microphone. Please check permissions.');
+        return false;
+    }
+}
+
+// Convert audio blob to WAV format using Web Audio API
+async function convertToWav(audioBlob) {
+    try {
+        // Create AudioContext with 16000 Hz sample rate
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)({
+            sampleRate: 16000
+        });
+        const arrayBuffer = await audioBlob.arrayBuffer();
+        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+        
+        console.log('AudioBuffer info:', {
+            sampleRate: audioBuffer.sampleRate,
+            length: audioBuffer.length,
+            duration: audioBuffer.duration,
+            numberOfChannels: audioBuffer.numberOfChannels
+        });
+        
+        // Resample to 16000 Hz if needed
+        let processedBuffer = audioBuffer;
+        if (audioBuffer.sampleRate !== 16000) {
+            console.log(`Resampling from ${audioBuffer.sampleRate} Hz to 16000 Hz`);
+            processedBuffer = await resampleAudioBuffer(audioBuffer, 16000);
+        }
+        
+        // Convert AudioBuffer to WAV
+        const wav = audioBufferToWav(processedBuffer);
+        return new Blob([wav], { type: 'audio/wav' });
+    } catch (error) {
+        console.warn('Failed to convert to WAV, sending original:', error);
+        // Fallback: send original blob, let backend try opus format
+        return audioBlob;
+    }
+}
+
+// Resample AudioBuffer to target sample rate
+async function resampleAudioBuffer(sourceBuffer, targetSampleRate) {
+    const offlineContext = new OfflineAudioContext(
+        sourceBuffer.numberOfChannels,
+        Math.floor(sourceBuffer.length * targetSampleRate / sourceBuffer.sampleRate),
+        targetSampleRate
+    );
+    
+    const source = offlineContext.createBufferSource();
+    source.buffer = sourceBuffer;
+    source.connect(offlineContext.destination);
+    source.start();
+    
+    return await offlineContext.startRendering();
+}
+
+// Convert AudioBuffer to WAV format
+function audioBufferToWav(buffer) {
+    const length = buffer.length;
+    const numberOfChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const bytesPerSample = 2; // 16-bit
+    const blockAlign = numberOfChannels * bytesPerSample;
+    const byteRate = sampleRate * blockAlign;
+    const dataSize = length * blockAlign;
+    const bufferSize = 44 + dataSize;
+    
+    const arrayBuffer = new ArrayBuffer(bufferSize);
+    const view = new DataView(arrayBuffer);
+    
+    // WAV header
+    const writeString = (offset, string) => {
+        for (let i = 0; i < string.length; i++) {
+            view.setUint8(offset + i, string.charCodeAt(i));
+        }
+    };
+    
+    writeString(0, 'RIFF');
+    view.setUint32(4, bufferSize - 8, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true); // fmt chunk size
+    view.setUint16(20, 1, true); // audio format (PCM)
+    view.setUint16(22, numberOfChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, 16, true); // bits per sample
+    writeString(36, 'data');
+    view.setUint32(40, dataSize, true);
+    
+    // Convert float samples to 16-bit PCM
+    let offset = 44;
+    for (let i = 0; i < length; i++) {
+        for (let channel = 0; channel < numberOfChannels; channel++) {
+            const sample = Math.max(-1, Math.min(1, buffer.getChannelData(channel)[i]));
+            view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+            offset += 2;
+        }
+    }
+    
+    return arrayBuffer;
+}
+
+// Send audio to backend STT service
+async function sendAudioToSTT(audioBlob, originalBlob = null) {
+    try {
+        console.log('Sending audio to STT:', {
+            size: audioBlob.size,
+            type: audioBlob.type
+        });
+        
+        const response = await fetch('/api/stt', {
+            method: 'POST',
+            body: audioBlob,
+            headers: {
+                'Content-Type': 'application/octet-stream'
+            }
+        });
+        
+        console.log('STT response status:', response.status, response.statusText);
+        
+        if (!response.ok) {
+            const errorText = await response.text().catch(() => 'Unknown error');
+            console.error('STT HTTP error:', {
+                status: response.status,
+                statusText: response.statusText,
+                body: errorText
+            });
+            throw new Error(`STT API error (${response.status}): ${errorText}`);
+        }
+        
+        const result = await response.json();
+        console.log('STT response:', result);
+        
+        if (result.status === 'success' && result.result) {
+            const input = document.getElementById('agent-input');
+            if (input) {
+                input.value = result.result;
+                // Auto-send after a short delay
+                setTimeout(() => {
+                    if (input.value.trim()) {
+                        sendAgentMessage();
+                    }
+                }, 300);
+            }
+        } else {
+            console.error('STT recognition failed:', result);
+            throw new Error(`STT recognition failed: ${result.error || 'Unknown error'}`);
+        }
+    } catch (error) {
+        console.error('Failed to send audio to STT:', error);
+        alert('Speech recognition error: ' + error.message);
+    }
+}
+
+// Toggle voice input
+async function toggleVoiceInput() {
+    if (isRecording) {
+        stopVoiceInput();
+    } else {
+        // Always reinitialize to ensure fresh stream
+        const initialized = await initAudioRecording();
+        if (!initialized) {
+            return;
+        }
+        
+        if (mediaRecorder && mediaRecorder.state === 'inactive') {
+            audioChunks = [];
+            try {
+                mediaRecorder.start();
+                isRecording = true;
+                
+                const btn = document.getElementById('agent-voice-input-btn');
+                const icon = document.getElementById('voice-input-icon');
+                if (btn) {
+                    btn.classList.add('recording');
+                    icon.textContent = 'Stop';
+                }
+            } catch (error) {
+                console.error('Failed to start MediaRecorder:', error);
+                alert('Failed to start recording: ' + error.message);
+                // Clean up on error
+                if (audioStream) {
+                    audioStream.getTracks().forEach(track => track.stop());
+                    audioStream = null;
+                }
+                mediaRecorder = null;
+            }
+        }
+    }
+}
+
+function stopVoiceInput() {
+    isRecording = false;
+    const btn = document.getElementById('agent-voice-input-btn');
+    const icon = document.getElementById('voice-input-icon');
+    if (btn) {
+        btn.classList.remove('recording');
+        icon.textContent = 'Mic';
+    }
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+    }
+    // Don't stop stream here - we'll reuse it for next recording
+}
+
+// Text-to-Speech function using backend Aliyun TTS
+async function speakText(text) {
+    const ttsToggle = document.getElementById('agent-tts-toggle');
+    if (!ttsToggle || !ttsToggle.checked) {
+        return; // TTS disabled
+    }
+    
+    if (!text || text.trim().length === 0) {
+        return;
+    }
+    
+    try {
+        // Stop any current speech
+        stopSpeaking();
+        
+        // Call backend TTS API
+        const response = await fetch('/api/tts', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                text: text,
+                format: 'wav',
+                voice: 'zhishuo'
+            }),
+        });
+        
+        if (!response.ok) {
+            throw new Error(`TTS API error: ${response.status}`);
+        }
+        
+        // Get audio data
+        const audioBlob = await response.blob();
+        const audioUrl = URL.createObjectURL(audioBlob);
+        
+        // Create audio element and play
+        const audio = new Audio(audioUrl);
+        currentUtterance = audio;
+        
+        audio.onended = function() {
+            URL.revokeObjectURL(audioUrl);
+            currentUtterance = null;
+        };
+        
+        audio.onerror = function(event) {
+            console.error('Audio playback error:', event);
+            URL.revokeObjectURL(audioUrl);
+            currentUtterance = null;
+        };
+        
+        await audio.play();
+    } catch (error) {
+        console.error('Failed to synthesize speech:', error);
+        // Fallback to browser TTS if available
+        if ('speechSynthesis' in window) {
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = 'zh-CN';
+            utterance.rate = 1.0;
+            utterance.pitch = 1.0;
+            utterance.volume = 1.0;
+            currentUtterance = utterance;
+            window.speechSynthesis.speak(utterance);
+        }
+    }
+}
+
+// Stop TTS
+function stopSpeaking() {
+    // Stop backend audio
+    if (currentUtterance && currentUtterance instanceof HTMLAudioElement) {
+        currentUtterance.pause();
+        currentUtterance.currentTime = 0;
+        currentUtterance = null;
+    }
+    
+    // Stop browser TTS
+    if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+    }
+}
+
+// Stop speaking when TTS toggle is turned off
+document.addEventListener('DOMContentLoaded', function() {
+    const ttsToggle = document.getElementById('agent-tts-toggle');
+    if (ttsToggle) {
+        ttsToggle.addEventListener('change', function() {
+            if (!this.checked) {
+                stopSpeaking();
+            }
+        });
+    }
+});
+
+// Clear agent chat (local only)
+function clearAgentChat() {
+    if (!confirm('Clear all chat messages? This will only clear the display, not the agent\'s memory.')) {
+        return;
+    }
+    
+    const chatContainer = document.getElementById('agent-chat-messages');
+    if (!chatContainer) return;
+    
+    // Clear all messages
+    chatContainer.innerHTML = '';
+    
+    // Add welcome message back
+    const welcomeMessage = document.createElement('div');
+    welcomeMessage.className = 'agent-message agent-message-bot';
+    const welcomeContent = document.createElement('div');
+    welcomeContent.className = 'agent-message-content';
+    welcomeContent.textContent = 'Hello! I\'m the Robonix agent. I can help you query the semantic map, submit tasks, and query system capabilities. How can I assist you?';
+    welcomeMessage.appendChild(welcomeContent);
+    chatContainer.appendChild(welcomeMessage);
+    
+    // Clear localStorage
+    localStorage.removeItem(CHAT_HISTORY_KEY);
+}
+
+// Reset agent (clear backend history)
+async function resetAgent() {
+    if (!confirm('Reset agent? This will clear the agent\'s conversation history on the server.')) {
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/agent/reset', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+        });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
+        // Clear local chat and localStorage
+        const chatContainer = document.getElementById('agent-chat-messages');
+        if (chatContainer) {
+            chatContainer.innerHTML = '';
+            
+            // Add welcome message back
+            const welcomeMessage = document.createElement('div');
+            welcomeMessage.className = 'agent-message agent-message-bot';
+            const welcomeContent = document.createElement('div');
+            welcomeContent.className = 'agent-message-content';
+            welcomeContent.textContent = 'Hello! I\'m the Robonix agent. I can help you query the semantic map, submit tasks, and query system capabilities. How can I assist you?';
+            welcomeMessage.appendChild(welcomeContent);
+            chatContainer.appendChild(welcomeMessage);
+            
+            // Add success message
+            const successMessage = document.createElement('div');
+            successMessage.className = 'agent-message agent-message-bot';
+            const successContent = document.createElement('div');
+            successContent.className = 'agent-message-content';
+            successContent.style.color = '#4caf50';
+            successContent.textContent = 'Agent has been reset. Conversation history cleared.';
+            successMessage.appendChild(successContent);
+            chatContainer.appendChild(successMessage);
+            
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+        
+        // Clear localStorage
+        localStorage.removeItem(CHAT_HISTORY_KEY);
+    } catch (error) {
+        console.error('Failed to reset agent:', error);
+        alert(`Failed to reset agent: ${error.message}`);
+    }
+}
+
+// Agent chat history persistence
+const CHAT_HISTORY_KEY = 'robonix_agent_chat_history';
+const MAX_HISTORY_SIZE = 100; // Maximum number of messages to keep
+
+function saveChatHistory() {
+    try {
+        const chatContainer = document.getElementById('agent-chat-messages');
+        if (!chatContainer) return;
+        
+        const messages = [];
+        const messageElements = chatContainer.querySelectorAll('.agent-message:not(#agent-loading)');
+        
+        messageElements.forEach((msgEl) => {
+            const isUser = msgEl.classList.contains('agent-message-user');
+            const contentEl = msgEl.querySelector('.agent-message-content');
+            
+            if (contentEl) {
+                const messageData = {
+                    type: isUser ? 'user' : 'bot',
+                    content: contentEl.textContent,
+                    functionCalls: []
+                };
+                
+                // Extract function calls if any
+                const functionCalls = msgEl.querySelectorAll('.agent-function-call');
+                functionCalls.forEach((funcCallEl) => {
+                    const funcName = funcCallEl.querySelector('.function-name')?.textContent || '';
+                    const funcArgsEl = funcCallEl.querySelector('.agent-function-args');
+                    const funcResultEl = funcCallEl.querySelector('.agent-function-result');
+                    
+                    let args = {};
+                    let result = {};
+                    
+                    try {
+                        if (funcArgsEl) {
+                            args = JSON.parse(funcArgsEl.textContent.replace(/^Arguments:\s*/, ''));
+                        }
+                    } catch (e) {
+                        args = { raw: funcArgsEl?.textContent || '' };
+                    }
+                    
+                    try {
+                        if (funcResultEl) {
+                            result = JSON.parse(funcResultEl.textContent.replace(/^Result:\s*/, ''));
+                        }
+                    } catch (e) {
+                        result = { raw: funcResultEl?.textContent || '' };
+                    }
+                    
+                    messageData.functionCalls.push({
+                        name: funcName,
+                        arguments: args,
+                        result: result
+                    });
+                });
+                
+                messages.push(messageData);
+            }
+        });
+        
+        // Keep only last MAX_HISTORY_SIZE messages
+        const messagesToSave = messages.slice(-MAX_HISTORY_SIZE);
+        localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(messagesToSave));
+    } catch (e) {
+        console.error('Failed to save chat history:', e);
+    }
+}
+
+function loadChatHistory() {
+    try {
+        const saved = localStorage.getItem(CHAT_HISTORY_KEY);
+        if (!saved) return;
+        
+        const messages = JSON.parse(saved);
+        if (!Array.isArray(messages) || messages.length === 0) return;
+        
+        const chatContainer = document.getElementById('agent-chat-messages');
+        if (!chatContainer) return;
+        
+        // Clear existing messages (except initial welcome message)
+        const existingMessages = chatContainer.querySelectorAll('.agent-message');
+        let hasWelcomeMessage = false;
+        existingMessages.forEach((msg, index) => {
+            // Keep the first welcome message if it exists
+            if (index === 0 && msg.querySelector('.agent-message-content')?.textContent.includes('Hello')) {
+                hasWelcomeMessage = true;
+                return;
+            }
+            msg.remove();
+        });
+        
+        // If we have saved history, remove welcome message to avoid duplication
+        if (hasWelcomeMessage && messages.length > 0) {
+            const welcomeMsg = chatContainer.querySelector('.agent-message');
+            if (welcomeMsg) {
+                welcomeMsg.remove();
+            }
+        }
+        
+        // Restore messages
+        messages.forEach((msgData, index) => {
+            const messageEl = document.createElement('div');
+            messageEl.className = `agent-message agent-message-${msgData.type}`;
+            // Disable animation for restored messages to avoid overwhelming animation
+            messageEl.style.animation = 'none';
+            messageEl.style.opacity = '1';
+            
+            if (msgData.content) {
+                const contentEl = document.createElement('div');
+                contentEl.className = 'agent-message-content';
+                contentEl.textContent = msgData.content;
+                messageEl.appendChild(contentEl);
+            }
+            
+            // Restore function calls
+            if (msgData.functionCalls && msgData.functionCalls.length > 0) {
+                msgData.functionCalls.forEach((funcCall) => {
+                    const funcCallDiv = document.createElement('div');
+                    funcCallDiv.className = 'agent-function-call';
+                    
+                    const funcHeader = document.createElement('div');
+                    funcHeader.className = 'agent-function-header';
+                    funcHeader.style.cursor = 'pointer';
+                    funcHeader.onclick = function() {
+                        const details = funcCallDiv.querySelector('.agent-function-details');
+                        if (details) {
+                            details.classList.toggle('expanded');
+                            const toggle = funcHeader.querySelector('.function-toggle');
+                            if (toggle) {
+                                toggle.textContent = details.classList.contains('expanded') ? '▼' : '▶';
+                            }
+                        }
+                    };
+                    funcHeader.innerHTML = `<span class="function-toggle">▶</span> <span class="function-icon">⚙️</span> <span class="function-name">${escapeHtml(funcCall.name)}</span>`;
+                    funcCallDiv.appendChild(funcHeader);
+                    
+                    const detailsDiv = document.createElement('div');
+                    detailsDiv.className = 'agent-function-details';
+                    
+                    const argsLabel = document.createElement('div');
+                    argsLabel.className = 'agent-function-label';
+                    argsLabel.textContent = 'Arguments:';
+                    detailsDiv.appendChild(argsLabel);
+                    
+                    const funcArgs = document.createElement('div');
+                    funcArgs.className = 'agent-function-args';
+                    funcArgs.textContent = JSON.stringify(funcCall.arguments, null, 2);
+                    detailsDiv.appendChild(funcArgs);
+                    
+                    const resultLabel = document.createElement('div');
+                    resultLabel.className = 'agent-function-label';
+                    resultLabel.textContent = 'Result:';
+                    detailsDiv.appendChild(resultLabel);
+                    
+                    const funcResult = document.createElement('div');
+                    funcResult.className = 'agent-function-result';
+                    funcResult.textContent = JSON.stringify(funcCall.result, null, 2);
+                    detailsDiv.appendChild(funcResult);
+                    
+                    funcCallDiv.appendChild(detailsDiv);
+                    messageEl.appendChild(funcCallDiv);
+                });
+            }
+            
+            chatContainer.appendChild(messageEl);
+        });
+        
+        // Scroll to bottom after rendering
+        requestAnimationFrame(() => {
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        });
+    } catch (e) {
+        console.error('Failed to load chat history:', e);
+    }
+}
+
 // Agent chat functions
 async function sendAgentMessage() {
     const input = document.getElementById('agent-input');
@@ -1759,21 +2428,27 @@ async function sendAgentMessage() {
     // Add user message to chat
     const chatContainer = document.getElementById('agent-chat-messages');
     const userMessage = document.createElement('div');
-    userMessage.className = 'agent-message';
-    userMessage.style.marginBottom = '10px';
-    userMessage.style.textAlign = 'right';
-    userMessage.innerHTML = `<strong>You:</strong> ${escapeHtml(message)}`;
+    userMessage.className = 'agent-message agent-message-user';
+    const userContent = document.createElement('div');
+    userContent.className = 'agent-message-content';
+    userContent.textContent = message;
+    userMessage.appendChild(userContent);
     chatContainer.appendChild(userMessage);
+    
+    // Save chat history
+    saveChatHistory();
     
     // Scroll to bottom
     chatContainer.scrollTop = chatContainer.scrollHeight;
     
-    // Show loading indicator
+    // Show loading indicator with typing animation
     const loadingMessage = document.createElement('div');
-    loadingMessage.className = 'agent-message';
-    loadingMessage.style.marginBottom = '10px';
+    loadingMessage.className = 'agent-message agent-message-bot';
     loadingMessage.id = 'agent-loading';
-    loadingMessage.innerHTML = '<strong>Agent:</strong> <em>Thinking...</em>';
+    const loadingContent = document.createElement('div');
+    loadingContent.className = 'agent-message-content agent-loading-content';
+    loadingContent.innerHTML = '<span class="typing-dots"><span></span><span></span><span></span></span>';
+    loadingMessage.appendChild(loadingContent);
     chatContainer.appendChild(loadingMessage);
     chatContainer.scrollTop = chatContainer.scrollHeight;
     
@@ -1798,12 +2473,89 @@ async function sendAgentMessage() {
             loading.remove();
         }
         
-        // Add agent response
+        // Add agent response (strip markdown if any)
         const agentMessage = document.createElement('div');
-        agentMessage.className = 'agent-message';
-        agentMessage.style.marginBottom = '10px';
-        agentMessage.innerHTML = `<strong>Agent:</strong> ${escapeHtml(data.message)}`;
+        agentMessage.className = 'agent-message agent-message-bot';
+        
+        // Add natural language message (only if not empty)
+        const messageText = stripMarkdown(data.message || '');
+        if (messageText.trim()) {
+            const agentContent = document.createElement('div');
+            agentContent.className = 'agent-message-content';
+            agentContent.textContent = messageText;
+            agentMessage.appendChild(agentContent);
+            
+            // Speak the response if TTS is enabled (async, don't wait)
+            speakText(messageText).catch(err => {
+                console.error('TTS error:', err);
+            });
+        }
+        
+        // Add function calls if any
+        if (data.function_calls && data.function_calls.length > 0) {
+            data.function_calls.forEach((funcCall, index) => {
+                const funcCallDiv = document.createElement('div');
+                funcCallDiv.className = 'agent-function-call';
+                
+                const funcHeader = document.createElement('div');
+                funcHeader.className = 'agent-function-header';
+                funcHeader.style.cursor = 'pointer';
+                funcHeader.onclick = function() {
+                    const details = funcCallDiv.querySelector('.agent-function-details');
+                    if (details) {
+                        details.classList.toggle('expanded');
+                        const toggle = funcHeader.querySelector('.function-toggle');
+                        if (toggle) {
+                            toggle.textContent = details.classList.contains('expanded') ? '▼' : '▶';
+                        }
+                    }
+                };
+                funcHeader.innerHTML = `<span class="function-toggle">▶</span> <span class="function-icon">⚙️</span> <span class="function-name">${escapeHtml(funcCall.name)}</span>`;
+                funcCallDiv.appendChild(funcHeader);
+                
+                // Details container (collapsible)
+                const detailsDiv = document.createElement('div');
+                detailsDiv.className = 'agent-function-details';
+                
+                // Arguments section
+                const argsLabel = document.createElement('div');
+                argsLabel.className = 'agent-function-label';
+                argsLabel.textContent = 'Arguments:';
+                detailsDiv.appendChild(argsLabel);
+                
+                const funcArgs = document.createElement('div');
+                funcArgs.className = 'agent-function-args';
+                try {
+                    funcArgs.textContent = JSON.stringify(funcCall.arguments, null, 2);
+                } catch (e) {
+                    funcArgs.textContent = String(funcCall.arguments);
+                }
+                detailsDiv.appendChild(funcArgs);
+                
+                // Result section
+                const resultLabel = document.createElement('div');
+                resultLabel.className = 'agent-function-label';
+                resultLabel.textContent = 'Result:';
+                detailsDiv.appendChild(resultLabel);
+                
+                const funcResult = document.createElement('div');
+                funcResult.className = 'agent-function-result';
+                try {
+                    funcResult.textContent = JSON.stringify(funcCall.result, null, 2);
+                } catch (e) {
+                    funcResult.textContent = String(funcCall.result);
+                }
+                detailsDiv.appendChild(funcResult);
+                
+                funcCallDiv.appendChild(detailsDiv);
+                agentMessage.appendChild(funcCallDiv);
+            });
+        }
+        
         chatContainer.appendChild(agentMessage);
+        
+        // Save chat history
+        saveChatHistory();
         
         // Scroll to bottom
         chatContainer.scrollTop = chatContainer.scrollHeight;
@@ -1818,16 +2570,29 @@ async function sendAgentMessage() {
         
         // Show error message
         const errorMessage = document.createElement('div');
-        errorMessage.className = 'agent-message';
-        errorMessage.style.marginBottom = '10px';
-        errorMessage.style.color = 'red';
-        errorMessage.innerHTML = `<strong>Agent:</strong> <em>Error: ${escapeHtml(error.message)}</em>`;
+        errorMessage.className = 'agent-message agent-message-bot';
+        const errorContent = document.createElement('div');
+        errorContent.className = 'agent-message-content';
+        errorContent.style.color = '#d32f2f';
+        errorContent.textContent = `Error: ${error.message}`;
+        errorMessage.appendChild(errorContent);
         chatContainer.appendChild(errorMessage);
+        
+        // Save chat history
+        saveChatHistory();
         
         // Scroll to bottom
         chatContainer.scrollTop = chatContainer.scrollHeight;
     }
 }
+
+// Mobile menu toggle
+document.getElementById('navbarToggle')?.addEventListener('click', function() {
+    const menu = document.getElementById('navbarMenu');
+    if (menu) {
+        menu.classList.toggle('active');
+    }
+});
 
 // Initialize on page load
 loadStatus();
@@ -1843,3 +2608,8 @@ setupAutoRefreshComponents();
 setupAutoRefreshViz();
 setupAutoRefreshMap2D();
 setupMap2DInteraction();
+
+// Load chat history after a short delay to ensure DOM is ready
+setTimeout(() => {
+    loadChatHistory();
+}, 100);

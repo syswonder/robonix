@@ -10,9 +10,35 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeechConfig {
+    #[serde(default)]
+    pub access_token: String,
+    #[serde(default)]
+    pub appkey: String,
+    #[serde(default = "default_region")]
+    pub region: String,
+}
+
+fn default_region() -> String {
+    "shanghai".to_string()
+}
+
+impl Default for SpeechConfig {
+    fn default() -> Self {
+        Self {
+            access_token: String::new(),
+            appkey: String::new(),
+            region: default_region(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreConfig {
     #[serde(default)]
     pub agent: AgentConfig,
+    #[serde(default)]
+    pub speech: SpeechConfig,
 }
 
 impl CoreConfig {
@@ -63,6 +89,7 @@ impl CoreConfig {
     pub fn default() -> Self {
         Self {
             agent: AgentConfig::default(),
+            speech: SpeechConfig::default(),
         }
     }
 }

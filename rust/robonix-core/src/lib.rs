@@ -11,6 +11,7 @@ pub mod agent;
 pub mod cognition;
 pub mod config;
 pub mod perception;
+pub mod speech;
 
 pub mod core;
 pub mod logging;
