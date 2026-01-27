@@ -79,6 +79,16 @@
             color: #721c24;
             border: 1px solid #f5c6cb;
         }
+        .status-message.warning {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+        .status-message.success.warning {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
     </style>
 </head>
 
@@ -228,8 +238,14 @@
                     statusMsg.textContent = `Error: ${result.error}`;
                     statusMsg.style.display = 'block';
                 } else {
-                    statusMsg.className = 'status-message success';
-                    statusMsg.textContent = 'Configuration saved successfully!';
+                    let message = result.message || 'Configuration saved successfully!';
+                    if (result.restart_required) {
+                        statusMsg.className = 'status-message success warning';
+                        message += ' ⚠️ ' + (result.restart_message || 'Please restart robonix-core for the changes to take effect.');
+                    } else {
+                        statusMsg.className = 'status-message success';
+                    }
+                    statusMsg.textContent = message;
                     statusMsg.style.display = 'block';
                 }
             } catch (error) {
@@ -269,8 +285,14 @@
                     statusMsg.textContent = `Error: ${result.error}`;
                     statusMsg.style.display = 'block';
                 } else {
-                    statusMsg.className = 'status-message success';
-                    statusMsg.textContent = 'Speech configuration saved successfully!';
+                    let message = result.message || 'Speech configuration saved successfully!';
+                    if (result.restart_required) {
+                        statusMsg.className = 'status-message success warning';
+                        message += ' ⚠️ ' + (result.restart_message || 'Please restart robonix-core for the changes to take effect.');
+                    } else {
+                        statusMsg.className = 'status-message success';
+                    }
+                    statusMsg.textContent = message;
                     statusMsg.style.display = 'block';
                 }
             } catch (error) {
