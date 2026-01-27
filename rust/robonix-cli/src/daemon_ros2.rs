@@ -11,14 +11,14 @@ use robonix_core::ros_idl::task::{
     SubmitTaskRequest, SubmitTaskResponse, TaskDataRequest, TaskDataResponse,
 };
 use ros2_client::{
-    service::AService, Context, Name, Node, NodeName, NodeOptions, ServiceMapping, ServiceTypeName,
+    Context, Name, Node, NodeName, NodeOptions, ServiceMapping, ServiceTypeName, service::AService,
 };
 use rustdds::{
-    policy::{self, Deadline, Lifespan},
     Duration, QosPolicyBuilder,
+    policy::{self, Deadline, Lifespan},
 };
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 
 pub struct DaemonRos2Clients {

@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Robonix Settings</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;500;600;700&display=swap"
+        rel="stylesheet">
+    <!-- Bootstrap 5 CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet"
+        integrity="sha384-T3c6CoIi6uLrA9TneNEoa7RxnatzjcDSCmG1MXxSR1GAsXEV/Dwwykc2MPK8M2HN" crossorigin="anonymous">
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        .settings-container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .settings-section {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .settings-section h3 {
+            margin-top: 0;
+            margin-bottom: 20px;
+            color: #333;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: #555;
+        }
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .form-group input:focus, .form-group select:focus {
+            outline: none;
+            border-color: #007bff;
+        }
+        .btn-save {
+            background: #007bff;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .btn-save:hover {
+            background: #0056b3;
+        }
+        .status-message {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            display: none;
+        }
+        .status-message.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status-message.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+    </style>
+</head>
+
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/">Robonix Console</a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav">
+                    <li class="nav-item">
+                        <a class="nav-link" href="/">Home</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link active" href="/settings">Settings</a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <div class="settings-container">
+        <h1>Settings</h1>
+
+        <div class="settings-section">
+            <h3>Agent Configuration</h3>
+            <form id="agent-config-form">
+                <div class="form-group">
+                    <label for="llm-provider">LLM Provider</label>
+                    <select id="llm-provider" name="llm_provider">
+                        <option value="deepseek">DeepSeek</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="api-key">API Key</label>
+                    <input type="password" id="api-key" name="api_key" placeholder="Enter API key">
+                </div>
+                <div class="form-group">
+                    <label for="api-base">API Base URL</label>
+                    <input type="text" id="api-base" name="api_base" placeholder="https://api.deepseek.com">
+                </div>
+                <div class="form-group">
+                    <label for="model">Model</label>
+                    <input type="text" id="model" name="model" placeholder="deepseek-chat">
+                </div>
+                <div class="form-group">
+                    <label for="temperature">Temperature</label>
+                    <input type="number" id="temperature" name="temperature" step="0.1" min="0" max="2" placeholder="0.7">
+                </div>
+                <button type="submit" class="btn-save">Save Configuration</button>
+                <div id="status-message" class="status-message"></div>
+            </form>
+        </div>
+
+        <div class="settings-section">
+            <h3>About</h3>
+            <p>This is the Robonix Core configuration. Core runs as a single instance in the distributed system.</p>
+            <p><strong>Note:</strong> CLI configuration (package storage path, SDK path) is managed separately on each node via <code>rbnx config</code> command.</p>
+        </div>
+    </div>
+
+    <!-- Bootstrap 5 JS Bundle -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-C6RzsynM9kWDrMNeT87bh95OGNyZPhcTNXj1NW7RuBCsyN/o0jlpcV8Qyq46cDfL"
+        crossorigin="anonymous"></script>
+    <script>
+        async function loadConfig() {
+            try {
+                const response = await fetch('/api/config');
+                const config = await response.json();
+                
+                if (config.error) {
+                    console.error('Failed to load config:', config.error);
+                    return;
+                }
+
+                // Populate form fields
+                document.getElementById('llm-provider').value = config.agent.llm_provider || 'deepseek';
+                document.getElementById('api-key').value = config.agent.api_key === '***' ? '' : (config.agent.api_key || '');
+                document.getElementById('api-base').value = config.agent.api_base || 'https://api.deepseek.com';
+                document.getElementById('model').value = config.agent.model || 'deepseek-chat';
+                document.getElementById('temperature').value = config.agent.temperature || 0.7;
+            } catch (error) {
+                console.error('Failed to load config:', error);
+                document.getElementById('system-config').innerHTML = `<p style="color: red;">Failed to load configuration</p>`;
+            }
+        }
+
+        document.getElementById('agent-config-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const formData = {
+                agent: {
+                    llm_provider: document.getElementById('llm-provider').value,
+                    api_key: document.getElementById('api-key').value || undefined,
+                    api_base: document.getElementById('api-base').value,
+                    model: document.getElementById('model').value,
+                    temperature: parseFloat(document.getElementById('temperature').value),
+                }
+            };
+
+            try {
+                const response = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(formData),
+                });
+
+                const result = await response.json();
+                const statusMsg = document.getElementById('status-message');
+                
+                if (result.error) {
+                    statusMsg.className = 'status-message error';
+                    statusMsg.textContent = `Error: ${result.error}`;
+                    statusMsg.style.display = 'block';
+                } else {
+                    statusMsg.className = 'status-message success';
+                    statusMsg.textContent = 'Configuration saved successfully!';
+                    statusMsg.style.display = 'block';
+                    // Reload config to update masked API key
+                    setTimeout(loadConfig, 1000);
+                }
+            } catch (error) {
+                const statusMsg = document.getElementById('status-message');
+                statusMsg.className = 'status-message error';
+                statusMsg.textContent = `Failed to save configuration: ${error.message}`;
+                statusMsg.style.display = 'block';
+            }
+        });
+
+        // Load config on page load
+        loadConfig();
+    </script>
+</body>
+
+</html>

@@ -10,6 +10,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::agent::{Agent, AgentConfig as LLMAgentConfig, AgentRequest, AgentResponse};
+use crate::config::CoreConfig;
 use crate::core::RobonixCore;
 use crate::perception::image_monitor::ImageMonitor;
 use crate::perception::tf_monitor::{TfMonitor, TfTreeResponse};
@@ -60,6 +62,7 @@ pub struct WebState {
     pub topic_monitor: Arc<TopicMonitor>,
     pub log_buffer: Arc<LogBuffer>,
     pub image_monitor: Arc<ImageMonitor>,
+    pub agent: Arc<Mutex<Agent>>,
     pub web_dir: std::path::PathBuf,
 }
 
@@ -79,6 +82,7 @@ pub fn create_web_state(
     topic_monitor: Arc<TopicMonitor>,
     log_buffer: Arc<LogBuffer>,
     image_monitor: Arc<ImageMonitor>,
+    agent: Arc<Mutex<Agent>>,
     web_dir: std::path::PathBuf,
 ) -> WebState {
     WebState {
@@ -88,6 +92,7 @@ pub fn create_web_state(
         topic_monitor,
         log_buffer,
         image_monitor,
+        agent,
         web_dir,
     }
 }
@@ -389,6 +394,134 @@ pub async fn image_handler(
         Err(e) => {
             warn!("Image file error opening {:?}: {:?}", image_path, e);
             Err(rocket::http::Status::NotFound)
+        }
+    }
+}
+
+#[rocket::get("/settings")]
+pub async fn settings_page(
+    state: &State<WebState>,
+) -> Result<RawHtml<String>, rocket::http::Status> {
+    let settings_path = state.web_dir.join("settings.html");
+    match tokio::fs::read_to_string(&settings_path).await {
+        Ok(content) => Ok(RawHtml(content)),
+        Err(e) => {
+            warn!(
+                "Failed to read settings.html from {:?}: {}",
+                settings_path, e
+            );
+            Err(rocket::http::Status::InternalServerError)
+        }
+    }
+}
+
+#[rocket::get("/api/config")]
+pub async fn get_config_handler() -> Json<serde_json::Value> {
+    match CoreConfig::load() {
+        Ok(config) => Json(serde_json::json!({
+            "agent": {
+                "llm_provider": config.agent.llm_provider,
+                "api_key": config.agent.api_key.as_ref().map(|_| "***").unwrap_or_default(),
+                "api_base": config.agent.api_base,
+                "model": config.agent.model,
+                "temperature": config.agent.temperature,
+            }
+        })),
+        Err(e) => {
+            warn!("Failed to load config: {}", e);
+            Json(serde_json::json!({
+                "error": format!("Failed to load config: {}", e)
+            }))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UpdateConfigRequest {
+    pub agent: Option<AgentConfigUpdate>,
+}
+
+#[derive(Deserialize)]
+pub struct AgentConfigUpdate {
+    pub llm_provider: Option<String>,
+    pub api_key: Option<String>,
+    pub api_base: Option<String>,
+    pub model: Option<String>,
+    pub temperature: Option<f64>,
+}
+
+#[rocket::post("/api/config", data = "<request>")]
+pub async fn update_config_handler(
+    state: &State<WebState>,
+    request: Json<UpdateConfigRequest>,
+) -> Json<serde_json::Value> {
+    match CoreConfig::load() {
+        Ok(mut config) => {
+            if let Some(agent_update) = &request.agent {
+                if let Some(llm_provider) = &agent_update.llm_provider {
+                    config.agent.llm_provider = llm_provider.clone();
+                }
+                if let Some(api_key) = &agent_update.api_key {
+                    // Only update if not masked
+                    if api_key != "***" {
+                        config.agent.api_key = Some(api_key.clone());
+                    }
+                }
+                if let Some(api_base) = &agent_update.api_base {
+                    config.agent.api_base = api_base.clone();
+                }
+                if let Some(model) = &agent_update.model {
+                    config.agent.model = model.clone();
+                }
+                if let Some(temperature) = agent_update.temperature {
+                    config.agent.temperature = temperature;
+                }
+
+                // Save config
+                if let Err(e) = config.save() {
+                    return Json(serde_json::json!({
+                        "error": format!("Failed to save config: {}", e)
+                    }));
+                }
+
+                // Recreate agent with new config
+                let new_agent_config = LLMAgentConfig {
+                    llm_provider: config.agent.llm_provider.clone(),
+                    api_key: config.agent.api_key.clone(),
+                    api_base: config.agent.api_base.clone(),
+                    model: config.agent.model.clone(),
+                    temperature: config.agent.temperature,
+                };
+                let new_agent = Agent::new(state.core.clone(), new_agent_config);
+                *state.agent.lock().await = new_agent;
+
+                Json(serde_json::json!({
+                    "status": "success",
+                    "message": "Config updated successfully"
+                }))
+            } else {
+                Json(serde_json::json!({
+                    "error": "No agent config provided"
+                }))
+            }
+        }
+        Err(e) => Json(serde_json::json!({
+            "error": format!("Failed to load config: {}", e)
+        })),
+    }
+}
+
+#[rocket::post("/api/agent/chat", data = "<request>")]
+pub async fn agent_chat_handler(
+    state: &State<WebState>,
+    request: Json<AgentRequest>,
+) -> Result<Json<AgentResponse>, rocket::http::Status> {
+    let mut agent = state.agent.lock().await;
+    match agent.chat(request.into_inner()).await {
+        Ok(response) => Ok(Json(response)),
+        Err(e) => {
+            warn!("Agent chat error: {}", e);
+            Err(rocket::http::Status::InternalServerError)
         }
     }
 }

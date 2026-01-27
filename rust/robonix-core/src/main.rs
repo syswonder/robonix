@@ -3,15 +3,17 @@
 //
 // Main entry point for robonix-core service
 
-use log::{debug, info};
+use log::{debug, info, warn};
+use robonix_core::agent::{Agent, AgentConfig as LLMAgentConfig};
 use robonix_core::core::RobonixCore;
 use robonix_core::logging::init_logger_with_buffer;
 use robonix_core::node::create_node;
 use robonix_core::server::{create_qos, create_servers, run_servers};
 use robonix_core::web::{
-    LogBuffer, create_web_state, image_handler, image_topics_handler, index, logs_handler,
-    primitives_handler, semantic_map_handler, services_handler, skills_handler, status_handler,
-    tasks_handler, tf_tree_handler, topics_handler,
+    LogBuffer, agent_chat_handler, create_web_state, get_config_handler, image_handler,
+    image_topics_handler, index, logs_handler, primitives_handler, semantic_map_handler,
+    services_handler, settings_page, skills_handler, status_handler, tasks_handler,
+    tf_tree_handler, topics_handler, update_config_handler,
 };
 use rocket::fs::FileServer;
 use rocket::routes;
@@ -169,6 +171,23 @@ fn main() {
             std::process::exit(1);
         };
 
+        // Load agent config and create agent
+        let agent_config = rt.block_on(async {
+            use robonix_core::config::CoreConfig;
+            match CoreConfig::load() {
+                Ok(config) => config.agent,
+                Err(e) => {
+                    warn!("Failed to load core config, using defaults: {}", e);
+                    LLMAgentConfig::default()
+                }
+            }
+        });
+
+        let agent = Arc::new(tokio::sync::Mutex::new(Agent::new(
+            core.clone(),
+            agent_config,
+        )));
+
         // Create web state
         let web_state = create_web_state(
             core.clone(),
@@ -177,6 +196,7 @@ fn main() {
             topic_monitor.clone(),
             log_buffer.clone(),
             image_monitor.clone(),
+            agent,
             web_dir.clone(),
         );
 
@@ -197,6 +217,7 @@ fn main() {
                     "/",
                     routes![
                         index,
+                        settings_page,
                         status_handler,
                         tf_tree_handler,
                         topics_handler,
@@ -208,6 +229,9 @@ fn main() {
                         semantic_map_handler,
                         image_topics_handler,
                         image_handler,
+                        get_config_handler,
+                        update_config_handler,
+                        agent_chat_handler,
                     ],
                 )
                 .mount("/static", FileServer::from(static_dir_clone))

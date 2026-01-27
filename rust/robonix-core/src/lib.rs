@@ -7,7 +7,9 @@
 pub mod spec;
 
 pub mod action;
+pub mod agent;
 pub mod cognition;
+pub mod config;
 pub mod perception;
 
 pub mod core;
