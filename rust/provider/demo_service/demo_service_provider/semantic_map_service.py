@@ -203,7 +203,7 @@ class SemanticMapService(Node):
     def _query_camera_primitives(self):
         """Query front camera primitives from OS with retry logic. Exits if failed."""
         self.rgb_image_topic = self.robonix.query_primitive_and_extract_field(
-            "prm::camera.capture",
+            "prm::camera.rgb",
             field_name="image",
             filter_dict={"camera": "front"},
             max_retries=5,

@@ -79,7 +79,7 @@ class RobonixClient:
         Query a primitive from Robonix OS with retry logic.
 
         Args:
-            primitive_name: Name of the primitive (e.g., "prm::camera.capture")
+            primitive_name: Name of the primitive (e.g., "prm::camera.rgb")
             filter_dict: Optional filter dictionary (will be JSON-encoded)
             max_retries: Maximum number of retry attempts
             retry_delay: Delay between retries (seconds)
@@ -247,7 +247,7 @@ class RobonixClient:
         Query a primitive and return its output_schema directly.
 
         Args:
-            primitive_name: Name of the primitive (e.g., "prm::camera.capture")
+            primitive_name: Name of the primitive (e.g., "prm::camera.rgb")
             filter_dict: Optional filter dictionary (will be JSON-encoded)
             max_retries: Maximum number of retry attempts
             retry_delay: Delay between retries (seconds)
@@ -293,7 +293,7 @@ class RobonixClient:
         with proper error handling and logging.
 
         Args:
-            primitive_name: Name of the primitive (e.g., "prm::camera.capture")
+            primitive_name: Name of the primitive (e.g., "prm::camera.rgb")
             field_name: Name of the field to extract from output_schema (e.g., "image", "pose")
             filter_dict: Optional filter dictionary (will be JSON-encoded)
             max_retries: Maximum number of retry attempts

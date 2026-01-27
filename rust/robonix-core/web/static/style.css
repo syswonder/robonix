@@ -213,13 +213,17 @@ button:active {
 .split-panel {
     display: flex;
     gap: 10px;
+    width: 100%;
 }
 
 .split-panel-left,
 .split-panel-right {
-    flex: 1;
+    flex: 1 1 50%;
+    min-width: 0;
+    max-width: 50%;
     display: flex;
     flex-direction: column;
+    box-sizing: border-box;
 }
 
 .sub-panel-header {
@@ -242,6 +246,9 @@ button:active {
     max-height: 500px;
     overflow-y: auto;
     flex: 1;
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
     font-variant-numeric: tabular-nums;
     transition: background-color 0.3s ease, border-color 0.3s ease;
 }
@@ -263,6 +270,9 @@ button:active {
     max-height: 500px;
     overflow-y: auto;
     flex: 1;
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
     transition: background-color 0.3s ease, border-color 0.3s ease;
 }
 
@@ -275,6 +285,13 @@ button:active {
     padding: 4px 0;
     border-bottom: 1px solid #eee;
     transition: all 0.2s ease;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
+    word-break: break-word;
 }
 
 .topic-entry:hover {
@@ -285,6 +302,9 @@ button:active {
 .topic-name {
     font-weight: 600;
     color: #333;
+    flex: 0 0 auto;
+    word-break: break-all;
+    overflow-wrap: break-word;
 }
 
 .topic-type {
@@ -292,6 +312,10 @@ button:active {
     font-size: 11px;
     margin-left: 8px;
     font-family: 'SF Mono', 'SFMono-Regular', -apple-system, BlinkMacSystemFont, 'Menlo', 'Monaco', 'Consolas', 'Courier New', monospace;
+    flex: 1 1 auto;
+    min-width: 0;
+    word-break: break-all;
+    overflow-wrap: break-word;
 }
 
 .topic-frequency {

@@ -281,7 +281,7 @@ pub async fn primitives_handler(state: &State<WebState>) -> Json<serde_json::Val
         .into_iter()
         .map(|(key, instance)| {
             // Extract name from key (format: "name$provider$version")
-            // Primitive names can contain "::" (e.g., "prm::camera.capture")
+            // Primitive names can contain "::" (e.g., "prm::camera.rgb")
             // Key uses "$" as separator, so we split by "$" and take everything except last two parts
             let key_parts: Vec<&str> = key.split('$').collect();
             let name = if key_parts.len() >= 3 {

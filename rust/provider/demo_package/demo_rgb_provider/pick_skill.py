@@ -118,10 +118,10 @@ class PickSkill(Node):
             self._use_fallback_topics()
             return
         
-        # Query prm::camera.capture
-        self.get_logger().info('Querying prm::camera.capture...')
+        # Query prm::camera.rgb
+        self.get_logger().info('Querying prm::camera.rgb...')
         try:
-            response = self.robonix_client.query_primitive('prm::camera.capture')
+            response = self.robonix_client.query_primitive('prm::camera.rgb')
             if response and response.instances:
                 instance = response.instances[0]
                 # Parse output_schema to get image topic
@@ -132,7 +132,7 @@ class PickSkill(Node):
                     self.get_logger().info(f'  Found vision primitive: {self.vision_image_topic}')
         except Exception as e:
             import traceback
-            self.get_logger().error(f'Error querying prm::camera.capture: {e}')
+            self.get_logger().error(f'Error querying prm::camera.rgb: {e}')
             self.get_logger().error(f'Traceback:\n{traceback.format_exc()}')
         
         # Query prm::arm.move.ee
@@ -203,7 +203,7 @@ class PickSkill(Node):
             self._publish_status(skill_id, 'running', {})
             
             # Step 1: Wait for image from vision primitive
-            self.get_logger().info('Step 1: Waiting for image from prm::camera.capture...')
+            self.get_logger().info('Step 1: Waiting for image from prm::camera.rgb...')
             # In real implementation, we would process the image here
             # For demo, we simulate object detection
             

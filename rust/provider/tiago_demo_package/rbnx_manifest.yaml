@@ -20,7 +20,7 @@ package:
 # Primitives provide standardized hardware capability mapping
 primitives:
   # Front camera RGB
-  - name: prm::camera.capture
+  - name: prm::camera.rgb
     # Spec defines: OUTPUT: {"image": "sensor_msgs/msg/Image"}
     input_schema: '{}'
     output_schema: '{"image":"/head_front_camera/rgb/image_raw"}'
