@@ -2,6 +2,8 @@
 
 set -e
 
+make fmt
+
 # Cleanup function to kill robonix-core
 cleanup() {
     if [ -n "$ROBONIX_PID" ]; then

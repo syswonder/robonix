@@ -4,8 +4,10 @@
 // Modern web-based management interface for robonix-core
 
 use rocket::State;
+use rocket::data::ByteUnit;
 use rocket::response::content::RawHtml;
 use rocket::serde::{Deserialize, Serialize, json::Json};
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -16,9 +18,10 @@ use crate::core::RobonixCore;
 use crate::perception::image_monitor::ImageMonitor;
 use crate::perception::tf_monitor::{TfMonitor, TfTreeResponse};
 use crate::perception::topic_monitor::{TopicMonitor, TopicsResponse};
+use crate::speech::{SttService, TtsService};
 use crate::task::task::TaskState;
 
-use log::{trace, warn};
+use log::{info, trace, warn};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub timestamp: String,
@@ -63,6 +66,8 @@ pub struct WebState {
     pub log_buffer: Arc<LogBuffer>,
     pub image_monitor: Arc<ImageMonitor>,
     pub agent: Arc<Mutex<Agent>>,
+    pub tts_service: Arc<TtsService>,
+    pub stt_service: Arc<SttService>,
     pub web_dir: std::path::PathBuf,
 }
 
@@ -83,6 +88,8 @@ pub fn create_web_state(
     log_buffer: Arc<LogBuffer>,
     image_monitor: Arc<ImageMonitor>,
     agent: Arc<Mutex<Agent>>,
+    tts_service: Arc<TtsService>,
+    stt_service: Arc<SttService>,
     web_dir: std::path::PathBuf,
 ) -> WebState {
     WebState {
@@ -93,6 +100,8 @@ pub fn create_web_state(
         log_buffer,
         image_monitor,
         agent,
+        tts_service,
+        stt_service,
         web_dir,
     }
 }
@@ -421,10 +430,15 @@ pub async fn get_config_handler() -> Json<serde_json::Value> {
         Ok(config) => Json(serde_json::json!({
             "agent": {
                 "llm_provider": config.agent.llm_provider,
-                "api_key": config.agent.api_key.as_ref().map(|_| "***").unwrap_or_default(),
+                "api_key": config.agent.api_key.unwrap_or_default(),
                 "api_base": config.agent.api_base,
                 "model": config.agent.model,
                 "temperature": config.agent.temperature,
+            },
+            "speech": {
+                "access_token": config.speech.access_token,
+                "appkey": config.speech.appkey,
+                "region": config.speech.region,
             }
         })),
         Err(e) => {
@@ -439,6 +453,14 @@ pub async fn get_config_handler() -> Json<serde_json::Value> {
 #[derive(Deserialize)]
 pub struct UpdateConfigRequest {
     pub agent: Option<AgentConfigUpdate>,
+    pub speech: Option<SpeechConfigUpdate>,
+}
+
+#[derive(Deserialize)]
+pub struct SpeechConfigUpdate {
+    pub access_token: Option<String>,
+    pub appkey: Option<String>,
+    pub region: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -457,31 +479,32 @@ pub async fn update_config_handler(
 ) -> Json<serde_json::Value> {
     match CoreConfig::load() {
         Ok(mut config) => {
+            let mut config_changed = false;
+
+            // Update agent config if provided
             if let Some(agent_update) = &request.agent {
                 if let Some(llm_provider) = &agent_update.llm_provider {
                     config.agent.llm_provider = llm_provider.clone();
+                    config_changed = true;
                 }
                 if let Some(api_key) = &agent_update.api_key {
                     // Only update if not masked
                     if api_key != "***" {
                         config.agent.api_key = Some(api_key.clone());
+                        config_changed = true;
                     }
                 }
                 if let Some(api_base) = &agent_update.api_base {
                     config.agent.api_base = api_base.clone();
+                    config_changed = true;
                 }
                 if let Some(model) = &agent_update.model {
                     config.agent.model = model.clone();
+                    config_changed = true;
                 }
                 if let Some(temperature) = agent_update.temperature {
                     config.agent.temperature = temperature;
-                }
-
-                // Save config
-                if let Err(e) = config.save() {
-                    return Json(serde_json::json!({
-                        "error": format!("Failed to save config: {}", e)
-                    }));
+                    config_changed = true;
                 }
 
                 // Recreate agent with new config
@@ -494,14 +517,53 @@ pub async fn update_config_handler(
                 };
                 let new_agent = Agent::new(state.core.clone(), new_agent_config);
                 *state.agent.lock().await = new_agent;
+            }
 
+            // Update speech config if provided
+            if let Some(speech_update) = &request.speech {
+                if let Some(access_token) = &speech_update.access_token {
+                    if access_token != "***" && !access_token.is_empty() {
+                        config.speech.access_token = access_token.clone();
+                        config_changed = true;
+                    }
+                }
+                if let Some(appkey) = &speech_update.appkey {
+                    if appkey != "***" && !appkey.is_empty() {
+                        config.speech.appkey = appkey.clone();
+                        config_changed = true;
+                    }
+                }
+                if let Some(region) = &speech_update.region {
+                    config.speech.region = region.clone();
+                    config_changed = true;
+                }
+
+                // Recreate TTS and STT services with new config
+                use crate::speech::{SttService, TtsService};
+                let new_tts_service = Arc::new(TtsService::new(config.speech.clone()));
+                let new_stt_service = Arc::new(SttService::new(config.speech.clone()));
+                // Note: We can't directly replace Arc in WebState, but we can update the inner values
+                // For now, the services will be recreated on next server restart
+                // The config is saved below, so it will be loaded on restart
+            }
+
+            // Save config if anything changed
+            if config_changed {
+                if let Err(e) = config.save() {
+                    return Json(serde_json::json!({
+                        "error": format!("Failed to save config: {}", e)
+                    }));
+                }
+            }
+
+            if request.agent.is_some() || request.speech.is_some() {
                 Json(serde_json::json!({
                     "status": "success",
                     "message": "Config updated successfully"
                 }))
             } else {
                 Json(serde_json::json!({
-                    "error": "No agent config provided"
+                    "error": "No config provided"
                 }))
             }
         }
@@ -524,4 +586,340 @@ pub async fn agent_chat_handler(
             Err(rocket::http::Status::InternalServerError)
         }
     }
+}
+
+#[rocket::post("/api/agent/reset")]
+pub async fn agent_reset_handler(
+    state: &State<WebState>,
+) -> Result<Json<serde_json::Value>, rocket::http::Status> {
+    let mut agent = state.agent.lock().await;
+    agent.clear_history();
+    Ok(Json(serde_json::json!({
+        "status": "success",
+        "message": "Agent history cleared"
+    })))
+}
+
+#[derive(SerdeSerialize, SerdeDeserialize)]
+pub struct TtsRequest {
+    pub text: String,
+    #[serde(default = "default_format")]
+    pub format: String,
+    #[serde(default = "default_voice")]
+    pub voice: String,
+}
+
+fn default_format() -> String {
+    "wav".to_string()
+}
+
+fn default_voice() -> String {
+    "zhishuo".to_string()
+}
+
+#[rocket::post("/api/tts", data = "<request>")]
+pub async fn tts_handler(
+    state: &State<WebState>,
+    request: Json<TtsRequest>,
+) -> Result<(rocket::http::ContentType, Vec<u8>), rocket::http::Status> {
+    let text = request.text.clone();
+    if text.is_empty() {
+        return Err(rocket::http::Status::BadRequest);
+    }
+
+    match state
+        .tts_service
+        .synthesize(&text, Some(&request.format), Some(&request.voice))
+        .await
+    {
+        Ok(audio_data) => {
+            // Save TTS audio to debug directory
+            if let Ok(debug_base_dir) = std::env::current_dir().map(|cwd| cwd.join("debug")) {
+                let debug_dir = debug_base_dir.join("tts");
+                if std::fs::create_dir_all(&debug_dir).is_ok() {
+                    use std::io::Write;
+                    use std::time::{SystemTime, UNIX_EPOCH};
+
+                    let timestamp = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+
+                    // Save audio file
+                    let audio_filename = format!("synthesis_{}.{}", timestamp, request.format);
+                    let audio_path = debug_dir.join(&audio_filename);
+
+                    if let Err(e) = std::fs::File::create(&audio_path)
+                        .and_then(|mut f| f.write_all(&audio_data))
+                    {
+                        warn!("Failed to save TTS audio to {:?}: {}", audio_path, e);
+                    } else {
+                        info!(
+                            "Saved TTS audio to: {:?} ({} bytes)",
+                            audio_path,
+                            audio_data.len()
+                        );
+                    }
+
+                    // Save request info
+                    let info_filename = format!("synthesis_{}_info.txt", timestamp);
+                    let info_path = debug_dir.join(&info_filename);
+                    let info_content = format!(
+                        "TTS Synthesis Info\n\
+                        ==================\n\
+                        Timestamp: {}\n\
+                        Text: {}\n\
+                        Format: {}\n\
+                        Voice: {}\n\
+                        Audio Size: {} bytes\n",
+                        timestamp,
+                        text,
+                        request.format,
+                        request.voice,
+                        audio_data.len()
+                    );
+
+                    if let Err(e) = std::fs::write(&info_path, info_content) {
+                        warn!("Failed to save TTS info to {:?}: {}", info_path, e);
+                    } else {
+                        info!("Saved TTS request info to: {:?}", info_path);
+                    }
+                }
+            }
+
+            let content_type = match request.format.as_str() {
+                "mp3" => rocket::http::ContentType::new("audio", "mpeg"),
+                "wav" => rocket::http::ContentType::new("audio", "wav"),
+                _ => rocket::http::ContentType::new("audio", "pcm"),
+            };
+            Ok((content_type, audio_data))
+        }
+        Err(e) => {
+            warn!("TTS synthesis error: {}", e);
+            Err(rocket::http::Status::InternalServerError)
+        }
+    }
+}
+
+#[rocket::post("/api/stt", data = "<audio_data>")]
+pub async fn stt_handler(
+    state: &State<WebState>,
+    audio_data: rocket::data::Data<'_>,
+) -> Result<Json<serde_json::Value>, rocket::http::Status> {
+    use log::info;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Read audio data (limit to 2MB for audio files)
+    let audio_bytes = audio_data
+        .open(ByteUnit::Megabyte(2))
+        .into_bytes()
+        .await
+        .map_err(|e| {
+            warn!("Failed to read audio data: {}", e);
+            rocket::http::Status::BadRequest
+        })?;
+
+    let audio_size = audio_bytes.len();
+    info!("STT request received: audio_size={} bytes", audio_size);
+
+    if audio_size == 0 {
+        warn!("STT request with empty audio data");
+        return Err(rocket::http::Status::BadRequest);
+    }
+
+    // Save audio file to debug directory (organized by function)
+    let debug_base_dir = match std::env::current_dir() {
+        Ok(cwd) => cwd.join("debug"),
+        Err(e) => {
+            warn!("Failed to get current directory: {}, using /tmp", e);
+            PathBuf::from("/tmp/robonix-debug")
+        }
+    };
+    let debug_dir = debug_base_dir.join("stt");
+
+    if let Err(e) = std::fs::create_dir_all(&debug_dir) {
+        warn!("Failed to create debug directory {:?}: {}", debug_dir, e);
+    } else {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Save original audio file
+        let original_ext = if audio_bytes.len() >= 4
+            && audio_bytes[0] == 0x1A
+            && audio_bytes[1] == 0x45
+            && audio_bytes[2] == 0xDF
+            && audio_bytes[3] == 0xA3
+        {
+            "webm"
+        } else if audio_bytes.len() >= 4 && &audio_bytes[0..4] == b"RIFF" {
+            "wav"
+        } else if audio_bytes.len() >= 4 && &audio_bytes[0..4] == b"OggS" {
+            "ogg"
+        } else {
+            "unknown"
+        };
+
+        let original_filename = format!("recording_{}_original.{}", timestamp, original_ext);
+        let original_path = debug_dir.join(&original_filename);
+
+        match std::fs::File::create(&original_path).and_then(|mut f| f.write_all(&audio_bytes)) {
+            Ok(_) => {
+                info!(
+                    "Saved original audio recording to: {:?} ({} bytes, format: {})",
+                    original_path, audio_size, original_ext
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to save original audio file to {:?}: {}",
+                    original_path, e
+                );
+            }
+        }
+    }
+
+    // Detect audio format from file header
+    let (format, detected_sample_rate) = detect_audio_format(&audio_bytes);
+
+    // For WAV files, try to read actual sample rate from header
+    let sample_rate = if format == "wav" && audio_bytes.len() >= 28 {
+        // WAV file: sample rate is at offset 24 (little-endian u32)
+        let sr = u32::from_le_bytes([
+            audio_bytes[24],
+            audio_bytes[25],
+            audio_bytes[26],
+            audio_bytes[27],
+        ]);
+        info!("Read sample rate from WAV header: {} Hz", sr);
+        sr
+    } else {
+        detected_sample_rate
+    };
+
+    info!(
+        "Detected audio format: format={}, sample_rate={} Hz, audio_size={} bytes",
+        format, sample_rate, audio_size
+    );
+
+    // Save the audio that will be sent to STT service (converted WAV if applicable)
+    let stt_audio_bytes = &audio_bytes;
+    let stt_format = format.clone();
+
+    // Save converted/sent audio to debug directory
+    if let Ok(debug_base_dir) = std::env::current_dir().map(|cwd| cwd.join("debug")) {
+        let debug_dir = debug_base_dir.join("stt");
+        if std::fs::create_dir_all(&debug_dir).is_ok() {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            let sent_filename = format!("recording_{}_sent_to_stt.{}", timestamp, stt_format);
+            let sent_path = debug_dir.join(&sent_filename);
+
+            if let Err(e) =
+                std::fs::File::create(&sent_path).and_then(|mut f| f.write_all(stt_audio_bytes))
+            {
+                warn!("Failed to save sent audio to {:?}: {}", sent_path, e);
+            } else {
+                info!(
+                    "Saved audio sent to STT service: {:?} ({} bytes)",
+                    sent_path,
+                    stt_audio_bytes.len()
+                );
+            }
+        }
+    }
+
+    match state
+        .stt_service
+        .recognize(stt_audio_bytes, Some(&stt_format), Some(sample_rate))
+        .await
+    {
+        Ok(text) => {
+            info!("STT recognition successful: result_length={}", text.len());
+
+            // Save STT request info and result to debug directory
+            if let Ok(debug_base_dir) = std::env::current_dir().map(|cwd| cwd.join("debug")) {
+                let debug_dir = debug_base_dir.join("stt");
+                if std::fs::create_dir_all(&debug_dir).is_ok() {
+                    let timestamp = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+
+                    // Save STT request info
+                    let info_filename = format!("request_{}_info.txt", timestamp);
+                    let info_path = debug_dir.join(&info_filename);
+                    let info_content = format!(
+                        "STT Request Info\n\
+                        ================\n\
+                        Timestamp: {}\n\
+                        Audio Size: {} bytes\n\
+                        Format: {}\n\
+                        Sample Rate: {} Hz\n\
+                        Result Length: {} chars\n\
+                        Result: {}\n",
+                        timestamp,
+                        audio_size,
+                        stt_format,
+                        sample_rate,
+                        text.len(),
+                        text
+                    );
+
+                    if let Err(e) = std::fs::write(&info_path, info_content) {
+                        warn!("Failed to save STT info to {:?}: {}", info_path, e);
+                    } else {
+                        info!("Saved STT request info to: {:?}", info_path);
+                    }
+                }
+            }
+
+            Ok(Json(serde_json::json!({
+                "status": "success",
+                "result": text
+            })))
+        }
+        Err(e) => {
+            warn!("STT recognition error: {}", e);
+            Err(rocket::http::Status::InternalServerError)
+        }
+    }
+}
+
+/// Detect audio format from file header
+fn detect_audio_format(audio_data: &[u8]) -> (String, u32) {
+    // Check for WebM format (starts with 0x1A 0x45 0xDF 0xA3)
+    if audio_data.len() >= 4
+        && audio_data[0] == 0x1A
+        && audio_data[1] == 0x45
+        && audio_data[2] == 0xDF
+        && audio_data[3] == 0xA3
+    {
+        // WebM typically contains Opus audio, but Aliyun needs OGG-encapsulated Opus
+        // Try opus format, but it might not work since webm != ogg
+        info!("Detected WebM format, trying opus format");
+        return ("opus".to_string(), 16000);
+    }
+
+    // Check for WAV format (starts with "RIFF")
+    if audio_data.len() >= 4 && &audio_data[0..4] == b"RIFF" {
+        info!("Detected WAV format");
+        return ("wav".to_string(), 16000);
+    }
+
+    // Check for OGG format (starts with "OggS")
+    if audio_data.len() >= 4 && &audio_data[0..4] == b"OggS" {
+        info!("Detected OGG format");
+        return ("opus".to_string(), 16000);
+    }
+
+    // Default to wav if unknown
+    warn!("Unknown audio format, defaulting to wav");
+    ("wav".to_string(), 16000)
 }

@@ -83,21 +83,17 @@
 </head>
 
 <body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
-        <div class="container-fluid">
+    <nav class="modern-navbar">
+        <div class="navbar-container">
             <a class="navbar-brand" href="/">Robonix Console</a>
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-                <span class="navbar-toggler-icon"></span>
+            <button class="navbar-toggler" type="button" id="navbarToggle">
+                <span></span>
+                <span></span>
+                <span></span>
             </button>
-            <div class="collapse navbar-collapse" id="navbarNav">
-                <ul class="navbar-nav">
-                    <li class="nav-item">
-                        <a class="nav-link" href="/">Home</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link active" href="/settings">Settings</a>
-                    </li>
-                </ul>
+            <div class="navbar-menu" id="navbarMenu">
+                <a class="nav-link" href="/">Home</a>
+                <a class="nav-link active" href="/settings">Settings</a>
             </div>
         </div>
     </nav>
@@ -116,7 +112,7 @@
                 </div>
                 <div class="form-group">
                     <label for="api-key">API Key</label>
-                    <input type="password" id="api-key" name="api_key" placeholder="Enter API key">
+                    <input type="text" id="api-key" name="api_key" placeholder="Enter API key">
                 </div>
                 <div class="form-group">
                     <label for="api-base">API Base URL</label>
@@ -136,9 +132,27 @@
         </div>
 
         <div class="settings-section">
-            <h3>About</h3>
-            <p>This is the Robonix Core configuration. Core runs as a single instance in the distributed system.</p>
-            <p><strong>Note:</strong> CLI configuration (package storage path, SDK path) is managed separately on each node via <code>rbnx config</code> command.</p>
+            <h3>Speech Configuration</h3>
+            <form id="speech-config-form">
+                <div class="form-group">
+                    <label for="speech-access-token">Access Token</label>
+                    <input type="text" id="speech-access-token" name="access_token" placeholder="Enter Aliyun access token">
+                </div>
+                <div class="form-group">
+                    <label for="speech-appkey">AppKey</label>
+                    <input type="text" id="speech-appkey" name="appkey" placeholder="Enter Aliyun appkey">
+                </div>
+                <div class="form-group">
+                    <label for="speech-region">Region</label>
+                    <select id="speech-region" name="region">
+                        <option value="shanghai">Shanghai</option>
+                        <option value="beijing">Beijing</option>
+                        <option value="shenzhen">Shenzhen</option>
+                    </select>
+                </div>
+                <button type="submit" class="btn-save">Save Speech Configuration</button>
+                <div id="speech-status-message" class="status-message"></div>
+            </form>
         </div>
     </div>
 
@@ -146,6 +160,15 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"
         integrity="sha384-C6RzsynM9kWDrMNeT87bh95OGNyZPhcTNXj1NW7RuBCsyN/o0jlpcV8Qyq46cDfL"
         crossorigin="anonymous"></script>
+    <script>
+        // Mobile menu toggle
+        document.getElementById('navbarToggle')?.addEventListener('click', function() {
+            const menu = document.getElementById('navbarMenu');
+            if (menu) {
+                menu.classList.toggle('active');
+            }
+        });
+    </script>
     <script>
         async function loadConfig() {
             try {
@@ -157,15 +180,21 @@
                     return;
                 }
 
-                // Populate form fields
+                // Populate agent form fields
                 document.getElementById('llm-provider').value = config.agent.llm_provider || 'deepseek';
-                document.getElementById('api-key').value = config.agent.api_key === '***' ? '' : (config.agent.api_key || '');
+                document.getElementById('api-key').value = config.agent.api_key || '';
                 document.getElementById('api-base').value = config.agent.api_base || 'https://api.deepseek.com';
                 document.getElementById('model').value = config.agent.model || 'deepseek-chat';
                 document.getElementById('temperature').value = config.agent.temperature || 0.7;
+
+                // Populate speech form fields
+                if (config.speech) {
+                    document.getElementById('speech-access-token').value = config.speech.access_token || '';
+                    document.getElementById('speech-appkey').value = config.speech.appkey || '';
+                    document.getElementById('speech-region').value = config.speech.region || 'shanghai';
+                }
             } catch (error) {
                 console.error('Failed to load config:', error);
-                document.getElementById('system-config').innerHTML = `<p style="color: red;">Failed to load configuration</p>`;
             }
         }
 
@@ -202,11 +231,50 @@
                     statusMsg.className = 'status-message success';
                     statusMsg.textContent = 'Configuration saved successfully!';
                     statusMsg.style.display = 'block';
-                    // Reload config to update masked API key
-                    setTimeout(loadConfig, 1000);
                 }
             } catch (error) {
                 const statusMsg = document.getElementById('status-message');
+                statusMsg.className = 'status-message error';
+                statusMsg.textContent = `Failed to save configuration: ${error.message}`;
+                statusMsg.style.display = 'block';
+            }
+        });
+
+        // Speech config form handler
+        document.getElementById('speech-config-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const formData = {
+                speech: {
+                    access_token: document.getElementById('speech-access-token').value || undefined,
+                    appkey: document.getElementById('speech-appkey').value || undefined,
+                    region: document.getElementById('speech-region').value || 'shanghai',
+                }
+            };
+
+            try {
+                const response = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(formData),
+                });
+
+                const result = await response.json();
+                const statusMsg = document.getElementById('speech-status-message');
+                
+                if (result.error) {
+                    statusMsg.className = 'status-message error';
+                    statusMsg.textContent = `Error: ${result.error}`;
+                    statusMsg.style.display = 'block';
+                } else {
+                    statusMsg.className = 'status-message success';
+                    statusMsg.textContent = 'Speech configuration saved successfully!';
+                    statusMsg.style.display = 'block';
+                }
+            } catch (error) {
+                const statusMsg = document.getElementById('speech-status-message');
                 statusMsg.className = 'status-message error';
                 statusMsg.textContent = `Failed to save configuration: ${error.message}`;
                 statusMsg.style.display = 'block';

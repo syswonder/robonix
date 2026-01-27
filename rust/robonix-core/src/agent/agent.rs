@@ -25,26 +25,60 @@ pub struct AgentRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentResponse {
     pub message: String,
-    pub function_results: Vec<FunctionResult>,
+    pub function_calls: Vec<FunctionCallInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FunctionResult {
+pub struct FunctionCallInfo {
     pub name: String,
+    pub arguments: Value,
     pub result: Value,
 }
 
 impl Agent {
+    fn create_system_message() -> ChatMessage {
+        ChatMessage {
+            role: "system".to_string(),
+            content: concat!(
+                "You are a helpful and friendly assistant for the Robonix robot system. ",
+                "You can help users in two ways:\n\n",
+                "1. Robonix system operations: Help users query the semantic map, submit tasks, ",
+                "query system capabilities, and perform robot operations using function calls when appropriate.\n\n",
+                "2. General conversation: You can also engage in general conversations, answer questions, ",
+                "provide introductions, explain concepts, and have friendly chats with users. ",
+                "Don't limit yourself to only robot-related topics - be helpful and conversational ",
+                "about any topic the user asks about.\n\n",
+                "Always provide natural language responses and use function calls only when the user ",
+                "needs to interact with the Robonix system. For general questions, conversations, ",
+                "or introductions, respond naturally without function calls.\n\n",
+                "IMPORTANT FORMATTING RULES:\n",
+                "- Return only plain text without any markdown formatting (no **, ##, ```, etc.)\n",
+                "- Write in complete, natural sentences and paragraphs only\n",
+                "- NEVER use bullet points, numbered lists, or any list format (no \"1.\", \"2.\", \"-\", etc.)\n",
+                "- NEVER use colons followed by line breaks or lists (no \"可能意味着：\\n\" or similar patterns)\n",
+                "- When presenting multiple points, connect them with words like \"and\", \"also\", \"additionally\", ",
+                "or write separate sentences\n",
+                "- Ensure exactly one space between words and sentences - no extra spaces anywhere\n",
+                "- Write as if you're having a natural conversation, not formatting a document\n",
+                "- Example BAD (Chinese): \"可能意味着：\\n机器人当前所在的区域比较空旷\\n或者语义地图还没有加载\"\n",
+                "- Example GOOD (Chinese): \"这可能意味着机器人当前所在的区域比较空旷，或者语义地图还没有加载。\"\n",
+                "- Example BAD (English): \"This may mean:\\nThe robot is in an empty area\\nor the semantic map hasn't loaded\"\n",
+                "- Example GOOD (English): \"This may mean the robot is in an empty area, or the semantic map hasn't loaded yet.\"\n",
+                "- Example BAD (Chinese): \"活跃任务：0个\\n注册的基础操作：0个\"\n",
+                "- Example GOOD (Chinese): \"当前系统中有0个活跃任务和0个注册的基础操作。\"\n",
+                "- Example BAD (English): \"Active tasks: 0\\nRegistered primitives: 0\"\n",
+                "- Example GOOD (English): \"Currently there are 0 active tasks and 0 registered primitives in the system.\""
+            ).to_string(),
+        }
+    }
+
     pub fn new(core: Arc<RobonixCore>, config: crate::agent::llm::AgentConfig) -> Self {
         let llm_client = LLMClient::new(config);
         let function_registry = FunctionRegistry::new(core);
 
         // Initialize with system message
         let mut conversation_history = Vec::new();
-        conversation_history.push(ChatMessage {
-            role: "system".to_string(),
-            content: "You are a helpful assistant for the Robonix robot system. You can help users query the semantic map, submit tasks, and query system capabilities. Always provide natural language responses and use function calls when appropriate.".to_string(),
-        });
+        conversation_history.push(Self::create_system_message());
 
         Self {
             llm_client,
@@ -70,44 +104,39 @@ impl Agent {
             .await
             .context("Failed to get LLM response")?;
 
-        // Execute function calls
-        let mut function_results = Vec::new();
+        // Execute function calls and collect results
+        let mut function_calls_info = Vec::new();
         for function_call in &llm_response.function_calls {
-            match self
+            let result = match self
                 .function_registry
                 .call_function(&function_call.name, function_call.arguments.clone())
                 .await
             {
-                Ok(result) => {
-                    function_results.push(FunctionResult {
-                        name: function_call.name.clone(),
-                        result,
-                    });
-                }
+                Ok(result) => result,
                 Err(e) => {
-                    function_results.push(FunctionResult {
-                        name: function_call.name.clone(),
-                        result: json!({
-                            "error": format!("Function execution failed: {}", e)
-                        }),
-                    });
+                    json!({
+                        "error": format!("Function execution failed: {}", e)
+                    })
                 }
-            }
+            };
+
+            function_calls_info.push(FunctionCallInfo {
+                name: function_call.name.clone(),
+                arguments: function_call.arguments.clone(),
+                result,
+            });
         }
 
         // If there were function calls, add them to conversation and get final response
         let final_message = if !llm_response.function_calls.is_empty() {
             // Add assistant message with function calls
             let mut assistant_message = format!("{}\n\n", llm_response.message);
-            for (i, function_call) in llm_response.function_calls.iter().enumerate() {
-                if i < function_results.len() {
-                    assistant_message.push_str(&format!(
-                        "Function {} returned: {}\n",
-                        function_call.name,
-                        serde_json::to_string_pretty(&function_results[i].result)
-                            .unwrap_or_default()
-                    ));
-                }
+            for function_call_info in &function_calls_info {
+                assistant_message.push_str(&format!(
+                    "Function {} returned: {}\n",
+                    function_call_info.name,
+                    serde_json::to_string_pretty(&function_call_info.result).unwrap_or_default()
+                ));
             }
 
             // Add to conversation
@@ -142,15 +171,13 @@ impl Agent {
 
         Ok(AgentResponse {
             message: final_message,
-            function_results,
+            function_calls: function_calls_info,
         })
     }
 
     pub fn clear_history(&mut self) {
         self.conversation_history.clear();
-        self.conversation_history.push(ChatMessage {
-            role: "system".to_string(),
-            content: "You are a helpful assistant for the Robonix robot system. You can help users query the semantic map, submit tasks, and query system capabilities. Always provide natural language responses and use function calls when appropriate.".to_string(),
-        });
+        self.conversation_history
+            .push(Self::create_system_message());
     }
 }

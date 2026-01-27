@@ -16,28 +16,23 @@
 </head>
 
 <body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
-        <div class="container-fluid">
+    <nav class="modern-navbar">
+        <div class="navbar-container">
             <a class="navbar-brand" href="/">Robonix Console</a>
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-                <span class="navbar-toggler-icon"></span>
+            <button class="navbar-toggler" type="button" id="navbarToggle">
+                <span></span>
+                <span></span>
+                <span></span>
             </button>
-            <div class="collapse navbar-collapse" id="navbarNav">
-                <ul class="navbar-nav">
-                    <li class="nav-item">
-                        <a class="nav-link active" href="/">Home</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="/settings">Settings</a>
-                    </li>
-                </ul>
+            <div class="navbar-menu" id="navbarMenu">
+                <a class="nav-link active" href="/">Home</a>
+                <a class="nav-link" href="/settings">Settings</a>
             </div>
         </div>
     </nav>
 
     <div class="container">
         <!-- <h1>Robonix Console</h1> -->
-        <br>
         <br>
 
         <div class="status">
@@ -59,19 +54,34 @@
             </div>
         </div>
 
-        <div class="panel">
-            <div class="panel-header">
+        <!-- Agent Card -->
+        <div class="panel agent-card expanded">
+            <div class="panel-header" onclick="toggleAgentChat()" style="cursor: pointer;">
                 <div class="panel-title">Robonix Agent</div>
+                <div class="agent-header-actions" onclick="event.stopPropagation();">
+                    <label class="agent-voice-toggle" title="Enable voice playback">
+                        <input type="checkbox" id="agent-tts-toggle" checked>
+                        <span class="voice-icon">Voice</span>
+                    </label>
+                    <button class="agent-action-btn" onclick="clearAgentChat()" title="Clear chat history">Clear</button>
+                    <button class="agent-action-btn" onclick="resetAgent()" title="Reset agent">Reset</button>
+                    <div class="agent-toggle">▼</div>
+                </div>
             </div>
-            <div id="agent-container" style="padding: 20px;">
-                <div id="agent-chat-messages" style="height: 300px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; padding: 15px; margin-bottom: 15px; background: #f9f9f9;">
-                    <div class="agent-message" style="margin-bottom: 10px;">
-                        <strong>Agent:</strong> Hello! I'm the Robonix agent. I can help you query the semantic map, submit tasks, and query system capabilities. How can I assist you?
+            <div id="agent-chat-popup" class="agent-chat-content">
+                <div id="agent-chat-messages" class="agent-chat-messages">
+                    <div class="agent-message agent-message-bot">
+                        <div class="agent-message-content">
+                            Hello! I'm the Robonix agent. I can help you query the semantic map, submit tasks, and query system capabilities. How can I assist you?
+                        </div>
                     </div>
                 </div>
-                <div style="display: flex; gap: 10px;">
-                    <input type="text" id="agent-input" placeholder="Type your message here..." style="flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 4px;" onkeypress="if(event.key === 'Enter') sendAgentMessage()">
-                    <button onclick="sendAgentMessage()" style="padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">Send</button>
+                <div class="agent-chat-input-container">
+                    <button id="agent-voice-input-btn" class="agent-voice-input-btn" onclick="toggleVoiceInput()" title="Voice input">
+                        <span id="voice-input-icon">Mic</span>
+                    </button>
+                    <input type="text" id="agent-input" class="agent-chat-input" placeholder="Type your message here..." onkeypress="if(event.key === 'Enter') sendAgentMessage()">
+                    <button onclick="sendAgentMessage()" class="agent-chat-send">Send</button>
                 </div>
             </div>
         </div>
