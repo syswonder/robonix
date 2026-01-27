@@ -32,7 +32,7 @@ pub struct SpecRegistry {
 // Macro to define a single primitive
 // Format: PRM!(primitives, name, desc, input_params, output_params)
 // input_params/output_params: HashMap of label -> ROS message type
-// Example: PRM!(primitives, "prm::camera.capture", "Capture RGB image", {}, {"image": "sensor_msgs/msg/Image"})
+// Example: PRM!(primitives, "prm::camera.rgb", "Capture RGB image", {}, {"image": "sensor_msgs/msg/Image"})
 #[macro_export]
 macro_rules! PRM {
     ($primitives:ident, $name:expr, $desc:expr, $input_params:tt, $output_params:tt) => {{

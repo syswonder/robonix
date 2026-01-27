@@ -2,7 +2,7 @@ use crate::spec::{PrimitiveSpec, ServiceSpec};
 use std::collections::HashMap;
 
 pub fn load_primitives(primitives: &mut HashMap<String, PrimitiveSpec>) {
-    PRM!(primitives, "prm::camera.capture", "Capture RGB image from camera",
+    PRM!(primitives, "prm::camera.rgb", "Capture RGB image from camera",
          {},  // No input parameters
          { "image": "sensor_msgs/msg/Image" });
 
@@ -13,6 +13,26 @@ pub fn load_primitives(primitives: &mut HashMap<String, PrimitiveSpec>) {
     PRM!(primitives, "prm::camera.depth", "Capture depth image from depth camera",
          {},  // No input parameters
          { "depth": "sensor_msgs/msg/Image" });
+
+    PRM!(primitives, "prm::sensor.pointcloud", "Capture point cloud data from 3D sensor",
+         {},  // No input parameters
+         { "pointcloud": "sensor_msgs/msg/PointCloud2" });
+
+    PRM!(primitives, "prm::camera.rgbd", "Capture RGB and depth images from RGBD camera",
+         {},  // No input parameters
+         { "rgb": "sensor_msgs/msg/Image", "depth": "sensor_msgs/msg/Image" });
+
+    PRM!(primitives, "prm::trasform.laserscan", "Transform point cloud to laser scan",
+         { "pointcloud": "sensor_msgs/msg/PointCloud2" },
+         { "scan": "sensor_msgs/msg/LaserScan" });
+
+    PRM!(primitives, "prm::description.urdf", "Provide robot URDF description",
+         {},  // No input parameters
+         { "urdf": "std_msgs/msg/String" }); // robot_description parameter as string
+
+    PRM!(primitives, "prm::slam.vision", "Visual SLAM providing map and localization",
+         {},  // No input parameters (subscribes to RGB, depth, pointcloud internally)
+         { "map": "nav_msgs/msg/OccupancyGrid" }); // Output map
 }
 
 pub fn load_services(services: &mut HashMap<String, ServiceSpec>) {

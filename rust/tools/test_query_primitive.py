@@ -50,7 +50,7 @@ class QueryPrimitiveTest(Node):
         self.get_logger().info('QueryPrimitive client created')
     
     def test_query(self):
-        """Test querying prm::camera.capture"""
+        """Test querying prm::camera.rgb"""
         import json
         
         self.get_logger().info('Waiting for service /rbnx/prm/query...')
@@ -75,7 +75,7 @@ class QueryPrimitiveTest(Node):
         
         # Create request
         request = QueryPrimitive.Request()
-        request.name = 'prm::camera.capture'
+        request.name = 'prm::camera.rgb'
         filter_dict = {"camera": "front"}
         request.filter = json.dumps(filter_dict)
         

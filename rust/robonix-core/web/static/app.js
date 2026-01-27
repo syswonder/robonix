@@ -347,8 +347,8 @@ function renderPrimitives(primitives) {
         let name = prim.name;
         if (!name && prim.key) {
             // Extract name from key
-            // Key format: "prm::camera.capture$provider$version"
-            // We want: "prm::camera.capture"
+            // Key format: "prm::camera.rgb$provider$version"
+            // We want: "prm::camera.rgb"
             const keyParts = prim.key.split('$');
             if (keyParts.length >= 3) {
                 // Key has at least 3 parts: name (may contain ::), provider, version
