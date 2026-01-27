@@ -24,7 +24,7 @@ primitives:
     input_schema: '{}'
     output_schema: '{"image":"/demo_rgb/image"}'
     metadata: '{"resolution":"640x480","format":"RGB"}'
-    version: 0.0.1-impl-alpha
+    version: 0.0.1
     start_script: rbnx/start_capture_rgb.sh
     stop_script: rbnx/stop_capture_rgb.sh
 
