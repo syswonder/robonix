@@ -559,7 +559,9 @@ pub async fn update_config_handler(
             if request.agent.is_some() || request.speech.is_some() {
                 Json(serde_json::json!({
                     "status": "success",
-                    "message": "Config updated successfully"
+                    "message": "Config updated successfully",
+                    "restart_required": true,
+                    "restart_message": "Please restart robonix-core for the changes to take effect."
                 }))
             } else {
                 Json(serde_json::json!({
