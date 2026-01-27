@@ -542,7 +542,7 @@ impl ProcessManager {
     /// Kill a process group (more efficient than killing individual processes)
     #[cfg(unix)]
     fn kill_process_tree(&self, pid: u32) -> Result<()> {
-        use nix::sys::signal::{kill, killpg, Signal};
+        use nix::sys::signal::{Signal, kill, killpg};
         use nix::unistd::Pid;
         use std::io::{BufRead, BufReader};
         use std::process::Command as SyncCommand;
@@ -858,7 +858,7 @@ impl ProcessManager {
                 // Fallback: try to kill just the main process
                 #[cfg(unix)]
                 {
-                    use nix::sys::signal::{kill, Signal};
+                    use nix::sys::signal::{Signal, kill};
                     use nix::unistd::Pid;
                     let pid = Pid::from_raw(process_info.pid as i32);
                     let _ = kill(pid, Signal::SIGTERM);

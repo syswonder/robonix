@@ -1746,6 +1746,89 @@ function setupMap2DInteraction() {
     });
 }
 
+// Agent chat functions
+async function sendAgentMessage() {
+    const input = document.getElementById('agent-input');
+    const message = input.value.trim();
+    
+    if (!message) return;
+    
+    // Clear input
+    input.value = '';
+    
+    // Add user message to chat
+    const chatContainer = document.getElementById('agent-chat-messages');
+    const userMessage = document.createElement('div');
+    userMessage.className = 'agent-message';
+    userMessage.style.marginBottom = '10px';
+    userMessage.style.textAlign = 'right';
+    userMessage.innerHTML = `<strong>You:</strong> ${escapeHtml(message)}`;
+    chatContainer.appendChild(userMessage);
+    
+    // Scroll to bottom
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+    
+    // Show loading indicator
+    const loadingMessage = document.createElement('div');
+    loadingMessage.className = 'agent-message';
+    loadingMessage.style.marginBottom = '10px';
+    loadingMessage.id = 'agent-loading';
+    loadingMessage.innerHTML = '<strong>Agent:</strong> <em>Thinking...</em>';
+    chatContainer.appendChild(loadingMessage);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+    
+    try {
+        const response = await fetch('/api/agent/chat', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ message }),
+        });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        
+        // Remove loading indicator
+        const loading = document.getElementById('agent-loading');
+        if (loading) {
+            loading.remove();
+        }
+        
+        // Add agent response
+        const agentMessage = document.createElement('div');
+        agentMessage.className = 'agent-message';
+        agentMessage.style.marginBottom = '10px';
+        agentMessage.innerHTML = `<strong>Agent:</strong> ${escapeHtml(data.message)}`;
+        chatContainer.appendChild(agentMessage);
+        
+        // Scroll to bottom
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+    } catch (error) {
+        console.error('Failed to send agent message:', error);
+        
+        // Remove loading indicator
+        const loading = document.getElementById('agent-loading');
+        if (loading) {
+            loading.remove();
+        }
+        
+        // Show error message
+        const errorMessage = document.createElement('div');
+        errorMessage.className = 'agent-message';
+        errorMessage.style.marginBottom = '10px';
+        errorMessage.style.color = 'red';
+        errorMessage.innerHTML = `<strong>Agent:</strong> <em>Error: ${escapeHtml(error.message)}</em>`;
+        chatContainer.appendChild(errorMessage);
+        
+        // Scroll to bottom
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+    }
+}
+
 // Initialize on page load
 loadStatus();
 loadTfTree();
