@@ -183,65 +183,105 @@ impl FunctionRegistry {
             .unwrap_or_default();
 
         // Get semantic map from cache
+        // Cache is directly an array of objects, not an object with "objects" field
         let task_manager = self.core.get_task_manager();
         let cache = task_manager.get_semantic_map_cache();
         let cache_guard = cache.lock().await;
-        let objects = cache_guard
-            .as_object()
-            .and_then(|obj| obj.get("objects"))
-            .and_then(|o| o.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let objects = cache_guard.as_array().cloned().unwrap_or_default();
         drop(cache_guard);
 
         // Calculate distances (simplified: assume robot is at origin for now)
         // In a real implementation, we'd get robot pose from TF tree
-        let mut objects_with_distance: Vec<(Value, f64)> = objects
+        let mut objects_with_distance: Vec<(Value, Option<f64>)> = objects
             .into_iter()
             .filter_map(|obj| {
                 // Filter by type if specified
+                // Object has "label" field (not "type"), but we check both for compatibility
                 if !types_filter.is_empty() {
-                    let obj_type = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    if !types_filter.contains(&obj_type.to_string()) {
+                    let obj_type = obj
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .or_else(|| obj.get("label").and_then(|l| l.as_str()))
+                        .unwrap_or("");
+                    // Case-insensitive comparison
+                    let obj_type_lower = obj_type.to_lowercase();
+                    if !types_filter.iter().any(|filter| filter.to_lowercase() == obj_type_lower) {
                         return None;
                     }
                 }
 
                 // Calculate distance from origin (robot position)
                 // Objects have frame_mapping with center coordinates
+                // Prefer "map" frame over "base_link" for more accurate distance calculation
+                let mut distance_opt: Option<f64> = None;
                 if let Some(frame_mappings) = obj.get("frame_mapping").and_then(|f| f.as_array()) {
-                    for mapping in frame_mappings {
+                    // First pass: look for "map" frame (preferred)
+                    for mapping in frame_mappings.iter() {
                         if let Some(frame_id) = mapping.get("frame_id").and_then(|f| f.as_str()) {
-                            if frame_id == "map" || frame_id == "base_link" {
+                            if frame_id == "map" {
                                 if let Some(center) = mapping.get("center") {
                                     let x = center.get("x").and_then(|x| x.as_f64()).unwrap_or(0.0);
                                     let y = center.get("y").and_then(|y| y.as_f64()).unwrap_or(0.0);
                                     let z = center.get("z").and_then(|z| z.as_f64()).unwrap_or(0.0);
                                     let distance = (x * x + y * y + z * z).sqrt();
-                                    return Some((obj.clone(), distance));
+                                    distance_opt = Some(distance);
+                                    break; // Found map frame, use it
+                                }
+                            }
+                        }
+                    }
+                    // Second pass: if no map frame found, try base_link
+                    if distance_opt.is_none() {
+                        for mapping in frame_mappings.iter() {
+                            if let Some(frame_id) = mapping.get("frame_id").and_then(|f| f.as_str()) {
+                                if frame_id == "base_link" {
+                                    if let Some(center) = mapping.get("center") {
+                                        let x = center.get("x").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                                        let y = center.get("y").and_then(|y| y.as_f64()).unwrap_or(0.0);
+                                        let z = center.get("z").and_then(|z| z.as_f64()).unwrap_or(0.0);
+                                        let distance = (x * x + y * y + z * z).sqrt();
+                                        distance_opt = Some(distance);
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                None
+                // Return object even if no distance available (distance will be None)
+                Some((obj.clone(), distance_opt))
             })
             .collect();
 
-        // Sort by distance
-        objects_with_distance
-            .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Sort by distance: objects with distance first, then by distance value
+        // Objects without distance go to the end
+        objects_with_distance.sort_by(|a, b| {
+            match (a.1, b.1) {
+                (Some(da), Some(db)) => da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+        });
 
         // Take nearest N objects
         let nearest: Vec<Value> = objects_with_distance
             .into_iter()
             .take(count)
-            .map(|(obj, distance)| {
+            .map(|(obj, distance_opt)| {
                 let mut result = obj.clone();
-                result
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("distance".to_string(), json!(distance));
+                if let Some(distance) = distance_opt {
+                    result
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("distance".to_string(), json!(distance));
+                } else {
+                    // Mark objects without distance information
+                    result
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("distance".to_string(), json!(null));
+                }
                 result
             })
             .collect();
@@ -254,23 +294,21 @@ impl FunctionRegistry {
 
     async fn infer_environment(&self) -> Result<Value> {
         // Get semantic map
+        // Cache is directly an array of objects, not an object with "objects" field
         let task_manager = self.core.get_task_manager();
         let cache = task_manager.get_semantic_map_cache();
         let cache_guard = cache.lock().await;
-        let objects = cache_guard
-            .as_object()
-            .and_then(|obj| obj.get("objects"))
-            .and_then(|o| o.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let objects = cache_guard.as_array().cloned().unwrap_or_default();
         drop(cache_guard);
 
         // Simple heuristic-based environment inference
+        // Object has "label" field (not "type"), but we check both for compatibility
         let mut object_types: Vec<String> = objects
             .iter()
             .filter_map(|obj| {
                 obj.get("type")
                     .and_then(|t| t.as_str())
+                    .or_else(|| obj.get("label").and_then(|l| l.as_str()))
                     .map(|s| s.to_string())
             })
             .collect();

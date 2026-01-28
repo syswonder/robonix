@@ -1,0 +1,25 @@
+manual_objects:
+  - label: kitchen_target_waypoint
+    frame_mapping:
+      - frame_id: "map"
+        center:
+          x: 8.21899
+          y: -11.6421
+          z: 0.0
+        bbox:
+          - scale_x: 0.1
+            scale_y: 0.1
+            scale_z: 0.1
+            yaw: 0.0
+  - label: room_315_target_waypoint
+    frame_mapping:
+      - frame_id: "map"
+        center:
+          x: 1.79997
+          y: 0.311725
+          z: 0.0
+        bbox:
+          - scale_x: 0.1
+            scale_y: 0.1
+            scale_z: 0.1
+            yaw: 0.0
