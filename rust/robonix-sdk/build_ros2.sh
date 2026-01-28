@@ -35,33 +35,15 @@ source /opt/ros/humble/setup.bash
 export PYTHON3_EXECUTABLE=/usr/bin/python3
 export PYTHON_EXECUTABLE=/usr/bin/python3
 
-# Build the package with explicit Python path and disable Python generator if needed
+# Clean build/install/log to avoid "existing path cannot be removed: Is a directory"
+# when using --symlink-install (leftover dir conflicts with symlink creation)
+if [ -d "build" ] || [ -d "install" ]; then
+    echo "Cleaning previous build artifacts..."
+    rm -rf build install log
+fi
+
+# Build the package (do not pass PYTHON3_EXECUTABLE; CMake finds Python itself)
 echo "Building ROS2 package..."
-colcon build --cmake-args \
-  -DPYTHON3_EXECUTABLE=/usr/bin/python3 \
-  -DCMAKE_PREFIX_PATH=/opt/ros/humble
-
-# # Install robonixpy to system site-packages for easy import
-# echo "Installing robonixpy to system site-packages..."
-# # Use the same Python executable that was used for building
-# INSTALL_DIR=$($PYTHON3_EXECUTABLE -c "import site; print(site.getsitepackages()[0])")
-# ROBONIXPY_SOURCE="install/robonix_sdk/local/lib/python3.10/dist-packages/robonixpy"
-# ROBONIXPY_TARGET="$INSTALL_DIR/robonixpy"
-
-# if [ -d "$ROBONIXPY_SOURCE" ]; then
-#     # Remove old installation if exists
-#     if [ -d "$ROBONIXPY_TARGET" ] || [ -L "$ROBONIXPY_TARGET" ]; then
-#         echo "Removing old robonixpy installation..."
-#         rm -rf "$ROBONIXPY_TARGET"
-#     fi
-    
-#     # Copy or symlink to system site-packages
-#     echo "Installing robonixpy to $ROBONIXPY_TARGET..."
-#     cp -r "$ROBONIXPY_SOURCE" "$ROBONIXPY_TARGET"
-#     echo "robonixpy installed successfully to system site-packages"
-# else
-#     echo "Warning: robonixpy source directory not found at $ROBONIXPY_SOURCE"
-#     echo "Skipping system site-packages installation"
-# fi
+colcon build --cmake-args -DCMAKE_PREFIX_PATH=/opt/ros/humble
 
 echo "Build completed successfully!"
