@@ -13,8 +13,10 @@ import base64
 import math
 import threading
 import time
+import yaml
 from pathlib import Path
 from datetime import datetime
+import yaml
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import (
@@ -194,6 +196,9 @@ class SemanticMapService(Node):
         self.update_thread.start()
         self.get_logger().info("Started background semantic map update thread")
 
+        # Load manual objects from config file
+        self._load_manual_objects_from_config(package_root)
+
         self.get_logger().info("Semantic map service started")
         self.get_logger().info("  Service: /demo_service/semantic_map/query")
         self.get_logger().info(
@@ -331,7 +336,24 @@ class SemanticMapService(Node):
                 )
                 snapshot_pose = self._find_pose_by_timestamp(image_stamp_sec)
 
-                if snapshot_pose:
+                # If no synchronized pose found, use latest pose if available
+                if not snapshot_pose:
+                    if self.latest_pose:
+                        snapshot_pose = self.latest_pose
+                        self.get_logger().debug(
+                            f"No synchronized pose found for image timestamp {image_stamp_sec:.3f}, "
+                            f"using latest available pose (robot_pos=[{snapshot_pose.pose.position.x:.2f}, "
+                            f"{snapshot_pose.pose.position.y:.2f}, {snapshot_pose.pose.position.z:.2f}])"
+                        )
+                    else:
+                        self.get_logger().warn(
+                            f"No pose available for image timestamp {image_stamp_sec:.3f}. "
+                            f"Skipping this update."
+                        )
+                        time.sleep(self.update_interval)
+                        continue
+                else:
+                    # Log synchronized pose info
                     pose_stamp_sec = (
                         float(snapshot_pose.header.stamp.sec)
                         + float(snapshot_pose.header.stamp.nanosec) / 1e9
@@ -342,14 +364,6 @@ class SemanticMapService(Node):
                         f"diff={time_diff * 1000:.1f}ms, robot_pos=[{snapshot_pose.pose.position.x:.2f}, "
                         f"{snapshot_pose.pose.position.y:.2f}, {snapshot_pose.pose.position.z:.2f}]"
                     )
-                else:
-                    self.get_logger().warn(
-                        f"No matching pose found for image timestamp {image_stamp_sec:.3f} "
-                        f"(tolerance: 0.5s). Skipping this update to ensure pose-image synchronization. "
-                        f"Latest pose available: {self.latest_pose is not None}"
-                    )
-                    time.sleep(self.update_interval)
-                    continue
 
                 try:
                     cv_image = self.cv_bridge.imgmsg_to_cv2(snapshot_image, "rgb8")
@@ -965,8 +979,164 @@ Only include objects that are clearly visible. Estimate distance as accurately a
             return "chair"
         elif "robot" in label_lower:
             return "robot"
+        elif "waypoint" in label_lower:
+            return "waypoint"
         else:
             return "object"
+
+    def _load_manual_objects_from_config(self, package_root):
+        """Load manual objects from semantic_map_config.yaml file."""
+        config_path = package_root / "rbnx" / "semantic_map_config.yaml"
+        
+        if not config_path.exists():
+            self.get_logger().info(
+                f"Config file not found at {config_path}, skipping manual objects loading"
+            )
+            return
+
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_data = yaml.safe_load(f)
+            
+            if not config_data or "manual_objects" not in config_data:
+                self.get_logger().info("No manual_objects found in config file")
+                return
+
+            manual_objects_config = config_data.get("manual_objects", [])
+            if not manual_objects_config:
+                self.get_logger().info("manual_objects list is empty")
+                return
+
+            loaded_count = 0
+            for obj_config in manual_objects_config:
+                try:
+                    obj = self._create_object_from_config(obj_config)
+                    if obj:
+                        # Generate ID if not provided, using same logic as auto-generated objects
+                        if not obj.id or obj.id == "":
+                            obj.id = self._generate_label_based_id(obj.label)
+                        
+                        # Check if object already exists (by ID)
+                        with self.memory_lock:
+                            if obj.id in self.semantic_map_memory:
+                                self.get_logger().warn(
+                                    f"Manual object with id '{obj.id}' already exists, skipping"
+                                )
+                                continue
+                            
+                            # Add to memory
+                            self.semantic_map_memory[obj.id] = obj
+                            loaded_count += 1
+                            
+                            # Log object position
+                            map_pos = None
+                            for fm in obj.frame_mapping:
+                                if fm.frame_id == "map":
+                                    map_pos = [fm.center.x, fm.center.y, fm.center.z]
+                                    break
+                            
+                            if map_pos:
+                                self.get_logger().info(
+                                    f'Loaded manual object "{obj.label}" (id={obj.id}) at map position '
+                                    f'[{map_pos[0]:.2f}, {map_pos[1]:.2f}, {map_pos[2]:.2f}]'
+                                )
+                            else:
+                                self.get_logger().info(
+                                    f'Loaded manual object "{obj.label}" (id={obj.id})'
+                                )
+                
+                except Exception as e:
+                    self.get_logger().error(
+                        f"Failed to load manual object from config: {e}"
+                    )
+                    import traceback
+                    self.get_logger().error(f"Traceback:\n{traceback.format_exc()}")
+                    continue
+
+            self.get_logger().info(
+                f"Successfully loaded {loaded_count} manual object(s) from config"
+            )
+
+        except Exception as e:
+            self.get_logger().error(
+                f"Failed to load manual objects from config file {config_path}: {e}"
+            )
+            import traceback
+            self.get_logger().error(f"Traceback:\n{traceback.format_exc()}")
+
+    def _create_object_from_config(self, obj_config):
+        """Create an Object from config dictionary."""
+        if "label" not in obj_config:
+            self.get_logger().error("Manual object config missing 'label' field")
+            return None
+
+        obj = Object()
+        obj.label = obj_config["label"]
+        
+        # Use provided ID or None (will be auto-generated later)
+        obj.id = obj_config.get("id") or ""
+        
+        # Set default empty lists for optional fields
+        obj.registered_skills = obj_config.get("registered_skills", [])
+        obj.registered_primitives = obj_config.get("registered_primitives", [])
+        obj.relations = obj_config.get("relations", [])
+        
+        # Parse frame_mapping
+        if "frame_mapping" not in obj_config:
+            self.get_logger().error(
+                f"Manual object '{obj.label}' config missing 'frame_mapping' field"
+            )
+            return None
+
+        obj.frame_mapping = []
+        for fm_config in obj_config["frame_mapping"]:
+            frame_mapping = FrameMapping()
+            frame_mapping.frame_id = fm_config.get("frame_id", "map")
+            
+            # Parse center
+            if "center" not in fm_config:
+                self.get_logger().error(
+                    f"Manual object '{obj.label}' frame_mapping missing 'center' field"
+                )
+                continue
+            
+            center_config = fm_config["center"]
+            frame_mapping.center = Point3D()
+            frame_mapping.center.x = float(center_config.get("x", 0.0))
+            frame_mapping.center.y = float(center_config.get("y", 0.0))
+            frame_mapping.center.z = float(center_config.get("z", 0.0))
+            
+            # Parse bbox (optional, defaults to small box)
+            frame_mapping.bbox = []
+            if "bbox" in fm_config and fm_config["bbox"]:
+                for bbox_config in fm_config["bbox"]:
+                    bbox = BoundingBox()
+                    bbox.scale_x = float(bbox_config.get("scale_x", 0.1))
+                    bbox.scale_y = float(bbox_config.get("scale_y", 0.1))
+                    bbox.scale_z = float(bbox_config.get("scale_z", 0.1))
+                    bbox.yaw = float(bbox_config.get("yaw", 0.0))
+                    frame_mapping.bbox.append(bbox)
+            else:
+                # Default bbox for waypoints
+                bbox = BoundingBox()
+                bbox.scale_x = 0.1
+                bbox.scale_y = 0.1
+                bbox.scale_z = 0.1
+                bbox.yaw = 0.0
+                frame_mapping.bbox.append(bbox)
+            
+            # Parse texture (optional, defaults to empty)
+            frame_mapping.texture = fm_config.get("texture", [])
+            
+            obj.frame_mapping.append(frame_mapping)
+
+        if not obj.frame_mapping:
+            self.get_logger().error(
+                f"Manual object '{obj.label}' has no valid frame_mapping"
+            )
+            return None
+
+        return obj
 
 
 def main(args=None):

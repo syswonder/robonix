@@ -230,9 +230,10 @@ pub async fn wait_and_register_service(
         .ok_or_else(|| anyhow::anyhow!("Service entry not found"))?;
 
     // Wait for ROS2 service to be available (check via ros2 service list)
+    // ROS2 service discovery can take 5-15 seconds, especially on first startup
     output::sub_step(&format!("Waiting for service {} to be available...", entry));
-    let max_wait = Duration::from_secs(10);
-    let check_interval = Duration::from_millis(200);
+    let max_wait = Duration::from_secs(20); // Increased from 10 to 20 seconds
+    let check_interval = Duration::from_millis(500); // Increased from 200ms to 500ms for less frequent checks
     let start_time = std::time::Instant::now();
 
     let sdk_path = config
@@ -240,10 +241,56 @@ pub async fn wait_and_register_service(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("robonix_sdk_path not configured"))?;
 
+    let mut last_log_elapsed = Duration::from_secs(0);
+    let mut check_count = 0;
+
     while start_time.elapsed() < max_wait {
         // Check if service is available using ros2 service list
         // Use bash -c to source SDK and run ros2 command
         let output = Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "source {}/install/setup.bash && ros2 service list 2>/dev/null",
+                sdk_path.display()
+            ))
+            .output();
+
+        check_count += 1;
+
+        if let Ok(output) = output {
+            if output.status.success() {
+                if let Ok(service_list) = String::from_utf8(output.stdout) {
+                    if service_list.lines().any(|line| line.trim() == entry) {
+                        let elapsed = start_time.elapsed();
+                        output::sub_step(&format!(
+                            "Service {} is available (found after {:.1}s, {} checks)",
+                            entry,
+                            elapsed.as_secs_f64(),
+                            check_count
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Log progress every 5 seconds
+        let elapsed = start_time.elapsed();
+        if elapsed.as_secs() >= 5 && (elapsed - last_log_elapsed).as_secs() >= 5 {
+            output::sub_step(&format!(
+                "Still waiting for service {}... (elapsed: {:.1}s)",
+                entry,
+                elapsed.as_secs_f64()
+            ));
+            last_log_elapsed = elapsed;
+        }
+
+        tokio::time::sleep(check_interval).await;
+    }
+
+    if start_time.elapsed() >= max_wait {
+        // Try one more time with verbose output for debugging
+        let debug_output = Command::new("bash")
             .arg("-c")
             .arg(format!(
                 "source {}/install/setup.bash && ros2 service list",
@@ -251,22 +298,27 @@ pub async fn wait_and_register_service(
             ))
             .output();
 
-        if let Ok(output) = output {
+        let debug_info = if let Ok(output) = debug_output {
             if let Ok(service_list) = String::from_utf8(output.stdout) {
-                if service_list.lines().any(|line| line.trim() == entry) {
-                    output::sub_step(&format!("Service {} is available", entry));
-                    break;
-                }
+                format!(
+                    "Available services: {}",
+                    service_list
+                        .lines()
+                        .take(10)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                "Failed to parse service list".to_string()
             }
-        }
+        } else {
+            "Failed to run ros2 service list".to_string()
+        };
 
-        tokio::time::sleep(check_interval).await;
-    }
-
-    if start_time.elapsed() >= max_wait {
         return Err(anyhow::anyhow!(
-            "Service {} did not become available within 10 seconds",
-            entry
+            "Service {} did not become available within 20 seconds. {}",
+            entry,
+            debug_info
         ));
     }
 
