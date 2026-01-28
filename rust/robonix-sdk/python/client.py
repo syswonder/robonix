@@ -1,9 +1,8 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: MulanPSL-2.0
-# Robonix Python Helper
+# Robonix Python client helper
 #
 # Helper module for interacting with Robonix services.
-# Simplifies common operations like querying primitives, services, and skills.
+# Install with robonix_sdk; use: from robonix_sdk.client import RobonixClient
 
 import json
 import time

@@ -35,7 +35,7 @@ from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from cv_bridge import CvBridge
 from dotenv import load_dotenv
 from openai import OpenAI
-from .robonixpy import RobonixClient  # type: ignore
+from robonix_sdk.client import RobonixClient
 
 
 class SemanticMapService(Node):

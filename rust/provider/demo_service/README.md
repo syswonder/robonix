@@ -16,7 +16,7 @@ The semantic map service (`semantic_map_service`) uses the front camera primitiv
 **Service Type**: `robonix_sdk/srv/service/semantic_map/QuerySemanticMap`
 
 **Features**:
-- Queries front camera primitive from OS using robonixpy client
+- Queries front camera primitive from OS using RobonixClient (from robonix_sdk.client)
 - Subscribes to RGB images and camera_info topics
 - Uses Qwen3-VL VLM to detect objects and estimate 3D positions in camera coordinate system
 - Returns objects with camera frame coordinates (world coordinates are empty for now)
@@ -111,7 +111,7 @@ rbnx deploy build
 The package requires the following Python packages (automatically installed via setup.py):
 - `python-dotenv`: For loading environment variables from .env file
 - `openai`: For DeepSeek and Qwen3-VL API clients (OpenAI-compatible)
-- `robonixpy`: For querying primitives from Robonix OS
+- `robonix_sdk`: For querying primitives from Robonix OS (use `from robonix_sdk.client import RobonixClient`)
 - `cv-bridge`: For converting ROS images to OpenCV format
 - `numpy`: For numerical operations
 - `Pillow`: For image processing

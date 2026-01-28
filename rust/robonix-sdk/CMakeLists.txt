@@ -1,4 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
+# Silence CMP0148 warning from rosidl_generator_py / FindPython
+if(POLICY CMP0148)
+  cmake_policy(SET CMP0148 OLD)
+endif()
+
 project(robonix_sdk)
 
 # find dependencies
@@ -55,6 +60,13 @@ rosidl_generate_interfaces(${PROJECT_NAME}
     builtin_interfaces
 )
 
+
+# Install Python client helper (RobonixClient) into same dir as rosidl-generated
+# package, so "source install/setup.bash" gives robonix_sdk.client (no global install).
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+# Match ament/rosidl layout: local/lib/pythonX.Y/dist-packages/robonix_sdk
+set(_rbnx_py_pkg "local/lib/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/dist-packages/robonix_sdk")
+install(FILES python/client.py DESTINATION ${_rbnx_py_pkg})
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
