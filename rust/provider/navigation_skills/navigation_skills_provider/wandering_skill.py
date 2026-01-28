@@ -61,10 +61,13 @@ class WanderingSkill(Node):
         self.start_subscriber = self.create_subscription(
             String, self.start_topic, self.start_callback, 10
         )
-        self.get_logger().info(f"Subscribing to start topic: {self.start_topic}")
+        self.get_logger().info(
+            f"Subscribing to start topic: {self.start_topic}")
 
-        self.status_publisher = self.create_publisher(String, self.status_topic, 10)
-        self.get_logger().info(f"Publishing to status topic: {self.status_topic}")
+        self.status_publisher = self.create_publisher(
+            String, self.status_topic, 10)
+        self.get_logger().info(
+            f"Publishing to status topic: {self.status_topic}")
 
         if self.pose_topic:
             self.pose_subscriber = self.create_subscription(
@@ -157,7 +160,8 @@ class WanderingSkill(Node):
                         pose_found = True
                         break
             except Exception as e:
-                self.get_logger().error(f"Error querying prm::base.pose.cov: {e}")
+                self.get_logger().error(
+                    f"Error querying prm::base.pose.cov: {e}")
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                 else:
@@ -227,7 +231,8 @@ class WanderingSkill(Node):
                     if navigate_found:
                         break
             except Exception as e:
-                self.get_logger().error(f"Error querying prm::base.navigate: {e}")
+                self.get_logger().error(
+                    f"Error querying prm::base.navigate: {e}")
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                 else:
@@ -316,7 +321,8 @@ class WanderingSkill(Node):
             import traceback
 
             self.get_logger().error(f"Traceback:\n{traceback.format_exc()}")
-            self._publish_status("unknown", "error", {"error": str(e)}, errno=4)
+            self._publish_status("unknown", "error", {
+                                 "error": str(e)}, errno=4)
 
     def _start_wandering_loop(self):
         """Start the wandering loop."""
@@ -332,7 +338,8 @@ class WanderingSkill(Node):
 
         while self.wandering_in_progress and iteration < max_iterations:
             iteration += 1
-            self.get_logger().info(f"Wandering iteration {iteration}/{max_iterations}")
+            self.get_logger().info(
+                f"Wandering iteration {iteration}/{max_iterations}")
 
             try:
                 if not self.latest_pose:
@@ -346,8 +353,10 @@ class WanderingSkill(Node):
                 if self.starting_position:
                     angle = random.uniform(0, 2 * math.pi)
                     distance = random.uniform(1.0, self.wander_radius)
-                    goal_x = self.starting_position[0] + distance * math.cos(angle)
-                    goal_y = self.starting_position[1] + distance * math.sin(angle)
+                    goal_x = self.starting_position[0] + \
+                        distance * math.cos(angle)
+                    goal_y = self.starting_position[1] + \
+                        distance * math.sin(angle)
                 else:
                     angle = random.uniform(0, 2 * math.pi)
                     distance = random.uniform(1.0, 3.0)
@@ -373,7 +382,8 @@ class WanderingSkill(Node):
 
                 self.navigation_complete = False
                 if self.navigate_goal_publisher is None:
-                    raise RuntimeError("Navigation goal publisher is not available")
+                    raise RuntimeError(
+                        "Navigation goal publisher is not available")
                 self.navigate_goal_publisher.publish(goal_pose)
 
                 timeout = 60.0
@@ -407,13 +417,16 @@ class WanderingSkill(Node):
                 self.get_logger().error(f"Error in wandering loop: {e}")
                 import traceback
 
-                self.get_logger().error(f"Traceback:\n{traceback.format_exc()}")
+                self.get_logger().error(
+                    f"Traceback:\n{traceback.format_exc()}")
                 time.sleep(2.0)
 
         self.wandering_in_progress = False
         result = {"message": "Wandering completed", "iterations": iteration}
-        self._publish_status(self.current_skill_id, "finished", result, errno=0)
-        self.get_logger().info(f"Wandering completed after {iteration} iterations.")
+        self._publish_status(self.current_skill_id,
+                             "finished", result, errno=0)
+        self.get_logger().info(
+            f"Wandering completed after {iteration} iterations.")
 
     def pose_cov_callback(self, msg):
         """Handle PoseWithCovarianceStamped updates and convert to PoseStamped."""
@@ -491,7 +504,8 @@ def main(args=None):
     def signal_handler(signum, frame):
         nonlocal shutdown_requested
         shutdown_requested = True
-        wandering_skill.get_logger().info(f"Received signal {signum}, shutting down...")
+        wandering_skill.get_logger().info(
+            f"Received signal {signum}, shutting down...")
         rclpy.shutdown()
 
     signal.signal(signal.SIGTERM, signal_handler)
