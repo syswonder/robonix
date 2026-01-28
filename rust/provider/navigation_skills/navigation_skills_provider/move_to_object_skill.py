@@ -255,7 +255,8 @@ class MoveToObjectSkill(Node):
                         )
                         break
             except Exception as e:
-                self.get_logger().error(f"Error querying prm::base.pose.cov: {e}")
+                self.get_logger().error(
+                    f"Error querying prm::base.pose.cov: {e}")
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                 else:
@@ -316,7 +317,8 @@ class MoveToObjectSkill(Node):
                         )
                     break
             except Exception as e:
-                self.get_logger().error(f"Error querying prm::base.navigate: {e}")
+                self.get_logger().error(
+                    f"Error querying prm::base.navigate: {e}")
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                 else:
@@ -410,7 +412,8 @@ class MoveToObjectSkill(Node):
             import traceback
 
             self.get_logger().error(f"Traceback:\n{traceback.format_exc()}")
-            self._publish_status("unknown", "error", {"error": str(e)}, errno=6)
+            self._publish_status("unknown", "error", {
+                                 "error": str(e)}, errno=6)
 
     def _start_status_timer(self, skill_id):
         """Start periodic status reporting (every 1 second)."""
@@ -434,7 +437,8 @@ class MoveToObjectSkill(Node):
                             skill_id, "running", {"message": current_message}, errno=0
                         )
 
-        self.status_timer = threading.Thread(target=status_timer_loop, daemon=True)
+        self.status_timer = threading.Thread(
+            target=status_timer_loop, daemon=True)
         self.status_timer.start()
 
     def _stop_status_timer(self):
@@ -576,7 +580,8 @@ class MoveToObjectSkill(Node):
                 final_distance = None
                 if self.latest_pose:
                     final_distance = math.sqrt(
-                        (self.latest_pose.pose.position.x - object_pose.pose.position.x)
+                        (self.latest_pose.pose.position.x -
+                         object_pose.pose.position.x)
                         ** 2
                         + (
                             self.latest_pose.pose.position.y
@@ -605,7 +610,8 @@ class MoveToObjectSkill(Node):
                     result["final_distance_to_object"] = final_distance
 
                 self._stop_status_timer()
-                self._publish_status(self.current_skill_id, "finished", result, errno=0)
+                self._publish_status(self.current_skill_id,
+                                     "finished", result, errno=0)
                 self.get_logger().info(
                     f"Successfully navigated to object: {target_object.label} "
                     f"(stopped {final_distance:.2f}m away, requested: {self.stop_radius:.2f}m)"
