@@ -86,19 +86,19 @@ done
 if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
     echo "Installing missing dependencies: ${MISSING_DEPS[*]}"
     # Update package lists and retry on failure
-    apt-get update -qq || apt-get update
+    sudo apt-get update -qq || sudo apt-get update
     # Try to install with retry logic
     MAX_RETRIES=3
     RETRY_COUNT=0
     while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-        if apt-get install -y "${MISSING_DEPS[@]}" 2>&1; then
+        if sudo apt-get install -y "${MISSING_DEPS[@]}" 2>&1; then
             break
         fi
         RETRY_COUNT=$((RETRY_COUNT + 1))
         if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
             echo "Installation attempt $RETRY_COUNT failed, retrying..."
             sleep 2
-            apt-get update -qq || apt-get update
+            sudo apt-get update -qq || sudo apt-get update
         else
             echo "Warning: Some dependencies could not be installed after $MAX_RETRIES attempts."
             echo "Attempting to continue with build..."
