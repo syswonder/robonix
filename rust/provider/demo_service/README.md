@@ -89,6 +89,7 @@ The task plan service requires a DeepSeek API key to function. Follow these step
 - ROS2 (Humble or later)
 - Python 3.8+
 - colcon build tools
+- **robonix-core** running (start from `rust` with `ROBONIX_WEB_ASSETS_DIR`, `ROBONIX_WEB_PORT`, and `eval $(make source-sdk)`; see [rust/README.md](../../README.md) Step 3)
 - DeepSeek API key (for task planning service)
 - Qwen3-VL API key (for semantic map service)
 - Front camera primitive registered and running (for semantic map service)
@@ -120,16 +121,16 @@ The package requires the following Python packages (automatically installed via 
 
 ### Start Services
 
-Services can be started individually or via robonix-cli:
+After registering a recipe that includes this package (`rbnx deploy register <recipe.yaml>`), start services via robonix-cli (pattern matches recipe item names):
 
 ```bash
-# Start semantic map service
+# Start semantic map service (pattern matches srv::semantic_map)
 rbnx deploy start semantic_map
 
-# Start task plan service
+# Start task plan service (pattern matches srv::task_plan)
 rbnx deploy start task_plan
 
-# Or start all services
+# Or start all items in the active recipe
 rbnx deploy start all
 ```
 

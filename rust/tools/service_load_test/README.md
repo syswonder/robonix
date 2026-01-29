@@ -21,11 +21,16 @@ colcon build --packages-select robonix_sdk
 source install/setup.bash
 ```
 
-2. Start robonix-core:
+2. Start robonix-core (from the **rust** directory; it uses environment variables, not CLI flags):
 ```bash
-cd /root/workspace/rust/robonix-core
-cargo run --release
+cd /path/to/rust
+eval $(make source-sdk)
+ROBONIX_WEB_ASSETS_DIR="$(pwd)/robonix-core/web" \
+ROBONIX_WEB_PORT=8000 \
+RUST_LOG=robonix_core=info \
+robonix-core
 ```
+Or use `./core.sh` from `rust` to start in background.
 
 3. In separate terminals, run the test clients:
 ```bash
