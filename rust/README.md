@@ -60,44 +60,33 @@ make setup-dev
 
 ## Step 3: Start robonix-core
 
-robonix-core provides the core services for the system. You need to start it in a separate terminal before using the CLI.
+robonix-core provides the core services for the system. You need to start it in a separate terminal before using the CLI. **It does not take command-line flags**; behavior is controlled by **environment variables**.
+
+From the `rust` directory, run:
 
 ```bash
-# In terminal 1: Start robonix-core
-eval $(make source-sdk) # source robonix-sdk environment
+# In terminal 1: source SDK, then start robonix-core with web UI
+cd rust
+eval $(make source-sdk)
+ROBONIX_WEB_ASSETS_DIR="$(pwd)/robonix-core/web" \
+ROBONIX_WEB_PORT=8000 \
+RUST_LOG=robonix_core=info \
 robonix-core
 ```
 
-robonix-core will start the following services:
+- **ROBONIX_WEB_ASSETS_DIR** and **ROBONIX_WEB_PORT**: Required for the web management UI. If either is unset, robonix-core runs without the web server (ROS2 services only).
+- **RUST_LOG**: Optional; controls log level (e.g. `robonix_core=info`, `robonix_core=debug`, `robonix_core::task=debug`, or `debug` for all).
+
+Alternatively use the helper script from `rust`: `./core.sh` (starts in background with the same env).
+
+robonix-core will start:
 - **Primitive API** (`/rbnx/prm/*`): Primitive registration and query
 - **Service API** (`/rbnx/srv/*`): Standard service registration and query
 - **Skill API** (`/rbnx/skl/*`): Skill registration and query
 - **Task API** (`/rbnx/task/*`): Task submission, status query, and result retrieval
+- **Web UI** (when env vars above are set): http://localhost:8000
 
 Keep this terminal running.
-
-### Configuring Log Levels
-
-You can control the verbosity of robonix-core logs by setting the `RUST_LOG` environment variable:
-
-```bash
-# preferred way to start robonix-core with logs and web GUI
-ROBONIX_WEB_ASSETS_DIR="$(pwd)/robonix-core/web" \
-ROBONIX_WEB_PORT=8000 \
-RUST_LOG=robonix_core=info robonix-core
-
-# alternative ways for RUST_LOG options
-# Show debug messages for robonix-core module
-RUST_LOG=robonix_core=debug robonix-core
-# Show debug messages for all modules, you can see rustdds logs too for example
-RUST_LOG=debug robonix-core
-# Show debug for task only
-RUST_LOG=robonix_core::task=debug robonix-core
-# Show trace messages (most verbose)
-RUST_LOG=robonix_core=trace robonix-core
-# Customize log levels for different modules
-RUST_LOG=robonix_core::task=debug,robonix_core=info,rustdds=error robonix-core
-```
 ## Step 4: Configure robonix-cli
 
 In a new terminal (terminal 2), configure the CLI:
@@ -182,17 +171,14 @@ When you create a task, the system automatically:
 4. **Executes** the RTDL code, calling skills in sequence (status: `running`)
 5. **Completes** with result feedback (status: `finished` or `failed`)
 
-## Step 9: Using Standard Services
+## Step 9: Standard Services (Used in Task Flow)
 
-The system provides standard services that can be queried:
+The task manager **currently uses** these standard services during task execution:
 
-- **Spatial Map Service** (`spatial_map`): Geometric structure information
-- **Semantic Map Service** (`semantic_map`): Object-level environment representation
-- **Task Planning Service** (`task_plan`): Converts natural language to RTDL code
-- **Plan Simulation Service** (`plan_simulate`): Validates task plan feasibility
-- **Result Feedback Service** (`result_feedback`): Validates execution results
+- **Semantic Map Service** (`srv::semantic_map`): Object-level environment representation; core polls it to build the object graph used by planning.
+- **Task Planning Service** (`srv::task_plan`): Converts natural language to RTDL (list format); core calls it in the planning phase.
 
-These services are automatically called by the task manager during task execution. You can also query them directly via ROS2 services.
+Other standard service **specs** (e.g. `spatial_map`, `plan_simulate`, `result_feedback`) are defined for providers but are **not yet invoked** in the core task flow. You can query registered services via the Web UI or ROS2.
 
 ## Common Commands Reference
 
@@ -215,7 +201,8 @@ make install-core   # Install robonix-core binary only
 ```bash
 rbnx <command>      # Run CLI with any command
 rbnx-daemon <command>  # Run daemon
-robonix-core        # Run robonix-core
+# robonix-core: set ROBONIX_WEB_ASSETS_DIR and ROBONIX_WEB_PORT for web UI (see Step 3)
+./core.sh           # From rust/: start robonix-core in background with web UI
 ```
 
 ### Environment Commands
@@ -262,22 +249,18 @@ rm -f /dev/shm/sem.fastrtps_* /dev/shm/fastrtps_*
 - **Skills**: User-defined high-level action logic, written in RTDL, flexible and do not need to conform to specifications
 - Skills can call primitives and services, and can also call other skills
 
-### RTDL Format
+### RTDL Format (Task Execution)
 
-RTDL (Robot Task Description Language) is the task description language. Example:
+The **task executor** currently supports only **list-form RTDL**: a JSON array of instructions. The `task_plan` service returns this format. Each instruction has `object_id`, `type`, `name`, and `params`:
 
-```python
-def skl::close_window(room: str):
-    skl::navigate_to(target_label = room)
-    srv::semantic_map.update(entity = room)
-    pose = srv::semantic_map.query_pose(
-        entity_type = "window",
-        parent_room = room
-    )
-    prm::arm.move.ee(pose = pose)
-    prm::gripper.close()
-    return True
+```json
+[
+  { "object_id": "robot_001", "type": "skill", "name": "pick", "params": { "target": "cup_001" } },
+  { "object_id": "robot_001", "type": "skill", "name": "place", "params": { "destination": "table_001" } }
+]
 ```
+
+Skills can be implemented as RTDL files (e.g. Python-like syntax in package `main_rtdl`); the executor runs the **list** produced by `task_plan`, which may reference those skills by name.
 
 ### Data Types
 
