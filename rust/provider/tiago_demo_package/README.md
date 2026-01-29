@@ -2,6 +2,12 @@
 
 Before registering this package or starting programs via recipes, start the simulator and supporting services manually.
 
+First, you need to make sure you've installed this package and `rbnx package list` will show it.
+
+```bash
+rbnx package build tiago_demo_package
+```
+
 ## 1. Start Webots simulator
 
 ```bash
