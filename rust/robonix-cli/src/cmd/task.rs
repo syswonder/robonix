@@ -99,7 +99,19 @@ pub async fn execute_list(_config: Config) -> Result<()> {
     Ok(())
 }
 
-pub async fn execute_cancel(_config: Config, _task_id: String) -> Result<()> {
-    output::warning("Cancel task functionality is not yet implemented in the new EAIOS API");
+pub async fn execute_cancel(config: Config, task_id: String) -> Result<()> {
+    output::action("Cancelling", &format!("task {}", task_id));
+
+    let client = TaskClient::new(config)?;
+    let response = client.cancel(task_id.clone()).await?;
+
+    if response.success {
+        output::success(&format!("Task {} cancelled", task_id));
+    } else {
+        output::warning(&format!(
+            "Task {} could not be cancelled (may already be finished, failed, or cancelled)",
+            task_id
+        ));
+    }
     Ok(())
 }

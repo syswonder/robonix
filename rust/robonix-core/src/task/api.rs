@@ -5,5 +5,6 @@
 // Re-export ROS IDL types for convenience
 
 pub use crate::ros_idl::task::{
-    SubmitTaskRequest, SubmitTaskResponse, TaskDataRequest, TaskDataResponse,
+    CancelTaskRequest, CancelTaskResponse, SubmitTaskRequest, SubmitTaskResponse, TaskDataRequest,
+    TaskDataResponse,
 };

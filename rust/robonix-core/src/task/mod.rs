@@ -227,6 +227,40 @@ impl TaskManager {
         api::TaskDataResponse { data: result }
     }
 
+    /// Cancel a task by ID
+    pub async fn cancel_task(&self, req: api::CancelTaskRequest) -> api::CancelTaskResponse {
+        use task::TaskState;
+
+        let task_id = req.task_id.clone();
+        let Some(task) = self.task_store.get_task(&task_id).await else {
+            debug!("cancel_task: task {} not found", task_id);
+            return api::CancelTaskResponse { success: false };
+        };
+
+        let old_state = task.state.clone();
+        if matches!(
+            old_state,
+            TaskState::Finished | TaskState::Failed | TaskState::Cancelled
+        ) {
+            debug!(
+                "cancel_task: task {} already in terminal state {:?}",
+                task_id, old_state
+            );
+            return api::CancelTaskResponse { success: false };
+        }
+
+        self.task_store
+            .update_task(&task_id, |t| t.transition_state(TaskState::Cancelled))
+            .await;
+
+        if old_state == TaskState::Pending {
+            self.task_queue.remove(&task_id).await;
+        }
+
+        info!("task {}: [CANCELLED] - cancelled by user request", task_id);
+        api::CancelTaskResponse { success: true }
+    }
+
     /// Start the runtime loop (called internally)
     async fn run_runtime_loop(self: Arc<Self>) {
         info!("task runtime started");
@@ -1000,5 +1034,8 @@ impl std::fmt::Debug for TaskManager {
 }
 
 // Re-export task types (from ros_idl)
-pub use api::{SubmitTaskRequest, SubmitTaskResponse, TaskDataRequest, TaskDataResponse};
+pub use api::{
+    CancelTaskRequest, CancelTaskResponse, SubmitTaskRequest, SubmitTaskResponse, TaskDataRequest,
+    TaskDataResponse,
+};
 pub use task::{Task, TaskContext, TaskState};

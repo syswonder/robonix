@@ -1524,6 +1524,14 @@ function showComponentModal(type, index) {
             html += `<div class="component-detail-value" style="color: #d32f2f;">${escapeHtml(data.error_message)}</div>`;
             html += `</div>`;
         }
+
+        const stateLower = (data.state || '').toLowerCase();
+        const canCancel = stateLower !== 'finished' && stateLower !== 'failed' && stateLower !== 'cancelled';
+        if (canCancel) {
+            html += `<div class="component-detail-section modal-actions">`;
+            html += `<button type="button" class="btn btn-danger" onclick="event.stopPropagation(); showCancelConfirmModal(${index})">Cancel task</button>`;
+            html += `</div>`;
+        }
     }
 
     content.innerHTML = html;
@@ -1543,11 +1551,58 @@ function closeComponentModal() {
     }, 300);
 }
 
+let pendingCancelTaskId = null;
+
+function showCancelConfirmModal(taskIndex) {
+    if (taskIndex < 0 || taskIndex >= tasksData.length) return;
+    pendingCancelTaskId = tasksData[taskIndex].task_id;
+    const msg = document.getElementById('cancel-task-confirm-message');
+    if (msg) msg.textContent = 'Are you sure you want to cancel this task?';
+    const modal = document.getElementById('cancel-task-confirm-modal');
+    if (modal) {
+        modal.style.display = 'block';
+        setTimeout(() => modal.classList.add('show'), 10);
+    }
+    const btn = document.getElementById('cancel-task-confirm-btn');
+    if (btn) btn.onclick = confirmCancelTask;
+}
+
+function closeCancelConfirmModal() {
+    pendingCancelTaskId = null;
+    const modal = document.getElementById('cancel-task-confirm-modal');
+    if (modal) {
+        modal.classList.remove('show');
+        setTimeout(() => { modal.style.display = 'none'; }, 300);
+    }
+}
+
+async function confirmCancelTask() {
+    if (!pendingCancelTaskId) return;
+    const taskId = pendingCancelTaskId;
+    closeCancelConfirmModal();
+    pendingCancelTaskId = null;
+    try {
+        const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' });
+        const result = await response.json();
+        if (result.success) {
+            closeComponentModal();
+            await loadTasks();
+        } else {
+            console.error('Cancel task failed:', result);
+            await loadTasks();
+        }
+    } catch (err) {
+        console.error('Cancel task request failed:', err);
+        await loadTasks();
+    }
+}
+
 // Close modal when clicking outside
 window.onclick = function (event) {
     const rtdlModal = document.getElementById('rtdl-modal');
     const componentModal = document.getElementById('component-modal');
     const componentListModal = document.getElementById('component-list-modal');
+    const cancelConfirmModal = document.getElementById('cancel-task-confirm-modal');
     if (event.target == rtdlModal) {
         rtdlModal.classList.remove('show');
         setTimeout(() => {
@@ -1565,6 +1620,9 @@ window.onclick = function (event) {
         setTimeout(() => {
             componentListModal.style.display = 'none';
         }, 300);
+    }
+    if (event.target == cancelConfirmModal) {
+        closeCancelConfirmModal();
     }
 }
 

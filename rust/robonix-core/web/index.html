@@ -225,6 +225,21 @@
                 <div id="component-list-modal-content"></div>
             </div>
         </div>
+
+        <!-- Cancel Task Confirm Modal -->
+        <div id="cancel-task-confirm-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Cancel Task</h2>
+                    <span class="close" onclick="closeCancelConfirmModal()">&times;</span>
+                </div>
+                <p id="cancel-task-confirm-message">Are you sure you want to cancel this task?</p>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeCancelConfirmModal()">No, keep it</button>
+                    <button type="button" class="btn btn-danger" id="cancel-task-confirm-btn">Yes, cancel task</button>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Alpine.js for reactive UI -->

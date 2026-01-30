@@ -15,7 +15,8 @@ use crate::ros_idl::skill::{
     QuerySkillRequest, QuerySkillResponse, RegisterSkillRequest, RegisterSkillResponse,
 };
 use crate::ros_idl::task::{
-    SubmitTaskRequest, SubmitTaskResponse, TaskDataRequest, TaskDataResponse,
+    CancelTaskRequest, CancelTaskResponse, SubmitTaskRequest, SubmitTaskResponse, TaskDataRequest,
+    TaskDataResponse,
 };
 use crate::ros_idl::test::{PingPongRequest, PingPongResponse};
 use futures_util::stream::StreamExt;
@@ -208,6 +209,17 @@ pub fn create_servers(
     )?;
     info!("task data service created at /rbnx/task/data");
 
+    // Task API: /rbnx/task/cancel
+    let cancel_task_server = node
+        .create_server::<AService<CancelTaskRequest, CancelTaskResponse>>(
+            ServiceMapping::Enhanced,
+            &Name::new("/rbnx/task", "cancel")?,
+            &ServiceTypeName::new("robonix_sdk", "CancelTask"),
+            service_qos.clone(),
+            service_qos.clone(),
+        )?;
+    info!("task cancel service created at /rbnx/task/cancel");
+
     // Ping Pong API: /rbnx/ping
     // WARNING: AService with custom Rust structs uses serde serialization,
     // which is incompatible with standard ROS2 clients that send CDR format.
@@ -237,6 +249,7 @@ pub fn create_servers(
         query_skill_server,
         submit_task_server,
         task_data_server,
+        cancel_task_server,
         ping_pong_server,
     })
 }
@@ -251,6 +264,7 @@ pub struct Servers {
     pub query_skill_server: Server<AService<QuerySkillRequest, QuerySkillResponse>>,
     pub submit_task_server: Server<AService<SubmitTaskRequest, SubmitTaskResponse>>,
     pub task_data_server: Server<AService<TaskDataRequest, TaskDataResponse>>,
+    pub cancel_task_server: Server<AService<CancelTaskRequest, CancelTaskResponse>>,
     pub ping_pong_server: Server<AService<PingPongRequest, PingPongResponse>>,
 }
 
@@ -263,6 +277,7 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
     // Clone components for each handler
     let task_manager_clone1 = task_manager.clone();
     let task_manager_clone3 = task_manager.clone();
+    let task_manager_clone4 = task_manager.clone();
     let skill_library_clone1 = skill_library.clone();
     let skill_library_clone2 = skill_library.clone();
     let service_registry_clone1 = service_registry.clone();
@@ -475,6 +490,30 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
                         }
                     }
                     Err(e) => error!("receive task [data] request error: {e:?}"),
+                }
+            })
+            .await;
+    });
+
+    // Handle task cancel requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("task-cancel", move || async move {
+        let stream = servers.cancel_task_server.receive_request_stream();
+        stream
+            .for_each(|result| async {
+                match result {
+                    Ok((req_id, req)) => {
+                        info!("received task [cancel] request: task_id={}", req.task_id);
+                        let resp = task_manager_clone4.cancel_task(req).await;
+                        info!("sending task [cancel] response: {resp:?}");
+                        if let Err(e) = servers
+                            .cancel_task_server
+                            .async_send_response(req_id, resp)
+                            .await
+                        {
+                            error!("send task [cancel] response error: {e:?}");
+                        }
+                    }
+                    Err(e) => error!("receive task [cancel] request error: {e:?}"),
                 }
             })
             .await;

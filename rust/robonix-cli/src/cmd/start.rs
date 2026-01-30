@@ -302,11 +302,7 @@ pub async fn wait_and_register_service(
             if let Ok(service_list) = String::from_utf8(output.stdout) {
                 format!(
                     "Available services: {}",
-                    service_list
-                        .lines()
-                        .take(10)
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    service_list.lines().take(10).collect::<Vec<_>>().join(", ")
                 )
             } else {
                 "Failed to parse service list".to_string()

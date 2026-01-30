@@ -8,7 +8,8 @@ use robonix_core::ros_idl::primitive::{RegisterPrimitiveRequest, RegisterPrimiti
 use robonix_core::ros_idl::service_registry::{RegisterServiceRequest, RegisterServiceResponse};
 use robonix_core::ros_idl::skill::{RegisterSkillRequest, RegisterSkillResponse};
 use robonix_core::ros_idl::task::{
-    SubmitTaskRequest, SubmitTaskResponse, TaskDataRequest, TaskDataResponse,
+    CancelTaskRequest, CancelTaskResponse, SubmitTaskRequest, SubmitTaskResponse, TaskDataRequest,
+    TaskDataResponse,
 };
 use ros2_client::{
     Context, Name, Node, NodeName, NodeOptions, ServiceMapping, ServiceTypeName, service::AService,
@@ -42,6 +43,8 @@ pub struct DaemonRos2Clients {
         Arc<Mutex<ros2_client::service::Client<AService<SubmitTaskRequest, SubmitTaskResponse>>>>,
     task_data_client:
         Arc<Mutex<ros2_client::service::Client<AService<TaskDataRequest, TaskDataResponse>>>>,
+    task_cancel_client:
+        Arc<Mutex<ros2_client::service::Client<AService<CancelTaskRequest, CancelTaskResponse>>>>,
     discovery_waited: Arc<AtomicBool>, // Track if we've already waited for service discovery
 }
 
@@ -132,6 +135,16 @@ impl DaemonRos2Clients {
             )
             .map_err(|e| anyhow::anyhow!("Failed to create task_data client: {:?}", e))?;
 
+        let task_cancel_client = node
+            .create_client::<AService<CancelTaskRequest, CancelTaskResponse>>(
+                ServiceMapping::Enhanced,
+                &Name::new("/rbnx/task", "cancel").unwrap(),
+                &ServiceTypeName::new("robonix_sdk", "CancelTask"),
+                service_qos.clone(),
+                service_qos.clone(),
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create task_cancel client: {:?}", e))?;
+
         Ok(Self {
             _node: Arc::new(Mutex::new(node)),
             primitive_client: Arc::new(Mutex::new(primitive_client)),
@@ -139,6 +152,7 @@ impl DaemonRos2Clients {
             skill_client: Arc::new(Mutex::new(skill_client)),
             submit_task_client: Arc::new(Mutex::new(submit_task_client)),
             task_data_client: Arc::new(Mutex::new(task_data_client)),
+            task_cancel_client: Arc::new(Mutex::new(task_cancel_client)),
             discovery_waited: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -293,6 +307,25 @@ impl DaemonRos2Clients {
         .map_err(|_| {
             anyhow::anyhow!(
                 "Timeout: Service call to /rbnx/task/data timed out after 10 seconds. \
+                Please ensure robonix-core is running. Start it with: robonix-core"
+            )
+        })?
+        .map_err(|e| anyhow::anyhow!("Service call error: {:?}", e))?;
+        Ok(response)
+    }
+
+    pub async fn call_cancel_task(&self, request: CancelTaskRequest) -> Result<CancelTaskResponse> {
+        self.wait_for_service_discovery().await;
+
+        let client = self.task_cancel_client.lock().await;
+        let response = tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            client.async_call_service(request),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Timeout: Service call to /rbnx/task/cancel timed out after 10 seconds. \
                 Please ensure robonix-core is running. Start it with: robonix-core"
             )
         })?

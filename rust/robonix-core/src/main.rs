@@ -13,7 +13,7 @@ use robonix_core::web::{
     LogBuffer, agent_chat_handler, agent_reset_handler, create_web_state, get_config_handler,
     image_handler, image_topics_handler, index, logs_handler, primitives_handler,
     semantic_map_handler, services_handler, settings_page, skills_handler, status_handler,
-    stt_handler, tasks_handler, tf_tree_handler, topics_handler, tts_handler,
+    stt_handler, task_cancel_handler, tasks_handler, tf_tree_handler, topics_handler, tts_handler,
     update_config_handler,
 };
 use rocket::fs::FileServer;
@@ -232,6 +232,7 @@ fn main() {
                         tf_tree_handler,
                         topics_handler,
                         tasks_handler,
+                        task_cancel_handler,
                         skills_handler,
                         services_handler,
                         primitives_handler,
