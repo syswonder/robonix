@@ -8,7 +8,9 @@ __pycache__/
 # Test logs and outputs
 *.log
 logs/
-test_framework/logs/
+test_framework/logs/*
+!test_framework/logs/benchmark_20260112_121236/
+!test_framework/logs/benchmark_20260112_121236/**
 **/logs/
 
 # Rust build artifacts
