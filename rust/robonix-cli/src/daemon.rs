@@ -12,7 +12,7 @@ use log::{error, info, warn};
 use robonix_core::ros_idl::primitive::RegisterPrimitiveRequest;
 use robonix_core::ros_idl::service_registry::RegisterServiceRequest;
 use robonix_core::ros_idl::skill::RegisterSkillRequest;
-use robonix_core::ros_idl::task::{SubmitTaskRequest, TaskDataRequest};
+use robonix_core::ros_idl::task::{CancelTaskRequest, SubmitTaskRequest, TaskDataRequest};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
@@ -238,6 +238,17 @@ impl Daemon {
                 match serde_json::from_str::<TaskDataRequest>(&request) {
                     Ok(req) => match ros2_clients.call_task_data(req).await {
                         Ok(resp) => DaemonResponse::TaskDataResponse {
+                            response: serde_json::to_string(&resp)?,
+                        },
+                        Err(e) => DaemonResponse::Error(format!("Service call failed: {}", e)),
+                    },
+                    Err(e) => DaemonResponse::Error(format!("Invalid request: {}", e)),
+                }
+            }
+            DaemonCommand::CallCancelTask { request } => {
+                match serde_json::from_str::<CancelTaskRequest>(&request) {
+                    Ok(req) => match ros2_clients.call_cancel_task(req).await {
+                        Ok(resp) => DaemonResponse::CancelTaskResponse {
                             response: serde_json::to_string(&resp)?,
                         },
                         Err(e) => DaemonResponse::Error(format!("Service call failed: {}", e)),

@@ -42,6 +42,9 @@ pub enum DaemonCommand {
     CallTaskData {
         request: String, // JSON serialized TaskDataRequest
     },
+    CallCancelTask {
+        request: String, // JSON serialized CancelTaskRequest
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,6 +73,9 @@ pub enum DaemonResponse {
     },
     TaskDataResponse {
         response: String, // JSON serialized TaskDataResponse
+    },
+    CancelTaskResponse {
+        response: String, // JSON serialized CancelTaskResponse
     },
 }
 

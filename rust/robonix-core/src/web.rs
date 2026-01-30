@@ -197,6 +197,7 @@ pub async fn tasks_handler(state: &State<WebState>) -> Json<serde_json::Value> {
                 "updated_at": task.updated_at,
                 "result": task.result,
                 "error_message": task.error_message,
+                "params": task.params,
             })
         })
         .collect();
@@ -204,6 +205,21 @@ pub async fn tasks_handler(state: &State<WebState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "tasks": tasks_json
     }))
+}
+
+#[rocket::post("/api/tasks/<task_id>/cancel")]
+pub async fn task_cancel_handler(
+    state: &State<WebState>,
+    task_id: &str,
+) -> Json<serde_json::Value> {
+    use crate::task::api::CancelTaskRequest;
+
+    let task_manager = state.core.get_task_manager();
+    let req = CancelTaskRequest {
+        task_id: task_id.to_string(),
+    };
+    let resp = task_manager.cancel_task(req).await;
+    Json(serde_json::json!({ "success": resp.success }))
 }
 
 #[rocket::get("/api/skills")]

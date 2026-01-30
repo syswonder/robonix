@@ -205,7 +205,10 @@ impl FunctionRegistry {
                         .unwrap_or("");
                     // Case-insensitive comparison
                     let obj_type_lower = obj_type.to_lowercase();
-                    if !types_filter.iter().any(|filter| filter.to_lowercase() == obj_type_lower) {
+                    if !types_filter
+                        .iter()
+                        .any(|filter| filter.to_lowercase() == obj_type_lower)
+                    {
                         return None;
                     }
                 }
@@ -233,12 +236,16 @@ impl FunctionRegistry {
                     // Second pass: if no map frame found, try base_link
                     if distance_opt.is_none() {
                         for mapping in frame_mappings.iter() {
-                            if let Some(frame_id) = mapping.get("frame_id").and_then(|f| f.as_str()) {
+                            if let Some(frame_id) = mapping.get("frame_id").and_then(|f| f.as_str())
+                            {
                                 if frame_id == "base_link" {
                                     if let Some(center) = mapping.get("center") {
-                                        let x = center.get("x").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                                        let y = center.get("y").and_then(|y| y.as_f64()).unwrap_or(0.0);
-                                        let z = center.get("z").and_then(|z| z.as_f64()).unwrap_or(0.0);
+                                        let x =
+                                            center.get("x").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                                        let y =
+                                            center.get("y").and_then(|y| y.as_f64()).unwrap_or(0.0);
+                                        let z =
+                                            center.get("z").and_then(|z| z.as_f64()).unwrap_or(0.0);
                                         let distance = (x * x + y * y + z * z).sqrt();
                                         distance_opt = Some(distance);
                                         break;
@@ -255,13 +262,11 @@ impl FunctionRegistry {
 
         // Sort by distance: objects with distance first, then by distance value
         // Objects without distance go to the end
-        objects_with_distance.sort_by(|a, b| {
-            match (a.1, b.1) {
-                (Some(da), Some(db)) => da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            }
+        objects_with_distance.sort_by(|a, b| match (a.1, b.1) {
+            (Some(da), Some(db)) => da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
         });
 
         // Take nearest N objects
