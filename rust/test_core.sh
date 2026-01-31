@@ -4,20 +4,20 @@ set -e
 
 make fmt
 
-# Cleanup function to kill robonix-core (process group + pkill fallback)
 cleanup() {
     echo ""
-    echo "Cleaning up: killing robonix-core..."
-    if [ -n "$ROBONIX_PID" ]; then
-        # Kill whole process group (so child processes die too)
-        kill -9 -"$ROBONIX_PID" 2>/dev/null || true
-        kill -9 "$ROBONIX_PID" 2>/dev/null || true
+    echo "Cleaning up: killing robonix-core, found pid(s): $(pgrep -x robonix-core | sort -n)"
+    pgrep -x robonix-core | sort -n | xargs -r kill -9
+    wait $ROBONIX_PID 2>/dev/null || true
+    echo "Making sure robonix-core does not exist..."
+    if pgrep -x robonix-core >/dev/null; then
+        echo "robonix-core still exists"
+        exit 1
     fi
-    pkill -9 -f "robonix-core" 2>/dev/null || true
+    echo "Cleanup complete!"
     exit 0
 }
 
-# Set up signal handlers for Ctrl-C and script termination
 trap cleanup SIGINT SIGTERM
 
 make fmt
@@ -25,19 +25,15 @@ make fmt
 make build-sdk
 eval $(make source-sdk)
 
-# kill any running robonix-core process
 echo "Killing any running robonix-core processes..."
 pkill -9 -f "robonix-core" 2>/dev/null || true
 sleep 1
 
-# kill any process using port 8000
 echo "Freeing port 8000..."
 PORT=8000
 
-# Try multiple methods to find and kill the process
 KILLED=false
 
-# Method 1: fuser (most reliable on Linux)
 if command -v fuser >/dev/null 2>&1; then
     if fuser -k ${PORT}/tcp 2>/dev/null; then
         KILLED=true
@@ -45,7 +41,6 @@ if command -v fuser >/dev/null 2>&1; then
     fi
 fi
 
-# Method 2: ss (modern Linux)
 if [ "$KILLED" = false ] && command -v ss >/dev/null 2>&1; then
     PIDS=$(ss -lptn "sport = :${PORT}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | sort -u)
     if [ -n "$PIDS" ]; then
@@ -56,7 +51,6 @@ if [ "$KILLED" = false ] && command -v ss >/dev/null 2>&1; then
     fi
 fi
 
-# Method 3: netstat (fallback)
 if [ "$KILLED" = false ] && command -v netstat >/dev/null 2>&1; then
     PIDS=$(netstat -tlnp 2>/dev/null | grep ":${PORT}" | awk '{print $7}' | cut -d'/' -f1 | grep -E '^[0-9]+$' | sort -u)
     if [ -n "$PIDS" ]; then
@@ -67,7 +61,6 @@ if [ "$KILLED" = false ] && command -v netstat >/dev/null 2>&1; then
     fi
 fi
 
-# Method 4: Parse /proc/net/tcp directly (last resort)
 if [ "$KILLED" = false ] && [ -f /proc/net/tcp ]; then
     # Convert port to hex (8000 = 0x1f40)
     PORT_HEX=$(printf "%04x" ${PORT})
@@ -87,10 +80,8 @@ if [ "$KILLED" = false ] && [ -f /proc/net/tcp ]; then
     fi
 fi
 
-# Wait a moment for the port to be released
 sleep 2
 
-# Verify port is free
 if command -v ss >/dev/null 2>&1; then
     if ss -lptn "sport = :${PORT}" 2>/dev/null | grep -q ":${PORT}"; then
         echo "Warning: Port ${PORT} may still be in use. Trying one more time..."
@@ -101,14 +92,11 @@ fi
 
 make install
 
-# So background job gets its own process group (kill -PGID kills children too)
 set -m
-# Start robonix-core in background and save PID
 ROBONIX_WEB_ASSETS_DIR="$(pwd)/robonix-core/web" \
 ROBONIX_WEB_PORT=8000 \
 RUST_LOG=robonix_core=info robonix-core &
 ROBONIX_PID=$!
 set +m
 
-# Wait for robonix-core; on Ctrl-C trap runs cleanup
 wait $ROBONIX_PID
