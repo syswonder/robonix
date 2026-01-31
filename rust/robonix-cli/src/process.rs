@@ -235,19 +235,10 @@ impl ProcessManager {
             }
         }
 
-        // Resolve script path
-        let script_path = package_path.join(start_script);
-        if !script_path.exists() {
-            anyhow::bail!("Start script not found: {}", script_path.display());
-        }
-
-        // Make script executable
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script_path)?.permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script_path, perms)?;
+        // start_script is run as a full shell command (any command); cwd is package_path
+        let start_script = start_script.trim();
+        if start_script.is_empty() {
+            anyhow::bail!("start_script is empty");
         }
 
         // Create log file path with simplified naming
@@ -278,15 +269,11 @@ impl ProcessManager {
         log_writer.write_all(header.as_bytes()).await?;
         log_writer.flush().await?;
 
-        // Start the process
-        log::info!(
-            "Starting process: {} (script: {})",
-            key,
-            script_path.display()
-        );
+        // Start the process: run start_script as a shell command (sh -c "...")
+        log::info!("Starting process: {} (command: {})", key, start_script);
 
-        // Use tokio::process::Command for async I/O
-        let mut cmd = Command::new(&script_path);
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(start_script);
         cmd.current_dir(package_path);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -325,7 +312,7 @@ impl ProcessManager {
 
         let mut child = cmd
             .spawn()
-            .with_context(|| format!("Failed to start script: {}", script_path.display()))?;
+            .with_context(|| format!("Failed to start command: {}", start_script))?;
 
         // Spawn tasks to capture output and write to log
         // Use separate file handles for stdout and stderr to avoid synchronization issues

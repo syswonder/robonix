@@ -23,6 +23,7 @@ struct ServiceEntry {
     metadata: String, // JSON string: stored as string internally
     provider: String,
     version: String,
+    node_id: String,
 }
 
 /// Service Registry - Manages service registration and querying
@@ -135,6 +136,7 @@ impl ServiceRegistry {
             metadata: metadata_string,
             provider: req.provider.clone(),
             version: req.version.clone(),
+            node_id: req.node_id.clone(),
         };
 
         services.insert(key, entry);
@@ -179,6 +181,7 @@ impl ServiceRegistry {
                 version: entry.version.clone(),
                 entry: entry.entry.clone(),
                 metadata: entry.metadata.clone(),
+                node_id: entry.node_id.clone(),
             });
         }
 
@@ -229,6 +232,7 @@ impl ServiceRegistry {
                     version: entry.version.clone(),
                     entry: entry.entry.clone(),
                     metadata: entry.metadata.clone(),
+                    node_id: entry.node_id.clone(),
                 },
             ));
         }

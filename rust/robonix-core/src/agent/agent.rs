@@ -4,8 +4,9 @@
 // Main agent implementation for natural language interaction
 
 use crate::agent::functions::FunctionRegistry;
-use crate::agent::llm::{ChatMessage, LLMClient};
+use crate::agent::llm::{AgentConfig, ChatMessage, LLMClient};
 use crate::core::RobonixCore;
+use crate::perception::image_monitor::ImageMonitor;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -41,9 +42,10 @@ impl Agent {
             role: "system".to_string(),
             content: concat!(
                 "You are a helpful and friendly assistant for the Robonix robot system. ",
+                "Keep responses concise: answer directly and avoid long paragraphs or unnecessary elaboration unless the user explicitly asks for detail.\n\n",
                 "You can help users in two ways:\n\n",
                 "1. Robonix system operations: Help users query the semantic map, submit tasks, ",
-                "query system capabilities, and perform robot operations using function calls when appropriate.\n\n",
+                "query system capabilities, describe what the robot sees (using describe_robot_vision when the user asks about the robot's view or current scene), and perform robot operations using function calls when appropriate.\n\n",
                 "2. General conversation: You can also engage in general conversations, answer questions, ",
                 "provide introductions, explain concepts, and have friendly chats with users. ",
                 "Don't limit yourself to only robot-related topics - be helpful and conversational ",
@@ -72,9 +74,13 @@ impl Agent {
         }
     }
 
-    pub fn new(core: Arc<RobonixCore>, config: crate::agent::llm::AgentConfig) -> Self {
-        let llm_client = LLMClient::new(config);
-        let function_registry = FunctionRegistry::new(core);
+    pub fn new(
+        core: Arc<RobonixCore>,
+        config: AgentConfig,
+        image_monitor: Arc<ImageMonitor>,
+    ) -> Self {
+        let llm_client = LLMClient::new(config.clone());
+        let function_registry = FunctionRegistry::new(core, image_monitor, config);
 
         // Initialize with system message
         let mut conversation_history = Vec::new();

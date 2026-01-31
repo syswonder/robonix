@@ -15,6 +15,9 @@ pub struct RegisterServiceRequest {
     pub metadata: String, // JSON string: metadata for instance filtering
     pub provider: String, // Service provider identifier
     pub version: String,  // Implementation version (e.g., "1.0.0", "1.0.0-alpha")
+    /// Node (CLI client) that registered this capability. Empty for backward compat.
+    #[serde(default)]
+    pub node_id: String,
 }
 
 impl ros2_client::Message for RegisterServiceRequest {}
@@ -41,6 +44,9 @@ pub struct ServiceInstance {
     pub version: String,
     pub entry: String,
     pub metadata: String, // JSON string: metadata for instance filtering
+    /// Node that registered this capability. Empty if unknown.
+    #[serde(default)]
+    pub node_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

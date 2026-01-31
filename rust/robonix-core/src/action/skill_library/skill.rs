@@ -33,6 +33,7 @@ struct SkillEntry {
     metadata: serde_json::Value,   // JSON: structured data for internal use
     provider: String,
     version: String,
+    node_id: String,
 }
 
 impl SkillEntry {
@@ -53,6 +54,7 @@ impl SkillEntry {
                 .unwrap_or_else(|_| "{}".to_string()),
             status: serde_json::to_string(&self.status).unwrap_or_else(|_| "{}".to_string()),
             metadata: serde_json::to_string(&self.metadata).unwrap_or_else(|_| "{}".to_string()),
+            node_id: self.node_id.clone(),
         }
     }
 }
@@ -169,6 +171,7 @@ impl SkillRegistry {
             metadata,
             provider: req.provider.clone(),
             version: req.version.clone(),
+            node_id: req.node_id.clone(),
         };
 
         let mut skills = self.skills.write().await;

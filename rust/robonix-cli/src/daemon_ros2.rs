@@ -4,6 +4,7 @@
 // Manages persistent ROS2 node and service clients for daemon
 
 use anyhow::Result;
+use robonix_core::ros_idl::get_listening_ips::{GetListeningIpsRequest, GetListeningIpsResponse};
 use robonix_core::ros_idl::primitive::{RegisterPrimitiveRequest, RegisterPrimitiveResponse};
 use robonix_core::ros_idl::service_registry::{RegisterServiceRequest, RegisterServiceResponse};
 use robonix_core::ros_idl::skill::{RegisterSkillRequest, RegisterSkillResponse};
@@ -45,6 +46,11 @@ pub struct DaemonRos2Clients {
         Arc<Mutex<ros2_client::service::Client<AService<TaskDataRequest, TaskDataResponse>>>>,
     task_cancel_client:
         Arc<Mutex<ros2_client::service::Client<AService<CancelTaskRequest, CancelTaskResponse>>>>,
+    get_listening_ips_client: Arc<
+        Mutex<
+            ros2_client::service::Client<AService<GetListeningIpsRequest, GetListeningIpsResponse>>,
+        >,
+    >,
     discovery_waited: Arc<AtomicBool>, // Track if we've already waited for service discovery
 }
 
@@ -145,6 +151,16 @@ impl DaemonRos2Clients {
             )
             .map_err(|e| anyhow::anyhow!("Failed to create task_cancel client: {:?}", e))?;
 
+        let get_listening_ips_client = node
+            .create_client::<AService<GetListeningIpsRequest, GetListeningIpsResponse>>(
+                ServiceMapping::Enhanced,
+                &Name::new("/rbnx/core", "get_listening_ips").unwrap(),
+                &ServiceTypeName::new("robonix_sdk", "GetListeningIps"),
+                service_qos.clone(),
+                service_qos.clone(),
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create get_listening_ips client: {:?}", e))?;
+
         Ok(Self {
             _node: Arc::new(Mutex::new(node)),
             primitive_client: Arc::new(Mutex::new(primitive_client)),
@@ -153,8 +169,30 @@ impl DaemonRos2Clients {
             submit_task_client: Arc::new(Mutex::new(submit_task_client)),
             task_data_client: Arc::new(Mutex::new(task_data_client)),
             task_cancel_client: Arc::new(Mutex::new(task_cancel_client)),
+            get_listening_ips_client: Arc::new(Mutex::new(get_listening_ips_client)),
             discovery_waited: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Get core's listening IPs via ROS2 (call this first to discover core's network addresses).
+    pub async fn call_get_listening_ips(&self) -> Result<Vec<String>> {
+        self.wait_for_service_discovery().await;
+
+        let client = self.get_listening_ips_client.lock().await;
+        let req = GetListeningIpsRequest { _dummy: 0 };
+        let response = tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            client.async_call_service(req),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("Timeout: get_listening_ips timed out. Ensure robonix-core is running.")
+        })?
+        .map_err(|e| anyhow::anyhow!("get_listening_ips call error: {:?}", e))?;
+
+        let ips: Vec<String> =
+            serde_json::from_str(&response.ips_json).unwrap_or_else(|_| Vec::new());
+        Ok(ips)
     }
 
     pub async fn call_register_primitive(

@@ -24,6 +24,9 @@ use tokio::sync::Mutex;
 pub struct ImageTopicInfo {
     pub topic_name: String,
     pub message_type: String,
+    /// ROS image encoding (e.g. rgb8, bgr8, mono8). Set when first image is received.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
     pub last_update: Option<SystemTime>,
     pub image_paths: Vec<ImagePathInfo>, // Paths to recent images (up to 10, sorted by time, newest first)
 }
@@ -89,6 +92,37 @@ impl ImageMonitor {
         topics.values().cloned().collect()
     }
 
+    /// Returns true if the encoding is a color (RGB/BGR) encoding suitable for VLM.
+    fn is_rgb_encoding(encoding: &str) -> bool {
+        let enc = encoding.to_lowercase();
+        matches!(
+            enc.as_str(),
+            "rgb8" | "bgr8" | "rgba8" | "bgra8" | "8uc3" | "8uc4"
+        )
+    }
+
+    /// Get full filesystem paths of the latest image for each RGB topic.
+    /// Used by the agent's describe_robot_vision to send images to the VLM.
+    pub async fn get_rgb_image_paths(&self) -> Vec<PathBuf> {
+        let topics = self.image_topics.lock().await;
+        let mut paths = Vec::new();
+        for info in topics.values() {
+            let encoding = info.encoding.as_deref().unwrap_or("");
+            if !Self::is_rgb_encoding(encoding) {
+                continue;
+            }
+            if let Some(latest) = info.image_paths.first() {
+                // Stored path is "images/xxx.jpg"; file on disk is storage_dir/xxx.jpg
+                let filename = latest
+                    .path
+                    .strip_prefix("images/")
+                    .unwrap_or(latest.path.as_str());
+                paths.push(self.image_storage_dir.join(filename));
+            }
+        }
+        paths
+    }
+
     /// Update image topic info (called when a new image is received)
     pub async fn update_image(&self, topic_name: String, image_path: String) {
         let mut topics = self.image_topics.lock().await;
@@ -104,13 +138,15 @@ impl ImageMonitor {
                 path: image_path,
                 timestamp,
             }];
+            // encoding is set in process_image_message_internal
         } else {
-            // New topic, add it
+            // New topic, add it (encoding will be set when first image is processed)
             topics.insert(
                 topic_name.clone(),
                 ImageTopicInfo {
                     topic_name: topic_name.clone(),
                     message_type: "sensor_msgs/msg/Image".to_string(),
+                    encoding: None,
                     last_update: Some(SystemTime::now()),
                     image_paths: vec![ImagePathInfo {
                         path: image_path,
@@ -142,6 +178,7 @@ impl ImageMonitor {
                 ImageTopicInfo {
                     topic_name: topic_name.clone(),
                     message_type: message_type.clone(),
+                    encoding: None,
                     last_update: None,
                     image_paths: Vec::new(),
                 },
@@ -309,6 +346,7 @@ impl ImageMonitor {
 
         if let Some(info) = topics.get_mut(topic_name) {
             info.last_update = Some(SystemTime::now());
+            info.encoding = Some(msg.encoding.clone());
             // Replace with latest image (only keep one)
             info.image_paths = vec![ImagePathInfo {
                 path: image_path.clone(),
@@ -324,6 +362,7 @@ impl ImageMonitor {
                 ImageTopicInfo {
                     topic_name: topic_name.to_string(),
                     message_type: "sensor_msgs/msg/Image".to_string(),
+                    encoding: Some(msg.encoding.clone()),
                     last_update: Some(SystemTime::now()),
                     image_paths: vec![ImagePathInfo {
                         path: image_path.clone(),

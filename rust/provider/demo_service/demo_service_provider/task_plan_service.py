@@ -4,7 +4,7 @@
 #
 # Demo task plan service implementation.
 # Converts natural language task description to RTDL code.
-# Uses DeepSeek LLM API for intelligent task planning.
+# Uses Qwen LLM API (DashScope) for intelligent task planning.
 # Uses simple list-style RTDL format (assembly-like instruction list).
 
 import os
@@ -18,7 +18,7 @@ from openai import OpenAI
 
 
 class TaskPlanService(Node):
-    """Implements task_plan service with DeepSeek LLM for RTDL generation."""
+    """Implements task_plan service with Qwen LLM (DashScope) for RTDL generation."""
 
     def __init__(self):
         super().__init__("demo_task_plan_service")
@@ -39,42 +39,44 @@ class TaskPlanService(Node):
         env_path = package_root / ".env"
         load_dotenv(env_path)
 
-        # Get DeepSeek API key from environment
-        self.api_key = os.getenv("DEEPSEEK_API_KEY")
+        # Same key as semantic_map: DASHSCOPE_API_KEY (or legacy QWEN3_VL_API_KEY)
+        self.api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN3_VL_API_KEY")
         if not self.api_key:
             self.get_logger().error(
-                "DEEPSEEK_API_KEY not found in .env file. "
-                "Please configure DEEPSEEK_API_KEY in .env file. "
-                "See README.md for configuration instructions."
+                "DASHSCOPE_API_KEY (or QWEN3_VL_API_KEY) not found in .env file. "
+                "Please configure API key in .env file. See README.md for configuration."
             )
             raise ValueError(
-                "DEEPSEEK_API_KEY not found. "
-                "Please configure DEEPSEEK_API_KEY in .env file."
+                "DASHSCOPE_API_KEY not found. "
+                "Please configure DASHSCOPE_API_KEY (or QWEN3_VL_API_KEY) in .env file."
             )
 
         # Validate API key format
         if not self._validate_api_key(self.api_key):
             self.get_logger().error(
-                "Invalid DEEPSEEK_API_KEY format. "
+                "Invalid DASHSCOPE_API_KEY format. "
                 'API key should start with "sk-" and be at least 35 characters long. '
                 "Please check your .env file."
             )
             raise ValueError(
-                "Invalid DEEPSEEK_API_KEY format. "
+                "Invalid DASHSCOPE_API_KEY format. "
                 'API key should start with "sk-" and be at least 35 characters long.'
             )
 
-        # Initialize DeepSeek client
+        # Qwen best LLM model for task planning (text); override via QWEN_LLM_MODEL env
+        self.qwen_model = os.getenv("QWEN_LLM_MODEL", "qwen-plus")
+
+        # Initialize Qwen client (DashScope OpenAI-compatible API)
         try:
-            self.deepseek_client = OpenAI(
-                base_url="https://api.deepseek.com",
+            self.qwen_client = OpenAI(
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
                 api_key=self.api_key,
             )
             self.get_logger().info(
-                f"DeepSeek API client initialized with key: {self.api_key[:10]}..."
+                f"Qwen API client initialized with model: {self.qwen_model}"
             )
         except Exception as e:
-            self.get_logger().error(f"Failed to initialize DeepSeek API client: {e}")
+            self.get_logger().error(f"Failed to initialize Qwen API client: {e}")
             raise
 
         # Create service
@@ -179,17 +181,17 @@ class TaskPlanService(Node):
         skill_specs=None,
     ):
         """
-        Generate simple list-style RTDL code from description using DeepSeek LLM.
+        Generate simple list-style RTDL code from description using Qwen LLM.
         Format: JSON array of instructions, each with type, name, and params.
         """
-        if not self.deepseek_client:
-            raise RuntimeError("DeepSeek client not initialized")
+        if not self.qwen_client:
+            raise RuntimeError("Qwen client not initialized")
 
-        return self._generate_rtdl_with_deepseek(
+        return self._generate_rtdl_with_qwen(
             description, object_graph, rtdl_syntax, skill_primitive_specs, skill_specs
         )
 
-    def _generate_rtdl_with_deepseek(
+    def _generate_rtdl_with_qwen(
         self,
         description,
         object_graph=None,
@@ -197,8 +199,8 @@ class TaskPlanService(Node):
         skill_primitive_specs=None,
         skill_specs=None,
     ):
-        """Generate RTDL using DeepSeek LLM API."""
-        self.get_logger().info("Using DeepSeek LLM for task planning")
+        """Generate RTDL using Qwen LLM API (DashScope)."""
+        self.get_logger().info(f"Using Qwen LLM ({self.qwen_model}) for task planning")
 
         # Build system prompt with RTDL syntax if provided
         if rtdl_syntax:
@@ -350,20 +352,20 @@ Important:
 
         # Log the full prompt
         self.get_logger().info("-" * 80)
-        self.get_logger().info("DeepSeek LLM Prompt:")
+        self.get_logger().info("Qwen LLM Prompt:")
         self.get_logger().info("System Prompt:")
         self.get_logger().info(system_prompt)
         self.get_logger().info("User Prompt:")
         self.get_logger().info(user_prompt)
         self.get_logger().info("-" * 80)
 
-        # Call DeepSeek API
+        # Call Qwen API
         import time
 
         start_time = time.time()
-        self.get_logger().info("Calling DeepSeek API...")
-        response = self.deepseek_client.chat.completions.create(
-            model="deepseek-chat",
+        self.get_logger().info("Calling Qwen API...")
+        response = self.qwen_client.chat.completions.create(
+            model=self.qwen_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -373,18 +375,18 @@ Important:
         elapsed_time = time.time() - start_time
 
         if not response.choices or len(response.choices) == 0:
-            raise RuntimeError("DeepSeek API response has no choices")
+            raise RuntimeError("Qwen API response has no choices")
 
         message_content = response.choices[0].message.content
         if message_content is None:
-            raise RuntimeError("DeepSeek API response content is None")
+            raise RuntimeError("Qwen API response content is None")
 
         llm_response = message_content.strip()
         self.get_logger().info(
-            f"DeepSeek API call completed in {elapsed_time:.2f} seconds"
+            f"Qwen API call completed in {elapsed_time:.2f} seconds"
         )
         self.get_logger().info("-" * 80)
-        self.get_logger().info("DeepSeek LLM Response (full):")
+        self.get_logger().info("Qwen LLM Response (full):")
         self.get_logger().info(llm_response)
         self.get_logger().info("-" * 80)
 
@@ -459,14 +461,14 @@ Important:
             # Convert to JSON string (RTDL format)
             return json.dumps(formatted_instructions, indent=2)
         except json.JSONDecodeError as e:
-            self.get_logger().error(f"Failed to parse DeepSeek response as JSON: {e}")
+            self.get_logger().error(f"Failed to parse Qwen response as JSON: {e}")
             self.get_logger().error(f"Response was: {llm_response}")
-            raise RuntimeError(f"Failed to parse DeepSeek response as JSON: {e}")
+            raise RuntimeError(f"Failed to parse Qwen response as JSON: {e}")
 
     def _validate_api_key(self, api_key: str) -> bool:
         """
-        Validate DeepSeek API key format.
-        DeepSeek API keys typically start with 'sk-' and are at least 32 characters long.
+        Validate DashScope/Qwen API key format.
+        API keys typically start with 'sk-' and are at least 32 characters long.
         """
         if not api_key or not isinstance(api_key, str):
             return False
@@ -474,7 +476,7 @@ Important:
         # Remove whitespace
         api_key = api_key.strip()
 
-        # Check minimum length (DeepSeek API keys are typically 32+ characters, including 'sk-' prefix)
+        # Check minimum length (DashScope API keys are typically 32+ characters, including 'sk-' prefix)
         # Minimum: 'sk-' (3) + key part (32) = 35 characters
         if len(api_key) < 35:
             return False
