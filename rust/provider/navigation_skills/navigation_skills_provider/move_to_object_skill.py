@@ -109,8 +109,13 @@ class MoveToObjectSkill(Node):
             self.navigate_goal_publisher = None
 
         if self.navigate_status_topic:
+            status_qos = QoSProfile(
+                reliability=ReliabilityPolicy.RELIABLE,
+                history=HistoryPolicy.KEEP_LAST,
+                depth=10,
+            )
             self.navigate_status_subscriber = self.create_subscription(
-                Bool, self.navigate_status_topic, self.navigate_status_callback, 10
+                Bool, self.navigate_status_topic, self.navigate_status_callback, status_qos
             )
             self.get_logger().info(
                 f"Subscribing to navigate status: {self.navigate_status_topic}"
@@ -143,6 +148,7 @@ class MoveToObjectSkill(Node):
 
         self.current_skill_id = None
         self.moving_in_progress = False
+        self._cancel_requested = False
         self.target_object_id = None
         self.stop_radius = 0.5
         self.navigation_complete = False
@@ -325,9 +331,27 @@ class MoveToObjectSkill(Node):
                     break
 
     def start_callback(self, msg):
-        """Handle skill start request."""
+        """Handle skill start request (input params or robonix terminate)."""
         try:
             data = json.loads(msg.data)
+            # Robonix can send terminate to start_topic to force-stop this skill
+            if data.get("terminate") and data.get("skill_id"):
+                sid = data.get("skill_id")
+                if self.moving_in_progress and sid == self.current_skill_id:
+                    self.get_logger().info(
+                        f"Received terminate for skill_id={sid}, stopping move_to_object"
+                    )
+                    self._cancel_requested = True
+                    self.moving_in_progress = False
+                    self._stop_status_timer()
+                    self._publish_status(
+                        sid,
+                        "cancelled",
+                        {"message": "Cancelled by robonix (terminate on start_topic)"},
+                        errno=0,
+                    )
+                return
+
             skill_id = data.get("skill_id", "unknown")
             params = data.get("params", {})
             target_object_id = params.get("target_object_id", "")
@@ -388,6 +412,7 @@ class MoveToObjectSkill(Node):
 
             self.current_skill_id = skill_id
             self.target_object_id = target_object_id
+            self._cancel_requested = False
             self.moving_in_progress = True
 
             self._publish_status(
@@ -571,10 +596,119 @@ class MoveToObjectSkill(Node):
             )
             self.navigate_goal_publisher.publish(goal_pose)
 
-            timeout = 60.0
+            # Reach = at goal (position + orientation within delta) and stationary for a while
+            POSITION_DELTA_M = 0.35
+            ANGLE_DELTA_RAD = 0.2
+            STILL_DURATION_S = 1.0
+            STILL_MOVE_THRESHOLD_M = 0.05
+            time_first_at_goal = None
+            pose_first_at_goal = None
+            last_log_time = 0.0
+            LOG_INTERVAL_S = 2.0
+
+            self.get_logger().info(
+                "Waiting for pose-based completion: dist<=%.2fm, yaw<=%.2f rad, still %.1fs"
+                % (POSITION_DELTA_M, ANGLE_DELTA_RAD, STILL_DURATION_S)
+            )
+
+            timeout = 90.0
             start_time = time.time()
-            while not self.navigation_complete and (time.time() - start_time) < timeout:
-                time.sleep(0.5)
+            while (
+                not self.navigation_complete
+                and (time.time() - start_time) < timeout
+                and not self._cancel_requested
+            ):
+                rclpy.spin_once(self, timeout_sec=0.1)
+                if self.navigation_complete or self._cancel_requested:
+                    break
+                now = time.time()
+                if self.latest_pose is None:
+                    if now - last_log_time >= LOG_INTERVAL_S:
+                        self.get_logger().warn(
+                            "No pose yet (amcl_pose?). elapsed=%.1fs" % (now - start_time)
+                        )
+                        last_log_time = now
+                    continue
+                dist = math.sqrt(
+                    (self.latest_pose.pose.position.x - goal_pose.pose.position.x) ** 2
+                    + (self.latest_pose.pose.position.y - goal_pose.pose.position.y) ** 2
+                )
+                yaw_goal = self._yaw_from_quat(goal_pose.pose.orientation)
+                yaw_now = self._yaw_from_quat(self.latest_pose.pose.orientation)
+                yaw_diff = yaw_now - yaw_goal
+                while yaw_diff > math.pi:
+                    yaw_diff -= 2.0 * math.pi
+                while yaw_diff < -math.pi:
+                    yaw_diff += 2.0 * math.pi
+                at_goal = dist <= POSITION_DELTA_M and abs(yaw_diff) <= ANGLE_DELTA_RAD
+                if at_goal:
+                    if time_first_at_goal is None:
+                        time_first_at_goal = time.time()
+                        pose_first_at_goal = (
+                            self.latest_pose.pose.position.x,
+                            self.latest_pose.pose.position.y,
+                        )
+                        self.get_logger().info(
+                            "At goal (dist=%.3fm, yaw_diff=%.3f rad). Starting still timer (%.1fs)."
+                            % (dist, yaw_diff, STILL_DURATION_S)
+                        )
+                    elif (time.time() - time_first_at_goal) >= STILL_DURATION_S:
+                        dx = self.latest_pose.pose.position.x - pose_first_at_goal[0]
+                        dy = self.latest_pose.pose.position.y - pose_first_at_goal[1]
+                        drift = math.sqrt(dx * dx + dy * dy)
+                        if drift <= STILL_MOVE_THRESHOLD_M:
+                            self.navigation_complete = True
+                            self.get_logger().info(
+                                "Navigation complete (at goal and stationary for %.1fs, drift=%.3fm)"
+                                % (STILL_DURATION_S, drift)
+                            )
+                        elif now - last_log_time >= LOG_INTERVAL_S:
+                            self.get_logger().info(
+                                "At goal but moved too much: drift=%.3fm (max %.2fm). Resetting still timer."
+                                % (drift, STILL_MOVE_THRESHOLD_M)
+                            )
+                            time_first_at_goal = None
+                            pose_first_at_goal = None
+                            last_log_time = now
+                    elif now - last_log_time >= LOG_INTERVAL_S:
+                        remaining = STILL_DURATION_S - (now - time_first_at_goal)
+                        self.get_logger().info(
+                            "At goal, waiting still: %.1fs left" % max(0, remaining)
+                        )
+                        last_log_time = now
+                else:
+                    if time_first_at_goal is not None:
+                        self.get_logger().info(
+                            "Left goal (dist=%.3fm, yaw_diff=%.3f rad). Resetting still timer."
+                            % (dist, yaw_diff)
+                        )
+                    time_first_at_goal = None
+                    pose_first_at_goal = None
+                    if now - last_log_time >= LOG_INTERVAL_S:
+                        self.get_logger().info(
+                            "Approaching: dist=%.3fm (need<=%.2f), yaw_diff=%.3f rad (need<=%.2f), pos=(%.2f,%.2f)"
+                            % (
+                                dist,
+                                POSITION_DELTA_M,
+                                yaw_diff,
+                                ANGLE_DELTA_RAD,
+                                self.latest_pose.pose.position.x,
+                                self.latest_pose.pose.position.y,
+                            )
+                        )
+                        last_log_time = now
+
+            if self._cancel_requested:
+                self._stop_status_timer()
+                self._publish_status(
+                    self.current_skill_id,
+                    "cancelled",
+                    {"message": "Cancelled by robonix (terminate on start_topic)"},
+                    errno=0,
+                )
+                self.get_logger().info("Move to object cancelled by robonix")
+                self.moving_in_progress = False
+                return
 
             if self.navigation_complete:
                 final_distance = None
@@ -621,13 +755,33 @@ class MoveToObjectSkill(Node):
                 self.moving_in_progress = False
             else:
                 self._stop_status_timer()
+                # Log why we timed out
+                if self.latest_pose is not None:
+                    dist = math.sqrt(
+                        (self.latest_pose.pose.position.x - goal_pose.pose.position.x) ** 2
+                        + (self.latest_pose.pose.position.y - goal_pose.pose.position.y) ** 2
+                    )
+                    yaw_goal = self._yaw_from_quat(goal_pose.pose.orientation)
+                    yaw_now = self._yaw_from_quat(self.latest_pose.pose.orientation)
+                    yaw_diff = yaw_now - yaw_goal
+                    while yaw_diff > math.pi:
+                        yaw_diff -= 2.0 * math.pi
+                    while yaw_diff < -math.pi:
+                        yaw_diff += 2.0 * math.pi
+                    self.get_logger().error(
+                        "Navigation timeout. Last: dist=%.3fm (need<=%.2f), yaw_diff=%.3f rad (need<=%.2f)"
+                        % (dist, POSITION_DELTA_M, yaw_diff, ANGLE_DELTA_RAD)
+                    )
+                else:
+                    self.get_logger().error(
+                        "Navigation timeout. No pose received (check amcl_pose topic)."
+                    )
                 self._publish_status(
                     self.current_skill_id,
                     "error",
                     {"error": "Navigation timeout"},
                     errno=10,
                 )
-                self.get_logger().error("Navigation timeout")
                 self.moving_in_progress = False
 
         except Exception as e:
@@ -708,6 +862,13 @@ class MoveToObjectSkill(Node):
                 pose.pose.orientation.w = 1.0
                 return pose
         return None
+
+    def _yaw_from_quat(self, q):
+        """Extract yaw (radians) from geometry_msgs Quaternion (x, y, z, w)."""
+        return math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        )
 
     def _calculate_goal_pose_near_object(self, object_pose, stop_radius):
         """

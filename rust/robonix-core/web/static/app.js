@@ -537,6 +537,7 @@ function showComponentDetailInListModal(type, index) {
     html += renderComponentItemDetail(type, data, index);
 
     content.innerHTML = html;
+    applySyntaxHighlighting(content);
 }
 
 function backToComponentList() {
@@ -567,7 +568,7 @@ function renderComponentItemDetail(type, item, index) {
         html += `<div class="component-detail-field"><span class="component-detail-label">Input Schema:</span></div>`;
         try {
             const inputSchema = JSON.parse(item.input_schema || '{}');
-            html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(inputSchema, null, 2))}</div>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(inputSchema, null, 2))}</code></pre>`;
         } catch (e) {
             html += `<div class="component-detail-value">${escapeHtml(item.input_schema || 'N/A')}</div>`;
         }
@@ -575,7 +576,7 @@ function renderComponentItemDetail(type, item, index) {
         html += `<div class="component-detail-field"><span class="component-detail-label">Output Schema:</span></div>`;
         try {
             const outputSchema = JSON.parse(item.output_schema || '{}');
-            html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(outputSchema, null, 2))}</div>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(outputSchema, null, 2))}</code></pre>`;
         } catch (e) {
             html += `<div class="component-detail-value">${escapeHtml(item.output_schema || 'N/A')}</div>`;
         }
@@ -583,7 +584,7 @@ function renderComponentItemDetail(type, item, index) {
         html += `<div class="component-detail-field"><span class="component-detail-label">Metadata:</span></div>`;
         try {
             const metadata = JSON.parse(item.metadata || '{}');
-            html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(metadata, null, 2))}</div>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(metadata, null, 2))}</code></pre>`;
         } catch (e) {
             html += `<div class="component-detail-value">${escapeHtml(item.metadata || 'N/A')}</div>`;
         }
@@ -613,7 +614,7 @@ function renderComponentItemDetail(type, item, index) {
         html += `<div class="component-detail-field"><span class="component-detail-label">Key:</span><span class="component-detail-value">${escapeHtml(item.key)}</span></div>`;
 
         html += `<div class="component-detail-field"><span class="component-detail-label">Metadata:</span></div>`;
-        html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(metadata, null, 2))}</div>`;
+        html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(metadata, null, 2))}</code></pre>`;
     } else if (type === 'skill') {
         html += `<h3>${escapeHtml(item.name)}</h3>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Skill ID:</span><span class="component-detail-value">${escapeHtml(item.skill_id || 'N/A')}</span></div>`;
@@ -636,7 +637,7 @@ function renderComponentItemDetail(type, item, index) {
             html += `<div class="component-detail-field"><span class="component-detail-label">Start Args:</span></div>`;
             try {
                 const startArgs = JSON.parse(item.start_args || '{}');
-                html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(startArgs, null, 2))}</div>`;
+                html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(startArgs, null, 2))}</code></pre>`;
             } catch (e) {
                 html += `<div class="component-detail-value">${escapeHtml(item.start_args)}</div>`;
             }
@@ -645,7 +646,7 @@ function renderComponentItemDetail(type, item, index) {
             html += `<div class="component-detail-field"><span class="component-detail-label">Metadata:</span></div>`;
             try {
                 const metadata = JSON.parse(item.metadata || '{}');
-                html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(metadata, null, 2))}</div>`;
+                html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(metadata, null, 2))}</code></pre>`;
             } catch (e) {
                 html += `<div class="component-detail-value">${escapeHtml(item.metadata)}</div>`;
             }
@@ -660,15 +661,15 @@ function renderComponentItemDetail(type, item, index) {
         if (item.rtdl) {
             html += `<div class="component-detail-field"><span class="component-detail-label">RTDL Type:</span><span class="component-detail-value">${escapeHtml(item.rtdl_type || 'N/A')}</span></div>`;
             html += `<div class="component-detail-field"><span class="component-detail-label">RTDL Program:</span></div>`;
-            html += `<div class="component-detail-json">${escapeHtml(item.rtdl)}</div>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(item.rtdl)}</code></pre>`;
         }
         if (item.params) {
             html += `<div class="component-detail-field"><span class="component-detail-label">Parameters:</span></div>`;
-            html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(item.params, null, 2))}</div>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(item.params, null, 2))}</code></pre>`;
         }
         if (item.result) {
             html += `<div class="component-detail-field"><span class="component-detail-label">Result:</span></div>`;
-            html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(item.result, null, 2))}</div>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(item.result, null, 2))}</code></pre>`;
         }
         if (item.error_message) {
             html += `<div class="component-detail-field"><span class="component-detail-label">Error:</span></div>`;
@@ -733,8 +734,20 @@ function openNodeLogViewer(type, index) {
             fetch(`/api/node-log?node_id=${encodeURIComponent(node_id)}&capability_key=${encodeURIComponent(capability_key)}`)
                 .then(r => r.json())
                 .then(data => {
-                    if (data.content != null) contentEl.textContent = data.content;
-                    contentEl.scrollTop = contentEl.scrollHeight;
+                    if (data.content == null) return;
+                    const autoScroll = document.getElementById('node-log-auto-scroll') && document.getElementById('node-log-auto-scroll').checked;
+                    const prevScrollTop = contentEl.scrollTop;
+                    const prevScrollHeight = contentEl.scrollHeight;
+                    const prevClientHeight = contentEl.clientHeight;
+                    contentEl.textContent = data.content;
+                    if (autoScroll) {
+                        contentEl.scrollTop = contentEl.scrollHeight;
+                    } else {
+                        // Keep same offset from top (new lines are appended at bottom, so top is unchanged)
+                        const newScrollHeight = contentEl.scrollHeight;
+                        const newMaxScroll = Math.max(0, newScrollHeight - prevClientHeight);
+                        contentEl.scrollTop = Math.min(prevScrollTop, newMaxScroll);
+                    }
                 })
                 .catch(() => { });
         }
@@ -917,6 +930,21 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+/** Apply syntax highlighting to code blocks in a container (modals). Uses highlight.js auto-detect. */
+function applySyntaxHighlighting(container) {
+    if (!container || typeof hljs === 'undefined') return;
+    const blocks = container.querySelectorAll('.syntax-block');
+    blocks.forEach(function (el) {
+        const text = el.textContent;
+        if (!text.trim()) return;
+        try {
+            const result = hljs.highlightAuto(text);
+            el.innerHTML = result.value;
+            el.className = 'hljs' + (result.language ? ' language-' + result.language : '');
+        } catch (e) { /* ignore */ }
+    });
 }
 
 // Remove markdown formatting from text
@@ -1412,9 +1440,11 @@ function renderImageMonitor(imageTopics) {
 function showRtdlModal(rtdl) {
     const modal = document.getElementById('rtdl-modal');
     const content = document.getElementById('rtdl-content');
-    content.textContent = rtdl;
+    if (!content) return;
+    content.textContent = rtdl || '';
+    content.className = 'syntax-block';
+    applySyntaxHighlighting(modal);
     modal.style.display = 'block';
-    // Trigger animation
     setTimeout(() => {
         modal.classList.add('show');
     }, 10);
@@ -1506,7 +1536,7 @@ function showComponentModal(type, index) {
         html += `<h3>Input Schema</h3>`;
         try {
             const inputSchema = JSON.parse(data.input_schema || '{}');
-            html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(inputSchema, null, 2))}</div>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(inputSchema, null, 2))}</code></pre>`;
         } catch (e) {
             html += `<div class="component-detail-value">${escapeHtml(data.input_schema || 'N/A')}</div>`;
         }
@@ -1516,7 +1546,7 @@ function showComponentModal(type, index) {
         html += `<h3>Output Schema</h3>`;
         try {
             const outputSchema = JSON.parse(data.output_schema || '{}');
-            html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(outputSchema, null, 2))}</div>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(outputSchema, null, 2))}</code></pre>`;
         } catch (e) {
             html += `<div class="component-detail-value">${escapeHtml(data.output_schema || 'N/A')}</div>`;
         }
@@ -1526,7 +1556,7 @@ function showComponentModal(type, index) {
         html += `<h3>Metadata</h3>`;
         try {
             const metadata = JSON.parse(data.metadata || '{}');
-            html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(metadata, null, 2))}</div>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(metadata, null, 2))}</code></pre>`;
         } catch (e) {
             html += `<div class="component-detail-value">${escapeHtml(data.metadata || 'N/A')}</div>`;
         }
@@ -1549,7 +1579,7 @@ function showComponentModal(type, index) {
         html += `<h3>Metadata</h3>`;
         try {
             const metadata = JSON.parse(data.metadata || '{}');
-            html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(metadata, null, 2))}</div>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(metadata, null, 2))}</code></pre>`;
         } catch (e) {
             html += `<div class="component-detail-value">${escapeHtml(data.metadata || 'N/A')}</div>`;
         }
@@ -1581,7 +1611,7 @@ function showComponentModal(type, index) {
             html += `<h3>Start Args</h3>`;
             try {
                 const startArgs = JSON.parse(data.start_args || '{}');
-                html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(startArgs, null, 2))}</div>`;
+                html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(startArgs, null, 2))}</code></pre>`;
             } catch (e) {
                 html += `<div class="component-detail-value">${escapeHtml(data.start_args)}</div>`;
             }
@@ -1593,7 +1623,7 @@ function showComponentModal(type, index) {
             html += `<h3>Metadata</h3>`;
             try {
                 const metadata = JSON.parse(data.metadata || '{}');
-                html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(metadata, null, 2))}</div>`;
+                html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(metadata, null, 2))}</code></pre>`;
             } catch (e) {
                 html += `<div class="component-detail-value">${escapeHtml(data.metadata)}</div>`;
             }
@@ -1613,21 +1643,21 @@ function showComponentModal(type, index) {
             html += `<div class="component-detail-section">`;
             html += `<h3>RTDL Program</h3>`;
             html += `<div class="component-detail-field"><span class="component-detail-label">Type:</span><span class="component-detail-value">${escapeHtml(data.rtdl_type || 'N/A')}</span></div>`;
-            html += `<div class="component-detail-json">${escapeHtml(data.rtdl)}</div>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(data.rtdl)}</code></pre>`;
             html += `</div>`;
         }
 
         if (data.params) {
             html += `<div class="component-detail-section">`;
             html += `<h3>Parameters</h3>`;
-            html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(data.params, null, 2))}</div>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(data.params, null, 2))}</code></pre>`;
             html += `</div>`;
         }
 
         if (data.result) {
             html += `<div class="component-detail-section">`;
             html += `<h3>Result</h3>`;
-            html += `<div class="component-detail-json">${escapeHtml(JSON.stringify(data.result, null, 2))}</div>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(data.result, null, 2))}</code></pre>`;
             html += `</div>`;
         }
 
@@ -1648,8 +1678,8 @@ function showComponentModal(type, index) {
     }
 
     content.innerHTML = html;
+    applySyntaxHighlighting(content);
     modal.style.display = 'block';
-    // Trigger animation
     setTimeout(() => {
         modal.classList.add('show');
     }, 10);

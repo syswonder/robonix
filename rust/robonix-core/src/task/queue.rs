@@ -8,6 +8,14 @@ use std::collections::BinaryHeap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Info for the currently running skill, used to send terminate via start_topic on cancel.
+#[derive(Debug, Clone)]
+pub struct RunningSkillInfo {
+    pub task_id: String,
+    pub start_topic: String,
+    pub skill_exec_id: String,
+}
+
 /// Task Queue Entry - Wrapper for priority-based scheduling
 #[derive(Debug, Clone)]
 struct TaskQueueEntry {
@@ -44,6 +52,7 @@ impl Ord for TaskQueueEntry {
 pub struct TaskQueue {
     queue: Arc<RwLock<BinaryHeap<TaskQueueEntry>>>,
     running_task: Arc<RwLock<Option<String>>>, // Currently running task ID
+    running_skill_info: Arc<RwLock<Option<RunningSkillInfo>>>, // For terminate via start_topic
 }
 
 impl TaskQueue {
@@ -51,6 +60,7 @@ impl TaskQueue {
         Self {
             queue: Arc::new(RwLock::new(BinaryHeap::new())),
             running_task: Arc::new(RwLock::new(None)),
+            running_skill_info: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -130,6 +140,34 @@ impl TaskQueue {
         } else if old_task.is_some() {
             debug!("running task cleared (was: {:?})", old_task);
         }
+        // Clear running skill info when clearing running task
+        if task_id.is_none() {
+            let mut info = self.running_skill_info.write().await;
+            if info.is_some() {
+                debug!("running skill info cleared (running task cleared)");
+                *info = None;
+            }
+        }
+    }
+
+    /// Set running skill info (start_topic, skill_exec_id) for terminate-on-cancel.
+    pub async fn set_running_skill_info(&self, info: Option<RunningSkillInfo>) {
+        let mut guard = self.running_skill_info.write().await;
+        *guard = info;
+        if let Some(ref i) = *guard {
+            debug!(
+                "running skill info set: task_id={}, start_topic={}, skill_exec_id={}",
+                i.task_id, i.start_topic, i.skill_exec_id
+            );
+        } else {
+            trace!("running skill info cleared");
+        }
+    }
+
+    /// Get running skill info for a task (if it's the current running skill).
+    pub async fn get_running_skill_info_for_task(&self, task_id: &str) -> Option<RunningSkillInfo> {
+        let guard = self.running_skill_info.read().await;
+        guard.as_ref().filter(|i| i.task_id == task_id).cloned()
     }
 
     /// Check if a higher priority task is available (for preemption)

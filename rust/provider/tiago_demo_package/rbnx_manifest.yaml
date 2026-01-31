@@ -49,13 +49,8 @@ primitives:
     start_script: rbnx/start_base_pose_amcl.sh
     stop_script: rbnx/stop_base_pose_amcl.sh
 
-  # Navigate to target pose
+  # Navigate to target pose (skill detects arrival via pose: stationary + within delta)
   - name: prm::base.navigate
-    # Spec defines: 
-    #   INPUT: {"goal": "geometry_msgs/msg/PoseStamped"}
-    #   OUTPUT: {"status": "std_msgs/msg/Bool"}
-    # Note: Nav2 uses action server, status topic is not available
-    # Skills should monitor navigation completion through other means
     input_schema: '{"goal":"/goal_pose"}'
     output_schema: '{}'
     metadata: '{"robot":"tiago","navigation":"nav2","simulator":"webots","action_server":"/navigate_to_pose"}'

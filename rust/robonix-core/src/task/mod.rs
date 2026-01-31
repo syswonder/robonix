@@ -17,7 +17,11 @@ use crate::service::ServiceRegistry;
 use crate::task::exception::{RecoveryAction, apply_recovery_action};
 use crate::task::executor::ExecutionResult;
 use log::{debug, error, info, trace, warn};
-use ros2_client::{AService, Name, Node, ServiceMapping, ServiceTypeName};
+use ros2_client::rustdds::{
+    Duration as RustddsDuration, QosPolicyBuilder,
+    policy::{self, Reliability},
+};
+use ros2_client::{AService, MessageTypeName, Name, Node, ServiceMapping, ServiceTypeName};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, interval, timeout};
@@ -62,6 +66,7 @@ impl TaskManager {
         let executor = Arc::new(executor::RtdlExecutor::new(
             skill_library.clone(),
             node.clone(),
+            task_queue.clone(),
         ));
 
         let manager = Arc::new(Self {
@@ -257,8 +262,72 @@ impl TaskManager {
             self.task_queue.remove(&task_id).await;
         }
 
+        // If task was running a skill, publish terminate to skill's start_topic so it stops
+        if old_state == TaskState::Running {
+            if let Some(info) = self
+                .task_queue
+                .get_running_skill_info_for_task(&task_id)
+                .await
+            {
+                if let Err(e) = self
+                    .publish_terminate_to_skill(&info.start_topic, &info.skill_exec_id)
+                    .await
+                {
+                    warn!(
+                        "task {}: failed to publish terminate to start_topic {}: {}",
+                        task_id, info.start_topic, e
+                    );
+                } else {
+                    info!(
+                        "task {}: sent terminate to skill start_topic {}",
+                        task_id, info.start_topic
+                    );
+                }
+            }
+        }
+
         info!("task {}: [CANCELLED] - cancelled by user request", task_id);
         api::CancelTaskResponse { success: true }
+    }
+
+    /// Publish a terminate message to a skill's start_topic so the skill stops.
+    async fn publish_terminate_to_skill(
+        &self,
+        start_topic: &str,
+        skill_exec_id: &str,
+    ) -> Result<(), String> {
+        let msg_json = serde_json::json!({
+            "terminate": true,
+            "skill_id": skill_exec_id
+        });
+        let msg_data = serde_json::to_string(&msg_json)
+            .map_err(|e| format!("Failed to serialize terminate message: {}", e))?;
+
+        let topic_name = Name::parse(start_topic)
+            .map_err(|e| format!("Failed to parse start_topic '{}': {}", start_topic, e))?;
+        let topic_qos = QosPolicyBuilder::new()
+            .history(policy::History::KeepLast { depth: 10 })
+            .reliability(Reliability::Reliable {
+                max_blocking_time: RustddsDuration::from_millis(100),
+            })
+            .durability(policy::Durability::Volatile)
+            .build();
+        let mut node_guard = self.node.lock().await;
+        let topic = node_guard
+            .create_topic(
+                &topic_name,
+                MessageTypeName::new("std_msgs", "String"),
+                &topic_qos,
+            )
+            .map_err(|e| format!("Failed to create topic '{}': {}", start_topic, e))?;
+        let publisher: ros2_client::Publisher<crate::ros_idl::skill::StdString> = node_guard
+            .create_publisher(&topic, None)
+            .map_err(|e| format!("Failed to create publisher for '{}': {}", start_topic, e))?;
+        let msg = crate::ros_idl::skill::StdString { data: msg_data };
+        publisher
+            .publish(msg)
+            .map_err(|e| format!("Failed to publish terminate to '{}': {}", start_topic, e))?;
+        Ok(())
     }
 
     /// Start the runtime loop (called internally)
@@ -704,6 +773,15 @@ impl TaskManager {
             .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
         let result = self.executor.execute_step(&mut task).await?;
+
+        // If task was cancelled externally (terminate sent to skill), store is already Cancelled; don't overwrite
+        let current = self.task_store.get_task(task_id).await;
+        if let Some(ref t) = current {
+            if matches!(t.state, task::TaskState::Cancelled) {
+                self.task_queue.set_running_task(None).await;
+                return Ok(());
+            }
+        }
 
         self.task_store
             .update_task(task_id, |t| {
