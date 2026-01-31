@@ -145,6 +145,20 @@
 
         <div class="panel">
             <div class="panel-header">
+                <div class="panel-title">Active CLI Nodes</div>
+                <div class="controls">
+                    <span id="nodes-count" class="status-count">0</span>
+                    <label>
+                        <input type="checkbox" id="auto-refresh-nodes" checked> Auto (3s)
+                    </label>
+                    <button onclick="loadNodes()">Refresh</button>
+                </div>
+            </div>
+            <div id="nodes-container" class="nodes-list">Loading...</div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
                 <div class="panel-title">Visualization</div>
                 <div class="controls">
                     <label>
@@ -223,6 +237,31 @@
                     <span class="close" onclick="closeComponentListModal()">&times;</span>
                 </div>
                 <div id="component-list-modal-content"></div>
+            </div>
+        </div>
+
+        <!-- CLI Node detail modal (machine info + capability status) -->
+        <div id="node-detail-modal" class="modal">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h2 id="node-detail-modal-title">Node</h2>
+                    <span class="close" onclick="closeNodeDetailModal()">&times;</span>
+                </div>
+                <div id="node-detail-modal-content"></div>
+            </div>
+        </div>
+
+        <!-- Node capability log viewer (remote CLI log stream) -->
+        <div id="node-log-modal" class="modal">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h2 id="node-log-modal-title">Node log</h2>
+                    <span class="close" onclick="closeNodeLogViewer()">&times;</span>
+                </div>
+                <div class="node-log-viewer-toolbar">
+                    <span id="node-log-modal-meta"></span>
+                </div>
+                <pre id="node-log-modal-content" class="node-log-pre"></pre>
             </div>
         </div>
 

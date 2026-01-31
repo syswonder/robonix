@@ -3,18 +3,32 @@
 //
 // Registry for system functions that can be called by the agent
 
+use crate::agent::llm::{AgentConfig, LLMClient};
 use crate::core::RobonixCore;
+use crate::perception::image_monitor::ImageMonitor;
 use anyhow::{Context, Result};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub struct FunctionRegistry {
     core: Arc<RobonixCore>,
+    image_monitor: Arc<ImageMonitor>,
+    agent_config: AgentConfig,
 }
 
 impl FunctionRegistry {
-    pub fn new(core: Arc<RobonixCore>) -> Self {
-        Self { core }
+    pub fn new(
+        core: Arc<RobonixCore>,
+        image_monitor: Arc<ImageMonitor>,
+        agent_config: AgentConfig,
+    ) -> Self {
+        Self {
+            core,
+            image_monitor,
+            agent_config,
+        }
     }
 
     pub fn get_function_schemas(&self) -> Vec<Value> {
@@ -151,6 +165,22 @@ impl FunctionRegistry {
                     }
                 }
             }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "describe_robot_vision",
+                    "description": "Describe what the robot currently sees from its RGB cameras. Use when the user asks about the robot's view, e.g. 'tell me what the robot sees', 'describe the current scene', '告诉我机器人目前看到的画面', 'what does the robot see?'. Uses the latest RGB images from the image monitor and a vision-language model to answer.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "question": {
+                                "type": "string",
+                                "description": "The user's question about the robot's view. Default: 'Describe what you see in these images from the robot\'s cameras.'"
+                            }
+                        }
+                    }
+                }
+            }),
         ]
     }
 
@@ -165,6 +195,7 @@ impl FunctionRegistry {
             "get_system_status" => self.get_system_status().await,
             "list_tasks" => self.list_tasks(arguments).await,
             "get_task_details" => self.get_task_details(arguments).await,
+            "describe_robot_vision" => self.describe_robot_vision(arguments).await,
             _ => anyhow::bail!("Unknown function: {}", name),
         }
     }
@@ -600,5 +631,41 @@ impl FunctionRegistry {
         } else {
             anyhow::bail!("Task not found: {}", task_id)
         }
+    }
+
+    async fn describe_robot_vision(&self, arguments: Value) -> Result<Value> {
+        let question = arguments
+            .get("question")
+            .and_then(|q| q.as_str())
+            .unwrap_or("Describe what you see in these images from the robot's cameras.")
+            .to_string();
+
+        let paths = self.image_monitor.get_rgb_image_paths().await;
+        if paths.is_empty() {
+            return Ok(json!({
+                "answer": "No RGB camera images are currently available. The image monitor has not received any RGB image topics yet, or no topics with RGB encoding (rgb8/bgr8/rgba8/bgra8) are subscribed.",
+                "image_count": 0
+            }));
+        }
+
+        let mut image_base64_urls = Vec::with_capacity(paths.len());
+        for path in &paths {
+            let data = tokio::fs::read(path)
+                .await
+                .context("Failed to read image file")?;
+            let b64 = BASE64_STANDARD.encode(&data);
+            image_base64_urls.push(format!("data:image/jpeg;base64,{}", b64));
+        }
+
+        let client = LLMClient::new(self.agent_config.clone());
+        let answer = client
+            .chat_vision(image_base64_urls, &question)
+            .await
+            .context("VLM call failed")?;
+
+        Ok(json!({
+            "answer": answer,
+            "image_count": paths.len()
+        }))
     }
 }

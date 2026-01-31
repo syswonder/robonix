@@ -23,3 +23,5 @@ manual_objects:
             scale_y: 0.1
             scale_z: 0.1
             yaw: 0.0
+
+# Setting goal pose: Frame:map, Position(-0.284224, 0.199099, 0), Orientation(0, 0, 0.92859, 0.371106) = Angle: 2.38119

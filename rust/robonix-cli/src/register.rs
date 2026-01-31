@@ -164,6 +164,7 @@ impl PackageRegistrar {
             metadata: metadata_str.to_string(),
             provider: provider.clone(),
             version,
+            node_id: self.config.effective_node_id(),
         };
 
         self.call_primitive_register_service(request).await?;
@@ -212,6 +213,7 @@ impl PackageRegistrar {
             metadata: metadata_str.to_string(),
             provider: provider.clone(),
             version,
+            node_id: self.config.effective_node_id(),
         };
 
         self.call_service_register_service(request).await?;
@@ -323,6 +325,7 @@ impl PackageRegistrar {
             metadata: metadata_str.to_string(),
             provider: provider.clone(),
             version,
+            node_id: self.config.effective_node_id(),
         };
 
         let response = self.call_skill_register_service(request).await?;

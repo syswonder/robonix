@@ -4,7 +4,7 @@ SPDX-License-Identifier: MulanPSL-2.0
 
 This package provides demo implementations of Robonix services:
 - **semantic_map**: Provides object-level representation of the environment using front camera and Qwen3-VL VLM
-- **task_plan**: Converts natural language task descriptions to RTDL code using DeepSeek LLM
+- **task_plan**: Converts natural language task descriptions to RTDL code using Qwen LLM (DashScope)
 
 ## Services
 
@@ -23,64 +23,36 @@ The semantic map service (`semantic_map_service`) uses the front camera primitiv
 
 ### Task Plan Service
 
-The task plan service (`task_plan_service`) converts natural language task descriptions into RTDL (Robot Task Description Langauge) code. It uses DeepSeek LLM API for intelligent task planning.
+The task plan service (`task_plan_service`) converts natural language task descriptions into RTDL (Robot Task Description Langauge) code. It uses Qwen LLM API (DashScope, model `qwen-plus` by default) for intelligent task planning.
 
 **Service Interface**: `/demo_service/task_plan/plan`
 **Service Type**: `robonix_sdk/srv/service/task_plan/PlanTask`
 
 ## Configuration
 
-### API Keys Configuration
+### API Key (one key for both services)
 
-Both services require API keys to function. Create a `.env` file in the package root directory (same level as `setup.py`) with the following content:
+**semantic_map** and **task_plan** share the same DashScope API key; configure it once. The services read `DASHSCOPE_API_KEY` first; if unset, they fall back to `QWEN3_VL_API_KEY` (backward compatible).
 
-```
-DEEPSEEK_API_KEY=sk-your-deepseek-api-key-here
-QWEN3_VL_API_KEY=sk-your-qwen3-vl-api-key-here
-```
+1. **Get an API key**
+   - Go to [DashScope Console](https://dashscope.aliyun.com/)
+   - Sign in, open API key management, create and copy a key
 
-### Qwen3-VL API Configuration
-
-The semantic map service requires a Qwen3-VL API key to function. Follow these steps to configure it:
-
-1. **Get a Qwen3-VL API Key**
-   - Visit [DashScope Platform](https://dashscope.aliyun.com/)
-   - Sign up or log in to your account
-   - Navigate to API keys section
-   - Create a new API key
-
-2. **Configure the API Key**
-   - Add `QWEN3_VL_API_KEY` to your `.env` file:
+2. **Configure**
+   - In the package root (same level as `setup.py`), copy `.env.example` to `.env`
+   - Set one of the following in `.env`:
+     ```
+     DASHSCOPE_API_KEY=sk-your-actual-api-key-here
+     ```
+     Or use the legacy variable (backward compatible):
      ```
      QWEN3_VL_API_KEY=sk-your-actual-api-key-here
      ```
-   - The service uses model `qwen-vl-plus` with base URL `https://dashscope.aliyuncs.com/compatible-mode/v1`
 
-3. **Verify Configuration**
-   - The service will automatically load the `.env` file on startup
-   - Check service logs to confirm Qwen3-VL API is initialized
-   - Ensure front camera primitive is registered and running
-
-### DeepSeek API Configuration
-
-The task plan service requires a DeepSeek API key to function. Follow these steps to configure it:
-
-1. **Get a DeepSeek API Key**
-   - Visit [DeepSeek Platform](https://platform.deepseek.com/)
-   - Sign up or log in to your account
-   - Navigate to API keys section
-   - Create a new API key
-
-2. **Configure the API Key**
-   - Add `DEEPSEEK_API_KEY` to your `.env` file:
-     ```
-     DEEPSEEK_API_KEY=sk-your-actual-api-key-here
-     ```
-
-3. **Verify Configuration**
-   - The service will automatically load the `.env` file on startup
-   - If the API key is not found, the service will fall back to simple keyword-based planning
-   - Check service logs to confirm DeepSeek API is initialized
+3. **Optional**
+   - Task plan default model is `qwen-plus`; set `QWEN_LLM_MODEL` (e.g. `qwen-max`) to override
+   - **Semantic map API cost**: The semantic_map service calls DashScope Qwen3-VL in a background loop. Default update interval is **30 seconds** (was 5s). To change: set `SEMANTIC_MAP_UPDATE_INTERVAL_SEC` in `.env` (e.g. `60` for once per minute; lower values = more API calls and higher cost).
+   - Both services load `.env` on startup; check logs to confirm API initialization
 
 ## Building and Installation
 
@@ -90,8 +62,7 @@ The task plan service requires a DeepSeek API key to function. Follow these step
 - Python 3.8+
 - colcon build tools
 - **robonix-core** running (start from `rust` with `ROBONIX_WEB_ASSETS_DIR`, `ROBONIX_WEB_PORT`, and `eval $(make source-sdk)`; see [rust/README.md](../../README.md) Step 3)
-- DeepSeek API key (for task planning service)
-- Qwen3-VL API key (for semantic map service)
+- DashScope (Qwen) API key (one key for both services; see `.env.example`)
 - Front camera primitive registered and running (for semantic map service)
 
 ### Build
@@ -111,7 +82,7 @@ rbnx deploy build
 
 The package requires the following Python packages (automatically installed via setup.py):
 - `python-dotenv`: For loading environment variables from .env file
-- `openai`: For DeepSeek and Qwen3-VL API clients (OpenAI-compatible)
+- `openai`: For Qwen/DashScope API clients (OpenAI-compatible)
 - `robonix_sdk`: For querying primitives from Robonix OS (use `from robonix_sdk.client import RobonixClient`)
 - `cv-bridge`: For converting ROS images to OpenCV format
 - `numpy`: For numerical operations
@@ -172,11 +143,10 @@ The task plan service generates RTDL code in JSON format:
 3. Check service logs for API errors
 4. Ensure front camera primitive is registered and publishing images
 
-**DeepSeek API Issues:**
-1. Check that `.env` file exists and contains `DEEPSEEK_API_KEY`
+**Qwen / DashScope API Issues:**
+1. Check that `.env` file exists and contains `DASHSCOPE_API_KEY`
 2. Verify the API key is correct and has sufficient credits
 3. Check service logs for API errors
-4. The service will automatically fall back to simple planning if API fails
 
 ### Service Not Starting
 

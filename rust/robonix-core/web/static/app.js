@@ -359,9 +359,10 @@ function renderPrimitives(primitives) {
             }
         }
         name = name || prim.key || 'Unknown';
+        const nodeLabel = (prim.node_id ? ` | Node: ${escapeHtml(prim.node_id)}` : '');
         html += `<div class="component-item" onclick="showComponentModal('primitive', ${index})">`;
         html += `<div class="component-item-name">${escapeHtml(name)}</div>`;
-        html += `<div class="component-item-meta">Provider: ${escapeHtml(prim.provider)} | Version: ${escapeHtml(prim.version)}</div>`;
+        html += `<div class="component-item-meta">Provider: ${escapeHtml(prim.provider)} | Version: ${escapeHtml(prim.version)}${nodeLabel}</div>`;
         html += `</div>`;
     });
     container.innerHTML = html;
@@ -447,8 +448,9 @@ function renderComponentListItem(type, item, index) {
             name = keyParts.length >= 3 ? keyParts.slice(0, keyParts.length - 2).join('$') : (keyParts[0] || item.key);
         }
         name = name || item.key || 'Unknown';
+        const nodeLabelPrim = (item.node_id ? ` | Node: ${escapeHtml(item.node_id)}` : '');
         html += `<div class="component-list-item-name">${escapeHtml(name)}</div>`;
-        html += `<div class="component-list-item-meta">Provider: ${escapeHtml(item.provider)} | Version: ${escapeHtml(item.version)}</div>`;
+        html += `<div class="component-list-item-meta">Provider: ${escapeHtml(item.provider)} | Version: ${escapeHtml(item.version)}${nodeLabelPrim}</div>`;
     } else if (type === 'service') {
         let name = item.name;
         if (!name && item.key) {
@@ -461,11 +463,13 @@ function renderComponentListItem(type, item, index) {
             metadata = JSON.parse(item.metadata || '{}');
         } catch (e) { }
         const status = metadata.status || 'unknown';
+        const nodeLabelSrv = (item.node_id ? ` | Node: ${escapeHtml(item.node_id)}` : '');
         html += `<div class="component-list-item-name">${escapeHtml(name)}</div>`;
-        html += `<div class="component-list-item-meta">Status: ${escapeHtml(status)} | Provider: ${escapeHtml(item.provider)}</div>`;
+        html += `<div class="component-list-item-meta">Status: ${escapeHtml(status)} | Provider: ${escapeHtml(item.provider)}${nodeLabelSrv}</div>`;
     } else if (type === 'skill') {
+        const nodeLabelSkl = (item.node_id ? ` | Node: ${escapeHtml(item.node_id)}` : '');
         html += `<div class="component-list-item-name">${escapeHtml(item.name)}</div>`;
-        html += `<div class="component-list-item-meta">Type: ${escapeHtml(item.type)} | Provider: ${escapeHtml(item.provider)}</div>`;
+        html += `<div class="component-list-item-meta">Type: ${escapeHtml(item.type)} | Provider: ${escapeHtml(item.provider)}${nodeLabelSkl}</div>`;
     } else if (type === 'task') {
         html += `<div class="component-list-item-name">${escapeHtml(item.task_id)}</div>`;
         html += `<div class="component-list-item-meta">${escapeHtml(item.description)} | State: ${item.state}</div>`;
@@ -554,6 +558,10 @@ function renderComponentItemDetail(type, item, index) {
         html += `<h3>${escapeHtml(name)}</h3>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Provider:</span><span class="component-detail-value">${escapeHtml(item.provider)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Version:</span><span class="component-detail-value">${escapeHtml(item.version)}</span></div>`;
+        if (item.node_id) {
+            html += `<div class="component-detail-field"><span class="component-detail-label">Registered by (node):</span><span class="component-detail-value">${escapeHtml(item.node_id)}</span></div>`;
+            html += `<div class="component-detail-actions"><button type="button" class="btn btn-outline-primary btn-sm" onclick="openNodeLogViewer('primitive', ${index})">View log</button></div>`;
+        }
         html += `<div class="component-detail-field"><span class="component-detail-label">Key:</span><span class="component-detail-value">${escapeHtml(item.key)}</span></div>`;
 
         html += `<div class="component-detail-field"><span class="component-detail-label">Input Schema:</span></div>`;
@@ -597,6 +605,10 @@ function renderComponentItemDetail(type, item, index) {
         html += `<div class="component-detail-field"><span class="component-detail-label">Status:</span><span class="component-detail-value">${escapeHtml(status)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Provider:</span><span class="component-detail-value">${escapeHtml(item.provider)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Version:</span><span class="component-detail-value">${escapeHtml(item.version)}</span></div>`;
+        if (item.node_id) {
+            html += `<div class="component-detail-field"><span class="component-detail-label">Registered by (node):</span><span class="component-detail-value">${escapeHtml(item.node_id)}</span></div>`;
+            html += `<div class="component-detail-actions"><button type="button" class="btn btn-outline-primary btn-sm" onclick="openNodeLogViewer('service', ${index})">View log</button></div>`;
+        }
         html += `<div class="component-detail-field"><span class="component-detail-label">Entry:</span><span class="component-detail-value">${escapeHtml(item.entry)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Key:</span><span class="component-detail-value">${escapeHtml(item.key)}</span></div>`;
 
@@ -608,6 +620,10 @@ function renderComponentItemDetail(type, item, index) {
         html += `<div class="component-detail-field"><span class="component-detail-label">Type:</span><span class="component-detail-value">${escapeHtml(item.type)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Provider:</span><span class="component-detail-value">${escapeHtml(item.provider)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Version:</span><span class="component-detail-value">${escapeHtml(item.version)}</span></div>`;
+        if (item.node_id) {
+            html += `<div class="component-detail-field"><span class="component-detail-label">Registered by (node):</span><span class="component-detail-value">${escapeHtml(item.node_id)}</span></div>`;
+            html += `<div class="component-detail-actions"><button type="button" class="btn btn-outline-primary btn-sm" onclick="openNodeLogViewer('skill', ${index})">View log</button></div>`;
+        }
         html += `<div class="component-detail-field"><span class="component-detail-label">Start Topic:</span><span class="component-detail-value">${escapeHtml(item.start_topic || 'N/A')}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Status Topic:</span><span class="component-detail-value">${escapeHtml(item.status_topic || 'N/A')}</span></div>`;
         if (item.skill_dir) {
@@ -662,6 +678,89 @@ function renderComponentItemDetail(type, item, index) {
 
     html += '</div>';
     return html;
+}
+
+// Node log viewer state (for remote CLI capability logs)
+let nodeLogViewerInterval = null;
+let nodeLogViewerNodeId = null;
+let nodeLogViewerCapabilityKey = null;
+
+function getItemForTypeAndIndex(type, index) {
+    if (type === 'primitive' && index >= 0 && index < primitivesData.length) return primitivesData[index];
+    if (type === 'service' && index >= 0 && index < servicesData.length) return servicesData[index];
+    if (type === 'skill' && index >= 0 && index < skillsData.length) return skillsData[index];
+    return null;
+}
+
+function getItemName(item, type) {
+    let name = item.name;
+    if (!name && item.key) {
+        const keyParts = item.key.split('$');
+        name = keyParts.length >= 3 ? keyParts.slice(0, keyParts.length - 2).join('$') : (keyParts[0] || item.key);
+    }
+    return name || item.key || '';
+}
+
+function openNodeLogViewer(type, index) {
+    const item = getItemForTypeAndIndex(type, index);
+    if (!item || !item.node_id) return;
+    const name = getItemName(item, type);
+    const capability_key = item.provider + '/' + name;
+    const node_id = item.node_id;
+
+    nodeLogViewerNodeId = node_id;
+    nodeLogViewerCapabilityKey = capability_key;
+
+    const modal = document.getElementById('node-log-modal');
+    const titleEl = document.getElementById('node-log-modal-title');
+    const metaEl = document.getElementById('node-log-modal-meta');
+    const contentEl = document.getElementById('node-log-modal-content');
+    if (!modal || !titleEl || !contentEl) return;
+
+    titleEl.textContent = `Log: ${name} @ ${node_id}`;
+    if (metaEl) metaEl.textContent = `Node: ${node_id} | Capability: ${capability_key}`;
+    contentEl.textContent = 'Opening log stream...';
+
+    modal.style.display = 'block';
+    setTimeout(() => modal.classList.add('show'), 10);
+
+    fetch('/api/log-subscriptions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ node_id, capability_key })
+    }).then(() => {
+        function poll() {
+            fetch(`/api/node-log?node_id=${encodeURIComponent(node_id)}&capability_key=${encodeURIComponent(capability_key)}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.content != null) contentEl.textContent = data.content;
+                    contentEl.scrollTop = contentEl.scrollHeight;
+                })
+                .catch(() => { });
+        }
+        poll();
+        if (nodeLogViewerInterval) clearInterval(nodeLogViewerInterval);
+        nodeLogViewerInterval = setInterval(poll, 1500);
+    }).catch(() => {
+        contentEl.textContent = 'Failed to open log stream. Ensure the CLI client (node) has core_http_url set and is pushing logs.';
+    });
+}
+
+function closeNodeLogViewer() {
+    if (nodeLogViewerInterval) {
+        clearInterval(nodeLogViewerInterval);
+        nodeLogViewerInterval = null;
+    }
+    if (nodeLogViewerNodeId != null && nodeLogViewerCapabilityKey != null) {
+        fetch(`/api/log-subscriptions?node_id=${encodeURIComponent(nodeLogViewerNodeId)}&capability_key=${encodeURIComponent(nodeLogViewerCapabilityKey)}`, { method: 'DELETE' }).catch(() => { });
+        nodeLogViewerNodeId = null;
+        nodeLogViewerCapabilityKey = null;
+    }
+    const modal = document.getElementById('node-log-modal');
+    if (modal) {
+        modal.classList.remove('show');
+        setTimeout(() => { modal.style.display = 'none'; }, 300);
+    }
 }
 
 function closeComponentListModal() {
@@ -722,9 +821,10 @@ function renderServices(services) {
             // Ignore parse errors
         }
         const status = metadata.status || 'unknown';
+        const nodeLabel = (srv.node_id ? ` | Node: ${escapeHtml(srv.node_id)}` : '');
         html += `<div class="component-item" onclick="showComponentModal('service', ${index})">`;
         html += `<div class="component-item-name">${escapeHtml(name)}</div>`;
-        html += `<div class="component-item-meta">Status: ${escapeHtml(status)} | Provider: ${escapeHtml(srv.provider)}</div>`;
+        html += `<div class="component-item-meta">Status: ${escapeHtml(status)} | Provider: ${escapeHtml(srv.provider)}${nodeLabel}</div>`;
         html += `</div>`;
     });
     container.innerHTML = html;
@@ -759,9 +859,10 @@ function renderSkills(skills) {
 
     let html = '';
     skills.forEach((skill, index) => {
+        const nodeLabel = (skill.node_id ? ` | Node: ${escapeHtml(skill.node_id)}` : '');
         html += `<div class="component-item" onclick="showComponentModal('skill', ${index})">`;
         html += `<div class="component-item-name">${escapeHtml(skill.name)}</div>`;
-        html += `<div class="component-item-meta">Type: ${escapeHtml(skill.type)} | Provider: ${escapeHtml(skill.provider)}</div>`;
+        html += `<div class="component-item-meta">Type: ${escapeHtml(skill.type)} | Provider: ${escapeHtml(skill.provider)}${nodeLabel}</div>`;
         html += `</div>`;
     });
     container.innerHTML = html;
@@ -1395,6 +1496,10 @@ function showComponentModal(type, index) {
         html += `<div class="component-detail-field"><span class="component-detail-label">Provider:</span><span class="component-detail-value">${escapeHtml(data.provider)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Version:</span><span class="component-detail-value">${escapeHtml(data.version)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Key:</span><span class="component-detail-value">${escapeHtml(data.key)}</span></div>`;
+        if (data.node_id) {
+            html += `<div class="component-detail-field"><span class="component-detail-label">Registered by (node):</span><span class="component-detail-value">${escapeHtml(data.node_id)}</span></div>`;
+            html += `<div class="component-detail-actions"><button type="button" class="btn btn-outline-primary btn-sm" onclick="openNodeLogViewer('primitive', ${index}); closeComponentModal();">View log</button></div>`;
+        }
         html += `</div>`;
 
         html += `<div class="component-detail-section">`;
@@ -1434,6 +1539,10 @@ function showComponentModal(type, index) {
         html += `<div class="component-detail-field"><span class="component-detail-label">Version:</span><span class="component-detail-value">${escapeHtml(data.version)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Entry:</span><span class="component-detail-value">${escapeHtml(data.entry)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Key:</span><span class="component-detail-value">${escapeHtml(data.key)}</span></div>`;
+        if (data.node_id) {
+            html += `<div class="component-detail-field"><span class="component-detail-label">Registered by (node):</span><span class="component-detail-value">${escapeHtml(data.node_id)}</span></div>`;
+            html += `<div class="component-detail-actions"><button type="button" class="btn btn-outline-primary btn-sm" onclick="openNodeLogViewer('service', ${index}); closeComponentModal();">View log</button></div>`;
+        }
         html += `</div>`;
 
         html += `<div class="component-detail-section">`;
@@ -1455,6 +1564,10 @@ function showComponentModal(type, index) {
         html += `<div class="component-detail-field"><span class="component-detail-label">Version:</span><span class="component-detail-value">${escapeHtml(data.version)}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Start Topic:</span><span class="component-detail-value">${escapeHtml(data.start_topic || 'N/A')}</span></div>`;
         html += `<div class="component-detail-field"><span class="component-detail-label">Status Topic:</span><span class="component-detail-value">${escapeHtml(data.status_topic || 'N/A')}</span></div>`;
+        if (data.node_id) {
+            html += `<div class="component-detail-field"><span class="component-detail-label">Registered by (node):</span><span class="component-detail-value">${escapeHtml(data.node_id)}</span></div>`;
+            html += `<div class="component-detail-actions"><button type="button" class="btn btn-outline-primary btn-sm" onclick="openNodeLogViewer('skill', ${index}); closeComponentModal();">View log</button></div>`;
+        }
         if (data.skill_dir) {
             html += `<div class="component-detail-field"><span class="component-detail-label">Skill Dir:</span><span class="component-detail-value">${escapeHtml(data.skill_dir)}</span></div>`;
         }
@@ -1602,6 +1715,7 @@ window.onclick = function (event) {
     const rtdlModal = document.getElementById('rtdl-modal');
     const componentModal = document.getElementById('component-modal');
     const componentListModal = document.getElementById('component-list-modal');
+    const nodeLogModal = document.getElementById('node-log-modal');
     const cancelConfirmModal = document.getElementById('cancel-task-confirm-modal');
     if (event.target == rtdlModal) {
         rtdlModal.classList.remove('show');
@@ -1620,6 +1734,13 @@ window.onclick = function (event) {
         setTimeout(() => {
             componentListModal.style.display = 'none';
         }, 300);
+    }
+    if (event.target == nodeLogModal) {
+        closeNodeLogViewer();
+    }
+    const nodeDetailModal = document.getElementById('node-detail-modal');
+    if (event.target == nodeDetailModal) {
+        closeNodeDetailModal();
     }
     if (event.target == cancelConfirmModal) {
         closeCancelConfirmModal();
@@ -1654,6 +1775,201 @@ function stopAutoRefreshComponents() {
     if (autoRefreshComponentsInterval) {
         clearInterval(autoRefreshComponentsInterval);
         autoRefreshComponentsInterval = null;
+    }
+}
+
+// Active CLI Nodes
+let nodesData = [];
+let autoRefreshNodesInterval = null;
+
+/** Infer OS family from machine_info.os_version (PRETTY_NAME, Kernel, etc.). */
+function getOsFamily(osVersionStr) {
+    if (!osVersionStr || typeof osVersionStr !== 'string') return 'unknown';
+    const s = osVersionStr.toLowerCase();
+    if (s.includes('darwin') || s.includes('macos') || s.includes('mac os')) return 'darwin';
+    if (s.includes('windows') || s.includes('microsoft')) return 'windows';
+    if (s.includes('linux') || s.includes('ubuntu') || s.includes('debian') || s.includes('fedora') || s.includes('centos') || s.includes('arch')) return 'linux';
+    return 'unknown';
+}
+
+/** Map os_version to distro image filename (without path). Images under /static/images/. */
+function getOsDistroImage(osVersionStr) {
+    if (!osVersionStr || typeof osVersionStr !== 'string') return null;
+    const s = osVersionStr.toLowerCase();
+    if (s.includes('ubuntu')) return 'ubuntu.svg';
+    if (s.includes('debian')) return 'debian.svg';
+    if (s.includes('fedora')) return 'fedora.svg';
+    if (s.includes('arch linux') || s.includes('archlinux')) return 'archlinux.svg';
+    if (s.includes('centos')) return 'centos.svg';
+    if (s.includes('opensuse') || s.includes('open suse')) return 'opensuse.svg';
+    if (s.includes('linux mint') || s.includes('linuxmint')) return 'linuxmint.svg';
+    if (s.includes('manjaro')) return 'manjaro.svg';
+    if (s.includes('nixos')) return 'nixos.svg';
+    if (s.includes('rocky linux') || s.includes('rockylinux')) return 'rockylinux.svg';
+    if (s.includes('alpine')) return 'alpinelinux.svg';
+    if (s.includes('gentoo')) return 'gentoo.svg';
+    if (s.includes('kali')) return 'kalilinux.svg';
+    if (s.includes('red hat') || s.includes('redhat')) return 'redhat.svg';
+    if (s.includes('alma linux') || s.includes('almalinux')) return 'almalinux.png';
+    if (s.includes('linux')) return 'linux.svg';
+    return null;
+}
+
+/** Node host icon: use /static/images/{distro}.svg when available, else inline SVG fallback. */
+function getNodeHostIcon(osVersionStr) {
+    const distroImage = getOsDistroImage(osVersionStr);
+    if (distroImage) {
+        const cls = 'node-host-icon node-host-icon-img';
+        return '<img class="' + cls + '" src="/static/images/' + distroImage + '" alt="" aria-hidden="true">';
+    }
+    const osFamily = getOsFamily(osVersionStr);
+    const cls = 'node-host-icon node-host-icon-' + osFamily;
+    const svg = '<svg class="' + cls + '" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20 3H4c-1.1 0-2 .9-2 2v11c0 1.1.9 2 2 2h3l-1 3h2l1-3h8l1 3h2l-1-3h3c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 13H4V5h16v11z"/></svg>';
+    return svg;
+}
+
+async function loadNodes() {
+    const container = document.getElementById('nodes-container');
+    if (!container) return;
+    try {
+        const response = await fetch('/api/nodes');
+        const data = await response.json();
+        nodesData = data.nodes || [];
+        renderNodes(nodesData);
+    } catch (error) {
+        console.error('Failed to load nodes:', error);
+        container.innerHTML = `Error: ${error.message}`;
+    }
+}
+
+function renderNodes(nodes) {
+    const container = document.getElementById('nodes-container');
+    if (!container) return;
+    const countEl = document.getElementById('nodes-count');
+    if (countEl) countEl.textContent = nodes.length;
+
+    if (nodes.length === 0) {
+        const coreUrl = 'http://' + (window.location.host || 'core-host:8080');
+        container.innerHTML = '<div class="component-item nodes-empty-hint">No active CLI nodes. Set <code>core_http_url: ' + escapeHtml(coreUrl) + '</code> in <code>~/.robonix/config.yaml</code> on each CLI machine, then start or restart the daemon (<code>rbnx daemon start</code>).</div>';
+        return;
+    }
+
+    let html = '';
+    nodes.forEach((node, index) => {
+        const aliveClass = node.alive ? 'node-alive' : 'node-dead';
+        const statusText = node.alive ? 'Alive' : 'Offline';
+        const ago = node.last_seen_ago_secs != null ? (node.last_seen_ago_secs < 60 ? `${node.last_seen_ago_secs}s ago` : `${Math.floor(node.last_seen_ago_secs / 60)}m ago`) : '';
+        const osVersion = (node.machine_info && node.machine_info.os_version) || '';
+        const hostIcon = getNodeHostIcon(osVersion);
+        html += `<div class="component-item node-item ${aliveClass}" onclick="showNodeDetailModal(${index})">`;
+        html += `<span class="node-item-icon" title="${escapeHtml(osVersion.split('\n')[0] || osFamily)}">${hostIcon}</span>`;
+        html += `<div class="node-item-body"><div class="component-item-name">${escapeHtml(node.node_id)}</div>`;
+        html += `<div class="component-item-meta">${statusText} | Last seen: ${ago}</div></div>`;
+        html += `</div>`;
+    });
+    container.innerHTML = html;
+}
+
+function showNodeDetailModal(index) {
+    if (index < 0 || index >= nodesData.length) return;
+    const node = nodesData[index];
+    const modal = document.getElementById('node-detail-modal');
+    const titleEl = document.getElementById('node-detail-modal-title');
+    const contentEl = document.getElementById('node-detail-modal-content');
+    if (!modal || !titleEl || !contentEl) return;
+
+    const osVersion = (node.machine_info && node.machine_info.os_version) || '';
+    const hostIcon = getNodeHostIcon(osVersion);
+    titleEl.innerHTML = `<span class="node-detail-title-icon">${hostIcon}</span> Node: ${escapeHtml(node.node_id)}`;
+    const aliveClass = node.alive ? 'node-alive' : 'node-dead';
+    const statusText = node.alive ? 'Alive' : 'Offline';
+    const ago = node.last_seen_ago_secs != null ? (node.last_seen_ago_secs < 60 ? `${node.last_seen_ago_secs}s ago` : `${Math.floor(node.last_seen_ago_secs / 60)}m ago`) : '';
+
+    let html = `<div class="node-detail-section"><span class="node-detail-badge ${aliveClass}">${statusText}</span> Last updated: ${ago}</div>`;
+
+    function collapseBlock(title, body, collapsed) {
+        const id = 'collapse-' + Math.random().toString(36).slice(2, 9);
+        const cls = collapsed ? 'node-detail-collapse collapsed' : 'node-detail-collapse';
+        const arrow = collapsed ? '▶' : '▼';
+        return `<div class="${cls}" data-collapsed="${collapsed}"><div class="node-detail-collapse-header" onclick="toggleNodeDetailCollapse(this)"><span class="node-detail-collapse-arrow">${arrow}</span> ${title}</div><div class="node-detail-collapse-body">${body}</div></div>`;
+    }
+
+    if (node.machine_info) {
+        const m = node.machine_info;
+        html += '<div class="node-detail-section"><h4>Machine info</h4>';
+        if (m.os_version) html += `<div class="component-detail-field"><span class="component-detail-label">OS:</span><pre class="node-detail-pre">${escapeHtml(m.os_version)}</pre></div>`;
+        if (m.cpu_info) html += `<div class="component-detail-field"><span class="component-detail-label">CPU:</span><pre class="node-detail-pre">${escapeHtml(m.cpu_info)}</pre></div>`;
+        if (m.memory_info) html += `<div class="component-detail-field"><span class="component-detail-label">Memory:</span><pre class="node-detail-pre">${escapeHtml(m.memory_info)}</pre></div>`;
+        if (m.disk_info) html += `<div class="component-detail-field"><span class="component-detail-label">Disk:</span><pre class="node-detail-pre">${escapeHtml(m.disk_info)}</pre></div>`;
+        if (m.hw_info) html += collapseBlock('Hardware (PCI / USB / lshw)', `<pre class="node-detail-pre">${escapeHtml(m.hw_info)}</pre>`, true);
+        html += '</div>';
+    }
+
+    if (node.capability_status) {
+        const cap = node.capability_status;
+        let capBody = '';
+        if (cap.active_recipe) capBody += `<div class="component-detail-field"><span class="component-detail-label">Active recipe:</span><span class="component-detail-value">${escapeHtml(cap.active_recipe)}</span></div>`;
+        if (cap.running && cap.running.length) {
+            capBody += '<div class="component-detail-field"><span class="component-detail-label">Running:</span></div><table class="node-detail-table"><thead><tr><th>Type</th><th>Name</th><th>Package</th><th>PID</th></tr></thead><tbody>';
+            cap.running.forEach(r => {
+                capBody += `<tr><td>${escapeHtml(r.package_type)}</td><td>${escapeHtml(r.std_name)}</td><td>${escapeHtml(r.package_name)}</td><td>${r.pid}</td></tr>`;
+            });
+            capBody += '</tbody></table>';
+        }
+        if (cap.packages && cap.packages.length) {
+            capBody += '<div class="component-detail-field"><span class="component-detail-label">Packages:</span></div><ul class="node-detail-list node-detail-packages">';
+            cap.packages.forEach(p => {
+                capBody += `<li>${escapeHtml(p.name)} ${escapeHtml(p.version || '')}</li>`;
+            });
+            capBody += '</ul>';
+        }
+        if (!cap.active_recipe && (!cap.packages || !cap.packages.length) && (!cap.running || !cap.running.length)) {
+            capBody = '<div class="component-detail-value">No data</div>';
+        }
+        if (capBody) html += '<div class="node-detail-section"><h4>Capability status</h4>' + collapseBlock('Running &amp; packages', capBody, true) + '</div>';
+    }
+
+    contentEl.innerHTML = html;
+    modal.style.display = 'block';
+    setTimeout(() => modal.classList.add('show'), 10);
+}
+
+function toggleNodeDetailCollapse(headerEl) {
+    const block = headerEl.closest('.node-detail-collapse');
+    if (!block) return;
+    const body = block.querySelector('.node-detail-collapse-body');
+    const arrow = block.querySelector('.node-detail-collapse-arrow');
+    const collapsed = block.classList.toggle('collapsed');
+    if (arrow) arrow.textContent = collapsed ? '▶' : '▼';
+}
+
+function closeNodeDetailModal() {
+    const modal = document.getElementById('node-detail-modal');
+    if (modal) {
+        modal.classList.remove('show');
+        setTimeout(() => { modal.style.display = 'none'; }, 300);
+    }
+}
+
+function setupAutoRefreshNodes() {
+    const checkbox = document.getElementById('auto-refresh-nodes');
+    if (!checkbox) return;
+    checkbox.addEventListener('change', (e) => {
+        if (e.target.checked) startAutoRefreshNodes();
+        else stopAutoRefreshNodes();
+    });
+    if (checkbox.checked) startAutoRefreshNodes();
+}
+
+function startAutoRefreshNodes() {
+    if (autoRefreshNodesInterval) clearInterval(autoRefreshNodesInterval);
+    autoRefreshNodesInterval = setInterval(loadNodes, 3000);
+}
+
+function stopAutoRefreshNodes() {
+    if (autoRefreshNodesInterval) {
+        clearInterval(autoRefreshNodesInterval);
+        autoRefreshNodesInterval = null;
     }
 }
 
@@ -1856,9 +2172,9 @@ async function initAudioRecording() {
             audioStream.getTracks().forEach(track => track.stop());
             audioStream = null;
         }
-        
+
         // Get new stream
-        audioStream = await navigator.mediaDevices.getUserMedia({ 
+        audioStream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 sampleRate: 16000,
                 channelCount: 1,
@@ -1866,32 +2182,32 @@ async function initAudioRecording() {
                 noiseSuppression: true
             }
         });
-        
+
         // Use webm format (will convert to WAV later)
         const options = {
             mimeType: 'audio/webm;codecs=opus',
             audioBitsPerSecond: 16000
         };
-        
+
         // Check if mimeType is supported
         if (!MediaRecorder.isTypeSupported(options.mimeType)) {
             console.warn('WebM with Opus not supported, using default');
             options.mimeType = '';
         }
-        
+
         mediaRecorder = new MediaRecorder(audioStream, options);
-        
-        mediaRecorder.ondataavailable = function(event) {
+
+        mediaRecorder.ondataavailable = function (event) {
             if (event.data.size > 0) {
                 audioChunks.push(event.data);
             }
         };
-        
-        mediaRecorder.onstop = async function() {
+
+        mediaRecorder.onstop = async function () {
             // Don't stop stream here, we'll reuse it
             const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
             audioChunks = [];
-            
+
             // Convert to WAV format for Aliyun STT
             try {
                 const wavBlob = await convertToWav(audioBlob);
@@ -1901,7 +2217,7 @@ async function initAudioRecording() {
                     originalType: audioBlob.type,
                     wavType: wavBlob.type
                 });
-                
+
                 // Send to backend (backend will save both original and converted files)
                 await sendAudioToSTT(wavBlob, audioBlob);
             } catch (error) {
@@ -1909,13 +2225,13 @@ async function initAudioRecording() {
                 alert('Failed to process audio: ' + error.message);
             }
         };
-        
-        mediaRecorder.onerror = function(event) {
+
+        mediaRecorder.onerror = function (event) {
             console.error('MediaRecorder error:', event.error);
             stopVoiceInput();
             alert('Audio recording error: ' + event.error);
         };
-        
+
         return true;
     } catch (error) {
         console.error('Failed to initialize audio recording:', error);
@@ -1933,21 +2249,21 @@ async function convertToWav(audioBlob) {
         });
         const arrayBuffer = await audioBlob.arrayBuffer();
         const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-        
+
         console.log('AudioBuffer info:', {
             sampleRate: audioBuffer.sampleRate,
             length: audioBuffer.length,
             duration: audioBuffer.duration,
             numberOfChannels: audioBuffer.numberOfChannels
         });
-        
+
         // Resample to 16000 Hz if needed
         let processedBuffer = audioBuffer;
         if (audioBuffer.sampleRate !== 16000) {
             console.log(`Resampling from ${audioBuffer.sampleRate} Hz to 16000 Hz`);
             processedBuffer = await resampleAudioBuffer(audioBuffer, 16000);
         }
-        
+
         // Convert AudioBuffer to WAV
         const wav = audioBufferToWav(processedBuffer);
         return new Blob([wav], { type: 'audio/wav' });
@@ -1965,12 +2281,12 @@ async function resampleAudioBuffer(sourceBuffer, targetSampleRate) {
         Math.floor(sourceBuffer.length * targetSampleRate / sourceBuffer.sampleRate),
         targetSampleRate
     );
-    
+
     const source = offlineContext.createBufferSource();
     source.buffer = sourceBuffer;
     source.connect(offlineContext.destination);
     source.start();
-    
+
     return await offlineContext.startRendering();
 }
 
@@ -1984,17 +2300,17 @@ function audioBufferToWav(buffer) {
     const byteRate = sampleRate * blockAlign;
     const dataSize = length * blockAlign;
     const bufferSize = 44 + dataSize;
-    
+
     const arrayBuffer = new ArrayBuffer(bufferSize);
     const view = new DataView(arrayBuffer);
-    
+
     // WAV header
     const writeString = (offset, string) => {
         for (let i = 0; i < string.length; i++) {
             view.setUint8(offset + i, string.charCodeAt(i));
         }
     };
-    
+
     writeString(0, 'RIFF');
     view.setUint32(4, bufferSize - 8, true);
     writeString(8, 'WAVE');
@@ -2008,7 +2324,7 @@ function audioBufferToWav(buffer) {
     view.setUint16(34, 16, true); // bits per sample
     writeString(36, 'data');
     view.setUint32(40, dataSize, true);
-    
+
     // Convert float samples to 16-bit PCM
     let offset = 44;
     for (let i = 0; i < length; i++) {
@@ -2018,7 +2334,7 @@ function audioBufferToWav(buffer) {
             offset += 2;
         }
     }
-    
+
     return arrayBuffer;
 }
 
@@ -2029,7 +2345,7 @@ async function sendAudioToSTT(audioBlob, originalBlob = null) {
             size: audioBlob.size,
             type: audioBlob.type
         });
-        
+
         const response = await fetch('/api/stt', {
             method: 'POST',
             body: audioBlob,
@@ -2037,9 +2353,9 @@ async function sendAudioToSTT(audioBlob, originalBlob = null) {
                 'Content-Type': 'application/octet-stream'
             }
         });
-        
+
         console.log('STT response status:', response.status, response.statusText);
-        
+
         if (!response.ok) {
             const errorText = await response.text().catch(() => 'Unknown error');
             console.error('STT HTTP error:', {
@@ -2049,10 +2365,10 @@ async function sendAudioToSTT(audioBlob, originalBlob = null) {
             });
             throw new Error(`STT API error (${response.status}): ${errorText}`);
         }
-        
+
         const result = await response.json();
         console.log('STT response:', result);
-        
+
         if (result.status === 'success' && result.result) {
             const input = document.getElementById('agent-input');
             if (input) {
@@ -2084,13 +2400,13 @@ async function toggleVoiceInput() {
         if (!initialized) {
             return;
         }
-        
+
         if (mediaRecorder && mediaRecorder.state === 'inactive') {
             audioChunks = [];
             try {
                 mediaRecorder.start();
                 isRecording = true;
-                
+
                 const btn = document.getElementById('agent-voice-input-btn');
                 const icon = document.getElementById('voice-input-icon');
                 if (btn) {
@@ -2131,15 +2447,15 @@ async function speakText(text) {
     if (!ttsToggle || !ttsToggle.checked) {
         return; // TTS disabled
     }
-    
+
     if (!text || text.trim().length === 0) {
         return;
     }
-    
+
     try {
         // Stop any current speech
         stopSpeaking();
-        
+
         // Call backend TTS API
         const response = await fetch('/api/tts', {
             method: 'POST',
@@ -2152,30 +2468,30 @@ async function speakText(text) {
                 voice: 'zhishuo'
             }),
         });
-        
+
         if (!response.ok) {
             throw new Error(`TTS API error: ${response.status}`);
         }
-        
+
         // Get audio data
         const audioBlob = await response.blob();
         const audioUrl = URL.createObjectURL(audioBlob);
-        
+
         // Create audio element and play
         const audio = new Audio(audioUrl);
         currentUtterance = audio;
-        
-        audio.onended = function() {
+
+        audio.onended = function () {
             URL.revokeObjectURL(audioUrl);
             currentUtterance = null;
         };
-        
-        audio.onerror = function(event) {
+
+        audio.onerror = function (event) {
             console.error('Audio playback error:', event);
             URL.revokeObjectURL(audioUrl);
             currentUtterance = null;
         };
-        
+
         await audio.play();
     } catch (error) {
         console.error('Failed to synthesize speech:', error);
@@ -2200,7 +2516,7 @@ function stopSpeaking() {
         currentUtterance.currentTime = 0;
         currentUtterance = null;
     }
-    
+
     // Stop browser TTS
     if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();
@@ -2208,10 +2524,10 @@ function stopSpeaking() {
 }
 
 // Stop speaking when TTS toggle is turned off
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', function () {
     const ttsToggle = document.getElementById('agent-tts-toggle');
     if (ttsToggle) {
-        ttsToggle.addEventListener('change', function() {
+        ttsToggle.addEventListener('change', function () {
             if (!this.checked) {
                 stopSpeaking();
             }
@@ -2224,13 +2540,13 @@ function clearAgentChat() {
     if (!confirm('Clear all chat messages? This will only clear the display, not the agent\'s memory.')) {
         return;
     }
-    
+
     const chatContainer = document.getElementById('agent-chat-messages');
     if (!chatContainer) return;
-    
+
     // Clear all messages
     chatContainer.innerHTML = '';
-    
+
     // Add welcome message back
     const welcomeMessage = document.createElement('div');
     welcomeMessage.className = 'agent-message agent-message-bot';
@@ -2239,7 +2555,7 @@ function clearAgentChat() {
     welcomeContent.textContent = 'Hello! I\'m the Robonix agent. I can help you query the semantic map, submit tasks, and query system capabilities. How can I assist you?';
     welcomeMessage.appendChild(welcomeContent);
     chatContainer.appendChild(welcomeMessage);
-    
+
     // Clear localStorage
     localStorage.removeItem(CHAT_HISTORY_KEY);
 }
@@ -2249,7 +2565,7 @@ async function resetAgent() {
     if (!confirm('Reset agent? This will clear the agent\'s conversation history on the server.')) {
         return;
     }
-    
+
     try {
         const response = await fetch('/api/agent/reset', {
             method: 'POST',
@@ -2257,16 +2573,16 @@ async function resetAgent() {
                 'Content-Type': 'application/json',
             },
         });
-        
+
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
-        
+
         // Clear local chat and localStorage
         const chatContainer = document.getElementById('agent-chat-messages');
         if (chatContainer) {
             chatContainer.innerHTML = '';
-            
+
             // Add welcome message back
             const welcomeMessage = document.createElement('div');
             welcomeMessage.className = 'agent-message agent-message-bot';
@@ -2275,7 +2591,7 @@ async function resetAgent() {
             welcomeContent.textContent = 'Hello! I\'m the Robonix agent. I can help you query the semantic map, submit tasks, and query system capabilities. How can I assist you?';
             welcomeMessage.appendChild(welcomeContent);
             chatContainer.appendChild(welcomeMessage);
-            
+
             // Add success message
             const successMessage = document.createElement('div');
             successMessage.className = 'agent-message agent-message-bot';
@@ -2285,10 +2601,10 @@ async function resetAgent() {
             successContent.textContent = 'Agent has been reset. Conversation history cleared.';
             successMessage.appendChild(successContent);
             chatContainer.appendChild(successMessage);
-            
+
             chatContainer.scrollTop = chatContainer.scrollHeight;
         }
-        
+
         // Clear localStorage
         localStorage.removeItem(CHAT_HISTORY_KEY);
     } catch (error) {
@@ -2305,31 +2621,31 @@ function saveChatHistory() {
     try {
         const chatContainer = document.getElementById('agent-chat-messages');
         if (!chatContainer) return;
-        
+
         const messages = [];
         const messageElements = chatContainer.querySelectorAll('.agent-message:not(#agent-loading)');
-        
+
         messageElements.forEach((msgEl) => {
             const isUser = msgEl.classList.contains('agent-message-user');
             const contentEl = msgEl.querySelector('.agent-message-content');
-            
+
             if (contentEl) {
                 const messageData = {
                     type: isUser ? 'user' : 'bot',
                     content: contentEl.textContent,
                     functionCalls: []
                 };
-                
+
                 // Extract function calls if any
                 const functionCalls = msgEl.querySelectorAll('.agent-function-call');
                 functionCalls.forEach((funcCallEl) => {
                     const funcName = funcCallEl.querySelector('.function-name')?.textContent || '';
                     const funcArgsEl = funcCallEl.querySelector('.agent-function-args');
                     const funcResultEl = funcCallEl.querySelector('.agent-function-result');
-                    
+
                     let args = {};
                     let result = {};
-                    
+
                     try {
                         if (funcArgsEl) {
                             args = JSON.parse(funcArgsEl.textContent.replace(/^Arguments:\s*/, ''));
@@ -2337,7 +2653,7 @@ function saveChatHistory() {
                     } catch (e) {
                         args = { raw: funcArgsEl?.textContent || '' };
                     }
-                    
+
                     try {
                         if (funcResultEl) {
                             result = JSON.parse(funcResultEl.textContent.replace(/^Result:\s*/, ''));
@@ -2345,18 +2661,18 @@ function saveChatHistory() {
                     } catch (e) {
                         result = { raw: funcResultEl?.textContent || '' };
                     }
-                    
+
                     messageData.functionCalls.push({
                         name: funcName,
                         arguments: args,
                         result: result
                     });
                 });
-                
+
                 messages.push(messageData);
             }
         });
-        
+
         // Keep only last MAX_HISTORY_SIZE messages
         const messagesToSave = messages.slice(-MAX_HISTORY_SIZE);
         localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(messagesToSave));
@@ -2369,13 +2685,13 @@ function loadChatHistory() {
     try {
         const saved = localStorage.getItem(CHAT_HISTORY_KEY);
         if (!saved) return;
-        
+
         const messages = JSON.parse(saved);
         if (!Array.isArray(messages) || messages.length === 0) return;
-        
+
         const chatContainer = document.getElementById('agent-chat-messages');
         if (!chatContainer) return;
-        
+
         // Clear existing messages (except initial welcome message)
         const existingMessages = chatContainer.querySelectorAll('.agent-message');
         let hasWelcomeMessage = false;
@@ -2387,7 +2703,7 @@ function loadChatHistory() {
             }
             msg.remove();
         });
-        
+
         // If we have saved history, remove welcome message to avoid duplication
         if (hasWelcomeMessage && messages.length > 0) {
             const welcomeMsg = chatContainer.querySelector('.agent-message');
@@ -2395,7 +2711,7 @@ function loadChatHistory() {
                 welcomeMsg.remove();
             }
         }
-        
+
         // Restore messages
         messages.forEach((msgData, index) => {
             const messageEl = document.createElement('div');
@@ -2403,24 +2719,24 @@ function loadChatHistory() {
             // Disable animation for restored messages to avoid overwhelming animation
             messageEl.style.animation = 'none';
             messageEl.style.opacity = '1';
-            
+
             if (msgData.content) {
                 const contentEl = document.createElement('div');
                 contentEl.className = 'agent-message-content';
                 contentEl.textContent = msgData.content;
                 messageEl.appendChild(contentEl);
             }
-            
+
             // Restore function calls
             if (msgData.functionCalls && msgData.functionCalls.length > 0) {
                 msgData.functionCalls.forEach((funcCall) => {
                     const funcCallDiv = document.createElement('div');
                     funcCallDiv.className = 'agent-function-call';
-                    
+
                     const funcHeader = document.createElement('div');
                     funcHeader.className = 'agent-function-header';
                     funcHeader.style.cursor = 'pointer';
-                    funcHeader.onclick = function() {
+                    funcHeader.onclick = function () {
                         const details = funcCallDiv.querySelector('.agent-function-details');
                         if (details) {
                             details.classList.toggle('expanded');
@@ -2432,38 +2748,38 @@ function loadChatHistory() {
                     };
                     funcHeader.innerHTML = `<span class="function-toggle">▶</span> <span class="function-icon">⚙️</span> <span class="function-name">${escapeHtml(funcCall.name)}</span>`;
                     funcCallDiv.appendChild(funcHeader);
-                    
+
                     const detailsDiv = document.createElement('div');
                     detailsDiv.className = 'agent-function-details';
-                    
+
                     const argsLabel = document.createElement('div');
                     argsLabel.className = 'agent-function-label';
                     argsLabel.textContent = 'Arguments:';
                     detailsDiv.appendChild(argsLabel);
-                    
+
                     const funcArgs = document.createElement('div');
                     funcArgs.className = 'agent-function-args';
                     funcArgs.textContent = JSON.stringify(funcCall.arguments, null, 2);
                     detailsDiv.appendChild(funcArgs);
-                    
+
                     const resultLabel = document.createElement('div');
                     resultLabel.className = 'agent-function-label';
                     resultLabel.textContent = 'Result:';
                     detailsDiv.appendChild(resultLabel);
-                    
+
                     const funcResult = document.createElement('div');
                     funcResult.className = 'agent-function-result';
                     funcResult.textContent = JSON.stringify(funcCall.result, null, 2);
                     detailsDiv.appendChild(funcResult);
-                    
+
                     funcCallDiv.appendChild(detailsDiv);
                     messageEl.appendChild(funcCallDiv);
                 });
             }
-            
+
             chatContainer.appendChild(messageEl);
         });
-        
+
         // Scroll to bottom after rendering
         requestAnimationFrame(() => {
             chatContainer.scrollTop = chatContainer.scrollHeight;
@@ -2477,12 +2793,12 @@ function loadChatHistory() {
 async function sendAgentMessage() {
     const input = document.getElementById('agent-input');
     const message = input.value.trim();
-    
+
     if (!message) return;
-    
+
     // Clear input
     input.value = '';
-    
+
     // Add user message to chat
     const chatContainer = document.getElementById('agent-chat-messages');
     const userMessage = document.createElement('div');
@@ -2492,13 +2808,13 @@ async function sendAgentMessage() {
     userContent.textContent = message;
     userMessage.appendChild(userContent);
     chatContainer.appendChild(userMessage);
-    
+
     // Save chat history
     saveChatHistory();
-    
+
     // Scroll to bottom
     chatContainer.scrollTop = chatContainer.scrollHeight;
-    
+
     // Show loading indicator with typing animation
     const loadingMessage = document.createElement('div');
     loadingMessage.className = 'agent-message agent-message-bot';
@@ -2509,7 +2825,7 @@ async function sendAgentMessage() {
     loadingMessage.appendChild(loadingContent);
     chatContainer.appendChild(loadingMessage);
     chatContainer.scrollTop = chatContainer.scrollHeight;
-    
+
     try {
         const response = await fetch('/api/agent/chat', {
             method: 'POST',
@@ -2518,23 +2834,23 @@ async function sendAgentMessage() {
             },
             body: JSON.stringify({ message }),
         });
-        
+
+        const data = await response.json().catch(() => ({}));
         if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
+            const msg = data.error || response.statusText || `HTTP error ${response.status}`;
+            throw new Error(msg);
         }
-        
-        const data = await response.json();
-        
+
         // Remove loading indicator
         const loading = document.getElementById('agent-loading');
         if (loading) {
             loading.remove();
         }
-        
+
         // Add agent response (strip markdown if any)
         const agentMessage = document.createElement('div');
         agentMessage.className = 'agent-message agent-message-bot';
-        
+
         // Add natural language message (only if not empty)
         const messageText = stripMarkdown(data.message || '');
         if (messageText.trim()) {
@@ -2542,23 +2858,23 @@ async function sendAgentMessage() {
             agentContent.className = 'agent-message-content';
             agentContent.textContent = messageText;
             agentMessage.appendChild(agentContent);
-            
+
             // Speak the response if TTS is enabled (async, don't wait)
             speakText(messageText).catch(err => {
                 console.error('TTS error:', err);
             });
         }
-        
+
         // Add function calls if any
         if (data.function_calls && data.function_calls.length > 0) {
             data.function_calls.forEach((funcCall, index) => {
                 const funcCallDiv = document.createElement('div');
                 funcCallDiv.className = 'agent-function-call';
-                
+
                 const funcHeader = document.createElement('div');
                 funcHeader.className = 'agent-function-header';
                 funcHeader.style.cursor = 'pointer';
-                funcHeader.onclick = function() {
+                funcHeader.onclick = function () {
                     const details = funcCallDiv.querySelector('.agent-function-details');
                     if (details) {
                         details.classList.toggle('expanded');
@@ -2570,17 +2886,17 @@ async function sendAgentMessage() {
                 };
                 funcHeader.innerHTML = `<span class="function-toggle">▶</span> <span class="function-icon">⚙️</span> <span class="function-name">${escapeHtml(funcCall.name)}</span>`;
                 funcCallDiv.appendChild(funcHeader);
-                
+
                 // Details container (collapsible)
                 const detailsDiv = document.createElement('div');
                 detailsDiv.className = 'agent-function-details';
-                
+
                 // Arguments section
                 const argsLabel = document.createElement('div');
                 argsLabel.className = 'agent-function-label';
                 argsLabel.textContent = 'Arguments:';
                 detailsDiv.appendChild(argsLabel);
-                
+
                 const funcArgs = document.createElement('div');
                 funcArgs.className = 'agent-function-args';
                 try {
@@ -2589,13 +2905,13 @@ async function sendAgentMessage() {
                     funcArgs.textContent = String(funcCall.arguments);
                 }
                 detailsDiv.appendChild(funcArgs);
-                
+
                 // Result section
                 const resultLabel = document.createElement('div');
                 resultLabel.className = 'agent-function-label';
                 resultLabel.textContent = 'Result:';
                 detailsDiv.appendChild(resultLabel);
-                
+
                 const funcResult = document.createElement('div');
                 funcResult.className = 'agent-function-result';
                 try {
@@ -2604,28 +2920,28 @@ async function sendAgentMessage() {
                     funcResult.textContent = String(funcCall.result);
                 }
                 detailsDiv.appendChild(funcResult);
-                
+
                 funcCallDiv.appendChild(detailsDiv);
                 agentMessage.appendChild(funcCallDiv);
             });
         }
-        
+
         chatContainer.appendChild(agentMessage);
-        
+
         // Save chat history
         saveChatHistory();
-        
+
         // Scroll to bottom
         chatContainer.scrollTop = chatContainer.scrollHeight;
     } catch (error) {
         console.error('Failed to send agent message:', error);
-        
+
         // Remove loading indicator
         const loading = document.getElementById('agent-loading');
         if (loading) {
             loading.remove();
         }
-        
+
         // Show error message
         const errorMessage = document.createElement('div');
         errorMessage.className = 'agent-message agent-message-bot';
@@ -2635,17 +2951,17 @@ async function sendAgentMessage() {
         errorContent.textContent = `Error: ${error.message}`;
         errorMessage.appendChild(errorContent);
         chatContainer.appendChild(errorMessage);
-        
+
         // Save chat history
         saveChatHistory();
-        
+
         // Scroll to bottom
         chatContainer.scrollTop = chatContainer.scrollHeight;
     }
 }
 
 // Mobile menu toggle
-document.getElementById('navbarToggle')?.addEventListener('click', function() {
+document.getElementById('navbarToggle')?.addEventListener('click', function () {
     const menu = document.getElementById('navbarMenu');
     if (menu) {
         menu.classList.toggle('active');
@@ -2658,11 +2974,13 @@ loadTfTree();
 loadTopics();
 loadLogs();
 loadComponents();
+loadNodes();
 loadVisualization();
 loadSemanticMap2D();
 setupAutoRefresh();
 setupAutoRefreshLogs();
 setupAutoRefreshComponents();
+setupAutoRefreshNodes();
 setupAutoRefreshViz();
 setupAutoRefreshMap2D();
 setupMap2DInteraction();

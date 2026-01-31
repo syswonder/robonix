@@ -8,7 +8,7 @@ use rocket::data::ByteUnit;
 use rocket::response::content::RawHtml;
 use rocket::serde::{Deserialize, Serialize, json::Json};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -57,6 +57,168 @@ impl LogBuffer {
     }
 }
 
+/// Tracks which node capability logs are "open" in the web UI and buffers their content.
+/// Only opened logs are updated; CLI pushes content only for subscribed (node_id, capability_key).
+#[derive(Clone)]
+pub struct NodeLogState {
+    /// (node_id, capability_key) currently open in some viewer
+    subscriptions: Arc<Mutex<HashSet<(String, String)>>>,
+    /// Buffered log content for opened streams; cleared when subscription is removed
+    logs: Arc<Mutex<HashMap<(String, String), String>>>,
+}
+
+impl NodeLogState {
+    pub fn new() -> Self {
+        Self {
+            subscriptions: Arc::new(Mutex::new(HashSet::new())),
+            logs: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub async fn add_subscription(&self, node_id: String, capability_key: String) {
+        let key = (node_id, capability_key);
+        let mut sub = self.subscriptions.lock().await;
+        sub.insert(key.clone());
+        drop(sub);
+        // Optionally clear previous content so viewer gets fresh tail
+        let mut logs = self.logs.lock().await;
+        logs.remove(&key);
+    }
+
+    pub async fn remove_subscription(&self, node_id: &str, capability_key: &str) {
+        let key = (node_id.to_string(), capability_key.to_string());
+        let mut sub = self.subscriptions.lock().await;
+        sub.remove(&key);
+        drop(sub);
+        let mut logs = self.logs.lock().await;
+        logs.remove(&key);
+    }
+
+    /// Returns capability_keys for the given node_id (for CLI to know what to push)
+    pub async fn get_subscriptions_for_node(&self, node_id: &str) -> Vec<String> {
+        let sub = self.subscriptions.lock().await;
+        sub.iter()
+            .filter(|(n, _)| n == node_id)
+            .map(|(_, k)| k.clone())
+            .collect()
+    }
+
+    /// Store log content from CLI; only stored if (node_id, capability_key) is subscribed
+    pub async fn push_log(&self, node_id: String, capability_key: String, content: String) {
+        let key = (node_id, capability_key);
+        let sub = self.subscriptions.lock().await;
+        if !sub.contains(&key) {
+            return;
+        }
+        drop(sub);
+        let mut logs = self.logs.lock().await;
+        logs.insert(key, content);
+    }
+
+    pub async fn get_log(&self, node_id: &str, capability_key: &str) -> Option<String> {
+        let key = (node_id.to_string(), capability_key.to_string());
+        let logs = self.logs.lock().await;
+        logs.get(&key).cloned()
+    }
+}
+
+/// Alive threshold: node is considered dead if no status update for this many seconds.
+const NODE_ALIVE_THRESHOLD_SECS: u64 = 60;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MachineInfo {
+    pub os_version: Option<String>,
+    pub cpu_info: Option<String>,
+    pub memory_info: Option<String>,
+    pub disk_info: Option<String>,
+    pub hw_info: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RunningProcessInfo {
+    pub package_name: String,
+    pub std_name: String,
+    pub package_type: String,
+    pub pid: u32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PackageListItem {
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CapabilityStatus {
+    pub active_recipe: Option<String>,
+    pub packages: Vec<PackageListItem>,
+    pub running: Vec<RunningProcessInfo>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NodeInfo {
+    pub node_id: String,
+    pub last_seen_secs: u64,
+    pub machine_info: Option<MachineInfo>,
+    pub capability_status: Option<CapabilityStatus>,
+}
+
+impl NodeInfo {
+    fn is_alive(&self, now_secs: u64) -> bool {
+        now_secs.saturating_sub(self.last_seen_secs) <= NODE_ALIVE_THRESHOLD_SECS
+    }
+}
+
+/// Tracks active CLI nodes: last status update and reported machine/capability info.
+#[derive(Clone)]
+pub struct NodeRegistry {
+    nodes: Arc<Mutex<std::collections::HashMap<String, NodeInfo>>>,
+}
+
+impl NodeRegistry {
+    pub fn new() -> Self {
+        Self {
+            nodes: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    pub async fn update_status(
+        &self,
+        node_id: String,
+        machine_info: Option<MachineInfo>,
+        capability_status: Option<CapabilityStatus>,
+    ) {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let info = NodeInfo {
+            node_id: node_id.clone(),
+            last_seen_secs: now_secs,
+            machine_info,
+            capability_status,
+        };
+        let mut nodes = self.nodes.lock().await;
+        nodes.insert(node_id, info);
+    }
+
+    pub async fn get_all_nodes(&self) -> Vec<(NodeInfo, bool)> {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let nodes = self.nodes.lock().await;
+        nodes
+            .values()
+            .cloned()
+            .map(|info| {
+                let alive = info.is_alive(now_secs);
+                (info, alive)
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone)]
 pub struct WebState {
     pub core: Arc<RobonixCore>,
@@ -66,9 +228,12 @@ pub struct WebState {
     pub log_buffer: Arc<LogBuffer>,
     pub image_monitor: Arc<ImageMonitor>,
     pub agent: Arc<Mutex<Agent>>,
-    pub tts_service: Arc<TtsService>,
-    pub stt_service: Arc<SttService>,
+    /// Wrapped in Mutex so speech config can be hot-replaced without restart.
+    pub tts_service: Arc<Mutex<Arc<TtsService>>>,
+    pub stt_service: Arc<Mutex<Arc<SttService>>>,
     pub web_dir: std::path::PathBuf,
+    pub node_log_state: Arc<NodeLogState>,
+    pub node_registry: Arc<NodeRegistry>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -91,6 +256,8 @@ pub fn create_web_state(
     tts_service: Arc<TtsService>,
     stt_service: Arc<SttService>,
     web_dir: std::path::PathBuf,
+    node_log_state: Arc<NodeLogState>,
+    node_registry: Arc<NodeRegistry>,
 ) -> WebState {
     WebState {
         core,
@@ -100,9 +267,11 @@ pub fn create_web_state(
         log_buffer,
         image_monitor,
         agent,
-        tts_service,
-        stt_service,
+        tts_service: Arc::new(Mutex::new(tts_service)),
+        stt_service: Arc::new(Mutex::new(stt_service)),
         web_dir,
+        node_log_state,
+        node_registry,
     }
 }
 
@@ -243,6 +412,7 @@ pub async fn skills_handler(state: &State<WebState>) -> Json<serde_json::Value> 
                 "skill_dir": instance.skill_dir,
                 "main_rtdl": instance.main_rtdl,
                 "metadata": instance.metadata,
+                "node_id": instance.node_id,
             })
         })
         .collect();
@@ -279,6 +449,7 @@ pub async fn services_handler(state: &State<WebState>) -> Json<serde_json::Value
                 "version": instance.version,
                 "entry": instance.entry,
                 "metadata": instance.metadata,
+                "node_id": instance.node_id,
             })
         })
         .collect();
@@ -319,6 +490,7 @@ pub async fn primitives_handler(state: &State<WebState>) -> Json<serde_json::Val
                 "input_schema": instance.input_schema,
                 "output_schema": instance.output_schema,
                 "metadata": instance.metadata,
+                "node_id": instance.node_id,
             })
         })
         .collect();
@@ -333,6 +505,125 @@ pub async fn logs_handler(state: &State<WebState>, limit: Option<usize>) -> Json
     let limit = limit.unwrap_or(100);
     let logs = state.log_buffer.get_logs(limit).await;
     Json(logs)
+}
+
+#[derive(SerdeDeserialize)]
+pub struct LogSubscriptionBody {
+    pub node_id: String,
+    pub capability_key: String,
+}
+
+#[rocket::post("/api/log-subscriptions", data = "<body>")]
+pub async fn log_subscriptions_post(
+    state: &State<WebState>,
+    body: Json<LogSubscriptionBody>,
+) -> Json<serde_json::Value> {
+    state
+        .node_log_state
+        .add_subscription(body.node_id.clone(), body.capability_key.clone())
+        .await;
+    Json(serde_json::json!({ "ok": true }))
+}
+
+#[rocket::delete("/api/log-subscriptions?<node_id>&<capability_key>")]
+pub async fn log_subscriptions_delete(
+    state: &State<WebState>,
+    node_id: &str,
+    capability_key: &str,
+) -> Json<serde_json::Value> {
+    state
+        .node_log_state
+        .remove_subscription(node_id, capability_key)
+        .await;
+    Json(serde_json::json!({ "ok": true }))
+}
+
+#[rocket::get("/api/log-subscriptions?<node_id>")]
+pub async fn log_subscriptions_get(state: &State<WebState>, node_id: &str) -> Json<Vec<String>> {
+    let list = state
+        .node_log_state
+        .get_subscriptions_for_node(node_id)
+        .await;
+    Json(list)
+}
+
+#[derive(SerdeDeserialize)]
+pub struct NodeLogBody {
+    pub node_id: String,
+    pub capability_key: String,
+    pub content: String,
+}
+
+#[rocket::post("/api/node-log", data = "<body>")]
+pub async fn node_log_post(
+    state: &State<WebState>,
+    body: Json<NodeLogBody>,
+) -> Json<serde_json::Value> {
+    state
+        .node_log_state
+        .push_log(
+            body.node_id.clone(),
+            body.capability_key.clone(),
+            body.content.clone(),
+        )
+        .await;
+    Json(serde_json::json!({ "ok": true }))
+}
+
+#[rocket::get("/api/node-log?<node_id>&<capability_key>")]
+pub async fn node_log_get(
+    state: &State<WebState>,
+    node_id: &str,
+    capability_key: &str,
+) -> Json<serde_json::Value> {
+    let content = state.node_log_state.get_log(node_id, capability_key).await;
+    Json(serde_json::json!({ "content": content.unwrap_or_default() }))
+}
+
+#[derive(SerdeDeserialize)]
+pub struct NodeStatusBody {
+    pub node_id: String,
+    pub machine_info: Option<MachineInfo>,
+    pub capability_status: Option<CapabilityStatus>,
+}
+
+#[rocket::post("/api/node-status", data = "<body>")]
+pub async fn node_status_post(
+    state: &State<WebState>,
+    body: Json<NodeStatusBody>,
+) -> Json<serde_json::Value> {
+    state
+        .node_registry
+        .update_status(
+            body.node_id.clone(),
+            body.machine_info.clone(),
+            body.capability_status.clone(),
+        )
+        .await;
+    Json(serde_json::json!({ "ok": true }))
+}
+
+#[rocket::get("/api/nodes")]
+pub async fn nodes_handler(state: &State<WebState>) -> Json<serde_json::Value> {
+    let list = state.node_registry.get_all_nodes().await;
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let nodes_json: Vec<serde_json::Value> = list
+        .into_iter()
+        .map(|(info, alive)| {
+            serde_json::json!({
+                "node_id": info.node_id,
+                "last_seen_secs": info.last_seen_secs,
+                "last_seen_ago_secs": now_secs.saturating_sub(info.last_seen_secs),
+                "alive": alive,
+                "machine_info": info.machine_info,
+                "capability_status": info.capability_status,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "nodes": nodes_json }))
 }
 
 #[rocket::get("/api/semantic-map")]
@@ -372,6 +663,7 @@ pub async fn image_topics_handler(state: &State<WebState>) -> Json<serde_json::V
             serde_json::json!({
                 "topic_name": info.topic_name,
                 "message_type": info.message_type,
+                "encoding": info.encoding,
                 "last_update": last_update_secs,
                 "image_paths": image_paths,
             })
@@ -531,7 +823,11 @@ pub async fn update_config_handler(
                     model: config.agent.model.clone(),
                     temperature: config.agent.temperature,
                 };
-                let new_agent = Agent::new(state.core.clone(), new_agent_config);
+                let new_agent = Agent::new(
+                    state.core.clone(),
+                    new_agent_config,
+                    state.image_monitor.clone(),
+                );
                 *state.agent.lock().await = new_agent;
             }
 
@@ -554,13 +850,12 @@ pub async fn update_config_handler(
                     config_changed = true;
                 }
 
-                // Recreate TTS and STT services with new config
+                // Hot-replace TTS and STT services with new config
                 use crate::speech::{SttService, TtsService};
-                let new_tts_service = Arc::new(TtsService::new(config.speech.clone()));
-                let new_stt_service = Arc::new(SttService::new(config.speech.clone()));
-                // Note: We can't directly replace Arc in WebState, but we can update the inner values
-                // For now, the services will be recreated on next server restart
-                // The config is saved below, so it will be loaded on restart
+                let new_tts = Arc::new(TtsService::new(config.speech.clone()));
+                let new_stt = Arc::new(SttService::new(config.speech.clone()));
+                *state.tts_service.lock().await = new_tts;
+                *state.stt_service.lock().await = new_stt;
             }
 
             // Save config if anything changed
@@ -575,9 +870,9 @@ pub async fn update_config_handler(
             if request.agent.is_some() || request.speech.is_some() {
                 Json(serde_json::json!({
                     "status": "success",
-                    "message": "Config updated successfully",
-                    "restart_required": true,
-                    "restart_message": "Please restart robonix-core for the changes to take effect."
+                    "message": "Config updated successfully.",
+                    "restart_required": false,
+                    "restart_message": null
                 }))
             } else {
                 Json(serde_json::json!({
@@ -595,13 +890,17 @@ pub async fn update_config_handler(
 pub async fn agent_chat_handler(
     state: &State<WebState>,
     request: Json<AgentRequest>,
-) -> Result<Json<AgentResponse>, rocket::http::Status> {
+) -> Result<Json<AgentResponse>, (rocket::http::Status, Json<serde_json::Value>)> {
     let mut agent = state.agent.lock().await;
     match agent.chat(request.into_inner()).await {
         Ok(response) => Ok(Json(response)),
         Err(e) => {
-            warn!("Agent chat error: {}", e);
-            Err(rocket::http::Status::InternalServerError)
+            let err_msg = format!("{:#}", e);
+            warn!("Agent chat error: {}", err_msg);
+            Err((
+                rocket::http::Status::InternalServerError,
+                Json(serde_json::json!({ "error": err_msg })),
+            ))
         }
     }
 }
@@ -645,8 +944,8 @@ pub async fn tts_handler(
         return Err(rocket::http::Status::BadRequest);
     }
 
-    match state
-        .tts_service
+    let tts = state.tts_service.lock().await.clone();
+    match tts
         .synthesize(&text, Some(&request.format), Some(&request.voice))
         .await
     {
@@ -853,8 +1152,8 @@ pub async fn stt_handler(
         }
     }
 
-    match state
-        .stt_service
+    let stt = state.stt_service.lock().await.clone();
+    match stt
         .recognize(stt_audio_bytes, Some(&stt_format), Some(sample_rate))
         .await
     {

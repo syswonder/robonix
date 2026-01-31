@@ -1,5 +1,7 @@
 #! /bin/bash
 
+rbnx daemon stop 2>/dev/null || true
+
 # make build-sdk
 eval $(make source-sdk)
 rbnx deploy build

@@ -12,6 +12,9 @@ pub struct RegisterPrimitiveRequest {
     pub metadata: String,      // JSON string: metadata for instance filtering
     pub provider: String,      // Primitive provider identifier
     pub version: String,       // Implementation version (e.g., "1.0.0", "1.0.0-alpha")
+    /// Node (CLI client) that registered this capability; e.g. hostname. Empty for backward compat.
+    #[serde(default)]
+    pub node_id: String,
 }
 
 impl ros2_client::Message for RegisterPrimitiveRequest {}
@@ -39,6 +42,9 @@ pub struct PrimitiveInstance {
     pub input_schema: String,  // JSON string: {"argname0":"/topic0", ...}
     pub output_schema: String, // JSON string: {"argname1":"/topic1", ...}
     pub metadata: String,      // JSON string: metadata for instance filtering
+    /// Node that registered this capability. Empty if unknown.
+    #[serde(default)]
+    pub node_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -342,6 +342,7 @@ pub async fn wait_and_register_service(
         metadata: metadata_str.to_string(),
         provider: package_name.to_string(),
         version,
+        node_id: config.effective_node_id(),
     };
 
     let request_json = serde_json::to_string(&request)?;

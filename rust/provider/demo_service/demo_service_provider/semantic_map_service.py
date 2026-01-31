@@ -43,8 +43,9 @@ from robonix_sdk.client import RobonixClient
 class SemanticMapService(Node):
     """Implements semantic_map service using front camera and qwen3-vl VLM."""
 
-    def __init__(self):
+    def __init__(self, config_filename=None):
         super().__init__("demo_semantic_map_service")
+        self.config_filename = config_filename
 
         current_file = Path(__file__).resolve()
         package_root = current_file.parent
@@ -56,13 +57,14 @@ class SemanticMapService(Node):
             package_root = current_file.parent.parent
 
         load_dotenv(package_root / ".env")
-        self.qwen_api_key = os.getenv("QWEN3_VL_API_KEY")
+        # Same key as task_plan: DASHSCOPE_API_KEY (or legacy QWEN3_VL_API_KEY)
+        self.qwen_api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN3_VL_API_KEY")
         if not self.qwen_api_key:
             self.get_logger().error(
-                "QWEN3_VL_API_KEY not found in .env file. "
-                "Please configure QWEN3_VL_API_KEY in .env file."
+                "DASHSCOPE_API_KEY not found in .env file. "
+                "Please configure DASHSCOPE_API_KEY in .env file."
             )
-            raise ValueError("QWEN3_VL_API_KEY not found in .env file.")
+            raise ValueError("DASHSCOPE_API_KEY not found in .env file.")
 
         try:
             self.qwen_client = OpenAI(
@@ -111,7 +113,20 @@ class SemanticMapService(Node):
 
         self.update_thread = None
         self.update_thread_running = False
-        self.update_interval = 5.0
+        # VLM API (Aliyun DashScope) is charged per request; default 30s to reduce cost
+        default_interval = 15.0
+        try:
+            self.update_interval = float(
+                os.getenv("SEMANTIC_MAP_UPDATE_INTERVAL_SEC", str(default_interval))
+            )
+            if self.update_interval < 5.0:
+                self.update_interval = 5.0
+        except (TypeError, ValueError):
+            self.update_interval = default_interval
+        self.get_logger().info(
+            f"Semantic map VLM update interval: {self.update_interval}s "
+            "(set SEMANTIC_MAP_UPDATE_INTERVAL_SEC to change; lower = more API cost)"
+        )
 
         self._query_camera_primitives()
         self._query_pose_primitive()
@@ -985,14 +1000,22 @@ Only include objects that are clearly visible. Estimate distance as accurately a
             return "object"
 
     def _load_manual_objects_from_config(self, package_root):
-        """Load manual objects from semantic_map_config.yaml file."""
-        config_path = package_root / "rbnx" / "semantic_map_config.yaml"
+        """Load manual objects from config YAML file (e.g. building_map_config.yaml or webots_map_config.yaml)."""
+        # Resolve config filename: short name -> *_map_config.yaml, or use as-is if contains '.yaml'
+        if not self.config_filename:
+            config_name = "building_map_config.yaml"
+        elif self.config_filename.endswith(".yaml") or self.config_filename.endswith(".yml"):
+            config_name = self.config_filename
+        else:
+            config_name = f"{self.config_filename}_map_config.yaml"
+        config_path = package_root / "rbnx" / config_name
         
         if not config_path.exists():
             self.get_logger().info(
                 f"Config file not found at {config_path}, skipping manual objects loading"
             )
             return
+        self.get_logger().info(f"Loading manual objects from config: {config_name}")
 
         try:
             with open(config_path, "r", encoding="utf-8") as f:
@@ -1140,10 +1163,25 @@ Only include objects that are clearly visible. Estimate distance as accurately a
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    import argparse
+    import sys
+    parser = argparse.ArgumentParser(description="Semantic map service (manual objects from config)")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Config name or file: 'building' (default), 'webots', or filename e.g. my_map_config.yaml",
+    )
+    # Parse only known args so rclpy can handle the rest
+    argv = args if args is not None else sys.argv[1:]
+    parsed, remaining = parser.parse_known_args(argv)
+    config_filename = parsed.config
+
+    rclpy.init(args=remaining)
     semantic_map_service = None
     try:
-        semantic_map_service = SemanticMapService()
+        semantic_map_service = SemanticMapService(config_filename=config_filename)
         rclpy.spin(semantic_map_service)
         semantic_map_service.destroy_node()
     except (RuntimeError, ValueError) as e:

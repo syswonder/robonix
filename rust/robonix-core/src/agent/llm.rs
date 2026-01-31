@@ -19,10 +19,11 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            llm_provider: "deepseek".to_string(),
+            llm_provider: "qwen".to_string(),
             api_key: None,
-            api_base: "https://api.deepseek.com".to_string(),
-            model: "deepseek-chat".to_string(),
+            // 华北2（北京）地域，与百炼/阿里云控制台一致；新加坡用 dashscope-intl.aliyuncs.com
+            api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+            model: "qwen3-vl-plus".to_string(),
             temperature: 0.7,
         }
     }
@@ -65,12 +66,14 @@ impl LLMClient {
         functions: Vec<serde_json::Value>,
     ) -> Result<LLMResponse> {
         match self.config.llm_provider.as_str() {
-            "deepseek" => self.chat_deepseek(messages, functions).await,
+            "deepseek" => self.chat_openai_compat(messages, functions).await,
+            "qwen" => self.chat_openai_compat(messages, functions).await,
             _ => anyhow::bail!("Unsupported LLM provider: {}", self.config.llm_provider),
         }
     }
 
-    async fn chat_deepseek(
+    /// OpenAI-compatible chat completions (used by DeepSeek and Qwen).
+    async fn chat_openai_compat(
         &self,
         messages: Vec<ChatMessage>,
         functions: Vec<serde_json::Value>,
@@ -81,12 +84,20 @@ impl LLMClient {
             .as_ref()
             .context("API key not configured")?;
 
-        let url = format!("{}/v1/chat/completions", self.config.api_base);
+        // If api_base already ends with /v1 (e.g. DashScope .../compatible-mode/v1), use /chat/completions; else /v1/chat/completions (e.g. DeepSeek)
+        let base = self.config.api_base.trim_end_matches('/');
+        let path = if base.ends_with("/v1") {
+            "/chat/completions"
+        } else {
+            "/v1/chat/completions"
+        };
+        let url = format!("{}{}", base, path);
 
         let mut request_body = json!({
             "model": self.config.model,
             "messages": messages,
             "temperature": self.config.temperature,
+            "max_tokens": 1024,
         });
 
         if !functions.is_empty() {
@@ -164,5 +175,100 @@ impl LLMClient {
             message: content,
             function_calls,
         })
+    }
+
+    /// Call Qwen3-VL (or compatible VLM) with images and a text question.
+    /// Each element of image_base64_urls should be "data:image/jpeg;base64,...".
+    pub async fn chat_vision(
+        &self,
+        image_base64_urls: Vec<String>,
+        question: &str,
+    ) -> Result<String> {
+        let api_key = self
+            .config
+            .api_key
+            .as_ref()
+            .context("API key not configured for VLM")?;
+
+        // If api_base already ends with /v1 (e.g. DashScope .../compatible-mode/v1), use /chat/completions; else /v1/chat/completions (e.g. DeepSeek)
+        let base = self.config.api_base.trim_end_matches('/');
+        let path = if base.ends_with("/v1") {
+            "/chat/completions"
+        } else {
+            "/v1/chat/completions"
+        };
+        let url = format!("{}{}", base, path);
+
+        // Build multimodal user content: image_url entries + text
+        let mut content: Vec<serde_json::Value> = Vec::new();
+        for url in &image_base64_urls {
+            content.push(json!({
+                "type": "image_url",
+                "image_url": { "url": url }
+            }));
+        }
+        content.push(json!({
+            "type": "text",
+            "text": question
+        }));
+
+        let mut request_body = json!({
+            "model": "qwen3-vl-plus",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": content
+                }
+            ],
+            "temperature": self.config.temperature,
+            "max_tokens": 2048,
+        });
+
+        // Qwen thinking (optional)
+        if self.config.llm_provider == "qwen" {
+            request_body["extra_body"] = json!({
+                "enable_thinking": false,
+                "thinking_budget": 8192
+            });
+        }
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .send()
+            .await
+            .context("Failed to send request to VLM API")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("VLM API error: {} - {}", status, text);
+        }
+
+        let response_json: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse VLM API response")?;
+
+        let choices = response_json
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .context("Invalid response format: missing choices")?;
+
+        if choices.is_empty() {
+            anyhow::bail!("No choices in VLM response");
+        }
+
+        let content = choices[0]
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        Ok(content)
     }
 }

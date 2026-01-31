@@ -18,6 +18,9 @@ pub struct RegisterSkillRequest {
     pub metadata: String,     // JSON string: metadata for instance filtering
     pub provider: String,     // Skill provider identifier
     pub version: String,      // Skill version
+    /// Node (CLI client) that registered this capability. Empty for backward compat.
+    #[serde(default)]
+    pub node_id: String,
 }
 
 impl ros2_client::Message for RegisterSkillRequest {}
@@ -54,6 +57,9 @@ pub struct SkillInstance {
     pub start_args: String, // JSON string: input parameter schema
     pub status: String,     // JSON string: status feedback schema
     pub metadata: String,   // JSON string: metadata for instance filtering
+    /// Node that registered this capability. Empty if unknown.
+    #[serde(default)]
+    pub node_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

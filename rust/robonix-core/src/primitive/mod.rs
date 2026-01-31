@@ -22,6 +22,7 @@ struct PrimitiveEntry {
     metadata: String,      // JSON string: stored as string internally
     provider: String,
     version: String,
+    node_id: String,
 }
 
 /// Primitive Registry - Manages primitive registration and querying
@@ -104,6 +105,7 @@ impl PrimitiveRegistry {
             metadata: req.metadata.clone(),
             provider: req.provider.clone(),
             version: req.version.clone(),
+            node_id: req.node_id.clone(),
         };
 
         let mut primitives = self.primitives.write().await;
@@ -150,6 +152,7 @@ impl PrimitiveRegistry {
                 input_schema: entry.input_schema.clone(),
                 output_schema: entry.output_schema.clone(),
                 metadata: entry.metadata.clone(),
+                node_id: entry.node_id.clone(),
             });
         }
 
@@ -169,6 +172,7 @@ impl PrimitiveRegistry {
                     input_schema: entry.input_schema.clone(),
                     output_schema: entry.output_schema.clone(),
                     metadata: entry.metadata.clone(),
+                    node_id: entry.node_id.clone(),
                 },
             ));
         }

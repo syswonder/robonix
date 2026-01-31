@@ -10,8 +10,10 @@ use robonix_core::logging::init_logger_with_buffer;
 use robonix_core::node::create_node;
 use robonix_core::server::{create_qos, create_servers, run_servers};
 use robonix_core::web::{
-    LogBuffer, agent_chat_handler, agent_reset_handler, create_web_state, get_config_handler,
-    image_handler, image_topics_handler, index, logs_handler, primitives_handler,
+    LogBuffer, NodeLogState, NodeRegistry, agent_chat_handler, agent_reset_handler,
+    create_web_state, get_config_handler, image_handler, image_topics_handler, index,
+    log_subscriptions_delete, log_subscriptions_get, log_subscriptions_post, logs_handler,
+    node_log_get, node_log_post, node_status_post, nodes_handler, primitives_handler,
     semantic_map_handler, services_handler, settings_page, skills_handler, status_handler,
     stt_handler, task_cancel_handler, tasks_handler, tf_tree_handler, topics_handler, tts_handler,
     update_config_handler,
@@ -190,11 +192,15 @@ fn main() {
         let agent = Arc::new(tokio::sync::Mutex::new(Agent::new(
             core.clone(),
             agent_config,
+            image_monitor.clone(),
         )));
 
         // Create TTS and STT services
         let tts_service = Arc::new(robonix_core::speech::TtsService::new(speech_config.clone()));
         let stt_service = Arc::new(robonix_core::speech::SttService::new(speech_config));
+
+        let node_log_state = Arc::new(NodeLogState::new());
+        let node_registry = Arc::new(NodeRegistry::new());
 
         // Create web state
         let web_state = create_web_state(
@@ -208,6 +214,8 @@ fn main() {
             tts_service,
             stt_service,
             web_dir.clone(),
+            node_log_state,
+            node_registry,
         );
 
         info!("starting web server on http://localhost:{}", port);
@@ -237,6 +245,13 @@ fn main() {
                         services_handler,
                         primitives_handler,
                         logs_handler,
+                        log_subscriptions_post,
+                        log_subscriptions_delete,
+                        log_subscriptions_get,
+                        node_log_post,
+                        node_log_get,
+                        node_status_post,
+                        nodes_handler,
                         semantic_map_handler,
                         image_topics_handler,
                         image_handler,

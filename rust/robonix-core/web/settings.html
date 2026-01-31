@@ -117,20 +117,21 @@
                 <div class="form-group">
                     <label for="llm-provider">LLM Provider</label>
                     <select id="llm-provider" name="llm_provider">
+                        <option value="qwen">Qwen (DashScope)</option>
                         <option value="deepseek">DeepSeek</option>
                     </select>
                 </div>
                 <div class="form-group">
                     <label for="api-key">API Key</label>
-                    <input type="text" id="api-key" name="api_key" placeholder="Enter API key">
+                    <input type="text" id="api-key" name="api_key" placeholder="DASHSCOPE_API_KEY for Qwen, or DeepSeek API key">
                 </div>
                 <div class="form-group">
                     <label for="api-base">API Base URL</label>
-                    <input type="text" id="api-base" name="api_base" placeholder="https://api.deepseek.com">
+                    <input type="text" id="api-base" name="api_base" placeholder="华北2(北京): dashscope.aliyuncs.com；新加坡: dashscope-intl.aliyuncs.com">
                 </div>
                 <div class="form-group">
                     <label for="model">Model</label>
-                    <input type="text" id="model" name="model" placeholder="deepseek-chat">
+                    <input type="text" id="model" name="model" placeholder="qwen3-vl-plus">
                 </div>
                 <div class="form-group">
                     <label for="temperature">Temperature</label>
@@ -191,10 +192,10 @@
                 }
 
                 // Populate agent form fields
-                document.getElementById('llm-provider').value = config.agent.llm_provider || 'deepseek';
+                document.getElementById('llm-provider').value = config.agent.llm_provider || 'qwen';
                 document.getElementById('api-key').value = config.agent.api_key || '';
-                document.getElementById('api-base').value = config.agent.api_base || 'https://api.deepseek.com';
-                document.getElementById('model').value = config.agent.model || 'deepseek-chat';
+                document.getElementById('api-base').value = config.agent.api_base || 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+                document.getElementById('model').value = config.agent.model || 'qwen3-vl-plus';
                 document.getElementById('temperature').value = config.agent.temperature || 0.7;
 
                 // Populate speech form fields

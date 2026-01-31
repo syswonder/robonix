@@ -4,6 +4,7 @@
 // Handles ROS2 service server creation and request handling
 
 use crate::core::RobonixCore;
+use crate::ros_idl::get_listening_ips::{GetListeningIpsRequest, GetListeningIpsResponse};
 use crate::ros_idl::primitive::{
     QueryPrimitiveRequest, QueryPrimitiveResponse, RegisterPrimitiveRequest,
     RegisterPrimitiveResponse,
@@ -29,6 +30,40 @@ use ros2_client::{
     },
 };
 use std::sync::Arc;
+
+/// Return all IP addresses this host is listening on (for daemon to discover core).
+fn get_listening_ips() -> Vec<String> {
+    #[cfg(target_os = "linux")]
+    {
+        match std::process::Command::new("hostname").arg("-I").output() {
+            Ok(output) if output.status.success() => {
+                let s = String::from_utf8_lossy(&output.stdout);
+                let ips: Vec<String> = s
+                    .split_whitespace()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !ips.is_empty() {
+                    return ips;
+                }
+            }
+            _ => {}
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = std::process::Command::new("hostname");
+    }
+    // Fallback: try to get one IP via UDP socket
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if let Ok(()) = socket.connect("8.8.8.8:80") {
+            if let Ok(addr) = socket.local_addr() {
+                return vec![addr.ip().to_string()];
+            }
+        }
+    }
+    Vec::new()
+}
 
 /// Set thread to real-time priority with SCHED_FIFO policy
 /// This ensures the thread has the highest priority and won't be preempted by other user threads
@@ -240,6 +275,17 @@ pub fn create_servers(
     )?;
     info!("ping pong service created at /rbnx/ping");
 
+    // Core API: /rbnx/core/get_listening_ips - returns all IPs this host is listening on
+    let get_listening_ips_server = node
+        .create_server::<AService<GetListeningIpsRequest, GetListeningIpsResponse>>(
+            ServiceMapping::Enhanced,
+            &Name::new("/rbnx/core", "get_listening_ips")?,
+            &ServiceTypeName::new("robonix_sdk", "GetListeningIps"),
+            service_qos.clone(),
+            service_qos.clone(),
+        )?;
+    info!("get_listening_ips service created at /rbnx/core/get_listening_ips");
+
     Ok(Servers {
         register_primitive_server,
         query_primitive_server,
@@ -251,6 +297,7 @@ pub fn create_servers(
         task_data_server,
         cancel_task_server,
         ping_pong_server,
+        get_listening_ips_server,
     })
 }
 
@@ -266,6 +313,7 @@ pub struct Servers {
     pub task_data_server: Server<AService<TaskDataRequest, TaskDataResponse>>,
     pub cancel_task_server: Server<AService<CancelTaskRequest, CancelTaskResponse>>,
     pub ping_pong_server: Server<AService<PingPongRequest, PingPongResponse>>,
+    pub get_listening_ips_server: Server<AService<GetListeningIpsRequest, GetListeningIpsResponse>>,
 }
 
 pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
@@ -548,6 +596,32 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
                     Err(e) => {
                         error!("receive pong request error: {e:?}");
                     }
+                }
+            })
+            .await;
+    });
+
+    // Handle get_listening_ips requests - Core API
+    spawn_core_api_thread("get_listening_ips", move || async move {
+        let stream = servers.get_listening_ips_server.receive_request_stream();
+        stream
+            .for_each(|result| async {
+                match result {
+                    Ok((req_id, _req)) => {
+                        let ips = get_listening_ips();
+                        let ips_json =
+                            serde_json::to_string(&ips).unwrap_or_else(|_| "[]".to_string());
+                        let resp = GetListeningIpsResponse { ips_json };
+                        info!("get_listening_ips: returning {} IP(s)", ips.len());
+                        if let Err(e) = servers
+                            .get_listening_ips_server
+                            .async_send_response(req_id, resp)
+                            .await
+                        {
+                            error!("send get_listening_ips response error: {e:?}");
+                        }
+                    }
+                    Err(e) => error!("receive get_listening_ips request error: {e:?}"),
                 }
             })
             .await;

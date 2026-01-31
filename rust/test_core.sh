@@ -4,17 +4,16 @@ set -e
 
 make fmt
 
-# Cleanup function to kill robonix-core
+# Cleanup function to kill robonix-core (process group + pkill fallback)
 cleanup() {
+    echo ""
+    echo "Cleaning up: killing robonix-core..."
     if [ -n "$ROBONIX_PID" ]; then
-        echo ""
-        echo "Cleaning up: killing robonix-core (PID: $ROBONIX_PID)..."
+        # Kill whole process group (so child processes die too)
+        kill -9 -"$ROBONIX_PID" 2>/dev/null || true
         kill -9 "$ROBONIX_PID" 2>/dev/null || true
-    else
-        echo ""
-        echo "Cleaning up: killing robonix-core..."
-        pkill -9 -f "robonix-core" 2>/dev/null || true
     fi
+    pkill -9 -f "robonix-core" 2>/dev/null || true
     exit 0
 }
 
@@ -102,11 +101,14 @@ fi
 
 make install
 
+# So background job gets its own process group (kill -PGID kills children too)
+set -m
 # Start robonix-core in background and save PID
 ROBONIX_WEB_ASSETS_DIR="$(pwd)/robonix-core/web" \
 ROBONIX_WEB_PORT=8000 \
 RUST_LOG=robonix_core=info robonix-core &
 ROBONIX_PID=$!
+set +m
 
-# Wait for robonix-core, so we can catch Ctrl-C and clean up
+# Wait for robonix-core; on Ctrl-C trap runs cleanup
 wait $ROBONIX_PID
