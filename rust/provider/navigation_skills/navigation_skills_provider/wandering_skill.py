@@ -101,6 +101,7 @@ class WanderingSkill(Node):
 
         self.current_skill_id = None
         self.wandering_in_progress = False
+        self._cancel_requested = False
         self.navigation_complete = False
         self.latest_pose = None
         self.wander_radius = 5.0
@@ -245,9 +246,26 @@ class WanderingSkill(Node):
             sys.exit(1)
 
     def start_callback(self, msg):
-        """Handle skill start request."""
+        """Handle skill start request (input params or robonix terminate)."""
         try:
             data = json.loads(msg.data)
+            # Robonix can send terminate to start_topic to force-stop this skill
+            if data.get("terminate") and data.get("skill_id"):
+                sid = data.get("skill_id")
+                if self.wandering_in_progress and sid == self.current_skill_id:
+                    self.get_logger().info(
+                        f"Received terminate for skill_id={sid}, stopping wandering"
+                    )
+                    self._cancel_requested = True
+                    self.wandering_in_progress = False
+                    self._publish_status(
+                        sid,
+                        "cancelled",
+                        {"message": "Cancelled by robonix (terminate on start_topic)"},
+                        errno=0,
+                    )
+                return
+
             skill_id = data.get("skill_id", "unknown")
             params = data.get("params", {})
 
@@ -303,6 +321,7 @@ class WanderingSkill(Node):
             )
 
             self.current_skill_id = skill_id
+            self._cancel_requested = False
             self.wandering_in_progress = True
 
             self._publish_status(
@@ -336,7 +355,11 @@ class WanderingSkill(Node):
         max_iterations = 20
         iteration = 0
 
-        while self.wandering_in_progress and iteration < max_iterations:
+        while (
+            self.wandering_in_progress
+            and not self._cancel_requested
+            and iteration < max_iterations
+        ):
             iteration += 1
             self.get_logger().info(
                 f"Wandering iteration {iteration}/{max_iterations}")
@@ -386,13 +409,14 @@ class WanderingSkill(Node):
                         "Navigation goal publisher is not available")
                 self.navigate_goal_publisher.publish(goal_pose)
 
-                timeout = 60.0
+                timeout = 90.0
                 start_time = time.time()
                 while (
                     not self.navigation_complete
                     and (time.time() - start_time) < timeout
+                    and not self._cancel_requested
                 ):
-                    time.sleep(0.5)
+                    rclpy.spin_once(self, timeout_sec=0.1)
 
                 if self.navigation_complete:
                     self.get_logger().info("Navigation completed successfully")
@@ -422,11 +446,22 @@ class WanderingSkill(Node):
                 time.sleep(2.0)
 
         self.wandering_in_progress = False
-        result = {"message": "Wandering completed", "iterations": iteration}
-        self._publish_status(self.current_skill_id,
-                             "finished", result, errno=0)
-        self.get_logger().info(
-            f"Wandering completed after {iteration} iterations.")
+        if self._cancel_requested:
+            self._publish_status(
+                self.current_skill_id,
+                "cancelled",
+                {"message": "Cancelled by robonix (terminate on start_topic)"},
+                errno=0,
+            )
+            self.get_logger().info("Wandering cancelled by robonix")
+        else:
+            result = {"message": "Wandering completed", "iterations": iteration}
+            self._publish_status(
+                self.current_skill_id, "finished", result, errno=0
+            )
+            self.get_logger().info(
+                f"Wandering completed after {iteration} iterations."
+            )
 
     def pose_cov_callback(self, msg):
         """Handle PoseWithCovarianceStamped updates and convert to PoseStamped."""

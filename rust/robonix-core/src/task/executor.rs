@@ -6,6 +6,7 @@
 
 use crate::action::skill_library::SkillLibrary;
 use crate::task::exception::{ExceptionHandler, ExceptionType, RecoveryAction};
+use crate::task::queue::{RunningSkillInfo, TaskQueue};
 use crate::task::task::Task;
 use futures_util::stream::StreamExt;
 use log::{debug, error, info, warn};
@@ -18,6 +19,17 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
+
+/// Clears running_skill_info when dropped (e.g. when execute_skill returns).
+struct ClearRunningSkillOnDrop(Arc<TaskQueue>);
+impl Drop for ClearRunningSkillOnDrop {
+    fn drop(&mut self) {
+        let q = self.0.clone();
+        tokio::spawn(async move {
+            q.set_running_skill_info(None).await;
+        });
+    }
+}
 
 /// RTDL Instruction - Represents a single instruction in RTDL
 #[derive(Debug, Clone)]
@@ -33,17 +45,20 @@ pub struct RtdlExecutor {
     skill_library: Arc<SkillLibrary>,
     exception_handler: ExceptionHandler,
     node: Arc<tokio::sync::Mutex<ros2_client::Node>>,
+    task_queue: Arc<TaskQueue>,
 }
 
 impl RtdlExecutor {
     pub fn new(
         skill_library: Arc<SkillLibrary>,
         node: Arc<tokio::sync::Mutex<ros2_client::Node>>,
+        task_queue: Arc<TaskQueue>,
     ) -> Self {
         Self {
             skill_library,
             exception_handler: ExceptionHandler,
             node,
+            task_queue,
         }
     }
 
@@ -453,9 +468,18 @@ impl RtdlExecutor {
         // We'll handle it in the main loop below
 
         // Wait for skill completion (monitor status_topic)
-        // Standard status format: {"skill_id": "...", "state": "running"|"finished"|"error", "result": {...}, "errno": 0, ...}
+        // Standard status format: {"skill_id": "...", "state": "running"|"finished"|"error"|"cancelled", "result": {...}, "errno": 0, ...}
         let timeout_duration = Duration::from_secs(300); // 5 minutes timeout
         let start_time = std::time::Instant::now();
+
+        // Register running skill info so cancel_task can publish terminate to start_topic
+        let info = RunningSkillInfo {
+            task_id: task.task_id.clone(),
+            start_topic: skill_instance.start_topic.clone(),
+            skill_exec_id: skill_exec_id.clone(),
+        };
+        self.task_queue.set_running_skill_info(Some(info)).await;
+        let _skill_guard = ClearRunningSkillOnDrop(self.task_queue.clone());
 
         // Process first status if we received it during retry loop
         if let Some(first_status_str) = first_status {
@@ -477,6 +501,13 @@ impl RtdlExecutor {
                                 );
                                 return Ok(());
                             }
+                        }
+                        "cancelled" => {
+                            info!(
+                                "Skill {} execution cancelled (terminate from robonix): skill_exec_id={}",
+                                skill_name, skill_exec_id
+                            );
+                            return Ok(());
                         }
                         "error" => {
                             // Extract error message
@@ -585,6 +616,13 @@ impl RtdlExecutor {
                                 );
                                 return Err((ExceptionType::SkillFailed, Some(error_msg)));
                             }
+                        }
+                        "cancelled" => {
+                            info!(
+                                "Skill {} execution cancelled (terminate from robonix): skill_exec_id={}",
+                                skill_name, skill_exec_id
+                            );
+                            return Ok(());
                         }
                         "error" => {
                             error!(

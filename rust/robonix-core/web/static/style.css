@@ -964,16 +964,12 @@ button:active {
     background-color: #e0e0e0;
 }
 
-#rtdl-content {
-    background: #f5f5f5;
-    padding: 15px;
-    border: 1px solid #ddd;
-    overflow-x: auto;
-    font-family: 'SF Mono', 'SFMono-Regular', -apple-system, BlinkMacSystemFont, 'Menlo', 'Monaco', 'Consolas', 'Courier New', monospace;
-    font-size: 12px;
-    white-space: pre-wrap;
+#rtdl-modal pre.component-detail-json {
     max-height: 600px;
-    overflow-y: auto;
+}
+#rtdl-modal pre.component-detail-json code {
+    background: transparent;
+    padding: 0;
 }
 
 .modal-large {
@@ -987,6 +983,9 @@ button:active {
     border-bottom: 1px solid #e0e0e0;
     font-size: 12px;
     color: #666;
+}
+.node-log-viewer-toolbar .node-log-auto-scroll {
+    margin-left: 1em;
 }
 .node-log-pre {
     margin: 0;

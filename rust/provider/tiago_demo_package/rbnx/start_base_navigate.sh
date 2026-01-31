@@ -29,8 +29,7 @@ ELAPSED=0
 while [ $ELAPSED -lt $TIMEOUT ]; do
     if ros2 action list 2>/dev/null | grep -q "navigate_to_pose"; then
         echo "Nav2 navigation action server is available!"
-        # Verify goal_pose topic exists (it should be created when needed)
-        echo "Navigation primitive is ready. Goal can be published to /goal_pose"
+        echo "Goal can be published to /goal_pose"
         exit 0
     fi
     sleep 1
