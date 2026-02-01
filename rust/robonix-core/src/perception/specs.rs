@@ -49,4 +49,11 @@ pub fn load_services(services: &mut HashMap<String, ServiceSpec>) {
         "Semantic map service providing entity-level representation using VLM for object detection and depth camera for accurate distance measurement",
         "robonix_sdk/srv/service/semantic_map/QuerySemanticMap"
     );
+
+    SRV!(
+        services,
+        "srv::transform.scan",
+        "Transform point cloud to laser scan. Serves many callers: CONVERT (one shot), START_STREAM (per-client output_topic), STOP_STREAM (release).",
+        "robonix_sdk/srv/service/transform_scan/TransformScan"
+    );
 }
