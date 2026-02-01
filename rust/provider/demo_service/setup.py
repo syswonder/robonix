@@ -33,6 +33,7 @@ setup(
         'console_scripts': [
             'semantic_map_service = demo_service_provider.semantic_map_service:main',
             'task_plan_service = demo_service_provider.task_plan_service:main',
+            'transform_scan_service = demo_service_provider.transform_scan_service:main',
         ],
     },
 )

@@ -232,7 +232,7 @@ pub async fn wait_and_register_service(
     // Wait for ROS2 service to be available (check via ros2 service list)
     // ROS2 service discovery can take 5-15 seconds, especially on first startup
     output::sub_step(&format!("Waiting for service {} to be available...", entry));
-    let max_wait = Duration::from_secs(20); // Increased from 10 to 20 seconds
+    let max_wait = Duration::from_secs(60); // Wait up to 60s for service (e.g. semantic_map)
     let check_interval = Duration::from_millis(500); // Increased from 200ms to 500ms for less frequent checks
     let start_time = std::time::Instant::now();
 
@@ -312,7 +312,7 @@ pub async fn wait_and_register_service(
         };
 
         return Err(anyhow::anyhow!(
-            "Service {} did not become available within 20 seconds. {}",
+            "Service {} did not become available within 60 seconds. {}",
             entry,
             debug_info
         ));

@@ -41,6 +41,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   # Standard service definitions
   "srv/service/spatial_map/GetSpatialMap.srv"
   "srv/service/semantic_map/QuerySemanticMap.srv"
+  "srv/service/transform_scan/TransformScan.srv"
   "srv/service/task_plan/PlanTask.srv"
   "srv/service/plan_simulate/SimulatePlan.srv"
   "srv/service/result_feedback/ResultFeedback.srv"

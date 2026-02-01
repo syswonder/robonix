@@ -24,7 +24,7 @@ services:
     entry: /demo_service/semantic_map/query
     metadata: '{"model":"qwen3-vl-plus","backend":"vlm","depth_camera":"prm::camera.depth","rgb_camera":"prm::camera.rgb","pose":"prm::base.pose.cov"}'
     version: 0.0.1
-    start_script: rbnx/start_semantic_map.sh configs/webots_map_config.yaml
+    start_script: rbnx/start_semantic_map.sh configs/demo_map_config.yaml
     stop_script: rbnx/stop_semantic_map.sh
 
   - name: srv::task_plan
@@ -34,3 +34,11 @@ services:
     version: 0.0.1
     start_script: rbnx/start_task_plan.sh
     stop_script: rbnx/stop_task_plan.sh
+
+  - name: srv::transform.scan
+    srv_type: robonix_sdk/srv/service/transform_scan/TransformScan
+    entry: /demo_service/transform_scan/convert
+    metadata: '{"input":"pointcloud_or_topic","output":"LaserScan","stream":"use prm::trasform.laserscan"}'
+    version: 0.0.1
+    start_script: rbnx/start_transform_scan.sh
+    stop_script: rbnx/stop_transform_scan.sh

@@ -11,6 +11,8 @@
   <depend>std_msgs</depend>
   <depend>builtin_interfaces</depend>
   <depend>robonix_sdk</depend>
+  <depend>sensor_msgs</depend>
+  <exec_depend>sensor_msgs_py</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
