@@ -14,6 +14,7 @@ import math
 import threading
 import time
 import yaml
+import numpy as np
 from pathlib import Path
 from datetime import datetime
 import yaml
@@ -126,6 +127,34 @@ class SemanticMapService(Node):
         self.get_logger().info(
             f"Semantic map VLM update interval: {self.update_interval}s "
             "(set SEMANTIC_MAP_UPDATE_INTERVAL_SEC to change; lower = more API cost)"
+        )
+
+        # Skip VLM when pose/image unchanged to save tokens
+        self.last_vlm_pose = None  # (x, y, z, yaw) when last VLM was called
+        self.last_vlm_image_lowres = None  # 32x32 grayscale for similarity
+        self._last_vlm_lock = threading.Lock()
+
+        try:
+            self.pose_position_threshold = float(
+                os.getenv("SEMANTIC_MAP_POSE_POSITION_THRESHOLD_M", "0.15"))
+        except (TypeError, ValueError):
+            self.pose_position_threshold = 0.15
+        try:
+            yaw_deg = float(
+                os.getenv("SEMANTIC_MAP_POSE_YAW_THRESHOLD_DEG", "10.0"))
+            self.pose_yaw_threshold_rad = math.radians(yaw_deg)
+        except (TypeError, ValueError):
+            self.pose_yaw_threshold_rad = math.radians(10.0)
+        try:
+            self.image_mse_threshold = float(
+                os.getenv("SEMANTIC_MAP_IMAGE_MSE_THRESHOLD", "80.0"))
+        except (TypeError, ValueError):
+            self.image_mse_threshold = 80.0
+
+        self.get_logger().info(
+            f"VLM skip: pose_threshold={self.pose_position_threshold}m / "
+            f"{math.degrees(self.pose_yaw_threshold_rad):.1f}°, "
+            f"image_mse_threshold={self.image_mse_threshold}"
         )
 
         self._query_camera_primitives()
@@ -387,6 +416,20 @@ class SemanticMapService(Node):
                     time.sleep(self.update_interval)
                     continue
 
+                # Skip VLM if pose or image unchanged to save tokens
+                if self._pose_unchanged(snapshot_pose):
+                    self.get_logger().info(
+                        "Skipping VLM: robot pose unchanged (saving tokens)"
+                    )
+                    time.sleep(self.update_interval)
+                    continue
+                if self._image_unchanged(cv_image):
+                    self.get_logger().info(
+                        "Skipping VLM: image similar to last (saving tokens)"
+                    )
+                    time.sleep(self.update_interval)
+                    continue
+
                 from PIL import Image as PILImage
                 import io
 
@@ -412,6 +455,13 @@ class SemanticMapService(Node):
                         f"Updated semantic map: {len(processed_objects)} new objects processed, {memory_count} total objects in memory"
                     )
 
+                # Remember pose and image so next cycle can skip VLM if unchanged
+                with self._last_vlm_lock:
+                    self.last_vlm_pose = self._pose_to_tuple(snapshot_pose)
+                    lowres = self._compute_image_lowres(cv_image)
+                    if lowres is not None:
+                        self.last_vlm_image_lowres = lowres.copy()
+
                 time.sleep(self.update_interval)
 
             except Exception as e:
@@ -422,6 +472,66 @@ class SemanticMapService(Node):
                 time.sleep(self.update_interval)  # Wait before retrying
 
         self.get_logger().info("Background update loop stopped")
+
+    def _pose_to_tuple(self, pose_stamped):
+        """Extract (x, y, z, yaw) from PoseStamped for comparison."""
+        if not pose_stamped or not pose_stamped.pose:
+            return None
+        p = pose_stamped.pose.position
+        o = pose_stamped.pose.orientation
+        yaw = math.atan2(
+            2.0 * (o.w * o.z + o.x * o.y),
+            1.0 - 2.0 * (o.y * o.y + o.z * o.z),
+        )
+        return (p.x, p.y, p.z, yaw)
+
+    def _pose_unchanged(self, current_pose_stamped):
+        """Return True if current pose is close to last VLM pose (skip VLM to save tokens)."""
+        with self._last_vlm_lock:
+            last = self.last_vlm_pose
+        if last is None:
+            return False
+        curr = self._pose_to_tuple(current_pose_stamped)
+        if curr is None:
+            return False
+        dx = curr[0] - last[0]
+        dy = curr[1] - last[1]
+        dz = curr[2] - last[2]
+        position_delta = math.sqrt(dx * dx + dy * dy + dz * dz)
+        yaw_delta = abs(curr[3] - last[3])
+        if yaw_delta > math.pi:
+            yaw_delta = 2.0 * math.pi - yaw_delta
+        return (
+            position_delta < self.pose_position_threshold
+            and yaw_delta < self.pose_yaw_threshold_rad
+        )
+
+    def _compute_image_lowres(self, cv_image, size=(32, 32)):
+        """Compute small grayscale image for similarity (no extra deps)."""
+        try:
+            if len(cv_image.shape) == 3:
+                gray = np.dot(cv_image[..., :3], [0.299, 0.587, 0.114]).astype(np.uint8)
+            else:
+                gray = cv_image
+            from PIL import Image as PILImage
+            pil = PILImage.fromarray(gray)
+            # 2 = BILINEAR (PIL.Image.Resampling.BILINEAR in Pillow 9+)
+            pil_small = pil.resize(size, 2)
+            return np.array(pil_small, dtype=np.uint8)
+        except Exception:
+            return None
+
+    def _image_unchanged(self, cv_image):
+        """Return True if image is very similar to last VLM image (skip VLM to save tokens)."""
+        with self._last_vlm_lock:
+            last_lowres = self.last_vlm_image_lowres
+        if last_lowres is None:
+            return False
+        curr_lowres = self._compute_image_lowres(cv_image)
+        if curr_lowres is None:
+            return False
+        mse = float(np.mean((curr_lowres.astype(np.float64) - last_lowres.astype(np.float64)) ** 2))
+        return mse < self.image_mse_threshold
 
     def _format_camera_info(self, camera_info):
         """Format camera info as text for VLM prompt."""

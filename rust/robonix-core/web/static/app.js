@@ -1,5 +1,35 @@
 let autoRefreshInterval = null;
 
+// Unescape \uXXXX in a JSON string for display (e.g. 你好 instead of \u4f60\u597d)
+function unescapeUnicodeInJson(s) {
+    return s.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+// Stringify JSON for display with Unicode unescaped
+function stringifyJsonForDisplay(obj, indent) {
+    if (obj === undefined) return '';
+    const indentVal = (indent === undefined || indent === null) ? 2 : indent;
+    return unescapeUnicodeInJson(JSON.stringify(obj, null, indentVal));
+}
+
+// Get RTDL (or any JSON string) as display string with Unicode unescaped, compact: one array item per line
+function getRtdlDisplayString(rtdlStr) {
+    if (rtdlStr == null || rtdlStr === '') return '';
+    if (typeof rtdlStr !== 'string') return stringifyJsonForDisplay(rtdlStr);
+    try {
+        const parsed = JSON.parse(rtdlStr);
+        if (Array.isArray(parsed)) {
+            const lines = parsed.map(function (item) {
+                return unescapeUnicodeInJson(JSON.stringify(item));
+            });
+            return '[\n  ' + lines.join(',\n  ') + '\n]';
+        }
+        return stringifyJsonForDisplay(parsed);
+    } catch (_) {
+        return unescapeUnicodeInJson(rtdlStr);
+    }
+}
+
 async function loadStatus() {
     try {
         const response = await fetch('/api/status');
@@ -661,15 +691,15 @@ function renderComponentItemDetail(type, item, index) {
         if (item.rtdl) {
             html += `<div class="component-detail-field"><span class="component-detail-label">RTDL Type:</span><span class="component-detail-value">${escapeHtml(item.rtdl_type || 'N/A')}</span></div>`;
             html += `<div class="component-detail-field"><span class="component-detail-label">RTDL Program:</span></div>`;
-            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(item.rtdl)}</code></pre>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(getRtdlDisplayString(item.rtdl))}</code></pre>`;
         }
         if (item.params) {
             html += `<div class="component-detail-field"><span class="component-detail-label">Parameters:</span></div>`;
-            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(item.params, null, 2))}</code></pre>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(stringifyJsonForDisplay(item.params))}</code></pre>`;
         }
         if (item.result) {
             html += `<div class="component-detail-field"><span class="component-detail-label">Result:</span></div>`;
-            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(item.result, null, 2))}</code></pre>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(stringifyJsonForDisplay(item.result))}</code></pre>`;
         }
         if (item.error_message) {
             html += `<div class="component-detail-field"><span class="component-detail-label">Error:</span></div>`;
@@ -919,7 +949,7 @@ function renderTasks(tasks) {
         html += `<div class="task-description">${escapeHtml(task.description)}</div>`;
         html += `<div class="component-item-meta">State: ${task.state} | Priority: ${task.priority}</div>`;
         if (task.rtdl) {
-            html += `<div class="task-rtdl-link" onclick="event.stopPropagation(); showRtdlModal('${escapeHtml(task.rtdl)}')">View RTDL</div>`;
+            html += `<div class="task-rtdl-link" onclick="event.stopPropagation(); showRtdlModalByIndex(${index})">View RTDL</div>`;
         }
         html += `</div>`;
     });
@@ -1297,6 +1327,7 @@ let lastImageMonitorData = new Map(); // Map<topicName, Set<timestamp>>
 // Image monitor state management
 let imageMonitorState = {
     topics: new Map(), // Map<topicName, {url, timestamp}>
+    hiddenTopics: new Set(), // topic names hidden due to load/decode error
     updateTopic(topicName, imagePath, timestamp) {
         if (imagePath) {
             const pathParts = imagePath.split('/');
@@ -1321,6 +1352,27 @@ let imageMonitorState = {
     }
 };
 
+function updateImageMonitorHiddenNote() {
+    const noteEl = document.getElementById('image-monitor-hidden-note');
+    if (!noteEl) return;
+    const hidden = Array.from(imageMonitorState.hiddenTopics);
+    if (hidden.length === 0) {
+        noteEl.style.display = 'none';
+        noteEl.innerHTML = '';
+        return;
+    }
+    noteEl.style.display = 'block';
+    noteEl.innerHTML = '<strong>Hidden (no image or failed to load/decode):</strong> ' + escapeHtml(hidden.join(', '));
+}
+
+// Sort key for Image Monitor: color/rgb first (0), other (1), depth last (2)
+function imageTopicSortKey(topicName) {
+    const n = topicName.toLowerCase();
+    if (n.includes('color') || n.includes('rgb')) return 0;
+    if (n.includes('depth')) return 2;
+    return 1;
+}
+
 function renderImageMonitor(imageTopics) {
     const container = document.getElementById('image-monitor-container');
 
@@ -1333,8 +1385,16 @@ function renderImageMonitor(imageTopics) {
         return;
     }
 
+    // Sort: standard color (color/rgb) first, then other, depth last; then by name
+    const sortedTopics = [...imageTopics].sort((a, b) => {
+        const ka = imageTopicSortKey(a.topic_name);
+        const kb = imageTopicSortKey(b.topic_name);
+        if (ka !== kb) return ka - kb;
+        return (a.topic_name || '').localeCompare(b.topic_name || '');
+    });
+
     // Update state
-    imageTopics.forEach(topic => {
+    sortedTopics.forEach(topic => {
         const topicName = topic.topic_name;
         const imagePaths = topic.image_paths || [];
         const latestImage = imagePaths.length > 0 ? imagePaths[0] : null;
@@ -1346,8 +1406,8 @@ function renderImageMonitor(imageTopics) {
         }
     });
 
-    // Render using simple DOM updates
-    imageTopics.forEach(topic => {
+    // Render using simple DOM updates (in sorted order)
+    sortedTopics.forEach(topic => {
         const topicName = topic.topic_name;
         const imagePaths = topic.image_paths || [];
         const latestImage = imagePaths.length > 0 ? imagePaths[0] : null;
@@ -1408,6 +1468,18 @@ function renderImageMonitor(imageTopics) {
 
             // Only update src if changed
             if (img.src !== url && url) {
+                imageMonitorState.hiddenTopics.delete(topicName);
+                topicEntry.style.display = '';
+                img.onerror = function () {
+                    imageMonitorState.hiddenTopics.add(topicName);
+                    topicEntry.style.display = 'none';
+                    updateImageMonitorHiddenNote();
+                };
+                img.onload = function () {
+                    imageMonitorState.hiddenTopics.delete(topicName);
+                    topicEntry.style.display = '';
+                    updateImageMonitorHiddenNote();
+                };
                 img.src = url;
                 img.style.display = 'block';
             }
@@ -1416,12 +1488,25 @@ function renderImageMonitor(imageTopics) {
                 timestampEl.textContent = timeStr;
                 timestampEl.title = timeStr;
             }
+            // Keep entry visible unless it was hidden by onerror
+            if (imageMonitorState.hiddenTopics.has(topicName)) {
+                topicEntry.style.display = 'none';
+            }
         } else {
+            // No image data for this topic: hide entry and list in "hidden" note
             img.style.display = 'none';
+            imageMonitorState.hiddenTopics.add(topicName);
+            topicEntry.style.display = 'none';
             if (timestampEl) {
                 timestampEl.textContent = '--:--:--';
             }
         }
+    });
+
+    // Reorder container children to match sorted order
+    sortedTopics.forEach(topic => {
+        const entry = container.querySelector(`[data-topic="${CSS.escape(topic.topic_name)}"]`);
+        if (entry) container.appendChild(entry);
     });
 
     // Remove topics that no longer exist
@@ -1432,22 +1517,32 @@ function renderImageMonitor(imageTopics) {
         if (topicName && !currentTopicNames.has(topicName)) {
             entry.remove();
             imageMonitorState.topics.delete(topicName);
+            imageMonitorState.hiddenTopics.delete(topicName);
         }
     });
+
+    updateImageMonitorHiddenNote();
 }
 
-// RTDL Modal
+// RTDL Modal (by raw string, used from component detail modal)
 function showRtdlModal(rtdl) {
     const modal = document.getElementById('rtdl-modal');
     const content = document.getElementById('rtdl-content');
     if (!content) return;
-    content.textContent = rtdl || '';
+    content.textContent = getRtdlDisplayString(rtdl) || '';
     content.className = 'syntax-block';
     applySyntaxHighlighting(modal);
     modal.style.display = 'block';
     setTimeout(() => {
         modal.classList.add('show');
     }, 10);
+}
+
+// RTDL Modal by task index (avoids embedding RTDL in HTML attribute)
+function showRtdlModalByIndex(taskIndex) {
+    if (taskIndex < 0 || taskIndex >= (tasksData || []).length) return;
+    const rtdl = tasksData[taskIndex].rtdl;
+    showRtdlModal(rtdl);
 }
 
 function closeRtdlModal() {
@@ -1643,21 +1738,21 @@ function showComponentModal(type, index) {
             html += `<div class="component-detail-section">`;
             html += `<h3>RTDL Program</h3>`;
             html += `<div class="component-detail-field"><span class="component-detail-label">Type:</span><span class="component-detail-value">${escapeHtml(data.rtdl_type || 'N/A')}</span></div>`;
-            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(data.rtdl)}</code></pre>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(getRtdlDisplayString(data.rtdl))}</code></pre>`;
             html += `</div>`;
         }
 
         if (data.params) {
             html += `<div class="component-detail-section">`;
             html += `<h3>Parameters</h3>`;
-            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(data.params, null, 2))}</code></pre>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(stringifyJsonForDisplay(data.params))}</code></pre>`;
             html += `</div>`;
         }
 
         if (data.result) {
             html += `<div class="component-detail-section">`;
             html += `<h3>Result</h3>`;
-            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(JSON.stringify(data.result, null, 2))}</code></pre>`;
+            html += `<pre class="component-detail-json"><code class="syntax-block">${escapeHtml(stringifyJsonForDisplay(data.result))}</code></pre>`;
             html += `</div>`;
         }
 
