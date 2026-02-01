@@ -2,6 +2,8 @@
 
 set -e
 
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+
 cleanup() {
     echo ""
     echo "Cleaning up: killing robonix-core, found pid(s): $(pgrep -x robonix-core | sort -n)"

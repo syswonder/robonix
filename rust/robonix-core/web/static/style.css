@@ -628,6 +628,20 @@ button:active {
     cursor: crosshair;
 }
 
+.image-monitor-hidden-note {
+    padding: 6px 10px;
+    margin: 0 10px 8px;
+    font-size: 11px;
+    color: #666;
+    background: #f5f5f5;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+}
+
+.image-monitor-hidden-note strong {
+    color: #333;
+}
+
 .image-monitor-wrapper {
     padding: 10px;
     max-height: 600px;
