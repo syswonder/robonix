@@ -23,11 +23,11 @@ STREAM_NS = "/demo_service/transform_scan/stream"
 
 
 def pointcloud_to_laserscan(cloud: PointCloud2, angle_min=-math.pi, angle_max=math.pi,
-                            num_bins=360, range_min=0.1, range_max=10.0) -> LaserScan:
+                            num_bins=360, range_min=0.1, range_max=10.0) -> LaserScan | None:
     """Convert PointCloud2 to LaserScan by projecting to 2D and binning by angle (min range per bin)."""
     try:
         points = point_cloud2.read_points(
-            cloud, field_names=("x", "y", "z"), skip_nans=True
+            cloud, field_names=["x", "y", "z"], skip_nans=True
         )
         pts = np.array(list(points), dtype=np.float64)
     except Exception:
