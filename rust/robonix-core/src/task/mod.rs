@@ -925,7 +925,9 @@ impl TaskManager {
             service_name, service_type
         );
 
-        let object_graph = {
+        // Create client and request only while holding node lock; release lock before
+        // calling the service so other core APIs (e.g. /rbnx/ping) can be processed.
+        let (client, request) = {
             let mut node_guard = node.lock().await;
             let service_qos = crate::server::create_qos();
 
@@ -967,84 +969,81 @@ impl TaskManager {
             };
 
             let request = crate::ros_idl::service_types::QuerySemanticMapRequest { types: vec![] };
+            (client, request)
+        };
 
-            // Semantic map service now returns immediately from memory, but we need to wait for service discovery
-            // ROS2 service discovery can take a few seconds, especially on first call
-            let timeout_duration = Duration::from_secs(10); // Increased timeout to allow for service discovery
-            debug!(
-                "[semantic_map] calling service with timeout: {}s",
-                timeout_duration.as_secs()
-            );
-            let call_start = std::time::Instant::now();
+        // Call semantic map service without holding node lock (allows other requests to be handled)
+        let timeout_duration = Duration::from_secs(10);
+        debug!(
+            "[semantic_map] calling service with timeout: {}s",
+            timeout_duration.as_secs()
+        );
+        let call_start = std::time::Instant::now();
+        let max_retries = 2;
+        let mut last_error = None;
+        let mut response_opt = None;
 
-            // Retry logic: ROS2 service discovery can be slow, especially on first call
-            let max_retries = 2;
-            let mut last_error = None;
-            let mut response_opt = None;
+        for attempt in 0..max_retries {
+            if attempt > 0 {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                debug!(
+                    "[semantic_map] retrying service call (attempt {}/{})",
+                    attempt + 1,
+                    max_retries
+                );
+            }
 
-            for attempt in 0..max_retries {
-                if attempt > 0 {
-                    // Wait a bit before retry to allow service discovery
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            let result =
+                timeout(timeout_duration, client.async_call_service(request.clone())).await;
+
+            match result {
+                Ok(Ok(response)) => {
+                    let elapsed = call_start.elapsed();
                     debug!(
-                        "[semantic_map] retrying service call (attempt {}/{})",
-                        attempt + 1,
-                        max_retries
+                        "[semantic_map] service call succeeded in {:?} (attempt {})",
+                        elapsed,
+                        attempt + 1
                     );
+                    response_opt = Some(response);
+                    break;
                 }
-
-                let result =
-                    timeout(timeout_duration, client.async_call_service(request.clone())).await;
-
-                match result {
-                    Ok(Ok(response)) => {
-                        let elapsed = call_start.elapsed();
-                        debug!(
-                            "[semantic_map] service call succeeded in {:?} (attempt {})",
-                            elapsed,
-                            attempt + 1
-                        );
-                        response_opt = Some(response);
-                        break;
+                Ok(Err(e)) => {
+                    last_error = Some(format!("Service call error: {:?}", e));
+                    if attempt < max_retries - 1 {
+                        continue;
                     }
-                    Ok(Err(e)) => {
-                        last_error = Some(format!("Service call error: {:?}", e));
-                        if attempt < max_retries - 1 {
-                            continue; // Retry
-                        }
-                    }
-                    Err(_) => {
-                        let elapsed = call_start.elapsed();
-                        last_error = Some(format!(
-                            "Service call timeout after {}s (elapsed: {:?})",
-                            timeout_duration.as_secs(),
-                            elapsed
-                        ));
-                        if attempt < max_retries - 1 {
-                            continue; // Retry
-                        }
+                }
+                Err(_) => {
+                    let elapsed = call_start.elapsed();
+                    last_error = Some(format!(
+                        "Service call timeout after {}s (elapsed: {:?})",
+                        timeout_duration.as_secs(),
+                        elapsed
+                    ));
+                    if attempt < max_retries - 1 {
+                        continue;
                     }
                 }
             }
+        }
 
-            let response = match response_opt {
-                Some(r) => r,
-                None => {
-                    warn!(
-                        "[semantic_map] service call failed after {} attempts: {}",
-                        max_retries,
-                        last_error.unwrap_or_else(|| "Unknown error".to_string())
-                    );
-                    return;
-                }
-            };
+        let response = match response_opt {
+            Some(r) => r,
+            None => {
+                warn!(
+                    "[semantic_map] service call failed after {} attempts: {}",
+                    max_retries,
+                    last_error.unwrap_or_else(|| "Unknown error".to_string())
+                );
+                return;
+            }
+        };
 
-            match serde_json::to_value(&response.objects) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("[semantic_map] failed to serialize objects to JSON: {}", e);
-                    return;
-                }
+        let object_graph = match serde_json::to_value(&response.objects) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("[semantic_map] failed to serialize objects to JSON: {}", e);
+                return;
             }
         };
 

@@ -49,12 +49,13 @@ echo "Service: $SERVICE_NAME"
 echo "Type: $SERVICE_TYPE"
 echo ""
 
-# Check if service is available
+# Check if service is available (capture first to avoid BrokenPipeError when piping to grep -q)
 echo "Checking if service is available..."
-if ! ros2 service list | grep -q "^$SERVICE_NAME$"; then
+SERVICE_LIST=$(ros2 service list 2>/dev/null) || true
+if ! echo "$SERVICE_LIST" | grep -q "^$SERVICE_NAME$"; then
     echo "ERROR: Service $SERVICE_NAME is not available"
     echo "Available services:"
-    ros2 service list | grep "/rbnx" || echo "  (no /rbnx services found)"
+    echo "$SERVICE_LIST" | grep "/rbnx" || echo "  (no /rbnx services found)"
     exit 1
 fi
 
@@ -74,6 +75,8 @@ fi
 echo ""
 
 # Test 1: Simple ping
+# NOTE: robonix-core exposes /rbnx/ping with AService (serde); ros2 CLI uses CDR.
+# If this call hangs, use robonix-cli or another AService client instead.
 echo "Test 1: Simple ping"
 echo "Calling service with message='hello' and sequence=1..."
 ros2 service call $SERVICE_NAME $SERVICE_TYPE "{message: 'hello', sequence: 1}"

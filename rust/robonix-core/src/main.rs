@@ -7,7 +7,7 @@ use log::{debug, info, warn};
 use robonix_core::agent::{Agent, AgentConfig as LLMAgentConfig};
 use robonix_core::core::RobonixCore;
 use robonix_core::logging::init_logger_with_buffer;
-use robonix_core::node::create_node;
+use robonix_core::node::create_nodes;
 use robonix_core::server::{create_qos, create_servers, run_servers};
 use robonix_core::web::{
     LogBuffer, NodeLogState, NodeRegistry, agent_chat_handler, agent_reset_handler,
@@ -36,25 +36,27 @@ fn main() {
     // Create Tokio runtime for async task execution
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
 
-    // Create ROS2 node first (before creating RobonixCore)
-    // Context must be kept alive for the node to work
-    let (node, context) = create_node();
-    let _context_arc = Arc::new(context); // Keep context alive
-    let node_arc = Arc::new(Mutex::new(node));
+    // Create two ROS2 nodes on separate contexts: core_api for /rbnx/* servers (ping, register, query, task submit, etc.),
+    // core_task for TaskManager (semantic_map, task_plan, executor) and monitors (TF, topic, image).
+    // Two contexts = two DDS/event loops so a long-running task never blocks API requests.
+    let (api_node, task_node, api_context, task_context) = create_nodes();
+    let _api_context = api_context; // Keep API context alive
+    let _task_context = task_context; // Keep task context alive
+    let api_node_arc = Arc::new(Mutex::new(api_node));
+    let task_node_arc = Arc::new(Mutex::new(task_node));
     let service_qos = create_qos();
-    info!("robonix core node started");
+    info!("robonix core nodes started (core_api, core_task)");
 
-    // Initialize core within runtime context (spawns background tasks)
-    // Pass the node to RobonixCore so TaskManager can use it
+    // Initialize core with task node (TaskManager uses it for semantic_map, task_plan, executor)
     let core = rt.block_on(async {
-        let core = Arc::new(RobonixCore::new(node_arc.clone()));
+        let core = Arc::new(RobonixCore::new(task_node_arc.clone()));
         info!("robonix core initialized");
         core
     });
 
-    // Get the node from the Arc for use in servers
+    // Create all /rbnx/* service servers on the API node (keeps API responsive)
     let servers = rt.block_on(async {
-        let mut node_guard = node_arc.lock().await;
+        let mut node_guard = api_node_arc.lock().await;
         match create_servers(&mut *node_guard, &service_qos) {
             Ok(servers) => servers,
             Err(e) => {
@@ -66,12 +68,12 @@ fn main() {
 
     info!("all robonix modules initialized");
 
-    // Create TF monitor and start monitoring
+    // Create TF monitor and start monitoring (uses task node)
     let tf_monitor = Arc::new(robonix_core::perception::tf_monitor::TfMonitor::new());
 
     // Start TF monitoring in background
     let tf_monitor_clone = tf_monitor.clone();
-    let node_for_tf = node_arc.clone();
+    let node_for_tf = task_node_arc.clone();
     rt.spawn(async move {
         let mut node_guard = node_for_tf.lock().await;
         if let Err(e) = tf_monitor_clone.start_monitoring(&mut *node_guard).await {
@@ -79,18 +81,18 @@ fn main() {
         }
     });
 
-    // Create topic monitor (no periodic task - topics discovered on-demand)
+    // Create topic monitor (no periodic task - topics discovered on-demand) (uses task node)
     let topic_monitor = Arc::new(robonix_core::perception::topic_monitor::TopicMonitor::new());
     // Initial discovery (synchronous, no spawn needed)
     let topic_monitor_init = topic_monitor.clone();
     rt.block_on(async {
-        let mut node_guard = node_arc.lock().await;
+        let mut node_guard = task_node_arc.lock().await;
         if let Err(e) = topic_monitor_init.start_monitoring(&mut *node_guard).await {
             eprintln!("Failed to start topic monitoring: {}", e);
         }
     });
 
-    // Create image monitor
+    // Create image monitor (uses task node)
     let image_storage_dir = std::path::PathBuf::from("/tmp/robonix_images");
     let image_monitor = Arc::new(robonix_core::perception::image_monitor::ImageMonitor::new(
         image_storage_dir,
@@ -99,7 +101,7 @@ fn main() {
     // Start image monitoring: discover image topics and subscribe to them
     let image_monitor_for_subscribe = image_monitor.clone();
     let topic_monitor_for_images = topic_monitor.clone();
-    let node_for_images = node_arc.clone();
+    let node_for_images = task_node_arc.clone();
     rt.spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         loop {
@@ -202,10 +204,10 @@ fn main() {
         let node_log_state = Arc::new(NodeLogState::new());
         let node_registry = Arc::new(NodeRegistry::new());
 
-        // Create web state
+        // Create web state (node ref is for monitors; use task node)
         let web_state = create_web_state(
             core.clone(),
-            node_arc.clone(),
+            task_node_arc.clone(),
             tf_monitor.clone(),
             topic_monitor.clone(),
             log_buffer.clone(),
