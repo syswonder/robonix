@@ -149,6 +149,7 @@ class MoveToObjectSkill(Node):
         self.current_skill_id = None
         self.moving_in_progress = False
         self._cancel_requested = False
+        self._target_replaced = False
         self.target_object_id = None
         self.stop_radius = 0.5
         self.navigation_complete = False
@@ -369,14 +370,22 @@ class MoveToObjectSkill(Node):
             )
 
             if self.moving_in_progress:
-                self.get_logger().warn(
-                    "Move operation already in progress, ignoring request"
+                self.get_logger().info(
+                    "New target received while moving, replacing with target_object_id=%s"
+                    % target_object_id
                 )
+                self.current_skill_id = skill_id
+                self.target_object_id = target_object_id
+                self._cancel_requested = False
+                self._target_replaced = True
                 self._publish_status(
                     skill_id,
-                    "error",
-                    {"error": "Operation already in progress"},
-                    errno=1,
+                    "running",
+                    {
+                        "message": "Target replaced, navigating to new object %s"
+                        % target_object_id
+                    },
+                    errno=0,
                 )
                 return
 
@@ -480,309 +489,310 @@ class MoveToObjectSkill(Node):
     def _move_operation(self):
         """Main move operation that finds and navigates to the target object."""
         try:
-            self.get_logger().info(
-                f"Querying semantic map for object with ID: {self.target_object_id}"
-            )
-            try:
-                objects = self._query_semantic_map()
-            except TimeoutError as e:
-                error_msg = f"Semantic map query timeout: {str(e)}"
-                self.get_logger().error(error_msg)
-                self._stop_status_timer()
-                self._publish_status(
-                    self.current_skill_id,
-                    "error",
-                    {"error": error_msg, "error_type": "timeout"},
-                    errno=7,
-                )
-                self.moving_in_progress = False
-                return
-            except RuntimeError as e:
-                error_msg = f"Semantic map service error: {str(e)}"
-                self.get_logger().error(error_msg)
-                self._stop_status_timer()
-                self._publish_status(
-                    self.current_skill_id,
-                    "error",
-                    {"error": error_msg, "error_type": "service_error"},
-                    errno=7,
-                )
-                self.moving_in_progress = False
-                return
-
-            if not objects:
-                error_msg = "Semantic map query returned no objects (map may be empty)"
-                self.get_logger().error(error_msg)
-                self._stop_status_timer()
-                self._publish_status(
-                    self.current_skill_id,
-                    "error",
-                    {"error": error_msg, "error_type": "empty_map"},
-                    errno=7,
-                )
-                self.moving_in_progress = False
-                return
-
-            target_object = None
-            for obj in objects:
-                if obj.id == self.target_object_id:
-                    target_object = obj
-                    break
-
-            if not target_object:
-                self.get_logger().error(
-                    f'Object with ID "{self.target_object_id}" not found in semantic map'
-                )
-                available_ids = [obj.id for obj in objects]
-                available_labels = [obj.label for obj in objects]
-                error_msg = (
-                    f'Object with ID "{self.target_object_id}" not found in semantic map. '
-                    f"Available object IDs: {available_ids[:10]}{'...' if len(available_ids) > 10 else ''}. "
-                    f"This may happen if the object was removed or the ID from planning is incorrect."
-                )
-                self.get_logger().error(error_msg)
-                self._stop_status_timer()
-                self._publish_status(
-                    self.current_skill_id,
-                    "error",
-                    {
-                        "error": error_msg,
-                        "requested_object_id": self.target_object_id,
-                        "available_object_ids": available_ids,
-                        "available_labels": available_labels,
-                    },
-                    errno=8,
-                )
-                self.moving_in_progress = False
-                return
-
-            self.get_logger().info(
-                f"Found target object: {target_object.id} ({target_object.label})"
-            )
-
-            object_pose = self._get_object_pose_in_map(target_object)
-            if not object_pose:
-                self.get_logger().error(
-                    f"Could not get pose for object {target_object.id}"
-                )
-                self._stop_status_timer()
-                self._publish_status(
-                    self.current_skill_id,
-                    "error",
-                    {"error": f"Could not get pose for object {target_object.id}"},
-                    errno=9,
-                )
-                self.moving_in_progress = False
-                return
-
-            goal_pose = self._calculate_goal_pose_near_object(
-                object_pose, self.stop_radius
-            )
-
-            actual_distance = math.sqrt(
-                (goal_pose.pose.position.x - object_pose.pose.position.x) ** 2
-                + (goal_pose.pose.position.y - object_pose.pose.position.y) ** 2
-            )
-
-            self.get_logger().info(
-                f"Navigating to object {target_object.id} ({target_object.label}) - "
-                f"Goal at ({goal_pose.pose.position.x:.2f}, {goal_pose.pose.position.y:.2f}), "
-                f"will stop {actual_distance:.2f}m from object (requested: {self.stop_radius:.2f}m)"
-            )
-
-            self.navigation_complete = False
-            assert self.navigate_goal_publisher is not None, (
-                "Navigation goal publisher must be available"
-            )
-            self.navigate_goal_publisher.publish(goal_pose)
-
-            # Reach = at goal (position + orientation within delta) and stationary for a while
-            POSITION_DELTA_M = 0.35
-            ANGLE_DELTA_RAD = 0.2
-            STILL_DURATION_S = 1.0
-            STILL_MOVE_THRESHOLD_M = 0.05
-            time_first_at_goal = None
-            pose_first_at_goal = None
-            last_log_time = 0.0
-            LOG_INTERVAL_S = 2.0
-
-            self.get_logger().info(
-                "Waiting for pose-based completion: dist<=%.2fm, yaw<=%.2f rad, still %.1fs"
-                % (POSITION_DELTA_M, ANGLE_DELTA_RAD, STILL_DURATION_S)
-            )
-
-            timeout = 90.0
-            start_time = time.time()
-            while (
-                not self.navigation_complete
-                and (time.time() - start_time) < timeout
-                and not self._cancel_requested
-            ):
-                rclpy.spin_once(self, timeout_sec=0.1)
-                if self.navigation_complete or self._cancel_requested:
-                    break
-                now = time.time()
-                if self.latest_pose is None:
-                    if now - last_log_time >= LOG_INTERVAL_S:
-                        self.get_logger().warn(
-                            "No pose yet (amcl_pose?). elapsed=%.1fs" % (now - start_time)
-                        )
-                        last_log_time = now
-                    continue
-                dist = math.sqrt(
-                    (self.latest_pose.pose.position.x - goal_pose.pose.position.x) ** 2
-                    + (self.latest_pose.pose.position.y - goal_pose.pose.position.y) ** 2
-                )
-                yaw_goal = self._yaw_from_quat(goal_pose.pose.orientation)
-                yaw_now = self._yaw_from_quat(self.latest_pose.pose.orientation)
-                yaw_diff = yaw_now - yaw_goal
-                while yaw_diff > math.pi:
-                    yaw_diff -= 2.0 * math.pi
-                while yaw_diff < -math.pi:
-                    yaw_diff += 2.0 * math.pi
-                at_goal = dist <= POSITION_DELTA_M and abs(yaw_diff) <= ANGLE_DELTA_RAD
-                if at_goal:
-                    if time_first_at_goal is None:
-                        time_first_at_goal = time.time()
-                        pose_first_at_goal = (
-                            self.latest_pose.pose.position.x,
-                            self.latest_pose.pose.position.y,
-                        )
-                        self.get_logger().info(
-                            "At goal (dist=%.3fm, yaw_diff=%.3f rad). Starting still timer (%.1fs)."
-                            % (dist, yaw_diff, STILL_DURATION_S)
-                        )
-                    elif (time.time() - time_first_at_goal) >= STILL_DURATION_S:
-                        dx = self.latest_pose.pose.position.x - pose_first_at_goal[0]
-                        dy = self.latest_pose.pose.position.y - pose_first_at_goal[1]
-                        drift = math.sqrt(dx * dx + dy * dy)
-                        if drift <= STILL_MOVE_THRESHOLD_M:
-                            self.navigation_complete = True
-                            self.get_logger().info(
-                                "Navigation complete (at goal and stationary for %.1fs, drift=%.3fm)"
-                                % (STILL_DURATION_S, drift)
-                            )
-                        elif now - last_log_time >= LOG_INTERVAL_S:
-                            self.get_logger().info(
-                                "At goal but moved too much: drift=%.3fm (max %.2fm). Resetting still timer."
-                                % (drift, STILL_MOVE_THRESHOLD_M)
-                            )
-                            time_first_at_goal = None
-                            pose_first_at_goal = None
-                            last_log_time = now
-                    elif now - last_log_time >= LOG_INTERVAL_S:
-                        remaining = STILL_DURATION_S - (now - time_first_at_goal)
-                        self.get_logger().info(
-                            "At goal, waiting still: %.1fs left" % max(0, remaining)
-                        )
-                        last_log_time = now
-                else:
-                    if time_first_at_goal is not None:
-                        self.get_logger().info(
-                            "Left goal (dist=%.3fm, yaw_diff=%.3f rad). Resetting still timer."
-                            % (dist, yaw_diff)
-                        )
-                    time_first_at_goal = None
-                    pose_first_at_goal = None
-                    if now - last_log_time >= LOG_INTERVAL_S:
-                        self.get_logger().info(
-                            "Approaching: dist=%.3fm (need<=%.2f), yaw_diff=%.3f rad (need<=%.2f), pos=(%.2f,%.2f)"
-                            % (
-                                dist,
-                                POSITION_DELTA_M,
-                                yaw_diff,
-                                ANGLE_DELTA_RAD,
-                                self.latest_pose.pose.position.x,
-                                self.latest_pose.pose.position.y,
-                            )
-                        )
-                        last_log_time = now
-
-            if self._cancel_requested:
-                self._stop_status_timer()
-                self._publish_status(
-                    self.current_skill_id,
-                    "cancelled",
-                    {"message": "Cancelled by robonix (terminate on start_topic)"},
-                    errno=0,
-                )
-                self.get_logger().info("Move to object cancelled by robonix")
-                self.moving_in_progress = False
-                return
-
-            if self.navigation_complete:
-                final_distance = None
-                if self.latest_pose:
-                    final_distance = math.sqrt(
-                        (self.latest_pose.pose.position.x -
-                         object_pose.pose.position.x)
-                        ** 2
-                        + (
-                            self.latest_pose.pose.position.y
-                            - object_pose.pose.position.y
-                        )
-                        ** 2
-                    )
-
-                result = {
-                    "message": f"Successfully navigated to object: {target_object.label}",
-                    "object_id": target_object.id,
-                    "object_label": target_object.label,
-                    "object_position": {
-                        "x": object_pose.pose.position.x,
-                        "y": object_pose.pose.position.y,
-                        "z": object_pose.pose.position.z,
-                    },
-                    "goal_position": {
-                        "x": goal_pose.pose.position.x,
-                        "y": goal_pose.pose.position.y,
-                        "z": goal_pose.pose.position.z,
-                    },
-                    "stop_radius": self.stop_radius,
-                }
-                if final_distance is not None:
-                    result["final_distance_to_object"] = final_distance
-
-                self._stop_status_timer()
-                self._publish_status(self.current_skill_id,
-                                     "finished", result, errno=0)
+            while True:
                 self.get_logger().info(
-                    f"Successfully navigated to object: {target_object.label} "
-                    f"(stopped {final_distance:.2f}m away, requested: {self.stop_radius:.2f}m)"
-                    if final_distance is not None
-                    else f"Successfully navigated to object: {target_object.label}"
+                    f"Querying semantic map for object with ID: {self.target_object_id}"
                 )
-                self.moving_in_progress = False
-            else:
-                self._stop_status_timer()
-                # Log why we timed out
-                if self.latest_pose is not None:
+                try:
+                    objects = self._query_semantic_map()
+                except TimeoutError as e:
+                    error_msg = f"Semantic map query timeout: {str(e)}"
+                    self.get_logger().error(error_msg)
+                    self._stop_status_timer()
+                    self._publish_status(
+                        self.current_skill_id,
+                        "error",
+                        {"error": error_msg, "error_type": "timeout"},
+                        errno=7,
+                    )
+                    self.moving_in_progress = False
+                    return
+                except RuntimeError as e:
+                    error_msg = f"Semantic map service error: {str(e)}"
+                    self.get_logger().error(error_msg)
+                    self._stop_status_timer()
+                    self._publish_status(
+                        self.current_skill_id,
+                        "error",
+                        {"error": error_msg, "error_type": "service_error"},
+                        errno=7,
+                    )
+                    self.moving_in_progress = False
+                    return
+
+                if not objects:
+                    error_msg = "Semantic map query returned no objects (map may be empty)"
+                    self.get_logger().error(error_msg)
+                    self._stop_status_timer()
+                    self._publish_status(
+                        self.current_skill_id,
+                        "error",
+                        {"error": error_msg, "error_type": "empty_map"},
+                        errno=7,
+                    )
+                    self.moving_in_progress = False
+                    return
+
+                target_object = None
+                for obj in objects:
+                    if obj.id == self.target_object_id:
+                        target_object = obj
+                        break
+
+                if not target_object:
+                    self.get_logger().error(
+                        f'Object with ID "{self.target_object_id}" not found in semantic map'
+                    )
+                    available_ids = [obj.id for obj in objects]
+                    available_labels = [obj.label for obj in objects]
+                    error_msg = (
+                        f'Object with ID "{self.target_object_id}" not found in semantic map. '
+                        f"Available object IDs: {available_ids[:10]}{'...' if len(available_ids) > 10 else ''}. "
+                        f"This may happen if the object was removed or the ID from planning is incorrect."
+                    )
+                    self.get_logger().error(error_msg)
+                    self._stop_status_timer()
+                    self._publish_status(
+                        self.current_skill_id,
+                        "error",
+                        {
+                            "error": error_msg,
+                            "requested_object_id": self.target_object_id,
+                            "available_object_ids": available_ids,
+                            "available_labels": available_labels,
+                        },
+                        errno=8,
+                    )
+                    self.moving_in_progress = False
+                    return
+
+                self.get_logger().info(
+                    f"Found target object: {target_object.id} ({target_object.label})"
+                )
+
+                object_pose = self._get_object_pose_in_map(target_object)
+                if not object_pose:
+                    self.get_logger().error(
+                        f"Could not get pose for object {target_object.id}"
+                    )
+                    self._stop_status_timer()
+                    self._publish_status(
+                        self.current_skill_id,
+                        "error",
+                        {"error": f"Could not get pose for object {target_object.id}"},
+                        errno=9,
+                    )
+                    self.moving_in_progress = False
+                    return
+
+                goal_pose = self._calculate_goal_pose_near_object(
+                    object_pose, self.stop_radius
+                )
+
+                actual_distance = math.sqrt(
+                    (goal_pose.pose.position.x - object_pose.pose.position.x) ** 2
+                    + (goal_pose.pose.position.y - object_pose.pose.position.y) ** 2
+                )
+
+                self.get_logger().info(
+                    f"Navigating to object {target_object.id} ({target_object.label}) - "
+                    f"Goal at ({goal_pose.pose.position.x:.2f}, {goal_pose.pose.position.y:.2f}), "
+                    f"will stop {actual_distance:.2f}m from object (requested: {self.stop_radius:.2f}m)"
+                )
+
+                self.navigation_complete = False
+                assert self.navigate_goal_publisher is not None, (
+                    "Navigation goal publisher must be available"
+                )
+                self.navigate_goal_publisher.publish(goal_pose)
+
+                # Reach = at goal (xyz position only, no orientation) and stationary for a while
+                POSITION_DELTA_M = 0.35
+                STILL_DURATION_S = 1.0
+                STILL_MOVE_THRESHOLD_M = 0.05
+                time_first_at_goal = None
+                pose_first_at_goal = None
+                last_log_time = 0.0
+                LOG_INTERVAL_S = 2.0
+
+                self.get_logger().info(
+                    "Waiting for pose-based completion: xyz dist<=%.2fm, still %.1fs"
+                    % (POSITION_DELTA_M, STILL_DURATION_S)
+                )
+
+                timeout = 90.0
+                start_time = time.time()
+                while (
+                    not self.navigation_complete
+                    and (time.time() - start_time) < timeout
+                    and not self._cancel_requested
+                    and not self._target_replaced
+                ):
+                    rclpy.spin_once(self, timeout_sec=0.1)
+                    if self.navigation_complete or self._cancel_requested or self._target_replaced:
+                        break
+                    now = time.time()
+                    if self.latest_pose is None:
+                        if now - last_log_time >= LOG_INTERVAL_S:
+                            self.get_logger().warn(
+                                "No pose yet (amcl_pose?). elapsed=%.1fs" % (now - start_time)
+                            )
+                            last_log_time = now
+                        continue
                     dist = math.sqrt(
                         (self.latest_pose.pose.position.x - goal_pose.pose.position.x) ** 2
                         + (self.latest_pose.pose.position.y - goal_pose.pose.position.y) ** 2
+                        + (self.latest_pose.pose.position.z - goal_pose.pose.position.z) ** 2
                     )
-                    yaw_goal = self._yaw_from_quat(goal_pose.pose.orientation)
-                    yaw_now = self._yaw_from_quat(self.latest_pose.pose.orientation)
-                    yaw_diff = yaw_now - yaw_goal
-                    while yaw_diff > math.pi:
-                        yaw_diff -= 2.0 * math.pi
-                    while yaw_diff < -math.pi:
-                        yaw_diff += 2.0 * math.pi
-                    self.get_logger().error(
-                        "Navigation timeout. Last: dist=%.3fm (need<=%.2f), yaw_diff=%.3f rad (need<=%.2f)"
-                        % (dist, POSITION_DELTA_M, yaw_diff, ANGLE_DELTA_RAD)
+                    at_goal = dist <= POSITION_DELTA_M
+                    if at_goal:
+                        if time_first_at_goal is None:
+                            time_first_at_goal = time.time()
+                            pose_first_at_goal = (
+                                self.latest_pose.pose.position.x,
+                                self.latest_pose.pose.position.y,
+                                self.latest_pose.pose.position.z,
+                            )
+                            self.get_logger().info(
+                                "At goal (xyz dist=%.3fm). Starting still timer (%.1fs)."
+                                % (dist, STILL_DURATION_S)
+                            )
+                        elif (time.time() - time_first_at_goal) >= STILL_DURATION_S:
+                            assert pose_first_at_goal is not None
+                            dx = self.latest_pose.pose.position.x - pose_first_at_goal[0]
+                            dy = self.latest_pose.pose.position.y - pose_first_at_goal[1]
+                            dz = self.latest_pose.pose.position.z - pose_first_at_goal[2]
+                            drift = math.sqrt(dx * dx + dy * dy + dz * dz)
+                            if drift <= STILL_MOVE_THRESHOLD_M:
+                                self.navigation_complete = True
+                                self.get_logger().info(
+                                    "Navigation complete (at goal and stationary for %.1fs, drift=%.3fm)"
+                                    % (STILL_DURATION_S, drift)
+                                )
+                            elif now - last_log_time >= LOG_INTERVAL_S:
+                                self.get_logger().info(
+                                    "At goal but moved too much: drift=%.3fm (max %.2fm). Resetting still timer."
+                                    % (drift, STILL_MOVE_THRESHOLD_M)
+                                )
+                                time_first_at_goal = None
+                                pose_first_at_goal = None
+                                last_log_time = now
+                        elif now - last_log_time >= LOG_INTERVAL_S:
+                            remaining = STILL_DURATION_S - (now - time_first_at_goal)
+                            self.get_logger().info(
+                                "At goal, waiting still: %.1fs left" % max(0, remaining)
+                            )
+                            last_log_time = now
+                    else:
+                        if time_first_at_goal is not None:
+                            self.get_logger().info(
+                                "Left goal (xyz dist=%.3fm). Resetting still timer."
+                                % (dist,)
+                            )
+                        time_first_at_goal = None
+                        pose_first_at_goal = None
+                        if now - last_log_time >= LOG_INTERVAL_S:
+                            self.get_logger().info(
+                                "Approaching: xyz dist=%.3fm (need<=%.2f), pos=(%.2f,%.2f,%.2f)"
+                                % (
+                                    dist,
+                                    POSITION_DELTA_M,
+                                    self.latest_pose.pose.position.x,
+                                    self.latest_pose.pose.position.y,
+                                    self.latest_pose.pose.position.z,
+                                )
+                            )
+                            last_log_time = now
+
+                if self._target_replaced:
+                    self._target_replaced = False
+                    self.get_logger().info(
+                        "Target replaced, switching to new object %s"
+                        % self.target_object_id
                     )
+                    continue
+
+                if self._cancel_requested:
+                    self._stop_status_timer()
+                    self._publish_status(
+                        self.current_skill_id,
+                        "cancelled",
+                        {"message": "Cancelled by robonix (terminate on start_topic)"},
+                        errno=0,
+                    )
+                    self.get_logger().info("Move to object cancelled by robonix")
+                    self.moving_in_progress = False
+                    return
+
+                if self.navigation_complete:
+                    final_distance = None
+                    if self.latest_pose:
+                        final_distance = math.sqrt(
+                            (self.latest_pose.pose.position.x -
+                             object_pose.pose.position.x)
+                            ** 2
+                            + (
+                                self.latest_pose.pose.position.y
+                                - object_pose.pose.position.y
+                            )
+                            ** 2
+                        )
+
+                    result = {
+                        "message": f"Successfully navigated to object: {target_object.label}",
+                        "object_id": target_object.id,
+                        "object_label": target_object.label,
+                        "object_position": {
+                            "x": object_pose.pose.position.x,
+                            "y": object_pose.pose.position.y,
+                            "z": object_pose.pose.position.z,
+                        },
+                        "goal_position": {
+                            "x": goal_pose.pose.position.x,
+                            "y": goal_pose.pose.position.y,
+                            "z": goal_pose.pose.position.z,
+                        },
+                        "stop_radius": self.stop_radius,
+                    }
+                    if final_distance is not None:
+                        result["final_distance_to_object"] = final_distance
+
+                    self._stop_status_timer()
+                    self._publish_status(self.current_skill_id,
+                                         "finished", result, errno=0)
+                    self.get_logger().info(
+                        f"Successfully navigated to object: {target_object.label} "
+                        f"(stopped {final_distance:.2f}m away, requested: {self.stop_radius:.2f}m)"
+                        if final_distance is not None
+                        else f"Successfully navigated to object: {target_object.label}"
+                    )
+                    self.moving_in_progress = False
+                    return
                 else:
-                    self.get_logger().error(
-                        "Navigation timeout. No pose received (check amcl_pose topic)."
+                    self._stop_status_timer()
+                    # Log why we timed out
+                    if self.latest_pose is not None:
+                        dist = math.sqrt(
+                            (self.latest_pose.pose.position.x - goal_pose.pose.position.x) ** 2
+                            + (self.latest_pose.pose.position.y - goal_pose.pose.position.y) ** 2
+                            + (self.latest_pose.pose.position.z - goal_pose.pose.position.z) ** 2
+                        )
+                        self.get_logger().error(
+                            "Navigation timeout. Last: xyz dist=%.3fm (need<=%.2f)"
+                            % (dist, POSITION_DELTA_M)
+                        )
+                    else:
+                        self.get_logger().error(
+                            "Navigation timeout. No pose received (check amcl_pose topic)."
+                        )
+                    self._publish_status(
+                        self.current_skill_id,
+                        "error",
+                        {"error": "Navigation timeout"},
+                        errno=10,
                     )
-                self._publish_status(
-                    self.current_skill_id,
-                    "error",
-                    {"error": "Navigation timeout"},
-                    errno=10,
-                )
-                self.moving_in_progress = False
+                    self.moving_in_progress = False
+                    return
 
         except Exception as e:
             self._stop_status_timer()
