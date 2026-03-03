@@ -1,0 +1,45 @@
+# Robonix Test Framework
+
+Test and benchmark utilities for comparing ROS2 client implementations (ros2-client/RustDDS, rclcpp/FastDDS, rclpy/FastDDS).
+
+## Benchmark Results (2026-01-12)
+
+Below are the averaged results from a benchmark run (3 repeats per configuration). **Conc** = concurrency level, **Reps** = total service calls, **Succ/Fail** = success/failure counts, **Rate** = success rate, **Avg/P50/P99** = latency in milliseconds.
+
+### Summary Table
+
+```
+=======================================================================================================================================
+                                      Robonix Benchmark Summary Report (Averages across Repeats)                                       
+=======================================================================================================================================
+Conc   Type                            Reps    Total     Succ     Fail     Rate        Avg        P50        P99
+---------------------------------------------------------------------------------------------------------------------------------------
+1      ros2-client (RustDDS)              3      500      500        0   100.0%     127.91     115.74     301.88
+1      rclcpp (FastDDS)                   3      500      500        0   100.0%     152.54     140.84     342.28
+1      rclpy (FastDDS)                    3      500      500        0   100.0%     209.30     195.66     494.32
+---------------------------------------------------------------------------------------------------------------------------------------
+2      ros2-client (RustDDS)              3     1000     1000        0   100.0%     121.80     101.78     392.63
+2      rclcpp (FastDDS)                   3     1000     1000        0   100.0%     146.47     125.46     426.22
+2      rclpy (FastDDS)                    3     1000      999        1    99.9%     884.28     225.70     539.06
+---------------------------------------------------------------------------------------------------------------------------------------
+4      ros2-client (RustDDS)              3     2000     2000        0   100.0%     125.92     103.83     441.83
+4      rclcpp (FastDDS)                   3     2000     2000        0   100.0%     181.75     142.13     698.89
+4      rclpy (FastDDS)                    3     2000     2000        0   100.0%     363.15     342.59     650.01
+---------------------------------------------------------------------------------------------------------------------------------------
+8      ros2-client (RustDDS)              3     4000     4000        0   100.0%     206.64     130.32    1560.63
+8      rclcpp (FastDDS)                   3     3833     3833        0   100.0%     280.19     191.78    1472.30
+8      rclpy (FastDDS)                    3     4000     3991        9    99.8%    4530.75     497.66    3053.90
+---------------------------------------------------------------------------------------------------------------------------------------
+```
+
+### Latency Comparison
+
+![Latency comparison by client and concurrency](logs/benchmark_20260112_121236/latency_comparison.png)
+
+ros2-client (RustDDS) shows lower average and median latency than rclcpp (FastDDS) and rclpy (FastDDS) across concurrency levels 1, 2, 4, and 8, with 100% success rate at Conc 1–4 and at Conc 8.
+
+### Failure Rate Comparison
+
+![Failure rate comparison by client and concurrency](logs/benchmark_20260112_121236/failure_rate_comparison.png)
+
+This run’s full logs (summary, plots, per-run JSON) are in `logs/benchmark_20260112_121236/`.

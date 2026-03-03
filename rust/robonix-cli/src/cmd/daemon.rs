@@ -67,7 +67,7 @@ pub async fn stop() -> Result<()> {
     // For now, we'll use a simple approach: find the process and kill it
     #[cfg(unix)]
     {
-        use nix::sys::signal::{kill, Signal};
+        use nix::sys::signal::{Signal, kill};
         use nix::unistd::Pid;
 
         // Try to find daemon process by checking socket file's owner or by name

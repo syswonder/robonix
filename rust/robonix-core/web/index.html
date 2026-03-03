@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Robonix Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;500;600;700&display=swap"
+        rel="stylesheet">
+    <!-- Bootstrap 5 CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet"
+        integrity="sha384-T3c6CoIi6uLrA9TneNEoa7RxnatzjcDSCmG1MXxSR1GAsXEV/Dwwykc2MPK8M2HN" crossorigin="anonymous">
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- highlight.js for syntax highlighting in modals -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css" crossorigin="anonymous">
+</head>
+
+<body>
+    <nav class="modern-navbar">
+        <div class="navbar-container">
+            <a class="navbar-brand" href="/">Robonix Console</a>
+            <button class="navbar-toggler" type="button" id="navbarToggle">
+                <span></span>
+                <span></span>
+                <span></span>
+            </button>
+            <div class="navbar-menu" id="navbarMenu">
+                <a class="nav-link active" href="/">Home</a>
+                <a class="nav-link" href="/settings">Settings</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container">
+        <!-- <h1>Robonix Console</h1> -->
+        <br>
+
+        <div class="status">
+            <div class="status-item">
+                <span class="status-label">Status:</span>
+                <span id="core-status">-</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Tasks:</span>
+                <span id="active-tasks">-</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Skills:</span>
+                <span id="skills-count">-</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Services:</span>
+                <span id="services-count">-</span>
+            </div>
+        </div>
+
+        <!-- Agent Card -->
+        <div class="panel agent-card expanded">
+            <div class="panel-header" onclick="toggleAgentChat()" style="cursor: pointer;">
+                <div class="panel-title">Robonix Agent</div>
+                <div class="agent-header-actions" onclick="event.stopPropagation();">
+                    <label class="agent-voice-toggle" title="Enable voice playback">
+                        <input type="checkbox" id="agent-tts-toggle" checked>
+                        <span class="voice-icon">Voice</span>
+                    </label>
+                    <button class="agent-action-btn" onclick="clearAgentChat()" title="Clear chat history">Clear</button>
+                    <button class="agent-action-btn" onclick="resetAgent()" title="Reset agent">Reset</button>
+                    <div class="agent-toggle">▼</div>
+                </div>
+            </div>
+            <div id="agent-chat-popup" class="agent-chat-content">
+                <div id="agent-chat-messages" class="agent-chat-messages">
+                    <div class="agent-message agent-message-bot">
+                        <div class="agent-message-content">
+                            Hello! I'm the Robonix agent. I can help you query the semantic map, submit tasks, and query system capabilities. How can I assist you?
+                        </div>
+                    </div>
+                </div>
+                <div class="agent-chat-input-container">
+                    <button id="agent-voice-input-btn" class="agent-voice-input-btn" onclick="toggleVoiceInput()" title="Voice input">
+                        <span id="voice-input-icon">Mic</span>
+                    </button>
+                    <input type="text" id="agent-input" class="agent-chat-input" placeholder="Type your message here..." onkeypress="if(event.key === 'Enter') sendAgentMessage()">
+                    <button onclick="sendAgentMessage()" class="agent-chat-send">Send</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <div class="panel-title">TF Tree & Topics</div>
+                <div class="controls">
+                    <label>
+                        <input type="checkbox" id="auto-refresh" checked> Auto (2s)
+                    </label>
+                    <button onclick="loadTfTree()">Refresh TF</button>
+                    <button onclick="loadTopics()">Refresh Topics</button>
+                </div>
+            </div>
+            <div class="split-panel">
+                <div class="split-panel-left">
+                    <div class="sub-panel-header">TF Tree</div>
+                    <div id="tf-tree-container">Loading...</div>
+                </div>
+                <div class="split-panel-right">
+                    <div class="sub-panel-header">Topics</div>
+                    <div id="topics-container">Loading...</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <div class="panel-title">System Components</div>
+                <div class="controls">
+                    <label>
+                        <input type="checkbox" id="auto-refresh-components" checked> Auto (2s)
+                    </label>
+                    <button onclick="loadComponents()">Refresh</button>
+                </div>
+            </div>
+            <div class="components-grid">
+                <div class="component-column">
+                    <div class="component-header" onclick="showComponentListModal('primitive')"
+                        style="cursor: pointer;">Primitives</div>
+                    <div id="primitives-container">Loading...</div>
+                </div>
+                <div class="component-column">
+                    <div class="component-header" onclick="showComponentListModal('service')" style="cursor: pointer;">
+                        Services</div>
+                    <div id="services-container">Loading...</div>
+                </div>
+                <div class="component-column">
+                    <div class="component-header" onclick="showComponentListModal('skill')" style="cursor: pointer;">
+                        Skills</div>
+                    <div id="skills-container">Loading...</div>
+                </div>
+                <div class="component-column">
+                    <div class="component-header" onclick="showComponentListModal('task')" style="cursor: pointer;">
+                        Tasks</div>
+                    <div id="tasks-container">Loading...</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <div class="panel-title">Active CLI Nodes</div>
+                <div class="controls">
+                    <span id="nodes-count" class="status-count">0</span>
+                    <label>
+                        <input type="checkbox" id="auto-refresh-nodes" checked> Auto (3s)
+                    </label>
+                    <button onclick="loadNodes()">Refresh</button>
+                </div>
+            </div>
+            <div id="nodes-container" class="nodes-list">Loading...</div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <div class="panel-title">Visualization</div>
+                <div class="controls">
+                    <label>
+                        <input type="checkbox" id="auto-refresh-viz" checked> Auto (2s)
+                    </label>
+                    <button onclick="loadVisualization()">Refresh</button>
+                </div>
+            </div>
+            <div class="viz-grid">
+                <div class="viz-card">
+                    <div class="viz-header">Semantic Map</div>
+                    <div id="semantic-map-container">Loading...</div>
+                </div>
+                <div class="viz-card">
+                    <div class="viz-header">Image Monitor</div>
+                    <div id="image-monitor-hidden-note" class="image-monitor-hidden-note" style="display: none;" title="These topics are hidden because they have no image data or the image failed to load/decode."></div>
+                    <div id="image-monitor-container" class="image-monitor-wrapper">Loading...</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <div class="panel-title">Semantic Map 2D View</div>
+                <div class="controls">
+                    <label>
+                        <input type="checkbox" id="auto-refresh-map2d" checked> Auto (2s)
+                    </label>
+                    <button onclick="loadSemanticMap2D()">Refresh</button>
+                </div>
+            </div>
+            <div class="map2d-card-full">
+                <div id="semantic-map-2d-container">
+                    <canvas id="semantic-map-2d-canvas"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <div class="panel-title">System Logs</div>
+                <div class="controls">
+                    <label>
+                        <input type="checkbox" id="auto-refresh-logs" checked> Auto (2s)
+                    </label>
+                    <button onclick="loadLogs()">Refresh</button>
+                </div>
+            </div>
+            <div id="logs-container">Loading...</div>
+        </div>
+
+        <!-- RTDL Modal -->
+        <div id="rtdl-modal" class="modal">
+            <div class="modal-content">
+                <span class="close" onclick="closeRtdlModal()">&times;</span>
+                <h2>RTDL Program</h2>
+                <pre class="component-detail-json"><code id="rtdl-content" class="syntax-block"></code></pre>
+            </div>
+        </div>
+
+        <!-- Component Detail Modal (for single item) -->
+        <div id="component-modal" class="modal">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h2 id="component-modal-title"></h2>
+                    <span class="close" onclick="closeComponentModal()">&times;</span>
+                </div>
+                <div id="component-modal-content"></div>
+            </div>
+        </div>
+
+        <!-- Component List Modal (for entire card) -->
+        <div id="component-list-modal" class="modal">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h2 id="component-list-modal-title"></h2>
+                    <span class="close" onclick="closeComponentListModal()">&times;</span>
+                </div>
+                <div id="component-list-modal-content"></div>
+            </div>
+        </div>
+
+        <!-- CLI Node detail modal (machine info + capability status) -->
+        <div id="node-detail-modal" class="modal">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h2 id="node-detail-modal-title">Node</h2>
+                    <span class="close" onclick="closeNodeDetailModal()">&times;</span>
+                </div>
+                <div id="node-detail-modal-content"></div>
+            </div>
+        </div>
+
+        <!-- Node capability log viewer (remote CLI log stream) -->
+        <div id="node-log-modal" class="modal">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h2 id="node-log-modal-title">Node log</h2>
+                    <span class="close" onclick="closeNodeLogViewer()">&times;</span>
+                </div>
+                <div class="node-log-viewer-toolbar">
+                    <span id="node-log-modal-meta"></span>
+                    <label class="node-log-auto-scroll">
+                        <input type="checkbox" id="node-log-auto-scroll" title="When unchecked, keeps your scroll position when new log lines arrive"> Auto-scroll to latest
+                    </label>
+                </div>
+                <pre id="node-log-modal-content" class="node-log-pre"></pre>
+            </div>
+        </div>
+
+        <!-- Cancel Task Confirm Modal -->
+        <div id="cancel-task-confirm-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Cancel Task</h2>
+                    <span class="close" onclick="closeCancelConfirmModal()">&times;</span>
+                </div>
+                <p id="cancel-task-confirm-message">Are you sure you want to cancel this task?</p>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeCancelConfirmModal()">No, keep it</button>
+                    <button type="button" class="btn btn-danger" id="cancel-task-confirm-btn">Yes, cancel task</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Alpine.js for reactive UI -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.3/dist/cdn.min.js"></script>
+    <!-- Bootstrap 5 JS Bundle -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-C6RzsynM9kWDrMNeT87bh95OGNyZPhcTNXj1NW7RuBCsyN/o0jlpcV8Qyq46cDfL"
+        crossorigin="anonymous"></script>
+    <!-- highlight.js for syntax highlighting in modals (auto-detect JSON, YAML, etc.) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/yaml.min.js" crossorigin="anonymous"></script>
+    <script src="/static/app.js"></script>
+</body>
+
+</html>

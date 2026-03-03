@@ -1,0 +1,26 @@
+# Webots simulator semantic map config
+manual_objects:
+  - label: init_waypoint
+    frame_mapping:
+      - frame_id: "map"
+        center:
+          x: -0.284224
+          y: 0.199099
+          z: 0.0
+        bbox:
+          - scale_x: 0.1
+            scale_y: 0.1
+            scale_z: 0.1
+            yaw: 0.0
+  - label: door_waypoint
+    frame_mapping:
+      - frame_id: "map"
+        center:
+          x: -9.49493
+          y: 3.14404
+          z: 0.0
+        bbox:
+          - scale_x: 0.1
+            scale_y: 0.1
+            scale_z: 0.1
+            yaw: 0.0

@@ -25,3 +25,6 @@ test_performance
 publish_camera_tf.py
 tailscale/
 target
+stress_test
+.robonix
+rust/debug

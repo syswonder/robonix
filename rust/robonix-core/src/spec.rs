@@ -32,7 +32,7 @@ pub struct SpecRegistry {
 // Macro to define a single primitive
 // Format: PRM!(primitives, name, desc, input_params, output_params)
 // input_params/output_params: HashMap of label -> ROS message type
-// Example: PRM!(primitives, "prm::camera.capture", "Capture RGB image", {}, {"image": "sensor_msgs/msg/Image"})
+// Example: PRM!(primitives, "prm::camera.rgb", "Capture RGB image", {}, {"image": "sensor_msgs/msg/Image"})
 #[macro_export]
 macro_rules! PRM {
     ($primitives:ident, $name:expr, $desc:expr, $input_params:tt, $output_params:tt) => {{
@@ -88,9 +88,20 @@ macro_rules! SRV {
 
 impl SpecRegistry {
     pub fn new() -> Self {
-        // Load specifications from the table
-        let primitives = crate::specs_table::load_primitives();
-        let services = crate::specs_table::load_services();
+        let mut primitives = HashMap::new();
+        let mut services = HashMap::new();
+
+        // Load perception specs (primitives + services)
+        crate::perception::specs::load_primitives(&mut primitives);
+        crate::perception::specs::load_services(&mut services);
+
+        // Load cognition specs (primitives + services)
+        crate::cognition::specs::load_primitives(&mut primitives);
+        crate::cognition::specs::load_services(&mut services);
+
+        // Load action specs (primitives + services)
+        crate::action::specs::load_primitives(&mut primitives);
+        crate::action::specs::load_services(&mut services);
 
         Self {
             primitives,

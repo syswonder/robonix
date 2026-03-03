@@ -1,0 +1,48 @@
+{
+  "stats": {
+    "rust": {
+      "total": 500,
+      "success": 500,
+      "failed": 0,
+      "avg": 138.65,
+      "min": 80.42,
+      "max": 1631.08,
+      "p50": 122.91,
+      "p95": 226.28,
+      "p99": 369.56,
+      "p999": 1210.61
+    },
+    "python": {
+      "total": 500,
+      "success": 500,
+      "failed": 0,
+      "avg": 197.07,
+      "min": 127.79,
+      "max": 565.77,
+      "p50": 188.59,
+      "p95": 270.84,
+      "p99": 434.88,
+      "p999": 565.77
+    },
+    "cpp": {
+      "total": 500,
+      "success": 500,
+      "failed": 0,
+      "avg": 153.18,
+      "min": 100.22,
+      "max": 861.34,
+      "p50": 141.11,
+      "p95": 291.48,
+      "p99": 353.24,
+      "p999": 415.06
+    }
+  },
+  "metadata": {
+    "timestamp": "2026-01-12T12:14:26.596284",
+    "log_dir": "/root/workspace/rust/tools/test_framework/logs/benchmark_20260112_121236/20260112_121350_rustdds_c1",
+    "concurrency": 1,
+    "requests": 500,
+    "rate": 100,
+    "duration": 0
+  }
+}

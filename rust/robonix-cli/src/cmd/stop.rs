@@ -5,7 +5,7 @@
 
 use super::recipe_utils;
 use crate::daemon_client::{DaemonClient, DaemonCommand, DaemonResponse};
-use crate::{output, Config};
+use crate::{Config, output};
 use anyhow::Result;
 
 pub async fn execute(config: Config, target: String) -> Result<()> {

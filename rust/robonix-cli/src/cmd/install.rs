@@ -3,7 +3,7 @@
 //
 // Install command implementation for robonix-cli
 
-use crate::{output, Config, PackageInstaller};
+use crate::{Config, PackageInstaller, output};
 use anyhow::Result;
 use std::path::PathBuf;
 

@@ -17,11 +17,12 @@ use tokio::sync::RwLock;
 #[derive(Debug, Clone)]
 struct PrimitiveEntry {
     name: String,
-    input_schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    metadata: serde_json::Value,
+    input_schema: String,  // JSON string: stored as string internally
+    output_schema: String, // JSON string: stored as string internally
+    metadata: String,      // JSON string: stored as string internally
     provider: String,
     version: String,
+    node_id: String,
 }
 
 /// Primitive Registry - Manages primitive registration and querying
@@ -46,7 +47,7 @@ impl PrimitiveRegistry {
         &self,
         req: RegisterPrimitiveRequest,
     ) -> RegisterPrimitiveResponse {
-        // Parse JSON strings
+        // Validate JSON format and parse for spec validation
         let input_schema: serde_json::Value = match serde_json::from_str(&req.input_schema) {
             Ok(v) => v,
             Err(e) => {
@@ -67,16 +68,14 @@ impl PrimitiveRegistry {
                 return RegisterPrimitiveResponse { ok: false };
             }
         };
-        let metadata: serde_json::Value = match serde_json::from_str(&req.metadata) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(
-                    "failed to parse metadata json: primitive_name={}, provider={}, error={}",
-                    req.name, req.provider, e
-                );
-                return RegisterPrimitiveResponse { ok: false };
-            }
-        };
+        // Validate metadata JSON format
+        if serde_json::from_str::<serde_json::Value>(&req.metadata).is_err() {
+            warn!(
+                "failed to parse metadata json: primitive_name={}, provider={}",
+                req.name, req.provider
+            );
+            return RegisterPrimitiveResponse { ok: false };
+        }
 
         // Validate against spec
         match self
@@ -96,15 +95,17 @@ impl PrimitiveRegistry {
         }
 
         // Key includes name, provider, and version to distinguish different implementations
-        let key = format!("{}::{}::{}", req.name, req.provider, req.version);
+        let key = format!("{}${}${}", req.name, req.provider, req.version);
 
+        // Store as JSON strings internally
         let entry = PrimitiveEntry {
             name: req.name.clone(),
-            input_schema,
-            output_schema,
-            metadata,
+            input_schema: req.input_schema.clone(),
+            output_schema: req.output_schema.clone(),
+            metadata: req.metadata.clone(),
             provider: req.provider.clone(),
             version: req.version.clone(),
+            node_id: req.node_id.clone(),
         };
 
         let mut primitives = self.primitives.write().await;
@@ -134,7 +135,13 @@ impl PrimitiveRegistry {
                     Ok(v) => v,
                     Err(_) => continue, // Skip if filter is invalid JSON
                 };
-                if !self.matches_filter(&entry.metadata, &filter_value) {
+                // Parse metadata for filtering
+                let metadata_value: serde_json::Value = match serde_json::from_str(&entry.metadata)
+                {
+                    Ok(v) => v,
+                    Err(_) => continue, // Skip if metadata is invalid JSON
+                };
+                if !self.matches_filter(&metadata_value, &filter_value) {
                     continue;
                 }
             }
@@ -145,10 +152,31 @@ impl PrimitiveRegistry {
                 input_schema: entry.input_schema.clone(),
                 output_schema: entry.output_schema.clone(),
                 metadata: entry.metadata.clone(),
+                node_id: entry.node_id.clone(),
             });
         }
 
         QueryPrimitiveResponse { instances }
+    }
+
+    /// Get all registered primitives (for web UI)
+    pub async fn get_all_primitives(&self) -> Vec<(String, PrimitiveInstance)> {
+        let primitives = self.primitives.read().await;
+        let mut result = Vec::new();
+        for (key, entry) in primitives.iter() {
+            result.push((
+                key.clone(),
+                PrimitiveInstance {
+                    provider: entry.provider.clone(),
+                    version: entry.version.clone(),
+                    input_schema: entry.input_schema.clone(),
+                    output_schema: entry.output_schema.clone(),
+                    metadata: entry.metadata.clone(),
+                    node_id: entry.node_id.clone(),
+                },
+            ));
+        }
+        result
     }
 
     /// Check if metadata matches filter

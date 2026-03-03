@@ -3,12 +3,14 @@
 //
 // Core coordination module for robonix-core
 
+use crate::action::skill_library::SkillLibrary;
 use crate::primitive::PrimitiveRegistry;
 use crate::service::ServiceRegistry;
-use crate::skill_library::SkillLibrary;
 use crate::spec::SpecRegistry;
-use crate::task_manager::TaskManager;
+use crate::task::TaskManager;
+use ros2_client::Node;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 // robonix Core - coordinates all modules according to robonix architecture
 pub struct RobonixCore {
@@ -20,7 +22,7 @@ pub struct RobonixCore {
 }
 
 impl RobonixCore {
-    pub fn new() -> Self {
+    pub fn new(node: Arc<Mutex<Node>>) -> Self {
         // Create shared spec registry (used by both primitive and service registries)
         let spec_registry = Arc::new(SpecRegistry::new());
 
@@ -33,6 +35,7 @@ impl RobonixCore {
             skill_library.clone(),
             service_registry.clone(),
             primitive_registry.clone(),
+            node,
         );
 
         Self {

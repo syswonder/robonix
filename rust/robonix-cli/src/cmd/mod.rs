@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use crate::Config;
 
 mod build;
+mod clean;
 mod config;
 mod daemon;
 mod info;
@@ -168,6 +169,10 @@ pub enum DeployCommands {
         /// - recipe file path (e.g., "demo_recipe.yaml")
         target: String,
     },
+    /// Clean logs directory in package storage path
+    ///
+    /// Removes all log files from ~/.robonix/packages/logs directory
+    Clean,
 }
 
 #[derive(Subcommand)]
@@ -226,6 +231,7 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             DeployCommands::Restart { target } => restart::execute(config, target).await,
             DeployCommands::Status => status::execute(config).await,
             DeployCommands::Unregister { target } => unregister::execute(config, target).await,
+            DeployCommands::Clean => clean::execute(config).await,
         },
         Commands::Config {
             set_storage_path,

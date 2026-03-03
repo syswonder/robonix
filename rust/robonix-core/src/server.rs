@@ -4,6 +4,7 @@
 // Handles ROS2 service server creation and request handling
 
 use crate::core::RobonixCore;
+use crate::ros_idl::get_listening_ips::{GetListeningIpsRequest, GetListeningIpsResponse};
 use crate::ros_idl::primitive::{
     QueryPrimitiveRequest, QueryPrimitiveResponse, RegisterPrimitiveRequest,
     RegisterPrimitiveResponse,
@@ -15,11 +16,12 @@ use crate::ros_idl::skill::{
     QuerySkillRequest, QuerySkillResponse, RegisterSkillRequest, RegisterSkillResponse,
 };
 use crate::ros_idl::task::{
-    SubmitTaskRequest, SubmitTaskResponse, TaskDataRequest, TaskDataResponse,
+    CancelTaskRequest, CancelTaskResponse, SubmitTaskRequest, SubmitTaskResponse, TaskDataRequest,
+    TaskDataResponse,
 };
 use crate::ros_idl::test::{PingPongRequest, PingPongResponse};
 use futures_util::stream::StreamExt;
-use log::{debug, error, info};
+use log::{error, info, warn};
 use ros2_client::{
     AService, Name, Node, Server, ServiceMapping, ServiceTypeName,
     rustdds::{
@@ -29,9 +31,114 @@ use ros2_client::{
 };
 use std::sync::Arc;
 
+/// Return all IP addresses this host is listening on (for daemon to discover core).
+fn get_listening_ips() -> Vec<String> {
+    #[cfg(target_os = "linux")]
+    {
+        match std::process::Command::new("hostname").arg("-I").output() {
+            Ok(output) if output.status.success() => {
+                let s = String::from_utf8_lossy(&output.stdout);
+                let ips: Vec<String> = s
+                    .split_whitespace()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !ips.is_empty() {
+                    return ips;
+                }
+            }
+            _ => {}
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = std::process::Command::new("hostname");
+    }
+    // Fallback: try to get one IP via UDP socket
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if let Ok(()) = socket.connect("8.8.8.8:80") {
+            if let Ok(addr) = socket.local_addr() {
+                return vec![addr.ip().to_string()];
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Set thread to real-time priority with SCHED_FIFO policy
+/// This ensures the thread has the highest priority and won't be preempted by other user threads
+fn set_thread_realtime_priority() {
+    #[cfg(target_os = "linux")]
+    {
+        use std::mem;
+        unsafe {
+            let mut param: libc::sched_param = mem::zeroed();
+            // Set priority to maximum (99 is the highest for SCHED_FIFO)
+            // Note: This requires CAP_SYS_NICE capability or running as root
+            param.sched_priority = 99;
+
+            let result =
+                libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param);
+
+            if result == 0 {
+                info!("Thread set to SCHED_FIFO with priority 99 (highest priority)");
+            } else {
+                let errno = *libc::__errno_location();
+                warn!(
+                    "Failed to set thread to real-time priority (errno: {}). \
+                    This may require root privileges or CAP_SYS_NICE capability. \
+                    Thread will run with normal priority.",
+                    errno
+                );
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        warn!("Real-time priority setting is only supported on Linux");
+    }
+}
+
+/// Spawn a core service API handler on a dedicated high-priority thread
+/// Each core ROS service API gets its own thread with real-time priority
+fn spawn_core_api_thread<F, Fut>(name: &str, f: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let name = name.to_string();
+    let name_for_error = name.clone();
+    std::thread::Builder::new()
+        .name(format!("core-api-{}", name))
+        .spawn(move || {
+            // Set thread to real-time priority
+            // set_thread_realtime_priority();
+
+            // Create a new Tokio runtime for this thread
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect(&format!(
+                    "Failed to create Tokio runtime for core API thread: {}",
+                    name
+                ));
+
+            info!("Core API thread '{}' started", name);
+
+            // Run the future
+            rt.block_on(f());
+        })
+        .expect(&format!(
+            "Failed to spawn core API thread: {}",
+            name_for_error
+        ));
+}
+
 pub fn create_qos() -> QosPolicies {
+    // Match official ros2_client demo QoS settings
     QosPolicyBuilder::new()
-        .history(policy::History::KeepLast { depth: 1000 })
+        .history(policy::History::KeepLast { depth: 10 })
         .reliability(policy::Reliability::Reliable {
             max_blocking_time: Duration::from_millis(100),
         })
@@ -137,15 +244,47 @@ pub fn create_servers(
     )?;
     info!("task data service created at /rbnx/task/data");
 
+    // Task API: /rbnx/task/cancel
+    let cancel_task_server = node
+        .create_server::<AService<CancelTaskRequest, CancelTaskResponse>>(
+            ServiceMapping::Enhanced,
+            &Name::new("/rbnx/task", "cancel")?,
+            &ServiceTypeName::new("robonix_sdk", "CancelTask"),
+            service_qos.clone(),
+            service_qos.clone(),
+        )?;
+    info!("task cancel service created at /rbnx/task/cancel");
+
     // Ping Pong API: /rbnx/ping
+    // WARNING: AService with custom Rust structs uses serde serialization,
+    // which is incompatible with standard ROS2 clients that send CDR format.
+    // This service will work with other ros2_client clients using AService,
+    // but NOT with standard ROS2 clients (ros2 CLI, Python rclpy, C++ rclcpp).
+    //
+    // To support standard ROS2 clients, we would need to:
+    // 1. Use generated ROS2 service types from .srv files (requires code generation)
+    // 2. Or implement CDR serialization for custom message types
+    //
+    // For now, this service only works with robonix-cli (which also uses AService).
     let ping_pong_server = node.create_server::<AService<PingPongRequest, PingPongResponse>>(
         ServiceMapping::Enhanced,
         &Name::new("/rbnx", "ping")?,
-        &ServiceTypeName::new("robonix_sdk", "PingPong"),
+        &ServiceTypeName::new("robonix_sdk", "PingPong"), // Matches robonix_sdk/srv/PingPong.srv
         service_qos.clone(),
         service_qos.clone(),
     )?;
     info!("ping pong service created at /rbnx/ping");
+
+    // Core API: /rbnx/core/get_listening_ips - returns all IPs this host is listening on
+    let get_listening_ips_server = node
+        .create_server::<AService<GetListeningIpsRequest, GetListeningIpsResponse>>(
+            ServiceMapping::Enhanced,
+            &Name::new("/rbnx/core", "get_listening_ips")?,
+            &ServiceTypeName::new("robonix_sdk", "GetListeningIps"),
+            service_qos.clone(),
+            service_qos.clone(),
+        )?;
+    info!("get_listening_ips service created at /rbnx/core/get_listening_ips");
 
     Ok(Servers {
         register_primitive_server,
@@ -156,7 +295,9 @@ pub fn create_servers(
         query_skill_server,
         submit_task_server,
         task_data_server,
+        cancel_task_server,
         ping_pong_server,
+        get_listening_ips_server,
     })
 }
 
@@ -170,7 +311,9 @@ pub struct Servers {
     pub query_skill_server: Server<AService<QuerySkillRequest, QuerySkillResponse>>,
     pub submit_task_server: Server<AService<SubmitTaskRequest, SubmitTaskResponse>>,
     pub task_data_server: Server<AService<TaskDataRequest, TaskDataResponse>>,
+    pub cancel_task_server: Server<AService<CancelTaskRequest, CancelTaskResponse>>,
     pub ping_pong_server: Server<AService<PingPongRequest, PingPongResponse>>,
+    pub get_listening_ips_server: Server<AService<GetListeningIpsRequest, GetListeningIpsResponse>>,
 }
 
 pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
@@ -182,6 +325,7 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
     // Clone components for each handler
     let task_manager_clone1 = task_manager.clone();
     let task_manager_clone3 = task_manager.clone();
+    let task_manager_clone4 = task_manager.clone();
     let skill_library_clone1 = skill_library.clone();
     let skill_library_clone2 = skill_library.clone();
     let service_registry_clone1 = service_registry.clone();
@@ -189,216 +333,248 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
     let primitive_registry_clone1 = primitive_registry.clone();
     let primitive_registry_clone2 = primitive_registry.clone();
 
-    // Handle primitive registration requests
-    let register_primitive_task = smol::spawn(async move {
+    // Handle primitive registration requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("prm-register", move || async move {
         let stream = servers.register_primitive_server.receive_request_stream();
         stream
             .for_each(|result| async {
                 match result {
                     Ok((req_id, req)) => {
                         info!(
-                            "received primitive registration request: primitive_name={}",
+                            "received primitive [registration] request: primitive_name={}",
                             req.name
                         );
                         let resp = primitive_registry_clone1.register_primitive(req).await;
+                        info!("sending primitive [registration] response: {resp:?}");
                         if let Err(e) = servers
                             .register_primitive_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send primitive registration response error: {e:?}");
+                            error!("send primitive [registration] response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive primitive registration request error: {e:?}"),
+                    Err(e) => error!("receive primitive [registration] request error: {e:?}"),
                 }
             })
             .await;
     });
 
-    // Handle primitive query requests
-    let query_primitive_task = smol::spawn(async move {
+    // Handle primitive query requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("prm-query", move || async move {
         let stream = servers.query_primitive_server.receive_request_stream();
         stream
             .for_each(|result| async {
                 match result {
                     Ok((req_id, req)) => {
-                        debug!(
-                            "received primitive query request: primitive_name={}",
+                        info!(
+                            "received primitive [query] request: primitive_name={}",
                             req.name
                         );
                         let resp = primitive_registry_clone2.query_primitive(req).await;
+                        info!("sending primitive [query] response: {resp:?}");
                         if let Err(e) = servers
                             .query_primitive_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send primitive query response error: {e:?}");
+                            error!("send primitive [query] response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive primitive query request error: {e:?}"),
+                    Err(e) => error!("receive primitive [query] request error: {e:?}"),
                 }
             })
             .await;
     });
 
-    // Handle service registration requests
-    let register_service_task = smol::spawn(async move {
+    // Handle service registration requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("srv-register", move || async move {
         let stream = servers.register_service_server.receive_request_stream();
         stream
             .for_each(|result| async {
                 match result {
                     Ok((req_id, req)) => {
                         info!(
-                            "received service registration request: service_name={}",
+                            "received service [registration] request: service_name={}",
                             req.name
                         );
                         let resp = service_registry_clone1.register_service(req).await;
+                        info!("sending service [registration] response: {resp:?}");
                         if let Err(e) = servers
                             .register_service_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send service registration response error: {e:?}");
+                            error!("send service [registration] response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive service registration request error: {e:?}"),
+                    Err(e) => error!("receive service [registration] request error: {e:?}"),
                 }
             })
             .await;
     });
 
-    // Handle service query requests
-    let query_service_task = smol::spawn(async move {
+    // Handle service query requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("srv-query", move || async move {
         let stream = servers.query_service_server.receive_request_stream();
         stream
             .for_each(|result| async {
                 match result {
                     Ok((req_id, req)) => {
-                        debug!("received service query request: service_name={}", req.name);
+                        info!(
+                            "received service [query] request: service_name={}",
+                            req.name
+                        );
                         let resp = service_registry_clone2.query_service(req).await;
+                        info!("sending service [query] response: {resp:?}");
                         if let Err(e) = servers
                             .query_service_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send service query response error: {e:?}");
+                            error!("send service [query] response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive service query request error: {e:?}"),
+                    Err(e) => error!("receive service [query] request error: {e:?}"),
                 }
             })
             .await;
     });
 
-    // Handle skill registration requests
-    let register_skill_task = smol::spawn(async move {
+    // Handle skill registration requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("skl-register", move || async move {
         let stream = servers.register_skill_server.receive_request_stream();
         stream
             .for_each(|result| async {
                 match result {
                     Ok((req_id, req)) => {
                         info!(
-                            "received skill registration request: skill_name={}",
+                            "received skill [registration] request: skill_name={}",
                             req.name
                         );
                         let resp = skill_library_clone1.register_skill(req).await;
+                        info!("sending skill [registration] response: {resp:?}");
                         if let Err(e) = servers
                             .register_skill_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send skill registration response error: {e:?}");
+                            error!("send skill [registration] response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive skill registration request error: {e:?}"),
+                    Err(e) => error!("receive skill [registration] request error: {e:?}"),
                 }
             })
             .await;
     });
 
-    // Handle skill query requests
-    let query_skill_task = smol::spawn(async move {
+    // Handle skill query requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("skl-query", move || async move {
         let stream = servers.query_skill_server.receive_request_stream();
         stream
             .for_each(|result| async {
                 match result {
                     Ok((req_id, req)) => {
-                        debug!("received skill query request: skill_name={}", req.name);
+                        info!("received skill [query] request: skill_name={}", req.name);
                         let resp = skill_library_clone2.query_skill(req).await;
+                        info!("sending skill [query] response: {resp:?}");
                         if let Err(e) = servers
                             .query_skill_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send skill query response error: {e:?}");
+                            error!("send skill [query] response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive skill query request error: {e:?}"),
+                    Err(e) => error!("receive skill [query] request error: {e:?}"),
                 }
             })
             .await;
     });
 
-    // Handle task submit requests
-    let submit_task_task = smol::spawn(async move {
+    // Handle task submit requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("task-submit", move || async move {
         let stream = servers.submit_task_server.receive_request_stream();
         stream
             .for_each(|result| async {
                 match result {
                     Ok((req_id, req)) => {
                         info!(
-                            "received task submit request: description={}",
+                            "received task [submit] request: description={}",
                             req.description
                         );
                         let resp = task_manager_clone1.submit_task(req).await;
+                        info!("sending task [submit] response: {resp:?}");
                         if let Err(e) = servers
                             .submit_task_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send task submit response error: {e:?}");
+                            error!("send task [submit] response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive task submit request error: {e:?}"),
+                    Err(e) => error!("receive task [submit] request error: {e:?}"),
                 }
             })
             .await;
     });
 
-    // Handle task data requests
-    let task_data_task = smol::spawn(async move {
+    // Handle task data requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("task-data", move || async move {
         let stream = servers.task_data_server.receive_request_stream();
         stream
             .for_each(|result| async {
                 match result {
                     Ok((req_id, req)) => {
-                        debug!("received task data request: task_id={}", req.task_id);
+                        info!("received task [data] request: task_id={}", req.task_id);
                         let resp = task_manager_clone3.get_task_data(req).await;
+                        info!("sending task [data] response: {resp:?}");
                         if let Err(e) = servers
                             .task_data_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send task data response error: {e:?}");
+                            error!("send task [data] response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive task data request error: {e:?}"),
+                    Err(e) => error!("receive task [data] request error: {e:?}"),
                 }
             })
             .await;
     });
 
-    // Handle ping pong requests
-    let ping_pong_task = smol::spawn(async move {
+    // Handle task cancel requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("task-cancel", move || async move {
+        let stream = servers.cancel_task_server.receive_request_stream();
+        stream
+            .for_each(|result| async {
+                match result {
+                    Ok((req_id, req)) => {
+                        info!("received task [cancel] request: task_id={}", req.task_id);
+                        let resp = task_manager_clone4.cancel_task(req).await;
+                        info!("sending task [cancel] response: {resp:?}");
+                        if let Err(e) = servers
+                            .cancel_task_server
+                            .async_send_response(req_id, resp)
+                            .await
+                        {
+                            error!("send task [cancel] response error: {e:?}");
+                        }
+                    }
+                    Err(e) => error!("receive task [cancel] request error: {e:?}"),
+                }
+            })
+            .await;
+    });
+
+    // Handle ping pong requests - Core API on dedicated high-priority thread
+    spawn_core_api_thread("ping", move || async move {
         let stream = servers.ping_pong_server.receive_request_stream();
         stream
             .for_each(|result| async {
                 match result {
                     Ok((req_id, req)) => {
-                        debug!(
-                            "received ping request: sequence={}, message={}",
-                            req.sequence, req.message
-                        );
+                        info!("received ping request: {req:?}");
                         let timestamp = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
@@ -408,31 +584,51 @@ pub async fn run_servers(servers: Servers, core: Arc<RobonixCore>) {
                             sequence: req.sequence,
                             timestamp,
                         };
+                        info!("sending pong response: {resp:?}",);
                         if let Err(e) = servers
                             .ping_pong_server
                             .async_send_response(req_id, resp)
                             .await
                         {
-                            error!("send ping pong response error: {e:?}");
+                            error!("send pong response error: {e:?}");
                         }
                     }
-                    Err(e) => error!("receive ping pong request error: {e:?}"),
+                    Err(e) => {
+                        error!("receive pong request error: {e:?}");
+                    }
                 }
             })
             .await;
     });
 
-    // Wait for all tasks (all run indefinitely)
-    futures_util::future::select_all(vec![
-        Box::pin(register_primitive_task),
-        Box::pin(query_primitive_task),
-        Box::pin(register_service_task),
-        Box::pin(query_service_task),
-        Box::pin(register_skill_task),
-        Box::pin(query_skill_task),
-        Box::pin(submit_task_task),
-        Box::pin(task_data_task),
-        Box::pin(ping_pong_task),
-    ])
-    .await;
+    // Handle get_listening_ips requests - Core API
+    spawn_core_api_thread("get_listening_ips", move || async move {
+        let stream = servers.get_listening_ips_server.receive_request_stream();
+        stream
+            .for_each(|result| async {
+                match result {
+                    Ok((req_id, _req)) => {
+                        let ips = get_listening_ips();
+                        let ips_json =
+                            serde_json::to_string(&ips).unwrap_or_else(|_| "[]".to_string());
+                        let resp = GetListeningIpsResponse { ips_json };
+                        info!("get_listening_ips: returning {} IP(s)", ips.len());
+                        if let Err(e) = servers
+                            .get_listening_ips_server
+                            .async_send_response(req_id, resp)
+                            .await
+                        {
+                            error!("send get_listening_ips response error: {e:?}");
+                        }
+                    }
+                    Err(e) => error!("receive get_listening_ips request error: {e:?}"),
+                }
+            })
+            .await;
+    });
+
+    // All core API handlers are now running
+    // Wait indefinitely (threads run independently)
+    info!("All core API service handlers started");
+    std::future::pending::<()>().await;
 }

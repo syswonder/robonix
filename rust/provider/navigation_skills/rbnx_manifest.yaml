@@ -1,0 +1,45 @@
+# Robonix Package Manifest
+# This file defines the primitives, services, and skills provided by this package
+# Format version: 2.0 (EAIOS Architecture)
+#
+# Note: 
+# - Primitives and services must conform to standard specifications
+# - Skills are flexible and user-defined
+# - JSON fields (input_schema, output_schema, metadata, start_args, status) must be valid JSON strings
+
+package:
+  name: navigation_skills_provider
+  version: 0.0.1
+  description: Navigation skills package providing wandering and move_to_object skills
+  maintainer: wheatfox
+  maintainer_email: wheatfox17@icloud.com
+  license: MulanPSL-2.0
+  build_script: rbnx/build.sh
+
+# Skills provided by this package
+skills:
+  # Wandering skill - randomly wanders and explores the environment
+  - name: skl::wandering
+    type: basic
+    start_topic: /robot1/skill/wandering/start
+    status_topic: /robot1/skill/wandering/status
+    entry: bash rbnx/start_wandering.sh
+    start_args: '{"wander_radius":"number (optional, default 5.0m)"}'
+    status: '{"state":"string","result":"any"}'
+    metadata: '{"domain":"indoor","capability":["navigation"]}'
+    version: 0.0.1
+    start_script: rbnx/start_wandering.sh
+    stop_script: rbnx/stop_wandering.sh
+
+  # Move to object skill - navigates to a specific object nearby, stopping at safe distance
+  - name: skl::move_to_object
+    type: basic
+    start_topic: /robot1/skill/move_to_object/start
+    status_topic: /robot1/skill/move_to_object/status
+    entry: bash rbnx/start_move_to_object.sh
+    start_args: '{"target_object_id":"string (required, UUID of target object)","stop_radius":"number (optional, default 0.5m)"}'
+    status: '{"state":"string","result":"any"}'
+    metadata: '{"domain":"indoor","capability":["navigation","semantic_mapping"]}'
+    version: 0.0.1
+    start_script: rbnx/start_move_to_object.sh
+    stop_script: rbnx/stop_move_to_object.sh
