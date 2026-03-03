@@ -1,6 +1,6 @@
 ---
 name: Feature Request
-about: Suggest a new feature for the robonix embodied intelligence framework
+about: Suggest a new feature for the Robonix
 title: '[FEATURE] '
 labels: 'enhancement'
 assignees: ''
@@ -11,14 +11,14 @@ assignees: ''
 Brief description of the proposed feature.
 
 ## Component
-- [ ] Brain (AI/LLM)
-- [ ] Capability (Hardware interface)
-- [ ] Driver (Hardware driver)
-- [ ] Manager (System bootstrap)
-- [ ] Memory (Knowledge storage)
-- [ ] Simulator (Genesis simulation)
-- [ ] Skill (Behavioral logic)
-- [ ] UAPI (User programming interface)
+
+- [ ] **Managers** (Task, Maps, AI Model services)
+- [ ] **UI System**
+- [ ] **RIDL Executor**
+- [ ] **Skill Library**
+- [ ] **Primitive HAL** (Camera, Base, Arm, …)
+- [ ] **Libraries / ROS2** (stack, bindings)
+- [ ] Other / not sure
 
 ## Problem Statement
 What problem does this feature solve?
