@@ -1,6 +1,6 @@
 ---
 name: Bug Report
-about: Report a bug in the robonix embodied intelligence framework
+about: Report a bug in the Robonix
 title: '[BUG] '
 labels: 'bug'
 assignees: ''
@@ -11,14 +11,14 @@ assignees: ''
 Brief description of the issue.
 
 ## Component
-- [ ] Brain (AI/LLM)
-- [ ] Capability (Hardware interface)
-- [ ] Driver (Hardware driver)
-- [ ] Manager (System bootstrap)
-- [ ] Memory (Knowledge storage)
-- [ ] Simulator (Genesis simulation)
-- [ ] Skill (Behavioral logic)
-- [ ] UAPI (User programming interface)
+
+- [ ] **Managers** (Task, Maps, AI Model services)
+- [ ] **UI System**
+- [ ] **RIDL Executor**
+- [ ] **Skill Library**
+- [ ] **Primitive HAL** (Camera, Base, Arm, …)
+- [ ] **Libraries / ROS2** (stack, bindings)
+- [ ] Other / not sure
 
 ## Steps to Reproduce
 1. 
@@ -31,8 +31,8 @@ What should happen instead.
 ## Environment
 - OS: [e.g. Ubuntu 22.04]
 - ROS2 Version: [e.g. Humble]
-- Python Version: [e.g. 3.8]
-- Hardware: [e.g. Piper Ranger, Genesis Simulator]
+- Rust Version: [e.g. 1.75]
+- Hardware: [e.g. robot base, camera, simulator]
 
 ## Error Logs
 ```
