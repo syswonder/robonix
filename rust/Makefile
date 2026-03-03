@@ -6,7 +6,7 @@
 # Tab completion: bash-completion is installed in Docker container
 # If tab completion doesn't work, ensure bash-completion is installed and enabled
 
-.PHONY: help build build-cli build-core build-sdk debug release install install-cli install-core source-sdk env clean test test-all test-rust test-python test-cpp test-ros2 benchmark check setup-dev fmt test-framework
+.PHONY: help build build-cli build-core build-sdk debug release install install-cli install-core source-sdk env clean test test-all test-rust test-python test-cpp test-ros2 benchmark check setup-dev fmt fmt-check ci-rust ci-full test-framework
 .DEFAULT_GOAL := help
 
 # Default ROS2 distribution (can be overridden)
@@ -49,8 +49,13 @@ help:
 	@echo "Development commands:"
 	@echo "  make setup-dev      - Setup development environment (link provider directory)"
 	@echo "  make fmt            - Format code using cargo fmt"
+	@echo "  make fmt-check      - Check format only (CI; fails if not formatted)"
 	@echo "  make check          - Run cargo check on all Rust projects"
 	@echo "  make clean          - Clean build artifacts"
+	@echo ""
+	@echo "CI (single entry points):"
+	@echo "  make ci-rust        - Format check + cargo check + build (no ROS2)"
+	@echo "  make ci-full        - Build SDK + Rust (requires ROS2 sourced, colcon on PATH)"
 	@echo ""
 	@echo "Test commands:"
 	@echo "  make test           - Run all tests (Rust, Python)"
@@ -110,6 +115,13 @@ build-sdk:
 
 # Alias for backward compatibility
 buildsdk: build-sdk
+
+# CI targets (single entry points; extend these when adding packages)
+ci-rust: fmt-check check build
+	@echo "✓ ci-rust done"
+
+ci-full: build-sdk build
+	@echo "✓ ci-full done (requires: ROS2 sourced, colcon on PATH)"
 
 # Install commands
 install: install-cli install-core
@@ -215,6 +227,13 @@ fmt:
 	@echo "Formatting robonix-core..."
 	cd $(CORE_DIR) && cargo fmt
 	@echo "✓ Code formatted"
+
+# Check formatting only (for CI; fails if not formatted)
+fmt-check:
+	@echo "Checking code format with cargo fmt -- --check..."
+	cd $(CLI_DIR) && cargo fmt -- --check
+	cd $(CORE_DIR) && cargo fmt -- --check
+	@echo "✓ Format check passed"
 
 # Check and test
 check:
