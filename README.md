@@ -2,11 +2,10 @@
 
 **Robonix** is an open-source embodied intelligence framework built with Rust and ROS2, implementing the EAIOS (Embodied AI Operating System) architecture.
 
-<div style="padding: 1rem; border: 1px solid #f0c36d; border-radius: 6px; margin: 1rem 0; background: transparent;">
-  <strong>Important notice</strong><br />
-  Robonix is in an early, fast-moving development phase. <strong>All interfaces, IDL formats, and internal Rust module designs may change without notice.</strong><br />
-  Until a stable release is published, <strong>no API or implementation stability is guaranteed</strong>. Do not rely on current interfaces for production or long-term compatibility.
-</div>
+> [!WARNING]
+> **Important notice**  
+> Robonix is in an early, fast-moving development phase. **All interfaces, IDL formats, and internal Rust module designs may change without notice.**  
+> Until a stable release is published, **no API or implementation stability is guaranteed**. Do not rely on current interfaces for production or long-term compatibility.
 
 ## Architecture
 
