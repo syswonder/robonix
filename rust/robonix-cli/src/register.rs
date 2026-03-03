@@ -98,9 +98,23 @@ impl PackageRegistrar {
             }
         }
 
-        // Save recipe state
+        // Save recipe state with absolute path (realpath)
+        let abs_recipe_path = recipe_path.canonicalize().unwrap_or_else(|_| {
+            // If canonicalize fails (e.g., file doesn't exist), try to make it absolute
+            // by joining with current directory
+            std::env::current_dir()
+                .ok()
+                .and_then(|cwd| {
+                    if recipe_path.is_absolute() {
+                        Some(recipe_path.clone())
+                    } else {
+                        Some(cwd.join(recipe_path))
+                    }
+                })
+                .unwrap_or_else(|| recipe_path.clone())
+        });
         let recipe_state = RecipeState {
-            recipe_path: recipe_path.clone(),
+            recipe_path: abs_recipe_path,
             recipe: recipe.clone(),
             registered_at: chrono::Utc::now().to_rfc3339(),
         };
@@ -150,6 +164,7 @@ impl PackageRegistrar {
             metadata: metadata_str.to_string(),
             provider: provider.clone(),
             version,
+            node_id: self.config.effective_node_id(),
         };
 
         self.call_primitive_register_service(request).await?;
@@ -198,6 +213,7 @@ impl PackageRegistrar {
             metadata: metadata_str.to_string(),
             provider: provider.clone(),
             version,
+            node_id: self.config.effective_node_id(),
         };
 
         self.call_service_register_service(request).await?;
@@ -214,16 +230,10 @@ impl PackageRegistrar {
         package_path: &PathBuf,
         skill: &Value,
     ) -> Result<()> {
-        let name_raw = skill["name"]
+        let name = skill["name"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Skill name not found"))?
             .to_string();
-        // Automatically add 'skl::' prefix if not present
-        let name = if name_raw.starts_with("skl::") {
-            name_raw
-        } else {
-            format!("skl::{}", name_raw)
-        };
 
         let start_topic = skill["start_topic"]
             .as_str()
@@ -315,6 +325,7 @@ impl PackageRegistrar {
             metadata: metadata_str.to_string(),
             provider: provider.clone(),
             version,
+            node_id: self.config.effective_node_id(),
         };
 
         let response = self.call_skill_register_service(request).await?;

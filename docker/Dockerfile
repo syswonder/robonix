@@ -37,7 +37,9 @@ RUN apt update && apt install -y \
     libglfw3 \
     libglfw3-dev \
     mesa-utils \
-    libclang-dev python3-vcstool
+    libclang-dev python3-vcstool \
+    bash-completion \
+    fonts-lmodern
 
 # RUN apt update && apt install -y curl && \
 # curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null && \

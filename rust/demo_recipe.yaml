@@ -6,13 +6,28 @@
 # arbitrary selection of which primitives, services, and skills to register.
 
 name: demo_recipe
-description: Demo recipe showing how to selectively register primitives, services, and skills from packages
+description: Demo recipe for Tiago robot with semantic map service and navigation skills
+# Note: This recipe requires AMCL to be running for pose primitives to work.
+# AMCL publishes to /amcl_pose topic (PoseWithCovarianceStamped).
 
 packages:
-  # Example 1: Register all primitives, services, and skills from a package
-  # (when primitives, services, and skills are not specified, all will be registered)
-  - name: demo_rgb_provider
-    # primitives: []  # If not specified, all primitives will be registered
-    # services: []    # If not specified, all services will be registered
-    # skills: []      # If not specified, all skills will be registered
+  # Tiago demo package - provides camera, depth, pose, and navigation primitives
+  # prm::base.pose.cov uses AMCL directly (PoseWithCovarianceStamped from /amcl_pose)
+  - name: tiago_demo_package
+    primitives:
+      - prm::camera.rgb
+      - prm::camera.depth
+      - prm::base.pose.cov  # Direct AMCL pose (PoseWithCovarianceStamped from /amcl_pose)
+      - prm::base.navigate
+
+  # Demo service provider - provides semantic_map and task_plan services
   - name: demo_service_provider
+    services:
+      - srv::semantic_map
+      - srv::task_plan
+
+  # Navigation skills provider - provides wandering and move_to_object skills
+  - name: navigation_skills_provider
+    skills:
+      - skl::wandering
+      - skl::move_to_object

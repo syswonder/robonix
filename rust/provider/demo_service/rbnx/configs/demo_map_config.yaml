@@ -1,0 +1,28 @@
+manual_objects:
+  - label: room_340_target_waypoint
+    frame_mapping:
+      - frame_id: "map"
+        center:
+          x: -38.5283
+          y: -10.4608
+          z: 0.0
+        bbox:
+          - scale_x: 0.1
+            scale_y: 0.1
+            scale_z: 0.1
+            yaw: 1.6405
+  - label: vending_machine_target_waypoint
+    frame_mapping:
+      - frame_id: "map"
+        center:
+          x: -26.8631
+          y: -13.2171
+          z: 0.0
+        bbox:
+          - scale_x: 0.1
+            scale_y: 0.1
+            scale_z: 0.1
+            yaw: 1.75626
+
+# Position(-38.5283,-10.4608,0). Orientation(0, 0.731315, 0.68204) = Angle: 1.6405 - room340_waypoint
+# Position(-26.8631, -13.2171, 0), Orientation (0, 0, 0.769545, 0.638593) = Angle: 1.75626 - vending_machine_waypoint

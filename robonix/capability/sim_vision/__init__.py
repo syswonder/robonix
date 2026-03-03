@@ -1,1 +1,0 @@
-# Simulator Vision Capability Package

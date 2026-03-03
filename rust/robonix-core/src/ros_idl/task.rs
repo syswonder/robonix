@@ -33,3 +33,18 @@ pub struct TaskDataResponse {
 }
 
 impl ros2_client::Message for TaskDataResponse {}
+
+/// Cancel task request (robonix spec)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelTaskRequest {
+    pub task_id: String,
+}
+
+impl ros2_client::Message for CancelTaskRequest {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelTaskResponse {
+    pub success: bool,
+}
+
+impl ros2_client::Message for CancelTaskResponse {}

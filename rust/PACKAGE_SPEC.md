@@ -152,7 +152,7 @@ primitives:
     start_script: rbnx/start_arm_move_v2.sh
     stop_script: rbnx/stop_arm_move_v2.sh
 
-  - name: prm::camera.capture
+  - name: prm::camera.rgb
     # Spec definition: OUTPUT: {"image":"sensor_msgs/Image"}
     input_schema: '{}'
     output_schema: '{"image":"/camera/image"}'

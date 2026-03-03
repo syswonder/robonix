@@ -6,7 +6,8 @@
 use crate::config::Config;
 use anyhow::Result;
 use robonix_core::ros_idl::task::{
-    SubmitTaskRequest, SubmitTaskResponse, TaskDataRequest, TaskDataResponse,
+    CancelTaskRequest, CancelTaskResponse, SubmitTaskRequest, SubmitTaskResponse, TaskDataRequest,
+    TaskDataResponse,
 };
 
 pub struct TaskClient {
@@ -68,6 +69,30 @@ impl TaskClient {
         match response {
             DaemonResponse::TaskDataResponse { response } => {
                 let resp: TaskDataResponse = serde_json::from_str(&response)?;
+                Ok(resp)
+            }
+            DaemonResponse::Error(e) => anyhow::bail!("Daemon error: {}", e),
+            _ => anyhow::bail!("Unexpected response type"),
+        }
+    }
+
+    pub async fn cancel(&self, task_id: String) -> Result<CancelTaskResponse> {
+        use crate::daemon_client::{DaemonClient, DaemonCommand, DaemonResponse};
+
+        let daemon_client = DaemonClient::new()?;
+        daemon_client.ensure_daemon_running().await?;
+
+        let request = CancelTaskRequest { task_id };
+        let request_json = serde_json::to_string(&request)?;
+        let response = daemon_client
+            .send_command(DaemonCommand::CallCancelTask {
+                request: request_json,
+            })
+            .await?;
+
+        match response {
+            DaemonResponse::CancelTaskResponse { response } => {
+                let resp: CancelTaskResponse = serde_json::from_str(&response)?;
                 Ok(resp)
             }
             DaemonResponse::Error(e) => anyhow::bail!("Daemon error: {}", e),

@@ -5,10 +5,10 @@
 
 use super::start;
 use super::stop;
-use crate::output;
 use crate::Config;
+use crate::output;
 use anyhow::Result;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 pub async fn execute(config: Config, target: String) -> Result<()> {
     output::action("Restarting", &format!("item(s) matching: {}", target));

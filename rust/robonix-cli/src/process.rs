@@ -235,28 +235,18 @@ impl ProcessManager {
             }
         }
 
-        // Resolve script path
-        let script_path = package_path.join(start_script);
-        if !script_path.exists() {
-            anyhow::bail!("Start script not found: {}", script_path.display());
+        // start_script is run as a full shell command (any command); cwd is package_path
+        let start_script = start_script.trim();
+        if start_script.is_empty() {
+            anyhow::bail!("start_script is empty");
         }
 
-        // Make script executable
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script_path)?.permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script_path, perms)?;
-        }
+        // Create log file path with simplified naming
+        // Format: {package_name}_{name}.log
+        // e.g., tiago_demo_package_camera_capture.log
+        let clean_name = std_name.replace("::", "_").replace(".", "_");
 
-        // Create log file path
-        let log_filename = format!(
-            "{}_{}_{}.log",
-            package_name,
-            package_type,
-            std_name.replace("::", "_")
-        );
+        let log_filename = format!("{}_{}.log", package_name, clean_name);
         let log_file = self.log_dir.join(&log_filename);
 
         // Open log file for writing
@@ -279,15 +269,11 @@ impl ProcessManager {
         log_writer.write_all(header.as_bytes()).await?;
         log_writer.flush().await?;
 
-        // Start the process
-        log::info!(
-            "Starting process: {} (script: {})",
-            key,
-            script_path.display()
-        );
+        // Start the process: run start_script as a shell command (sh -c "...")
+        log::info!("Starting process: {} (command: {})", key, start_script);
 
-        // Use tokio::process::Command for async I/O
-        let mut cmd = Command::new(&script_path);
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(start_script);
         cmd.current_dir(package_path);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -295,6 +281,9 @@ impl ProcessManager {
         // Set PYTHONUNBUFFERED=1 to disable Python output buffering
         // This ensures logs are written immediately
         cmd.env("PYTHONUNBUFFERED", "1");
+
+        // Force FastDDS for all started processes
+        cmd.env("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp");
 
         // Set ROBONIX_SDK_PATH from config or environment variable
         if std::env::var("ROBONIX_SDK_PATH").is_err() {
@@ -323,7 +312,7 @@ impl ProcessManager {
 
         let mut child = cmd
             .spawn()
-            .with_context(|| format!("Failed to start script: {}", script_path.display()))?;
+            .with_context(|| format!("Failed to start command: {}", start_script))?;
 
         // Spawn tasks to capture output and write to log
         // Use separate file handles for stdout and stderr to avoid synchronization issues
@@ -540,7 +529,7 @@ impl ProcessManager {
     /// Kill a process group (more efficient than killing individual processes)
     #[cfg(unix)]
     fn kill_process_tree(&self, pid: u32) -> Result<()> {
-        use nix::sys::signal::{kill, killpg, Signal};
+        use nix::sys::signal::{Signal, kill, killpg};
         use nix::unistd::Pid;
         use std::io::{BufRead, BufReader};
         use std::process::Command as SyncCommand;
@@ -856,7 +845,7 @@ impl ProcessManager {
                 // Fallback: try to kill just the main process
                 #[cfg(unix)]
                 {
-                    use nix::sys::signal::{kill, Signal};
+                    use nix::sys::signal::{Signal, kill};
                     use nix::unistd::Pid;
                     let pid = Pid::from_raw(process_info.pid as i32);
                     let _ = kill(pid, Signal::SIGTERM);

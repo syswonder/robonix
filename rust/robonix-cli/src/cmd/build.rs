@@ -4,7 +4,7 @@
 // Build command implementation for robonix-cli
 
 use super::recipe_utils;
-use crate::{output, Config, PackageDatabase};
+use crate::{Config, PackageDatabase, output};
 use anyhow::{Context, Result};
 use colored::*;
 use serde_yaml::Value;
