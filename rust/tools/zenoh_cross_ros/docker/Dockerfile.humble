@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-std-msgs \
     ros-humble-geometry-msgs \
     ros-humble-rmw-zenoh-cpp \
+    ros-humble-rmw-cyclonedds-cpp \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install eclipse-zenoh

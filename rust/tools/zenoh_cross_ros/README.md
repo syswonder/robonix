@@ -11,7 +11,7 @@ Goal: have nodes on distro A (e.g. Humble) and distro B (e.g. Jazzy) communicate
 **Same message type on both sides** (e.g. `geometry_msgs/Point`, same topic name):
 
 1. **Same distro** (e.g. all Jazzy): Use rmw_zenoh. Install `ros-<distro>-rmw-zenoh-cpp`, run one router `ros2 run rmw_zenoh_cpp rmw_zenohd`, set `RMW_IMPLEMENTATION=rmw_zenoh_cpp` and connect endpoints (e.g. session config or `ZENOH_CONFIG_OVERRIDE=connect/endpoints=["tcp/<router>:7447"]`). No bridge; all topics/services/actions go over Zenoh.
-2. **Different distros** (e.g. Humble + Jazzy): rmw_zenoh is not compatible (type-hash mismatch, [#569](https://github.com/ros2/rmw_zenoh/issues/569)). Use zenoh-bridge-ros2dds: one bridge in router mode (`zenoh-bridge-ros2dds -l tcp/0.0.0.0:7447`), the other in client mode (`zenoh-bridge-ros2dds client -e tcp/<listener>:7447`). Both sides keep default DDS; use different `ROS_DOMAIN_ID` per side so only the bridge links them. Image: `eclipse/zenoh-bridge-ros2dds:nightly`.
+2. **Different distros** (e.g. Humble + Jazzy): rmw_zenoh is not compatible (type-hash mismatch, [#569](https://github.com/ros2/rmw_zenoh/issues/569)). Use zenoh-bridge-ros2dds: one bridge in router mode (`zenoh-bridge-ros2dds -l tcp/0.0.0.0:7447`), the other in client mode (`zenoh-bridge-ros2dds client -e tcp/<listener>:7447`). Both sides use the same DDS (e.g. Cyclone DDS via `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`); use different `ROS_DOMAIN_ID` per side so only the bridge links them. Image: `eclipse/zenoh-bridge-ros2dds:nightly`.
 
 **Different message types** (same semantic, different IDL):
 
