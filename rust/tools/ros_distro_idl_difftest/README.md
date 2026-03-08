@@ -8,25 +8,30 @@ This directory provides a systematic way to compare **ROS IDL definitions** (.ms
 2. **Reproducible**: Scripts fetch specified distro branches into local directories for diffing and automated analysis.
 3. **Readable reports**: Generate human-readable Markdown reports and machine-friendly JSON for downstream tooling and compatibility design.
 
-## Distros (most-used first)
+## Distro timeline and progression
 
-| Distro   | Branch    | Note            |
-|----------|-----------|-----------------|
-| Humble   | `humble`  | LTS, widely used |
-| Jazzy    | `jazzy`   | Current stable   |
-| Rolling  | `rolling` | Development mainline |
-| Iron     | `iron`    | Optional, EOL    |
-| Kilted   | `kilted`  | Optional, newer  |
+Comparison is **progressive by release order**: each distro is compared only to the next (e.g. humble → jazzy → rolling), not pairwise. That matches how distros evolve over time.
 
-Scripts use **humble / jazzy / rolling** by default; extend via `config.yaml`.
+| Distro               | Release Date      | EOL Date         | Support | Ubuntu         |
+| -------------------- | ----------------- | ---------------- | ------- | -------------- |
+| **Kilted** Kaiju      | May 23, 2025      | **Dec 2026**     | LTS     | 24.04 (Noble)  |
+| **Jazzy** Jalisco     | May 23, 2024      | **May 2029**     | LTS     | 24.04 (Noble)  |
+| Iron Irwini           | May 23, 2023      | November 2024    | —       | 22.04 (Jammy)  |
+| **Humble** Hawksbill  | May 23, 2022      | **May 2027**     | LTS     | 22.04 (Jammy)  |
+| Galactic Geochelone   | May 23, 2021      | December 9, 2022 | —       | 20.04 (Focal)  |
+| Foxy Fitzroy          | June 5, 2020      | June 20, 2023    | —       | 20.04 (Focal)  |
+| Eloquent … / Dashing … / older | 2017–2019 | various | — | 16.04 / 18.04 |
+
+Chronological order used in this tool: **foxy → humble → iron → jazzy → kilted → rolling**. **Foxy** (LTS before Humble) is included as the most-used pre-Humble distro. Scripts use **foxy / humble / jazzy / rolling** by default in `config.yaml`; add or remove distros there as needed.
 
 ## Core message repos and branches
 
 | Repo                     | Description                          | Typical packages / interfaces |
 |--------------------------|--------------------------------------|-------------------------------|
-| ros2/common_interfaces   | Common message and service definitions | std_msgs, geometry_msgs, sensor_msgs, nav_msgs |
+| ros2/common_interfaces   | Common message and service definitions | std_msgs, geometry_msgs, sensor_msgs, nav_msgs, trajectory_msgs, etc. |
 | ros2/rcl_interfaces      | Interfaces for ROS client libraries  | Parameters, logging, lifecycle |
-| ros2/unique_identifier_msgs | UUID and identifier messages      | UUID.msg |
+| ros2/geometry2           | Transform library and messages       | tf2_msgs, tf2_geometry_msgs |
+| ros-controls/control_msgs| Robot control messages and actions   | Joint/cartesian trajectories, controller setpoints |
 
 Each repo has distro-named branches on GitHub (e.g. `humble`, `jazzy`, `rolling`). Scripts clone each branch into a separate directory.
 
@@ -49,11 +54,10 @@ ros_distro_idl_difftest/
 │   │   └── rolling/
 │   ├── rcl_interfaces/
 │   │   └── ...
-│   └── unique_identifier_msgs/
-│       └── ...
+│   └── ...
 └── reports/                  # Generated reports (optional to commit)
-    ├── idl_diff_report_<timestamp>.md
-    └── idl_diff_report_<timestamp>.json
+    ├── idl_diff_report.md
+    └── idl_diff_report.json
 ```
 
 ## Usage
@@ -78,8 +82,8 @@ cd rust/tools/ros_distro_idl_difftest
 - Scans all `.msg`, `.srv`, `.action` under `repos/<repo>/<distro>/`.
 - Aligns interfaces by package + kind + name across distros and compares fields (types, names, constants).
 - Writes:
-  - `reports/idl_diff_report_<timestamp>.md`: Summary and per-interface diff.
-  - `reports/idl_diff_report_<timestamp>.json`: Structured output for tooling.
+  - `reports/idl_diff_report.md`: Summary and per-interface table.
+  - `reports/idl_diff_report.json`: Structured output for tooling.
 
 ### 3. Restrict to specific distros or repos
 
@@ -87,12 +91,11 @@ cd rust/tools/ros_distro_idl_difftest
 
 ## Report contents
 
-- **Per package**: Which distros have the package, which do not.
-- **Per interface**: Field-level diffs for the same interface name across distros:
-  - Added/removed fields
-  - Type changes
-  - Default/constant changes (if any)
-- **Summary**: Counts per distro pair and per repo, including breaking changes (type or structure).
+The report is **one large Markdown table**:
+
+- **Header row**: `Interface` | `<distro1>` | `<distro2>` | … | `Changes (progressive)`
+- **One row per interface** (e.g. `common_interfaces/std_msgs/msg/Header`): each distro column shows `✓ (n)` if present (n = field count) or `—` if missing; the last column summarizes **progressive** changes (e.g. `humble→jazzy: +field_x; jazzy→rolling: type y→z`).
+- **Summary** above the table: repos, distro order, total interfaces, and per-repo counts (only in some distros, with progressive diff).
 
 ## Relation to zenoh_cross_ros
 

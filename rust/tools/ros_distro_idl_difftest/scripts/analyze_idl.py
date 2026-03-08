@@ -10,7 +10,6 @@ import argparse
 import json
 import re
 from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +19,22 @@ def _strip_comment(line: str) -> str:
     i = line.find("#")
     return (line[:i] if i >= 0 else line).strip()
 
+def _is_default_literal(token: str) -> bool:
+    """True if token looks like a default value (bool, number, or quoted string)."""
+    if token in ("true", "false"):
+        return True
+    if not token:
+        return False
+    # Integer or float
+    t = token.lstrip("-")
+    if t.replace(".", "", 1).isdigit():
+        return True
+    # Quoted string
+    if len(token) >= 2 and token[0] == '"' and token[-1] == '"':
+        return True
+    return False
+
+
 def _parse_msg_like_block(lines: list[str]) -> list[tuple[str, str]]:
     """Parse a .msg block or one section of .srv (request/response) or .action. Returns [(type, name), ...]"""
     fields: list[tuple[str, str]] = []
@@ -27,9 +42,8 @@ def _parse_msg_like_block(lines: list[str]) -> list[tuple[str, str]]:
         line = _strip_comment(raw)
         if not line:
             continue
-        # Constant: UPPER_CASE= value or field: type name [= default]
+        # Constant: UPPER_CASE= value
         if "=" in line and not line.strip().startswith(("int", "float", "string", "bool", "byte", "char", "wstring")):
-            # Likely constant, format "NAME= value"
             const_match = re.match(r"^([A-Z][A-Z0-9_]*)\s*=\s*(.*)$", line)
             if const_match:
                 name, _ = const_match.group(1), const_match.group(2)
@@ -37,9 +51,13 @@ def _parse_msg_like_block(lines: list[str]) -> list[tuple[str, str]]:
                 continue
         parts = line.split()
         if len(parts) >= 2:
-            # Last token is name, rest is type (may include [])
-            name = parts[-1]
-            type_part = " ".join(parts[:-1])
+            # Optional default: "type name default" e.g. "bool read_only false" -> type=bool, name=read_only
+            if len(parts) >= 3 and _is_default_literal(parts[-1]):
+                name = parts[-2]
+                type_part = " ".join(parts[:-2])
+            else:
+                name = parts[-1]
+                type_part = " ".join(parts[:-1])
             if name and not name.startswith("#"):
                 fields.append((type_part.strip(), name))
     return fields
@@ -129,27 +147,47 @@ def diff_blocks(
     return {"blocks_changed": changes, "identical": len(changes) == 0}
 
 
-# --- Main flow: scan repos, align by distro, generate report ---
+# --- Main flow: scan repos, align by distro, progressive comparison, one table ---
 
-@dataclass
-class DistroDiff:
-    distro_a: str
-    distro_b: str
-    key: str
-    only_in_a: bool
-    only_in_b: bool
-    diff: dict[str, Any]
+# Chronological distro order (release date): older → newer. Comparison is progressive (each vs next).
+# See README for full distro table. Foxy was the LTS before Humble (most-used pre-Humble).
+DISTRO_CHRONOLOGICAL_ORDER = [
+    "foxy",     # June 2020, LTS to June 2023 (most-used before Humble)
+    "humble",   # May 2022, LTS to May 2027
+    "iron",     # May 2023, EOL Nov 2024
+    "jazzy",    # May 2024, LTS to May 2029
+    "kilted",   # May 2025, LTS to Dec 2026
+    "rolling",  # development
+]
 
 
-def run_analysis(repos_root: Path, distros: list[str] | None = None) -> tuple[dict, list[DistroDiff]]:
+def _block_field_count(blocks: dict[str, list[tuple[str, str]]]) -> int:
+    return sum(len(fields) for fields in blocks.values())
+
+
+def _describe_diff(delta: dict[str, Any]) -> list[str]:
+    """Turn diff_blocks output into short bullet lines for one transition (with inline code)."""
+    parts: list[str] = []
+    for block in delta.get("blocks_changed", []):
+        block_name = block.get("block") or "(message)"
+        for x in block.get("added", []):
+            parts.append(f"+ `{block_name}`: `{x['type']}` `{x['name']}`")
+        for x in block.get("removed", []):
+            parts.append(f"- `{block_name}`: `{x['type']}` `{x['name']}`")
+        for x in block.get("type_changed", []):
+            parts.append(f"~ `{x['name']}`: `{x['from']}` → `{x['to']}`")
+    return parts
+
+
+def run_analysis(repos_root: Path, distros: list[str] | None = None) -> tuple[dict, list[dict[str, Any]]]:
     """
     repos_root: path to repos/ (under it: repo_name/distro_name/...).
-    Returns (summary, list of DistroDiff).
+    Compares distros in chronological order (progressive: each vs next).
+    Returns (summary, rows) where each row has: interface, cells {distro: cell_text}, changes (progressive).
     """
     if distros is None:
         distros = []
     # Collect all IDLs per (repo, distro)
-    # structure: data[repo][distro][key] = blocks
     data: dict[str, dict[str, dict[str, dict[str, list[tuple[str, str]]]]]] = defaultdict(lambda: defaultdict(dict))
     for repo_dir in repos_root.iterdir():
         if not repo_dir.is_dir() or repo_dir.name.startswith("."):
@@ -164,122 +202,140 @@ def run_analysis(repos_root: Path, distros: list[str] | None = None) -> tuple[di
             for key, blocks in idl_map.items():
                 data[repo_dir.name][distro][key] = blocks
 
-    # Union of all (repo, key)
-    all_keys: set[tuple[str, str]] = set()
+    all_keys = set()
     for repo, by_distro in data.items():
         for distro, by_key in by_distro.items():
             for key in by_key:
                 all_keys.add((repo, key))
 
-    # For each (repo, key), compare every distro pair
-    diffs: list[DistroDiff] = []
-    summary: dict[str, Any] = {
-        "repos": list({r for r, _ in all_keys}),
-        "distros": distros or list(set(d for repo in data for d in data[repo])),
-        "total_interfaces": len(all_keys),
-        "per_repo": defaultdict(lambda: {"total": 0, "only_in_some": 0, "diff_count": 0}),
-        "per_distro_pair": defaultdict(int),
-    }
-
     all_distros = set()
     for repo in data:
         all_distros.update(data[repo].keys())
-    distro_list_global = sorted(all_distros)
+    # Order distros by release chronology; append any extra (e.g. from repos) not in the list
+    ordered_distros: list[str] = [d for d in DISTRO_CHRONOLOGICAL_ORDER if d in all_distros]
+    for d in sorted(all_distros):
+        if d not in ordered_distros:
+            ordered_distros.append(d)
+
+    summary: dict[str, Any] = {
+        "repos": list({r for r, _ in all_keys}),
+        "distros": ordered_distros,
+        "total_interfaces": len(all_keys),
+        "per_repo": defaultdict(lambda: {"total": 0, "only_in_some": 0, "with_progressive_diff": 0}),
+    }
+    rows: list[dict[str, Any]] = []
 
     for repo, key in sorted(all_keys):
         summary["per_repo"][repo]["total"] += 1
         by_distro = {d: data[repo][d].get(key) for d in data[repo]}
         present = [d for d in by_distro if by_distro[d] is not None]
+        # Only in some = not in every distro *that this repo has* (incomplete repos: count only their distros)
         only_in_some = len(present) < len(by_distro)
         if only_in_some:
             summary["per_repo"][repo]["only_in_some"] += 1
 
-        for i, da in enumerate(distro_list_global):
-            for db in distro_list_global[i + 1 :]:
-                va = by_distro.get(da)
-                vb = by_distro.get(db)
-                if va is None and vb is None:
-                    continue
-                if va is None:
-                    diffs.append(DistroDiff(da, db, f"{repo}/{key}", False, True, {}))
-                    summary["per_distro_pair"][(da, db)] += 1
-                    continue
-                if vb is None:
-                    diffs.append(DistroDiff(da, db, f"{repo}/{key}", True, False, {}))
-                    summary["per_distro_pair"][(da, db)] += 1
-                    continue
-                delta = diff_blocks(va, vb)
-                if not delta["identical"]:
-                    diffs.append(DistroDiff(da, db, f"{repo}/{key}", False, False, delta))
-                    summary["per_repo"][repo]["diff_count"] += 1
-                    summary["per_distro_pair"][(da, db)] += 1
+        cells: dict[str, str] = {}
+        for d in ordered_distros:
+            if d not in data[repo]:
+                # Branch not fetched for this repo (e.g. control_msgs has no foxy/rolling)
+                cells[d] = "∅"
+            else:
+                blocks = by_distro.get(d)
+                if blocks is None:
+                    # Branch fetched, but this definition doesn't exist in that distro
+                    cells[d] = "—"
+                else:
+                    n = _block_field_count(blocks)
+                    cells[d] = f"✓ ({n})" if n else "✓"
+
+        # Only compare adjacent distros that this repo actually has (no "only in X" for uncloned distros)
+        repo_distros = [d for d in ordered_distros if d in data[repo]]
+        change_parts: list[str] = []
+        for i in range(len(repo_distros) - 1):
+            old_d, new_d = repo_distros[i], repo_distros[i + 1]
+            va = by_distro.get(old_d)
+            vb = by_distro.get(new_d)
+            if va is None and vb is None:
+                continue
+            if va is None:
+                change_parts.append(f"`{old_d}`→`{new_d}`: only in `{new_d}`")
+                summary["per_repo"][repo]["with_progressive_diff"] += 1
+                continue
+            if vb is None:
+                change_parts.append(f"`{old_d}`→`{new_d}`: only in `{old_d}`")
+                summary["per_repo"][repo]["with_progressive_diff"] += 1
+                continue
+            delta = diff_blocks(va, vb)
+            if not delta["identical"]:
+                summary["per_repo"][repo]["with_progressive_diff"] += 1
+                desc = _describe_diff(delta)
+                change_parts.append(f"`{old_d}`→`{new_d}`: " + "; ".join(desc[:5]) + (" …" if len(desc) > 5 else ""))
+
+        rows.append({
+            "interface": f"{repo}/{key}",
+            "cells": cells,
+            "changes": " | ".join(change_parts) if change_parts else "",
+        })
 
     summary["per_repo"] = dict(summary["per_repo"])
-    summary["per_distro_pair"] = {f"{a}_{b}": c for (a, b), c in summary["per_distro_pair"].items()}
-    return summary, diffs
+    return summary, rows
 
 
-def write_md_report(summary: dict, diffs: list[DistroDiff], out_path: Path) -> None:
+def write_md_report(summary: dict, rows: list[dict[str, Any]], out_path: Path) -> None:
+    ordered = summary.get("distros", [])
+    # One big table: header = Interface | distro1 | distro2 | ... | Changes (progressive)
+    header_cells = ["Interface"] + ordered + ["Changes (progressive)"]
+    sep = "| " + " | ".join(["---"] * len(header_cells)) + " |"
     lines = [
-        "# ROS 2 IDL diff report",
+        "# ROS 2 IDL diff report (progressive by distro order)",
+        "",
+        "Distros are compared in **chronological release order** (each vs next): " + " → ".join(f"`{d}`" for d in ordered) + ".",
         "",
         "## Summary",
-        f"- Repos: {', '.join(summary.get('repos', []))}",
-        f"- Distros: {', '.join(summary.get('distros', []))}",
-        f"- Total interfaces (pkg+kind+name): {summary.get('total_interfaces', 0)}",
+        f"- Repos: {', '.join(f'`{r}`' for r in summary.get('repos', []))}",
+        f"- Distros (order): {', '.join(f'`{d}`' for d in ordered)}",
+        f"- Total interfaces: {summary.get('total_interfaces', 0)}",
         "",
         "### Per repo",
-        "| Repo | Interfaces | Only in some distros | With field/structure diff |",
-        "|------|------------|----------------------|----------------------------|",
+        "",
+        "| Column | Meaning |",
+        "|--------|--------|",
+        "| **Interfaces** | Number of distinct definitions (e.g. `std_msgs/msg/Header` = 1). Same definition in several distros still counts as 1. |",
+        "| **Only in some distros** | Among the distros **fetched for this repo**, how many definitions exist in only part of them. For repos with fewer distros (e.g. only humble+jazzy), only those count—not the full list. |",
+        "| **Changed at some step** | Count of *steps* where a definition differs (each foxy→humble, humble→jazzy, jazzy→rolling). One interface can contribute more than once if it changes in multiple steps; so this number can be larger than Interfaces. |",
+        "",
+        "| Repo | Interfaces | Only in some distros | Changed at some step |",
+        "|------|------------|----------------------|----------------------|",
     ]
     for repo, rec in summary.get("per_repo", {}).items():
-        lines.append(f"| {repo} | {rec['total']} | {rec['only_in_some']} | {rec['diff_count']} |")
+        lines.append(f"| `{repo}` | {rec['total']} | {rec['only_in_some']} | {rec['with_progressive_diff']} |")
     lines.extend([
         "",
-        "### Per distro pair (interface diff count)",
-        "| Distro A | Distro B | Diff count |",
-        "|----------|----------|------------|",
+        "---",
+        "",
+        "## Interface table (one row per definition)",
+        "",
+        "Distro columns: `✓ (n)` = present; `—` = absent in that distro; `∅` = branch not fetched for this repo.",
+        "",
+        "| " + " | ".join(header_cells) + " |",
+        sep,
     ])
-    for pair, count in sorted(summary.get("per_distro_pair", {}).items()):
-        a, b = pair.replace("_", " ").split(maxsplit=1) if "_" in pair else (pair, "")
-        lines.append(f"| {a} | {b} | {count} |")
-    lines.extend(["", "---", "", "## Details (interfaces with diffs)", ""])
-
-    for d in diffs:
-        lines.append(f"### {d.key} ({d.distro_a} vs {d.distro_b})")
-        if d.only_in_a:
-            lines.append("- Only in " + d.distro_a)
-        elif d.only_in_b:
-            lines.append("- Only in " + d.distro_b)
-        else:
-            for block in d.diff.get("blocks_changed", []):
-                lines.append(f"- **{block['block']}**")
-                for x in block.get("added", []):
-                    lines.append(f"  - Added: `{x['type']} {x['name']}`")
-                for x in block.get("removed", []):
-                    lines.append(f"  - Removed: `{x['type']} {x['name']}`")
-                for x in block.get("type_changed", []):
-                    lines.append(f"  - Type changed: `{x['name']}` {x['from']} -> {x['to']}")
-        lines.append("")
-
+    for row in rows:
+        interface_cell = "`" + row["interface"].replace("`", "\\`") + "`"
+        distro_cells = [row["cells"].get(d, "∅") for d in ordered]
+        changes_raw = row.get("changes", "")
+        # Split Changes into lines: each transition on its own line, items within separated too
+        changes_md = changes_raw.replace(" | ", "<br><br>").replace("; ", "<br>") if changes_raw else ""
+        cell_values = [interface_cell] + distro_cells + [changes_md]
+        # Escape pipes in cell text for Markdown
+        cell_values = [str(c).replace("|", "\\|") for c in cell_values]
+        lines.append("| " + " | ".join(cell_values) + " |")
+    lines.append("")
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def write_json_report(summary: dict, diffs: list[DistroDiff], out_path: Path) -> None:
-    payload = {
-        "summary": summary,
-        "diffs": [
-            {
-                "distro_a": d.distro_a,
-                "distro_b": d.distro_b,
-                "key": d.key,
-                "only_in_a": d.only_in_a,
-                "only_in_b": d.only_in_b,
-                "diff": d.diff,
-            }
-            for d in diffs
-        ],
-    }
+def write_json_report(summary: dict, rows: list[dict[str, Any]], out_path: Path) -> None:
+    payload = {"summary": summary, "rows": rows}
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
@@ -298,14 +354,12 @@ def main() -> int:
         print(f"Repos root does not exist: {root}", file=__import__("sys").stderr)
         return 1
 
-    summary, diffs = run_analysis(root, args.distros)
+    summary, rows = run_analysis(root, args.distros)
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    from datetime import datetime
-    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    md_path = args.out_dir / f"idl_diff_report_{ts}.md"
-    json_path = args.out_dir / f"idl_diff_report_{ts}.json"
-    write_md_report(summary, diffs, md_path)
-    write_json_report(summary, diffs, json_path)
+    md_path = args.out_dir / "idl_diff_report.md"
+    json_path = args.out_dir / "idl_diff_report.json"
+    write_md_report(summary, rows, md_path)
+    write_json_report(summary, rows, json_path)
     print(f"Report written: {md_path}")
     print(f"JSON written:  {json_path}")
     return 0

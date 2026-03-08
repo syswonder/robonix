@@ -92,7 +92,8 @@ def main() -> int:
         if not name or not url:
             print(f"Skip repo entry missing name/url: {repo}", file=sys.stderr)
             continue
-        for distro in distros:
+        repo_distros = repo.get("distros") or distros
+        for distro in repo_distros:
             dest = repos_root / name / distro
             if args.dry_run:
                 print(f"[dry-run] would clone -b {distro} {url} -> {dest}")
