@@ -1,0 +1,44 @@
+# Test 2: Same IDL — use Zenoh RMW (rmw_zenoh_cpp). No bridge, no hardcoded topics.
+# Router listens on 0.0.0.0:7447; humble/jazzy use session config to connect as client (no multicast scouting).
+# Session config sets transport/shared_memory/enabled=false so no POSIX SHM in Docker. Docker’s per-container /dev/shm (even with
+services:
+  zenoh_router:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.zenoh_router
+    environment:
+      - ZENOH_CONFIG_OVERRIDE=listen/endpoints=["tcp/0.0.0.0:7447"]
+    networks:
+      - cross_ros
+
+  humble:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.humble
+    environment:
+      - RMW_IMPLEMENTATION=rmw_zenoh_cpp
+      - ZENOH_SESSION_CONFIG_URI=/workspace/config/rmw_zenoh_client.json5
+    volumes:
+      - ./config/rmw_zenoh_client.json5:/workspace/config/rmw_zenoh_client.json5:ro
+    depends_on:
+      - zenoh_router
+    networks:
+      - cross_ros
+
+  jazzy:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.jazzy
+    environment:
+      - RMW_IMPLEMENTATION=rmw_zenoh_cpp
+      - ZENOH_SESSION_CONFIG_URI=/workspace/config/rmw_zenoh_client.json5
+    volumes:
+      - ./config/rmw_zenoh_client.json5:/workspace/config/rmw_zenoh_client.json5:ro
+    depends_on:
+      - zenoh_router
+    networks:
+      - cross_ros
+
+networks:
+  cross_ros:
+    driver: bridge

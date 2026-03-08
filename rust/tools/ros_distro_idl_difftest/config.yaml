@@ -1,0 +1,25 @@
+# ROS 2 distro IDL difftest – config for fetch_repos.sh and analyze_idl.py
+
+# Distros to compare (branch names). Most-used first: humble, jazzy, rolling
+distros:
+  - humble
+  - jazzy
+  - rolling
+
+# Optional: add iron, kilted, etc.
+# distros_optional:
+#   - iron
+#   - kilted
+
+# Repos to fetch and analyze (GitHub repo name used as clone target and directory name)
+repos:
+  - name: common_interfaces
+    url: https://github.com/ros2/common_interfaces.git
+    # Branch names match distros; if a branch is missing for a distro, that clone is skipped
+  - name: rcl_interfaces
+    url: https://github.com/ros2/rcl_interfaces.git
+  - name: unique_identifier_msgs
+    url: https://github.com/ros2/unique_identifier_msgs.git
+
+# Root directory for clones (relative to this config’s directory, or absolute)
+repos_dir: repos

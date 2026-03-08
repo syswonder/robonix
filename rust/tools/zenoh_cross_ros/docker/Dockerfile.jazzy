@@ -1,0 +1,24 @@
+# Jazzy side: build cross_ros_jazzy_msgs and prepare Python bridge environment.
+# Use osrf/ros:jazzy-desktop (ros-base tag not always available on Docker Hub).
+FROM osrf/ros:jazzy-desktop
+
+ENV ROS_DISTRO=jazzy
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-pip \
+    python3-colcon-common-extensions \
+    ros-jazzy-std-msgs \
+    ros-jazzy-geometry-msgs \
+    ros-jazzy-rmw-zenoh-cpp \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --break-system-packages eclipse-zenoh
+
+WORKDIR /workspace
+COPY msgs/jazzy/cross_ros_jazzy_msgs /workspace/src/cross_ros_jazzy_msgs
+RUN . /opt/ros/jazzy/setup.sh && colcon build --packages-select cross_ros_jazzy_msgs
+
+COPY scripts /workspace/scripts
+RUN chmod +x /workspace/scripts/*.py
+
+RUN echo 'source /opt/ros/jazzy/setup.bash && source /workspace/install/setup.bash' >> /root/.bashrc
+CMD ["bash", "-c", "source /opt/ros/jazzy/setup.bash && source /workspace/install/setup.bash && sleep infinity"]
