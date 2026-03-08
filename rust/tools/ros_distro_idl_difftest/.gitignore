@@ -1,0 +1,5 @@
+# Cloned ROS 2 repos – do not version control
+repos/
+
+# Uncomment to ignore generated reports as well
+# reports/

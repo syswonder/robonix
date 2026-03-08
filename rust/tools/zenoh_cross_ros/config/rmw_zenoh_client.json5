@@ -1,0 +1,16 @@
+{
+  "mode": "client",
+  "connect": {
+    "endpoints": ["tcp/zenoh_router:7447"]
+  },
+  "scouting": {
+    "multicast": {
+      "enabled": false
+    }
+  },
+  "transport": {
+    "shared_memory": {
+      "enabled": false
+    }
+  }
+}

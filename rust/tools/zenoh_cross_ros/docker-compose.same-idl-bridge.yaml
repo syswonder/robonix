@@ -1,0 +1,49 @@
+# Test 2 (cross-distro): Same IDL via zenoh-bridge-ros2dds. Humble and Jazzy use Fast DDS
+# (different ROS_DOMAIN_ID); two bridge containers connect them over Zenoh so /point flows
+# Humble -> Jazzy. Use this for Humble+Jazzy because rmw_zenoh does not support
+# cross-distro messaging (type-hash mismatch, see README).
+
+services:
+  bridge_jazzy:
+    image: eclipse/zenoh-bridge-ros2dds:nightly
+    environment:
+      - ROS_DOMAIN_ID=1
+    command: ["-l", "tcp/0.0.0.0:7447"]
+    networks:
+      - cross_ros
+
+  bridge_humble:
+    image: eclipse/zenoh-bridge-ros2dds:nightly
+    environment:
+      - ROS_DOMAIN_ID=0
+    command: ["client", "-e", "tcp/bridge_jazzy:7447"]
+    depends_on:
+      - bridge_jazzy
+    networks:
+      - cross_ros
+
+  humble:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.humble
+    environment:
+      - ROS_DOMAIN_ID=0
+    depends_on:
+      - bridge_humble
+    networks:
+      - cross_ros
+
+  jazzy:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.jazzy
+    environment:
+      - ROS_DOMAIN_ID=1
+    depends_on:
+      - bridge_jazzy
+    networks:
+      - cross_ros
+
+networks:
+  cross_ros:
+    driver: bridge

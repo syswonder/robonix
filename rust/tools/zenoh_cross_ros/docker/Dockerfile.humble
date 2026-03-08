@@ -1,0 +1,25 @@
+# Humble side: build cross_ros_humble_msgs and prepare Python bridge environment.
+# Use osrf/ros:humble-desktop (ros-base tag not always available on Docker Hub).
+FROM osrf/ros:humble-desktop
+
+ENV ROS_DISTRO=humble
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-pip \
+    python3-colcon-common-extensions \
+    ros-humble-std-msgs \
+    ros-humble-geometry-msgs \
+    ros-humble-rmw-zenoh-cpp \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install eclipse-zenoh
+
+WORKDIR /workspace
+COPY msgs/humble/cross_ros_humble_msgs /workspace/src/cross_ros_humble_msgs
+RUN . /opt/ros/humble/setup.sh && colcon build --packages-select cross_ros_humble_msgs
+
+COPY scripts /workspace/scripts
+RUN chmod +x /workspace/scripts/*.py
+
+# Default: source workspace and keep container running so we can exec bridge/pub.
+RUN echo 'source /opt/ros/humble/setup.bash && source /workspace/install/setup.bash' >> /root/.bashrc
+CMD ["bash", "-c", "source /opt/ros/humble/setup.bash && source /workspace/install/setup.bash && sleep infinity"]
