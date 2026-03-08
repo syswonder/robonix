@@ -1,12 +1,11 @@
-# Test 2 (cross-distro): Same IDL via zenoh-bridge-ros2dds. Humble and Jazzy use Fast DDS
-# (different ROS_DOMAIN_ID); two bridge containers connect them over Zenoh so /point flows
-# Humble -> Jazzy. Use this for Humble+Jazzy because rmw_zenoh does not support
-# cross-distro messaging (type-hash mismatch, see README).
+# Test 2 (cross-distro): Same IDL via zenoh-bridge-ros2dds. Humble and Jazzy use Cyclone DDS
+# (different ROS_DOMAIN_ID); two bridge containers connect them over Zenoh.
 
 services:
   bridge_jazzy:
     image: eclipse/zenoh-bridge-ros2dds:nightly
     environment:
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
       - ROS_DOMAIN_ID=1
     command: ["-l", "tcp/0.0.0.0:7447"]
     networks:
@@ -15,6 +14,7 @@ services:
   bridge_humble:
     image: eclipse/zenoh-bridge-ros2dds:nightly
     environment:
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
       - ROS_DOMAIN_ID=0
     command: ["client", "-e", "tcp/bridge_jazzy:7447"]
     depends_on:
@@ -27,6 +27,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.humble
     environment:
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
       - ROS_DOMAIN_ID=0
     depends_on:
       - bridge_humble
@@ -38,6 +39,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.jazzy
     environment:
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
       - ROS_DOMAIN_ID=1
     depends_on:
       - bridge_jazzy

@@ -18,8 +18,9 @@ def main():
     def cb(msg: Point):
         received.append((msg.x, msg.y, msg.z))
         n = len(received)
-        node.get_logger().info(f"Received #{n}/10 Point: x={msg.x}, y={msg.y}, z={msg.z}")
-        print(f"Jazzy received #{n}/10: x={msg.x}, y={msg.y}, z={msg.z}", flush=True)
+        node.get_logger().info(
+            f"Received #{n}/10 Point: x={msg.x:.1f}, y={msg.y:.1f}, z={msg.z:.1f}"
+        )
 
     node.create_subscription(Point, "/point", cb, 10)
     node.get_logger().info("Subscribed to /point (waiting for 10 messages, up to 15s)...")

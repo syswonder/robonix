@@ -21,7 +21,9 @@ def main():
         msg.y = 2.0 + i * 0.1
         msg.z = 3.0 + i * 0.1
         pub.publish(msg)
-        node.get_logger().info(f"Published Point: x={msg.x}, y={msg.y}, z={msg.z}")
+        node.get_logger().info(
+            f"Published Point: x={msg.x:.1f}, y={msg.y:.1f}, z={msg.z:.1f}"
+        )
         time.sleep(0.5)
 
     node.destroy_node()

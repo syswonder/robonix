@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-jazzy-std-msgs \
     ros-jazzy-geometry-msgs \
     ros-jazzy-rmw-zenoh-cpp \
+    ros-jazzy-rmw-cyclonedds-cpp \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --break-system-packages eclipse-zenoh
