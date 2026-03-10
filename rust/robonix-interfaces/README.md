@@ -20,4 +20,3 @@ This repository is the source of truth for Robonix public interfaces.
 - public interaction semantics are defined in RIDL
 - reusable payload structures are defined as ROS messages under `lib/`
 - new architecture does not require `robonix-sdk`
-- legacy `ridl/prm/*` files remain as migration inputs, not the long-term namespace model
