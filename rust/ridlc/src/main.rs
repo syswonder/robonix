@@ -3,8 +3,9 @@
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
 // NOTE: this bin crate depends on the ridlc library crate.
@@ -38,6 +39,11 @@ struct Args {
     /// Target language: python (default)
     #[arg(long = "lang", default_value = "python")]
     lang: String,
+
+    /// Output layout: `workspace` emits a directly buildable ROS workspace,
+    /// `package` keeps the legacy single-package + rosidl tree layout.
+    #[arg(long = "layout", default_value = "workspace")]
+    layout: String,
 }
 
 fn collect_ridl_from(path: &Path, acc: &mut Vec<PathBuf>) -> Result<()> {
@@ -75,6 +81,14 @@ fn collect_ridl_from(path: &Path, acc: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+fn ridlc_prefix() -> &'static str {
+    if io::stderr().is_terminal() {
+        "\x1b[1;38;5;45m[ridlc]\x1b[0m"
+    } else {
+        "[ridlc]"
+    }
+}
+
 fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
@@ -98,18 +112,18 @@ fn main() -> Result<()> {
         );
     }
 
-    eprintln!("[ridlc] includes: {:?}", args.include);
-    eprintln!("[ridlc] out: {}", args.out.display());
-    eprintln!("[ridlc] inputs (expanded):");
+    eprintln!("{} includes: {:?}", ridlc_prefix(), args.include);
+    eprintln!("{} out: {}", ridlc_prefix(), args.out.display());
+    eprintln!("{} inputs (expanded):", ridlc_prefix());
     for p in &all_inputs {
         eprintln!("  - {}", p.display());
     }
 
     // Group parsed files by RIDL namespace so each namespace becomes its own Python package
     // (e.g. robonix/prm/base vs robonix/prm/localization).
-    let mut files_by_ns: HashMap<String, ridlc::ast::File> = HashMap::new();
+    let mut files_by_ns: BTreeMap<String, ridlc::ast::File> = BTreeMap::new();
     for path in &all_inputs {
-        eprintln!("[ridlc] parsing RIDL: {}", path.display());
+        eprintln!("{} parsing RIDL: {}", ridlc_prefix(), path.display());
         let content = std::fs::read_to_string(path).with_context(|| {
             format!("failed to read RIDL file '{}'", path.display())
         })?;
@@ -121,7 +135,7 @@ fn main() -> Result<()> {
             .clone()
             .unwrap_or_else(|| "robonix/unknown".to_string());
 
-        use std::collections::hash_map::Entry;
+        use std::collections::btree_map::Entry;
         match files_by_ns.entry(ns_key) {
             Entry::Occupied(mut e) => {
                 e.get_mut().merge(file);
@@ -143,8 +157,30 @@ fn main() -> Result<()> {
 
     match args.lang.as_str() {
         "python" => {
-            // Emit gRPC runtime client into out_dir once so code works out of the box.
-            python_gen::emit_runtime_grpc(&args.out)?;
+            let python_out = match args.layout.as_str() {
+                "workspace" => {
+                    let ws_src = args.out.join("src");
+                    std::fs::create_dir_all(&ws_src)?;
+                    for subdir in ["generated", "vendor"] {
+                        let package_dir = ws_src.join(subdir);
+                        if package_dir.exists() {
+                            std::fs::remove_dir_all(&package_dir).with_context(|| {
+                                format!("failed to remove previous package dir '{}'", package_dir.display())
+                            })?;
+                        }
+                    }
+                    ws_src.join("generated").join("robonix_interfaces")
+                }
+                "package" => args.out.clone(),
+                _ => anyhow::bail!(
+                    "unsupported --layout: {} (use 'workspace' or 'package')",
+                    args.layout
+                ),
+            };
+
+            // Emit gRPC runtime client into the generated runtime package once
+            // so code works out of the box.
+            python_gen::emit_runtime_grpc(&python_out)?;
             for (ns, ast) in &files_by_ns {
                 ns_count += 1;
                 for iface in &ast.interfaces {
@@ -155,22 +191,30 @@ fn main() -> Result<()> {
                         ridlc::ast::Interface::Event(_) => total_events += 1,
                     }
                 }
-
-                python_gen::generate(ast, &args.out)?;
+                python_gen::generate(ast, &python_out)?;
                 eprintln!(
-                    "[ridlc] generated Python stubs for namespace '{}' under '{}'",
+                    "{} generated Python stubs for namespace '{}' under '{}'",
+                    ridlc_prefix(),
                     ns,
-                    args.out.display()
+                    python_out.display()
                 );
             }
-            // One ROS2 package per out_dir (ament_python); ready for package.xml / colcon.
-            python_gen::emit_ros_package_files(&args.out, "robonix_interfaces")?;
+            python_gen::emit_ros_package_files(&python_out, "robonix_interfaces")?;
+            if args.layout == "workspace" {
+                let workspace_src = args.out.join("src");
+                python_gen::assemble_workspace_ros_packages(
+                    &workspace_src,
+                    &python_out,
+                    &args.include,
+                )?;
+                python_gen::emit_app_skeleton(&workspace_src, &files_by_ns)?;
+            }
         }
         _ => anyhow::bail!("unsupported --lang: {} (use 'python')", args.lang),
     }
 
     let total_ifaces = total_streams + total_commands + total_queries + total_events;
-    eprintln!("[ridlc] summary:");
+    eprintln!("{} summary:", ridlc_prefix());
     eprintln!("  namespaces: {}", ns_count);
     eprintln!("  interfaces: {} (stream={}, command={}, query={}, event={})",
         total_ifaces, total_streams, total_commands, total_queries, total_events);

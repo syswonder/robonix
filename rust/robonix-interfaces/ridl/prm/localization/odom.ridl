@@ -1,7 +1,0 @@
-namespace robonix/prm/localization
-
-import nav_msgs/msg/Odometry
-
-stream odom {
-    output pose nav_msgs/msg/Odometry
-}

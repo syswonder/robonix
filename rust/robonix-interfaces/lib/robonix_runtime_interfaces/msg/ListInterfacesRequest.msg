@@ -1,0 +1,2 @@
+string module_id
+string namespace_prefix

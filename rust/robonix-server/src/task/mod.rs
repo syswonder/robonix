@@ -1065,7 +1065,8 @@ impl TaskManager {
         // Print brief summary
         if object_count > 0 {
             info!(
-                "[semantic_map] cache updated: {} objects total",
+                "[semantic_map] cache updated: {} -> {} objects total",
+                old_count,
                 object_count
             );
 
@@ -1099,7 +1100,7 @@ impl TaskManager {
                 }
             }
         } else {
-            debug!("[semantic_map] cache updated: 0 objects");
+            debug!("[semantic_map] cache updated: {} -> 0 objects", old_count);
         }
     }
 }

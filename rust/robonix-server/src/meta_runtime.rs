@@ -131,7 +131,7 @@ impl MetaRuntimeRegistry {
 
     fn allocate_channel_name(&self, kind: CapabilityKind) -> String {
         format!(
-            "{}/{}/{}",
+            "{}/{}/n{}",
             self.channel_prefix,
             kind.short(),
             Uuid::new_v4().simple()
@@ -489,6 +489,8 @@ mod tests {
 
         assert_eq!(first, second);
         assert!(first.starts_with("/rbnx/ch/q/"));
+        let leaf = first.rsplit('/').next().expect("channel leaf token");
+        assert!(leaf.starts_with('n'));
     }
 
     #[tokio::test]

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // RIDL AST types (RFC001 subset)
 
-use std::collections::HashMap;
-
 /// Full RIDL file AST; multiple files merge by namespace.
 #[derive(Default)]
 pub struct File {
@@ -28,12 +26,19 @@ pub enum Interface {
 #[derive(Clone, Debug)]
 pub struct StreamDef {
     pub name: String,
-    pub outputs: Vec<StreamOutput>,
+    pub fields: Vec<StreamField>,
     pub version: Option<String>,
 }
 
 #[derive(Clone, Debug)]
-pub struct StreamOutput {
+pub enum StreamDirection {
+    Input,
+    Output,
+}
+
+#[derive(Clone, Debug)]
+pub struct StreamField {
+    pub direction: StreamDirection,
     pub name: String,
     pub type_ref: String,
 }

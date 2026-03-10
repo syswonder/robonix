@@ -1,0 +1,7 @@
+robonix_runtime_interfaces/ModuleDescriptor module
+robonix_runtime_interfaces/InterfaceDescriptor interface
+string instance_id
+string status
+string channel_name
+string metadata_json
+builtin_interfaces/Time updated_at
