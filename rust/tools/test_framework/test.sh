@@ -115,7 +115,7 @@ start_core() {
     
     # Start core in background
     cd "$ROOT_DIR"
-    ROBONIX_WEB_ASSETS_DIR="$ROOT_DIR/robonix-core/web" \
+    ROBONIX_WEB_ASSETS_DIR="$ROOT_DIR/robonix-server/web" \
     ROBONIX_WEB_PORT=8000 \
     RUST_LOG=robonix_server=info \
     robonix-server > "$DDS_LOG_DIR/core.log" 2>&1 &

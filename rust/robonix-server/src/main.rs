@@ -148,7 +148,7 @@ fn main() {
                 web_dir
             );
             eprintln!(
-                "Please set ROBONIX_WEB_ASSETS_DIR to the web directory path (e.g., /path/to/robonix-core/web)."
+                "Please set ROBONIX_WEB_ASSETS_DIR to the web directory path (e.g., /path/to/robonix-server/web)."
             );
             std::process::exit(1);
         }

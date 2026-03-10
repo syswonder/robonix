@@ -32,7 +32,7 @@ regex = "1.10"
 colored = "3.0.0"
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.1", features = ["signal", "process"] }
-robonix-server = { path = "../robonix-core" }
+robonix-server = { path = "../robonix-server" }
 ros2-client = { version = "0.8.2", features = ["pre-iron-gid"] }
 rustdds = "0.11"
 
