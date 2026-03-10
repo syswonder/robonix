@@ -1,0 +1,34 @@
+namespace robonix/system/registry
+
+import robonix_runtime_interfaces/msg/RegisterModuleRequest
+import robonix_runtime_interfaces/msg/RegisterModuleResponse
+import robonix_runtime_interfaces/msg/RegisterInterfaceRequest
+import robonix_runtime_interfaces/msg/RegisterInterfaceResponse
+import robonix_runtime_interfaces/msg/ResolveInterfaceRequest
+import robonix_runtime_interfaces/msg/ResolveInterfaceResponse
+import robonix_runtime_interfaces/msg/ListInterfacesRequest
+import robonix_runtime_interfaces/msg/ListInterfacesResponse
+
+query register_module {
+    request req robonix_runtime_interfaces/msg/RegisterModuleRequest;
+    response res robonix_runtime_interfaces/msg/RegisterModuleResponse;
+    version 1.0;
+}
+
+query register_interface {
+    request req robonix_runtime_interfaces/msg/RegisterInterfaceRequest;
+    response res robonix_runtime_interfaces/msg/RegisterInterfaceResponse;
+    version 1.0;
+}
+
+query resolve_interface {
+    request req robonix_runtime_interfaces/msg/ResolveInterfaceRequest;
+    response res robonix_runtime_interfaces/msg/ResolveInterfaceResponse;
+    version 1.0;
+}
+
+query list_interfaces {
+    request req robonix_runtime_interfaces/msg/ListInterfacesRequest;
+    response res robonix_runtime_interfaces/msg/ListInterfacesResponse;
+    version 1.0;
+}

@@ -21,7 +21,7 @@ use crate::ros_idl::task::{
 };
 use crate::ros_idl::test::{PingPongRequest, PingPongResponse};
 use futures_util::stream::StreamExt;
-use log::{error, info, warn};
+use log::{error, info};
 use ros2_client::{
     AService, Name, Node, Server, ServiceMapping, ServiceTypeName,
     rustdds::{
@@ -63,41 +63,6 @@ fn get_listening_ips() -> Vec<String> {
         }
     }
     Vec::new()
-}
-
-/// Set thread to real-time priority with SCHED_FIFO policy
-/// This ensures the thread has the highest priority and won't be preempted by other user threads
-fn set_thread_realtime_priority() {
-    #[cfg(target_os = "linux")]
-    {
-        use std::mem;
-        unsafe {
-            let mut param: libc::sched_param = mem::zeroed();
-            // Set priority to maximum (99 is the highest for SCHED_FIFO)
-            // Note: This requires CAP_SYS_NICE capability or running as root
-            param.sched_priority = 99;
-
-            let result =
-                libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param);
-
-            if result == 0 {
-                info!("Thread set to SCHED_FIFO with priority 99 (highest priority)");
-            } else {
-                let errno = *libc::__errno_location();
-                warn!(
-                    "Failed to set thread to real-time priority (errno: {}). \
-                    This may require root privileges or CAP_SYS_NICE capability. \
-                    Thread will run with normal priority.",
-                    errno
-                );
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        warn!("Real-time priority setting is only supported on Linux");
-    }
 }
 
 /// Spawn a core service API handler on a dedicated high-priority thread

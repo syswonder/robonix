@@ -1,0 +1,8 @@
+namespace robonix/hal/localization
+
+import geometry_msgs/msg/PoseWithCovarianceStamped
+
+stream pose {
+    output state geometry_msgs/msg/PoseWithCovarianceStamped
+    version 1.0;
+}

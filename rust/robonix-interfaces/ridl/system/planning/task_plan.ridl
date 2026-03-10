@@ -1,0 +1,9 @@
+namespace robonix/system/planning
+
+import std_msgs/msg/String
+
+query task_plan {
+    request description std_msgs/msg/String;
+    response plan std_msgs/msg/String;
+    version 1.0;
+}

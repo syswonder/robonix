@@ -32,5 +32,6 @@ uuid = { version = "1.22.0", features = ["v4"] }
 tonic-prost = "0.14.5"
 
 [build-dependencies]
+protoc-bin-vendored = "3.2.0"
 tonic-build = "0.14.5"
 tonic-prost-build = "0.14.5"

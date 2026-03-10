@@ -1,0 +1,8 @@
+namespace robonix/system/execution
+
+import std_msgs/msg/String
+
+event result_feedback {
+    payload report std_msgs/msg/String
+    version 1.0;
+}

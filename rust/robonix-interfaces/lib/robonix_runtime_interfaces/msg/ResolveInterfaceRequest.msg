@@ -1,0 +1,4 @@
+string interface_id
+uint32 major_version
+string target_instance
+string metadata_filter_json

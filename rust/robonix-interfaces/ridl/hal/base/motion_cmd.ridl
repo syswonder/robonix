@@ -1,0 +1,12 @@
+namespace robonix/hal/base
+
+import geometry_msgs/msg/Twist
+import nav_msgs/msg/Odometry
+import robonix_msgs/msg/CommandResult
+
+command motion_cmd {
+    input cmd geometry_msgs/msg/Twist
+    output odom nav_msgs/msg/Odometry
+    result status robonix_msgs/msg/CommandResult
+    version 1.0;
+}

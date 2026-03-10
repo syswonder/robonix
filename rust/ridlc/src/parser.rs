@@ -5,23 +5,12 @@ use anyhow::{anyhow, Result};
 
 use crate::ast::{
     CommandDef, CommandField, EventDef, EventPayload, File, Import, Interface, QueryDef,
-    QueryField, SafetyItem, StreamDef, StreamOutput,
+    QueryField, SafetyItem, StreamDef, StreamDirection, StreamField,
 };
 
 struct Lexer<'a> {
     s: &'a str,
     pos: usize,
-}
-
-#[derive(Clone, Debug)]
-enum Tok {
-    Ident(String),
-    Path(String),
-    NumDot(String),
-    LBrace,
-    RBrace,
-    Semicolon,
-    Eof,
 }
 
 impl<'a> Lexer<'a> {
@@ -218,7 +207,7 @@ impl<'a> Lexer<'a> {
         self.expect_ident("stream")?;
         let name = self.take_ident()?;
         self.expect_char('{')?;
-        let mut outputs = Vec::new();
+        let mut fields = Vec::new();
         let mut version = None;
         loop {
             self.skip_ws_comments();
@@ -231,16 +220,21 @@ impl<'a> Lexer<'a> {
                 break;
             }
             let kw = kw.unwrap();
-            if kw == "output" {
-                let oname = self.take_ident()?;
+            if kw == "output" || kw == "input" {
+                let fname = self.take_ident()?;
                 let type_ref = self.take_type_ref()?;
                 // Semicolon at end of line is optional; allow newline+closing brace.
                 self.skip_ws_comments();
                 if let Some(';') = self.peek_char() {
                     self.next_char();
                 }
-                outputs.push(StreamOutput {
-                    name: oname,
+                fields.push(StreamField {
+                    direction: if kw == "input" {
+                        StreamDirection::Input
+                    } else {
+                        StreamDirection::Output
+                    },
+                    name: fname,
                     type_ref,
                 });
             } else if kw == "version" {
@@ -262,7 +256,7 @@ impl<'a> Lexer<'a> {
         self.expect_char('}')?;
         Ok(StreamDef {
             name,
-            outputs,
+            fields,
             version,
         })
     }

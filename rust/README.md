@@ -60,7 +60,7 @@ make setup-dev
 
 ## Step 3: Start robonix-server
 
-robonix-server provides the core services for the system. You need to start it in a separate terminal before using the CLI. **It does not take command-line flags**; behavior is controlled by **environment variables**.
+`robonix-server` provides the core services for the system. You need to start it in a separate terminal before using the CLI or any RIDL-generated node. **It does not take command-line flags**; behavior is controlled by **environment variables**.
 
 From the `rust` directory, run:
 
@@ -70,21 +70,27 @@ cd rust
 eval $(make source-sdk)
 ROBONIX_WEB_ASSETS_DIR="$(pwd)/robonix-server/web" \
 ROBONIX_WEB_PORT=8000 \
+ROBONIX_META_GRPC_ADDR=0.0.0.0:50051 \
 RUST_LOG=robonix_server=info \
 robonix-server
 ```
 
-- **ROBONIX_WEB_ASSETS_DIR** and **ROBONIX_WEB_PORT**: Required for the web management UI. If either is unset, robonix-server runs without the web server (ROS2 services only).
+- **ROBONIX_WEB_ASSETS_DIR** and **ROBONIX_WEB_PORT**: Required for the web management UI. If either is unset, robonix-server still runs the core APIs but without the web server.
+- **ROBONIX_META_GRPC_ADDR**: Optional; listen address for the runtime meta API used by RIDL-generated nodes. Default: `0.0.0.0:50051`.
+- **ROBONIX_META_GRPC_ENDPOINT**: Optional; endpoint string returned by `RegisterNode`. If unset, the value of `ROBONIX_META_GRPC_ADDR` is reused.
 - **RUST_LOG**: Optional; controls log level (e.g. `robonix_server=info`, `robonix_server=debug`, `robonix_server::task=debug`, or `debug` for all).
 
 Alternatively use the helper script from `rust`: `./server.sh` (starts in background with the same env).
 
 robonix-server will start:
+- **Runtime meta API** (`gRPC`): `RegisterNode`, `RegisterStream`, `RegisterCommand`, `RegisterQuery`, `ResolveStream`, `ResolveCommand`, `ResolveQuery`
 - **Primitive API** (`/rbnx/prm/*`): Primitive registration and query
 - **Service API** (`/rbnx/srv/*`): Standard service registration and query
 - **Skill API** (`/rbnx/skl/*`): Skill registration and query
 - **Task API** (`/rbnx/task/*`): Task submission, status query, and result retrieval
 - **Web UI** (when env vars above are set): http://localhost:8000
+
+The gRPC runtime meta API is the control plane for RIDL-generated code. It allocates opaque runtime channel names and returns them to generated ROS 2 clients/servers, which then create their ROS topic/action/service endpoints normally.
 
 Keep this terminal running.
 ## Step 4: Configure robonix-cli
@@ -221,17 +227,10 @@ make clean          # Clean build artifacts
 
 ## Troubleshooting
 
-### Check if robonix-server is running
-```bash
-ros2 service list | grep rbnx
-```
+For the runtime meta API:
 
-### Check service availability
 ```bash
-ros2 service type /rbnx/prm/register
-ros2 service type /rbnx/srv/register
-ros2 service type /rbnx/skl/register
-ros2 service type /rbnx/task/submit
+grpcurl -plaintext 127.0.0.1:50051 list
 ```
 
 ### Clean up all ROS2 processes

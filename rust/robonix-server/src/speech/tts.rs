@@ -28,8 +28,6 @@ struct TtsRequest {
 
 #[derive(Debug, Deserialize)]
 struct TtsErrorResponse {
-    task_id: Option<String>,
-    result: Option<String>,
     status: u32,
     message: String,
 }
@@ -102,7 +100,7 @@ impl TtsService {
         log::debug!("TTS request JSON: {}", json_body);
 
         // Build POST request with proper headers
-        let mut request_builder = self
+        let request_builder = self
             .client
             .post(&url)
             .header("Content-Type", "application/json");
