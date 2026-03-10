@@ -19,7 +19,7 @@ BUILD_MODE ?= debug
 # Paths
 RUST_DIR := $(shell pwd)
 CLI_DIR := $(RUST_DIR)/robonix-cli
-CORE_DIR := $(RUST_DIR)/robonix-core
+CORE_DIR := $(RUST_DIR)/robonix-server
 SDK_DIR := $(RUST_DIR)/robonix-sdk
 PROVIDER_DIR := $(RUST_DIR)/provider
 
@@ -195,9 +195,9 @@ env:
 		echo "  robonix-cli: ✗ Not found"; \
 	fi
 	@if [ -f "$(CORE_DIR)/Cargo.toml" ]; then \
-		echo "  robonix-server (robonix-core): ✓ Found"; \
+		echo "  robonix-server (robonix-server): ✓ Found"; \
 	else \
-		echo "  robonix-server (robonix-core): ✗ Not found"; \
+		echo "  robonix-server (robonix-server): ✗ Not found"; \
 	fi
 	@echo ""
 	@echo "Development Setup:"

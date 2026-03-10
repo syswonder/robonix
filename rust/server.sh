@@ -20,7 +20,7 @@ cleanup() {
 
 trap cleanup SIGINT SIGTERM
 
-ROBONIX_WEB_ASSETS_DIR="$(pwd)/robonix-core/web" \
+ROBONIX_WEB_ASSETS_DIR="$(pwd)/robonix-server/web" \
 ROBONIX_WEB_PORT=8000 \
 RUST_LOG=robonix_server=info robonix-server &
 ROBONIX_PID=$!

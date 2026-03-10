@@ -68,7 +68,7 @@ From the `rust` directory, run:
 # In terminal 1: source SDK, then start robonix-server with web UI
 cd rust
 eval $(make source-sdk)
-ROBONIX_WEB_ASSETS_DIR="$(pwd)/robonix-core/web" \
+ROBONIX_WEB_ASSETS_DIR="$(pwd)/robonix-server/web" \
 ROBONIX_WEB_PORT=8000 \
 RUST_LOG=robonix_server=info \
 robonix-server

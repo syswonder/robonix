@@ -14,4 +14,4 @@ anyhow = "1.0"
 clap = { version = "4.0", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
-robonix-server = { path = "../../../robonix-core" }
+robonix-server = { path = "../../../robonix-server" }
