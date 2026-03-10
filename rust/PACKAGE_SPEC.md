@@ -261,7 +261,7 @@ Start and stop scripts are used to manage primitive/service/skill processes. The
 
 ## Standard Specification Validation
 
-Primitives and standard services must conform to the standard specifications defined in `robonix-core`. The system will validate during registration:
+Primitives and standard services must conform to the standard specifications defined in `robonix-server`. The system will validate during registration:
 
 1. **Primitives**: 
    - Primitive names must match standard specifications
@@ -305,7 +305,7 @@ packages:
 
 The deployment process is divided into multiple steps, executed in order:
 
-1. **Registration Phase** (`rbnx deploy register <recipe_file>`): Register each primitive/service/skill to robonix-core
+1. **Registration Phase** (`rbnx deploy register <recipe_file>`): Register each primitive/service/skill to robonix-server
    - Each registration request includes `provider` (package name) and metadata
    - **Note**: Registration does not start processes, it only registers primitive/service/skill information to the system
 
@@ -355,7 +355,7 @@ rbnx deploy stop
 rbnx deploy unregister demo_recipe.yaml
 ```
 
-Standard primitive and service specifications are defined in [`robonix-core/src/specs_table.rs`](robonix-core/src/specs_table.rs).
+Standard primitive and service specifications are defined in [`robonix-server/src/specs_table.rs`](robonix-server/src/specs_table.rs).
 
 ## Examples
 

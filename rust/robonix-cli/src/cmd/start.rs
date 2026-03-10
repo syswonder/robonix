@@ -9,7 +9,7 @@ use crate::daemon_client::{DaemonClient, DaemonCommand, DaemonResponse};
 use crate::database::PackageDatabase;
 use crate::output;
 use anyhow::Result;
-use robonix_core::ros_idl::service_registry::RegisterServiceRequest;
+use robonix_server::ros_idl::service_registry::RegisterServiceRequest;
 use serde_yaml::Value;
 use std::process::Command;
 use std::time::Duration;

@@ -66,8 +66,8 @@ cleanup() {
         kill -KILL -$TEST_PGID 2>/dev/null || true
     fi
     
-    # Kill robonix-core if running
-    pkill -9 -f "robonix-core" 2>/dev/null || true
+    # Kill robonix-server if running
+    pkill -9 -f "robonix-server" 2>/dev/null || true
     
     # Kill any test processes
     if [ -f "$PID_FILE" ]; then
@@ -98,12 +98,12 @@ fi
 # Ensure ROS2 environment is properly set
 export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
 
-# Start robonix-core
+# Start robonix-server
 start_core() {
-    echo "=== Starting robonix-core (RustDDS) ==="
+    echo "=== Starting robonix-server (RustDDS) ==="
     
     # Kill any existing core
-    pkill -9 -f "robonix-core" 2>/dev/null || true
+    pkill -9 -f "robonix-server" 2>/dev/null || true
     sleep 1
     
     # Free port 8000
@@ -117,20 +117,20 @@ start_core() {
     cd "$ROOT_DIR"
     ROBONIX_WEB_ASSETS_DIR="$ROOT_DIR/robonix-core/web" \
     ROBONIX_WEB_PORT=8000 \
-    RUST_LOG=robonix_core=info \
-    robonix-core > "$DDS_LOG_DIR/core.log" 2>&1 &
+    RUST_LOG=robonix_server=info \
+    robonix-server > "$DDS_LOG_DIR/core.log" 2>&1 &
     CORE_PID=$!
     echo "$CORE_PID" >> "$PID_FILE"
     
     # Wait for core to be ready
-    echo "Waiting for robonix-core to start..."
+    echo "Waiting for robonix-server to start..."
     
     # First, wait a bit for the process to actually start
     sleep 2
     
     # Check if process is still running
     if ! kill -0 "$CORE_PID" 2>/dev/null; then
-        echo "✗ robonix-core process died immediately"
+        echo "✗ robonix-server process died immediately"
         echo "Check log: $DDS_LOG_DIR/core.log"
         if [ -f "$DDS_LOG_DIR/core.log" ]; then
             echo "Last 10 lines of log:"
@@ -142,7 +142,7 @@ start_core() {
     # Check log for successful startup message
     if [ -f "$DDS_LOG_DIR/core.log" ]; then
         if grep -q "robonix core ready" "$DDS_LOG_DIR/core.log"; then
-            echo "✓ robonix-core started successfully (from log)"
+            echo "✓ robonix-server started successfully (from log)"
             # Give it a moment for services to be discoverable
             sleep 2
         fi
@@ -161,7 +161,7 @@ start_core() {
     for i in {1..30}; do
         # Check if process is still running
         if ! kill -0 "$CORE_PID" 2>/dev/null; then
-            echo "✗ robonix-core process died after ${i}s"
+            echo "✗ robonix-server process died after ${i}s"
             echo "Check log: $DDS_LOG_DIR/core.log"
             if [ -f "$DDS_LOG_DIR/core.log" ]; then
                 echo "Last 10 lines of log:"
@@ -177,12 +177,12 @@ start_core() {
                 # Try to verify service is available
                 SERVICE_LIST_OUTPUT=$(ros2 service list 2>&1 | grep -v "ERROR\|Error\|error" || true)
                 if echo "$SERVICE_LIST_OUTPUT" | grep -q "/rbnx/ping"; then
-                    echo "✓ robonix-core is ready (service discovered after ${i}s)"
+                    echo "✓ robonix-server is ready (service discovered after ${i}s)"
                     return 0
                 fi
                 # If log says ready but service not found, give it more time (DDS discovery)
                 if [ $i -ge 5 ]; then
-                    echo "✓ robonix-core is ready (from log), DDS discovery may take time"
+                    echo "✓ robonix-server is ready (from log), DDS discovery may take time"
                     echo "  Proceeding with tests (services should be available)"
                     return 0
                 fi
@@ -194,7 +194,7 @@ start_core() {
             if ss -ltn 2>/dev/null | grep -q ":8000"; then
                 # Port is listening, core is likely ready
                 if [ $i -ge 3 ]; then
-                    echo "✓ robonix-core web GUI is listening, assuming ready"
+                    echo "✓ robonix-server web GUI is listening, assuming ready"
                     echo "  (DDS service discovery may take additional time)"
                     return 0
                 fi
@@ -204,7 +204,7 @@ start_core() {
         # Method 3: Try ros2 service list (may fail due to RMW mismatch, but worth trying)
         SERVICE_LIST_OUTPUT=$(ros2 service list 2>&1 | grep -v "ERROR\|Error\|error" || true)
         if echo "$SERVICE_LIST_OUTPUT" | grep -q "/rbnx/ping"; then
-            echo "✓ robonix-core is ready (service discovered after ${i}s)"
+            echo "✓ robonix-server is ready (service discovered after ${i}s)"
             return 0
         fi
         
@@ -216,7 +216,7 @@ start_core() {
         sleep 1
     done
     
-    echo "✗ robonix-core failed to start or services not discovered after 30s"
+    echo "✗ robonix-server failed to start or services not discovered after 30s"
     echo ""
     echo "Diagnostics:"
     echo "  Process status:"
@@ -247,7 +247,7 @@ start_core() {
     fi
     echo ""
     echo "  Note: If you see RMW errors above, it's because:"
-    echo "    - robonix-core uses RustDDS (rustdds crate) via ros2-client"
+    echo "    - robonix-server uses RustDDS (rustdds crate) via ros2-client"
     echo "    - ROS2 CLI tools use RMW (rmw_fastrtps_cpp)"
     echo "    - They can still communicate via DDS discovery protocol"
     echo ""
@@ -390,9 +390,9 @@ main() {
     # Set DDS implementation for ROS2 CLI tools
     export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
     if [ "$DDS_TYPE" = "fastdds" ]; then
-        echo "Testing FastDDS: robonix-core and CLI tools both use FastDDS (rmw_fastrtps_cpp)"
+        echo "Testing FastDDS: robonix-server and CLI tools both use FastDDS (rmw_fastrtps_cpp)"
     else
-        echo "Testing RustDDS: robonix-core uses RustDDS (rustdds crate via ros2-client)"
+        echo "Testing RustDDS: robonix-server uses RustDDS (rustdds crate via ros2-client)"
         echo "  CLI tools use fastrtps (rmw_fastrtps_cpp) for service discovery"
     fi
     
@@ -405,7 +405,7 @@ main() {
     
     # Start core first
     if ! start_core; then
-        echo "Failed to start robonix-core"
+        echo "Failed to start robonix-server"
         exit 1
     fi
     

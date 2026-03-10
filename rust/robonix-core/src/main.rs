@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Robonix Core Main Entry
 //
-// Main entry point for robonix-core service
+// Main entry point for robonix-server service
 
 use log::{debug, info, warn};
-use robonix_core::agent::{Agent, AgentConfig as LLMAgentConfig};
-use robonix_core::core::RobonixCore;
-use robonix_core::logging::init_logger_with_buffer;
-use robonix_core::node::create_nodes;
-use robonix_core::server::{create_qos, create_servers, run_servers};
-use robonix_core::web::{
+use robonix_server::agent::{Agent, AgentConfig as LLMAgentConfig};
+use robonix_server::core::RobonixCore;
+use robonix_server::logging::init_logger_with_buffer;
+use robonix_server::node::create_nodes;
+use robonix_server::server::{create_qos, create_servers, run_servers};
+use robonix_server::web::{
     LogBuffer, NodeLogState, NodeRegistry, agent_chat_handler, agent_reset_handler,
     create_web_state, get_config_handler, image_handler, image_topics_handler, index,
     log_subscriptions_delete, log_subscriptions_get, log_subscriptions_post, logs_handler,
@@ -31,7 +31,7 @@ fn main() {
     // Initialize logger with buffer
     init_logger_with_buffer(Some(log_buffer.clone()));
 
-    info!("robonix core starting...");
+    info!("robonix server starting...");
 
     // Create Tokio runtime for async task execution
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
@@ -45,12 +45,12 @@ fn main() {
     let api_node_arc = Arc::new(Mutex::new(api_node));
     let task_node_arc = Arc::new(Mutex::new(task_node));
     let service_qos = create_qos();
-    info!("robonix core nodes started (core_api, core_task)");
+    info!("robonix server nodes started (core_api, core_task)");
 
     // Initialize core with task node (TaskManager uses it for semantic_map, task_plan, executor)
     let core = rt.block_on(async {
         let core = Arc::new(RobonixCore::new(task_node_arc.clone()));
-        info!("robonix core initialized");
+        info!("robonix server initialized");
         core
     });
 
@@ -66,10 +66,10 @@ fn main() {
         }
     });
 
-    info!("all robonix modules initialized");
+    info!("all robonix server modules initialized");
 
     // Create TF monitor and start monitoring (uses task node)
-    let tf_monitor = Arc::new(robonix_core::perception::tf_monitor::TfMonitor::new());
+    let tf_monitor = Arc::new(robonix_server::perception::tf_monitor::TfMonitor::new());
 
     // Start TF monitoring in background
     let tf_monitor_clone = tf_monitor.clone();
@@ -82,7 +82,7 @@ fn main() {
     });
 
     // Create topic monitor (no periodic task - topics discovered on-demand) (uses task node)
-    let topic_monitor = Arc::new(robonix_core::perception::topic_monitor::TopicMonitor::new());
+    let topic_monitor = Arc::new(robonix_server::perception::topic_monitor::TopicMonitor::new());
     // Initial discovery (synchronous, no spawn needed)
     let topic_monitor_init = topic_monitor.clone();
     rt.block_on(async {
@@ -94,9 +94,8 @@ fn main() {
 
     // Create image monitor (uses task node)
     let image_storage_dir = std::path::PathBuf::from("/tmp/robonix_images");
-    let image_monitor = Arc::new(robonix_core::perception::image_monitor::ImageMonitor::new(
-        image_storage_dir,
-    ));
+    let image_monitor =
+        Arc::new(robonix_server::perception::image_monitor::ImageMonitor::new(image_storage_dir));
 
     // Start image monitoring: discover image topics and subscribe to them
     let image_monitor_for_subscribe = image_monitor.clone();
@@ -178,14 +177,14 @@ fn main() {
 
         // Load config and create services
         let (agent_config, speech_config) = rt.block_on(async {
-            use robonix_core::config::CoreConfig;
+            use robonix_server::config::CoreConfig;
             match CoreConfig::load() {
                 Ok(config) => (config.agent, config.speech),
                 Err(e) => {
                     warn!("Failed to load core config, using defaults: {}", e);
                     (
                         LLMAgentConfig::default(),
-                        robonix_core::config::SpeechConfig::default(),
+                        robonix_server::config::SpeechConfig::default(),
                     )
                 }
             }
@@ -198,8 +197,10 @@ fn main() {
         )));
 
         // Create TTS and STT services
-        let tts_service = Arc::new(robonix_core::speech::TtsService::new(speech_config.clone()));
-        let stt_service = Arc::new(robonix_core::speech::SttService::new(speech_config));
+        let tts_service = Arc::new(robonix_server::speech::TtsService::new(
+            speech_config.clone(),
+        ));
+        let stt_service = Arc::new(robonix_server::speech::SttService::new(speech_config));
 
         let node_log_state = Arc::new(NodeLogState::new());
         let node_registry = Arc::new(NodeRegistry::new());

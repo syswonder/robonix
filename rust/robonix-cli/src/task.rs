@@ -5,7 +5,7 @@
 
 use crate::config::Config;
 use anyhow::Result;
-use robonix_core::ros_idl::task::{
+use robonix_server::ros_idl::task::{
     CancelTaskRequest, CancelTaskResponse, SubmitTaskRequest, SubmitTaskResponse, TaskDataRequest,
     TaskDataResponse,
 };

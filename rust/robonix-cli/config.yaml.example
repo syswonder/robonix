@@ -15,7 +15,7 @@ package_storage_path: ~/.robonix/packages
 # Default: hostname. Set when multiple machines use the same hostname or you want a custom label.
 # node_id: my-robot-1
 
-# Core web HTTP URL (optional) - base URL of robonix-core web server (e.g. http://core-host:8080).
+# Core web HTTP URL (optional) - base URL of robonix-server web server (e.g. http://core-host:8080).
 # When set, the daemon pushes capability logs to core for any log viewer opened in the web UI (real-time updates).
 # core_http_url: http://192.168.1.10:8080
 

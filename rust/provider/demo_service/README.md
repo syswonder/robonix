@@ -61,7 +61,7 @@ The task plan service (`task_plan_service`) converts natural language task descr
 - ROS2 (Humble or later)
 - Python 3.8+
 - colcon build tools
-- **robonix-core** running (start from `rust` with `ROBONIX_WEB_ASSETS_DIR`, `ROBONIX_WEB_PORT`, and `eval $(make source-sdk)`; see [rust/README.md](../../README.md) Step 3)
+- **robonix-server** running (start from `rust` with `ROBONIX_WEB_ASSETS_DIR`, `ROBONIX_WEB_PORT`, and `eval $(make source-sdk)`; see [rust/README.md](../../README.md) Step 3)
 - DashScope (Qwen) API key (one key for both services; see `.env.example`)
 - Front camera primitive registered and running (for semantic map service)
 

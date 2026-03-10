@@ -6,12 +6,12 @@ make fmt
 
 cleanup() {
     echo ""
-    echo "Cleaning up: killing robonix-core, found pid(s): $(pgrep -x robonix-core | sort -n)"
-    pgrep -x robonix-core | sort -n | xargs -r kill -9
+    echo "Cleaning up: killing robonix-server, found pid(s): $(pgrep -x robonix-server | sort -n)"
+    pgrep -x robonix-server | sort -n | xargs -r kill -9
     wait $ROBONIX_PID 2>/dev/null || true
-    echo "Making sure robonix-core does not exist..."
-    if pgrep -x robonix-core >/dev/null; then
-        echo "robonix-core still exists"
+    echo "Making sure robonix-server does not exist..."
+    if pgrep -x robonix-server >/dev/null; then
+        echo "robonix-server still exists"
         exit 1
     fi
     echo "Cleanup complete!"
@@ -25,8 +25,8 @@ make fmt
 make build-sdk
 eval $(make source-sdk)
 
-echo "Killing any running robonix-core processes..."
-pkill -9 -f "robonix-core" 2>/dev/null || true
+echo "Killing any running robonix-server processes..."
+pkill -9 -f "robonix-server" 2>/dev/null || true
 sleep 1
 
 echo "Freeing port 8000..."
@@ -85,7 +85,7 @@ sleep 2
 if command -v ss >/dev/null 2>&1; then
     if ss -lptn "sport = :${PORT}" 2>/dev/null | grep -q ":${PORT}"; then
         echo "Warning: Port ${PORT} may still be in use. Trying one more time..."
-        pkill -9 -f "robonix-core" 2>/dev/null || true
+        pkill -9 -f "robonix-server" 2>/dev/null || true
         sleep 2
     fi
 fi
@@ -95,7 +95,7 @@ make install
 set -m
 ROBONIX_WEB_ASSETS_DIR="$(pwd)/robonix-core/web" \
 ROBONIX_WEB_PORT=8000 \
-RUST_LOG=robonix_core=info robonix-core &
+RUST_LOG=robonix_server=info robonix-server &
 ROBONIX_PID=$!
 set +m
 

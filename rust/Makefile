@@ -28,18 +28,18 @@ help:
 	@echo "Robonix Makefile - Available commands:"
 	@echo ""
 	@echo "Build commands:"
-	@echo "  make build          - Build robonix-cli and robonix-core (default: debug mode)"
+	@echo "  make build          - Build robonix-cli and robonix-server (default: debug mode)"
 	@echo "  make debug          - Build in debug mode (default)"
 	@echo "  make release        - Build in release mode"
 	@echo "  make build-cli      - Build robonix-cli only (uses BUILD_MODE, default: debug)"
-	@echo "  make build-core     - Build robonix-core only (uses BUILD_MODE, default: debug)"
+	@echo "  make build-core     - Build robonix-server only (uses BUILD_MODE, default: debug)"
 	@echo "  make build-sdk      - Build robonix-sdk ROS2 interface package"
 	@echo "  Note: Set BUILD_MODE=release to build in release mode, or use 'make release'"
 	@echo ""
 	@echo "Install commands:"
-	@echo "  make install        - Install robonix-cli and robonix-core binaries via cargo install"
+	@echo "  make install        - Install robonix-cli and robonix-server binaries via cargo install"
 	@echo "  make install-cli    - Install robonix-cli binaries (rbnx, rbnx-daemon) only"
-	@echo "  make install-core   - Install robonix-core binary only"
+	@echo "  make install-core   - Install robonix-server binary only"
 	@echo "  Note: Binaries are installed to ~/.cargo/bin (make sure it's in your PATH)"
 	@echo ""
 	@echo "Environment commands:"
@@ -99,9 +99,9 @@ build-cli:
 	@echo "✓ robonix-cli built successfully ($(BUILD_MODE_DESC) mode)"
 
 build-core:
-	@echo "Building robonix-core ($(BUILD_MODE_DESC) mode)..."
+	@echo "Building robonix-server ($(BUILD_MODE_DESC) mode)..."
 	cd $(CORE_DIR) && cargo build $(CARGO_BUILD_FLAGS)
-	@echo "✓ robonix-core built successfully ($(BUILD_MODE_DESC) mode)"
+	@echo "✓ robonix-server built successfully ($(BUILD_MODE_DESC) mode)"
 
 build-sdk:
 	@echo "Building robonix-sdk ROS2 interface package..."
@@ -133,7 +133,7 @@ install: install-cli install-core
 	@echo "You can now run:"
 	@echo "  rbnx <command>"
 	@echo "  rbnx-daemon <command>"
-	@echo "  robonix-core"
+	@echo "  robonix-server"
 
 install-cli:
 	@echo "Installing robonix-cli binaries via cargo install..."
@@ -141,9 +141,9 @@ install-cli:
 	@echo "✓ Installed rbnx and rbnx-daemon"
 
 install-core:
-	@echo "Installing robonix-core binary via cargo install..."
+	@echo "Installing robonix-server binary via cargo install..."
 	cd $(CORE_DIR) && cargo install --path .
-	@echo "✓ Installed robonix-core"
+	@echo "✓ Installed robonix-server"
 
 # Environment commands
 source-sdk:
@@ -195,9 +195,9 @@ env:
 		echo "  robonix-cli: ✗ Not found"; \
 	fi
 	@if [ -f "$(CORE_DIR)/Cargo.toml" ]; then \
-		echo "  robonix-core: ✓ Found"; \
+		echo "  robonix-server (robonix-core): ✓ Found"; \
 	else \
-		echo "  robonix-core: ✗ Not found"; \
+		echo "  robonix-server (robonix-core): ✗ Not found"; \
 	fi
 	@echo ""
 	@echo "Development Setup:"
@@ -224,7 +224,7 @@ fmt:
 	@echo "Formatting code with cargo fmt..."
 	@echo "Formatting robonix-cli..."
 	cd $(CLI_DIR) && cargo fmt
-	@echo "Formatting robonix-core..."
+	@echo "Formatting robonix-server..."
 	cd $(CORE_DIR) && cargo fmt
 	@echo "✓ Code formatted"
 
@@ -240,7 +240,7 @@ check:
 	@echo "Running cargo check on all Rust projects..."
 	@echo "Checking robonix-cli..."
 	cd $(CLI_DIR) && cargo check
-	@echo "Checking robonix-core..."
+	@echo "Checking robonix-server..."
 	cd $(CORE_DIR) && cargo check
 	@echo "✓ All checks passed"
 

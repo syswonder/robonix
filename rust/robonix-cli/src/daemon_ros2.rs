@@ -4,11 +4,11 @@
 // Manages persistent ROS2 node and service clients for daemon
 
 use anyhow::Result;
-use robonix_core::ros_idl::get_listening_ips::{GetListeningIpsRequest, GetListeningIpsResponse};
-use robonix_core::ros_idl::primitive::{RegisterPrimitiveRequest, RegisterPrimitiveResponse};
-use robonix_core::ros_idl::service_registry::{RegisterServiceRequest, RegisterServiceResponse};
-use robonix_core::ros_idl::skill::{RegisterSkillRequest, RegisterSkillResponse};
-use robonix_core::ros_idl::task::{
+use robonix_server::ros_idl::get_listening_ips::{GetListeningIpsRequest, GetListeningIpsResponse};
+use robonix_server::ros_idl::primitive::{RegisterPrimitiveRequest, RegisterPrimitiveResponse};
+use robonix_server::ros_idl::service_registry::{RegisterServiceRequest, RegisterServiceResponse};
+use robonix_server::ros_idl::skill::{RegisterSkillRequest, RegisterSkillResponse};
+use robonix_server::ros_idl::task::{
     CancelTaskRequest, CancelTaskResponse, SubmitTaskRequest, SubmitTaskResponse, TaskDataRequest,
     TaskDataResponse,
 };
@@ -75,7 +75,7 @@ impl DaemonRos2Clients {
         });
 
         // Create service clients
-        // Match QoS settings with robonix-core server for compatibility
+        // Match QoS settings with robonix-server for compatibility
         let service_qos = QosPolicyBuilder::new()
             .history(policy::History::KeepLast { depth: 10 })
             .reliability(policy::Reliability::Reliable {
@@ -186,7 +186,9 @@ impl DaemonRos2Clients {
         )
         .await
         .map_err(|_| {
-            anyhow::anyhow!("Timeout: get_listening_ips timed out. Ensure robonix-core is running.")
+            anyhow::anyhow!(
+                "Timeout: get_listening_ips timed out. Ensure robonix-server is running."
+            )
         })?
         .map_err(|e| anyhow::anyhow!("get_listening_ips call error: {:?}", e))?;
 
@@ -235,7 +237,7 @@ impl DaemonRos2Clients {
 
         Err(anyhow::anyhow!(
             "Service call to /rbnx/prm/register failed after {} attempts. {}. \
-            Please ensure robonix-core is running. Start it with: robonix-core",
+            Please ensure robonix-server is running. Start it with: robonix-server",
             max_retries,
             last_error.unwrap_or_else(|| "Unknown error".to_string())
         ))
@@ -283,7 +285,7 @@ impl DaemonRos2Clients {
 
         Err(anyhow::anyhow!(
             "Service call to /rbnx/srv/register failed after {} attempts. {}. \
-            Please ensure robonix-core is running. Start it with: robonix-core",
+            Please ensure robonix-server is running. Start it with: robonix-server",
             max_retries,
             last_error.unwrap_or_else(|| "Unknown error".to_string())
         ))
@@ -305,7 +307,7 @@ impl DaemonRos2Clients {
         .map_err(|_| {
             anyhow::anyhow!(
                 "Timeout: Service call to /rbnx/skl/register timed out after 10 seconds. \
-                Please ensure robonix-core is running. Start it with: robonix-core"
+                Please ensure robonix-server is running. Start it with: robonix-server"
             )
         })?
         .map_err(|e| anyhow::anyhow!("Service call error: {:?}", e))?;
@@ -325,7 +327,7 @@ impl DaemonRos2Clients {
         .map_err(|_| {
             anyhow::anyhow!(
                 "Timeout: Service call to /rbnx/task/submit timed out after 30 seconds. \
-                Please ensure robonix-core is running. Start it with: robonix-core"
+                Please ensure robonix-server is running. Start it with: robonix-server"
             )
         })?
         .map_err(|e| anyhow::anyhow!("Service call error: {:?}", e))?;
@@ -345,7 +347,7 @@ impl DaemonRos2Clients {
         .map_err(|_| {
             anyhow::anyhow!(
                 "Timeout: Service call to /rbnx/task/data timed out after 10 seconds. \
-                Please ensure robonix-core is running. Start it with: robonix-core"
+                Please ensure robonix-server is running. Start it with: robonix-server"
             )
         })?
         .map_err(|e| anyhow::anyhow!("Service call error: {:?}", e))?;
@@ -364,7 +366,7 @@ impl DaemonRos2Clients {
         .map_err(|_| {
             anyhow::anyhow!(
                 "Timeout: Service call to /rbnx/task/cancel timed out after 10 seconds. \
-                Please ensure robonix-core is running. Start it with: robonix-core"
+                Please ensure robonix-server is running. Start it with: robonix-server"
             )
         })?
         .map_err(|e| anyhow::anyhow!("Service call error: {:?}", e))?;
@@ -379,7 +381,7 @@ impl DaemonRos2Clients {
         // as service discovery is a one-time process
         if !self.discovery_waited.swap(true, Ordering::Relaxed) {
             // ROS2 service discovery typically takes 1-5 seconds, especially when
-            // daemon starts before robonix-core or when they start simultaneously.
+            // daemon starts before robonix-server or when they start simultaneously.
             // We wait a reasonable time to allow discovery to complete.
             // The spinner is already running in the background to help with discovery.
             tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;

@@ -38,7 +38,7 @@ pkill -9 -f 'robot_state_publisher' 2>/dev/null || true
 # 5. fastrtps shm
 rm -f /dev/shm/sem.fastrtps_* /dev/shm/fastrtps_* 2>/dev/null || true
 
-pkill -9 -f "ros2|rclpy|rclcpp|webots|python|python3|rbnx-daemon|robonix-core|rviz2"
+pkill -9 -f "ros2|rclpy|rclcpp|webots|python|python3|rbnx-daemon|robonix-server|rviz2"
 rm -f /dev/shm/sem.fastrtps_* /dev/shm/fastrtps_*
 
 echo "kill.sh done."
