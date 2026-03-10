@@ -2,7 +2,7 @@
 // Rust CLI Stress Test - Single Client Process
 use anyhow::Result;
 use clap::Parser;
-use robonix_core::ros_idl::test::{PingPongRequest, PingPongResponse};
+use robonix_server::ros_idl::test::{PingPongRequest, PingPongResponse};
 use ros2_client::{
     service::AService, Context, Name, NodeName, NodeOptions, ServiceMapping, ServiceTypeName,
 };

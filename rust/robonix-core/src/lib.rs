@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Robonix Core Library
 //
-// Core library module for robonix-core
+// Core library module for robonix-server
 
 #[macro_use]
 pub mod spec;

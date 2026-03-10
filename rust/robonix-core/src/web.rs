@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Web Module
 //
-// Modern web-based management interface for robonix-core
+// Modern web-based management interface for robonix-server
 
 use rocket::State;
 use rocket::data::ByteUnit;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Core Configuration Module
 //
-// Configuration management for robonix-core (distributed system, single instance)
+// Configuration management for robonix-server (distributed system, single instance)
 
 use crate::agent::llm::AgentConfig;
 use anyhow::{Context, Result};

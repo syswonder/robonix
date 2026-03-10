@@ -75,7 +75,7 @@ fi
 echo ""
 
 # Test 1: Simple ping
-# NOTE: robonix-core exposes /rbnx/ping with AService (serde); ros2 CLI uses CDR.
+# NOTE: robonix-server exposes /rbnx/ping with AService (serde); ros2 CLI uses CDR.
 # If this call hangs, use robonix-cli or another AService client instead.
 echo "Test 1: Simple ping"
 echo "Calling service with message='hello' and sequence=1..."

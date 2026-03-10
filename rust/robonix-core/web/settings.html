@@ -242,7 +242,7 @@
                     let message = result.message || 'Configuration saved successfully!';
                     if (result.restart_required) {
                         statusMsg.className = 'status-message success warning';
-                        message += ' ⚠️ ' + (result.restart_message || 'Please restart robonix-core for the changes to take effect.');
+                        message += ' ⚠️ ' + (result.restart_message || 'Please restart robonix-server for the changes to take effect.');
                     } else {
                         statusMsg.className = 'status-message success';
                     }
@@ -289,7 +289,7 @@
                     let message = result.message || 'Speech configuration saved successfully!';
                     if (result.restart_required) {
                         statusMsg.className = 'status-message success warning';
-                        message += ' ⚠️ ' + (result.restart_message || 'Please restart robonix-core for the changes to take effect.');
+                        message += ' ⚠️ ' + (result.restart_message || 'Please restart robonix-server for the changes to take effect.');
                     } else {
                         statusMsg.className = 'status-message success';
                     }

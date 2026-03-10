@@ -1,10 +1,10 @@
 # Service Load Test
 
-This directory contains high-intensity load testing scripts for robonix-core services.
+This directory contains high-intensity load testing scripts for robonix-server services.
 
 ## Purpose
 
-Test concurrent access to robonix-core services, particularly the ping pong service, to identify any issues with multiple processes making high-frequency requests.
+Test concurrent access to robonix-server services, particularly the ping pong service, to identify any issues with multiple processes making high-frequency requests.
 
 ## Files
 
@@ -21,16 +21,16 @@ colcon build --packages-select robonix_sdk
 source install/setup.bash
 ```
 
-2. Start robonix-core (from the **rust** directory; it uses environment variables, not CLI flags):
+2. Start robonix-server (from the **rust** directory; it uses environment variables, not CLI flags):
 ```bash
 cd /path/to/rust
 eval $(make source-sdk)
 ROBONIX_WEB_ASSETS_DIR="$(pwd)/robonix-core/web" \
 ROBONIX_WEB_PORT=8000 \
-RUST_LOG=robonix_core=info \
-robonix-core
+RUST_LOG=robonix_server=info \
+robonix-server
 ```
-Or use `./core.sh` from `rust` to start in background.
+Or use `./server.sh` from `rust` to start in background.
 
 3. In separate terminals, run the test clients:
 ```bash
@@ -63,5 +63,5 @@ Both clients should be able to successfully call the ping pong service concurren
 
 ## Troubleshooting
 
-If you see high failure rates or one client blocking the other, this indicates a concurrency issue in robonix-core that needs to be fixed.
+If you see high failure rates or one client blocking the other, this indicates a concurrency issue in robonix-server that needs to be fixed.
 

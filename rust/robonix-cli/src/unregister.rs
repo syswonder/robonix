@@ -222,7 +222,7 @@ impl PackageUnregistrar {
 
     // TODO: Implement when core unregister service is available
     // async fn call_unregister_service(&self, package_name: &str, package_type: &str, std_name: &str) -> Result<()> {
-    //     // Call robonix-core unregister service
+    //     // Call robonix-server unregister service
     //     // This will be implemented when the service is available
     //     Ok(())
     // }

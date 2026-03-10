@@ -44,7 +44,7 @@ make install
 After installation, you can run binaries directly (if rust toolchains are correctly installed and configured):
 - `rbnx` - Robonix CLI
 - `rbnx-daemon` - Robonix daemon
-- `robonix-core` - Robonix core service
+- `robonix-server` - Robonix server (core service)
 
 ## Step 2: Setup Development Environment (Optional)
 
@@ -58,28 +58,28 @@ After installation, you can run binaries directly (if rust toolchains are correc
 make setup-dev
 ```
 
-## Step 3: Start robonix-core
+## Step 3: Start robonix-server
 
-robonix-core provides the core services for the system. You need to start it in a separate terminal before using the CLI. **It does not take command-line flags**; behavior is controlled by **environment variables**.
+robonix-server provides the core services for the system. You need to start it in a separate terminal before using the CLI. **It does not take command-line flags**; behavior is controlled by **environment variables**.
 
 From the `rust` directory, run:
 
 ```bash
-# In terminal 1: source SDK, then start robonix-core with web UI
+# In terminal 1: source SDK, then start robonix-server with web UI
 cd rust
 eval $(make source-sdk)
 ROBONIX_WEB_ASSETS_DIR="$(pwd)/robonix-core/web" \
 ROBONIX_WEB_PORT=8000 \
-RUST_LOG=robonix_core=info \
-robonix-core
+RUST_LOG=robonix_server=info \
+robonix-server
 ```
 
-- **ROBONIX_WEB_ASSETS_DIR** and **ROBONIX_WEB_PORT**: Required for the web management UI. If either is unset, robonix-core runs without the web server (ROS2 services only).
-- **RUST_LOG**: Optional; controls log level (e.g. `robonix_core=info`, `robonix_core=debug`, `robonix_core::task=debug`, or `debug` for all).
+- **ROBONIX_WEB_ASSETS_DIR** and **ROBONIX_WEB_PORT**: Required for the web management UI. If either is unset, robonix-server runs without the web server (ROS2 services only).
+- **RUST_LOG**: Optional; controls log level (e.g. `robonix_server=info`, `robonix_server=debug`, `robonix_server::task=debug`, or `debug` for all).
 
-Alternatively use the helper script from `rust`: `./core.sh` (starts in background with the same env).
+Alternatively use the helper script from `rust`: `./server.sh` (starts in background with the same env).
 
-robonix-core will start:
+robonix-server will start:
 - **Primitive API** (`/rbnx/prm/*`): Primitive registration and query
 - **Service API** (`/rbnx/srv/*`): Standard service registration and query
 - **Skill API** (`/rbnx/skl/*`): Skill registration and query
@@ -121,7 +121,7 @@ rbnx package build all
 
 ## Step 6: Register Packages
 
-Use a recipe file to register primitives, services, and skills to robonix-core:
+Use a recipe file to register primitives, services, and skills to robonix-server:
 
 ```bash
 # rbnx daemon restart # if anything went wrong
@@ -184,9 +184,9 @@ Other standard service **specs** (e.g. `spatial_map`, `plan_simulate`, `result_f
 
 ### Build Commands
 ```bash
-make build          # Build robonix-cli and robonix-core
+make build          # Build robonix-cli and robonix-server
 make build-cli      # Build robonix-cli only
-make build-core     # Build robonix-core only
+make build-core     # Build robonix-server only
 make build-sdk      # Build robonix-sdk ROS2 interface package
 ```
 
@@ -194,15 +194,15 @@ make build-sdk      # Build robonix-sdk ROS2 interface package
 ```bash
 make install        # Install all binaries to ~/.local/bin
 make install-cli    # Install robonix-cli binaries only
-make install-core   # Install robonix-core binary only
+make install-core   # Install robonix-server binary only
 ```
 
 ### Run Commands (after installation)
 ```bash
 rbnx <command>      # Run CLI with any command
 rbnx-daemon <command>  # Run daemon
-# robonix-core: set ROBONIX_WEB_ASSETS_DIR and ROBONIX_WEB_PORT for web UI (see Step 3)
-./core.sh           # From rust/: start robonix-core in background with web UI
+# robonix-server: set ROBONIX_WEB_ASSETS_DIR and ROBONIX_WEB_PORT for web UI (see Step 3)
+./server.sh           # From rust/: start robonix-server in background with web UI
 ```
 
 ### Environment Commands
@@ -221,7 +221,7 @@ make clean          # Clean build artifacts
 
 ## Troubleshooting
 
-### Check if robonix-core is running
+### Check if robonix-server is running
 ```bash
 ros2 service list | grep rbnx
 ```
@@ -236,7 +236,7 @@ ros2 service type /rbnx/task/submit
 
 ### Clean up all ROS2 processes
 ```bash
-pkill -9 -f "ros2|rclpy|rclcpp|webots|python|python3|rbnx-daemon|robonix-core|rviz2"
+pkill -9 -f "ros2|rclpy|rclcpp|webots|python|python3|rbnx-daemon|robonix-server|rviz2"
 rm -f /dev/shm/sem.fastrtps_* /dev/shm/fastrtps_*
 ```
 

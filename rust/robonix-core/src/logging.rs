@@ -22,7 +22,7 @@ pub fn init_logger_with_buffer(log_buffer: Option<Arc<LogBuffer>>) {
     }
 
     let env = Env::default()
-        .filter_or("RUST_LOG", "robonix_core=info,rustdds=error")
+        .filter_or("RUST_LOG", "robonix_server=info,rustdds=error")
         .write_style_or("RUST_LOG_STYLE", "auto");
 
     Builder::from_env(env)
@@ -45,7 +45,7 @@ pub fn init_logger_with_buffer(log_buffer: Option<Arc<LogBuffer>>) {
             let proc_name = std::env::current_exe()
                 .ok()
                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-                .unwrap_or_else(|| "robonix-core".to_string());
+                .unwrap_or_else(|| "robonix-server".to_string());
 
             let timestamp = format!("{}.{:06}", secs, micros);
             let proc_info = format!("{}[{}]", proc_name, std::process::id());
