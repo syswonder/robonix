@@ -1,0 +1,17 @@
+namespace robonix/prm/base
+
+import geometry_msgs/msg/Twist
+import nav_msgs/msg/Odometry
+import robonix_msgs/msg/CommandResult
+
+command move {
+    input cmd geometry_msgs/msg/Twist
+    output feedback nav_msgs/msg/Odometry
+    result status robonix_msgs/msg/CommandResult
+    safety {
+        max_linear_vel   float RW
+        max_angular_vel  float RW
+        timeout_ms       int32 RO
+        enable_guard     bool  RO
+    }
+}

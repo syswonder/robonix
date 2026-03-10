@@ -26,3 +26,11 @@ image = "0.25"
 byteorder = "1.5"
 libc = "0.2"
 base64 = "0.22"
+tonic = "0.14.5"
+prost = "0.14.3"
+uuid = { version = "1.22.0", features = ["v4"] }
+tonic-prost = "0.14.5"
+
+[build-dependencies]
+tonic-build = "0.14.5"
+tonic-prost-build = "0.14.5"

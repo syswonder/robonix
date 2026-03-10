@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+# RIDL Compiler - PoC code generator for Robonix Interface Definition Language
+
+[package]
+name = "ridlc"
+version = "0.1.0"
+edition = "2024"
+description = "RIDL compiler: parse .ridl and generate Rust client/server stubs"
+
+[[bin]]
+name = "ridlc"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+anyhow = "1.0"
+thiserror = "1.0"
+log = "0.4"
+env_logger = "0.11"
