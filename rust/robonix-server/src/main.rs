@@ -7,6 +7,7 @@ use log::{debug, info, warn};
 use robonix_server::agent::{Agent, AgentConfig as LLMAgentConfig};
 use robonix_server::core::RobonixCore;
 use robonix_server::logging::init_logger_with_buffer;
+use robonix_server::meta_runtime::serve_meta_runtime;
 use robonix_server::node::create_nodes;
 use robonix_server::server::{create_qos, create_servers, run_servers};
 use robonix_server::web::{
@@ -53,6 +54,22 @@ fn main() {
         info!("robonix server initialized");
         core
     });
+
+    // Start gRPC meta API used by RIDL-generated nodes for registration/channel resolution.
+    let grpc_addr = std::env::var("ROBONIX_META_GRPC_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:50051".to_string());
+    let grpc_listen_addr: std::net::SocketAddr = grpc_addr
+        .parse()
+        .unwrap_or_else(|_| "0.0.0.0:50051".parse().expect("valid default gRPC address"));
+    let grpc_advertised_endpoint = std::env::var("ROBONIX_META_GRPC_ENDPOINT")
+        .unwrap_or_else(|_| grpc_addr.clone());
+    let meta_registry = core.get_meta_runtime_registry();
+    rt.spawn(async move {
+        if let Err(e) = serve_meta_runtime(meta_registry, grpc_listen_addr, grpc_advertised_endpoint).await {
+            eprintln!("robonix meta runtime gRPC server error: {}", e);
+        }
+    });
+    info!("robonix meta runtime gRPC scheduled on {}", grpc_addr);
 
     // Create all /rbnx/* service servers on the API node (keeps API responsive)
     let servers = rt.block_on(async {

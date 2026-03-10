@@ -1,0 +1,103 @@
+syntax = "proto3";
+
+// Meta API: management of "services" — channel allocation and discovery.
+// robonix-server exposes this via gRPC; nodes use it instead of ROS service for runtime control.
+package robonix.runtime;
+
+option py_generic_services = false;
+
+// --- Node registration (optional: register process and declare capabilities) ---
+
+message RegisterNodeRequest {
+  string node_id = 1;           // optional; server may assign if empty
+  repeated string ridl_namespaces = 2;
+  repeated string capabilities = 3;  // interface names this node provides
+}
+
+message RegisterNodeResponse {
+  string node_id = 1;
+  string runtime_endpoint = 2;
+}
+
+// --- Stream (topic): register provider / resolve consumer topic ---
+
+message RegisterStreamRequest {
+  string node_id = 1;
+  string namespace = 2;        // e.g. "robonix/prm/localization"
+  string stream_name = 3;
+  string role = 4;             // "provider" | "consumer"
+}
+
+message RegisterStreamResponse {
+  string channel_name = 1;     // ROS2 topic name
+}
+
+message ResolveStreamRequest {
+  string requester_id = 1;
+  string target = 2;           // node id or logical selector
+  string namespace = 3;
+  string stream_name = 4;
+  string role = 5;             // "consumer"
+}
+
+message ResolveStreamResponse {
+  string channel_name = 1;
+}
+
+// --- Command (action): register server / resolve client action ---
+
+message RegisterCommandRequest {
+  string node_id = 1;
+  string namespace = 2;
+  string command_name = 3;
+}
+
+message RegisterCommandResponse {
+  string channel_name = 1;     // ROS2 action name
+}
+
+message ResolveCommandRequest {
+  string requester_id = 1;
+  string target = 2;
+  string namespace = 3;
+  string command_name = 4;
+}
+
+message ResolveCommandResponse {
+  string channel_name = 1;
+}
+
+// --- Query (service): register server / resolve client service ---
+
+message RegisterQueryRequest {
+  string node_id = 1;
+  string namespace = 2;
+  string query_name = 3;
+}
+
+message RegisterQueryResponse {
+  string channel_name = 1;     // ROS2 service name
+}
+
+message ResolveQueryRequest {
+  string requester_id = 1;
+  string target = 2;
+  string namespace = 3;
+  string query_name = 4;
+}
+
+message ResolveQueryResponse {
+  string channel_name = 1;
+}
+
+// --- Service definition ---
+
+service RobonixRuntime {
+  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
+  rpc RegisterStream(RegisterStreamRequest) returns (RegisterStreamResponse);
+  rpc RegisterCommand(RegisterCommandRequest) returns (RegisterCommandResponse);
+  rpc RegisterQuery(RegisterQueryRequest) returns (RegisterQueryResponse);
+  rpc ResolveStream(ResolveStreamRequest) returns (ResolveStreamResponse);
+  rpc ResolveCommand(ResolveCommandRequest) returns (ResolveCommandResponse);
+  rpc ResolveQuery(ResolveQueryRequest) returns (ResolveQueryResponse);
+}

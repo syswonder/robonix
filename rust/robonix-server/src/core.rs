@@ -4,6 +4,7 @@
 // Core coordination module for robonix-server
 
 use crate::action::skill_library::SkillLibrary;
+use crate::meta_runtime::MetaRuntimeRegistry;
 use crate::primitive::PrimitiveRegistry;
 use crate::service::ServiceRegistry;
 use crate::spec::SpecRegistry;
@@ -19,6 +20,7 @@ pub struct RobonixCore {
     skill_library: Arc<SkillLibrary>,
     service_registry: Arc<ServiceRegistry>,
     primitive_registry: Arc<PrimitiveRegistry>,
+    meta_runtime_registry: Arc<MetaRuntimeRegistry>,
 }
 
 impl RobonixCore {
@@ -30,6 +32,7 @@ impl RobonixCore {
         let skill_library = Arc::new(SkillLibrary::new());
         let service_registry = Arc::new(ServiceRegistry::new_with_spec(spec_registry.clone()));
         let primitive_registry = Arc::new(PrimitiveRegistry::new_with_spec(spec_registry));
+        let meta_runtime_registry = Arc::new(MetaRuntimeRegistry::default());
 
         let task_manager = TaskManager::new(
             skill_library.clone(),
@@ -43,6 +46,7 @@ impl RobonixCore {
             skill_library,
             service_registry,
             primitive_registry,
+            meta_runtime_registry,
         }
     }
 
@@ -61,5 +65,9 @@ impl RobonixCore {
 
     pub fn get_primitive_registry(&self) -> Arc<PrimitiveRegistry> {
         self.primitive_registry.clone()
+    }
+
+    pub fn get_meta_runtime_registry(&self) -> Arc<MetaRuntimeRegistry> {
+        self.meta_runtime_registry.clone()
     }
 }

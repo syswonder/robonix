@@ -15,6 +15,7 @@ pub mod speech;
 
 pub mod core;
 pub mod logging;
+pub mod meta_runtime;
 pub mod node;
 pub mod primitive;
 pub mod ros_idl;
