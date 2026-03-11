@@ -35,7 +35,7 @@ def main() -> None:
     runtime_client = RobonixRuntimeStub(grpc_channel)
     server = create_execute_server(runtime_client, node_id=node_id)
 
-    def execute(request):
+    def execute(request, goal_handle=None):
         # Example skill: echo request_json in result
         result = server._action_type.Result()
         req_json = request.request_json.data if hasattr(request.request_json, "data") else "{}"

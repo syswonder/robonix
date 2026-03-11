@@ -1522,9 +1522,10 @@ fn emit_command_python(out_dir: &Path, c: &CommandDef, namespace: Option<&str>) 
     out.push_str("    def __init__(self, service_or_action_name: str):\n");
     out.push_str("        super().__init__('ridlc_command_server_' + service_or_action_name.replace('/', '_'))\n");
     out.push_str("        self._name = service_or_action_name\n\n");
-    out.push_str("    def execute(self, request):\n");
+    out.push_str("    def execute(self, request, goal_handle=None):\n");
     out.push_str("        \"\"\"Handle a single command request.\n");
     out.push_str("\n");
+    out.push_str("        goal_handle: ROS2 action goal handle, for publishing feedback via goal_handle.publish_feedback().\n");
     out.push_str("        Default implementation is abstract; override in subclass.\n");
     out.push_str("        \"\"\"\n");
     out.push_str("        raise NotImplementedError('override execute() in subclass')\n\n\n");
@@ -1594,7 +1595,7 @@ fn emit_command_python(out_dir: &Path, c: &CommandDef, namespace: Option<&str>) 
     out.push_str("            self._action_server = ActionServer(self, self._action_type, self._name, execute_callback=self._execute_callback)\n");
     out.push_str("        return self._action_server\n\n");
     out.push_str("    async def _execute_callback(self, goal_handle):\n");
-    out.push_str("        result = self.execute(goal_handle.request)\n");
+    out.push_str("        result = self.execute(goal_handle.request, goal_handle)\n");
     out.push_str("        goal_handle.succeed()\n");
     out.push_str("        return result\n\n");
 
