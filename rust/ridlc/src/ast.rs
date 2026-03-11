@@ -11,8 +11,8 @@ pub struct File {
 
 #[derive(Clone, Debug)]
 pub struct Import {
-    pub path: String,       // e.g. "geometry_msgs/msg/Twist"
-    pub wildcard: bool,     // import pkg/msg/*
+    pub path: String,   // e.g. "geometry_msgs/msg/Twist"
+    pub wildcard: bool, // import pkg/msg/*
 }
 
 #[derive(Clone, Debug)]

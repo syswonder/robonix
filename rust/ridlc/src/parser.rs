@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Minimal RIDL parser (RFC001 subset)
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use crate::ast::{
     Annotation, CommandDef, CommandField, EventDef, EventPayload, File, Import, Interface,
@@ -74,7 +74,11 @@ impl<'a> Lexer<'a> {
         } else {
             return Err(self.error("unexpected eof"));
         }
-        while self.peek_char().map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) {
+        while self
+            .peek_char()
+            .map(|c| c.is_alphanumeric() || c == '_')
+            .unwrap_or(false)
+        {
             self.next_char();
         }
         Ok(self.s[start..self.pos].to_string())
@@ -138,7 +142,17 @@ impl<'a> Lexer<'a> {
                     s
                 } else {
                     let start = self.pos;
-                    while self.peek_char().map(|c| c.is_alphanumeric() || c == '_' || c == '=' || c.is_ascii_digit() || c == '.').unwrap_or(false) {
+                    while self
+                        .peek_char()
+                        .map(|c| {
+                            c.is_alphanumeric()
+                                || c == '_'
+                                || c == '='
+                                || c.is_ascii_digit()
+                                || c == '.'
+                        })
+                        .unwrap_or(false)
+                    {
                         self.next_char();
                     }
                     self.s[start..self.pos].trim().to_string()
@@ -159,7 +173,11 @@ impl<'a> Lexer<'a> {
         self.expect_ident("namespace")?;
         self.skip_ws_comments();
         let start = self.pos;
-        while self.peek_char().map(|c| c.is_alphanumeric() || c == '_' || c == '/').unwrap_or(false) {
+        while self
+            .peek_char()
+            .map(|c| c.is_alphanumeric() || c == '_' || c == '/')
+            .unwrap_or(false)
+        {
             self.next_char();
         }
         let path = self.s[start..self.pos].trim().to_string();
@@ -552,7 +570,8 @@ pub fn parse_file(content: &str) -> Result<File> {
             file.interfaces
                 .push(Interface::Event(lex.parse_event_def()?));
         } else {
-            lex.next_char().ok_or_else(|| lex.error("unexpected token"))?;
+            lex.next_char()
+                .ok_or_else(|| lex.error("unexpected token"))?;
         }
         lex.skip_ws_comments();
     }

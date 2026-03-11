@@ -119,7 +119,9 @@ fn build_package(pkg_info: &crate::database::PackageInfo) -> Result<()> {
                 .arg(&command)
                 .current_dir(&work_dir)
                 .status()
-                .with_context(|| format!("Failed to execute build command in {}", work_dir.display()))?;
+                .with_context(|| {
+                    format!("Failed to execute build command in {}", work_dir.display())
+                })?;
 
             #[cfg(not(unix))]
             let status = Command::new("sh")
@@ -127,7 +129,9 @@ fn build_package(pkg_info: &crate::database::PackageInfo) -> Result<()> {
                 .arg(&command)
                 .current_dir(&work_dir)
                 .status()
-                .with_context(|| format!("Failed to execute build command in {}", work_dir.display()))?;
+                .with_context(|| {
+                    format!("Failed to execute build command in {}", work_dir.display())
+                })?;
 
             status
         }
@@ -232,7 +236,12 @@ fn run_shell(command: &str, current_dir: &Path) -> Result<()> {
         .arg(command)
         .current_dir(current_dir)
         .status()
-        .with_context(|| format!("Failed to execute shell command in {}", current_dir.display()))?;
+        .with_context(|| {
+            format!(
+                "Failed to execute shell command in {}",
+                current_dir.display()
+            )
+        })?;
 
     #[cfg(not(unix))]
     let status = Command::new("sh")
@@ -240,7 +249,12 @@ fn run_shell(command: &str, current_dir: &Path) -> Result<()> {
         .arg(command)
         .current_dir(current_dir)
         .status()
-        .with_context(|| format!("Failed to execute shell command in {}", current_dir.display()))?;
+        .with_context(|| {
+            format!(
+                "Failed to execute shell command in {}",
+                current_dir.display()
+            )
+        })?;
 
     if !status.success() {
         anyhow::bail!(
@@ -257,7 +271,10 @@ fn shell_quote(path: &Path) -> String {
     format!("\"{}\"", path.display())
 }
 
-fn build_local_vnext(package_root: &Path, manifest: &manifest::VNextManifest) -> Result<LocalBuildLayout> {
+fn build_local_vnext(
+    package_root: &Path,
+    manifest: &manifest::VNextManifest,
+) -> Result<LocalBuildLayout> {
     let summary = PackageManifest::VNext(manifest.clone()).validate_and_summarize()?;
     let package_name = summary.name.clone();
     let interface_check = manifest::validate_interface_references(&summary, package_root)?;
@@ -282,7 +299,10 @@ fn build_local_vnext(package_root: &Path, manifest: &manifest::VNextManifest) ->
 
     copy_package_tree(
         package_root,
-        &workspace_root.join("src").join("package").join(&package_name),
+        &workspace_root
+            .join("src")
+            .join("package")
+            .join(&package_name),
     )?;
     link_current_interfaces(&interfaces_root, &build_root)?;
 
@@ -291,7 +311,9 @@ fn build_local_vnext(package_root: &Path, manifest: &manifest::VNextManifest) ->
     output::sub_step(&format!("Workspace: {}", workspace_root.display()));
     output::sub_step(&format!("Interface catalog: {}", catalog_root.display()));
 
-    let runtime_interfaces = interfaces_root.join("lib").join("robonix_runtime_interfaces");
+    let runtime_interfaces = interfaces_root
+        .join("lib")
+        .join("robonix_runtime_interfaces");
     let rcl_interfaces = interfaces_root.join("lib").join("rcl_interfaces");
     let common_interfaces = interfaces_root.join("lib").join("common_interfaces");
 
@@ -325,7 +347,10 @@ fn build_local_vnext(package_root: &Path, manifest: &manifest::VNextManifest) ->
     );
     run_shell(&colcon_command, package_root)?;
 
-    output::check(&format!("Generated workspace: {}", workspace_root.display()));
+    output::check(&format!(
+        "Generated workspace: {}",
+        workspace_root.display()
+    ));
     output::check(&format!(
         "Install setup: {}",
         workspace_root.join("install").join("setup.bash").display()
@@ -360,7 +385,10 @@ pub async fn execute_local(path: PathBuf) -> Result<()> {
     let package_root = path
         .canonicalize()
         .with_context(|| format!("Failed to canonicalize package path {}", path.display()))?;
-    output::action("Building", &format!("local package at {}", package_root.display()));
+    output::action(
+        "Building",
+        &format!("local package at {}", package_root.display()),
+    );
 
     build_local_package(&package_root)?;
     Ok(())
@@ -407,4 +435,3 @@ pub async fn execute_package(config: Config, target: String) -> Result<()> {
 
     Ok(())
 }
-

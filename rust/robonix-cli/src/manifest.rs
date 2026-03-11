@@ -41,8 +41,13 @@ pub enum PackageManifest {
 
 #[derive(Debug, Clone)]
 pub enum BuildStrategy {
-    LegacyScript { script: Option<String> },
-    VNextCommand { command: String, workspace_root: Option<String> },
+    LegacyScript {
+        script: Option<String>,
+    },
+    VNextCommand {
+        command: String,
+        workspace_root: Option<String>,
+    },
     None,
 }
 
@@ -274,9 +279,21 @@ fn validate_legacy(manifest: &LegacyManifest) -> Result<PackageSummary> {
         name: manifest.package.name.clone(),
         version: manifest.package.version.clone(),
         manifest_kind: ManifestKind::LegacyRbnx,
-        primitives: manifest.primitives.iter().map(|item| item.name.clone()).collect(),
-        services: manifest.services.iter().map(|item| item.name.clone()).collect(),
-        skills: manifest.skills.iter().map(|item| item.name.clone()).collect(),
+        primitives: manifest
+            .primitives
+            .iter()
+            .map(|item| item.name.clone())
+            .collect(),
+        services: manifest
+            .services
+            .iter()
+            .map(|item| item.name.clone())
+            .collect(),
+        skills: manifest
+            .skills
+            .iter()
+            .map(|item| item.name.clone())
+            .collect(),
         provided_interfaces: Vec::new(),
         consumed_interfaces: Vec::new(),
         nodes: Vec::new(),
@@ -310,7 +327,8 @@ fn validate_vnext(manifest: &VNextManifest) -> Result<PackageSummary> {
     }
 
     let interfaces = manifest.interfaces.clone().unwrap_or_default();
-    if manifest.nodes.is_empty() && interfaces.provides.is_empty() && interfaces.consumes.is_empty() {
+    if manifest.nodes.is_empty() && interfaces.provides.is_empty() && interfaces.consumes.is_empty()
+    {
         anyhow::bail!("Manifest must declare at least one node or interface");
     }
 
@@ -334,8 +352,16 @@ fn validate_vnext(manifest: &VNextManifest) -> Result<PackageSummary> {
         primitives: Vec::new(),
         services: Vec::new(),
         skills: Vec::new(),
-        provided_interfaces: interfaces.provides.into_iter().map(|item| item.id).collect(),
-        consumed_interfaces: interfaces.consumes.into_iter().map(|item| item.id).collect(),
+        provided_interfaces: interfaces
+            .provides
+            .into_iter()
+            .map(|item| item.id)
+            .collect(),
+        consumed_interfaces: interfaces
+            .consumes
+            .into_iter()
+            .map(|item| item.id)
+            .collect(),
         nodes: manifest.nodes.iter().map(|item| item.id.clone()).collect(),
         build_strategy,
     })

@@ -14,7 +14,10 @@ pub async fn execute(path: PathBuf) -> Result<()> {
         .map_err(anyhow::Error::from)
         .unwrap_or(path.clone());
 
-    output::action("Validating", &format!("package at {}", package_root.display()));
+    output::action(
+        "Validating",
+        &format!("package at {}", package_root.display()),
+    );
     let detected = manifest::detect_and_load(&package_root)?;
     let summary = detected.manifest.validate_and_summarize()?;
 
@@ -38,13 +41,9 @@ pub async fn execute(path: PathBuf) -> Result<()> {
         ));
     }
 
-    let interface_check =
-        manifest::validate_interface_references(&summary, &package_root)?;
+    let interface_check = manifest::validate_interface_references(&summary, &package_root)?;
     if let Some(catalog_root) = interface_check.catalog_root {
-        output::check(&format!(
-            "Interface catalog: {}",
-            catalog_root.display()
-        ));
+        output::check(&format!("Interface catalog: {}", catalog_root.display()));
         if !interface_check.checked_interfaces.is_empty() {
             output::sub_step(&format!(
                 "Validated interfaces: {}",

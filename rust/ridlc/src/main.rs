@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // ridlc - RIDL compiler PoC
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use std::collections::BTreeMap;
 use std::fs;
@@ -47,8 +47,8 @@ struct Args {
 }
 
 fn collect_ridl_from(path: &Path, acc: &mut Vec<PathBuf>) -> Result<()> {
-    let meta = fs::metadata(path)
-        .with_context(|| format!("failed to stat path '{}'", path.display()))?;
+    let meta =
+        fs::metadata(path).with_context(|| format!("failed to stat path '{}'", path.display()))?;
     if meta.is_dir() {
         for entry in fs::read_dir(path)
             .with_context(|| format!("failed to read dir '{}'", path.display()))?
@@ -65,17 +65,10 @@ fn collect_ridl_from(path: &Path, acc: &mut Vec<PathBuf>) -> Result<()> {
         }
     } else {
         // Single file: require .ridl extension
-        if path
-            .extension()
-            .map(|e| e == "ridl")
-            .unwrap_or(false)
-        {
+        if path.extension().map(|e| e == "ridl").unwrap_or(false) {
             acc.push(path.to_path_buf());
         } else {
-            bail!(
-                "input path '{}' is not a .ridl file",
-                path.display()
-            );
+            bail!("input path '{}' is not a .ridl file", path.display());
         }
     }
     Ok(())
@@ -124,9 +117,8 @@ fn main() -> Result<()> {
     let mut files_by_ns: BTreeMap<String, ridlc::ast::File> = BTreeMap::new();
     for path in &all_inputs {
         eprintln!("{} parsing RIDL: {}", ridlc_prefix(), path.display());
-        let content = std::fs::read_to_string(path).with_context(|| {
-            format!("failed to read RIDL file '{}'", path.display())
-        })?;
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read RIDL file '{}'", path.display()))?;
         let file = parse_file(&content)
             .with_context(|| format!("failed to parse RIDL file '{}'", path.display()))?;
 
@@ -165,7 +157,10 @@ fn main() -> Result<()> {
                         let package_dir = ws_src.join(subdir);
                         if package_dir.exists() {
                             std::fs::remove_dir_all(&package_dir).with_context(|| {
-                                format!("failed to remove previous package dir '{}'", package_dir.display())
+                                format!(
+                                    "failed to remove previous package dir '{}'",
+                                    package_dir.display()
+                                )
                             })?;
                         }
                     }
@@ -247,8 +242,10 @@ fn main() -> Result<()> {
     let total_ifaces = total_streams + total_commands + total_queries + total_events;
     eprintln!("{} summary:", ridlc_prefix());
     eprintln!("  namespaces: {}", ns_count);
-    eprintln!("  interfaces: {} (stream={}, command={}, query={}, event={})",
-        total_ifaces, total_streams, total_commands, total_queries, total_events);
+    eprintln!(
+        "  interfaces: {} (stream={}, command={}, query={}, event={})",
+        total_ifaces, total_streams, total_commands, total_queries, total_events
+    );
 
     Ok(())
 }

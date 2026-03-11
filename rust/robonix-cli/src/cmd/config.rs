@@ -8,11 +8,7 @@ use anyhow::Result;
 use colored::*;
 use std::path::PathBuf;
 
-pub async fn execute(
-    _config: Config,
-    set_storage_path: Option<PathBuf>,
-    show: bool,
-) -> Result<()> {
+pub async fn execute(_config: Config, set_storage_path: Option<PathBuf>, show: bool) -> Result<()> {
     let mut config = Config::load()?;
     let mut updated = false;
 

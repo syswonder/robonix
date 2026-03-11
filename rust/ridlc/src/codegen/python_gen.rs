@@ -20,7 +20,9 @@ fn ridlc_prefix() -> &'static str {
 
 /// Path to proto/gen (gRPC Python stubs) relative to ridlc crate root.
 fn proto_gen_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("proto").join("gen")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("proto")
+        .join("gen")
 }
 
 /// Copy gRPC runtime client modules into out_dir so generated code works out of the box.
@@ -40,9 +42,14 @@ pub fn emit_runtime_grpc(out_dir: &Path) -> Result<()> {
             return Ok(());
         }
         let dst = out_dir.join(f);
-        fs::copy(&src, &dst).with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
+        fs::copy(&src, &dst)
+            .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
     }
-    eprintln!("{} emitted gRPC runtime client into {}", ridlc_prefix(), out_dir.display());
+    eprintln!(
+        "{} emitted gRPC runtime client into {}",
+        ridlc_prefix(),
+        out_dir.display()
+    );
     Ok(())
 }
 
@@ -70,7 +77,8 @@ pub fn emit_ros_package_files(out_dir: &Path, package_name: &str) -> Result<()> 
 script_dir=$base/lib/PACKAGE_NAME
 [install]
 install_scripts=$base/lib/PACKAGE_NAME
-"#.replace("PACKAGE_NAME", package_name);
+"#
+    .replace("PACKAGE_NAME", package_name);
 
     let setup_py = r#"from setuptools import setup, find_packages
 
@@ -94,7 +102,8 @@ setup(
     tests_require=['pytest'],
     entry_points={},
 )
-"#.replace("PACKAGE_NAME", package_name);
+"#
+    .replace("PACKAGE_NAME", package_name);
 
     fs::write(out_dir.join("package.xml"), package_xml)?;
     fs::write(out_dir.join("setup.cfg"), setup_cfg)?;
@@ -183,8 +192,9 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         if src_path.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
-            fs::copy(&src_path, &dst_path)
-                .with_context(|| format!("copy {} -> {}", src_path.display(), dst_path.display()))?;
+            fs::copy(&src_path, &dst_path).with_context(|| {
+                format!("copy {} -> {}", src_path.display(), dst_path.display())
+            })?;
         }
     }
     Ok(())
@@ -467,9 +477,7 @@ install_scripts=$base/lib/PACKAGE_NAME
 
     let setup_py = format!(
         "from setuptools import find_packages, setup\n\npackage_name = '{}'\n\nsetup(\n    name=package_name,\n    version='0.0.1',\n    packages=find_packages(exclude=['test']),\n    data_files=[\n        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),\n        ('share/' + package_name, ['package.xml', 'README.md']),\n    ],\n    install_requires=['setuptools', 'grpcio'],\n    zip_safe=True,\n    maintainer='robonix',\n    maintainer_email='wheatfox17@icloud.com',\n    description='User-editable app skeletons for RIDL-generated interfaces',\n    license='MulanPSL-2.0',\n    tests_require=['pytest'],\n{}{}\n",
-        APP_PACKAGE_NAME,
-        entry_points_block,
-        ")"
+        APP_PACKAGE_NAME, entry_points_block, ")"
     );
 
     let readme = r#"# robonix_interfaces_app
@@ -531,7 +539,9 @@ fn emit_query_app_module(out_dir: &Path, namespace: &str, q: &QueryDef) -> Resul
     ));
     out.push_str("from robonix_runtime_pb2_grpc import RobonixRuntimeStub\n\n\n");
     out.push_str("def main() -> None:\n");
-    out.push_str("    endpoint = os.environ.get(\"ROBONIX_RUNTIME_ENDPOINT\", \"127.0.0.1:50051\")\n");
+    out.push_str(
+        "    endpoint = os.environ.get(\"ROBONIX_RUNTIME_ENDPOINT\", \"127.0.0.1:50051\")\n",
+    );
     out.push_str(&format!(
         "    node_id = os.environ.get(\"ROBONIX_NODE_ID\", \"{}\")\n\n",
         app_entry_name(namespace, &q.name, "server")
@@ -572,7 +582,9 @@ fn emit_command_app_module(out_dir: &Path, namespace: &str, c: &CommandDef) -> R
     ));
     out.push_str("from robonix_runtime_pb2_grpc import RobonixRuntimeStub\n\n\n");
     out.push_str("def main() -> None:\n");
-    out.push_str("    endpoint = os.environ.get(\"ROBONIX_RUNTIME_ENDPOINT\", \"127.0.0.1:50051\")\n");
+    out.push_str(
+        "    endpoint = os.environ.get(\"ROBONIX_RUNTIME_ENDPOINT\", \"127.0.0.1:50051\")\n",
+    );
     out.push_str(&format!(
         "    node_id = os.environ.get(\"ROBONIX_NODE_ID\", \"{}\")\n\n",
         app_entry_name(namespace, &c.name, "server")
@@ -601,7 +613,11 @@ fn emit_command_app_module(out_dir: &Path, namespace: &str, c: &CommandDef) -> R
     Ok(module_name)
 }
 
-fn emit_stream_app_module(out_dir: &Path, namespace: &str, s: &StreamDef) -> Result<(String, &'static str)> {
+fn emit_stream_app_module(
+    out_dir: &Path,
+    namespace: &str,
+    s: &StreamDef,
+) -> Result<(String, &'static str)> {
     let ns_import = namespace.replace('/', ".");
     let field = s
         .fields
@@ -660,7 +676,9 @@ fn emit_stream_app_module(out_dir: &Path, namespace: &str, s: &StreamDef) -> Res
     ));
     out.push_str("from robonix_runtime_pb2_grpc import RobonixRuntimeStub\n\n\n");
     out.push_str("def main() -> None:\n");
-    out.push_str("    endpoint = os.environ.get(\"ROBONIX_RUNTIME_ENDPOINT\", \"127.0.0.1:50051\")\n");
+    out.push_str(
+        "    endpoint = os.environ.get(\"ROBONIX_RUNTIME_ENDPOINT\", \"127.0.0.1:50051\")\n",
+    );
     out.push_str(&format!(
         "    node_id = os.environ.get(\"ROBONIX_NODE_ID\", \"{}\")\n\n",
         app_entry_name(namespace, &s.name, role)
@@ -680,7 +698,11 @@ fn emit_event_app_module(out_dir: &Path, namespace: &str, e: &EventDef) -> Resul
     let mut out = String::new();
     out.push_str("# Generated by ridlc. Edit this file to add your app logic.\n\n");
     out.push_str("import rclpy\n\n");
-    out.push_str(&format!("from {} import {}Publisher\n\n\n", ns_import, pascal(&e.name)));
+    out.push_str(&format!(
+        "from {} import {}Publisher\n\n\n",
+        ns_import,
+        pascal(&e.name)
+    ));
     out.push_str("def main() -> None:\n");
     out.push_str("    publisher = ");
     out.push_str(&format!("{}Publisher(\"/todo/event\")\n", pascal(&e.name)));
@@ -695,7 +717,10 @@ fn emit_event_app_module(out_dir: &Path, namespace: &str, e: &EventDef) -> Resul
     Ok(module_name)
 }
 
-fn emit_combined_runtime_module(py_root: &Path, files_by_ns: &BTreeMap<String, File>) -> Result<String> {
+fn emit_combined_runtime_module(
+    py_root: &Path,
+    files_by_ns: &BTreeMap<String, File>,
+) -> Result<String> {
     let module_name = "combined_runtime";
     let mut import_lines = Vec::new();
     let mut setup_lines = Vec::new();
@@ -723,9 +748,14 @@ fn emit_combined_runtime_module(py_root: &Path, files_by_ns: &BTreeMap<String, F
                         "    def {name}_handler(request, response):",
                         name = q.name
                     ));
-                    setup_lines.push("        # TODO: fill the response with real query logic.".to_string());
+                    setup_lines.push(
+                        "        # TODO: fill the response with real query logic.".to_string(),
+                    );
                     setup_lines.push("        return response".to_string());
-                    setup_lines.push(format!("    {name}_server.start({name}_handler)", name = q.name));
+                    setup_lines.push(format!(
+                        "    {name}_server.start({name}_handler)",
+                        name = q.name
+                    ));
                     setup_lines.push(format!("    nodes.append({}_server)", q.name));
                 }
                 Interface::Command(c) => {
@@ -742,18 +772,26 @@ fn emit_combined_runtime_module(py_root: &Path, files_by_ns: &BTreeMap<String, F
                         entry = entry
                     ));
                     setup_lines.push(format!("    def {name}_execute(request):", name = c.name));
-                    setup_lines.push("        # TODO: inspect request and populate the action result.".to_string());
-                    setup_lines.push(format!("        result = {name}_server._action_type.Result()", name = c.name));
+                    setup_lines.push(
+                        "        # TODO: inspect request and populate the action result."
+                            .to_string(),
+                    );
+                    setup_lines.push(format!(
+                        "        result = {name}_server._action_type.Result()",
+                        name = c.name
+                    ));
                     setup_lines.push("        return result".to_string());
-                    setup_lines.push(format!("    {name}_server.execute = {name}_execute", name = c.name));
+                    setup_lines.push(format!(
+                        "    {name}_server.execute = {name}_execute",
+                        name = c.name
+                    ));
                     setup_lines.push(format!("    {name}_server.start()", name = c.name));
                     setup_lines.push(format!("    nodes.append({}_server)", c.name));
                 }
                 Interface::Stream(s) => {
-                    let field = s
-                        .fields
-                        .first()
-                        .ok_or_else(|| anyhow::anyhow!("stream '{}' must have one field", s.name))?;
+                    let field = s.fields.first().ok_or_else(|| {
+                        anyhow::anyhow!("stream '{}' must have one field", s.name)
+                    })?;
                     match field.direction {
                         StreamDirection::Output => {
                             import_lines.push(format!(
@@ -768,10 +806,20 @@ fn emit_combined_runtime_module(py_root: &Path, files_by_ns: &BTreeMap<String, F
                                 env = env_name,
                                 entry = entry
                             ));
-                            setup_lines.push(format!("    def publish_{name}_once():", name = s.name));
-                            setup_lines.push("        # TODO: populate and publish the stream message.".to_string());
-                            setup_lines.push(format!("        msg = {name}_publisher._msg_type()", name = s.name));
-                            setup_lines.push(format!("        {name}_publisher.publish(msg)", name = s.name));
+                            setup_lines
+                                .push(format!("    def publish_{name}_once():", name = s.name));
+                            setup_lines.push(
+                                "        # TODO: populate and publish the stream message."
+                                    .to_string(),
+                            );
+                            setup_lines.push(format!(
+                                "        msg = {name}_publisher._msg_type()",
+                                name = s.name
+                            ));
+                            setup_lines.push(format!(
+                                "        {name}_publisher.publish(msg)",
+                                name = s.name
+                            ));
                             setup_lines.push(format!(
                                 "    {name}_timer = {name}_publisher.create_timer(0.5, publish_{name}_once)",
                                 name = s.name
@@ -794,7 +842,8 @@ fn emit_combined_runtime_module(py_root: &Path, files_by_ns: &BTreeMap<String, F
                                 target_env = target_env,
                                 entry = entry
                             ));
-                            setup_lines.push(format!("    def on_{name}_message(msg):", name = s.name));
+                            setup_lines
+                                .push(format!("    def on_{name}_message(msg):", name = s.name));
                             setup_lines.push(format!(
                                 "        {name}_subscriber.get_logger().info(f\"received {name}: {{msg}}\")",
                                 name = s.name
@@ -828,7 +877,9 @@ fn emit_combined_runtime_module(py_root: &Path, files_by_ns: &BTreeMap<String, F
     teardown_lines.push("            rclpy.shutdown()".to_string());
 
     let mut out = String::new();
-    out.push_str("# Generated by ridlc. Edit this file to host multiple interfaces in one process.\n\n");
+    out.push_str(
+        "# Generated by ridlc. Edit this file to host multiple interfaces in one process.\n\n",
+    );
     out.push_str("import os\n\n");
     out.push_str("import grpc\n");
     out.push_str("import rclpy\n");
@@ -839,7 +890,9 @@ fn emit_combined_runtime_module(py_root: &Path, files_by_ns: &BTreeMap<String, F
     }
     out.push_str("from robonix_runtime_pb2_grpc import RobonixRuntimeStub\n\n\n");
     out.push_str("def main() -> None:\n");
-    out.push_str("    endpoint = os.environ.get(\"ROBONIX_RUNTIME_ENDPOINT\", \"127.0.0.1:50051\")\n");
+    out.push_str(
+        "    endpoint = os.environ.get(\"ROBONIX_RUNTIME_ENDPOINT\", \"127.0.0.1:50051\")\n",
+    );
     out.push_str("    grpc_channel = grpc.insecure_channel(endpoint)\n");
     out.push_str("    runtime_client = RobonixRuntimeStub(grpc_channel)\n");
     out.push_str("    nodes = []\n");
@@ -997,19 +1050,31 @@ fn emit_command_action_idl(ros_out: &Path, ns: &str, c: &CommandDef) -> Result<(
 
     // Goal (use command input, if present).
     if let Some(ref inp) = c.input {
-        content.push_str(&format!("{} {}\n", rosidl_field_type(&inp.type_ref), inp.name));
+        content.push_str(&format!(
+            "{} {}\n",
+            rosidl_field_type(&inp.type_ref),
+            inp.name
+        ));
     }
     content.push_str("---\n");
 
     // Result (use command result, if present).
     if let Some(ref res) = c.result {
-        content.push_str(&format!("{} {}\n", rosidl_field_type(&res.type_ref), res.name));
+        content.push_str(&format!(
+            "{} {}\n",
+            rosidl_field_type(&res.type_ref),
+            res.name
+        ));
     }
     content.push_str("---\n");
 
     // Feedback (use command output, if present).
     if let Some(ref out_f) = c.output {
-        content.push_str(&format!("{} {}\n", rosidl_field_type(&out_f.type_ref), out_f.name));
+        content.push_str(&format!(
+            "{} {}\n",
+            rosidl_field_type(&out_f.type_ref),
+            out_f.name
+        ));
     }
 
     let filename = format!("{}.action", rosidl_symbol_name(ns, &c.name));
@@ -1024,10 +1089,18 @@ fn emit_query_srv_idl(ros_out: &Path, ns: &str, q: &QueryDef) -> Result<()> {
 
     let mut content = String::new();
     // Request
-    content.push_str(&format!("{} {}\n", rosidl_field_type(&q.request.type_ref), q.request.name));
+    content.push_str(&format!(
+        "{} {}\n",
+        rosidl_field_type(&q.request.type_ref),
+        q.request.name
+    ));
     content.push_str("---\n");
     // Response
-    content.push_str(&format!("{} {}\n", rosidl_field_type(&q.response.type_ref), q.response.name));
+    content.push_str(&format!(
+        "{} {}\n",
+        rosidl_field_type(&q.response.type_ref),
+        q.response.name
+    ));
 
     let filename = format!("{}.srv", rosidl_symbol_name(ns, &q.name));
     let path = srv_dir.join(filename);
@@ -1073,24 +1146,40 @@ pub fn generate(ast: &File, out_dir: &Path) -> Result<()> {
                 let (filename, names) = emit_query_python(&out_pkg_dir, q, ast.namespace_path())?;
                 // Also generate corresponding .srv IDL for this query.
                 emit_query_srv_idl(&rosidl_out, ns, q)?;
-                init_content.push_str(&format!("from .{} import {}\n", filename.trim_end_matches(".py"), names.join(", ")));
+                init_content.push_str(&format!(
+                    "from .{} import {}\n",
+                    filename.trim_end_matches(".py"),
+                    names.join(", ")
+                ));
                 all_names.extend(names);
             }
             Interface::Stream(s) => {
                 let (filename, names) = emit_stream_python(&out_pkg_dir, s, ast.namespace_path())?;
-                init_content.push_str(&format!("from .{} import {}\n", filename.trim_end_matches(".py"), names.join(", ")));
+                init_content.push_str(&format!(
+                    "from .{} import {}\n",
+                    filename.trim_end_matches(".py"),
+                    names.join(", ")
+                ));
                 all_names.extend(names);
             }
             Interface::Command(c) => {
                 let (filename, names) = emit_command_python(&out_pkg_dir, c, ast.namespace_path())?;
                 // Also generate corresponding .action IDL for this command.
                 emit_command_action_idl(&rosidl_out, ns, c)?;
-                init_content.push_str(&format!("from .{} import {}\n", filename.trim_end_matches(".py"), names.join(", ")));
+                init_content.push_str(&format!(
+                    "from .{} import {}\n",
+                    filename.trim_end_matches(".py"),
+                    names.join(", ")
+                ));
                 all_names.extend(names);
             }
             Interface::Event(e) => {
                 let (filename, names) = emit_event_python(&out_pkg_dir, e)?;
-                init_content.push_str(&format!("from .{} import {}\n", filename.trim_end_matches(".py"), names.join(", ")));
+                init_content.push_str(&format!(
+                    "from .{} import {}\n",
+                    filename.trim_end_matches(".py"),
+                    names.join(", ")
+                ));
                 all_names.extend(names);
             }
         }
@@ -1111,7 +1200,11 @@ pub fn generate(ast: &File, out_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn emit_query_python(out_dir: &Path, q: &QueryDef, namespace: Option<&str>) -> Result<(String, Vec<String>)> {
+fn emit_query_python(
+    out_dir: &Path,
+    q: &QueryDef,
+    namespace: Option<&str>,
+) -> Result<(String, Vec<String>)> {
     let (req_import, req_type_name) = ros2_python_type(&q.request.type_ref);
     let (res_import, res_type_name) = ros2_python_type(&q.response.type_ref);
     let filename = format!("{}_query", q.name);
@@ -1129,7 +1222,10 @@ fn emit_query_python(out_dir: &Path, q: &QueryDef, namespace: Option<&str>) -> R
     out.push_str(&format!("from {} import {}\n", req_import, req_type_name));
     out.push_str(&format!("from {} import {}\n", res_import, res_type_name));
     out.push_str("\n");
-    out.push_str(&format!("# Service type: {} / {}\n", q.request.type_ref, q.response.type_ref));
+    out.push_str(&format!(
+        "# Service type: {} / {}\n",
+        q.request.type_ref, q.response.type_ref
+    ));
     out.push_str("\n");
     out.push_str(&format!("def _load_{}_srv_type():\n", q.name));
     out.push_str("    import importlib\n");
@@ -1138,7 +1234,10 @@ fn emit_query_python(out_dir: &Path, q: &QueryDef, namespace: Option<&str>) -> R
         ros_pkg, srv_type_name
     ));
 
-    out.push_str(&format!("def {}_call(node, service_name, request, timeout_sec=10.0):\n", q.name));
+    out.push_str(&format!(
+        "def {}_call(node, service_name, request, timeout_sec=10.0):\n",
+        q.name
+    ));
     out.push_str("    \"\"\"Blocking call to query (ROS2 service client).\"\"\"\n");
     out.push_str("    from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy\n");
     out.push_str(&format!("    srv_type = _load_{}_srv_type()\n", q.name));
@@ -1160,10 +1259,14 @@ fn emit_query_python(out_dir: &Path, q: &QueryDef, namespace: Option<&str>) -> R
     out.push_str("    \"\"\"Base ROS2 service client for query '");
     out.push_str(&q.name);
     out.push_str("'. Channel (service) is provided by runtime.\n\n");
-    out.push_str("    Subclass this class and override ``call()`` to implement transport-specific logic.\n");
+    out.push_str(
+        "    Subclass this class and override ``call()`` to implement transport-specific logic.\n",
+    );
     out.push_str("    \"\"\"\n\n");
     out.push_str("    def __init__(self, service_name: str):\n");
-    out.push_str("        super().__init__('ridlc_query_client_' + service_name.replace('/', '_'))\n");
+    out.push_str(
+        "        super().__init__('ridlc_query_client_' + service_name.replace('/', '_'))\n",
+    );
     out.push_str("        self._service_name = service_name\n\n");
     out.push_str("    def call(self, request, timeout_sec=10.0):\n");
     out.push_str("        \"\"\"Perform the query and return a response.\n");
@@ -1176,10 +1279,14 @@ fn emit_query_python(out_dir: &Path, q: &QueryDef, namespace: Option<&str>) -> R
     out.push_str("    \"\"\"Base ROS2 server stub for query '");
     out.push_str(&q.name);
     out.push_str("'. Channel (service) is provided by runtime.\n\n");
-    out.push_str("    Subclass this class and override ``start()`` to bind handler and start serving.\n");
+    out.push_str(
+        "    Subclass this class and override ``start()`` to bind handler and start serving.\n",
+    );
     out.push_str("    \"\"\"\n\n");
     out.push_str("    def __init__(self, service_name: str):\n");
-    out.push_str("        super().__init__('ridlc_query_server_' + service_name.replace('/', '_'))\n");
+    out.push_str(
+        "        super().__init__('ridlc_query_server_' + service_name.replace('/', '_'))\n",
+    );
     out.push_str("        self._service_name = service_name\n\n");
     out.push_str("    def start(self, handler):\n");
     out.push_str("        \"\"\"Bind a handler(request) -> response and start serving.\n");
@@ -1218,46 +1325,85 @@ fn emit_query_python(out_dir: &Path, q: &QueryDef, namespace: Option<&str>) -> R
     out.push_str("    resp = runtime_client.RegisterQuery(req)\n");
     out.push_str("    return resp.channel_name\n\n");
 
-    out.push_str(&format!("class Ros2{}Server({}Server):\n", pascal(&q.name), pascal(&q.name)));
-    out.push_str("    \"\"\"Concrete ROS2 query server with automatic runtime registration.\"\"\"\n\n");
+    out.push_str(&format!(
+        "class Ros2{}Server({}Server):\n",
+        pascal(&q.name),
+        pascal(&q.name)
+    ));
+    out.push_str(
+        "    \"\"\"Concrete ROS2 query server with automatic runtime registration.\"\"\"\n\n",
+    );
     out.push_str("    def __init__(self, runtime_client, node_id: str):\n");
-    out.push_str(&format!("        service_name = register_{}_server(runtime_client, node_id)\n", q.name));
+    out.push_str(&format!(
+        "        service_name = register_{}_server(runtime_client, node_id)\n",
+        q.name
+    ));
     out.push_str("        super().__init__(service_name)\n");
     out.push_str("        self._runtime_client = runtime_client\n");
     out.push_str("        self._node_id = node_id\n");
-    out.push_str(&format!("        self._srv_type = _load_{}_srv_type()\n", q.name));
+    out.push_str(&format!(
+        "        self._srv_type = _load_{}_srv_type()\n",
+        q.name
+    ));
     out.push_str("        self._service = None\n\n");
     out.push_str("    def start(self, handler):\n");
     out.push_str("        if self._service is None:\n");
     out.push_str("            self._service = self.create_service(self._srv_type, self._service_name, handler)\n");
     out.push_str("        return self._service\n\n");
 
-    out.push_str(&format!("class Ros2{}Client({}Client):\n", pascal(&q.name), pascal(&q.name)));
-    out.push_str("    \"\"\"Concrete ROS2 query client with automatic runtime resolution.\"\"\"\n\n");
+    out.push_str(&format!(
+        "class Ros2{}Client({}Client):\n",
+        pascal(&q.name),
+        pascal(&q.name)
+    ));
+    out.push_str(
+        "    \"\"\"Concrete ROS2 query client with automatic runtime resolution.\"\"\"\n\n",
+    );
     out.push_str("    def __init__(self, runtime_client, requester_id: str, target: str):\n");
-    out.push_str(&format!("        service_name = resolve_{}_service(runtime_client, requester_id, target)\n", q.name));
+    out.push_str(&format!(
+        "        service_name = resolve_{}_service(runtime_client, requester_id, target)\n",
+        q.name
+    ));
     out.push_str("        super().__init__(service_name)\n");
     out.push_str("        self._runtime_client = runtime_client\n");
     out.push_str("        self._requester_id = requester_id\n");
     out.push_str("        self._target = target\n");
-    out.push_str(&format!("        self._srv_type = _load_{}_srv_type()\n", q.name));
-    out.push_str("        self._client = self.create_client(self._srv_type, self._service_name)\n\n");
+    out.push_str(&format!(
+        "        self._srv_type = _load_{}_srv_type()\n",
+        q.name
+    ));
+    out.push_str(
+        "        self._client = self.create_client(self._srv_type, self._service_name)\n\n",
+    );
     out.push_str("    def call(self, request, timeout_sec=10.0):\n");
     out.push_str("        if not self._client.wait_for_service(timeout_sec=timeout_sec):\n");
-    out.push_str("            raise RuntimeError(f'Service {self._service_name!r} not available')\n");
+    out.push_str(
+        "            raise RuntimeError(f'Service {self._service_name!r} not available')\n",
+    );
     out.push_str("        future = self._client.call_async(request)\n");
-    out.push_str("        rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_sec)\n");
+    out.push_str(
+        "        rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_sec)\n",
+    );
     out.push_str("        return future.result()\n\n");
 
-    out.push_str(&format!("def create_{}_server(runtime_client, node_id: str, init_rclpy: bool = True):\n", q.name));
+    out.push_str(&format!(
+        "def create_{}_server(runtime_client, node_id: str, init_rclpy: bool = True):\n",
+        q.name
+    ));
     out.push_str("    if init_rclpy and not rclpy.ok():\n");
     out.push_str("        rclpy.init()\n");
-    out.push_str(&format!("    return Ros2{}Server(runtime_client, node_id)\n\n", pascal(&q.name)));
+    out.push_str(&format!(
+        "    return Ros2{}Server(runtime_client, node_id)\n\n",
+        pascal(&q.name)
+    ));
 
     out.push_str(&format!("def create_{}_client(runtime_client, requester_id: str, target: str, init_rclpy: bool = True):\n", q.name));
     out.push_str("    if init_rclpy and not rclpy.ok():\n");
     out.push_str("        rclpy.init()\n");
-    out.push_str(&format!("    return Ros2{}Client(runtime_client, requester_id, target)\n\n", pascal(&q.name)));
+    out.push_str(&format!(
+        "    return Ros2{}Client(runtime_client, requester_id, target)\n\n",
+        pascal(&q.name)
+    ));
 
     let path = out_dir.join(format!("{}.py", filename));
     fs::write(&path, out)?;
@@ -1275,7 +1421,11 @@ fn emit_query_python(out_dir: &Path, q: &QueryDef, namespace: Option<&str>) -> R
     ))
 }
 
-fn emit_stream_python(out_dir: &Path, s: &StreamDef, namespace: Option<&str>) -> Result<(String, Vec<String>)> {
+fn emit_stream_python(
+    out_dir: &Path,
+    s: &StreamDef,
+    namespace: Option<&str>,
+) -> Result<(String, Vec<String>)> {
     let filename = format!("{}_stream", s.name);
     let ns_literal = namespace.unwrap_or("robonix/unknown");
     if s.fields.len() != 1 {
@@ -1305,7 +1455,10 @@ fn emit_stream_python(out_dir: &Path, s: &StreamDef, namespace: Option<&str>) ->
             StreamDirection::Input => "input",
             StreamDirection::Output => "output",
         };
-        out.push_str(&format!("# {} {}: {}\n", direction_label, field.name, field.type_ref));
+        out.push_str(&format!(
+            "# {} {}: {}\n",
+            direction_label, field.name, field.type_ref
+        ));
     }
     out.push_str("\n\n");
     match direction {
@@ -1317,7 +1470,9 @@ fn emit_stream_python(out_dir: &Path, s: &StreamDef, namespace: Option<&str>) ->
             out.push_str("    Subclass this class and override ``publish()`` to connect to a concrete transport.\n");
             out.push_str("    \"\"\"\n\n");
             out.push_str("    def __init__(self, topic_name: str, msg_type=None):\n");
-            out.push_str("        super().__init__('ridlc_stream_pub_' + topic_name.replace('/', '_'))\n");
+            out.push_str(
+                "        super().__init__('ridlc_stream_pub_' + topic_name.replace('/', '_'))\n",
+            );
             out.push_str("        self._topic = topic_name\n");
             out.push_str("        self._msg_type = msg_type\n");
             out.push_str("        self._pub = None\n\n");
@@ -1326,7 +1481,9 @@ fn emit_stream_python(out_dir: &Path, s: &StreamDef, namespace: Option<&str>) ->
             out.push_str("\n");
             out.push_str("        Default implementation is abstract; override in subclass.\n");
             out.push_str("        \"\"\"\n");
-            out.push_str("        raise NotImplementedError('override publish() in subclass')\n\n\n");
+            out.push_str(
+                "        raise NotImplementedError('override publish() in subclass')\n\n\n",
+            );
 
             out.push_str(&format!(
                 "def register_{}_provider(runtime_client, node_id: str) -> str:\n",
@@ -1362,12 +1519,16 @@ fn emit_stream_python(out_dir: &Path, s: &StreamDef, namespace: Option<&str>) ->
             out.push_str("    Subclass this class and override ``start()`` to connect to a concrete transport.\n");
             out.push_str("    \"\"\"\n\n");
             out.push_str("    def __init__(self, topic_name: str, msg_type=None):\n");
-            out.push_str("        super().__init__('ridlc_stream_sub_' + topic_name.replace('/', '_'))\n");
+            out.push_str(
+                "        super().__init__('ridlc_stream_sub_' + topic_name.replace('/', '_'))\n",
+            );
             out.push_str("        self._topic = topic_name\n");
             out.push_str("        self._msg_type = msg_type\n");
             out.push_str("        self._sub = None\n\n");
             out.push_str("    def start(self, callback):\n");
-            out.push_str("        \"\"\"Start subscribing and dispatch messages to callback(msg).\n");
+            out.push_str(
+                "        \"\"\"Start subscribing and dispatch messages to callback(msg).\n",
+            );
             out.push_str("\n");
             out.push_str("        Default implementation is abstract; override in subclass.\n");
             out.push_str("        \"\"\"\n");
@@ -1381,12 +1542,16 @@ fn emit_stream_python(out_dir: &Path, s: &StreamDef, namespace: Option<&str>) ->
             out.push_str("    Subclass this class and override ``start()`` to connect to a concrete transport.\n");
             out.push_str("    \"\"\"\n\n");
             out.push_str("    def __init__(self, topic_name: str, msg_type=None):\n");
-            out.push_str("        super().__init__('ridlc_stream_sub_' + topic_name.replace('/', '_'))\n");
+            out.push_str(
+                "        super().__init__('ridlc_stream_sub_' + topic_name.replace('/', '_'))\n",
+            );
             out.push_str("        self._topic = topic_name\n");
             out.push_str("        self._msg_type = msg_type\n");
             out.push_str("        self._sub = None\n\n");
             out.push_str("    def start(self, callback):\n");
-            out.push_str("        \"\"\"Start subscribing and dispatch messages to callback(msg).\n");
+            out.push_str(
+                "        \"\"\"Start subscribing and dispatch messages to callback(msg).\n",
+            );
             out.push_str("\n");
             out.push_str("        Default implementation is abstract; override in subclass.\n");
             out.push_str("        \"\"\"\n");
@@ -1408,15 +1573,25 @@ fn emit_stream_python(out_dir: &Path, s: &StreamDef, namespace: Option<&str>) ->
     }
 
     out.push_str(&format!("def _load_{}_msg_type():\n", s.name));
-    out.push_str(&format!("    from {} import {}\n", msg_import, msg_type_name));
+    out.push_str(&format!(
+        "    from {} import {}\n",
+        msg_import, msg_type_name
+    ));
     out.push_str(&format!("    return {}\n\n", msg_type_name));
 
     let exported_names = match direction {
         StreamDirection::Output => {
-            out.push_str(&format!("class Ros2{}Publisher({}Publisher):\n", pascal(&s.name), pascal(&s.name)));
+            out.push_str(&format!(
+                "class Ros2{}Publisher({}Publisher):\n",
+                pascal(&s.name),
+                pascal(&s.name)
+            ));
             out.push_str("    \"\"\"Concrete ROS2 stream publisher with automatic runtime registration.\"\"\"\n\n");
             out.push_str("    def __init__(self, runtime_client, node_id: str):\n");
-            out.push_str(&format!("        topic_name = register_{}_provider(runtime_client, node_id)\n", s.name));
+            out.push_str(&format!(
+                "        topic_name = register_{}_provider(runtime_client, node_id)\n",
+                s.name
+            ));
             out.push_str(&format!("        msg_type = _load_{}_msg_type()\n", s.name));
             out.push_str("        super().__init__(topic_name, msg_type)\n");
             out.push_str("        self._runtime_client = runtime_client\n");
@@ -1425,14 +1600,26 @@ fn emit_stream_python(out_dir: &Path, s: &StreamDef, namespace: Option<&str>) ->
             out.push_str("    def publish(self, msg):\n");
             out.push_str("        self._pub.publish(msg)\n\n");
 
-            out.push_str(&format!("def create_{}_publisher(runtime_client, node_id: str, init_rclpy: bool = True):\n", s.name));
+            out.push_str(&format!(
+                "def create_{}_publisher(runtime_client, node_id: str, init_rclpy: bool = True):\n",
+                s.name
+            ));
             out.push_str("    if init_rclpy and not rclpy.ok():\n");
             out.push_str("        rclpy.init()\n");
-            out.push_str(&format!("    return Ros2{}Publisher(runtime_client, node_id)\n\n", pascal(&s.name)));
+            out.push_str(&format!(
+                "    return Ros2{}Publisher(runtime_client, node_id)\n\n",
+                pascal(&s.name)
+            ));
 
-            out.push_str(&format!("class Ros2{}Subscriber({}Subscriber):\n", pascal(&s.name), pascal(&s.name)));
+            out.push_str(&format!(
+                "class Ros2{}Subscriber({}Subscriber):\n",
+                pascal(&s.name),
+                pascal(&s.name)
+            ));
             out.push_str("    \"\"\"Concrete ROS2 stream subscriber with automatic runtime resolution.\"\"\"\n\n");
-            out.push_str("    def __init__(self, runtime_client, requester_id: str, target: str):\n");
+            out.push_str(
+                "    def __init__(self, runtime_client, requester_id: str, target: str):\n",
+            );
             out.push_str(&format!("        topic_name = resolve_{}_consumer_topic(runtime_client, requester_id, target)\n", s.name));
             out.push_str(&format!("        msg_type = _load_{}_msg_type()\n", s.name));
             out.push_str("        super().__init__(topic_name, msg_type)\n");
@@ -1447,7 +1634,10 @@ fn emit_stream_python(out_dir: &Path, s: &StreamDef, namespace: Option<&str>) ->
             out.push_str(&format!("def create_{}_subscriber(runtime_client, requester_id: str, target: str, init_rclpy: bool = True):\n", s.name));
             out.push_str("    if init_rclpy and not rclpy.ok():\n");
             out.push_str("        rclpy.init()\n");
-            out.push_str(&format!("    return Ros2{}Subscriber(runtime_client, requester_id, target)\n\n", pascal(&s.name)));
+            out.push_str(&format!(
+                "    return Ros2{}Subscriber(runtime_client, requester_id, target)\n\n",
+                pascal(&s.name)
+            ));
 
             vec![
                 format!("{}Publisher", pascal(&s.name)),
@@ -1459,9 +1649,15 @@ fn emit_stream_python(out_dir: &Path, s: &StreamDef, namespace: Option<&str>) ->
             ]
         }
         StreamDirection::Input => {
-            out.push_str(&format!("class Ros2{}Subscriber({}Subscriber):\n", pascal(&s.name), pascal(&s.name)));
+            out.push_str(&format!(
+                "class Ros2{}Subscriber({}Subscriber):\n",
+                pascal(&s.name),
+                pascal(&s.name)
+            ));
             out.push_str("    \"\"\"Concrete ROS2 stream subscriber with automatic runtime resolution.\"\"\"\n\n");
-            out.push_str("    def __init__(self, runtime_client, requester_id: str, target: str):\n");
+            out.push_str(
+                "    def __init__(self, runtime_client, requester_id: str, target: str):\n",
+            );
             out.push_str(&format!("        topic_name = resolve_{}_consumer_topic(runtime_client, requester_id, target)\n", s.name));
             out.push_str(&format!("        msg_type = _load_{}_msg_type()\n", s.name));
             out.push_str("        super().__init__(topic_name, msg_type)\n");
@@ -1476,7 +1672,10 @@ fn emit_stream_python(out_dir: &Path, s: &StreamDef, namespace: Option<&str>) ->
             out.push_str(&format!("def create_{}_subscriber(runtime_client, requester_id: str, target: str, init_rclpy: bool = True):\n", s.name));
             out.push_str("    if init_rclpy and not rclpy.ok():\n");
             out.push_str("        rclpy.init()\n");
-            out.push_str(&format!("    return Ros2{}Subscriber(runtime_client, requester_id, target)\n\n", pascal(&s.name)));
+            out.push_str(&format!(
+                "    return Ros2{}Subscriber(runtime_client, requester_id, target)\n\n",
+                pascal(&s.name)
+            ));
 
             vec![
                 format!("{}Subscriber", pascal(&s.name)),
@@ -1491,7 +1690,11 @@ fn emit_stream_python(out_dir: &Path, s: &StreamDef, namespace: Option<&str>) ->
     Ok((filename, exported_names))
 }
 
-fn emit_command_python(out_dir: &Path, c: &CommandDef, namespace: Option<&str>) -> Result<(String, Vec<String>)> {
+fn emit_command_python(
+    out_dir: &Path,
+    c: &CommandDef,
+    namespace: Option<&str>,
+) -> Result<(String, Vec<String>)> {
     let filename = format!("{}_command", c.name);
     let ns_literal = namespace.unwrap_or("robonix/unknown");
     let ros_pkg = ROSIDL_PACKAGE_NAME;
@@ -1534,7 +1737,9 @@ fn emit_command_python(out_dir: &Path, c: &CommandDef, namespace: Option<&str>) 
     out.push_str("    \"\"\"Base ROS2 client stub for command '");
     out.push_str(&c.name);
     out.push_str("'. Channel (action or service) is provided by runtime.\n\n");
-    out.push_str("    Subclass this class and override ``send()`` to connect to a concrete transport.\n");
+    out.push_str(
+        "    Subclass this class and override ``send()`` to connect to a concrete transport.\n",
+    );
     out.push_str("    \"\"\"\n\n");
     out.push_str("    def __init__(self, service_or_action_name: str):\n");
     out.push_str("        super().__init__('ridlc_command_client_' + service_or_action_name.replace('/', '_'))\n");
@@ -1580,14 +1785,26 @@ fn emit_command_python(out_dir: &Path, c: &CommandDef, namespace: Option<&str>) 
         ros_pkg, action_type_name
     ));
 
-    out.push_str(&format!("class Ros2{}Server({}Server):\n", pascal(&c.name), pascal(&c.name)));
-    out.push_str("    \"\"\"Concrete ROS2 action server with automatic runtime registration.\"\"\"\n\n");
+    out.push_str(&format!(
+        "class Ros2{}Server({}Server):\n",
+        pascal(&c.name),
+        pascal(&c.name)
+    ));
+    out.push_str(
+        "    \"\"\"Concrete ROS2 action server with automatic runtime registration.\"\"\"\n\n",
+    );
     out.push_str("    def __init__(self, runtime_client, node_id: str):\n");
-    out.push_str(&format!("        action_name = register_{}_server(runtime_client, node_id)\n", c.name));
+    out.push_str(&format!(
+        "        action_name = register_{}_server(runtime_client, node_id)\n",
+        c.name
+    ));
     out.push_str("        super().__init__(action_name)\n");
     out.push_str("        self._runtime_client = runtime_client\n");
     out.push_str("        self._node_id = node_id\n");
-    out.push_str(&format!("        self._action_type = _load_{}_action_type()\n", c.name));
+    out.push_str(&format!(
+        "        self._action_type = _load_{}_action_type()\n",
+        c.name
+    ));
     out.push_str("        self._action_server = None\n\n");
     out.push_str("    def start(self):\n");
     out.push_str("        from rclpy.action import ActionServer\n");
@@ -1599,33 +1816,56 @@ fn emit_command_python(out_dir: &Path, c: &CommandDef, namespace: Option<&str>) 
     out.push_str("        goal_handle.succeed()\n");
     out.push_str("        return result\n\n");
 
-    out.push_str(&format!("class Ros2{}Client({}Client):\n", pascal(&c.name), pascal(&c.name)));
-    out.push_str("    \"\"\"Concrete ROS2 action client with automatic runtime resolution.\"\"\"\n\n");
+    out.push_str(&format!(
+        "class Ros2{}Client({}Client):\n",
+        pascal(&c.name),
+        pascal(&c.name)
+    ));
+    out.push_str(
+        "    \"\"\"Concrete ROS2 action client with automatic runtime resolution.\"\"\"\n\n",
+    );
     out.push_str("    def __init__(self, runtime_client, requester_id: str, target: str):\n");
-    out.push_str(&format!("        action_name = resolve_{}_client_action(runtime_client, requester_id, target)\n", c.name));
+    out.push_str(&format!(
+        "        action_name = resolve_{}_client_action(runtime_client, requester_id, target)\n",
+        c.name
+    ));
     out.push_str("        super().__init__(action_name)\n");
     out.push_str("        self._runtime_client = runtime_client\n");
     out.push_str("        self._requester_id = requester_id\n");
     out.push_str("        self._target = target\n");
-    out.push_str(&format!("        self._action_type = _load_{}_action_type()\n", c.name));
+    out.push_str(&format!(
+        "        self._action_type = _load_{}_action_type()\n",
+        c.name
+    ));
     out.push_str("        from rclpy.action import ActionClient\n");
     out.push_str("        self._client = ActionClient(self, self._action_type, self._name)\n\n");
     out.push_str("    def send(self, request, timeout_sec=10.0):\n");
     out.push_str("        if not self._client.wait_for_server(timeout_sec=timeout_sec):\n");
     out.push_str("            raise RuntimeError(f'Action {self._name!r} not available')\n");
     out.push_str("        future = self._client.send_goal_async(request)\n");
-    out.push_str("        rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_sec)\n");
+    out.push_str(
+        "        rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_sec)\n",
+    );
     out.push_str("        return future.result()\n\n");
 
-    out.push_str(&format!("def create_{}_server(runtime_client, node_id: str, init_rclpy: bool = True):\n", c.name));
+    out.push_str(&format!(
+        "def create_{}_server(runtime_client, node_id: str, init_rclpy: bool = True):\n",
+        c.name
+    ));
     out.push_str("    if init_rclpy and not rclpy.ok():\n");
     out.push_str("        rclpy.init()\n");
-    out.push_str(&format!("    return Ros2{}Server(runtime_client, node_id)\n\n", pascal(&c.name)));
+    out.push_str(&format!(
+        "    return Ros2{}Server(runtime_client, node_id)\n\n",
+        pascal(&c.name)
+    ));
 
     out.push_str(&format!("def create_{}_client(runtime_client, requester_id: str, target: str, init_rclpy: bool = True):\n", c.name));
     out.push_str("    if init_rclpy and not rclpy.ok():\n");
     out.push_str("        rclpy.init()\n");
-    out.push_str(&format!("    return Ros2{}Client(runtime_client, requester_id, target)\n\n", pascal(&c.name)));
+    out.push_str(&format!(
+        "    return Ros2{}Client(runtime_client, requester_id, target)\n\n",
+        pascal(&c.name)
+    ));
 
     let path = out_dir.join(format!("{}.py", filename));
     fs::write(&path, out)?;
@@ -1652,7 +1892,10 @@ fn emit_event_python(out_dir: &Path, e: &EventDef) -> Result<(String, Vec<String
     out.push_str("import rclpy\n");
     out.push_str("from rclpy.node import Node\n");
     out.push_str("from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy\n\n");
-    out.push_str(&format!("# payload: {} ({})\n", e.payload.name, e.payload.type_ref));
+    out.push_str(&format!(
+        "# payload: {} ({})\n",
+        e.payload.name, e.payload.type_ref
+    ));
     out.push_str("\n\n");
     out.push_str(&format!("class {}Publisher(Node):\n", pascal(&e.name)));
     out.push_str("    \"\"\"Generated ROS2 publisher for event '");
@@ -1674,10 +1917,7 @@ fn emit_event_python(out_dir: &Path, e: &EventDef) -> Result<(String, Vec<String
     out.push_str("            self._pub.publish(msg)\n\n");
     let path = out_dir.join(format!("{}.py", filename));
     fs::write(&path, out)?;
-    Ok((
-        filename,
-        vec![format!("{}Publisher", pascal(&e.name))],
-    ))
+    Ok((filename, vec![format!("{}Publisher", pascal(&e.name))]))
 }
 
 fn pascal(s: &str) -> String {

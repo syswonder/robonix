@@ -16,33 +16,33 @@ pub mod pb {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum CapabilityKind {
+enum InterfaceKind {
     Stream,
     Command,
     Query,
 }
 
-impl CapabilityKind {
+impl InterfaceKind {
     fn short(self) -> &'static str {
         match self {
-            CapabilityKind::Stream => "s",
-            CapabilityKind::Command => "c",
-            CapabilityKind::Query => "q",
+            InterfaceKind::Stream => "s",
+            InterfaceKind::Command => "c",
+            InterfaceKind::Query => "q",
         }
     }
 
     fn as_str(self) -> &'static str {
         match self {
-            CapabilityKind::Stream => "stream",
-            CapabilityKind::Command => "command",
-            CapabilityKind::Query => "query",
+            InterfaceKind::Stream => "stream",
+            InterfaceKind::Command => "command",
+            InterfaceKind::Query => "query",
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct CapabilityKey {
-    kind: CapabilityKind,
+struct InterfaceKey {
+    kind: InterfaceKind,
     namespace: String,
     name: String,
     provider_node_id: String,
@@ -61,7 +61,7 @@ struct NodeRecord {
 #[allow(dead_code)]
 struct ChannelRecord {
     channel_name: String,
-    kind: CapabilityKind,
+    kind: InterfaceKind,
     namespace: String,
     name: String,
     provider_node_id: String,
@@ -74,7 +74,7 @@ struct LinkRecord {
     requester_id: String,
     target: String,
     provider_node_id: String,
-    kind: CapabilityKind,
+    kind: InterfaceKind,
     namespace: String,
     name: String,
     channel_name: String,
@@ -84,7 +84,7 @@ struct LinkRecord {
 #[derive(Debug, Default)]
 struct MetaRuntimeState {
     nodes: HashMap<String, NodeRecord>,
-    channels: HashMap<CapabilityKey, ChannelRecord>,
+    channels: HashMap<InterfaceKey, ChannelRecord>,
     links: Vec<LinkRecord>,
 }
 
@@ -121,15 +121,16 @@ impl MetaRuntimeRegistry {
             if allow_empty {
                 return Ok(String::new());
             }
-            return Err(Status::invalid_argument(format!("{field} must not be empty")));
+            return Err(Status::invalid_argument(format!(
+                "{field} must not be empty"
+            )));
         }
         if value.len() > 128 {
             return Err(Status::invalid_argument(format!("{field} too long")));
         }
-        let valid = value.chars().all(|c| {
-            c.is_ascii_alphanumeric()
-                || matches!(c, '_' | '-' | '/' | '.' | ':' | '*' )
-        });
+        let valid = value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | '.' | ':' | '*'));
         if !valid {
             return Err(Status::invalid_argument(format!(
                 "{field} contains unsupported characters"
@@ -138,7 +139,7 @@ impl MetaRuntimeRegistry {
         Ok(value.to_string())
     }
 
-    fn allocate_channel_name(&self, kind: CapabilityKind) -> String {
+    fn allocate_channel_name(&self, kind: InterfaceKind) -> String {
         format!(
             "{}/{}/n{}",
             self.channel_prefix,
@@ -185,15 +186,15 @@ impl MetaRuntimeRegistry {
             .updated_at_ms = Self::now_ms();
     }
 
-    async fn register_capability(
+    async fn register_interface(
         &self,
-        kind: CapabilityKind,
+        kind: InterfaceKind,
         node_id: String,
         namespace: String,
         name: String,
     ) -> String {
         self.ensure_node_exists(&node_id).await;
-        let key = CapabilityKey {
+        let key = InterfaceKey {
             kind,
             namespace: namespace.clone(),
             name: name.clone(),
@@ -204,11 +205,7 @@ impl MetaRuntimeRegistry {
         if let Some(existing) = inner.channels.get(&key) {
             info!(
                 "meta-runtime: reused {:?} channel '{}' for provider='{}' namespace='{}' name='{}'",
-                kind,
-                existing.channel_name,
-                node_id,
-                namespace,
-                name
+                kind, existing.channel_name, node_id, namespace, name
             );
             return existing.channel_name.clone();
         }
@@ -216,11 +213,7 @@ impl MetaRuntimeRegistry {
         let channel_name = self.allocate_channel_name(kind);
         info!(
             "meta-runtime: allocated {:?} channel '{}' for provider='{}' namespace='{}' name='{}'",
-            kind,
-            channel_name,
-            node_id,
-            namespace,
-            name
+            kind, channel_name, node_id, namespace, name
         );
         inner.channels.insert(
             key,
@@ -236,9 +229,9 @@ impl MetaRuntimeRegistry {
         channel_name
     }
 
-    async fn resolve_capability(
+    async fn resolve_interface(
         &self,
-        kind: CapabilityKind,
+        kind: InterfaceKind,
         requester_id: String,
         target: String,
         namespace: String,
@@ -255,9 +248,7 @@ impl MetaRuntimeRegistry {
                     entry.kind == kind
                         && entry.namespace == namespace
                         && entry.name == name
-                        && (target.is_empty()
-                            || target == "*"
-                            || entry.provider_node_id == target)
+                        && (target.is_empty() || target == "*" || entry.provider_node_id == target)
                 })
                 .cloned()
                 .collect();
@@ -285,8 +276,16 @@ impl MetaRuntimeRegistry {
             "meta-runtime: resolved {:?} channel '{}' for requester='{}' target='{}' provider='{}' namespace='{}' name='{}'",
             kind,
             selected.channel_name,
-            inner.links.last().map(|l| l.requester_id.as_str()).unwrap_or_default(),
-            inner.links.last().map(|l| l.target.as_str()).unwrap_or_default(),
+            inner
+                .links
+                .last()
+                .map(|l| l.requester_id.as_str())
+                .unwrap_or_default(),
+            inner
+                .links
+                .last()
+                .map(|l| l.target.as_str())
+                .unwrap_or_default(),
             selected.provider_node_id,
             selected.namespace,
             selected.name
@@ -432,7 +431,8 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
     ) -> Result<Response<pb::RegisterStreamResponse>, Status> {
         let req = request.into_inner();
         let node_id = MetaRuntimeRegistry::validate_identifier("node_id", &req.node_id, false)?;
-        let namespace = MetaRuntimeRegistry::validate_identifier("namespace", &req.namespace, false)?;
+        let namespace =
+            MetaRuntimeRegistry::validate_identifier("namespace", &req.namespace, false)?;
         let stream_name =
             MetaRuntimeRegistry::validate_identifier("stream_name", &req.stream_name, false)?;
         let role = MetaRuntimeRegistry::validate_identifier("role", &req.role, false)?;
@@ -443,7 +443,7 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
         }
         let channel_name = self
             .registry
-            .register_capability(CapabilityKind::Stream, node_id, namespace, stream_name)
+            .register_interface(InterfaceKind::Stream, node_id, namespace, stream_name)
             .await;
         Ok(Response::new(pb::RegisterStreamResponse { channel_name }))
     }
@@ -456,7 +456,8 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
         let requester_id =
             MetaRuntimeRegistry::validate_identifier("requester_id", &req.requester_id, false)?;
         let target = MetaRuntimeRegistry::validate_identifier("target", &req.target, true)?;
-        let namespace = MetaRuntimeRegistry::validate_identifier("namespace", &req.namespace, false)?;
+        let namespace =
+            MetaRuntimeRegistry::validate_identifier("namespace", &req.namespace, false)?;
         let stream_name =
             MetaRuntimeRegistry::validate_identifier("stream_name", &req.stream_name, false)?;
         let role = MetaRuntimeRegistry::validate_identifier("role", &req.role, false)?;
@@ -467,8 +468,8 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
         }
         let channel_name = self
             .registry
-            .resolve_capability(
-                CapabilityKind::Stream,
+            .resolve_interface(
+                InterfaceKind::Stream,
                 requester_id,
                 target,
                 namespace,
@@ -484,12 +485,13 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
     ) -> Result<Response<pb::RegisterCommandResponse>, Status> {
         let req = request.into_inner();
         let node_id = MetaRuntimeRegistry::validate_identifier("node_id", &req.node_id, false)?;
-        let namespace = MetaRuntimeRegistry::validate_identifier("namespace", &req.namespace, false)?;
+        let namespace =
+            MetaRuntimeRegistry::validate_identifier("namespace", &req.namespace, false)?;
         let command_name =
             MetaRuntimeRegistry::validate_identifier("command_name", &req.command_name, false)?;
         let channel_name = self
             .registry
-            .register_capability(CapabilityKind::Command, node_id, namespace, command_name)
+            .register_interface(InterfaceKind::Command, node_id, namespace, command_name)
             .await;
         Ok(Response::new(pb::RegisterCommandResponse { channel_name }))
     }
@@ -502,13 +504,14 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
         let requester_id =
             MetaRuntimeRegistry::validate_identifier("requester_id", &req.requester_id, false)?;
         let target = MetaRuntimeRegistry::validate_identifier("target", &req.target, true)?;
-        let namespace = MetaRuntimeRegistry::validate_identifier("namespace", &req.namespace, false)?;
+        let namespace =
+            MetaRuntimeRegistry::validate_identifier("namespace", &req.namespace, false)?;
         let command_name =
             MetaRuntimeRegistry::validate_identifier("command_name", &req.command_name, false)?;
         let channel_name = self
             .registry
-            .resolve_capability(
-                CapabilityKind::Command,
+            .resolve_interface(
+                InterfaceKind::Command,
                 requester_id,
                 target,
                 namespace,
@@ -524,12 +527,13 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
     ) -> Result<Response<pb::RegisterQueryResponse>, Status> {
         let req = request.into_inner();
         let node_id = MetaRuntimeRegistry::validate_identifier("node_id", &req.node_id, false)?;
-        let namespace = MetaRuntimeRegistry::validate_identifier("namespace", &req.namespace, false)?;
+        let namespace =
+            MetaRuntimeRegistry::validate_identifier("namespace", &req.namespace, false)?;
         let query_name =
             MetaRuntimeRegistry::validate_identifier("query_name", &req.query_name, false)?;
         let channel_name = self
             .registry
-            .register_capability(CapabilityKind::Query, node_id, namespace, query_name)
+            .register_interface(InterfaceKind::Query, node_id, namespace, query_name)
             .await;
         Ok(Response::new(pb::RegisterQueryResponse { channel_name }))
     }
@@ -542,13 +546,14 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
         let requester_id =
             MetaRuntimeRegistry::validate_identifier("requester_id", &req.requester_id, false)?;
         let target = MetaRuntimeRegistry::validate_identifier("target", &req.target, true)?;
-        let namespace = MetaRuntimeRegistry::validate_identifier("namespace", &req.namespace, false)?;
+        let namespace =
+            MetaRuntimeRegistry::validate_identifier("namespace", &req.namespace, false)?;
         let query_name =
             MetaRuntimeRegistry::validate_identifier("query_name", &req.query_name, false)?;
         let channel_name = self
             .registry
-            .resolve_capability(
-                CapabilityKind::Query,
+            .resolve_interface(
+                InterfaceKind::Query,
                 requester_id,
                 target,
                 namespace,
@@ -603,16 +608,16 @@ mod tests {
         let registry = MetaRuntimeRegistry::default();
 
         let first = registry
-            .register_capability(
-                CapabilityKind::Query,
+            .register_interface(
+                InterfaceKind::Query,
                 "node-a".to_string(),
                 "robonix/prm/base".to_string(),
                 "get_status".to_string(),
             )
             .await;
         let second = registry
-            .register_capability(
-                CapabilityKind::Query,
+            .register_interface(
+                InterfaceKind::Query,
                 "node-a".to_string(),
                 "robonix/prm/base".to_string(),
                 "get_status".to_string(),
@@ -630,16 +635,16 @@ mod tests {
         let registry = MetaRuntimeRegistry::default();
 
         let channel_a = registry
-            .register_capability(
-                CapabilityKind::Command,
+            .register_interface(
+                InterfaceKind::Command,
                 "node-a".to_string(),
                 "robonix/prm/base".to_string(),
                 "move".to_string(),
             )
             .await;
         let channel_b = registry
-            .register_capability(
-                CapabilityKind::Command,
+            .register_interface(
+                InterfaceKind::Command,
                 "node-b".to_string(),
                 "robonix/prm/base".to_string(),
                 "move".to_string(),
@@ -647,8 +652,8 @@ mod tests {
             .await;
 
         let resolved = registry
-            .resolve_capability(
-                CapabilityKind::Command,
+            .resolve_interface(
+                InterfaceKind::Command,
                 "client-1".to_string(),
                 "node-b".to_string(),
                 "robonix/prm/base".to_string(),
