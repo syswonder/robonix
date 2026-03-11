@@ -1,9 +1,13 @@
 namespace robonix/system/map
 
 import std_msgs/msg/String
+import robonix_msg/msg/Object
 
-query semantic_query {
-    request filter std_msgs/msg/String;
-    response objects std_msgs/msg/String;
+query semantic_query
+    @idempotent
+    @cacheable(ttl=60)
+{
+    request filter std_msgs/msg/String @doc("JSON filter, e.g. room=kitchen");
+    response objects robonix_msg/msg/Object[] @ref("Object.id") @doc("Objects matching filter");
     version 1.0;
 }

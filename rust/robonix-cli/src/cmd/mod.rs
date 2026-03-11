@@ -10,48 +10,47 @@ use std::path::PathBuf;
 use crate::Config;
 
 mod build;
-mod clean;
 mod config;
-mod daemon;
 mod info;
+mod launch_helpers;
+mod run_package;
 mod install;
 mod list;
-mod recipe_utils;
-mod register;
-mod restart;
 mod search;
-mod start;
-mod status;
-mod stop;
-mod task;
-mod unregister;
+mod validate;
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Build a package (requires -p)
+    Build {
+        /// Package name or path (e.g. python_ping_client or examples/python_ping_client)
+        #[arg(short = 'p', long, required = true)]
+        package: String,
+    },
+    /// Start one node of a package (package and node required). Blocks until the process exits.
+    Start {
+        /// Package name or path
+        #[arg(short = 'p', long, required = true)]
+        package: String,
+        /// Node id to start (e.g. call_ping). Exactly one node per invocation.
+        #[arg(short = 'n', long, required = true)]
+        node: String,
+        /// Registry endpoint (default: 127.0.0.1:50051)
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
     /// Package management commands
     #[command(subcommand)]
     Package(PackageCommands),
-    /// Deploy and manage recipes (workflow: register -> start -> stop -> unregister)
-    #[command(subcommand)]
-    Deploy(DeployCommands),
     /// Configure robonix-cli
     Config {
         /// Set package storage path
         #[arg(short = 'p', long)]
         set_storage_path: Option<PathBuf>,
-        /// Set robonix-sdk path
-        #[arg(short = 'm', long)]
-        set_sdk_path: Option<PathBuf>,
         /// Show current configuration
         #[arg(short, long)]
         show: bool,
     },
-    /// Daemon management commands
-    #[command(subcommand)]
-    Daemon(DaemonCommands),
-    /// Task management commands
-    #[command(subcommand)]
-    Task(TaskCommands),
 }
 
 #[derive(Subcommand)]
@@ -96,121 +95,24 @@ pub enum PackageCommands {
         #[arg(required = false, default_value = "all")]
         target: String,
     },
-}
-
-#[derive(Subcommand)]
-pub enum DeployCommands {
-    /// Register packages from a recipe file (only registers, does not start)
-    ///
-    /// Workflow order: register -> start -> stop -> unregister
-    /// You must register before starting processes.
-    Register {
-        /// Recipe file path
-        recipe: PathBuf,
+    /// Build a local vNext package into package-local rbnx-build workspace
+    BuildLocal {
+        /// Local path to package directory
+        path: PathBuf,
     },
-    /// Start capability or skill processes from active recipe
-    ///
-    /// Requires: recipe must be registered first (use 'deploy register')
-    /// You can start/stop multiple times during deployment.
-    Start {
-        /// Target to start. Can be:
-        /// - "all" to start all items in recipe
-        /// - Pattern like "cap::vision.*" or "*.pick" to match multiple
-        /// - Exact name like "cap::vision.capture_rgb"
-        #[arg(required = false, default_value = "all")]
-        target: String,
-    },
-    /// Stop capability or skill processes from active recipe
-    ///
-    /// Requires: processes must be running (use 'deploy start' first)
-    /// You can start/stop multiple times during deployment.
-    Stop {
-        /// Target to stop. Can be:
-        /// - "all" to stop all running processes from recipe
-        /// - Pattern like "cap::vision.*" or "*.pick" to match multiple
-        /// - Exact name like "cap::vision.capture_rgb"
-        #[arg(required = false, default_value = "all")]
-        target: String,
-    },
-    /// Restart capability or skill processes from active recipe
-    ///
-    /// This is equivalent to: stop -> wait -> start
-    /// Stops the target processes (if running) and then starts them again.
-    Restart {
-        /// Target to restart. Can be:
-        /// - "all" to restart all processes from recipe
-        /// - Pattern like "cap::vision.*" or "*.pick" to match multiple
-        /// - Exact name like "cap::vision.capture_rgb"
-        #[arg(required = false, default_value = "all")]
-        target: String,
-    },
-    /// Show status of all running cap/skill processes from active recipe
-    Status,
-    /// Build packages (compile, install dependencies, etc.)
-    ///
-    /// Builds packages before deployment. Can build all packages in recipe
-    /// or a specific package by name.
-    Build {
-        /// Target to build. Can be:
-        /// - "all" to build all packages in recipe
-        /// - Package name (e.g., "demo_rgb_provider")
-        #[arg(required = false, default_value = "all")]
-        target: String,
-    },
-    /// Unregister packages, capabilities, skills, or recipes
-    ///
-    /// Requires: all processes must be stopped first (use 'deploy stop')
-    /// This is the final step in the workflow: register -> start -> stop -> unregister
-    Unregister {
-        /// Target to unregister. Can be:
-        /// - package name (e.g., "demo_rgb_provider")
-        /// - package.capability (e.g., "demo_rgb_provider.cap::vision.capture_rgb")
-        /// - package.skill (e.g., "demo_rgb_provider.skl::pick")
-        /// - recipe file path (e.g., "demo_recipe.yaml")
-        target: String,
-    },
-    /// Clean logs directory in package storage path
-    ///
-    /// Removes all log files from ~/.robonix/packages/logs directory
-    Clean,
-}
-
-#[derive(Subcommand)]
-pub enum DaemonCommands {
-    /// Start the daemon
-    Start,
-    /// Stop the daemon
-    Stop,
-    /// Show daemon status
-    Status,
-    /// Restart the daemon
-    Restart,
-}
-
-#[derive(Subcommand)]
-pub enum TaskCommands {
-    /// Create a new task from natural language
-    Create {
-        /// Natural language task description (can be multiple words)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        natural_language: Vec<String>,
-    },
-    /// Get task by ID
-    Get {
-        /// Task ID
-        task_id: String,
-    },
-    /// List all tasks
-    List,
-    /// Cancel a task
-    Cancel {
-        /// Task ID
-        task_id: String,
+    /// Validate a package manifest without installing it
+    Validate {
+        /// Local path to package directory
+        path: PathBuf,
     },
 }
 
 pub async fn execute(command: Commands, config: Config) -> Result<()> {
     match command {
+        Commands::Build { package } => run_package::execute_build(&package).await,
+        Commands::Start { package, node, endpoint } => {
+            run_package::execute_start(&package, &node, endpoint.as_deref()).await
+        }
         Commands::Package(cmd) => match cmd {
             PackageCommands::Install {
                 github,
@@ -222,36 +124,12 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             PackageCommands::SearchCap { name } => search::execute_cap(config, name).await,
             PackageCommands::SearchSkill { name } => search::execute_skill(config, name).await,
             PackageCommands::Build { target } => build::execute_package(config, target).await,
-        },
-        Commands::Deploy(cmd) => match cmd {
-            DeployCommands::Register { recipe } => register::execute(config, recipe).await,
-            DeployCommands::Build { target } => build::execute(config, target).await,
-            DeployCommands::Start { target } => start::execute(config, target).await,
-            DeployCommands::Stop { target } => stop::execute(config, target).await,
-            DeployCommands::Restart { target } => restart::execute(config, target).await,
-            DeployCommands::Status => status::execute(config).await,
-            DeployCommands::Unregister { target } => unregister::execute(config, target).await,
-            DeployCommands::Clean => clean::execute(config).await,
+            PackageCommands::BuildLocal { path } => build::execute_local(path).await,
+            PackageCommands::Validate { path } => validate::execute(path).await,
         },
         Commands::Config {
             set_storage_path,
-            set_sdk_path,
             show,
-        } => config::execute(config, set_storage_path, set_sdk_path, show).await,
-        Commands::Daemon(cmd) => match cmd {
-            DaemonCommands::Start => daemon::start().await,
-            DaemonCommands::Stop => daemon::stop().await,
-            DaemonCommands::Status => daemon::status().await,
-            DaemonCommands::Restart => daemon::restart().await,
-        },
-        Commands::Task(cmd) => match cmd {
-            TaskCommands::Create { natural_language } => {
-                let natural_language_str = natural_language.join(" ");
-                task::execute_create(config, natural_language_str).await
-            }
-            TaskCommands::Get { task_id } => task::execute_get(config, task_id).await,
-            TaskCommands::List => task::execute_list(config).await,
-            TaskCommands::Cancel { task_id } => task::execute_cancel(config, task_id).await,
-        },
+        } => config::execute(config, set_storage_path, show).await,
     }
 }

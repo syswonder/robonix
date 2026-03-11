@@ -66,3 +66,5 @@ These names are intentionally opaque. The namespace and interface name are used 
 - The gRPC runtime meta API and the legacy ROS `/rbnx/*` APIs coexist in the current server.
 - RIDL-generated code should talk to the gRPC runtime meta API, not to the legacy ROS registration services.
 - The actual message/service/action types used by generated Python code still come from ROS IDL.
+- The legacy `/rbnx/*` side of the server still contains `robonix_sdk`-based service contracts. That is migration debt, not the target interface model.
+- Static package metadata belongs in `../ROBONIX_PACKAGE_MANIFEST.md`; live instance state and final channel allocation belong in the runtime registry hosted by `robonix-server`.

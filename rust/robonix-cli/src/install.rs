@@ -5,9 +5,9 @@
 
 use crate::config::Config;
 use crate::database::{PackageDatabase, PackageInfo, PackageSource};
+use crate::manifest::{self};
 use crate::output;
 use anyhow::{Context, Result};
-use serde_yaml::Value;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::SystemTime;
@@ -28,8 +28,6 @@ impl PackageInstaller {
             .last()
             .context("Invalid GitHub repository format")?
             .trim_end_matches(".git");
-
-        let target_path = self.config.package_storage_path.join(repo_name);
 
         // Clone repository to temporary location first
         let temp_path = self
@@ -55,20 +53,25 @@ impl PackageInstaller {
         let commit_str = commit.to_string();
 
         // Verify package has manifest
-        let manifest_path = temp_path.join("rbnx_manifest.yaml");
-        if !manifest_path.exists() {
-            std::fs::remove_dir_all(&temp_path)?;
-            anyhow::bail!("Package does not have rbnx_manifest.yaml");
-        }
+        let detected_manifest = manifest::detect_and_load(&temp_path)?;
 
         // Validate manifest and get package info
         output::step("Validating", "package manifest");
-        let (package_name, version) = Self::validate_manifest(&manifest_path)
+        let manifest_summary = detected_manifest
+            .manifest
+            .validate_and_summarize()
             .with_context(|| "Invalid robonix package manifest")?;
+        let package_name = manifest_summary.name.clone();
+        let version = manifest_summary.version.clone();
+        let target_path = self.config.package_storage_path.join(&package_name);
 
         // Display validation info
         output::sub_step(&format!("Package name: {}", package_name));
         output::sub_step(&format!("Version: {}", version));
+        output::sub_step(&format!(
+            "Manifest kind: {}",
+            manifest_summary.manifest_kind.label()
+        ));
 
         // Check if package already exists by name
         let db = PackageDatabase::load(&self.config.package_storage_path)?;
@@ -95,9 +98,15 @@ impl PackageInstaller {
 
         // Create package info and add to database
         let package_info = Self::create_package_info(
-            &package_name,
             &target_path,
-            &target_path.join("rbnx_manifest.yaml"),
+            &target_path.join(
+                detected_manifest
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(manifest::LEGACY_MANIFEST_FILE),
+            ),
+            &manifest_summary,
             PackageSource::GitHub {
                 repo: repo_url,
                 branch: branch.map(|s| s.to_string()),
@@ -118,19 +127,24 @@ impl PackageInstaller {
             .with_context(|| format!("Failed to canonicalize path: {}", source_path.display()))?;
 
         // Verify package has manifest
-        let manifest_path = source_path.join("rbnx_manifest.yaml");
-        if !manifest_path.exists() {
-            anyhow::bail!("Package does not have rbnx_manifest.yaml");
-        }
+        let detected_manifest = manifest::detect_and_load(&source_path)?;
 
         // Validate manifest and get package info
         output::step("Validating", "package manifest");
-        let (package_name, version) = Self::validate_manifest(&manifest_path)
+        let manifest_summary = detected_manifest
+            .manifest
+            .validate_and_summarize()
             .with_context(|| "Invalid robonix package manifest")?;
+        let package_name = manifest_summary.name.clone();
+        let version = manifest_summary.version.clone();
 
         // Display validation info
         output::sub_step(&format!("Package name: {}", package_name));
         output::sub_step(&format!("Version: {}", version));
+        output::sub_step(&format!(
+            "Manifest kind: {}",
+            manifest_summary.manifest_kind.label()
+        ));
 
         // Check if package already exists by name
         let db = PackageDatabase::load(&self.config.package_storage_path)?;
@@ -159,11 +173,17 @@ impl PackageInstaller {
             )
         })?;
 
-        let manifest_path = target_path.join("rbnx_manifest.yaml");
+        let manifest_path = target_path.join(
+            detected_manifest
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(manifest::LEGACY_MANIFEST_FILE),
+        );
         let package_info = Self::create_package_info(
-            &package_name,
             &target_path,
             &manifest_path,
+            &manifest_summary,
             PackageSource::Local { path: source_path },
         )?;
 
@@ -175,48 +195,16 @@ impl PackageInstaller {
     }
 
     pub fn parse_manifest_name(manifest_path: &Path) -> Result<String> {
-        let content = std::fs::read_to_string(manifest_path)
-            .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
-
-        let manifest: Value = serde_yaml::from_str(&content)
-            .with_context(|| format!("Failed to parse manifest: {}", manifest_path.display()))?;
-
-        let name = manifest["package"]["name"]
-            .as_str()
-            .context("Package name not found in manifest")?;
-
-        Ok(name.to_string())
+        let manifest = manifest::load_from_path(manifest_path)?;
+        Ok(manifest.validate_and_summarize()?.name)
     }
 
     /// Validate that the manifest is a valid robonix package
     /// Returns (name, version) if valid
     pub fn validate_manifest(manifest_path: &Path) -> Result<(String, String)> {
-        let content = std::fs::read_to_string(manifest_path)
-            .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
-
-        let manifest: Value = serde_yaml::from_str(&content)
-            .with_context(|| format!("Failed to parse manifest: {}", manifest_path.display()))?;
-
-        // Check required fields
-        let package = manifest
-            .get("package")
-            .context("Missing 'package' section in manifest")?;
-
-        let name = package
-            .get("name")
-            .and_then(|v| v.as_str())
-            .context("Missing 'package.name' in manifest")?;
-
-        let version = package
-            .get("version")
-            .and_then(|v| v.as_str())
-            .context("Missing 'package.version' in manifest")?;
-
-        // Check that at least one of primitives, services, or skills sections exist
-        // (They can be empty lists, but the sections should exist)
-        // Note: We don't require all sections to exist, as packages may only provide primitives, services, or skills
-
-        Ok((name.to_string(), version.to_string()))
+        let manifest = manifest::load_from_path(manifest_path)?;
+        let summary = manifest.validate_and_summarize()?;
+        Ok((summary.name, summary.version))
     }
 
     /// Prompt user for confirmation to overwrite existing package
@@ -235,56 +223,25 @@ impl PackageInstaller {
     }
 
     pub fn create_package_info(
-        name: &str,
         path: &Path,
         manifest_path: &Path,
+        summary: &crate::manifest::PackageSummary,
         source: PackageSource,
     ) -> Result<PackageInfo> {
-        let content = std::fs::read_to_string(manifest_path)?;
-        let manifest: Value = serde_yaml::from_str(&content)?;
-
-        let version = manifest["package"]["version"]
-            .as_str()
-            .unwrap_or("0.0.0")
-            .to_string();
-
-        let mut primitives = Vec::new();
-        if let Some(prms) = manifest["primitives"].as_sequence() {
-            for prm in prms {
-                if let Some(name) = prm["name"].as_str() {
-                    primitives.push(name.to_string());
-                }
-            }
-        }
-
-        let mut services = Vec::new();
-        if let Some(srvs) = manifest["services"].as_sequence() {
-            for srv in srvs {
-                if let Some(name) = srv["name"].as_str() {
-                    services.push(name.to_string());
-                }
-            }
-        }
-
-        let mut skills = Vec::new();
-        if let Some(skls) = manifest["skills"].as_sequence() {
-            for skl in skls {
-                if let Some(name) = skl["name"].as_str() {
-                    skills.push(name.to_string());
-                }
-            }
-        }
-
         let installed_at = chrono::DateTime::<chrono::Utc>::from(SystemTime::now()).to_rfc3339();
 
         Ok(PackageInfo {
-            name: name.to_string(),
-            version,
+            name: summary.name.clone(),
+            version: summary.version.clone(),
             path: path.to_path_buf(),
             manifest_path: manifest_path.to_path_buf(),
-            primitives,
-            services,
-            skills,
+            manifest_kind: summary.manifest_kind.clone(),
+            primitives: summary.primitives.clone(),
+            services: summary.services.clone(),
+            skills: summary.skills.clone(),
+            provided_interfaces: summary.provided_interfaces.clone(),
+            consumed_interfaces: summary.consumed_interfaces.clone(),
+            nodes: summary.nodes.clone(),
             installed_at,
             source,
         })

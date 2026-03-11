@@ -4,8 +4,8 @@
 use anyhow::{anyhow, Result};
 
 use crate::ast::{
-    CommandDef, CommandField, EventDef, EventPayload, File, Import, Interface, QueryDef,
-    QueryField, SafetyItem, StreamDef, StreamDirection, StreamField,
+    Annotation, CommandDef, CommandField, EventDef, EventPayload, File, Import, Interface,
+    QueryDef, QueryField, SafetyItem, StreamDef, StreamDirection, StreamField,
 };
 
 struct Lexer<'a> {
@@ -83,7 +83,7 @@ impl<'a> Lexer<'a> {
         self.skip_ws_comments();
         let start = self.pos;
         while let Some(c) = self.peek_char() {
-            if c == ';' || c == '\n' || c == '{' || c == '}' {
+            if c == ';' || c == '\n' || c == '{' || c == '}' || c == '@' {
                 break;
             }
             self.next_char();
@@ -107,6 +107,53 @@ impl<'a> Lexer<'a> {
                 Err(self.error(&msg))
             }
         }
+    }
+    /// Parse zero or more annotations: @key or @key("value"). Stops when no @ is found.
+    fn parse_annotations(&mut self) -> Result<Vec<Annotation>> {
+        let mut out = Vec::new();
+        loop {
+            self.skip_ws_comments();
+            if self.peek_char() != Some('@') {
+                break;
+            }
+            self.next_char(); // consume '@'
+            let key = self.take_ident()?;
+            self.skip_ws_comments();
+            let value = if self.peek_char() == Some('(') {
+                self.next_char(); // consume '('
+                self.skip_ws_comments();
+                let v = if self.peek_char() == Some('"') {
+                    self.next_char(); // consume '"'
+                    let start = self.pos;
+                    while let Some(c) = self.peek_char() {
+                        if c == '"' {
+                            break;
+                        }
+                        self.next_char();
+                    }
+                    let s = self.s[start..self.pos].to_string();
+                    if self.peek_char() == Some('"') {
+                        self.next_char();
+                    }
+                    s
+                } else {
+                    let start = self.pos;
+                    while self.peek_char().map(|c| c.is_alphanumeric() || c == '_' || c == '=' || c.is_ascii_digit() || c == '.').unwrap_or(false) {
+                        self.next_char();
+                    }
+                    self.s[start..self.pos].trim().to_string()
+                };
+                self.skip_ws_comments();
+                if self.peek_char() == Some(')') {
+                    self.next_char();
+                }
+                Some(v)
+            } else {
+                None
+            };
+            out.push(Annotation { key, value });
+        }
+        Ok(out)
     }
     fn parse_namespace_decl(&mut self) -> Result<String> {
         self.expect_ident("namespace")?;
@@ -145,6 +192,7 @@ impl<'a> Lexer<'a> {
     fn parse_query_def(&mut self) -> Result<QueryDef> {
         self.expect_ident("query")?;
         let name = self.take_ident()?;
+        let annotations = self.parse_annotations()?;
         self.expect_char('{')?;
         let mut request = None;
         let mut response = None;
@@ -164,19 +212,23 @@ impl<'a> Lexer<'a> {
                 "request" => {
                     let fname = self.take_ident()?;
                     let type_ref = self.take_type_ref()?;
+                    let field_ann = self.parse_annotations()?;
                     self.expect_char(';')?;
                     request = Some(QueryField {
                         name: fname,
                         type_ref,
+                        annotations: field_ann,
                     });
                 }
                 "response" => {
                     let fname = self.take_ident()?;
                     let type_ref = self.take_type_ref()?;
+                    let field_ann = self.parse_annotations()?;
                     self.expect_char(';')?;
                     response = Some(QueryField {
                         name: fname,
                         type_ref,
+                        annotations: field_ann,
                     });
                 }
                 "version" => {
@@ -198,6 +250,7 @@ impl<'a> Lexer<'a> {
         self.expect_char('}')?;
         Ok(QueryDef {
             name,
+            annotations,
             request: request.ok_or_else(|| anyhow!("query must have request"))?,
             response: response.ok_or_else(|| anyhow!("query must have response"))?,
             version,
@@ -206,6 +259,7 @@ impl<'a> Lexer<'a> {
     fn parse_stream_def(&mut self) -> Result<StreamDef> {
         self.expect_ident("stream")?;
         let name = self.take_ident()?;
+        let annotations = self.parse_annotations()?;
         self.expect_char('{')?;
         let mut fields = Vec::new();
         let mut version = None;
@@ -223,6 +277,7 @@ impl<'a> Lexer<'a> {
             if kw == "output" || kw == "input" {
                 let fname = self.take_ident()?;
                 let type_ref = self.take_type_ref()?;
+                let field_ann = self.parse_annotations()?;
                 // Semicolon at end of line is optional; allow newline+closing brace.
                 self.skip_ws_comments();
                 if let Some(';') = self.peek_char() {
@@ -236,6 +291,7 @@ impl<'a> Lexer<'a> {
                     },
                     name: fname,
                     type_ref,
+                    annotations: field_ann,
                 });
             } else if kw == "version" {
                 self.skip_ws_comments();
@@ -256,6 +312,7 @@ impl<'a> Lexer<'a> {
         self.expect_char('}')?;
         Ok(StreamDef {
             name,
+            annotations,
             fields,
             version,
         })
@@ -263,6 +320,7 @@ impl<'a> Lexer<'a> {
     fn parse_command_def(&mut self) -> Result<CommandDef> {
         self.expect_ident("command")?;
         let name = self.take_ident()?;
+        let annotations = self.parse_annotations()?;
         self.expect_char('{')?;
         let mut input = None;
         let mut output = None;
@@ -284,6 +342,7 @@ impl<'a> Lexer<'a> {
                 "input" => {
                     let fname = self.take_ident()?;
                     let type_ref = self.take_type_ref()?;
+                    let field_ann = self.parse_annotations()?;
                     self.skip_ws_comments();
                     if let Some(';') = self.peek_char() {
                         self.next_char();
@@ -291,11 +350,13 @@ impl<'a> Lexer<'a> {
                     input = Some(CommandField {
                         name: fname,
                         type_ref,
+                        annotations: field_ann,
                     });
                 }
                 "output" => {
                     let fname = self.take_ident()?;
                     let type_ref = self.take_type_ref()?;
+                    let field_ann = self.parse_annotations()?;
                     self.skip_ws_comments();
                     if let Some(';') = self.peek_char() {
                         self.next_char();
@@ -303,11 +364,13 @@ impl<'a> Lexer<'a> {
                     output = Some(CommandField {
                         name: fname,
                         type_ref,
+                        annotations: field_ann,
                     });
                 }
                 "result" => {
                     let fname = self.take_ident()?;
                     let type_ref = self.take_type_ref()?;
+                    let field_ann = self.parse_annotations()?;
                     self.skip_ws_comments();
                     if let Some(';') = self.peek_char() {
                         self.next_char();
@@ -315,6 +378,7 @@ impl<'a> Lexer<'a> {
                     result = Some(CommandField {
                         name: fname,
                         type_ref,
+                        annotations: field_ann,
                     });
                 }
                 "version" => {
@@ -395,6 +459,7 @@ impl<'a> Lexer<'a> {
         self.expect_char('}')?;
         Ok(CommandDef {
             name,
+            annotations,
             input,
             output,
             result,
@@ -405,6 +470,7 @@ impl<'a> Lexer<'a> {
     fn parse_event_def(&mut self) -> Result<EventDef> {
         self.expect_ident("event")?;
         let name = self.take_ident()?;
+        let annotations = self.parse_annotations()?;
         self.expect_char('{')?;
         let mut payload = None;
         let mut version = None;
@@ -422,6 +488,7 @@ impl<'a> Lexer<'a> {
             if kw == "payload" {
                 let pname = self.take_ident()?;
                 let type_ref = self.take_type_ref()?;
+                let field_ann = self.parse_annotations()?;
                 self.skip_ws_comments();
                 if let Some(';') = self.peek_char() {
                     self.next_char();
@@ -429,6 +496,7 @@ impl<'a> Lexer<'a> {
                 payload = Some(EventPayload {
                     name: pname,
                     type_ref,
+                    annotations: field_ann,
                 });
             } else if kw == "version" {
                 self.skip_ws_comments();
@@ -449,6 +517,7 @@ impl<'a> Lexer<'a> {
         self.expect_char('}')?;
         Ok(EventDef {
             name,
+            annotations,
             payload: payload.ok_or_else(|| anyhow!("event must have payload"))?,
             version,
         })

@@ -1,15 +1,9 @@
 # Robonix CLI Configuration
-# Copy this file to ~/.config/robonix/config.yaml or use 'rbnx config --set-storage-path <path>'
-# On Linux: ~/.config/robonix/config.yaml
+# Copy this file to ~/.robonix/config.yaml or use 'rbnx config --set-storage-path <path>'
 
 # Package storage path where all robonix packages will be installed
 # Default: ~/.robonix/packages
 package_storage_path: ~/.robonix/packages
-
-# Robonix SDK path (optional)
-# Set via: rbnx config --set-sdk-path <path>
-# If not set, will use ROBONIX_SDK_PATH environment variable
-# robonix_sdk_path: /path/to/robonix-sdk
 
 # Node ID (optional) - identifier for this CLI client; shown in core web UI as "Registered by (node)".
 # Default: hostname. Set when multiple machines use the same hostname or you want a custom label.

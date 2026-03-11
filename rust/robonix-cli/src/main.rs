@@ -11,7 +11,7 @@ mod cmd;
 
 #[derive(Parser)]
 #[command(name = "rbnx")]
-#[command(about = "Robonix Package Manager CLI", long_about = None)]
+#[command(about = "Robonix helper CLI for package validation, build, and local orchestration", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: cmd::Commands,

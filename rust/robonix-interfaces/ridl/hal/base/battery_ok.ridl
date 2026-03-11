@@ -1,0 +1,10 @@
+namespace robonix/hal/base
+
+import std_msgs/msg/Empty
+import std_msgs/msg/Bool
+
+query battery_ok {
+    request req std_msgs/msg/Empty;
+    response ok std_msgs/msg/Bool;
+    version 1.0;
+}

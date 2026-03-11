@@ -1,0 +1,10 @@
+namespace robonix/system/manager
+
+import std_msgs/msg/String
+import robonix_msg/msg/Object
+
+query map_manager {
+    request filter std_msgs/msg/String;
+    response snapshot robonix_msg/msg/Object[];
+    version 1.0;
+}

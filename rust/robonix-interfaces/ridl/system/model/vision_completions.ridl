@@ -1,0 +1,9 @@
+namespace robonix/system/model
+
+import std_msgs/msg/String
+
+query vision_completions {
+    request request_json std_msgs/msg/String;
+    response response_json std_msgs/msg/String;
+    version 1.0;
+}

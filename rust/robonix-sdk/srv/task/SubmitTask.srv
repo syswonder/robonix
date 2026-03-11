@@ -1,6 +1,0 @@
-# SubmitTask service (robonix spec)
-string description             # Natural language task description
-string params                  # JSON: optional parameters
----
-string task_id
-

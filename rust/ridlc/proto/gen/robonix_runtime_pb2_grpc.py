@@ -71,6 +71,11 @@ class RobonixRuntimeStub(object):
                 request_serializer=robonix__runtime__pb2.ResolveQueryRequest.SerializeToString,
                 response_deserializer=robonix__runtime__pb2.ResolveQueryResponse.FromString,
                 _registered_method=True)
+        self.InspectRuntime = channel.unary_unary(
+                '/robonix.runtime.RobonixRuntime/InspectRuntime',
+                request_serializer=robonix__runtime__pb2.InspectRuntimeRequest.SerializeToString,
+                response_deserializer=robonix__runtime__pb2.InspectRuntimeResponse.FromString,
+                _registered_method=True)
 
 
 class RobonixRuntimeServicer(object):
@@ -120,6 +125,12 @@ class RobonixRuntimeServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def InspectRuntime(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_RobonixRuntimeServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -157,6 +168,11 @@ def add_RobonixRuntimeServicer_to_server(servicer, server):
                     servicer.ResolveQuery,
                     request_deserializer=robonix__runtime__pb2.ResolveQueryRequest.FromString,
                     response_serializer=robonix__runtime__pb2.ResolveQueryResponse.SerializeToString,
+            ),
+            'InspectRuntime': grpc.unary_unary_rpc_method_handler(
+                    servicer.InspectRuntime,
+                    request_deserializer=robonix__runtime__pb2.InspectRuntimeRequest.FromString,
+                    response_serializer=robonix__runtime__pb2.InspectRuntimeResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -350,6 +366,33 @@ class RobonixRuntime(object):
             '/robonix.runtime.RobonixRuntime/ResolveQuery',
             robonix__runtime__pb2.ResolveQueryRequest.SerializeToString,
             robonix__runtime__pb2.ResolveQueryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def InspectRuntime(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/robonix.runtime.RobonixRuntime/InspectRuntime',
+            robonix__runtime__pb2.InspectRuntimeRequest.SerializeToString,
+            robonix__runtime__pb2.InspectRuntimeResponse.FromString,
             options,
             channel_credentials,
             insecure,

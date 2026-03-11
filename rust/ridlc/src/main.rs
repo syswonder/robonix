@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 // NOTE: this bin crate depends on the ridlc library crate.
 // We must import modules through the library root, not `crate::`.
-use ridlc::codegen::python_gen;
+use ridlc::codegen::{python_gen, rust_gen};
 use ridlc::parser::parse_file;
 
 #[derive(Parser)]
@@ -36,7 +36,7 @@ struct Args {
     #[arg(short = 'o', long = "out", required = true)]
     out: PathBuf,
 
-    /// Target language: python (default)
+    /// Target language: python or rust
     #[arg(long = "lang", default_value = "python")]
     lang: String,
 
@@ -210,7 +210,38 @@ fn main() -> Result<()> {
                 python_gen::emit_app_skeleton(&workspace_src, &files_by_ns)?;
             }
         }
-        _ => anyhow::bail!("unsupported --lang: {} (use 'python')", args.lang),
+        "rust" => {
+            let rust_out = match args.layout.as_str() {
+                "workspace" | "package" => args.out.join("ridl_generated.rs"),
+                _ => anyhow::bail!(
+                    "unsupported --layout: {} (use 'workspace' or 'package')",
+                    args.layout
+                ),
+            };
+            for (ns, ast) in &files_by_ns {
+                ns_count += 1;
+                for iface in &ast.interfaces {
+                    match iface {
+                        ridlc::ast::Interface::Stream(_) => total_streams += 1,
+                        ridlc::ast::Interface::Command(_) => total_commands += 1,
+                        ridlc::ast::Interface::Query(_) => total_queries += 1,
+                        ridlc::ast::Interface::Event(_) => total_events += 1,
+                    }
+                }
+                eprintln!(
+                    "{} queued Rust bindings for namespace '{}'",
+                    ridlc_prefix(),
+                    ns
+                );
+            }
+            rust_gen::generate_bindings(&files_by_ns, &args.include, &rust_out)?;
+            eprintln!(
+                "{} generated Rust bindings under '{}'",
+                ridlc_prefix(),
+                rust_out.display()
+            );
+        }
+        _ => anyhow::bail!("unsupported --lang: {} (use 'python' or 'rust')", args.lang),
     }
 
     let total_ifaces = total_streams + total_commands + total_queries + total_events;

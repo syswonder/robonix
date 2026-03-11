@@ -4,3 +4,6 @@
 [submodule "common_interfaces"]
 	path = rust/robonix-interfaces/lib/common_interfaces
 	url = https://github.com/enkerewpo/common_interfaces
+[submodule "docs"]
+	path = docs
+	url = https://github.com/syswonder/robonix-book

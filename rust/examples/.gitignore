@@ -1,0 +1,8 @@
+log/
+tmp/
+.artifacts/
+__pycache__/
+*.pyc
+
+rbnx-build
+build

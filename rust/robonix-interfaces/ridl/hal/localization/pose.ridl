@@ -2,7 +2,9 @@ namespace robonix/hal/localization
 
 import geometry_msgs/msg/PoseWithCovarianceStamped
 
-stream pose {
-    output state geometry_msgs/msg/PoseWithCovarianceStamped
+stream pose
+    @frame("odom")
+{
+    output state geometry_msgs/msg/PoseWithCovarianceStamped @frame("odom")
     version 1.0;
 }

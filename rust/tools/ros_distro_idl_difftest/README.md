@@ -10,7 +10,7 @@ This directory provides a systematic way to compare **ROS IDL definitions** (.ms
 
 ## Distro timeline and progression
 
-Comparison is **progressive by release order**: each distro is compared only to the next (e.g. humble → jazzy → rolling), not pairwise. That matches how distros evolve over time.
+Comparison is **progressive by release order**: each distro is compared only to the next (e.g. humble -> jazzy -> rolling), not pairwise. That matches how distros evolve over time.
 
 | Distro               | Release Date      | EOL Date         | Support | Ubuntu         |
 | -------------------- | ----------------- | ---------------- | ------- | -------------- |
@@ -22,7 +22,7 @@ Comparison is **progressive by release order**: each distro is compared only to 
 | Foxy Fitzroy          | June 5, 2020      | June 20, 2023    | —       | 20.04 (Focal)  |
 | Eloquent … / Dashing … / older | 2017–2019 | various | — | 16.04 / 18.04 |
 
-Chronological order used in this tool: **foxy → humble → iron → jazzy → kilted → rolling**. **Foxy** (LTS before Humble) is included as the most-used pre-Humble distro. Scripts use **foxy / humble / jazzy / rolling** by default in `config.yaml`; add or remove distros there as needed.
+Chronological order used in this tool: **foxy -> humble -> iron -> jazzy -> kilted -> rolling**. **Foxy** (LTS before Humble) is included as the most-used pre-Humble distro. Scripts use **foxy / humble / jazzy / rolling** by default in `config.yaml`; add or remove distros there as needed.
 
 ## Core message repos and branches
 
@@ -94,7 +94,7 @@ cd rust/tools/ros_distro_idl_difftest
 The report is **one large Markdown table**:
 
 - **Header row**: `Interface` | `<distro1>` | `<distro2>` | … | `Changes (progressive)`
-- **One row per interface** (e.g. `common_interfaces/std_msgs/msg/Header`): each distro column shows `✓ (n)` if present (n = field count) or `—` if missing; the last column summarizes **progressive** changes (e.g. `humble→jazzy: +field_x; jazzy→rolling: type y→z`).
+- **One row per interface** (e.g. `common_interfaces/std_msgs/msg/Header`): each distro column shows `✓ (n)` if present (n = field count) or `—` if missing; the last column summarizes **progressive** changes (e.g. `humble->jazzy: +field_x; jazzy->rolling: type y->z`).
 - **Summary** above the table: repos, distro order, total interfaces, and per-repo counts (only in some distros, with progressive diff).
 
 ## Relation to zenoh_cross_ros

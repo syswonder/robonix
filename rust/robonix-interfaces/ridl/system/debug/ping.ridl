@@ -1,0 +1,11 @@
+namespace robonix/system/debug
+
+import std_msgs/msg/String
+
+query ping
+    @idempotent
+{
+    request data std_msgs/msg/String;
+    response data std_msgs/msg/String;
+    version 1.0;
+}

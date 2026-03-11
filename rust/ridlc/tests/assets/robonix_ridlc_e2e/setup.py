@@ -15,7 +15,7 @@ setup(
     install_requires=["setuptools"],
     zip_safe=True,
     maintainer="robonix",
-    maintainer_email="user@todo.todo",
+    maintainer_email="wheatfox17@icloud.com",
     description="End-to-end test nodes for RIDL-generated interfaces.",
     license="MulanPSL-2.0",
     tests_require=["pytest"],
