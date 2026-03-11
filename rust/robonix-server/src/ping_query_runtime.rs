@@ -7,7 +7,9 @@ use std::time::Duration as StdDuration;
 
 pub struct PingQueryRuntime {
     _node: Arc<crate::runtime::RuntimeNode>,
-    _server: crate::runtime::QueryServerHandle<crate::generated::robonix_system_debug::ping_query::QueryService>,
+    _server: crate::runtime::QueryServerHandle<
+        crate::generated::robonix_system_debug::ping_query::QueryService,
+    >,
     _node_id: String,
 }
 
@@ -18,10 +20,13 @@ impl PingQueryRuntime {
         node.start_background_spin()
             .context("failed to start ping query runtime executor")?;
 
-        let mut runtime_client =
-            crate::runtime::RuntimeClient::connect_with_retry(runtime_endpoint, 20, StdDuration::from_millis(250))
-                .await
-                .context("failed to connect ping query runtime to registry")?;
+        let mut runtime_client = crate::runtime::RuntimeClient::connect_with_retry(
+            runtime_endpoint,
+            20,
+            StdDuration::from_millis(250),
+        )
+        .await
+        .context("failed to connect ping query runtime to registry")?;
         let node_id = runtime_client
             .register_node(
                 "robonix-server",
@@ -31,22 +36,24 @@ impl PingQueryRuntime {
             .await
             .context("failed to register ping query runtime node")?;
 
-        let server =
-            crate::generated::robonix_system_debug::ping_query::create_registered_server(
-                &node,
-                &mut runtime_client,
-                &node_id,
-            )
-            .await
-            .context("failed to create ping query server")?;
+        let server = crate::generated::robonix_system_debug::ping_query::create_registered_server(
+            &node,
+            &mut runtime_client,
+            &node_id,
+        )
+        .await
+        .context("failed to create ping query server")?;
 
-        server.set_callback(|request: crate::generated::robonix_system_debug::ping_query::Request| {
-            let payload = crate::generated::robonix_system_debug::ping_query::request_string(&request);
-            info!("ping query received: {}", payload);
-            crate::generated::robonix_system_debug::ping_query::response_from_string(format!(
-                "pong:{payload}"
-            ))
-        });
+        server.set_callback(
+            |request: crate::generated::robonix_system_debug::ping_query::Request| {
+                let payload =
+                    crate::generated::robonix_system_debug::ping_query::request_string(&request);
+                info!("ping query received: {}", payload);
+                crate::generated::robonix_system_debug::ping_query::response_from_string(format!(
+                    "pong:{payload}"
+                ))
+            },
+        );
 
         let runtime = Arc::new(Self {
             _node: node,

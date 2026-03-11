@@ -36,7 +36,14 @@ Robonix follows the EAIOS architecture with four core components:
 
 ## Quick Start
 
-See [robonix quickstart](rust/README.md)
+```bash
+git clone https://github.com/syswonder/robonix
+cd robonix
+git submodule update --init --recursive
+cd rust && make build && make install
+```
+
+See [Quick Start](rust/README.md) and [Documentation](docs/).
 
 ## License
 

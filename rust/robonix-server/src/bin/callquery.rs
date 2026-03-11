@@ -23,14 +23,10 @@ fn parse_args() -> Result<Args> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--endpoint" => {
-                endpoint = args
-                    .next()
-                    .context("missing value for --endpoint")?;
+                endpoint = args.next().context("missing value for --endpoint")?;
             }
             "--requester-id" => {
-                requester_id = args
-                    .next()
-                    .context("missing value for --requester-id")?;
+                requester_id = args.next().context("missing value for --requester-id")?;
             }
             "-h" | "--help" => {
                 print_usage();
@@ -42,7 +38,9 @@ fn parse_args() -> Result<Args> {
 
     if positionals.len() < 2 || positionals.len() > 3 {
         print_usage();
-        bail!("expected: callquery [--endpoint ADDR] [--requester-id ID] <target> <interface_id> [request_json]");
+        bail!(
+            "expected: callquery [--endpoint ADDR] [--requester-id ID] <target> <interface_id> [request_json]"
+        );
     }
 
     Ok(Args {
@@ -58,7 +56,9 @@ fn parse_args() -> Result<Args> {
 }
 
 fn print_usage() {
-    eprintln!("usage: callquery [--endpoint ADDR] [--requester-id ID] <target> <interface_id> [request_json]");
+    eprintln!(
+        "usage: callquery [--endpoint ADDR] [--requester-id ID] <target> <interface_id> [request_json]"
+    );
 }
 
 fn normalize_interface_id(interface_id: &str) -> String {

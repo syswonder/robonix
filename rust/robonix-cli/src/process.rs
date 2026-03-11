@@ -222,7 +222,11 @@ impl ProcessManager {
                 };
                 #[cfg(not(unix))]
                 let (pgid, pids) = (None, None);
-                return Ok(ProcessStartResult { pid: existing.pid, pgid, pids });
+                return Ok(ProcessStartResult {
+                    pid: existing.pid,
+                    pgid,
+                    pids,
+                });
             }
         }
 
@@ -245,11 +249,18 @@ impl ProcessManager {
             .stderr(Stdio::inherit())
             .env("PYTHONUNBUFFERED", "1");
 
-        let mut child = cmd.spawn().with_context(|| format!("Failed to start: {}", start_script))?;
-        let pid = child.id().ok_or_else(|| anyhow::anyhow!("Failed to get process ID"))?;
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("Failed to start: {}", start_script))?;
+        let pid = child
+            .id()
+            .ok_or_else(|| anyhow::anyhow!("Failed to get process ID"))?;
         log::info!("Running {} (PID {})", key, pid);
 
-        let status = child.wait().await.with_context(|| "Failed to wait for process")?;
+        let status = child
+            .wait()
+            .await
+            .with_context(|| "Failed to wait for process")?;
         if !status.success() {
             anyhow::bail!("Process exited with {}", status);
         }

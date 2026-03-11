@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 
-use crate::ast::{Annotation, CommandDef, EventDef, File, Interface, QueryDef, StreamDef, StreamDirection};
+use crate::ast::{
+    Annotation, CommandDef, EventDef, File, Interface, QueryDef, StreamDef, StreamDirection,
+};
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -57,9 +59,12 @@ impl MsgResolver {
         if self.cache.contains_key(&key) {
             return Ok(());
         }
-        let path = self
-            .find_msg_path(package, name)
-            .with_context(|| format!("failed to resolve ROS msg '{}'", format!("{package}/{name}")))?;
+        let path = self.find_msg_path(package, name).with_context(|| {
+            format!(
+                "failed to resolve ROS msg '{}'",
+                format!("{package}/{name}")
+            )
+        })?;
         let spec = parse_msg_file(package, name, &path)?;
         for field in &spec.fields {
             if let MsgTypeRef::Named { package, name } = &field.type_ref {
@@ -89,10 +94,7 @@ impl MsgResolver {
     }
 }
 
-fn index_msg_files(
-    root: &Path,
-    index: &mut HashMap<(String, String), PathBuf>,
-) -> Result<()> {
+fn index_msg_files(root: &Path, index: &mut HashMap<(String, String), PathBuf>) -> Result<()> {
     if !root.exists() {
         return Ok(());
     }
@@ -123,7 +125,11 @@ fn infer_package_name(path: &Path) -> Option<String> {
     let parent = path.parent()?;
     let parent_name = parent.file_name()?.to_str()?;
     if parent_name == "msg" {
-        return parent.parent()?.file_name()?.to_str().map(|s| s.to_string());
+        return parent
+            .parent()?
+            .file_name()?
+            .to_str()
+            .map(|s| s.to_string());
     }
     Some(parent_name.to_string())
 }
@@ -133,11 +139,7 @@ fn parse_msg_file(package: &str, name: &str, path: &Path) -> Result<MsgSpec> {
         .with_context(|| format!("failed to read msg file '{}'", path.display()))?;
     let mut fields = Vec::new();
     for raw_line in src.lines() {
-        let line = raw_line
-            .split('#')
-            .next()
-            .unwrap_or_default()
-            .trim();
+        let line = raw_line.split('#').next().unwrap_or_default().trim();
         if line.is_empty() || line.contains('=') {
             continue;
         }
@@ -163,11 +165,7 @@ fn parse_msg_file(package: &str, name: &str, path: &Path) -> Result<MsgSpec> {
 }
 
 fn parse_msg_field_type(current_package: &str, raw_type: &str) -> Result<(MsgTypeRef, bool)> {
-    let normalized = raw_type
-        .split("<=")
-        .next()
-        .unwrap_or(raw_type)
-        .trim();
+    let normalized = raw_type.split("<=").next().unwrap_or(raw_type).trim();
     let (base_type, is_array) = if let Some(idx) = normalized.find('[') {
         (&normalized[..idx], true)
     } else {
@@ -289,8 +287,7 @@ fn rosidl_symbol_name(ns: &str, iface_name: &str) -> String {
 fn is_rust_keyword(name: &str) -> bool {
     matches!(
         name,
-        "as"
-            | "break"
+        "as" | "break"
             | "const"
             | "continue"
             | "crate"
@@ -334,7 +331,10 @@ fn rust_type_expr(ty: &MsgTypeRef, is_array: bool) -> String {
     let base = match ty {
         MsgTypeRef::Primitive(p) => p.clone(),
         MsgTypeRef::Named { package, name } => {
-            format!("{RUNTIME_CRATE_ROOT}::generated::types::{}::{}", package, name)
+            format!(
+                "{RUNTIME_CRATE_ROOT}::generated::types::{}::{}",
+                package, name
+            )
         }
     };
     if is_array {
@@ -497,7 +497,9 @@ fn emit_std_msgs_module(out: &mut String, indent: &str) -> Result<()> {
     ));
     out.push_str(&format!("{indent}    }}\n"));
     out.push_str(&format!("{indent}}}\n\n"));
-    out.push_str(&format!("{indent}impl rosidl_runtime_rs::Message for String {{\n"));
+    out.push_str(&format!(
+        "{indent}impl rosidl_runtime_rs::Message for String {{\n"
+    ));
     out.push_str(&format!("{indent}    type RmwMsg = rmw::String;\n"));
     out.push_str(&format!(
         "{indent}    fn into_rmw_message(msg_cow: std::borrow::Cow<'_, Self>) -> std::borrow::Cow<'_, Self::RmwMsg> {{\n"
@@ -534,7 +536,9 @@ fn emit_std_msgs_module(out: &mut String, indent: &str) -> Result<()> {
     ));
     out.push_str(&format!("{indent}    }}\n\n"));
     out.push_str(&format!("{indent}    #[repr(C)]\n"));
-    out.push_str(&format!("{indent}    #[derive(Clone, Debug, PartialEq, PartialOrd)]\n"));
+    out.push_str(&format!(
+        "{indent}    #[derive(Clone, Debug, PartialEq, PartialOrd)]\n"
+    ));
     out.push_str(&format!("{indent}    pub struct String {{\n"));
     out.push_str(&format!(
         "{indent}        pub data: rosidl_runtime_rs::String,\n"
@@ -543,7 +547,9 @@ fn emit_std_msgs_module(out: &mut String, indent: &str) -> Result<()> {
     out.push_str(&format!("{indent}    impl Default for String {{\n"));
     out.push_str(&format!("{indent}        fn default() -> Self {{\n"));
     out.push_str(&format!("{indent}            unsafe {{\n"));
-    out.push_str(&format!("{indent}                let mut msg = std::mem::zeroed();\n"));
+    out.push_str(&format!(
+        "{indent}                let mut msg = std::mem::zeroed();\n"
+    ));
     out.push_str(&format!(
         "{indent}                if !std_msgs__msg__String__init(&mut msg as *mut _) {{ panic!(\"Call to std_msgs__msg__String__init() failed\"); }}\n"
     ));
@@ -551,7 +557,9 @@ fn emit_std_msgs_module(out: &mut String, indent: &str) -> Result<()> {
     out.push_str(&format!("{indent}            }}\n"));
     out.push_str(&format!("{indent}        }}\n"));
     out.push_str(&format!("{indent}    }}\n\n"));
-    out.push_str(&format!("{indent}    impl rosidl_runtime_rs::Message for String {{\n"));
+    out.push_str(&format!(
+        "{indent}    impl rosidl_runtime_rs::Message for String {{\n"
+    ));
     out.push_str(&format!("{indent}        type RmwMsg = Self;\n"));
     out.push_str(&format!(
         "{indent}        fn into_rmw_message(msg_cow: std::borrow::Cow<'_, Self>) -> std::borrow::Cow<'_, Self::RmwMsg> {{ msg_cow }}\n"
@@ -560,7 +568,9 @@ fn emit_std_msgs_module(out: &mut String, indent: &str) -> Result<()> {
         "{indent}        fn from_rmw_message(msg: Self::RmwMsg) -> Self {{ msg }}\n"
     ));
     out.push_str(&format!("{indent}    }}\n"));
-    out.push_str(&format!("{indent}    impl rosidl_runtime_rs::RmwMessage for String {{\n"));
+    out.push_str(&format!(
+        "{indent}    impl rosidl_runtime_rs::RmwMessage for String {{\n"
+    ));
     out.push_str(&format!(
         "{indent}        const TYPE_NAME: &'static str = \"std_msgs/msg/String\";\n"
     ));
@@ -825,14 +835,19 @@ fn emit_query_module(out: &mut String, namespace: &str, q: &QueryDef, indent: &s
         "{indent}#[derive(Clone, Debug, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]\n"
     ));
     out.push_str(&format!("{indent}pub struct Request {{\n"));
-    out.push_str(&format!("{indent}    pub {}: RequestPayload,\n", request_field));
+    out.push_str(&format!(
+        "{indent}    pub {}: RequestPayload,\n",
+        request_field
+    ));
     out.push_str(&format!("{indent}}}\n"));
     out.push_str(&format!("{indent}impl Default for Request {{\n"));
     out.push_str(&format!(
         "{indent}    fn default() -> Self {{ <Self as rosidl_runtime_rs::Message>::from_rmw_message(rmw::Request::default()) }}\n"
     ));
     out.push_str(&format!("{indent}}}\n"));
-    out.push_str(&format!("{indent}impl rosidl_runtime_rs::Message for Request {{\n"));
+    out.push_str(&format!(
+        "{indent}impl rosidl_runtime_rs::Message for Request {{\n"
+    ));
     out.push_str(&format!("{indent}    type RmwMsg = rmw::Request;\n"));
     out.push_str(&format!(
         "{indent}    fn into_rmw_message(msg_cow: std::borrow::Cow<'_, Self>) -> std::borrow::Cow<'_, Self::RmwMsg> {{\n"
@@ -858,14 +873,19 @@ fn emit_query_module(out: &mut String, namespace: &str, q: &QueryDef, indent: &s
         "{indent}#[derive(Clone, Debug, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]\n"
     ));
     out.push_str(&format!("{indent}pub struct Response {{\n"));
-    out.push_str(&format!("{indent}    pub {}: ResponsePayload,\n", response_field));
+    out.push_str(&format!(
+        "{indent}    pub {}: ResponsePayload,\n",
+        response_field
+    ));
     out.push_str(&format!("{indent}}}\n"));
     out.push_str(&format!("{indent}impl Default for Response {{\n"));
     out.push_str(&format!(
         "{indent}    fn default() -> Self {{ <Self as rosidl_runtime_rs::Message>::from_rmw_message(rmw::Response::default()) }}\n"
     ));
     out.push_str(&format!("{indent}}}\n"));
-    out.push_str(&format!("{indent}impl rosidl_runtime_rs::Message for Response {{\n"));
+    out.push_str(&format!(
+        "{indent}impl rosidl_runtime_rs::Message for Response {{\n"
+    ));
     out.push_str(&format!("{indent}    type RmwMsg = rmw::Response;\n"));
     out.push_str(&format!(
         "{indent}    fn into_rmw_message(msg_cow: std::borrow::Cow<'_, Self>) -> std::borrow::Cow<'_, Self::RmwMsg> {{\n"
@@ -888,10 +908,14 @@ fn emit_query_module(out: &mut String, namespace: &str, q: &QueryDef, indent: &s
     out.push_str(&format!("{indent}}}\n"));
 
     out.push_str(&format!("{indent}pub struct QueryService;\n"));
-    out.push_str(&format!("{indent}impl rosidl_runtime_rs::Service for QueryService {{\n"));
+    out.push_str(&format!(
+        "{indent}impl rosidl_runtime_rs::Service for QueryService {{\n"
+    ));
     out.push_str(&format!("{indent}    type Request = Request;\n"));
     out.push_str(&format!("{indent}    type Response = Response;\n"));
-    out.push_str(&format!("{indent}    fn get_type_support() -> *const std::ffi::c_void {{\n"));
+    out.push_str(&format!(
+        "{indent}    fn get_type_support() -> *const std::ffi::c_void {{\n"
+    ));
     out.push_str(&format!(
         "{indent}        let func: unsafe extern \"C\" fn() -> *const std::ffi::c_void = {RUNTIME_CRATE_ROOT}::runtime::load_symbol(\"librobonix_interfaces_ros2__rosidl_typesupport_c.so\", b\"rosidl_typesupport_c__get_service_type_support_handle__robonix_interfaces_ros2__srv__{}\\0\");\n",
         ros_type
@@ -969,7 +993,9 @@ fn emit_query_rmw_module(
     out.push_str(&format!("{indent}pub mod rmw {{\n"));
 
     out.push_str(&format!("{indent}    #[repr(C)]\n"));
-    out.push_str(&format!("{indent}    #[derive(Clone, Debug, PartialEq, PartialOrd)]\n"));
+    out.push_str(&format!(
+        "{indent}    #[derive(Clone, Debug, PartialEq, PartialOrd)]\n"
+    ));
     out.push_str(&format!("{indent}    pub struct Request {{\n"));
     out.push_str(&format!(
         "{indent}        pub {}: {RUNTIME_CRATE_ROOT}::generated::types::std_msgs::rmw::String,\n",
@@ -979,7 +1005,9 @@ fn emit_query_rmw_module(
     out.push_str(&format!("{indent}    impl Default for Request {{\n"));
     out.push_str(&format!("{indent}        fn default() -> Self {{\n"));
     out.push_str(&format!("{indent}            unsafe {{\n"));
-    out.push_str(&format!("{indent}                let mut msg = std::mem::zeroed();\n"));
+    out.push_str(&format!(
+        "{indent}                let mut msg = std::mem::zeroed();\n"
+    ));
     out.push_str(&format!(
         "{indent}                let init: unsafe extern \"C\" fn(*mut Request) -> bool = {RUNTIME_CRATE_ROOT}::runtime::load_symbol(\"librobonix_interfaces_ros2__rosidl_generator_c.so\", b\"robonix_interfaces_ros2__srv__{}_Request__init\\0\");\n",
         ros_type
@@ -992,7 +1020,9 @@ fn emit_query_rmw_module(
     out.push_str(&format!("{indent}            }}\n"));
     out.push_str(&format!("{indent}        }}\n"));
     out.push_str(&format!("{indent}    }}\n"));
-    out.push_str(&format!("{indent}    impl rosidl_runtime_rs::Message for Request {{\n"));
+    out.push_str(&format!(
+        "{indent}    impl rosidl_runtime_rs::Message for Request {{\n"
+    ));
     out.push_str(&format!("{indent}        type RmwMsg = Self;\n"));
     out.push_str(&format!(
         "{indent}        fn into_rmw_message(msg_cow: std::borrow::Cow<'_, Self>) -> std::borrow::Cow<'_, Self::RmwMsg> {{ msg_cow }}\n"
@@ -1001,12 +1031,16 @@ fn emit_query_rmw_module(
         "{indent}        fn from_rmw_message(msg: Self::RmwMsg) -> Self {{ msg }}\n"
     ));
     out.push_str(&format!("{indent}    }}\n"));
-    out.push_str(&format!("{indent}    impl rosidl_runtime_rs::RmwMessage for Request {{\n"));
+    out.push_str(&format!(
+        "{indent}    impl rosidl_runtime_rs::RmwMessage for Request {{\n"
+    ));
     out.push_str(&format!(
         "{indent}        const TYPE_NAME: &'static str = \"robonix_interfaces_ros2/srv/{}_Request\";\n",
         ros_type
     ));
-    out.push_str(&format!("{indent}        fn get_type_support() -> *const std::ffi::c_void {{\n"));
+    out.push_str(&format!(
+        "{indent}        fn get_type_support() -> *const std::ffi::c_void {{\n"
+    ));
     out.push_str(&format!(
         "{indent}            let func: unsafe extern \"C\" fn() -> *const std::ffi::c_void = {RUNTIME_CRATE_ROOT}::runtime::load_symbol(\"librobonix_interfaces_ros2__rosidl_typesupport_c.so\", b\"rosidl_typesupport_c__get_message_type_support_handle__robonix_interfaces_ros2__srv__{}_Request\\0\");\n",
         ros_type
@@ -1016,7 +1050,9 @@ fn emit_query_rmw_module(
     out.push_str(&format!("{indent}    }}\n"));
 
     out.push_str(&format!("{indent}    #[repr(C)]\n"));
-    out.push_str(&format!("{indent}    #[derive(Clone, Debug, PartialEq, PartialOrd)]\n"));
+    out.push_str(&format!(
+        "{indent}    #[derive(Clone, Debug, PartialEq, PartialOrd)]\n"
+    ));
     out.push_str(&format!("{indent}    pub struct Response {{\n"));
     out.push_str(&format!(
         "{indent}        pub {}: {RUNTIME_CRATE_ROOT}::generated::types::std_msgs::rmw::String,\n",
@@ -1026,7 +1062,9 @@ fn emit_query_rmw_module(
     out.push_str(&format!("{indent}    impl Default for Response {{\n"));
     out.push_str(&format!("{indent}        fn default() -> Self {{\n"));
     out.push_str(&format!("{indent}            unsafe {{\n"));
-    out.push_str(&format!("{indent}                let mut msg = std::mem::zeroed();\n"));
+    out.push_str(&format!(
+        "{indent}                let mut msg = std::mem::zeroed();\n"
+    ));
     out.push_str(&format!(
         "{indent}                let init: unsafe extern \"C\" fn(*mut Response) -> bool = {RUNTIME_CRATE_ROOT}::runtime::load_symbol(\"librobonix_interfaces_ros2__rosidl_generator_c.so\", b\"robonix_interfaces_ros2__srv__{}_Response__init\\0\");\n",
         ros_type
@@ -1039,7 +1077,9 @@ fn emit_query_rmw_module(
     out.push_str(&format!("{indent}            }}\n"));
     out.push_str(&format!("{indent}        }}\n"));
     out.push_str(&format!("{indent}    }}\n"));
-    out.push_str(&format!("{indent}    impl rosidl_runtime_rs::Message for Response {{\n"));
+    out.push_str(&format!(
+        "{indent}    impl rosidl_runtime_rs::Message for Response {{\n"
+    ));
     out.push_str(&format!("{indent}        type RmwMsg = Self;\n"));
     out.push_str(&format!(
         "{indent}        fn into_rmw_message(msg_cow: std::borrow::Cow<'_, Self>) -> std::borrow::Cow<'_, Self::RmwMsg> {{ msg_cow }}\n"
@@ -1048,12 +1088,16 @@ fn emit_query_rmw_module(
         "{indent}        fn from_rmw_message(msg: Self::RmwMsg) -> Self {{ msg }}\n"
     ));
     out.push_str(&format!("{indent}    }}\n"));
-    out.push_str(&format!("{indent}    impl rosidl_runtime_rs::RmwMessage for Response {{\n"));
+    out.push_str(&format!(
+        "{indent}    impl rosidl_runtime_rs::RmwMessage for Response {{\n"
+    ));
     out.push_str(&format!(
         "{indent}        const TYPE_NAME: &'static str = \"robonix_interfaces_ros2/srv/{}_Response\";\n",
         ros_type
     ));
-    out.push_str(&format!("{indent}        fn get_type_support() -> *const std::ffi::c_void {{\n"));
+    out.push_str(&format!(
+        "{indent}        fn get_type_support() -> *const std::ffi::c_void {{\n"
+    ));
     out.push_str(&format!(
         "{indent}            let func: unsafe extern \"C\" fn() -> *const std::ffi::c_void = {RUNTIME_CRATE_ROOT}::runtime::load_symbol(\"librobonix_interfaces_ros2__rosidl_typesupport_c.so\", b\"rosidl_typesupport_c__get_message_type_support_handle__robonix_interfaces_ros2__srv__{}_Response\\0\");\n",
         ros_type
@@ -1072,5 +1116,8 @@ fn ridl_rust_type(type_ref: &str) -> Result<String> {
     let Some((package, name)) = parse_ridl_type_ref(type_ref) else {
         bail!("unsupported RIDL Rust type ref '{}'", type_ref);
     };
-    Ok(format!("{RUNTIME_CRATE_ROOT}::generated::types::{}::{}", package, name))
+    Ok(format!(
+        "{RUNTIME_CRATE_ROOT}::generated::types::{}::{}",
+        package, name
+    ))
 }

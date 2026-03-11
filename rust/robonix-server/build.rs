@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn collect_ridl_files(root: &Path, acc: &mut Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+fn collect_ridl_files(
+    root: &Path,
+    acc: &mut Vec<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !root.exists() {
         return Ok(());
     }
@@ -57,7 +60,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let generated_file = PathBuf::from("src").join("generated").join("ridl_generated.rs");
+    let generated_file = PathBuf::from("src")
+        .join("generated")
+        .join("ridl_generated.rs");
     ridlc::codegen::rust_gen::generate_bindings(
         &files_by_ns,
         &[PathBuf::from("../robonix-interfaces/lib")],

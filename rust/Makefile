@@ -21,6 +21,8 @@ help:
 	@echo ""
 	@echo "  Install:"
 	@echo "    make install       - Install to ~/.cargo/bin (ridlc, rbnx, robonix-server)"
+	@echo "    Note: robonix-server installs a wrapper that sources the colcon workspace;"
+	@echo "    the rust/ directory must remain in place for robonix-server to run."
 	@echo ""
 	@echo "  Clean:"
 	@echo "    make clean         - Remove target dirs and build artifacts"
@@ -56,8 +58,25 @@ install-ridlc:
 install-cli:
 	cd $(CLI_DIR) && cargo install --path . --bin rbnx $(CARGO_FLAGS)
 
-install-server:
-	cd $(CORE_DIR) && cargo install --path . $(CARGO_FLAGS)
+RUST_ABS := $(shell cd $(RUST_DIR) && pwd)
+BUILD_SUBDIR := $(if $(filter release,$(BUILD_MODE)),release,debug)
+
+install-server: build-server
+	@# robonix-server needs LD_LIBRARY_PATH from colcon workspace; install a wrapper
+	@mkdir -p ~/.cargo/bin; \
+	printf '%s\n' \
+		'#!/usr/bin/env bash' \
+		'set -euo pipefail' \
+		'RUST_DIR="$(RUST_ABS)"' \
+		'export ROBONIX_META_GRPC_ADDR="$${ROBONIX_META_GRPC_ADDR:-0.0.0.0:50051}"' \
+		'export ROBONIX_META_GRPC_ENDPOINT="$${ROBONIX_META_GRPC_ENDPOINT:-127.0.0.1:50051}"' \
+		'export RUST_LOG="$${RUST_LOG:-robonix_server=info,rclrs=warn}"' \
+		'export RMW_IMPLEMENTATION="$${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"' \
+		'set +u; . "$$RUST_DIR/setup_zenoh_rclrs_env" "$$RUST_DIR/robonix-server/Cargo.toml" robonix-server; set -u' \
+		'exec "$$RUST_DIR/robonix-server/target/$(BUILD_SUBDIR)/robonix-server" "$$@"' \
+		> ~/.cargo/bin/robonix-server; \
+	chmod +x ~/.cargo/bin/robonix-server; \
+	echo "Installed robonix-server wrapper to ~/.cargo/bin (rust dir: $(RUST_ABS))"
 
 clean:
 	@echo "Cleaning ridlc..."

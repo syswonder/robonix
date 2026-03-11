@@ -11,9 +11,9 @@ use std::path::PathBuf;
 fn resolve_package_path(spec: &str) -> Result<PathBuf> {
     let path = PathBuf::from(spec);
     if path.exists() {
-        return path.canonicalize().with_context(|| {
-            format!("Failed to canonicalize package path: {}", path.display())
-        });
+        return path
+            .canonicalize()
+            .with_context(|| format!("Failed to canonicalize package path: {}", path.display()));
     }
 
     // Try as name: look in examples/, ., package_storage
@@ -26,16 +26,19 @@ fn resolve_package_path(spec: &str) -> Result<PathBuf> {
 
     for candidate in &candidates {
         if candidate.join(manifest::VNEXT_MANIFEST_FILE).exists() {
-            return candidate.canonicalize().with_context(|| {
-                format!("Failed to canonicalize: {}", candidate.display())
-            });
+            return candidate
+                .canonicalize()
+                .with_context(|| format!("Failed to canonicalize: {}", candidate.display()));
         }
     }
 
     anyhow::bail!(
         "Package '{}' not found. Tried: {:?}",
         spec,
-        candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()
+        candidates
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
     )
 }
 
@@ -44,7 +47,11 @@ pub async fn execute_build(spec: &str) -> Result<()> {
     build::execute_local(package_root).await
 }
 
-pub async fn execute_start(spec: &str, node_id: &str, registry_endpoint: Option<&str>) -> Result<()> {
+pub async fn execute_start(
+    spec: &str,
+    node_id: &str,
+    registry_endpoint: Option<&str>,
+) -> Result<()> {
     let package_root = resolve_package_path(spec)?;
     let detected = manifest::detect_and_load(&package_root)?;
     let manifest = match &detected.manifest {
@@ -56,7 +63,18 @@ pub async fn execute_start(spec: &str, node_id: &str, registry_endpoint: Option<
         .nodes
         .iter()
         .find(|n| n.id == node_id)
-        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in manifest. Available: {}", node_id, manifest.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>().join(", ")))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Node '{}' not found in manifest. Available: {}",
+                node_id,
+                manifest
+                    .nodes
+                    .iter()
+                    .map(|n| n.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
 
     let build_layout = match build::get_existing_build_layout(&package_root)? {
         Some(layout) => {
@@ -76,7 +94,10 @@ pub async fn execute_start(spec: &str, node_id: &str, registry_endpoint: Option<
     let log_dir = run_root.join("rbnx-deploy").join("logs");
     let process_manager = ProcessManager::new(log_dir)?;
 
-    output::action("Running", &format!("node {} ({})", node_id, manifest.package.name));
+    output::action(
+        "Running",
+        &format!("node {} ({})", node_id, manifest.package.name),
+    );
     output::sub_step(&format!("Runtime endpoint: {}", endpoint));
 
     let node_type = node.node_type.as_deref().unwrap_or("python");
@@ -96,7 +117,11 @@ pub async fn execute_start(spec: &str, node_id: &str, registry_endpoint: Option<
 
     let mut env = std::collections::HashMap::new();
     env.insert("ROBONIX_META_GRPC_ENDPOINT".to_string(), endpoint.clone());
-    if let Some(profile) = manifest.launch_profiles.as_ref().and_then(|p| p.get("default")) {
+    if let Some(profile) = manifest
+        .launch_profiles
+        .as_ref()
+        .and_then(|p| p.get("default"))
+    {
         if let Some(launch) = profile.nodes.get(&node.id) {
             for (k, v) in &launch.env {
                 env.insert(k.clone(), v.clone());
@@ -105,11 +130,8 @@ pub async fn execute_start(spec: &str, node_id: &str, registry_endpoint: Option<
     }
 
     let std_name = format!("{}.{}", build_layout.package_name, node.id);
-    let start_command = crate::cmd::launch_helpers::build_start_command(
-        &build_layout.install_setup,
-        module,
-        &env,
-    );
+    let start_command =
+        crate::cmd::launch_helpers::build_start_command(&build_layout.install_setup, module, &env);
 
     let result = process_manager
         .start_process(

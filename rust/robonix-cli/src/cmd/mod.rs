@@ -12,10 +12,10 @@ use crate::Config;
 mod build;
 mod config;
 mod info;
-mod launch_helpers;
-mod run_package;
 mod install;
+mod launch_helpers;
 mod list;
+mod run_package;
 mod search;
 mod validate;
 
@@ -110,9 +110,11 @@ pub enum PackageCommands {
 pub async fn execute(command: Commands, config: Config) -> Result<()> {
     match command {
         Commands::Build { package } => run_package::execute_build(&package).await,
-        Commands::Start { package, node, endpoint } => {
-            run_package::execute_start(&package, &node, endpoint.as_deref()).await
-        }
+        Commands::Start {
+            package,
+            node,
+            endpoint,
+        } => run_package::execute_start(&package, &node, endpoint.as_deref()).await,
         Commands::Package(cmd) => match cmd {
             PackageCommands::Install {
                 github,

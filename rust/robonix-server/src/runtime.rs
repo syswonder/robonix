@@ -2,7 +2,9 @@
 
 use anyhow::{Context, Result, bail};
 use libloading::Library;
-use rclrs::{Client, Context as RosContext, CreateBasicExecutor, Executor, Node, Service, SpinOptions};
+use rclrs::{
+    Client, Context as RosContext, CreateBasicExecutor, Executor, Node, Service, SpinOptions,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration as StdDuration, Instant};
@@ -158,7 +160,9 @@ where
     Svc: rosidl_runtime_rs::Service,
 {
     node.node()
-        .create_service::<Svc, _>(channel_name, |_request: Svc::Request| Svc::Response::default())
+        .create_service::<Svc, _>(channel_name, |_request: Svc::Request| {
+            Svc::Response::default()
+        })
         .with_context(|| format!("failed to create ROS query server '{channel_name}'"))
 }
 

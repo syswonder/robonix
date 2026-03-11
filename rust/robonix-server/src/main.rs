@@ -20,13 +20,13 @@ async fn main() {
         ALL_INTERFACES.len()
     );
 
-    let grpc_addr = std::env::var("ROBONIX_META_GRPC_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:50051".to_string());
+    let grpc_addr =
+        std::env::var("ROBONIX_META_GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:50051".to_string());
     let grpc_listen_addr: std::net::SocketAddr = grpc_addr
         .parse()
         .unwrap_or_else(|_| "0.0.0.0:50051".parse().expect("valid default gRPC address"));
-    let grpc_advertised_endpoint = std::env::var("ROBONIX_META_GRPC_ENDPOINT")
-        .unwrap_or_else(|_| grpc_addr.clone());
+    let grpc_advertised_endpoint =
+        std::env::var("ROBONIX_META_GRPC_ENDPOINT").unwrap_or_else(|_| grpc_addr.clone());
     let registry = Arc::new(MetaRuntimeRegistry::default());
 
     let grpc_task = tokio::spawn(serve_meta_runtime(
