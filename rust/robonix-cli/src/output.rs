@@ -33,7 +33,7 @@ pub fn error(message: &str) {
 
 /// Print a step message (like "Validating", "Processing", etc.)
 pub fn step(action: &str, target: &str) {
-    println!("  {} {}", format!("→ {}", action).cyan(), target);
+    println!("  {} {}", format!("-> {}", action).cyan(), target);
 }
 
 /// Print a sub-step message (indented detail)

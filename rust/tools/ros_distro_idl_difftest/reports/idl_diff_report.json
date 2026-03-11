@@ -45,7 +45,7 @@
         "jazzy": "✓ (2)",
         "rolling": "—"
       },
-      "changes": "`jazzy`→`rolling`: only in `jazzy`"
+      "changes": "`jazzy`->`rolling`: only in `jazzy`"
     },
     {
       "interface": "common_interfaces/actionlib_msgs/msg/GoalStatus",
@@ -55,7 +55,7 @@
         "jazzy": "✓ (13)",
         "rolling": "—"
       },
-      "changes": "`jazzy`→`rolling`: only in `jazzy`"
+      "changes": "`jazzy`->`rolling`: only in `jazzy`"
     },
     {
       "interface": "common_interfaces/actionlib_msgs/msg/GoalStatusArray",
@@ -65,7 +65,7 @@
         "jazzy": "✓ (2)",
         "rolling": "—"
       },
-      "changes": "`jazzy`→`rolling`: only in `jazzy`"
+      "changes": "`jazzy`->`rolling`: only in `jazzy`"
     },
     {
       "interface": "common_interfaces/diagnostic_msgs/msg/DiagnosticArray",
@@ -225,7 +225,7 @@
         "jazzy": "✓ (2)",
         "rolling": "✓ (2)"
       },
-      "changes": "`foxy`→`humble`: only in `humble`"
+      "changes": "`foxy`->`humble`: only in `humble`"
     },
     {
       "interface": "common_interfaces/geometry_msgs/msg/PolygonInstanceStamped",
@@ -235,7 +235,7 @@
         "jazzy": "✓ (2)",
         "rolling": "✓ (2)"
       },
-      "changes": "`foxy`→`humble`: only in `humble`"
+      "changes": "`foxy`->`humble`: only in `humble`"
     },
     {
       "interface": "common_interfaces/geometry_msgs/msg/PolygonStamped",
@@ -265,7 +265,7 @@
         "jazzy": "✓ (3)",
         "rolling": "—"
       },
-      "changes": "`jazzy`→`rolling`: only in `jazzy`"
+      "changes": "`jazzy`->`rolling`: only in `jazzy`"
     },
     {
       "interface": "common_interfaces/geometry_msgs/msg/PoseArray",
@@ -415,7 +415,7 @@
         "jazzy": "✓ (4)",
         "rolling": "✓ (4)"
       },
-      "changes": "`foxy`→`humble`: only in `humble`"
+      "changes": "`foxy`->`humble`: only in `humble`"
     },
     {
       "interface": "common_interfaces/geometry_msgs/msg/Wrench",
@@ -445,7 +445,7 @@
         "jazzy": "✓ (2)",
         "rolling": "✓ (2)"
       },
-      "changes": "`foxy`→`humble`: only in `humble`"
+      "changes": "`foxy`->`humble`: only in `humble`"
     },
     {
       "interface": "common_interfaces/nav_msgs/msg/GridCells",
@@ -505,7 +505,7 @@
         "jazzy": "✓ (2)",
         "rolling": "✓ (2)"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "common_interfaces/nav_msgs/msg/TrajectoryPoint",
@@ -515,7 +515,7 @@
         "jazzy": "✓ (5)",
         "rolling": "✓ (5)"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "common_interfaces/nav_msgs/srv/GetMap",
@@ -545,7 +545,7 @@
         "jazzy": "✓ (8)",
         "rolling": "✓ (8)"
       },
-      "changes": "`foxy`→`humble`: only in `humble`"
+      "changes": "`foxy`->`humble`: only in `humble`"
     },
     {
       "interface": "common_interfaces/nav_msgs/srv/SetMap",
@@ -565,7 +565,7 @@
         "jazzy": "✓ (39)",
         "rolling": "✓ (39)"
       },
-      "changes": "`humble`→`jazzy`: ~ `=`: `uint8 POWER_SUPPLY_TECHNOLOGY_LIMN` → `uint8 POWER_SUPPLY_TECHNOLOGY_VRLA`"
+      "changes": "`humble`->`jazzy`: ~ `=`: `uint8 POWER_SUPPLY_TECHNOLOGY_LIMN` -> `uint8 POWER_SUPPLY_TECHNOLOGY_VRLA`"
     },
     {
       "interface": "common_interfaces/sensor_msgs/msg/CameraInfo",
@@ -775,7 +775,7 @@
         "jazzy": "✓ (12)",
         "rolling": "✓ (15)"
       },
-      "changes": "`jazzy`→`rolling`: ~ `=`: `uint8 FLOAT64` → `uint8 BOOL`"
+      "changes": "`jazzy`->`rolling`: ~ `=`: `uint8 FLOAT64` -> `uint8 BOOL`"
     },
     {
       "interface": "common_interfaces/sensor_msgs/msg/Range",
@@ -785,7 +785,7 @@
         "jazzy": "✓ (9)",
         "rolling": "✓ (9)"
       },
-      "changes": "`humble`→`jazzy`: + `(message)`: `float32` `variance`"
+      "changes": "`humble`->`jazzy`: + `(message)`: `float32` `variance`"
     },
     {
       "interface": "common_interfaces/sensor_msgs/msg/RegionOfInterest",
@@ -875,7 +875,7 @@
         "jazzy": "✓ (17)",
         "rolling": "✓ (17)"
       },
-      "changes": "`foxy`→`humble`: + `(message)`: `uint8` `PRISM=5`; + `(message)`: `uint8` `PRISM_HEIGHT=0`; + `(message)`: `geometry_msgs/Polygon` `polygon`"
+      "changes": "`foxy`->`humble`: + `(message)`: `uint8` `PRISM=5`; + `(message)`: `uint8` `PRISM_HEIGHT=0`; + `(message)`: `geometry_msgs/Polygon` `polygon`"
     },
     {
       "interface": "common_interfaces/std_msgs/msg/Bool",
@@ -1335,7 +1335,7 @@
         "jazzy": "✓ (36)",
         "rolling": "✓ (36)"
       },
-      "changes": "`foxy`→`humble`: + `(message)`: `MeshFile` `mesh_file`; + `(message)`: `sensor_msgs/CompressedImage` `texture`; + `(message)`: `string` `texture_resource`; + `(message)`: `UVCoordinate[]` `uv_coordinates` | `humble`→`jazzy`: + `(message)`: `int32` `ARROW_STRIP=12`"
+      "changes": "`foxy`->`humble`: + `(message)`: `MeshFile` `mesh_file`; + `(message)`: `sensor_msgs/CompressedImage` `texture`; + `(message)`: `string` `texture_resource`; + `(message)`: `UVCoordinate[]` `uv_coordinates` | `humble`->`jazzy`: + `(message)`: `int32` `ARROW_STRIP=12`"
     },
     {
       "interface": "common_interfaces/visualization_msgs/msg/MarkerArray",
@@ -1365,7 +1365,7 @@
         "jazzy": "✓ (2)",
         "rolling": "✓ (2)"
       },
-      "changes": "`foxy`→`humble`: only in `humble`"
+      "changes": "`foxy`->`humble`: only in `humble`"
     },
     {
       "interface": "common_interfaces/visualization_msgs/msg/UVCoordinate",
@@ -1375,7 +1375,7 @@
         "jazzy": "✓ (2)",
         "rolling": "✓ (2)"
       },
-      "changes": "`foxy`→`humble`: only in `humble`"
+      "changes": "`foxy`->`humble`: only in `humble`"
     },
     {
       "interface": "common_interfaces/visualization_msgs/srv/GetInteractiveMarkers",
@@ -1395,7 +1395,7 @@
         "jazzy": "✓ (7)",
         "rolling": "∅"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "control_msgs/control_msgs/action/FollowJointTrajectory",
@@ -1475,7 +1475,7 @@
         "jazzy": "✓ (1)",
         "rolling": "∅"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "control_msgs/control_msgs/msg/DynamicInterfaceGroupValues",
@@ -1495,7 +1495,7 @@
         "jazzy": "✓ (3)",
         "rolling": "∅"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "control_msgs/control_msgs/msg/DynamicJointState",
@@ -1515,7 +1515,7 @@
         "jazzy": "✓ (2)",
         "rolling": "∅"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "control_msgs/control_msgs/msg/GripperCommand",
@@ -1585,7 +1585,7 @@
         "jazzy": "✓ (12)",
         "rolling": "∅"
       },
-      "changes": "`humble`→`jazzy`: + `(message)`: `float64` `speed_scaling_factor`; - `(message)`: `trajectory_msgs/JointTrajectoryPoint` `actual`; - `(message)`: `trajectory_msgs/JointTrajectoryPoint` `desired`; - `(message)`: `trajectory_msgs/MultiDOFJointTrajectoryPoint` `multi_dof_actual`; - `(message)`: `trajectory_msgs/MultiDOFJointTrajectoryPoint` `multi_dof_desired`"
+      "changes": "`humble`->`jazzy`: + `(message)`: `float64` `speed_scaling_factor`; - `(message)`: `trajectory_msgs/JointTrajectoryPoint` `actual`; - `(message)`: `trajectory_msgs/JointTrajectoryPoint` `desired`; - `(message)`: `trajectory_msgs/MultiDOFJointTrajectoryPoint` `multi_dof_actual`; - `(message)`: `trajectory_msgs/MultiDOFJointTrajectoryPoint` `multi_dof_desired`"
     },
     {
       "interface": "control_msgs/control_msgs/msg/Keys",
@@ -1595,7 +1595,7 @@
         "jazzy": "✓ (2)",
         "rolling": "∅"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "control_msgs/control_msgs/msg/MecanumDriveControllerState",
@@ -1615,7 +1615,7 @@
         "jazzy": "✓ (2)",
         "rolling": "∅"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "control_msgs/control_msgs/msg/MotionPrimitive",
@@ -1625,7 +1625,7 @@
         "jazzy": "✓ (9)",
         "rolling": "∅"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "control_msgs/control_msgs/msg/MotionPrimitiveSequence",
@@ -1635,7 +1635,7 @@
         "jazzy": "✓ (1)",
         "rolling": "∅"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "control_msgs/control_msgs/msg/MultiDOFCommand",
@@ -1695,7 +1695,7 @@
         "jazzy": "✓ (1)",
         "rolling": "∅"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "control_msgs/control_msgs/msg/SteeringControllerStatus",
@@ -1715,7 +1715,7 @@
         "jazzy": "✓ (6)",
         "rolling": "∅"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "control_msgs/control_msgs/srv/QueryCalibrationState",
@@ -1745,7 +1745,7 @@
         "jazzy": "✓ (8)",
         "rolling": "∅"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "geometry2/tf2_msgs/action/LookupTransform",
@@ -1915,7 +1915,7 @@
         "jazzy": "✓ (4)",
         "rolling": "✓ (4)"
       },
-      "changes": "`jazzy`→`rolling`: + `(message)`: `builtin_interfaces/Time` `stamp`; - `(message)`: `uint64` `timestamp`"
+      "changes": "`jazzy`->`rolling`: + `(message)`: `builtin_interfaces/Time` `stamp`; - `(message)`: `uint64` `timestamp`"
     },
     {
       "interface": "rcl_interfaces/lifecycle_msgs/srv/ChangeState",
@@ -1995,7 +1995,7 @@
         "jazzy": "✓ (12)",
         "rolling": "✓ (12)"
       },
-      "changes": "`humble`→`jazzy`: ~ `DEBUG=10`: `byte` → `uint8`; ~ `ERROR=40`: `byte` → `uint8`; ~ `FATAL=50`: `byte` → `uint8`; ~ `INFO=20`: `byte` → `uint8`; ~ `WARN=30`: `byte` → `uint8`"
+      "changes": "`humble`->`jazzy`: ~ `DEBUG=10`: `byte` -> `uint8`; ~ `ERROR=40`: `byte` -> `uint8`; ~ `FATAL=50`: `byte` -> `uint8`; ~ `INFO=20`: `byte` -> `uint8`; ~ `WARN=30`: `byte` -> `uint8`"
     },
     {
       "interface": "rcl_interfaces/rcl_interfaces/msg/LoggerLevel",
@@ -2005,7 +2005,7 @@
         "jazzy": "✓ (8)",
         "rolling": "✓ (8)"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "rcl_interfaces/rcl_interfaces/msg/Parameter",
@@ -2025,7 +2025,7 @@
         "jazzy": "✓ (8)",
         "rolling": "✓ (8)"
       },
-      "changes": "`foxy`→`humble`: + `(message)`: `bool` `dynamic_typing`"
+      "changes": "`foxy`->`humble`: + `(message)`: `bool` `dynamic_typing`"
     },
     {
       "interface": "rcl_interfaces/rcl_interfaces/msg/ParameterEvent",
@@ -2075,7 +2075,7 @@
         "jazzy": "✓ (2)",
         "rolling": "✓ (2)"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "rcl_interfaces/rcl_interfaces/msg/SetParametersResult",
@@ -2105,7 +2105,7 @@
         "jazzy": "✓ (2)",
         "rolling": "✓ (2)"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "rcl_interfaces/rcl_interfaces/srv/GetParameterTypes",
@@ -2145,7 +2145,7 @@
         "jazzy": "✓ (2)",
         "rolling": "✓ (2)"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "rcl_interfaces/rcl_interfaces/srv/SetParameters",
@@ -2185,7 +2185,7 @@
         "jazzy": "✓ (8)",
         "rolling": "✓ (8)"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "rcl_interfaces/statistics_msgs/msg/MetricsMessage",
@@ -2245,7 +2245,7 @@
         "jazzy": "✓ (3)",
         "rolling": "✓ (3)"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "rcl_interfaces/type_description_interfaces/msg/FieldType",
@@ -2255,7 +2255,7 @@
         "jazzy": "✓ (93)",
         "rolling": "✓ (93)"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "rcl_interfaces/type_description_interfaces/msg/IndividualTypeDescription",
@@ -2265,7 +2265,7 @@
         "jazzy": "✓ (2)",
         "rolling": "✓ (2)"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "rcl_interfaces/type_description_interfaces/msg/KeyValue",
@@ -2275,7 +2275,7 @@
         "jazzy": "✓ (2)",
         "rolling": "✓ (2)"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "rcl_interfaces/type_description_interfaces/msg/TypeDescription",
@@ -2285,7 +2285,7 @@
         "jazzy": "✓ (2)",
         "rolling": "✓ (2)"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "rcl_interfaces/type_description_interfaces/msg/TypeSource",
@@ -2295,7 +2295,7 @@
         "jazzy": "✓ (3)",
         "rolling": "✓ (3)"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     },
     {
       "interface": "rcl_interfaces/type_description_interfaces/srv/GetTypeDescription",
@@ -2305,7 +2305,7 @@
         "jazzy": "✓ (8)",
         "rolling": "✓ (8)"
       },
-      "changes": "`humble`→`jazzy`: only in `jazzy`"
+      "changes": "`humble`->`jazzy`: only in `jazzy`"
     }
   ]
 }

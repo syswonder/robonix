@@ -1,8 +1,8 @@
 namespace robonix/system/execution
 
-import std_msgs/msg/String
+import robonix_msg/msg/Dict
 
 event result_feedback {
-    payload report std_msgs/msg/String
+    payload report robonix_msg/msg/Dict
     version 1.0;
 }

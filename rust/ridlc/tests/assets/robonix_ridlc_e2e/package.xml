@@ -4,7 +4,7 @@
   <name>robonix_ridlc_e2e</name>
   <version>0.0.1</version>
   <description>End-to-end test nodes for RIDL-generated interfaces.</description>
-  <maintainer email="user@todo.todo">robonix</maintainer>
+  <maintainer email="wheatfox17@icloud.com">robonix</maintainer>
   <license>MulanPSL-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>
   <depend>rclpy</depend>

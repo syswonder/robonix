@@ -1,0 +1,10 @@
+namespace robonix/system/manager
+
+import std_msgs/msg/String
+import robonix_msg/msg/SkillInstance
+
+query skill_library {
+    request filter std_msgs/msg/String;
+    response skills robonix_msg/msg/SkillInstance[];
+    version 1.0;
+}

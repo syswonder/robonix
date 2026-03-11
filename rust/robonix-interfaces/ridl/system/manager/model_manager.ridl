@@ -1,0 +1,10 @@
+namespace robonix/system/manager
+
+import std_msgs/msg/String
+import robonix_msg/msg/ServiceInstance
+
+query model_manager {
+    request filter std_msgs/msg/String;
+    response models robonix_msg/msg/ServiceInstance[];
+    version 1.0;
+}

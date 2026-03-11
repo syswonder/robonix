@@ -2,8 +2,7 @@ FROM osrf/ros:humble-desktop
     
 ENV ROS_DOMAIN_ID=0
 ENV ROS_LOCALHOST_ONLY=0
-# ENV FASTRTPS_DEFAULT_PROFILES_FILE=/root/shared/fast.xml
-# ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+ENV RMW_IMPLEMENTATION=rmw_zenoh_cpp
 
 # RUN apt-get update && apt-get install -y \
 #     ca-certificates \
@@ -20,11 +19,16 @@ ENV ROS_LOCALHOST_ONLY=0
 
 RUN apt update && apt install -y \
     ros-humble-rmw-fastrtps-cpp \
+    ros-humble-rmw-zenoh-cpp \
     python3-pip \
+    python3-grpcio \
+    python3-protobuf \
     python3-dev \
     build-essential \
     git \
+    curl \
     wget \
+    protobuf-compiler \
     libeigen3-dev \
     libgl1-mesa-glx \
     libglib2.0-0 \
@@ -40,6 +44,8 @@ RUN apt update && apt install -y \
     libclang-dev python3-vcstool \
     bash-completion \
     fonts-lmodern
+
+RUN pip3 install --no-cache-dir grpcio-tools
 
 # RUN apt update && apt install -y curl && \
 # curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null && \

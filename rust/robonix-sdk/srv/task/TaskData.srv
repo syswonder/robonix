@@ -1,5 +1,0 @@
-# TaskData service (robonix spec)
-string task_id
----
-string data                    # JSON: complete task data
-

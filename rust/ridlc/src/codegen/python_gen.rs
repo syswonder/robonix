@@ -55,7 +55,7 @@ pub fn emit_ros_package_files(out_dir: &Path, package_name: &str) -> Result<()> 
   <name>PACKAGE_NAME</name>
   <version>0.0.1</version>
   <description>RIDL-generated interfaces and runtime gRPC client (robonix meta API).</description>
-  <maintainer email="user@todo.todo">robonix</maintainer>
+  <maintainer email="wheatfox17@icloud.com">robonix</maintainer>
   <license>MulanPSL-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>
   <depend>rclpy</depend>
@@ -88,7 +88,7 @@ setup(
     install_requires=['setuptools', 'grpcio'],
     zip_safe=True,
     maintainer='robonix',
-    maintainer_email='user@todo.todo',
+    maintainer_email='wheatfox17@icloud.com',
     description='RIDL-generated interfaces and runtime gRPC client',
     license='MulanPSL-2.0',
     tests_require=['pytest'],
@@ -111,12 +111,21 @@ setup(
     Ok(())
 }
 
-/// Map RIDL type ref (e.g. "geometry_msgs/msg/Twist") to ROS2 Python import and type name.
+/// Map RIDL type ref (e.g. "geometry_msgs/msg/Twist", "robonix_msg/msg/Object[]")
+/// to ROS2 Python import and type name. Strips [] from type name; maps robonix_msg -> robonix_msgs.
 fn ros2_python_type(type_ref: &str) -> (String, String) {
     let trimmed = type_ref.trim();
     let parts: Vec<&str> = trimmed.split('/').collect();
     if parts.len() >= 3 {
-        (format!("{}.{}", parts[0], parts[1]), parts[2].to_string())
+        let mut pkg = parts[0];
+        if pkg == "robonix_msg" {
+            pkg = "robonix_msgs";
+        }
+        let mut type_name = parts[2].to_string();
+        if type_name.ends_with("[]") {
+            type_name.truncate(type_name.len().saturating_sub(2));
+        }
+        (format!("{}.msg", pkg), type_name)
     } else {
         ("std_msgs.msg".to_string(), trimmed.to_string())
     }
@@ -315,7 +324,7 @@ fn write_rosidl_package_files(
   <name>{package_name}</name>\n\
   <version>0.0.1</version>\n\
   <description>{description}</description>\n\
-  <maintainer email=\"user@todo.todo\">robonix</maintainer>\n\
+  <maintainer email=\"wheatfox17@icloud.com\">robonix</maintainer>\n\
   <license>MulanPSL-2.0</license>\n\
   <buildtool_depend>ament_cmake</buildtool_depend>\n\
   <buildtool_depend>rosidl_default_generators</buildtool_depend>\n\
@@ -422,7 +431,7 @@ fn emit_app_package_files(out_dir: &Path, entry_points: &[(String, String)]) -> 
   <name>PACKAGE_NAME</name>
   <version>0.0.1</version>
   <description>User-editable app skeletons for RIDL-generated interfaces.</description>
-  <maintainer email="user@todo.todo">robonix</maintainer>
+  <maintainer email="wheatfox17@icloud.com">robonix</maintainer>
   <license>MulanPSL-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>
   <depend>rclpy</depend>
@@ -457,7 +466,7 @@ install_scripts=$base/lib/PACKAGE_NAME
     };
 
     let setup_py = format!(
-        "from setuptools import find_packages, setup\n\npackage_name = '{}'\n\nsetup(\n    name=package_name,\n    version='0.0.1',\n    packages=find_packages(exclude=['test']),\n    data_files=[\n        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),\n        ('share/' + package_name, ['package.xml', 'README.md']),\n    ],\n    install_requires=['setuptools', 'grpcio'],\n    zip_safe=True,\n    maintainer='robonix',\n    maintainer_email='user@todo.todo',\n    description='User-editable app skeletons for RIDL-generated interfaces',\n    license='MulanPSL-2.0',\n    tests_require=['pytest'],\n{}{}\n",
+        "from setuptools import find_packages, setup\n\npackage_name = '{}'\n\nsetup(\n    name=package_name,\n    version='0.0.1',\n    packages=find_packages(exclude=['test']),\n    data_files=[\n        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),\n        ('share/' + package_name, ['package.xml', 'README.md']),\n    ],\n    install_requires=['setuptools', 'grpcio'],\n    zip_safe=True,\n    maintainer='robonix',\n    maintainer_email='wheatfox17@icloud.com',\n    description='User-editable app skeletons for RIDL-generated interfaces',\n    license='MulanPSL-2.0',\n    tests_require=['pytest'],\n{}{}\n",
         APP_PACKAGE_NAME,
         entry_points_block,
         ")"
@@ -935,13 +944,18 @@ pub fn emit_app_skeleton(workspace_src: &Path, files_by_ns: &BTreeMap<String, Fi
     Ok(())
 }
 
-/// Convert a RIDL type ref like `std_msgs/msg/String` into the field syntax
-/// expected by ROS `.msg` / `.srv` / `.action` files: `std_msgs/String`.
+/// Convert a RIDL type ref like `std_msgs/msg/String` or `robonix_msg/msg/Object[]`
+/// into the field syntax expected by ROS `.msg` / `.srv` / `.action` files: `std_msgs/String`, `robonix_msgs/Object[]`.
 fn rosidl_field_type(type_ref: &str) -> String {
     let trimmed = type_ref.trim();
     let parts: Vec<&str> = trimmed.split('/').collect();
     if parts.len() >= 3 {
-        format!("{}/{}", parts[0], parts[2])
+        let mut pkg = parts[0];
+        // Vendored package is robonix_msgs; RIDL may use robonix_msg
+        if pkg == "robonix_msg" {
+            pkg = "robonix_msgs";
+        }
+        format!("{}/{}", pkg, parts[2])
     } else {
         trimmed.to_string()
     }
@@ -1326,6 +1340,38 @@ fn emit_stream_python(out_dir: &Path, s: &StreamDef, namespace: Option<&str>) ->
             ));
             out.push_str("    resp = runtime_client.RegisterStream(req)\n");
             out.push_str("    return resp.channel_name\n\n");
+
+            // Consumer of output stream: resolve topic and subscribe
+            out.push_str(&format!(
+                "def resolve_{}_consumer_topic(runtime_client, requester_id: str, target: str) -> str:\n",
+                s.name
+            ));
+            out.push_str("    \"\"\"Resolve stream consumer topic via robonix-server gRPC meta API. Returns ROS2 topic name to subscribe to.\"\"\"\n");
+            out.push_str("    from robonix_runtime_pb2 import ResolveStreamRequest\n");
+            out.push_str(&format!(
+                "    req = ResolveStreamRequest(requester_id=requester_id, target=target, namespace=\"{}\", stream_name=\"{}\", role=\"consumer\")\n",
+                ns_literal, s.name
+            ));
+            out.push_str("    resp = runtime_client.ResolveStream(req)\n");
+            out.push_str("    return resp.channel_name\n\n");
+
+            out.push_str(&format!("class {}Subscriber(Node):\n", pascal(&s.name)));
+            out.push_str("    \"\"\"Base ROS2 subscriber for stream '");
+            out.push_str(&s.name);
+            out.push_str("'. Channel (topic) provided by runtime.\n\n");
+            out.push_str("    Subclass this class and override ``start()`` to connect to a concrete transport.\n");
+            out.push_str("    \"\"\"\n\n");
+            out.push_str("    def __init__(self, topic_name: str, msg_type=None):\n");
+            out.push_str("        super().__init__('ridlc_stream_sub_' + topic_name.replace('/', '_'))\n");
+            out.push_str("        self._topic = topic_name\n");
+            out.push_str("        self._msg_type = msg_type\n");
+            out.push_str("        self._sub = None\n\n");
+            out.push_str("    def start(self, callback):\n");
+            out.push_str("        \"\"\"Start subscribing and dispatch messages to callback(msg).\n");
+            out.push_str("\n");
+            out.push_str("        Default implementation is abstract; override in subclass.\n");
+            out.push_str("        \"\"\"\n");
+            out.push_str("        raise NotImplementedError('override start() in subclass')\n\n");
         }
         StreamDirection::Input => {
             out.push_str(&format!("class {}Subscriber(Node):\n", pascal(&s.name)));
@@ -1384,10 +1430,32 @@ fn emit_stream_python(out_dir: &Path, s: &StreamDef, namespace: Option<&str>) ->
             out.push_str("        rclpy.init()\n");
             out.push_str(&format!("    return Ros2{}Publisher(runtime_client, node_id)\n\n", pascal(&s.name)));
 
+            out.push_str(&format!("class Ros2{}Subscriber({}Subscriber):\n", pascal(&s.name), pascal(&s.name)));
+            out.push_str("    \"\"\"Concrete ROS2 stream subscriber with automatic runtime resolution.\"\"\"\n\n");
+            out.push_str("    def __init__(self, runtime_client, requester_id: str, target: str):\n");
+            out.push_str(&format!("        topic_name = resolve_{}_consumer_topic(runtime_client, requester_id, target)\n", s.name));
+            out.push_str(&format!("        msg_type = _load_{}_msg_type()\n", s.name));
+            out.push_str("        super().__init__(topic_name, msg_type)\n");
+            out.push_str("        self._runtime_client = runtime_client\n");
+            out.push_str("        self._requester_id = requester_id\n");
+            out.push_str("        self._target = target\n\n");
+            out.push_str("    def start(self, callback):\n");
+            out.push_str("        if self._sub is None:\n");
+            out.push_str("            self._sub = self.create_subscription(self._msg_type, self._topic, callback, QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10))\n");
+            out.push_str("        return self._sub\n\n");
+
+            out.push_str(&format!("def create_{}_subscriber(runtime_client, requester_id: str, target: str, init_rclpy: bool = True):\n", s.name));
+            out.push_str("    if init_rclpy and not rclpy.ok():\n");
+            out.push_str("        rclpy.init()\n");
+            out.push_str(&format!("    return Ros2{}Subscriber(runtime_client, requester_id, target)\n\n", pascal(&s.name)));
+
             vec![
                 format!("{}Publisher", pascal(&s.name)),
                 format!("Ros2{}Publisher", pascal(&s.name)),
                 format!("create_{}_publisher", s.name),
+                format!("{}Subscriber", pascal(&s.name)),
+                format!("Ros2{}Subscriber", pascal(&s.name)),
+                format!("create_{}_subscriber", s.name),
             ]
         }
         StreamDirection::Input => {

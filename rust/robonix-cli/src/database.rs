@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::manifest::ManifestKind;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageInfo {
     pub name: String,
@@ -15,11 +17,19 @@ pub struct PackageInfo {
     pub path: PathBuf,
     pub manifest_path: PathBuf,
     #[serde(default)]
+    pub manifest_kind: ManifestKind,
+    #[serde(default)]
     pub primitives: Vec<String>, // List of primitive names
     #[serde(default)]
     pub services: Vec<String>, // List of service names
     #[serde(default)]
     pub skills: Vec<String>, // List of skill names
+    #[serde(default)]
+    pub provided_interfaces: Vec<String>,
+    #[serde(default)]
+    pub consumed_interfaces: Vec<String>,
+    #[serde(default, alias = "components")]
+    pub nodes: Vec<String>,
     pub installed_at: String, // ISO 8601 timestamp
     pub source: PackageSource,
 }
@@ -160,7 +170,13 @@ impl PackageDatabase {
                 }
 
                 // Check if this directory contains a manifest
-                let manifest_path = path.join("rbnx_manifest.yaml");
+                let manifest_path = match crate::manifest::detect_manifest_path(&path) {
+                    Ok(path) => path,
+                    Err(_) => {
+                        continue;
+                    }
+                };
+
                 if !manifest_path.exists() {
                     continue;
                 }
@@ -184,11 +200,25 @@ impl PackageDatabase {
                             PackageSource::Local { path: path.clone() }
                         };
 
+                        let summary = match crate::manifest::load_from_path(&manifest_path)
+                            .and_then(|manifest| manifest.validate_and_summarize())
+                        {
+                            Ok(summary) => summary,
+                            Err(e) => {
+                                log::warn!(
+                                    "Failed to parse manifest for package at {}: {}",
+                                    path.display(),
+                                    e
+                                );
+                                continue;
+                            }
+                        };
+
                         // Create or update package info
                         match PackageInstaller::create_package_info(
-                            &package_name,
                             &path,
                             &manifest_path,
+                            &summary,
                             source,
                         ) {
                             Ok(package_info) => {
@@ -196,7 +226,7 @@ impl PackageDatabase {
                             }
                             Err(e) => {
                                 log::warn!(
-                                    "Failed to parse manifest for package at {}: {}",
+                                    "Failed to create package info for package at {}: {}",
                                     path.display(),
                                     e
                                 );

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::fs::OpenOptions;
-use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 /// Information about a running process for a capability or skill
@@ -198,268 +198,72 @@ impl ProcessManager {
         &self.hostname
     }
 
-    /// Start a process for a capability or skill
+    /// Start a process; blocks until it exits. Output goes to terminal (no log file for now).
     pub async fn start_process(
         &self,
-        package_name: &str,
+        _package_name: &str,
         std_name: &str,
         package_type: &str,
         package_path: &Path,
         start_script: &str,
-        robonix_sdk_path: Option<&PathBuf>,
     ) -> Result<ProcessStartResult> {
         let key = format!("{}::{}", package_type, std_name);
-
-        // Check if already running
         {
             let processes = self.processes.lock().unwrap();
             if let Some(existing) = processes.get(&key) {
                 log::warn!("Process for {} already running, skipping", key);
-                // Return existing process info
                 #[cfg(unix)]
                 let (pgid, pids) = {
                     if let Ok(pgid) = Self::get_process_group_id(existing.pid) {
-                        let pids = Self::get_processes_in_group(pgid).ok();
-                        (Some(pgid), pids)
+                        (Some(pgid), Self::get_processes_in_group(pgid).ok())
                     } else {
                         (None, None)
                     }
                 };
                 #[cfg(not(unix))]
                 let (pgid, pids) = (None, None);
-                return Ok(ProcessStartResult {
-                    pid: existing.pid,
-                    pgid,
-                    pids,
-                });
+                return Ok(ProcessStartResult { pid: existing.pid, pgid, pids });
             }
         }
 
-        // start_script is run as a full shell command (any command); cwd is package_path
         let start_script = start_script.trim();
         if start_script.is_empty() {
             anyhow::bail!("start_script is empty");
         }
 
-        // Create log file path with simplified naming
-        // Format: {package_name}_{name}.log
-        // e.g., tiago_demo_package_camera_capture.log
-        let clean_name = std_name.replace("::", "_").replace(".", "_");
-
-        let log_filename = format!("{}_{}.log", package_name, clean_name);
-        let log_file = self.log_dir.join(&log_filename);
-
-        // Open log file for writing
-        let log_file_handle = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_file)
-            .await
-            .with_context(|| format!("Failed to open log file: {}", log_file.display()))?;
-
-        let mut log_writer = BufWriter::new(log_file_handle);
-
-        // Write header to log
-        let header = format!(
-            "=== Started {} {} at {} ===\n",
-            package_type,
-            std_name,
-            chrono::Utc::now().to_rfc3339()
-        );
-        log_writer.write_all(header.as_bytes()).await?;
-        log_writer.flush().await?;
-
-        // Start the process: run start_script as a shell command (sh -c "...")
-        log::info!("Starting process: {} (command: {})", key, start_script);
-
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(start_script);
-        cmd.current_dir(package_path);
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-
-        // Set PYTHONUNBUFFERED=1 to disable Python output buffering
-        // This ensures logs are written immediately
-        cmd.env("PYTHONUNBUFFERED", "1");
-
-        // Force FastDDS for all started processes
-        cmd.env("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp");
-
-        // Set ROBONIX_SDK_PATH from config or environment variable
-        if std::env::var("ROBONIX_SDK_PATH").is_err() {
-            if let Some(config_path) = robonix_sdk_path {
-                cmd.env("ROBONIX_SDK_PATH", config_path);
-            }
-        }
-
-        // Create process in new process group for isolation
         #[cfg(unix)]
-        {
-            use nix::unistd::setsid;
-            // Use pre_exec to create new session/process group before exec
-            unsafe {
-                cmd.pre_exec(|| {
-                    // Create new session (which also creates new process group)
-                    // This ensures all child processes are in the same group
-                    setsid().map_err(|e| {
-                        // Convert nix error to io::Error
-                        std::io::Error::from_raw_os_error(e as i32)
-                    })?;
-                    Ok(())
-                });
-            }
+        let mut cmd = Command::new("bash");
+        #[cfg(unix)]
+        cmd.arg("-lc").arg(start_script);
+        #[cfg(not(unix))]
+        let mut cmd = Command::new("sh");
+        #[cfg(not(unix))]
+        cmd.arg("-lc").arg(start_script);
+
+        cmd.current_dir(package_path)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .env("PYTHONUNBUFFERED", "1");
+
+        let mut child = cmd.spawn().with_context(|| format!("Failed to start: {}", start_script))?;
+        let pid = child.id().ok_or_else(|| anyhow::anyhow!("Failed to get process ID"))?;
+        log::info!("Running {} (PID {})", key, pid);
+
+        let status = child.wait().await.with_context(|| "Failed to wait for process")?;
+        if !status.success() {
+            anyhow::bail!("Process exited with {}", status);
         }
 
-        let mut child = cmd
-            .spawn()
-            .with_context(|| format!("Failed to start command: {}", start_script))?;
-
-        // Spawn tasks to capture output and write to log
-        // Use separate file handles for stdout and stderr to avoid synchronization issues
-        let log_file_stdout = log_file.clone();
-        let log_file_stderr = log_file.clone();
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        // Capture stdout (line-by-line for better reliability)
-        if let Some(stdout) = stdout {
-            tokio::spawn(async move {
-                if let Ok(mut file) = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&log_file_stdout)
-                    .await
-                {
-                    use tokio::io::{AsyncBufReadExt, BufReader};
-                    let reader = BufReader::new(stdout);
-                    let mut lines = reader.lines();
-
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        if let Err(e) = file.write_all(line.as_bytes()).await {
-                            log::error!("Failed to write stdout to log: {}", e);
-                            break;
-                        }
-                        if let Err(e) = file.write_all(b"\n").await {
-                            log::error!("Failed to write newline: {}", e);
-                            break;
-                        }
-                        // Flush after each line to ensure immediate persistence
-                        if let Err(e) = file.flush().await {
-                            log::error!("Failed to flush stdout log: {}", e);
-                            break;
-                        }
-                    }
-                }
-            });
-        }
-
-        // Capture stderr with prefix (line-by-line for proper prefix placement)
-        if let Some(stderr) = stderr {
-            tokio::spawn(async move {
-                if let Ok(mut file) = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&log_file_stderr)
-                    .await
-                {
-                    use tokio::io::{AsyncBufReadExt, BufReader};
-                    let reader = BufReader::new(stderr);
-                    let mut lines = reader.lines();
-                    let mut is_new_line = true;
-
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        // Add prefix only at the start of each line
-                        if is_new_line {
-                            if let Err(e) = file.write_all(b"[STDERR] ").await {
-                                log::error!("Failed to write stderr prefix: {}", e);
-                                break;
-                            }
-                        }
-                        if let Err(e) = file.write_all(line.as_bytes()).await {
-                            log::error!("Failed to write stderr to log: {}", e);
-                            break;
-                        }
-                        if let Err(e) = file.write_all(b"\n").await {
-                            log::error!("Failed to write newline: {}", e);
-                            break;
-                        }
-                        if let Err(e) = file.flush().await {
-                            log::error!("Failed to flush stderr log: {}", e);
-                            break;
-                        }
-                        is_new_line = true;
-                    }
-                }
-            });
-        }
-
-        // Wait a bit to check if process started successfully and let initial output be captured
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
-        // Check if process is still running
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                // Process exited, wait a bit more for log capture to finish
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-                // Read and print last part of log file for debugging
-                let log_tail = Self::read_log_tail(&log_file, 20).unwrap_or_default();
-
-                anyhow::bail!(
-                    "Process exited immediately with status: {:?}.\nLog file: {}\nLast log lines:\n{}",
-                    status,
-                    log_file.display(),
-                    log_tail
-                );
-            }
-            Ok(None) => {
-                // Process is still running, good
-                log::info!("Process started successfully: {}", key);
-            }
-            Err(e) => {
-                anyhow::bail!("Failed to check process status: {}", e);
-            }
-        }
-
-        // Get PID and detach the child (let it run independently)
-        let pid = child
-            .id()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get process ID"))?;
-
-        // Detach the child - it will continue running even if we drop the handle
-        // We'll manage it by PID
-        drop(child);
-
-        // Get process group information for return value
         #[cfg(unix)]
         let (pgid, pids) = {
             if let Ok(pgid) = Self::get_process_group_id(pid) {
-                let pids = Self::get_processes_in_group(pgid).ok();
-                (Some(pgid), pids)
+                (Some(pgid), Self::get_processes_in_group(pgid).ok())
             } else {
                 (None, None)
             }
         };
         #[cfg(not(unix))]
         let (pgid, pids) = (None, None);
-
-        // Store process info
-        let process_info = ProcessInfo {
-            package_name: package_name.to_string(),
-            std_name: std_name.to_string(),
-            package_type: package_type.to_string(),
-            pid,
-            log_file,
-            hostname: self.hostname.clone(),
-        };
-
-        {
-            let mut processes = self.processes.lock().unwrap();
-            processes.insert(key, process_info.clone());
-        }
-
-        // Save state to persistent storage
-        self.save_state()?;
 
         Ok(ProcessStartResult { pid, pgid, pids })
     }
@@ -495,35 +299,6 @@ impl ProcessManager {
         }
 
         false
-    }
-
-    /// Read last N lines from a log file
-    fn read_log_tail(log_file: &Path, lines: usize) -> Result<String> {
-        use std::fs::File;
-        use std::io::{BufRead, BufReader};
-
-        if !log_file.exists() {
-            return Ok(format!("Log file does not exist: {}", log_file.display()));
-        }
-
-        let file = File::open(log_file)
-            .with_context(|| format!("Failed to open log file: {}", log_file.display()))?;
-
-        let reader = BufReader::new(file);
-        let all_lines: Vec<String> = reader
-            .lines()
-            .collect::<Result<Vec<_>, _>>()
-            .with_context(|| format!("Failed to read log file: {}", log_file.display()))?;
-
-        // Get last N lines
-        let start = if all_lines.len() > lines {
-            all_lines.len() - lines
-        } else {
-            0
-        };
-
-        let tail_lines = &all_lines[start..];
-        Ok(tail_lines.join("\n"))
     }
 
     /// Kill a process group (more efficient than killing individual processes)
@@ -911,6 +686,26 @@ impl ProcessManager {
         }
 
         Ok(())
+    }
+
+    /// Stop all processes for a given package name
+    pub async fn stop_by_package(&self, package_name: &str) -> Result<Vec<String>> {
+        let to_stop: Vec<(String, String)> = {
+            let processes = self.processes.lock().unwrap();
+            processes
+                .values()
+                .filter(|p| p.package_name == package_name)
+                .map(|p| (p.std_name.clone(), p.package_type.clone()))
+                .collect()
+        };
+
+        let mut stopped = Vec::new();
+        for (std_name, package_type) in to_stop {
+            if self.stop_process(&std_name, &package_type).await.is_ok() {
+                stopped.push(std_name);
+            }
+        }
+        Ok(stopped)
     }
 }
 

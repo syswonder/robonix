@@ -1,7 +1,0 @@
-# QuerySemanticMap service (robonix spec)
-# Semantic map service builds object-level representation on top of spatial map
-string[] types             # Filter by object type, e.g., ["room","window","robot"]
----
-robonix_sdk/Object[] objects
-builtin_interfaces/Time stamp
-

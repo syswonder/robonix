@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# List runtime nodes and channels via robonix-server meta API.
+# Usage: ./list_interfaces [endpoint]
+#   endpoint defaults to 127.0.0.1:50051 or ROBONIX_META_GRPC_ENDPOINT
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUST_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+PYTHON_PKG="$RUST_DIR/robonix-server/target/rclrs_interfaces_ws/python_pkg"
+interface="${1:-${ROBONIX_META_GRPC_ENDPOINT:-127.0.0.1:50051}}"
+
+PYTHONPATH="$PYTHON_PKG${PYTHONPATH:+:$PYTHONPATH}" python3 - "$interface" <<'PY'
+import json
+import os
+import sys
+import time
+from collections import defaultdict
+
+import grpc
+from robonix_runtime_pb2 import InspectRuntimeRequest
+from robonix_runtime_pb2_grpc import RobonixRuntimeStub
+
+
+def to_ridl_name(namespace: str, name: str) -> str:
+    if namespace and name:
+        return f"{namespace}/{name}.ridl"
+    if namespace:
+        return f"{namespace}.ridl"
+    if name:
+        return f"{name}.ridl"
+    return "<unknown>.ridl"
+
+
+def parse_declared_capability(raw: str, registered_kind_by_interface):
+    if ":" in raw:
+        direction, interface_id = raw.split(":", 1)
+    else:
+        direction, interface_id = "declare", raw
+    kind = registered_kind_by_interface.get(interface_id, "unknown")
+    ridl_name = "<unknown>.ridl"
+    if interface_id:
+        ridl_name = f"{interface_id}.ridl"
+    return direction, kind, ridl_name
+
+
+interface = sys.argv[1]
+channel = grpc.insecure_channel(interface)
+client = RobonixRuntimeStub(channel)
+
+deadline = time.time() + 15
+snapshot = None
+last_error = None
+while time.time() < deadline:
+    try:
+        response = client.InspectRuntime(InspectRuntimeRequest(), timeout=2.0)
+        snapshot = json.loads(response.json)
+        if snapshot.get("nodes") or snapshot.get("channels"):
+            break
+    except Exception as exc:
+        last_error = exc
+    time.sleep(0.3)
+
+if snapshot is None:
+    raise SystemExit(f"failed to inspect runtime via meta api: {last_error}")
+
+nodes = sorted(snapshot.get("nodes", []), key=lambda item: item.get("node_id", ""))
+channels = sorted(snapshot.get("channels", []), key=lambda item: (item.get("provider_node_id", ""), item.get("namespace", ""), item.get("name", "")))
+links = sorted(snapshot.get("links", []), key=lambda item: (item.get("requester_id", ""), item.get("namespace", ""), item.get("name", "")))
+show_raw = os.environ.get("ROBONIX_INSPECT_RAW", "0") == "1"
+
+query_count = sum(1 for entry in channels if entry.get("kind") == "query")
+command_count = sum(1 for entry in channels if entry.get("kind") == "command")
+stream_count = sum(1 for entry in channels if entry.get("kind") == "stream")
+
+channels_by_provider = defaultdict(list)
+registered_kind_by_interface = {}
+for entry in channels:
+    channels_by_provider[entry.get("provider_node_id", "")].append(entry)
+    namespace = entry.get("namespace", "")
+    name = entry.get("name", "")
+    if namespace and name:
+        registered_kind_by_interface[f"{namespace}/{name}"] = entry.get("kind", "unknown")
+
+print(f"runtime nodes: interface={interface}", flush=True)
+print(
+    f"{len(nodes)} nodes, {query_count} query, {command_count} command, {stream_count} stream",
+    flush=True,
+)
+print("", flush=True)
+print(f"Found {len(nodes)} nodes:", flush=True)
+for index, node in enumerate(nodes):
+    node_id = node.get("node_id", "")
+    namespaces = node.get("ridl_namespaces") or []
+    declared_capabilities = node.get("capabilities") or []
+    print(f"{index:>2}  {node_id}", flush=True)
+    print(f"    namespaces: {', '.join(namespaces) if namespaces else '-'}", flush=True)
+
+    registered_channels = channels_by_provider.get(node_id, [])
+    if registered_channels:
+        print("    registered:", flush=True)
+        for entry in registered_channels:
+            print(
+                "      - "
+                f"{entry.get('kind', 'unknown'):7} "
+                f"{to_ridl_name(entry.get('namespace', ''), entry.get('name', ''))} "
+                f"channel={entry.get('channel_name', '')}",
+                flush=True,
+            )
+    else:
+        print("    registered: -", flush=True)
+
+    if declared_capabilities:
+        print("    declared:", flush=True)
+        for capability in declared_capabilities:
+            direction, kind, ridl_name = parse_declared_capability(capability, registered_kind_by_interface)
+            print(
+                "      - "
+                f"{direction:7} "
+                f"{kind:7} "
+                f"{ridl_name}",
+                flush=True,
+            )
+    else:
+        print("    declared: -", flush=True)
+
+print("", flush=True)
+print(f"Resolved links: {len(links)}", flush=True)
+if links:
+    for index, link in enumerate(links):
+        print(
+            f"{index:>2}  "
+            f"{link.get('kind', 'unknown'):7} "
+            f"{to_ridl_name(link.get('namespace', ''), link.get('name', ''))} "
+            f"requester={link.get('requester_id', '')} "
+            f"provider={link.get('provider_node_id', '')} "
+            f"channel={link.get('channel_name', '')}",
+            flush=True,
+        )
+else:
+    print("  (none)", flush=True)
+
+if show_raw:
+    print("", flush=True)
+    print("Raw snapshot JSON:", flush=True)
+    print(json.dumps(snapshot, indent=2, ensure_ascii=False), flush=True)
+PY

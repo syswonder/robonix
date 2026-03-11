@@ -28,3 +28,5 @@ target
 stress_test
 .robonix
 rust/debug
+.artifacts/
+rbnx-deploy

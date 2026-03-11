@@ -149,7 +149,7 @@ def diff_blocks(
 
 # --- Main flow: scan repos, align by distro, progressive comparison, one table ---
 
-# Chronological distro order (release date): older → newer. Comparison is progressive (each vs next).
+# Chronological distro order (release date): older -> newer. Comparison is progressive (each vs next).
 # See README for full distro table. Foxy was the LTS before Humble (most-used pre-Humble).
 DISTRO_CHRONOLOGICAL_ORDER = [
     "foxy",     # June 2020, LTS to June 2023 (most-used before Humble)
@@ -175,7 +175,7 @@ def _describe_diff(delta: dict[str, Any]) -> list[str]:
         for x in block.get("removed", []):
             parts.append(f"- `{block_name}`: `{x['type']}` `{x['name']}`")
         for x in block.get("type_changed", []):
-            parts.append(f"~ `{x['name']}`: `{x['from']}` → `{x['to']}`")
+            parts.append(f"~ `{x['name']}`: `{x['from']}` -> `{x['to']}`")
     return parts
 
 
@@ -258,18 +258,18 @@ def run_analysis(repos_root: Path, distros: list[str] | None = None) -> tuple[di
             if va is None and vb is None:
                 continue
             if va is None:
-                change_parts.append(f"`{old_d}`→`{new_d}`: only in `{new_d}`")
+                change_parts.append(f"`{old_d}`->`{new_d}`: only in `{new_d}`")
                 summary["per_repo"][repo]["with_progressive_diff"] += 1
                 continue
             if vb is None:
-                change_parts.append(f"`{old_d}`→`{new_d}`: only in `{old_d}`")
+                change_parts.append(f"`{old_d}`->`{new_d}`: only in `{old_d}`")
                 summary["per_repo"][repo]["with_progressive_diff"] += 1
                 continue
             delta = diff_blocks(va, vb)
             if not delta["identical"]:
                 summary["per_repo"][repo]["with_progressive_diff"] += 1
                 desc = _describe_diff(delta)
-                change_parts.append(f"`{old_d}`→`{new_d}`: " + "; ".join(desc[:5]) + (" …" if len(desc) > 5 else ""))
+                change_parts.append(f"`{old_d}`->`{new_d}`: " + "; ".join(desc[:5]) + (" …" if len(desc) > 5 else ""))
 
         rows.append({
             "interface": f"{repo}/{key}",
@@ -289,7 +289,7 @@ def write_md_report(summary: dict, rows: list[dict[str, Any]], out_path: Path) -
     lines = [
         "# ROS 2 IDL diff report (progressive by distro order)",
         "",
-        "Distros are compared in **chronological release order** (each vs next): " + " → ".join(f"`{d}`" for d in ordered) + ".",
+        "Distros are compared in **chronological release order** (each vs next): " + " -> ".join(f"`{d}`" for d in ordered) + ".",
         "",
         "## Summary",
         f"- Repos: {', '.join(f'`{r}`' for r in summary.get('repos', []))}",
@@ -302,7 +302,7 @@ def write_md_report(summary: dict, rows: list[dict[str, Any]], out_path: Path) -
         "|--------|--------|",
         "| **Interfaces** | Number of distinct definitions (e.g. `std_msgs/msg/Header` = 1). Same definition in several distros still counts as 1. |",
         "| **Only in some distros** | Among the distros **fetched for this repo**, how many definitions exist in only part of them. For repos with fewer distros (e.g. only humble+jazzy), only those count—not the full list. |",
-        "| **Changed at some step** | Count of *steps* where a definition differs (each foxy→humble, humble→jazzy, jazzy→rolling). One interface can contribute more than once if it changes in multiple steps; so this number can be larger than Interfaces. |",
+        "| **Changed at some step** | Count of *steps* where a definition differs (each foxy->humble, humble->jazzy, jazzy->rolling). One interface can contribute more than once if it changes in multiple steps; so this number can be larger than Interfaces. |",
         "",
         "| Repo | Interfaces | Only in some distros | Changed at some step |",
         "|------|------------|----------------------|----------------------|",

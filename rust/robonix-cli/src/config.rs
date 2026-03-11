@@ -11,8 +11,6 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub package_storage_path: PathBuf,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub robonix_sdk_path: Option<PathBuf>,
     /// Node identifier (e.g. hostname) for capabilities registered by this CLI; shown in core web UI.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
@@ -73,7 +71,6 @@ impl Config {
 
         Self {
             package_storage_path: default_path,
-            robonix_sdk_path: None,
             node_id: None,
             core_http_url: None,
         }

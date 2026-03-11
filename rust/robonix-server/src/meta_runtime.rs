@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Robonix runtime meta API (gRPC)
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::info;
+use serde_json::json;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -27,6 +28,14 @@ impl CapabilityKind {
             CapabilityKind::Stream => "s",
             CapabilityKind::Command => "c",
             CapabilityKind::Query => "q",
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            CapabilityKind::Stream => "stream",
+            CapabilityKind::Command => "command",
+            CapabilityKind::Query => "query",
         }
     }
 }
@@ -193,10 +202,26 @@ impl MetaRuntimeRegistry {
 
         let mut inner = self.inner.write().await;
         if let Some(existing) = inner.channels.get(&key) {
+            info!(
+                "meta-runtime: reused {:?} channel '{}' for provider='{}' namespace='{}' name='{}'",
+                kind,
+                existing.channel_name,
+                node_id,
+                namespace,
+                name
+            );
             return existing.channel_name.clone();
         }
 
         let channel_name = self.allocate_channel_name(kind);
+        info!(
+            "meta-runtime: allocated {:?} channel '{}' for provider='{}' namespace='{}' name='{}'",
+            kind,
+            channel_name,
+            node_id,
+            namespace,
+            name
+        );
         inner.channels.insert(
             key,
             ChannelRecord {
@@ -256,8 +281,103 @@ impl MetaRuntimeRegistry {
             channel_name: selected.channel_name.clone(),
             created_at_ms: Self::now_ms(),
         });
+        info!(
+            "meta-runtime: resolved {:?} channel '{}' for requester='{}' target='{}' provider='{}' namespace='{}' name='{}'",
+            kind,
+            selected.channel_name,
+            inner.links.last().map(|l| l.requester_id.as_str()).unwrap_or_default(),
+            inner.links.last().map(|l| l.target.as_str()).unwrap_or_default(),
+            selected.provider_node_id,
+            selected.namespace,
+            selected.name
+        );
 
         Ok(selected.channel_name)
+    }
+
+    async fn inspect_runtime_json(&self) -> Result<String> {
+        let inner = self.inner.read().await;
+
+        let mut nodes = inner
+            .nodes
+            .values()
+            .map(|node| {
+                json!({
+                    "node_id": node.node_id,
+                    "ridl_namespaces": node.ridl_namespaces,
+                    "capabilities": node.capabilities,
+                    "updated_at_ms": node.updated_at_ms.to_string(),
+                })
+            })
+            .collect::<Vec<_>>();
+        nodes.sort_by(|a, b| {
+            a.get("node_id")
+                .and_then(serde_json::Value::as_str)
+                .cmp(&b.get("node_id").and_then(serde_json::Value::as_str))
+        });
+
+        let mut channels = inner
+            .channels
+            .values()
+            .map(|channel| {
+                json!({
+                    "channel_name": channel.channel_name,
+                    "kind": channel.kind.as_str(),
+                    "namespace": channel.namespace,
+                    "name": channel.name,
+                    "provider_node_id": channel.provider_node_id,
+                    "created_at_ms": channel.created_at_ms.to_string(),
+                })
+            })
+            .collect::<Vec<_>>();
+        channels.sort_by(|a, b| {
+            a.get("channel_name")
+                .and_then(serde_json::Value::as_str)
+                .cmp(&b.get("channel_name").and_then(serde_json::Value::as_str))
+        });
+
+        let mut links = inner
+            .links
+            .iter()
+            .map(|link| {
+                json!({
+                    "requester_id": link.requester_id,
+                    "target": link.target,
+                    "provider_node_id": link.provider_node_id,
+                    "kind": link.kind.as_str(),
+                    "namespace": link.namespace,
+                    "name": link.name,
+                    "channel_name": link.channel_name,
+                    "created_at_ms": link.created_at_ms.to_string(),
+                })
+            })
+            .collect::<Vec<_>>();
+        links.sort_by(|a, b| {
+            let a_key = (
+                a.get("requester_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+                a.get("channel_name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+            );
+            let b_key = (
+                b.get("requester_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+                b.get("channel_name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+            );
+            a_key.cmp(&b_key)
+        });
+
+        serde_json::to_string_pretty(&json!({
+            "nodes": nodes,
+            "channels": channels,
+            "links": links,
+        }))
+        .context("failed to serialize runtime snapshot")
     }
 }
 
@@ -436,6 +556,18 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
             )
             .await?;
         Ok(Response::new(pb::ResolveQueryResponse { channel_name }))
+    }
+
+    async fn inspect_runtime(
+        &self,
+        _request: Request<pb::InspectRuntimeRequest>,
+    ) -> Result<Response<pb::InspectRuntimeResponse>, Status> {
+        let json = self
+            .registry
+            .inspect_runtime_json()
+            .await
+            .map_err(|err| Status::internal(format!("failed to inspect runtime: {err:#}")))?;
+        Ok(Response::new(pb::InspectRuntimeResponse { json }))
     }
 }
 

@@ -90,6 +90,14 @@ message ResolveQueryResponse {
   string channel_name = 1;
 }
 
+// --- Runtime inspection (read-only snapshot) ---
+
+message InspectRuntimeRequest {}
+
+message InspectRuntimeResponse {
+  string json = 1;
+}
+
 // --- Service definition ---
 
 service RobonixRuntime {
@@ -100,4 +108,5 @@ service RobonixRuntime {
   rpc ResolveStream(ResolveStreamRequest) returns (ResolveStreamResponse);
   rpc ResolveCommand(ResolveCommandRequest) returns (ResolveCommandResponse);
   rpc ResolveQuery(ResolveQueryRequest) returns (ResolveQueryResponse);
+  rpc InspectRuntime(InspectRuntimeRequest) returns (InspectRuntimeResponse);
 }

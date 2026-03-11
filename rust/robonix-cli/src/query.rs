@@ -30,9 +30,16 @@ impl PackageQuery {
 
         println!("Package: {}", pkg.name);
         println!("Version: {}", pkg.version);
+        println!("Manifest kind: {}", pkg.manifest_kind.label());
         println!("Path: {}", pkg.path.display());
         println!("Installed at: {}", pkg.installed_at);
         println!("Source: {:?}", pkg.source);
+        if !pkg.nodes.is_empty() {
+            println!("\nNodes:");
+            for node in &pkg.nodes {
+                println!("  - {}", node);
+            }
+        }
         println!("\nPrimitives:");
         for prm in &pkg.primitives {
             println!("  - {}", prm);
@@ -44,6 +51,18 @@ impl PackageQuery {
         println!("\nSkills:");
         for skill in &pkg.skills {
             println!("  - {}", skill);
+        }
+        if !pkg.provided_interfaces.is_empty() {
+            println!("\nProvided interfaces:");
+            for interface_id in &pkg.provided_interfaces {
+                println!("  - {}", interface_id);
+            }
+        }
+        if !pkg.consumed_interfaces.is_empty() {
+            println!("\nConsumed interfaces:");
+            for interface_id in &pkg.consumed_interfaces {
+                println!("  - {}", interface_id);
+            }
         }
 
         Ok(())

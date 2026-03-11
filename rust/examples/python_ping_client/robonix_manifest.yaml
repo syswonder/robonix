@@ -1,0 +1,15 @@
+# 最小 manifest 示例（核心：版本 + 启动入口）
+manifestVersion: 1
+
+package:
+  id: com.robonix.example.ping_client
+  name: python_ping_client
+  version: 0.1.0
+  vendor: robonix
+  description: Python client for testing robonix/system/debug/ping
+  license: MulanPSL-2.0
+
+nodes:
+  - id: call_ping
+    type: python
+    entry: python_ping_client.call_ping:main

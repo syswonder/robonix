@@ -26,6 +26,7 @@ pub enum Interface {
 #[derive(Clone, Debug)]
 pub struct StreamDef {
     pub name: String,
+    pub annotations: Vec<Annotation>,
     pub fields: Vec<StreamField>,
     pub version: Option<String>,
 }
@@ -41,11 +42,19 @@ pub struct StreamField {
     pub direction: StreamDirection,
     pub name: String,
     pub type_ref: String,
+    pub annotations: Vec<Annotation>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Annotation {
+    pub key: String,
+    pub value: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 pub struct CommandDef {
     pub name: String,
+    pub annotations: Vec<Annotation>,
     pub input: Option<CommandField>,
     pub output: Option<CommandField>,
     pub result: Option<CommandField>,
@@ -57,6 +66,7 @@ pub struct CommandDef {
 pub struct CommandField {
     pub name: String,
     pub type_ref: String,
+    pub annotations: Vec<Annotation>,
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +79,7 @@ pub struct SafetyItem {
 #[derive(Clone, Debug)]
 pub struct QueryDef {
     pub name: String,
+    pub annotations: Vec<Annotation>,
     pub request: QueryField,
     pub response: QueryField,
     pub version: Option<String>,
@@ -78,11 +89,13 @@ pub struct QueryDef {
 pub struct QueryField {
     pub name: String,
     pub type_ref: String,
+    pub annotations: Vec<Annotation>,
 }
 
 #[derive(Clone, Debug)]
 pub struct EventDef {
     pub name: String,
+    pub annotations: Vec<Annotation>,
     pub payload: EventPayload,
     pub version: Option<String>,
 }
@@ -91,6 +104,7 @@ pub struct EventDef {
 pub struct EventPayload {
     pub name: String,
     pub type_ref: String,
+    pub annotations: Vec<Annotation>,
 }
 
 impl File {

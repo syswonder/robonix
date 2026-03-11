@@ -2,6 +2,17 @@
 
 SPDX-License-Identifier: MulanPSL-2.0
 
+## Status
+
+This package belongs to the older provider stack and still depends on
+`robonix_sdk` service and message definitions.
+
+It is not yet aligned with the new RIDL-first interface architecture under
+`robonix-interfaces/ridl/*`.
+
+Use this package as a legacy example only until its service contracts are
+migrated to RIDL plus `robonix-interfaces/lib/*` message packages.
+
 This package provides demo implementations of Robonix services:
 - **semantic_map**: Provides object-level representation of the environment using front camera and Qwen3-VL VLM
 - **task_plan**: Converts natural language task descriptions to RTDL code using Qwen LLM (DashScope)
@@ -83,7 +94,7 @@ rbnx deploy build
 The package requires the following Python packages (automatically installed via setup.py):
 - `python-dotenv`: For loading environment variables from .env file
 - `openai`: For Qwen/DashScope API clients (OpenAI-compatible)
-- `robonix_sdk`: For querying primitives from Robonix OS (use `from robonix_sdk.client import RobonixClient`)
+- `robonix_sdk`: legacy provider dependency for querying primitives from Robonix OS
 - `cv-bridge`: For converting ROS images to OpenCV format
 - `numpy`: For numerical operations
 - `Pillow`: For image processing
@@ -151,7 +162,7 @@ The task plan service generates RTDL code in JSON format:
 ### Service Not Starting
 
 1. Ensure ROS2 is properly sourced: `source /opt/ros/humble/setup.bash`
-2. Check that robonix-sdk is built and sourced
+2. Check that the legacy `robonix-sdk` package is built and sourced
 3. Verify Python dependencies are installed
 4. Check service logs in `rbnx/` directory
 

@@ -1,0 +1,14 @@
+namespace robonix/hal/camera
+
+import sensor_msgs/msg/Image
+import sensor_msgs/msg/CameraInfo
+
+stream image {
+    output frame sensor_msgs/msg/Image
+    version 1.0;
+}
+
+stream image_info {
+    output info sensor_msgs/msg/CameraInfo
+    version 1.0;
+}
