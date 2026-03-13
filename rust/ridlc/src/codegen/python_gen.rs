@@ -9,6 +9,7 @@ use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
 use crate::ast::{CommandDef, EventDef, File, Interface, QueryDef, StreamDef, StreamDirection};
+use crate::codegen::err::RIDLC_ERR_PREFIX;
 
 fn ridlc_prefix() -> &'static str {
     if io::stderr().is_terminal() {
@@ -1430,7 +1431,8 @@ fn emit_stream_python(
     let ns_literal = namespace.unwrap_or("robonix/unknown");
     if s.fields.len() != 1 {
         bail!(
-            "stream '{}' must declare exactly one input/output field, found {}",
+            "{} stream '{}' must declare exactly one input/output field, found {}",
+            RIDLC_ERR_PREFIX,
             s.name,
             s.fields.len()
         );

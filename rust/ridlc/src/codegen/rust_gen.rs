@@ -10,6 +10,13 @@ use std::path::{Path, PathBuf};
 
 const RUNTIME_CRATE_ROOT: &str = "robonix_server";
 
+/// Full ROS message type format: package/msg/Name (e.g. std_msgs/msg/Float64)
+fn ros_msg_type_fmt(package: &str, name: &str) -> String {
+    format!("{package}/msg/{name}")
+}
+
+use crate::codegen::err::RIDLC_ERR_PREFIX;
+
 #[derive(Clone, Debug)]
 struct MsgField {
     name: String,
@@ -30,9 +37,19 @@ struct MsgSpec {
     fields: Vec<MsgField>,
 }
 
+/// Context for error reporting when resolving a type from RIDL
+#[derive(Clone, Debug, Default)]
+struct ResolveContext {
+    namespace: Option<String>,
+    interface_kind: Option<&'static str>,
+    interface_name: Option<String>,
+    field_name: Option<String>,
+}
+
 struct MsgResolver {
     index: HashMap<(String, String), PathBuf>,
     cache: HashMap<(String, String), MsgSpec>,
+    include_paths: Vec<PathBuf>,
 }
 
 impl MsgResolver {
@@ -44,31 +61,49 @@ impl MsgResolver {
         Ok(Self {
             index,
             cache: HashMap::new(),
+            include_paths: include_paths.to_vec(),
         })
     }
 
-    fn resolve_ridl_type(&mut self, type_ref: &str) -> Result<()> {
+    fn resolve_ridl_type(&mut self, type_ref: &str, ctx: &ResolveContext) -> Result<()> {
         if let Some((package, name)) = parse_ridl_type_ref(type_ref) {
-            self.resolve_named_type(&package, &name)?;
+            self.resolve_named_type(&package, &name, Some((type_ref, ctx)))?;
         }
         Ok(())
     }
 
-    fn resolve_named_type(&mut self, package: &str, name: &str) -> Result<()> {
+    fn resolve_named_type(
+        &mut self,
+        package: &str,
+        name: &str,
+        from: Option<(&str, &ResolveContext)>,
+    ) -> Result<()> {
         let key = (package.to_string(), name.to_string());
         if self.cache.contains_key(&key) {
             return Ok(());
         }
+        let full_type = ros_msg_type_fmt(package, name);
         let path = self.find_msg_path(package, name).with_context(|| {
-            format!(
-                "failed to resolve ROS msg '{}'",
-                format!("{package}/{name}")
+            format_resolve_error(
+                &full_type,
+                from,
+                &self.include_paths,
             )
         })?;
         let spec = parse_msg_file(package, name, &path)?;
         for field in &spec.fields {
             if let MsgTypeRef::Named { package, name } = &field.type_ref {
-                self.resolve_named_type(package, name)?;
+                let dep_ctx = ResolveContext {
+                    namespace: Some(spec.package.clone()),
+                    interface_kind: Some("msg"),
+                    interface_name: Some(spec.name.clone()),
+                    field_name: Some(field.name.clone()),
+                };
+                self.resolve_named_type(
+                    package,
+                    name,
+                    Some((&ros_msg_type_fmt(package, name), &dep_ctx)),
+                )?;
             }
         }
         self.cache.insert(key, spec);
@@ -98,8 +133,12 @@ fn index_msg_files(root: &Path, index: &mut HashMap<(String, String), PathBuf>) 
     if !root.exists() {
         return Ok(());
     }
-    for entry in fs::read_dir(root)
-        .with_context(|| format!("failed to read directory '{}'", root.display()))?
+    for entry in fs::read_dir(root).with_context(|| {
+        format!(
+            "{RIDLC_ERR_PREFIX} failed to read include directory '{}' (check that path exists)",
+            root.display()
+        )
+    })?
     {
         let entry = entry?;
         let path = entry.path();
@@ -135,8 +174,12 @@ fn infer_package_name(path: &Path) -> Option<String> {
 }
 
 fn parse_msg_file(package: &str, name: &str, path: &Path) -> Result<MsgSpec> {
-    let src = fs::read_to_string(path)
-        .with_context(|| format!("failed to read msg file '{}'", path.display()))?;
+    let src = fs::read_to_string(path).with_context(|| {
+        format!(
+            "{RIDLC_ERR_PREFIX} failed to read .msg file '{}'",
+            path.display()
+        )
+    })?;
     let mut fields = Vec::new();
     for raw_line in src.lines() {
         let line = raw_line.split('#').next().unwrap_or_default().trim();
@@ -150,7 +193,13 @@ fn parse_msg_file(package: &str, name: &str, path: &Path) -> Result<MsgSpec> {
         let Some(raw_name) = parts.next() else {
             continue;
         };
-        let (type_ref, is_array) = parse_msg_field_type(package, raw_type)?;
+        let (type_ref, is_array) = parse_msg_field_type(package, raw_type).with_context(|| {
+            format!(
+                "{RIDLC_ERR_PREFIX} invalid field in '{}' at line with type '{}'",
+                path.display(),
+                raw_type
+            )
+        })?;
         fields.push(MsgField {
             name: sanitize_field_name(raw_name),
             type_ref,
@@ -173,7 +222,9 @@ fn parse_msg_field_type(current_package: &str, raw_type: &str) -> Result<(MsgTyp
     };
     let base_type = base_type.trim();
     if base_type.is_empty() {
-        bail!("empty msg field type");
+        bail!(
+            "{RIDLC_ERR_PREFIX} empty message field type in .msg file (expected 'type name' per line)"
+        );
     }
     if let Some(primitive) = map_primitive_type(base_type) {
         return Ok((MsgTypeRef::Primitive(primitive.to_string()), is_array));
@@ -242,6 +293,38 @@ fn package_aliases(package: &str) -> Vec<&str> {
         "robonix_msgs" => vec!["robonix_msgs", "robonix_msg"],
         _ => vec![package],
     }
+}
+
+fn format_resolve_error(
+    full_type: &str,
+    from: Option<(&str, &ResolveContext)>,
+    include_paths: &[PathBuf],
+) -> String {
+    let mut msg = format!(
+        "{RIDLC_ERR_PREFIX} failed to resolve ROS message type '{}'",
+        full_type
+    );
+    if let Some((_type_ref, ctx)) = from {
+        let mut parts = Vec::new();
+        if let Some(ref ns) = ctx.namespace {
+            parts.push(format!("namespace '{ns}'"));
+        }
+        if let (Some(kind), Some(ref name)) = (ctx.interface_kind, ctx.interface_name.as_ref()) {
+            parts.push(format!("{kind} '{name}'"));
+        }
+        if let Some(ref f) = ctx.field_name {
+            parts.push(format!("field '{f}'"));
+        }
+        if !parts.is_empty() {
+            msg.push_str(&format!("\n  referenced from: {}", parts.join(", ")));
+        }
+    }
+    msg.push_str("\n  searched include paths:");
+    for p in include_paths {
+        msg.push_str(&format!("\n    - {}", p.display()));
+    }
+    msg.push_str("\n  hint: ensure the .msg file exists (e.g. <include>/common_interfaces/std_msgs/msg/Float64.msg for std_msgs/msg/Float64)");
+    msg
 }
 
 fn sanitize_field_name(name: &str) -> String {
@@ -344,31 +427,77 @@ fn rust_type_expr(ty: &MsgTypeRef, is_array: bool) -> String {
     }
 }
 
-fn push_interface_imports(ast: &File, resolver: &mut MsgResolver) -> Result<()> {
+fn push_interface_imports(
+    namespace: &str,
+    ast: &File,
+    resolver: &mut MsgResolver,
+) -> Result<()> {
     for iface in &ast.interfaces {
         match iface {
             Interface::Query(q) => {
-                resolver.resolve_ridl_type(&q.request.type_ref)?;
-                resolver.resolve_ridl_type(&q.response.type_ref)?;
+                let ctx = ResolveContext {
+                    namespace: Some(namespace.to_string()),
+                    interface_kind: Some("query"),
+                    interface_name: Some(q.name.clone()),
+                    field_name: Some(q.request.name.clone()),
+                };
+                resolver.resolve_ridl_type(&q.request.type_ref, &ctx)?;
+                let ctx = ResolveContext {
+                    namespace: Some(namespace.to_string()),
+                    interface_kind: Some("query"),
+                    interface_name: Some(q.name.clone()),
+                    field_name: Some(q.response.name.clone()),
+                };
+                resolver.resolve_ridl_type(&q.response.type_ref, &ctx)?;
             }
             Interface::Stream(s) => {
                 for field in &s.fields {
-                    resolver.resolve_ridl_type(&field.type_ref)?;
+                    let ctx = ResolveContext {
+                        namespace: Some(namespace.to_string()),
+                        interface_kind: Some("stream"),
+                        interface_name: Some(s.name.clone()),
+                        field_name: Some(field.name.clone()),
+                    };
+                    resolver.resolve_ridl_type(&field.type_ref, &ctx)?;
                 }
             }
             Interface::Command(c) => {
                 if let Some(field) = &c.input {
-                    resolver.resolve_ridl_type(&field.type_ref)?;
+                    let ctx = ResolveContext {
+                        namespace: Some(namespace.to_string()),
+                        interface_kind: Some("command"),
+                        interface_name: Some(c.name.clone()),
+                        field_name: Some(field.name.clone()),
+                    };
+                    resolver.resolve_ridl_type(&field.type_ref, &ctx)?;
                 }
                 if let Some(field) = &c.output {
-                    resolver.resolve_ridl_type(&field.type_ref)?;
+                    let ctx = ResolveContext {
+                        namespace: Some(namespace.to_string()),
+                        interface_kind: Some("command"),
+                        interface_name: Some(c.name.clone()),
+                        field_name: Some(field.name.clone()),
+                    };
+                    resolver.resolve_ridl_type(&field.type_ref, &ctx)?;
                 }
                 if let Some(field) = &c.result {
-                    resolver.resolve_ridl_type(&field.type_ref)?;
+                    let ctx = ResolveContext {
+                        namespace: Some(namespace.to_string()),
+                        interface_kind: Some("command"),
+                        interface_name: Some(c.name.clone()),
+                        field_name: Some(field.name.clone()),
+                    };
+                    resolver.resolve_ridl_type(&field.type_ref, &ctx)?;
                 }
             }
             Interface::Event(e) => {
-                resolver.resolve_ridl_type(&e.payload.type_ref)?;
+                let ctx = ResolveContext {
+                    namespace: Some(namespace.to_string()),
+                    interface_kind: Some("event"),
+                    interface_name: Some(e.name.clone()),
+                    field_name: Some(e.payload.name.clone()),
+                };
+                resolver.resolve_ridl_type(&e.payload.type_ref, &ctx)?;
             }
         }
     }
@@ -381,8 +510,8 @@ pub fn generate_bindings(
     out_file: &Path,
 ) -> Result<()> {
     let mut resolver = MsgResolver::new(include_paths)?;
-    for ast in files_by_ns.values() {
-        push_interface_imports(ast, &mut resolver)?;
+    for (namespace, ast) in files_by_ns {
+        push_interface_imports(namespace, ast, &mut resolver)?;
     }
 
     let mut out = String::new();
@@ -453,14 +582,14 @@ pub fn generate_bindings(
         if let Some(parent) = out_file.parent() {
             fs::create_dir_all(parent).with_context(|| {
                 format!(
-                    "failed to create parent directory for generated rust bindings '{}'",
+                    "{RIDLC_ERR_PREFIX} failed to create output directory '{}'",
                     parent.display()
                 )
             })?;
         }
         fs::write(out_file, out).with_context(|| {
             format!(
-                "failed to write generated rust bindings '{}'",
+                "{RIDLC_ERR_PREFIX} failed to write generated Rust bindings to '{}'",
                 out_file.display()
             )
         })?;
@@ -710,10 +839,12 @@ fn emit_namespace_modules(out: &mut String, namespace: &str, ast: &File) -> Resu
                 out.push_str(&format!("{base_indent}}}\n"));
             }
             Interface::Stream(s) => {
-                let field = s
-                    .fields
-                    .first()
-                    .with_context(|| format!("stream '{}' has no fields", s.name))?;
+                let field = s.fields.first().with_context(|| {
+                    format!(
+                        "{RIDLC_ERR_PREFIX} stream '{}' in namespace '{}' has no fields (at least one field required)",
+                        s.name, namespace
+                    )
+                })?;
                 let direction = match field.direction {
                     StreamDirection::Input => "input",
                     StreamDirection::Output => "output",
@@ -1114,7 +1245,10 @@ fn is_string_query(q: &QueryDef) -> bool {
 
 fn ridl_rust_type(type_ref: &str) -> Result<String> {
     let Some((package, name)) = parse_ridl_type_ref(type_ref) else {
-        bail!("unsupported RIDL Rust type ref '{}'", type_ref);
+        bail!(
+            "{RIDLC_ERR_PREFIX} unsupported RIDL type '{}' (expected format: package/msg/Name, e.g. std_msgs/msg/String)",
+            type_ref
+        );
     };
     Ok(format!(
         "{RUNTIME_CRATE_ROOT}::generated::types::{}::{}",

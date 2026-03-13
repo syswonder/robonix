@@ -22,9 +22,14 @@ fn collect_ridl_files(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("cargo:rerun-if-changed=../ridlc/proto/robonix_runtime.proto");
-    println!("cargo:rerun-if-changed=../robonix-interfaces/ridl");
-    println!("cargo:rerun-if-changed=../robonix-interfaces/lib");
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir.parent().unwrap_or(&manifest_dir);
+    let ridlc_proto = workspace_root.join("ridlc/proto");
+    let robonix_interfaces = workspace_root.join("robonix-interfaces");
+
+    println!("cargo:rerun-if-changed={}", ridlc_proto.join("robonix_runtime.proto").display());
+    println!("cargo:rerun-if-changed={}", robonix_interfaces.join("ridl").display());
+    println!("cargo:rerun-if-changed={}", robonix_interfaces.join("lib").display());
 
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
     unsafe {
@@ -35,12 +40,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(true)
         .build_client(true)
         .compile_protos(
-            &["../ridlc/proto/robonix_runtime.proto"],
-            &["../ridlc/proto"],
+            &[ridlc_proto.join("robonix_runtime.proto")],
+            &[ridlc_proto.clone()],
         )?;
 
     let mut ridl_files = Vec::new();
-    collect_ridl_files(Path::new("../robonix-interfaces/ridl"), &mut ridl_files)?;
+    collect_ridl_files(&robonix_interfaces.join("ridl"), &mut ridl_files)?;
     ridl_files.sort();
 
     let mut files_by_ns: BTreeMap<String, ridlc::ast::File> = BTreeMap::new();
@@ -60,12 +65,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let generated_file = PathBuf::from("src")
+    let generated_file = manifest_dir
+        .join("src")
         .join("generated")
         .join("ridl_generated.rs");
     ridlc::codegen::rust_gen::generate_bindings(
         &files_by_ns,
-        &[PathBuf::from("../robonix-interfaces/lib")],
+        &[robonix_interfaces.join("lib")],
         &generated_file,
     )?;
 
@@ -84,7 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ridlc::codegen::python_gen::assemble_workspace_ros_packages(
         &workspace_src,
         &python_pkg_dir,
-        &[PathBuf::from("../robonix-interfaces/lib")],
+        &[robonix_interfaces.join("lib")],
     )?;
 
     Ok(())
