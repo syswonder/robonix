@@ -68,7 +68,10 @@ fn collect_ridl_from(path: &Path, acc: &mut Vec<PathBuf>) -> Result<()> {
         if path.extension().map(|e| e == "ridl").unwrap_or(false) {
             acc.push(path.to_path_buf());
         } else {
-            bail!("input path '{}' is not a .ridl file", path.display());
+            bail!(
+                "[ridlc] input path '{}' is not a .ridl file (expected .ridl extension)",
+                path.display()
+            );
         }
     }
     Ok(())
@@ -87,7 +90,9 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     if args.include.is_empty() {
-        anyhow::bail!("at least one -I/--include path is required");
+        anyhow::bail!(
+            "[ridlc] at least one -I/--include path is required (e.g. -I path/to/robonix-interfaces/lib)"
+        );
     }
 
     // Collect all RIDL inputs: positional + -i/--input (with directory expansion).
@@ -100,7 +105,7 @@ fn main() -> Result<()> {
     }
     if all_inputs.is_empty() {
         bail!(
-            "no RIDL inputs provided.\n\
+            "[ridlc] no RIDL inputs provided.\n\
              Use positional paths or -i/--input <ridl-or-dir> (can repeat)."
         );
     }
@@ -118,9 +123,9 @@ fn main() -> Result<()> {
     for path in &all_inputs {
         eprintln!("{} parsing RIDL: {}", ridlc_prefix(), path.display());
         let content = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read RIDL file '{}'", path.display()))?;
+            .with_context(|| format!("[ridlc] failed to read RIDL file '{}'", path.display()))?;
         let file = parse_file(&content)
-            .with_context(|| format!("failed to parse RIDL file '{}'", path.display()))?;
+            .with_context(|| format!("[ridlc] failed to parse RIDL file '{}'", path.display()))?;
 
         let ns_key = file
             .namespace
