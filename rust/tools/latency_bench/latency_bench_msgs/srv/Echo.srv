@@ -1,0 +1,5 @@
+# Request: raw binary payload (same as other transports)
+uint8[] data
+---
+# Response: echo back
+uint8[] data

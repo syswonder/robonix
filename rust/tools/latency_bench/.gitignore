@@ -1,0 +1,11 @@
+# Benchmark results
+results
+
+# ROS2 colcon workspace
+ros2_ws
+
+# Python
+__pycache__
+*.py[cod]
+*.egg-info
+.eggs

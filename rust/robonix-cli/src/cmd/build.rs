@@ -46,6 +46,21 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 fn robonix_interfaces_root_from_catalog(catalog_root: &Path) -> Result<PathBuf> {
     catalog_root
         .parent()
@@ -53,8 +68,61 @@ fn robonix_interfaces_root_from_catalog(catalog_root: &Path) -> Result<PathBuf> 
         .context("Interface catalog root should be robonix-interfaces/ridl")
 }
 
+/// Write file only when content differs, preserving mtime for incremental colcon builds.
+fn write_if_changed(path: &Path, content: &str) -> Result<()> {
+    let existing = fs::read_to_string(path).ok();
+    if existing.as_deref() == Some(content) {
+        return Ok(());
+    }
+    fs::write(path, content)?;
+    Ok(())
+}
+
 /// Files to skip when copying (e.g. when we auto-generate them).
-const SKIP_ROS_PYTHON_FILES: &[&str] = &["package.xml", "setup.py", "setup.cfg"];
+/// package.xml is NOT skipped: developers may add their own with custom ROS2 deps.
+const SKIP_ROS_PYTHON_FILES: &[&str] = &["setup.py", "setup.cfg"];
+
+/// Sync package to workspace with rsync (preserves mtime for incremental colcon builds).
+/// Falls back to copy_package_tree when rsync is not available.
+#[cfg(unix)]
+fn sync_package_tree(
+    src: &Path,
+    dst: &Path,
+    skip_msgs_package: Option<&str>,
+    skip_ros_python_files: bool,
+) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    let mut exclude_args: Vec<String> = vec!["--exclude=rbnx-build".into()];
+    if skip_ros_python_files {
+        exclude_args.push("--exclude=setup.py".into());
+        exclude_args.push("--exclude=setup.cfg".into());
+        exclude_args.push("--exclude=resource".into());
+    }
+    if let Some(name) = skip_msgs_package {
+        exclude_args.push(format!("--exclude={name}"));
+    }
+    let src_trailing = format!("{}/", src.display());
+    match Command::new("rsync")
+        .args(["-a", "--delete"])
+        .args(&exclude_args)
+        .arg(&src_trailing)
+        .arg(dst)
+        .status()
+    {
+        Ok(status) if status.success() => Ok(()),
+        _ => copy_package_tree(src, dst, skip_msgs_package, skip_ros_python_files),
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_package_tree(
+    src: &Path,
+    dst: &Path,
+    skip_msgs_package: Option<&str>,
+    skip_ros_python_files: bool,
+) -> Result<()> {
+    copy_package_tree(src, dst, skip_msgs_package, skip_ros_python_files)
+}
 
 fn copy_package_tree(
     src: &Path,
@@ -219,7 +287,7 @@ fn collect_vendor_msg_packages(interfaces_root: &Path) -> Result<Vec<String>> {
     Ok(names.into_iter().collect())
 }
 
-fn build_local(package_root: &Path, manifest: &Manifest) -> Result<LocalBuildLayout> {
+fn build_local(package_root: &Path, manifest: &Manifest, clean: bool) -> Result<LocalBuildLayout> {
     let summary = manifest.validate_and_summarize()?;
     let package_name = summary.name.clone();
     let interface_check = manifest::validate_interface_references(&summary, package_root)?;
@@ -235,7 +303,7 @@ fn build_local(package_root: &Path, manifest: &Manifest) -> Result<LocalBuildLay
 
     let build_root = package_root.join(RBNX_BUILD_DIR);
     let workspace_root = build_root.join("ws");
-    if build_root.exists() {
+    if clean && build_root.exists() {
         fs::remove_dir_all(&build_root)
             .with_context(|| format!("Failed to clean {}", build_root.display()))?;
     }
@@ -252,7 +320,7 @@ fn build_local(package_root: &Path, manifest: &Manifest) -> Result<LocalBuildLay
         .nodes
         .iter()
         .any(|n| n.entry.as_ref().map_or(false, |e| e.contains(':')));
-    copy_package_tree(
+    sync_package_tree(
         package_root,
         &workspace_root
             .join("src")
@@ -307,8 +375,11 @@ fn build_local(package_root: &Path, manifest: &Manifest) -> Result<LocalBuildLay
             .map(|d| format!("  <depend>{d}</depend>"))
             .collect::<Vec<_>>()
             .join("\n");
-        let package_xml = format!(
-            r#"<?xml version="1.0"?>
+        // Only generate package.xml when source has none; otherwise use developer's (for custom ROS2 deps).
+        let src_package_xml = package_root.join("package.xml");
+        if !src_package_xml.exists() {
+            let package_xml = format!(
+                r#"<?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>{package_name}</name>
@@ -323,10 +394,12 @@ fn build_local(package_root: &Path, manifest: &Manifest) -> Result<LocalBuildLay
   </export>
 </package>
 "#,
-            version = manifest.package.version,
-            description = manifest.package.description,
-            license = manifest.package.license,
-        );
+                version = manifest.package.version,
+                description = manifest.package.description,
+                license = manifest.package.license,
+            );
+            write_if_changed(&package_pkg_root.join("package.xml"), &package_xml)?;
+        }
         let setup_cfg = format!(
             r#"[develop]
 script_dir=$base/lib/{package_name}
@@ -360,12 +433,11 @@ setup(
             description = manifest.package.description.replace('"', "\\\""),
             license = manifest.package.license,
         );
-        fs::write(package_pkg_root.join("package.xml"), package_xml)?;
-        fs::write(package_pkg_root.join("setup.cfg"), setup_cfg)?;
-        fs::write(package_pkg_root.join("setup.py"), setup_py)?;
+        write_if_changed(&package_pkg_root.join("setup.cfg"), &setup_cfg)?;
+        write_if_changed(&package_pkg_root.join("setup.py"), &setup_py)?;
         let resource_dir = package_pkg_root.join("resource");
         fs::create_dir_all(&resource_dir)?;
-        fs::write(resource_dir.join(&package_name), "")?;
+        write_if_changed(&resource_dir.join(&package_name), "")?;
     }
 
     // Auto-generate {package}_msgs from package msg/ directory (avoids manual package.xml, CMakeLists.txt)
@@ -499,6 +571,32 @@ ament_package()
             shell_quote(&package_ridl_dir),
         );
         run_shell(&ridlc_package_command, &repo_root)?;
+        // Merge {pkg}_interfaces/skill_demo/skill/ into main package so skill_demo.skill is importable
+        let interfaces_skill = package_pkg_root
+            .join(format!("{package_name}_interfaces"))
+            .join(&package_name)
+            .join("skill");
+        let main_skill = package_pkg_root.join(&package_name).join("skill");
+        if interfaces_skill.is_dir() {
+            fs::create_dir_all(main_skill.parent().unwrap())?;
+            if main_skill.exists() {
+                fs::remove_dir_all(&main_skill)?;
+            }
+            copy_dir_all(&interfaces_skill, &main_skill)?;
+        }
+        // Exclude {pkg} from {pkg}_interfaces so main package wins in PYTHONPATH
+        let interfaces_setup = package_pkg_root
+            .join(format!("{package_name}_interfaces"))
+            .join("setup.py");
+        if let Ok(content) = fs::read_to_string(&interfaces_setup) {
+            let patched = content.replace(
+                "packages=find_packages(exclude=['test'])",
+                &format!("packages=find_packages(exclude=['test', '{package_name}'])"),
+            );
+            if patched != content {
+                fs::write(&interfaces_setup, patched)?;
+            }
+        }
     }
 
     output::step("Building", "colcon workspace under rbnx-build/ws");
@@ -558,16 +656,16 @@ ament_package()
     })
 }
 
-pub fn build_local_package(path: &Path) -> Result<LocalBuildLayout> {
+pub fn build_local_package(path: &Path, clean: bool) -> Result<LocalBuildLayout> {
     let package_root = path
         .canonicalize()
         .with_context(|| format!("Failed to canonicalize package path {}", path.display()))?;
 
     let detected = manifest::detect_and_load(&package_root)?;
-    build_local(&package_root, &detected.manifest)
+    build_local(&package_root, &detected.manifest, clean)
 }
 
-pub async fn execute_local(path: PathBuf) -> Result<()> {
+pub async fn execute_local(path: PathBuf, clean: bool) -> Result<()> {
     let package_root = path
         .canonicalize()
         .with_context(|| format!("Failed to canonicalize package path {}", path.display()))?;
@@ -576,7 +674,7 @@ pub async fn execute_local(path: PathBuf) -> Result<()> {
         &format!("local package at {}", package_root.display()),
     );
 
-    build_local_package(&package_root)?;
+    build_local_package(&package_root, clean)?;
     Ok(())
 }
 

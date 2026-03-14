@@ -39,7 +39,7 @@ rbnx build -p python_ping_client && rbnx start -p python_ping_client -n call_pin
 
 Build and run with rbnx: `rbnx build -p <package>` → `rbnx start -p <package> -n <node>` (one node per start; start blocks until the process exits).
 
-- `python_ping_client/robonix_manifest.yaml`: manifest `nodes` lists each node's id, type, entry.
+- Each example has `robonix_manifest.yaml` and `package.xml` (custom ROS2 deps; see `skill_demo/package.xml`, `prm_camera_vendor/package.xml`).
 
 ## Test scripts
 
