@@ -2,7 +2,7 @@ namespace robonix/prm/base
 
 import geometry_msgs/msg/PoseStamped
 
-command navigate {
+command navigate @interruptible {
     input goal geometry_msgs/msg/PoseStamped;
     version 1.0;
 }

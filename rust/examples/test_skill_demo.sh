@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test skill_demo: execute command server + client
+# Test skill_demo: greet command server + client
 # Prerequisite: robonix-server must be running (./start_server in another terminal)
 set -euo pipefail
 

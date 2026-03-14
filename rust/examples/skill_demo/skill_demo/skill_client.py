@@ -1,51 +1,37 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Skill demo: execute command client. Resolves and sends execute goal."""
+"""Skill demo: greet command client. Resolves and sends greet goal.
+Must be run via rbnx start."""
 
-import os
 import sys
-
-def _setup_path():
-    try:
-        import robonix_runtime_pb2_grpc  # noqa: F401
-    except ImportError:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        pkg_root = os.path.dirname(os.path.dirname(script_dir))
-        rust_dir = os.path.dirname(pkg_root)
-        python_pkg = os.path.join(
-            rust_dir, "robonix-server", "target", "rclrs_interfaces_ws", "python_pkg"
-        )
-        if os.path.exists(python_pkg) and python_pkg not in sys.path:
-            sys.path.insert(0, python_pkg)
-
-
-_setup_path()
 
 import grpc
 import rclpy
 
-from robonix.system.skill.execute_command import create_execute_client
+from skill_demo.skill.greet_command import create_greet_client
+from skill_demo_msgs.msg import GreetRequest
 from robonix_runtime_pb2_grpc import RobonixRuntimeStub
 
 
 def main() -> None:
-    endpoint = os.environ.get("ROBONIX_META_GRPC_ENDPOINT", "127.0.0.1:50051")
-    requester_id = os.environ.get("ROBONIX_NODE_ID", "skill_client")
-    target = os.environ.get("ROBONIX_COMMAND_TARGET", "skill_server")
+    endpoint = "127.0.0.1:50051"
+    requester_id = "skill_client"
+    target = "skill_server"
 
     grpc_channel = grpc.insecure_channel(endpoint)
     runtime_client = RobonixRuntimeStub(grpc_channel)
-    client = create_execute_client(
+    client = create_greet_client(
         runtime_client,
         requester_id=requester_id,
         target=target,
     )
 
     request = client._action_type.Goal()
-    request.request_json.data = '{"skill":"greet","params":{}}'
+    request.request = GreetRequest()
+    request.request.name = "world"
 
     goal_handle = client.send(request)
     if goal_handle is None or not goal_handle.accepted:
-        print("Execute goal not accepted", flush=True)
+        print("Greet goal not accepted", flush=True)
         sys.exit(1)
 
     result_future = goal_handle.get_result_async()
@@ -55,7 +41,7 @@ def main() -> None:
         print("Timeout waiting for result", flush=True)
         sys.exit(1)
 
-    print("result:", wrapped.result.response_json.data)
+    print("result:", wrapped.result.response.message, "success:", wrapped.result.response.success)
 
     client.destroy_node()
     if rclpy.ok():

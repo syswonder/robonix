@@ -1,25 +1,8 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Stream demo: pose subscriber. Resolves channel from robonix-server and connects to stream_server."""
+"""Stream demo: pose subscriber. Resolves channel from robonix-server and connects to stream_server.
+Must be run via rbnx start."""
 
-import os
 import sys
-
-def _setup_path():
-    try:
-        import robonix_runtime_pb2_grpc  # noqa: F401
-    except ImportError:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        pkg_root = os.path.dirname(os.path.dirname(script_dir))
-        rust_dir = os.path.dirname(pkg_root)
-        python_pkg = os.path.join(
-            rust_dir, "robonix-server", "target", "rclrs_interfaces_ws", "python_pkg"
-        )
-        if os.path.exists(python_pkg) and python_pkg not in sys.path:
-            sys.path.insert(0, python_pkg)
-
-
-_setup_path()
-
 import time
 
 import grpc
@@ -31,9 +14,9 @@ from robonix_runtime_pb2_grpc import RobonixRuntimeStub
 
 
 def main() -> None:
-    endpoint = os.environ.get("ROBONIX_META_GRPC_ENDPOINT", "127.0.0.1:50051")
-    requester_id = os.environ.get("ROBONIX_NODE_ID", "stream_demo_client")
-    target = os.environ.get("ROBONIX_STREAM_TARGET", "stream_demo_server")
+    endpoint = "127.0.0.1:50051"
+    requester_id = "stream_demo_client"
+    target = "stream_demo_server"
 
     grpc_channel = grpc.insecure_channel(endpoint)
     runtime_client = RobonixRuntimeStub(grpc_channel)

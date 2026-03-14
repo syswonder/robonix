@@ -3,8 +3,8 @@
 //
 // Manifest validation for robonix-cli
 
-use crate::manifest;
-use crate::output;
+use robonix_cli::manifest;
+use robonix_cli::output;
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -22,7 +22,6 @@ pub async fn execute(path: PathBuf) -> Result<()> {
     let summary = detected.manifest.validate_and_summarize()?;
 
     output::check(&format!("Manifest: {}", detected.path.display()));
-    output::check(&format!("Kind: {}", summary.manifest_kind.label()));
     output::check(&format!("Package: {} {}", summary.name, summary.version));
 
     if !summary.nodes.is_empty() {

@@ -1,14 +1,10 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// Database Module
-//
-// Package database management for robonix-cli
+// Package database for system-installed packages (~/.robonix/packages)
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-
-use crate::manifest::ManifestKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageInfo {
@@ -17,28 +13,24 @@ pub struct PackageInfo {
     pub path: PathBuf,
     pub manifest_path: PathBuf,
     #[serde(default)]
-    pub manifest_kind: ManifestKind,
+    pub primitives: Vec<String>,
     #[serde(default)]
-    pub primitives: Vec<String>, // List of primitive names
+    pub services: Vec<String>,
     #[serde(default)]
-    pub services: Vec<String>, // List of service names
-    #[serde(default)]
-    pub skills: Vec<String>, // List of skill names
+    pub skills: Vec<String>,
     #[serde(default)]
     pub provided_interfaces: Vec<String>,
     #[serde(default)]
     pub consumed_interfaces: Vec<String>,
     #[serde(default, alias = "components")]
     pub nodes: Vec<String>,
-    pub installed_at: String, // ISO 8601 timestamp
+    pub installed_at: String,
     pub source: PackageSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PackageSource {
-    Local {
-        path: PathBuf,
-    },
+    Local { path: PathBuf },
     GitHub {
         repo: String,
         branch: Option<String>,
@@ -58,30 +50,24 @@ impl PackageDatabase {
 
     pub fn load(storage_path: &Path) -> Result<Self> {
         let db_path = Self::db_path(storage_path);
-
         if !db_path.exists() {
             return Ok(Self {
                 packages: HashMap::new(),
             });
         }
-
         let content = std::fs::read_to_string(&db_path)
             .with_context(|| format!("Failed to read database: {}", db_path.display()))?;
-
-        let db: PackageDatabase = serde_json::from_str(&content)
-            .with_context(|| format!("Failed to parse database: {}", db_path.display()))?;
-
+        let db: PackageDatabase =
+            serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse database: {}", db_path.display()))?;
         Ok(db)
     }
 
     pub fn save(&self, storage_path: &Path) -> Result<()> {
         let db_path = Self::db_path(storage_path);
-
         let content = serde_json::to_string_pretty(self).context("Failed to serialize database")?;
-
         std::fs::write(&db_path, content)
             .with_context(|| format!("Failed to write database: {}", db_path.display()))?;
-
         Ok(())
     }
 
@@ -103,164 +89,79 @@ impl PackageDatabase {
         packages
     }
 
-    pub fn find_by_primitive(&self, primitive_name: &str) -> Vec<&PackageInfo> {
-        let mut packages: Vec<&PackageInfo> = self
-            .packages
-            .values()
-            .filter(|pkg| pkg.primitives.iter().any(|p| p == primitive_name))
-            .collect();
-        packages.sort_by(|a, b| a.name.cmp(&b.name));
-        packages
-    }
-
-    pub fn find_by_service(&self, service_name: &str) -> Vec<&PackageInfo> {
-        let mut packages: Vec<&PackageInfo> = self
-            .packages
-            .values()
-            .filter(|pkg| pkg.services.iter().any(|s| s == service_name))
-            .collect();
-        packages.sort_by(|a, b| a.name.cmp(&b.name));
-        packages
-    }
-
-    pub fn find_by_skill(&self, skill_name: &str) -> Vec<&PackageInfo> {
-        let mut packages: Vec<&PackageInfo> = self
-            .packages
-            .values()
-            .filter(|pkg| pkg.skills.iter().any(|s| s == skill_name))
-            .collect();
-        packages.sort_by(|a, b| a.name.cmp(&b.name));
-        packages
-    }
-
     pub fn find_by_name(&self, name: &str) -> Option<&PackageInfo> {
         self.packages.get(name)
     }
 
-    /// Sync database with actual packages in storage path
-    /// This scans the storage directory and updates the database to match the filesystem
     pub fn sync(storage_path: &Path) -> Result<()> {
         use crate::install::PackageInstaller;
 
-        // Load existing database
         let mut db = Self::load(storage_path)?;
-
-        // Track which packages we found in the filesystem
         let mut found_packages = HashSet::new();
 
-        // Scan storage directory for packages
         if storage_path.exists() {
-            for entry in std::fs::read_dir(storage_path).with_context(|| {
-                format!(
-                    "Failed to read storage directory: {}",
-                    storage_path.display()
-                )
-            })? {
+            for entry in std::fs::read_dir(storage_path)
+                .with_context(|| format!("Failed to read storage: {}", storage_path.display()))?
+            {
                 let entry = entry?;
                 let path = entry.path();
-
-                // Skip db.json file
                 if path.file_name().and_then(|n| n.to_str()) == Some("db.json") {
                     continue;
                 }
-
-                // Only process directories
                 if !path.is_dir() {
                     continue;
                 }
 
-                // Check if this directory contains a manifest
                 let manifest_path = match crate::manifest::detect_manifest_path(&path) {
-                    Ok(path) => path,
-                    Err(_) => {
-                        continue;
-                    }
+                    Ok(p) => p,
+                    Err(_) => continue,
                 };
-
                 if !manifest_path.exists() {
                     continue;
                 }
 
-                // Parse manifest and create/update package info
-                match PackageInstaller::parse_manifest_name(&manifest_path) {
-                    Ok(package_name) => {
-                        found_packages.insert(package_name.clone());
-
-                        // Determine source (try to preserve existing source if available)
-                        let source = if let Some(existing) = db.get_package(&package_name) {
-                            // Preserve existing source if path matches
-                            if existing.path == path {
-                                existing.source.clone()
-                            } else {
-                                // Path changed, treat as local
-                                PackageSource::Local { path: path.clone() }
-                            }
-                        } else {
-                            // New package, treat as local
-                            PackageSource::Local { path: path.clone() }
-                        };
-
-                        let summary = match crate::manifest::load_from_path(&manifest_path)
-                            .and_then(|manifest| manifest.validate_and_summarize())
-                        {
-                            Ok(summary) => summary,
-                            Err(e) => {
-                                log::warn!(
-                                    "Failed to parse manifest for package at {}: {}",
-                                    path.display(),
-                                    e
-                                );
-                                continue;
-                            }
-                        };
-
-                        // Create or update package info
-                        match PackageInstaller::create_package_info(
-                            &path,
-                            &manifest_path,
-                            &summary,
-                            source,
-                        ) {
-                            Ok(package_info) => {
-                                db.add_package(package_info);
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "Failed to create package info for package at {}: {}",
-                                    path.display(),
-                                    e
-                                );
-                            }
-                        }
-                    }
+                let package_name = match PackageInstaller::parse_manifest_name(&manifest_path) {
+                    Ok(n) => n,
                     Err(e) => {
-                        log::warn!(
-                            "Failed to parse manifest at {}: {}",
-                            manifest_path.display(),
-                            e
-                        );
+                        log::warn!("Failed to parse manifest at {}: {}", manifest_path.display(), e);
+                        continue;
                     }
+                };
+                found_packages.insert(package_name.clone());
+
+                let source = db
+                    .get_package(&package_name)
+                    .filter(|e| e.path == path)
+                    .map(|e| e.source.clone())
+                    .unwrap_or(PackageSource::Local { path: path.clone() });
+
+                let summary = match crate::manifest::load_from_path(&manifest_path)
+                    .and_then(|m| m.validate_and_summarize())
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::warn!("Failed to parse manifest at {}: {}", path.display(), e);
+                        continue;
+                    }
+                };
+
+                match PackageInstaller::create_package_info(&path, &manifest_path, &summary, source)
+                {
+                    Ok(info) => db.add_package(info),
+                    Err(e) => log::warn!("Failed to create package info at {}: {}", path.display(), e),
                 }
             }
         }
 
-        // Remove packages from database that no longer exist in filesystem
-        let db_package_names: Vec<String> = db.packages.keys().cloned().collect();
-        for package_name in db_package_names {
-            if !found_packages.contains(&package_name) {
-                if let Some(removed) = db.remove_package(&package_name) {
-                    log::info!(
-                        "Removed package '{}' from database (directory not found: {})",
-                        package_name,
-                        removed.path.display()
-                    );
+        for name in db.packages.keys().cloned().collect::<Vec<_>>() {
+            if !found_packages.contains(&name) {
+                if let Some(removed) = db.remove_package(&name) {
+                    log::info!("Removed '{}' from database (not found: {})", name, removed.path.display());
                 }
             }
         }
 
-        // Save updated database
         db.save(storage_path)?;
-
         Ok(())
     }
 }

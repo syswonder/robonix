@@ -3,7 +3,7 @@
 //
 // Config command implementation for robonix-cli
 
-use crate::Config;
+use robonix_cli::Config;
 use anyhow::Result;
 use colored::*;
 use std::path::PathBuf;

@@ -9,11 +9,8 @@ pub mod install;
 pub mod manifest;
 pub mod output;
 pub mod process;
-pub mod query;
 
 pub use config::Config;
-pub use database::PackageDatabase;
-pub use install::PackageInstaller;
-pub use manifest::{BuildStrategy, ManifestKind, PackageManifest, PackageSummary};
+pub use database::{PackageDatabase, PackageInfo, PackageSource};
+pub use manifest::{Manifest, PackageSummary};
 pub use process::ProcessManager;
-pub use query::PackageQuery;

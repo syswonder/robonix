@@ -16,7 +16,7 @@ Robonix PoC examples: calling queries provided by robonix-server.
 | **python_ping_client** | Python client with manifest, calls ping query |
 | **stream_demo** | Stream: stream_server (pose publisher) + stream_client (subscriber), connected via robonix-server |
 | **query_demo** | Query: semantic_server (semantic_query) + semantic_client, with sample semantic map |
-| **skill_demo** | Command: skill_server (execute) + skill_client, with sample skill implementation |
+| **skill_demo** | Command: skill_server (greet) + skill_client, per-skill command with typed ROS msg |
 | **prm_camera_vendor** | 相机厂商示例：prm::camera (rgb, depth, rgbd, intrinsics)，不实现 ir |
 | **prm_arm_vendor** | 机械臂厂商示例：prm::arm (move_ee, joint_trajectory) + prm::gripper (close, open) |
 | **map_semantic_service** | 地图服务示例：robonix/system/map/semantic_query |
