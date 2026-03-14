@@ -85,7 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&workspace_src)?;
     ridlc::codegen::python_gen::emit_runtime_grpc(&python_pkg_dir)?;
     for file in files_by_ns.values() {
-        ridlc::codegen::python_gen::generate(file, &python_pkg_dir)?;
+        ridlc::codegen::python_gen::generate(file, &python_pkg_dir, None)?;
     }
     ridlc::codegen::python_gen::assemble_workspace_ros_packages(
         &workspace_src,
