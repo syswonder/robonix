@@ -82,9 +82,10 @@ pub async fn execute_build(
     config: Config,
     path: Option<PathBuf>,
     global: Option<String>,
+    clean: bool,
 ) -> Result<()> {
     let package_root = resolve_package_path(&config, path, global)?;
-    build::execute_local(package_root).await
+    build::execute_local(package_root, clean).await
 }
 
 pub async fn execute_start(
@@ -119,7 +120,7 @@ pub async fn execute_start(
             output::sub_step("Using existing build (rbnx-build/ws/install)");
             layout
         }
-        None => build::build_local_package(&package_root)?,
+        None => build::build_local_package(&package_root, false)?,
     };
     let endpoint = registry_endpoint
         .map(String::from)
@@ -171,12 +172,19 @@ pub async fn execute_start(
     let start_command =
         crate::cmd::launch_helpers::build_start_command(&build_layout.install_setup, module, &env);
 
+    // Run from install prefix so Python finds installed packages (e.g. skill_demo.skill)
+    // instead of shadowing them with the source tree.
+    let working_dir = build_layout
+        .install_setup
+        .parent()
+        .context("install_setup has no parent")?;
+
     let result = process_manager
         .start_process(
             &build_layout.package_name,
             &std_name,
             "node",
-            &package_root,
+            working_dir,
             &start_command,
         )
         .await?;

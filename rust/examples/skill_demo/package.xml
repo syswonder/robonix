@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>skill_demo</name>
+  <version>0.1.0</version>
+  <description>Skill demo - execute command with example skill implementation</description>
+  <maintainer email="robonix@example.com">robonix</maintainer>
+  <license>MulanPSL-2.0</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <depend>rclpy</depend>
+  <depend>robonix_interfaces</depend>
+  <depend>robonix_interfaces_ros2</depend>
+  <depend>robonix_msgs</depend>
+  <depend>action_msgs</depend>
+  <depend>builtin_interfaces</depend>
+  <depend>std_msgs</depend>
+  <depend>skill_demo_msgs</depend>
+  <depend>skill_demo_interfaces</depend>
+  <depend>skill_demo_interfaces_ros2</depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

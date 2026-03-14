@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+// Echo service: request/response use raw bytes for fair comparison with other transports.
+service Echo {
+  rpc Echo(EchoRequest) returns (EchoResponse);
+}
+
+message EchoRequest {
+  bytes data = 1;
+}
+
+message EchoResponse {
+  bytes data = 1;
+}

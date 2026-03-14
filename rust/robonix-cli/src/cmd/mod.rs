@@ -28,6 +28,9 @@ pub enum Commands {
         /// Build by system-installed package name
         #[arg(short = 'g', long)]
         global: Option<String>,
+        /// Clean build (remove rbnx-build before building). Default: incremental.
+        #[arg(long)]
+        clean: bool,
     },
     /// Start one node of a package (package and node required). Blocks until the process exits.
     Start {
@@ -75,7 +78,7 @@ pub enum Commands {
 
 pub async fn execute(command: Commands, config: Config) -> Result<()> {
     match command {
-        Commands::Build { path, global } => run_package::execute_build(config, path, global).await,
+        Commands::Build { path, global, clean } => run_package::execute_build(config, path, global, clean).await,
         Commands::Start {
             package,
             node,

@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>query_demo</name>
+  <version>0.1.0</version>
+  <description>Query demo - semantic_query server and client with example semantic map</description>
+  <maintainer email="robonix@example.com">robonix</maintainer>
+  <license>MulanPSL-2.0</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <depend>rclpy</depend>
+  <depend>robonix_interfaces</depend>
+  <depend>robonix_interfaces_ros2</depend>
+  <depend>robonix_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

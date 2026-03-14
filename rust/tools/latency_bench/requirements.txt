@@ -1,0 +1,8 @@
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+protobuf>=4.25.0
+pyzmq>=25.0.0
+aiohttp>=3.9.0
+rclpy>=3.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
