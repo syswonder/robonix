@@ -1,0 +1,15 @@
+# Example: Map semantic service implementing robonix/system/map/semantic_query
+manifestVersion: 1
+
+package:
+  id: com.robonix.example.map_semantic_service
+  name: map_semantic_service
+  version: 0.1.0
+  vendor: robonix
+  description: Semantic map query service implementing robonix/system/map/semantic_query
+  license: MulanPSL-2.0
+
+nodes:
+  - id: com.robonix.example.map_semantic
+    type: python
+    entry: map_semantic_service.semantic_server:main

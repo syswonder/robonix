@@ -57,19 +57,19 @@ required_files=(
     "src/generated/robonix_interfaces/resource/robonix_interfaces"
     "src/generated/robonix_interfaces/robonix_runtime_pb2.py"
     "src/generated/robonix_interfaces/robonix_runtime_pb2_grpc.py"
-    "src/generated/robonix_interfaces/robonix/hal/base/status_query.py"
-    "src/generated/robonix_interfaces/robonix/hal/base/motion_cmd_command.py"
-    "src/generated/robonix_interfaces/robonix/hal/localization/pose_stream.py"
+    "src/generated/robonix_interfaces/robonix/prm/base/status_query.py"
+    "src/generated/robonix_interfaces/robonix/prm/base/move_command.py"
+    "src/generated/robonix_interfaces/robonix/prm/base/pose_cov_stream.py"
     "src/app/robonix_interfaces_app/package.xml"
     "src/app/robonix_interfaces_app/setup.py"
     "src/app/robonix_interfaces_app/robonix_interfaces_app/combined_runtime.py"
-    "src/app/robonix_interfaces_app/robonix_interfaces_app/robonix/hal/base/status_server.py"
-    "src/app/robonix_interfaces_app/robonix_interfaces_app/robonix/hal/base/motion_cmd_server.py"
-    "src/app/robonix_interfaces_app/robonix_interfaces_app/robonix/hal/localization/pose_publisher.py"
+    "src/app/robonix_interfaces_app/robonix_interfaces_app/robonix/prm/base/status_server.py"
+    "src/app/robonix_interfaces_app/robonix_interfaces_app/robonix/prm/base/move_server.py"
+    "src/app/robonix_interfaces_app/robonix_interfaces_app/robonix/prm/base/pose_cov_publisher.py"
     "src/generated/robonix_interfaces_ros2/package.xml"
     "src/generated/robonix_interfaces_ros2/CMakeLists.txt"
-    "src/generated/robonix_interfaces_ros2/srv/HalBaseStatus.srv"
-    "src/generated/robonix_interfaces_ros2/action/HalBaseMotionCmd.action"
+    "src/generated/robonix_interfaces_ros2/srv/PrmBaseStatus.srv"
+    "src/generated/robonix_interfaces_ros2/action/PrmBaseMove.action"
     "src/vendor/robonix_msgs/package.xml"
     "src/vendor/robonix_msgs/CMakeLists.txt"
     "src/vendor/robonix_msgs/msg/CommandResult.msg"
@@ -108,16 +108,16 @@ for py_file in runtime_pkg.rglob("*.py"):
 for py_file in app_pkg.rglob("*.py"):
     py_compile.compile(str(py_file), doraise=True)
 
-query_src = (runtime_pkg / "robonix/hal/base/status_query.py").read_text()
+query_src = (runtime_pkg / "robonix/prm/base/status_query.py").read_text()
 assert "class Ros2StatusServer" in query_src
 assert "def resolve_status_service" in query_src
-assert 'namespace="robonix/hal/base"' in query_src
+assert 'namespace="robonix/prm/base"' in query_src
 
-action_src = (rosidl_pkg / "action/HalBaseMotionCmd.action").read_text()
-assert "geometry_msgs/Twist cmd" in action_src
+action_src = (rosidl_pkg / "action/PrmBaseMove.action").read_text()
+assert "geometry_msgs/Twist cmd_vel" in action_src
 assert "robonix_msgs/CommandResult status" in action_src
 
-srv_src = (rosidl_pkg / "srv/HalBaseStatus.srv").read_text()
+srv_src = (rosidl_pkg / "srv/PrmBaseStatus.srv").read_text()
 assert "std_msgs/String req" in srv_src
 assert "std_msgs/String res" in srv_src
 
@@ -131,20 +131,20 @@ assert "string message" in cmd_result_msg
 std_msgs_package_xml = (std_msgs_pkg / "package.xml").read_text()
 assert "<name>std_msgs</name>" in std_msgs_package_xml
 
-app_query_src = (app_pkg / "robonix/hal/base/status_server.py").read_text()
+app_query_src = (app_pkg / "robonix/prm/base/status_server.py").read_text()
 assert "create_status_server" in app_query_src
 
-app_cmd_src = (app_pkg / "robonix/hal/base/motion_cmd_server.py").read_text()
-assert "create_motion_cmd_server" in app_cmd_src
+app_cmd_src = (app_pkg / "robonix/prm/base/move_server.py").read_text()
+assert "create_move_server" in app_cmd_src
 
-app_stream_src = (app_pkg / "robonix/hal/localization/pose_publisher.py").read_text()
-assert "create_pose_publisher" in app_stream_src
+app_stream_src = (app_pkg / "robonix/prm/base/pose_cov_publisher.py").read_text()
+assert "create_pose_cov_publisher" in app_stream_src
 
 combined_src = (app_pkg / "combined_runtime.py").read_text()
 assert "MultiThreadedExecutor" in combined_src
 assert "create_status_server" in combined_src
-assert "create_motion_cmd_server" in combined_src
-assert "create_pose_publisher" in combined_src
+assert "create_move_server" in combined_src
+assert "create_pose_cov_publisher" in combined_src
 
 print(f"{prefix} python syntax and generated file assertions passed")
 PY

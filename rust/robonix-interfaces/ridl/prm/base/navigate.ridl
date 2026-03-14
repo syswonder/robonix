@@ -1,0 +1,8 @@
+namespace robonix/prm/base
+
+import geometry_msgs/msg/PoseStamped
+
+command navigate {
+    input goal geometry_msgs/msg/PoseStamped;
+    version 1.0;
+}

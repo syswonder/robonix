@@ -1,0 +1,10 @@
+namespace robonix/prm/arm
+
+import sensor_msgs/msg/JointState
+import std_msgs/msg/Bool
+
+command move_joint {
+    input joint_positions sensor_msgs/msg/JointState;
+    result status std_msgs/msg/Bool;
+    version 1.0;
+}

@@ -1,0 +1,8 @@
+namespace robonix/prm/sensor
+
+import sensor_msgs/msg/Imu
+
+stream imu {
+    output imu sensor_msgs/msg/Imu;
+    version 1.0;
+}

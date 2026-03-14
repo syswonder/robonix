@@ -1,8 +1,0 @@
-namespace robonix/hal/lidar
-
-import sensor_msgs/msg/LaserScan
-
-stream scan {
-    output scan sensor_msgs/msg/LaserScan
-    version 1.0;
-}

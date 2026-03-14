@@ -97,10 +97,10 @@ async fn call_supported_query(
     request_json: &str,
 ) -> Result<String> {
     match interface_id {
-        "robonix/hal/base/status" => call_string_query!(
-            robonix_server::generated::robonix_hal_base::status_query::create_resolved_client,
-            robonix_server::generated::robonix_hal_base::status_query::request_from_string,
-            robonix_server::generated::robonix_hal_base::status_query::response_into_string,
+        "robonix/prm/base/status" => call_string_query!(
+            robonix_server::generated::robonix_prm_base::status_query::create_resolved_client,
+            robonix_server::generated::robonix_prm_base::status_query::request_from_string,
+            robonix_server::generated::robonix_prm_base::status_query::response_into_string,
             node,
             runtime_client,
             requester_id,

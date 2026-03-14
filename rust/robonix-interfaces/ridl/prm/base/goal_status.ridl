@@ -1,0 +1,10 @@
+namespace robonix/prm/base
+
+import std_msgs/msg/String
+import robonix_msg/msg/NavigationStatus
+
+query goal_status {
+    request goal_id std_msgs/msg/String;
+    response status robonix_msg/msg/NavigationStatus;
+    version 1.0;
+}

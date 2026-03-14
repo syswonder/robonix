@@ -1,0 +1,8 @@
+namespace robonix/prm/camera
+
+import sensor_msgs/msg/Image
+
+stream depth {
+    output depth sensor_msgs/msg/Image;
+    version 1.0;
+}

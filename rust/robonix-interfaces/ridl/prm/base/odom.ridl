@@ -1,0 +1,8 @@
+namespace robonix/prm/base
+
+import nav_msgs/msg/Odometry
+
+stream odom {
+    output odom nav_msgs/msg/Odometry;
+    version 1.0;
+}

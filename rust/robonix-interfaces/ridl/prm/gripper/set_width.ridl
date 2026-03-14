@@ -1,0 +1,10 @@
+namespace robonix/prm/gripper
+
+import std_msgs/msg/Float64
+import std_msgs/msg/Bool
+
+command set_width {
+    input width std_msgs/msg/Float64;
+    result status std_msgs/msg/Bool;
+    version 1.0;
+}

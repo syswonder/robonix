@@ -1,0 +1,10 @@
+namespace robonix/prm/gripper
+
+import std_msgs/msg/Empty
+import std_msgs/msg/Bool
+
+command close {
+    input req std_msgs/msg/Empty;
+    result status std_msgs/msg/Bool;
+    version 1.0;
+}

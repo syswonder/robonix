@@ -1,8 +1,0 @@
-namespace robonix/hal/base
-
-import sensor_msgs/msg/JointState
-
-stream joint_state {
-    output state sensor_msgs/msg/JointState
-    version 1.0;
-}

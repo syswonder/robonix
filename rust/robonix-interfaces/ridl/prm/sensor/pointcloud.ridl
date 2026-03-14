@@ -1,0 +1,8 @@
+namespace robonix/prm/sensor
+
+import sensor_msgs/msg/PointCloud2
+
+stream pointcloud {
+    output pointcloud sensor_msgs/msg/PointCloud2;
+    version 1.0;
+}

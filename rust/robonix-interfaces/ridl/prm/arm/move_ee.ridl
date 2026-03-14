@@ -1,0 +1,10 @@
+namespace robonix/prm/arm
+
+import geometry_msgs/msg/PoseStamped
+import std_msgs/msg/Bool
+
+command move_ee {
+    input pose geometry_msgs/msg/PoseStamped;
+    result status std_msgs/msg/Bool;
+    version 1.0;
+}
