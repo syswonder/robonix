@@ -1,0 +1,8 @@
+namespace robonix/prm/force_torque
+
+import geometry_msgs/msg/WrenchStamped
+
+stream wrench {
+    output wrench geometry_msgs/msg/WrenchStamped;
+    version 1.0;
+}

@@ -1,0 +1,8 @@
+namespace robonix/prm/gripper
+
+import std_msgs/msg/Float64
+
+stream state_width {
+    output width std_msgs/msg/Float64;
+    version 1.0;
+}

@@ -1,0 +1,8 @@
+namespace robonix/prm/camera
+
+import robonix_msg/msg/RGBD
+
+stream rgbd {
+    output rgbd robonix_msg/msg/RGBD;
+    version 1.0;
+}

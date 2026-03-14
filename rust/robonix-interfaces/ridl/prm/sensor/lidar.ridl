@@ -1,0 +1,8 @@
+namespace robonix/prm/sensor
+
+import sensor_msgs/msg/LaserScan
+
+stream lidar {
+    output scan sensor_msgs/msg/LaserScan;
+    version 1.0;
+}

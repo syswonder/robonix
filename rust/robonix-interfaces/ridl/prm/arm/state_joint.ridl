@@ -1,0 +1,8 @@
+namespace robonix/prm/arm
+
+import sensor_msgs/msg/JointState
+
+stream state_joint {
+    output joint_states sensor_msgs/msg/JointState;
+    version 1.0;
+}

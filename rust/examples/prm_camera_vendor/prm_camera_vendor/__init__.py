@@ -1,0 +1,1 @@
+# Example camera vendor package

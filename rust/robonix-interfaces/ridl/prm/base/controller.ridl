@@ -1,0 +1,10 @@
+namespace robonix/prm/base
+
+import nav_msgs/msg/Path
+import std_msgs/msg/Bool
+
+command controller {
+    input path nav_msgs/msg/Path;
+    result success std_msgs/msg/Bool;
+    version 1.0;
+}

@@ -1,0 +1,12 @@
+namespace robonix/prm/base
+
+import geometry_msgs/msg/Twist
+import nav_msgs/msg/Odometry
+import robonix_msg/msg/CommandResult
+
+command move {
+    input cmd_vel geometry_msgs/msg/Twist;
+    output odom nav_msgs/msg/Odometry;
+    result status robonix_msg/msg/CommandResult;
+    version 1.0;
+}

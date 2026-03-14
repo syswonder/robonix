@@ -23,7 +23,7 @@ _setup_path()
 import grpc
 import rclpy
 
-from robonix.hal.localization import create_pose_publisher
+from robonix.prm.base import create_pose_cov_publisher
 from robonix_runtime_pb2_grpc import RobonixRuntimeStub
 
 
@@ -33,7 +33,7 @@ def main() -> None:
 
     grpc_channel = grpc.insecure_channel(endpoint)
     runtime_client = RobonixRuntimeStub(grpc_channel)
-    publisher = create_pose_publisher(runtime_client, node_id=node_id)
+    publisher = create_pose_cov_publisher(runtime_client, node_id=node_id)
 
     def publish_once() -> None:
         msg = publisher._msg_type()

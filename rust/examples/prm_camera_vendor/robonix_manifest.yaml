@@ -1,0 +1,23 @@
+# Example: Camera vendor package implementing prm::camera (partial)
+# Implements: rgb, depth, rgbd, intrinsics. Does NOT implement: ir (hardware does not support)
+manifestVersion: 1
+
+package:
+  id: com.robonix.example.prm_camera_vendor
+  name: prm_camera_vendor
+  version: 0.1.0
+  vendor: robonix
+  description: Example RGB-D camera vendor implementing prm::camera (rgb, depth, rgbd, intrinsics)
+  license: MulanPSL-2.0
+
+# Optional: declare provided interfaces for documentation
+# provides:
+#   - robonix/prm/camera/rgb
+#   - robonix/prm/camera/depth
+#   - robonix/prm/camera/rgbd
+#   - robonix/prm/camera/intrinsics
+
+nodes:
+  - id: com.robonix.example.camera
+    type: python
+    entry: prm_camera_vendor.camera_node:main

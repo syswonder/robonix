@@ -26,7 +26,7 @@ import grpc
 import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped
 
-from robonix.hal.localization import create_pose_subscriber
+from robonix.prm.base import create_pose_cov_subscriber
 from robonix_runtime_pb2_grpc import RobonixRuntimeStub
 
 
@@ -37,7 +37,7 @@ def main() -> None:
 
     grpc_channel = grpc.insecure_channel(endpoint)
     runtime_client = RobonixRuntimeStub(grpc_channel)
-    subscriber = create_pose_subscriber(runtime_client, requester_id=requester_id, target=target)
+    subscriber = create_pose_cov_subscriber(runtime_client, requester_id=requester_id, target=target)
 
     received = []
 

@@ -1,9 +1,0 @@
-namespace robonix/hal/base
-
-import std_msgs/msg/String
-
-query status {
-    request req std_msgs/msg/String;
-    response res std_msgs/msg/String;
-    version 1.0;
-}
