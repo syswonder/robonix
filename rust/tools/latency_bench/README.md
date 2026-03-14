@@ -73,4 +73,5 @@ python3 -m latency_bench.benchmark --transport grpc --iterations 10000
 - 控制台打印：min, max, mean, median, p50, p95, p99 (μs)
 - JSON 输出到 `results/`
 - 汇总对比（自动生成 summary.txt 和 latency_plot.png）：`python3 summarize_results.py results`
-- 含稳定度：std（标准差）、cv%（变异系数，越低越稳定）
+- **startup**：从 client 初始化到首次成功响应（含 rclpy.init、DDS 发现等，ROS2 明显慢于 gRPC/ZMQ）
+- **稳定度**：std（标准差）、cv%（变异系数，越低越稳定）

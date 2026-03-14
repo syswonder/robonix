@@ -14,12 +14,17 @@ import numpy as np
 from latency_bench.payload import get_payload, validate_response
 
 
-def run_grpc_bench(addr: str, payload: bytes, warmup: int, iterations: int) -> list[float]:
+def run_grpc_bench(addr: str, payload: bytes, warmup: int, iterations: int) -> tuple[float, list[float]]:
     import grpc
     from proto import echo_pb2, echo_pb2_grpc
 
+    t_start = time.perf_counter()
     channel = grpc.insecure_channel(addr)
     stub = echo_pb2_grpc.EchoStub(channel)
+    resp = stub.Echo(echo_pb2.EchoRequest(data=payload))
+    if not validate_response(payload, resp.data):
+        raise ValueError("Response mismatch")
+    startup_us = (time.perf_counter() - t_start) * 1e6
 
     def one_call():
         t0 = time.perf_counter()
@@ -35,15 +40,21 @@ def run_grpc_bench(addr: str, payload: bytes, warmup: int, iterations: int) -> l
     latencies = []
     for _ in range(iterations):
         latencies.append(one_call())
-    return latencies
+    return startup_us, latencies
 
 
-def run_zmq_bench(addr: str, payload: bytes, warmup: int, iterations: int) -> list[float]:
+def run_zmq_bench(addr: str, payload: bytes, warmup: int, iterations: int) -> tuple[float, list[float]]:
     import zmq
 
+    t_start = time.perf_counter()
     ctx = zmq.Context()
     sock = ctx.socket(zmq.REQ)
     sock.connect(addr)
+    sock.send(payload)
+    resp = sock.recv()
+    if not validate_response(payload, resp):
+        raise ValueError("Response mismatch")
+    startup_us = (time.perf_counter() - t_start) * 1e6
 
     def one_call():
         t0 = time.perf_counter()
@@ -60,11 +71,20 @@ def run_zmq_bench(addr: str, payload: bytes, warmup: int, iterations: int) -> li
     latencies = []
     for _ in range(iterations):
         latencies.append(one_call())
-    return latencies
+    return startup_us, latencies
 
 
-def run_http_bench(url: str, payload: bytes, warmup: int, iterations: int) -> list[float]:
+def run_http_bench(url: str, payload: bytes, warmup: int, iterations: int) -> tuple[float, list[float]]:
     import urllib.request
+
+    t_start = time.perf_counter()
+    req = urllib.request.Request(url, data=payload, method="POST")
+    req.add_header("Content-Type", "application/octet-stream")
+    with urllib.request.urlopen(req) as resp:
+        resp_data = resp.read()
+    if not validate_response(payload, resp_data):
+        raise ValueError("Response mismatch")
+    startup_us = (time.perf_counter() - t_start) * 1e6
 
     def one_call():
         t0 = time.perf_counter()
@@ -83,19 +103,30 @@ def run_http_bench(url: str, payload: bytes, warmup: int, iterations: int) -> li
     latencies = []
     for _ in range(iterations):
         latencies.append(one_call())
-    return latencies
+    return startup_us, latencies
 
 
-def run_ros2_bench(payload: bytes, warmup: int, iterations: int) -> list[float]:
+def run_ros2_bench(payload: bytes, warmup: int, iterations: int) -> tuple[float, list[float]]:
     import rclpy
     from rclpy.node import Node
     from latency_bench_msgs.srv import Echo
 
+    t_start = time.perf_counter()
     rclpy.init()
     node = Node("bench_client")
     client = node.create_client(Echo, "/latency_bench/echo")
     if not client.wait_for_service(timeout_sec=10.0):
         raise RuntimeError("ROS2 echo service not available")
+    req = Echo.Request()
+    req.data = list(payload)
+    future = client.call_async(req)
+    rclpy.spin_until_future_complete(node, future, timeout_sec=30.0)
+    result = future.result()
+    if result is None:
+        raise RuntimeError("ROS2 call failed")
+    if not validate_response(payload, bytes(result.data)):
+        raise ValueError("Response mismatch")
+    startup_us = (time.perf_counter() - t_start) * 1e6
 
     def one_call():
         req = Echo.Request()
@@ -120,12 +151,13 @@ def run_ros2_bench(payload: bytes, warmup: int, iterations: int) -> list[float]:
 
     node.destroy_node()
     rclpy.shutdown()
-    return latencies
+    return startup_us, latencies
 
 
-def compute_stats(latencies: list[float]) -> dict:
+def compute_stats(startup_us: float, latencies: list[float]) -> dict:
     arr = np.array(latencies)
     return {
+        "startup_us": startup_us,
         "min_us": float(np.min(arr)),
         "max_us": float(np.max(arr)),
         "mean_us": float(np.mean(arr)),
@@ -140,6 +172,7 @@ def compute_stats(latencies: list[float]) -> dict:
 
 def print_stats(name: str, stats: dict):
     print(f"\n=== {name} ===")
+    print(f"  startup: {stats['startup_us']:.2f} μs (init + first response, incl. rclpy.init etc.)")
     print(f"  min:    {stats['min_us']:.2f} μs")
     print(f"  max:    {stats['max_us']:.2f} μs")
     print(f"  mean:   {stats['mean_us']:.2f} μs")
@@ -167,20 +200,20 @@ def main():
 
     try:
         if args.transport == "grpc":
-            latencies = run_grpc_bench(args.grpc_addr, payload, args.warmup, args.iterations)
+            startup_us, latencies = run_grpc_bench(args.grpc_addr, payload, args.warmup, args.iterations)
         elif args.transport == "zmq":
-            latencies = run_zmq_bench(args.zmq_addr, payload, args.warmup, args.iterations)
+            startup_us, latencies = run_zmq_bench(args.zmq_addr, payload, args.warmup, args.iterations)
         elif args.transport == "http":
-            latencies = run_http_bench(args.http_url, payload, args.warmup, args.iterations)
+            startup_us, latencies = run_http_bench(args.http_url, payload, args.warmup, args.iterations)
         elif args.transport == "ros2":
-            latencies = run_ros2_bench(payload, args.warmup, args.iterations)
+            startup_us, latencies = run_ros2_bench(payload, args.warmup, args.iterations)
         else:
             raise ValueError(f"Unknown transport: {args.transport}")
     except Exception as e:
         print(f"Benchmark failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    stats = compute_stats(latencies)
+    stats = compute_stats(startup_us, latencies)
     rmw = os.environ.get("RMW_IMPLEMENTATION", "default")
     name = f"{args.transport} (RMW={rmw})" if args.transport == "ros2" else args.transport
     print_stats(name, stats)
