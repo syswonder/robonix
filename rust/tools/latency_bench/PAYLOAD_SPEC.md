@@ -25,8 +25,11 @@
 
 ## 4. 时间测量
 
-- **起点**：client 发送前 `t0`
-- **终点**：client 收到完整 response 后 `t1`
-- **RTT**：`(t1 - t0)` 微秒 (μs)
+- **startup (启动时间)**：从 client 初始化到首次成功响应的总时间，含：
+  - gRPC: channel + stub + 首 RPC
+  - ZMQ: context + socket + connect + 首 send/recv
+  - HTTP: 首 request（含 TCP 连接）
+  - ROS2: **rclpy.init()** + node + client + wait_for_service + 首 call（rclpy 初始化与 DDS 发现较慢）
+- **steady-state RTT**：warmup 后的请求，`t0` 发送前 → `t1` 收到完整 response，`(t1 - t0)` 微秒
 
 单次测量不包含序列化/反序列化外的业务逻辑。
