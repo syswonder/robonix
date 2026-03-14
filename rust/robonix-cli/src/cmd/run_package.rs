@@ -2,21 +2,52 @@
 // Run package commands: build, start (start blocks until process exits)
 
 use super::build;
-use crate::manifest::{self, PackageManifest};
-use crate::output;
-use crate::process::ProcessManager;
+use robonix_cli::manifest;
+use robonix_cli::output;
+use robonix_cli::process::ProcessManager;
+use robonix_cli::Config;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-fn resolve_package_path(spec: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(spec);
-    if path.exists() {
-        return path
+/// Resolve package path from -p (local path) or -g (system-installed name).
+fn resolve_package_path(
+    config: &Config,
+    path: Option<PathBuf>,
+    global: Option<String>,
+) -> Result<PathBuf> {
+    if let Some(p) = path {
+        let canonical = p
             .canonicalize()
-            .with_context(|| format!("Failed to canonicalize package path: {}", path.display()));
+            .with_context(|| format!("Failed to canonicalize: {}", p.display()))?;
+        if canonical.join(manifest::MANIFEST_FILE).exists() {
+            return Ok(canonical);
+        }
+        anyhow::bail!("Path {} does not contain {}", canonical.display(), manifest::MANIFEST_FILE);
     }
 
-    // Try as name: look in examples/, ., package_storage
+    if let Some(name) = global {
+        let db = robonix_cli::PackageDatabase::load(&config.package_storage_path)?;
+        if let Some(pkg) = db.get_package(&name) {
+            return Ok(pkg.path.clone());
+        }
+        anyhow::bail!("Package '{}' not found in system storage ({})", name, config.package_storage_path.display());
+    }
+
+    anyhow::bail!("Specify -p <path> for local package or -g <name> for system-installed package")
+}
+
+/// Resolve package path for start: accepts path or name (looks in examples, cwd, system storage).
+fn resolve_package_path_for_start(config: &Config, spec: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(spec);
+    if path.exists() {
+        let canonical = path
+            .canonicalize()
+            .with_context(|| format!("Failed to canonicalize: {}", path.display()))?;
+        if canonical.join(manifest::MANIFEST_FILE).exists() {
+            return Ok(canonical);
+        }
+    }
+
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
     let candidates = [
         cwd.join("examples").join(spec),
@@ -25,15 +56,20 @@ fn resolve_package_path(spec: &str) -> Result<PathBuf> {
     ];
 
     for candidate in &candidates {
-        if candidate.join(manifest::VNEXT_MANIFEST_FILE).exists() {
+        if candidate.join(manifest::MANIFEST_FILE).exists() {
             return candidate
                 .canonicalize()
                 .with_context(|| format!("Failed to canonicalize: {}", candidate.display()));
         }
     }
 
+    let db = robonix_cli::PackageDatabase::load(&config.package_storage_path)?;
+    if let Some(pkg) = db.get_package(spec) {
+        return Ok(pkg.path.clone());
+    }
+
     anyhow::bail!(
-        "Package '{}' not found. Tried: {:?}",
+        "Package '{}' not found. Tried: {:?} and system storage",
         spec,
         candidates
             .iter()
@@ -42,22 +78,24 @@ fn resolve_package_path(spec: &str) -> Result<PathBuf> {
     )
 }
 
-pub async fn execute_build(spec: &str) -> Result<()> {
-    let package_root = resolve_package_path(spec)?;
+pub async fn execute_build(
+    config: Config,
+    path: Option<PathBuf>,
+    global: Option<String>,
+) -> Result<()> {
+    let package_root = resolve_package_path(&config, path, global)?;
     build::execute_local(package_root).await
 }
 
 pub async fn execute_start(
+    config: &Config,
     spec: &str,
     node_id: &str,
     registry_endpoint: Option<&str>,
 ) -> Result<()> {
-    let package_root = resolve_package_path(spec)?;
+    let package_root = resolve_package_path_for_start(config, spec)?;
     let detected = manifest::detect_and_load(&package_root)?;
-    let manifest = match &detected.manifest {
-        PackageManifest::VNext(m) => m.clone(),
-        PackageManifest::Legacy(_) => anyhow::bail!("Legacy packages not supported for run start"),
-    };
+    let manifest = &detected.manifest;
 
     let node = manifest
         .nodes
@@ -137,7 +175,7 @@ pub async fn execute_start(
         .start_process(
             &build_layout.package_name,
             &std_name,
-            "vnext-node",
+            "node",
             &package_root,
             &start_command,
         )

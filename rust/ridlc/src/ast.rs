@@ -20,7 +20,6 @@ pub enum Interface {
     Stream(StreamDef),
     Command(CommandDef),
     Query(QueryDef),
-    Event(EventDef),
 }
 
 #[derive(Clone, Debug)]
@@ -87,21 +86,6 @@ pub struct QueryDef {
 
 #[derive(Clone, Debug)]
 pub struct QueryField {
-    pub name: String,
-    pub type_ref: String,
-    pub annotations: Vec<Annotation>,
-}
-
-#[derive(Clone, Debug)]
-pub struct EventDef {
-    pub name: String,
-    pub annotations: Vec<Annotation>,
-    pub payload: EventPayload,
-    pub version: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct EventPayload {
     pub name: String,
     pub type_ref: String,
     pub annotations: Vec<Annotation>,

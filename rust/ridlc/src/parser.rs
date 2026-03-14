@@ -4,8 +4,8 @@
 use anyhow::{Result, anyhow};
 
 use crate::ast::{
-    Annotation, CommandDef, CommandField, EventDef, EventPayload, File, Import, Interface,
-    QueryDef, QueryField, SafetyItem, StreamDef, StreamDirection, StreamField,
+    Annotation, CommandDef, CommandField, File, Import, Interface, QueryDef, QueryField,
+    SafetyItem, StreamDef, StreamDirection, StreamField,
 };
 
 struct Lexer<'a> {
@@ -485,61 +485,6 @@ impl<'a> Lexer<'a> {
             safety,
         })
     }
-    fn parse_event_def(&mut self) -> Result<EventDef> {
-        self.expect_ident("event")?;
-        let name = self.take_ident()?;
-        let annotations = self.parse_annotations()?;
-        self.expect_char('{')?;
-        let mut payload = None;
-        let mut version = None;
-        loop {
-            self.skip_ws_comments();
-            // End of event body.
-            if matches!(self.peek_char(), Some('}')) {
-                break;
-            }
-            let kw = self.take_ident();
-            if kw.is_err() {
-                break;
-            }
-            let kw = kw.unwrap();
-            if kw == "payload" {
-                let pname = self.take_ident()?;
-                let type_ref = self.take_type_ref()?;
-                let field_ann = self.parse_annotations()?;
-                self.skip_ws_comments();
-                if let Some(';') = self.peek_char() {
-                    self.next_char();
-                }
-                payload = Some(EventPayload {
-                    name: pname,
-                    type_ref,
-                    annotations: field_ann,
-                });
-            } else if kw == "version" {
-                self.skip_ws_comments();
-                let start = self.pos;
-                while self
-                    .peek_char()
-                    .map(|c| c.is_ascii_digit() || c == '.')
-                    .unwrap_or(false)
-                {
-                    self.next_char();
-                }
-                version = Some(self.s[start..self.pos].to_string());
-                self.expect_char(';')?;
-            } else {
-                break;
-            }
-        }
-        self.expect_char('}')?;
-        Ok(EventDef {
-            name,
-            annotations,
-            payload: payload.ok_or_else(|| anyhow!("event must have payload"))?,
-            version,
-        })
-    }
 }
 
 pub fn parse_file(content: &str) -> Result<File> {
@@ -566,9 +511,6 @@ pub fn parse_file(content: &str) -> Result<File> {
         } else if rest.starts_with("command") {
             file.interfaces
                 .push(Interface::Command(lex.parse_command_def()?));
-        } else if rest.starts_with("event") {
-            file.interfaces
-                .push(Interface::Event(lex.parse_event_def()?));
         } else {
             lex.next_char()
                 .ok_or_else(|| lex.error("unexpected token"))?;

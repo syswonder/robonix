@@ -3,9 +3,9 @@
 //
 // Main entry point for robonix-cli command-line tool
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
-use robonix_cli::*;
+use robonix_cli::Config;
 
 mod cmd;
 
@@ -29,8 +29,9 @@ async fn main() -> Result<()> {
     let config = Config::load()?;
     config.ensure_storage_dir()?;
 
-    // Sync database with filesystem on startup
-    PackageDatabase::sync(&config.package_storage_path).context("Failed to sync database")?;
+    if let Err(e) = robonix_cli::PackageDatabase::sync(&config.package_storage_path) {
+        log::warn!("Package database sync failed: {}", e);
+    }
 
     cmd::execute(cli.command, config).await?;
 

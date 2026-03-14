@@ -32,9 +32,9 @@ struct Args {
     #[arg(short = 'I', long = "include", number_of_values = 1)]
     include: Vec<PathBuf>,
 
-    /// Output directory for generated code
-    #[arg(short = 'o', long = "out", required = true)]
-    out: PathBuf,
+    /// Output directory for generated code (required unless --package-output is set)
+    #[arg(short = 'o', long = "out")]
+    out: Option<PathBuf>,
 
     /// Target language: python or rust
     #[arg(long = "lang", default_value = "python")]
@@ -44,6 +44,16 @@ struct Args {
     /// `package` keeps the legacy single-package + rosidl tree layout.
     #[arg(long = "layout", default_value = "workspace")]
     layout: String,
+
+    /// Output path for package-local interfaces (when building a package with ridl/).
+    /// When set, outputs to this path instead of workspace src/generated.
+    #[arg(long = "package-output", value_name = "PATH")]
+    package_output: Option<PathBuf>,
+
+    /// Package name for generated interfaces (e.g. skill_demo_interfaces).
+    /// Required when --package-output is set.
+    #[arg(long = "package-name", value_name = "NAME")]
+    package_name: Option<String>,
 }
 
 fn collect_ridl_from(path: &Path, acc: &mut Vec<PathBuf>) -> Result<()> {
@@ -95,6 +105,20 @@ fn main() -> Result<()> {
         );
     }
 
+    let package_mode = args.package_output.is_some();
+    if package_mode {
+        if args.package_name.is_none() {
+            bail!("[ridlc] --package-name is required when --package-output is set");
+        }
+    } else if args.out.is_none() {
+        bail!("[ridlc] -o/--out is required when not using --package-output");
+    }
+    let out_path = if package_mode {
+        args.package_output.as_ref().unwrap().clone()
+    } else {
+        args.out.as_ref().unwrap().clone()
+    };
+
     // Collect all RIDL inputs: positional + -i/--input (with directory expansion).
     let mut all_inputs: Vec<PathBuf> = Vec::new();
     for p in &args.inputs {
@@ -111,7 +135,7 @@ fn main() -> Result<()> {
     }
 
     eprintln!("{} includes: {:?}", ridlc_prefix(), args.include);
-    eprintln!("{} out: {}", ridlc_prefix(), args.out.display());
+    eprintln!("{} out: {}", ridlc_prefix(), out_path.display());
     eprintln!("{} inputs (expanded):", ridlc_prefix());
     for p in &all_inputs {
         eprintln!("  - {}", p.display());
@@ -143,39 +167,74 @@ fn main() -> Result<()> {
         }
     }
 
-    std::fs::create_dir_all(&args.out)?;
+    // Package-local mode: namespace must start with manifest package.name (e.g. skill_demo or skill_demo/xxx)
+    if package_mode {
+        let pkg_name = args.package_name.as_ref().unwrap();
+        let ns_prefix = pkg_name
+            .strip_suffix("_interfaces")
+            .unwrap_or(pkg_name);
+        for ns in files_by_ns.keys() {
+            let valid = ns == ns_prefix || ns.starts_with(&format!("{}/", ns_prefix));
+            if !valid {
+                bail!(
+                    "[ridlc] package-local RIDL namespace '{}' must be '{}' or '{}/*' (from --package-name {})",
+                    ns,
+                    ns_prefix,
+                    ns_prefix,
+                    pkg_name
+                );
+            }
+        }
+    }
+
+    std::fs::create_dir_all(&out_path)?;
 
     // Simple statistics for generated artifacts.
     let mut total_streams = 0usize;
     let mut total_commands = 0usize;
     let mut total_queries = 0usize;
-    let mut total_events = 0usize;
     let mut ns_count = 0usize;
 
     match args.lang.as_str() {
         "python" => {
-            let python_out = match args.layout.as_str() {
-                "workspace" => {
-                    let ws_src = args.out.join("src");
-                    std::fs::create_dir_all(&ws_src)?;
-                    for subdir in ["generated", "vendor"] {
-                        let package_dir = ws_src.join(subdir);
-                        if package_dir.exists() {
-                            std::fs::remove_dir_all(&package_dir).with_context(|| {
-                                format!(
-                                    "failed to remove previous package dir '{}'",
-                                    package_dir.display()
-                                )
-                            })?;
+            let python_out = if package_mode {
+                let pkg_name = args.package_name.as_ref().unwrap();
+                let pkg_out = out_path.join(pkg_name);
+                std::fs::create_dir_all(&pkg_out)?;
+                pkg_out
+            } else {
+                match args.layout.as_str() {
+                    "workspace" => {
+                        let ws_src = out_path.join("src");
+                        std::fs::create_dir_all(&ws_src)?;
+                        for subdir in ["generated", "vendor"] {
+                            let package_dir = ws_src.join(subdir);
+                            if package_dir.exists() {
+                                std::fs::remove_dir_all(&package_dir).with_context(|| {
+                                    format!(
+                                        "failed to remove previous package dir '{}'",
+                                        package_dir.display()
+                                    )
+                                })?;
+                            }
                         }
+                        ws_src.join("generated").join("robonix_interfaces")
                     }
-                    ws_src.join("generated").join("robonix_interfaces")
-                }
-                "package" => args.out.clone(),
+                "package" => out_path.clone(),
                 _ => anyhow::bail!(
                     "unsupported --layout: {} (use 'workspace' or 'package')",
                     args.layout
                 ),
+            }
+            };
+
+            let gen_options = if package_mode {
+                Some(ridlc::codegen::python_gen::PackageGenOptions {
+                    python_package_name: args.package_name.as_ref().unwrap().clone(),
+                    rosidl_base: out_path.clone(),
+                })
+            } else {
+                None
             };
 
             // Emit gRPC runtime client into the generated runtime package once
@@ -188,10 +247,9 @@ fn main() -> Result<()> {
                         ridlc::ast::Interface::Stream(_) => total_streams += 1,
                         ridlc::ast::Interface::Command(_) => total_commands += 1,
                         ridlc::ast::Interface::Query(_) => total_queries += 1,
-                        ridlc::ast::Interface::Event(_) => total_events += 1,
                     }
                 }
-                python_gen::generate(ast, &python_out)?;
+                python_gen::generate(ast, &python_out, gen_options.as_ref())?;
                 eprintln!(
                     "{} generated Python stubs for namespace '{}' under '{}'",
                     ridlc_prefix(),
@@ -199,9 +257,16 @@ fn main() -> Result<()> {
                     python_out.display()
                 );
             }
-            python_gen::emit_ros_package_files(&python_out, "robonix_interfaces")?;
-            if args.layout == "workspace" {
-                let workspace_src = args.out.join("src");
+            let pkg_name_for_ros = if package_mode {
+                args.package_name.as_ref().unwrap().as_str()
+            } else {
+                "robonix_interfaces"
+            };
+            python_gen::emit_ros_package_files(&python_out, pkg_name_for_ros)?;
+            if package_mode {
+                python_gen::emit_package_local_rosidl(&out_path, args.package_name.as_ref().unwrap(), &files_by_ns)?;
+            } else if args.layout == "workspace" {
+                let workspace_src = out_path.join("src");
                 python_gen::assemble_workspace_ros_packages(
                     &workspace_src,
                     &python_out,
@@ -212,7 +277,7 @@ fn main() -> Result<()> {
         }
         "rust" => {
             let rust_out = match args.layout.as_str() {
-                "workspace" | "package" => args.out.join("ridl_generated.rs"),
+                "workspace" | "package" => out_path.join("ridl_generated.rs"),
                 _ => anyhow::bail!(
                     "unsupported --layout: {} (use 'workspace' or 'package')",
                     args.layout
@@ -225,7 +290,6 @@ fn main() -> Result<()> {
                         ridlc::ast::Interface::Stream(_) => total_streams += 1,
                         ridlc::ast::Interface::Command(_) => total_commands += 1,
                         ridlc::ast::Interface::Query(_) => total_queries += 1,
-                        ridlc::ast::Interface::Event(_) => total_events += 1,
                     }
                 }
                 eprintln!(
@@ -244,12 +308,12 @@ fn main() -> Result<()> {
         _ => anyhow::bail!("unsupported --lang: {} (use 'python' or 'rust')", args.lang),
     }
 
-    let total_ifaces = total_streams + total_commands + total_queries + total_events;
+    let total_ifaces = total_streams + total_commands + total_queries;
     eprintln!("{} summary:", ridlc_prefix());
     eprintln!("  namespaces: {}", ns_count);
     eprintln!(
-        "  interfaces: {} (stream={}, command={}, query={}, event={})",
-        total_ifaces, total_streams, total_commands, total_queries, total_events
+        "  interfaces: {} (stream={}, command={}, query={})",
+        total_ifaces, total_streams, total_commands, total_queries
     );
 
     Ok(())

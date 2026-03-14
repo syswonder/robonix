@@ -2,30 +2,12 @@
 """
 Python client for robonix/system/debug/ping query.
 Calls the ping service via robonix-server meta API + ROS2 (Zenoh).
+Must be run via rbnx start (not direct python).
 """
 
-import os
 import sys
 
 import grpc
-
-# Add generated Python stubs when not running from colcon install
-def _setup_path():
-    try:
-        import robonix_runtime_pb2_grpc  # noqa: F401
-    except ImportError:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        # python_ping_client/call_ping.py -> examples/python_ping_client -> rust
-        pkg_root = os.path.dirname(os.path.dirname(script_dir))
-        rust_dir = os.path.dirname(pkg_root)
-        python_pkg = os.path.join(
-            rust_dir, "robonix-server", "target", "rclrs_interfaces_ws", "python_pkg"
-        )
-        if os.path.exists(python_pkg) and python_pkg not in sys.path:
-            sys.path.insert(0, python_pkg)
-
-
-_setup_path()
 
 from robonix.system.debug.ping_query import create_ping_client
 from robonix_runtime_pb2_grpc import RobonixRuntimeStub
@@ -34,9 +16,9 @@ from std_msgs.msg import String
 
 
 def main():
-    endpoint = os.environ.get("ROBONIX_META_GRPC_ENDPOINT", "127.0.0.1:50051")
-    target = os.environ.get("ROBONIX_PING_TARGET", "robonix-server")
-    requester_id = os.environ.get("ROBONIX_QUERY_REQUESTER_ID", "python_ping_client")
+    endpoint = "127.0.0.1:50051"
+    target = "robonix-server"
+    requester_id = "python_ping_client"
     payload = sys.argv[1] if len(sys.argv) > 1 else "hello"
 
     channel = grpc.insecure_channel(endpoint)

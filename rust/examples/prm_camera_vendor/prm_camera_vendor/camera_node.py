@@ -8,26 +8,6 @@ Code structure:
 - [Hook] Stream has no execute; just call publisher.publish(msg) in loop/timer
 """
 
-import os
-import sys
-
-# [Optional] Only needed when running directly with python (not via rbnx start); rbnx start sources install, skip this
-def _setup_path():
-    try:
-        import robonix_runtime_pb2_grpc  # noqa: F401
-    except ImportError:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        pkg_root = os.path.dirname(os.path.dirname(script_dir))
-        rust_dir = os.path.dirname(pkg_root)
-        python_pkg = os.path.join(
-            rust_dir, "robonix-server", "target", "rclrs_interfaces_ws", "python_pkg"
-        )
-        if os.path.exists(python_pkg) and python_pkg not in sys.path:
-            sys.path.insert(0, python_pkg)
-
-
-_setup_path()
-
 import grpc
 import rclpy
 
@@ -41,8 +21,8 @@ from robonix_msgs.msg import RGBD
 
 
 def main() -> None:
-    endpoint = os.environ.get("ROBONIX_META_GRPC_ENDPOINT", "127.0.0.1:50051")
-    node_id = os.environ.get("ROBONIX_NODE_ID", "com.robonix.example.camera")
+    endpoint = "127.0.0.1:50051"
+    node_id = "com.robonix.example.camera"
 
     # [Required] 1) Init ROS2  2) Connect to meta gRPC  3) Get runtime_client (for channel registration)
     rclpy.init()

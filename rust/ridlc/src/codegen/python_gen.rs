@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Python ROS2 code generator for RIDL (PoC)
-// Generates rclpy-based client/server stubs for query, stream, command, event.
+// Generates rclpy-based client/server stubs for query, stream, command.
 
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
@@ -8,8 +8,15 @@ use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
-use crate::ast::{CommandDef, EventDef, File, Interface, QueryDef, StreamDef, StreamDirection};
+use crate::ast::{CommandDef, File, Interface, QueryDef, StreamDef, StreamDirection};
 use crate::codegen::err::RIDLC_ERR_PREFIX;
+
+/// Options for package-local RIDL generation (when --package-output is set).
+#[derive(Clone)]
+pub struct PackageGenOptions {
+    pub python_package_name: String,
+    pub rosidl_base: PathBuf,
+}
 
 fn ridlc_prefix() -> &'static str {
     if io::stderr().is_terminal() {
@@ -63,7 +70,7 @@ pub fn emit_ros_package_files(out_dir: &Path, package_name: &str) -> Result<()> 
   <name>PACKAGE_NAME</name>
   <version>0.0.1</version>
   <description>RIDL-generated interfaces and runtime gRPC client (robonix meta API).</description>
-  <maintainer email="wheatfox17@icloud.com">robonix</maintainer>
+  <maintainer email="robonix@example.com">robonix</maintainer>
   <license>MulanPSL-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>
   <depend>rclpy</depend>
@@ -97,7 +104,7 @@ setup(
     install_requires=['setuptools', 'grpcio'],
     zip_safe=True,
     maintainer='robonix',
-    maintainer_email='wheatfox17@icloud.com',
+    maintainer_email='robonix@example.com',
     description='RIDL-generated interfaces and runtime gRPC client',
     license='MulanPSL-2.0',
     tests_require=['pytest'],
@@ -226,6 +233,10 @@ fn maybe_copy_ros_package(src_dir: &Path, workspace_src: &Path) -> Result<Option
     ) {
         return Ok(None);
     }
+    // Exclude packages with deps we don't vendor (e.g. test_interface_files)
+    if matches!(package_name.as_str(), "test_msgs") {
+        return Ok(None);
+    }
 
     let dst = workspace_src.join(&package_name);
     copy_dir_recursive(src_dir, &dst)?;
@@ -335,7 +346,7 @@ fn write_rosidl_package_files(
   <name>{package_name}</name>\n\
   <version>0.0.1</version>\n\
   <description>{description}</description>\n\
-  <maintainer email=\"wheatfox17@icloud.com\">robonix</maintainer>\n\
+  <maintainer email=\"robonix@example.com\">robonix</maintainer>\n\
   <license>MulanPSL-2.0</license>\n\
   <buildtool_depend>ament_cmake</buildtool_depend>\n\
   <buildtool_depend>rosidl_default_generators</buildtool_depend>\n\
@@ -375,6 +386,35 @@ ament_package()\n"
 
     fs::write(out_dir.join("package.xml"), package_xml)?;
     fs::write(out_dir.join("CMakeLists.txt"), cmake)?;
+    Ok(())
+}
+
+/// Emit package.xml and CMakeLists.txt for package-local ROS IDL output.
+/// Called when --package-output is set; the rosidl was written to rosidl_base/package_name_ros2.
+pub fn emit_package_local_rosidl(
+    rosidl_base: &Path,
+    package_name: &str,
+    _files_by_ns: &BTreeMap<String, File>,
+) -> Result<()> {
+    let rosidl_pkg_name = format!("{}_ros2", package_name);
+    let rosidl_dir = rosidl_base.join(&rosidl_pkg_name);
+    if !rosidl_dir.exists() {
+        return Ok(());
+    }
+    let (deps, interface_files) =
+        collect_rosidl_metadata(&rosidl_dir, &["msg", "srv", "action"], &rosidl_pkg_name)?;
+    write_rosidl_package_files(
+        &rosidl_dir,
+        &rosidl_pkg_name,
+        "RIDL-generated ROS interface package (package-local).",
+        &deps,
+        &interface_files,
+    )?;
+    eprintln!(
+        "{} emitted package-local ROS IDL package '{}'",
+        ridlc_prefix(),
+        rosidl_pkg_name
+    );
     Ok(())
 }
 
@@ -442,7 +482,7 @@ fn emit_app_package_files(out_dir: &Path, entry_points: &[(String, String)]) -> 
   <name>PACKAGE_NAME</name>
   <version>0.0.1</version>
   <description>User-editable app skeletons for RIDL-generated interfaces.</description>
-  <maintainer email="wheatfox17@icloud.com">robonix</maintainer>
+  <maintainer email="robonix@example.com">robonix</maintainer>
   <license>MulanPSL-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>
   <depend>rclpy</depend>
@@ -477,7 +517,7 @@ install_scripts=$base/lib/PACKAGE_NAME
     };
 
     let setup_py = format!(
-        "from setuptools import find_packages, setup\n\npackage_name = '{}'\n\nsetup(\n    name=package_name,\n    version='0.0.1',\n    packages=find_packages(exclude=['test']),\n    data_files=[\n        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),\n        ('share/' + package_name, ['package.xml', 'README.md']),\n    ],\n    install_requires=['setuptools', 'grpcio'],\n    zip_safe=True,\n    maintainer='robonix',\n    maintainer_email='wheatfox17@icloud.com',\n    description='User-editable app skeletons for RIDL-generated interfaces',\n    license='MulanPSL-2.0',\n    tests_require=['pytest'],\n{}{}\n",
+        "from setuptools import find_packages, setup\n\npackage_name = '{}'\n\nsetup(\n    name=package_name,\n    version='0.0.1',\n    packages=find_packages(exclude=['test']),\n    data_files=[\n        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),\n        ('share/' + package_name, ['package.xml', 'README.md']),\n    ],\n    install_requires=['setuptools', 'grpcio'],\n    zip_safe=True,\n    maintainer='robonix',\n    maintainer_email='robonix@example.com',\n    description='User-editable app skeletons for RIDL-generated interfaces',\n    license='MulanPSL-2.0',\n    tests_require=['pytest'],\n{}{}\n",
         APP_PACKAGE_NAME, entry_points_block, ")"
     );
 
@@ -693,31 +733,6 @@ fn emit_stream_app_module(
     Ok((module_name, role))
 }
 
-fn emit_event_app_module(out_dir: &Path, namespace: &str, e: &EventDef) -> Result<String> {
-    let ns_import = namespace.replace('/', ".");
-    let module_name = format!("{}_publisher", e.name);
-    let mut out = String::new();
-    out.push_str("# Generated by ridlc. Edit this file to add your app logic.\n\n");
-    out.push_str("import rclpy\n\n");
-    out.push_str(&format!(
-        "from {} import {}Publisher\n\n\n",
-        ns_import,
-        pascal(&e.name)
-    ));
-    out.push_str("def main() -> None:\n");
-    out.push_str("    publisher = ");
-    out.push_str(&format!("{}Publisher(\"/todo/event\")\n", pascal(&e.name)));
-    out.push_str("    msg = publisher._msg_type()\n");
-    out.push_str("    publisher.emit(msg)\n");
-    out.push_str("    publisher.destroy_node()\n");
-    out.push_str("    if rclpy.ok():\n");
-    out.push_str("        rclpy.shutdown()\n\n\n");
-    out.push_str("if __name__ == \"__main__\":\n");
-    out.push_str("    main()\n");
-    fs::write(out_dir.join(format!("{}.py", module_name)), out)?;
-    Ok(module_name)
-}
-
 fn emit_combined_runtime_module(
     py_root: &Path,
     files_by_ns: &BTreeMap<String, File>,
@@ -857,7 +872,6 @@ fn emit_combined_runtime_module(
                         }
                     }
                 }
-                Interface::Event(_e) => {}
             }
         }
     }
@@ -972,18 +986,6 @@ pub fn emit_app_skeleton(workspace_src: &Path, files_by_ns: &BTreeMap<String, Fi
                         ),
                     ));
                 }
-                Interface::Event(e) => {
-                    let module_name = emit_event_app_module(&ns_pkg_dir, namespace, e)?;
-                    entry_points.push((
-                        app_entry_name(namespace, &e.name, "publisher"),
-                        format!(
-                            "{}.{}.{}:main",
-                            APP_PACKAGE_NAME,
-                            namespace.replace('/', "."),
-                            module_name
-                        ),
-                    ));
-                }
             }
         }
     }
@@ -1043,8 +1045,8 @@ fn maybe_vendor_robonix_msgs(ros_out: &Path) -> Result<()> {
     Ok(())
 }
 
-fn emit_command_action_idl(ros_out: &Path, ns: &str, c: &CommandDef) -> Result<()> {
-    let action_dir = ros_out.join(ROSIDL_PACKAGE_NAME).join("action");
+fn emit_command_action_idl(rosidl_pkg_dir: &Path, ns: &str, c: &CommandDef) -> Result<()> {
+    let action_dir = rosidl_pkg_dir.join("action");
     fs::create_dir_all(&action_dir)?;
 
     let mut content = String::new();
@@ -1084,8 +1086,8 @@ fn emit_command_action_idl(ros_out: &Path, ns: &str, c: &CommandDef) -> Result<(
     Ok(())
 }
 
-fn emit_query_srv_idl(ros_out: &Path, ns: &str, q: &QueryDef) -> Result<()> {
-    let srv_dir = ros_out.join(ROSIDL_PACKAGE_NAME).join("srv");
+fn emit_query_srv_idl(rosidl_pkg_dir: &Path, ns: &str, q: &QueryDef) -> Result<()> {
+    let srv_dir = rosidl_pkg_dir.join("srv");
     fs::create_dir_all(&srv_dir)?;
 
     let mut content = String::new();
@@ -1109,7 +1111,7 @@ fn emit_query_srv_idl(ros_out: &Path, ns: &str, q: &QueryDef) -> Result<()> {
     Ok(())
 }
 
-pub fn generate(ast: &File, out_dir: &Path) -> Result<()> {
+pub fn generate(ast: &File, out_dir: &Path, package_options: Option<&PackageGenOptions>) -> Result<()> {
     // Build Python package path from RIDL namespace, e.g.:
     //   namespace robonix/prm/localization
     // becomes directory structure:
@@ -1131,12 +1133,17 @@ pub fn generate(ast: &File, out_dir: &Path) -> Result<()> {
     }
     let out_pkg_dir = pkg_dir;
 
-    // Root directory for generated ROS IDL (msg/srv/action). Kept separate
-    // from Python package tree so a ROS2 package can vendor or move them.
-    let rosidl_out = rosidl_root(out_dir);
-    // Also vendor selected Robonix messages (e.g. CommandResult) so the
-    // generated workspace can build without relying on system-wide packages.
-    maybe_vendor_robonix_msgs(&rosidl_out)?;
+    // Root directory for generated ROS IDL (msg/srv/action).
+    let (rosidl_pkg_path, rosidl_pkg_name) = if let Some(ref opts) = package_options {
+        let pkg_ros2 = format!("{}_ros2", opts.python_package_name);
+        let path = opts.rosidl_base.join(&pkg_ros2);
+        fs::create_dir_all(&path)?;
+        (path, pkg_ros2)
+    } else {
+        let rosidl_out = rosidl_root(out_dir);
+        maybe_vendor_robonix_msgs(&rosidl_out)?;
+        (rosidl_out.join(ROSIDL_PACKAGE_NAME), ROSIDL_PACKAGE_NAME.to_string())
+    };
 
     let mut init_content = String::from("# Generated by ridlc. Do not edit.\n\n");
     let mut all_names = Vec::new();
@@ -1144,9 +1151,9 @@ pub fn generate(ast: &File, out_dir: &Path) -> Result<()> {
     for iface in &ast.interfaces {
         match iface {
             Interface::Query(q) => {
-                let (filename, names) = emit_query_python(&out_pkg_dir, q, ast.namespace_path())?;
+                let (filename, names) = emit_query_python(&out_pkg_dir, q, ast.namespace_path(), &rosidl_pkg_name)?;
                 // Also generate corresponding .srv IDL for this query.
-                emit_query_srv_idl(&rosidl_out, ns, q)?;
+                emit_query_srv_idl(&rosidl_pkg_path, ns, q)?;
                 init_content.push_str(&format!(
                     "from .{} import {}\n",
                     filename.trim_end_matches(".py"),
@@ -1164,18 +1171,9 @@ pub fn generate(ast: &File, out_dir: &Path) -> Result<()> {
                 all_names.extend(names);
             }
             Interface::Command(c) => {
-                let (filename, names) = emit_command_python(&out_pkg_dir, c, ast.namespace_path())?;
+                let (filename, names) = emit_command_python(&out_pkg_dir, c, ast.namespace_path(), &rosidl_pkg_name)?;
                 // Also generate corresponding .action IDL for this command.
-                emit_command_action_idl(&rosidl_out, ns, c)?;
-                init_content.push_str(&format!(
-                    "from .{} import {}\n",
-                    filename.trim_end_matches(".py"),
-                    names.join(", ")
-                ));
-                all_names.extend(names);
-            }
-            Interface::Event(e) => {
-                let (filename, names) = emit_event_python(&out_pkg_dir, e)?;
+                emit_command_action_idl(&rosidl_pkg_path, ns, c)?;
                 init_content.push_str(&format!(
                     "from .{} import {}\n",
                     filename.trim_end_matches(".py"),
@@ -1205,12 +1203,13 @@ fn emit_query_python(
     out_dir: &Path,
     q: &QueryDef,
     namespace: Option<&str>,
+    rosidl_pkg_name: &str,
 ) -> Result<(String, Vec<String>)> {
     let (req_import, req_type_name) = ros2_python_type(&q.request.type_ref);
     let (res_import, res_type_name) = ros2_python_type(&q.response.type_ref);
     let filename = format!("{}_query", q.name);
     let ns_literal = namespace.unwrap_or("robonix/unknown");
-    let ros_pkg = ROSIDL_PACKAGE_NAME;
+    let ros_pkg = rosidl_pkg_name;
     let srv_type_name = rosidl_symbol_name(ns_literal, &q.name);
 
     let mut out = String::new();
@@ -1696,10 +1695,11 @@ fn emit_command_python(
     out_dir: &Path,
     c: &CommandDef,
     namespace: Option<&str>,
+    rosidl_pkg_name: &str,
 ) -> Result<(String, Vec<String>)> {
     let filename = format!("{}_command", c.name);
     let ns_literal = namespace.unwrap_or("robonix/unknown");
-    let ros_pkg = ROSIDL_PACKAGE_NAME;
+    let ros_pkg = rosidl_pkg_name;
     let action_type_name = rosidl_symbol_name(ns_literal, &c.name);
     let mut out = String::new();
     out.push_str("# Generated by ridlc. Do not edit.\n");
@@ -1882,44 +1882,6 @@ fn emit_command_python(
             format!("create_{}_client", c.name),
         ],
     ))
-}
-
-fn emit_event_python(out_dir: &Path, e: &EventDef) -> Result<(String, Vec<String>)> {
-    let filename = format!("{}_event", e.name);
-    let mut out = String::new();
-    out.push_str("# Generated by ridlc. Do not edit.\n");
-    out.push_str("# Event: ");
-    out.push_str(&e.name);
-    out.push_str(" (ROS2 publisher, one-shot)\n\n");
-    out.push_str("import rclpy\n");
-    out.push_str("from rclpy.node import Node\n");
-    out.push_str("from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy\n\n");
-    out.push_str(&format!(
-        "# payload: {} ({})\n",
-        e.payload.name, e.payload.type_ref
-    ));
-    out.push_str("\n\n");
-    out.push_str(&format!("class {}Publisher(Node):\n", pascal(&e.name)));
-    out.push_str("    \"\"\"Generated ROS2 publisher for event '");
-    out.push_str(&e.name);
-    out.push_str("'.\"\"\"\n\n");
-    out.push_str("    def __init__(self, topic_name: str, msg_type=None):\n");
-    out.push_str("        super().__init__('ridlc_event_pub_' + topic_name.replace('/', '_'))\n");
-    out.push_str("        self._topic = topic_name\n");
-    out.push_str("        self._msg_type = msg_type\n");
-    out.push_str("        self._pub = None\n\n");
-    out.push_str("    def emit(self, msg):\n");
-    out.push_str("        if self._pub is None and self._msg_type is not None:\n");
-    out.push_str("            self._pub = self.create_publisher(\n");
-    out.push_str("                self._msg_type,\n");
-    out.push_str("                self._topic,\n");
-    out.push_str("                QoSProfile(depth=1),\n");
-    out.push_str("            )\n");
-    out.push_str("        if self._pub is not None:\n");
-    out.push_str("            self._pub.publish(msg)\n\n");
-    let path = out_dir.join(format!("{}.py", filename));
-    fs::write(&path, out)?;
-    Ok((filename, vec![format!("{}Publisher", pascal(&e.name))]))
 }
 
 fn pascal(s: &str) -> String {

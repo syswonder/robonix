@@ -1,0 +1,10 @@
+namespace skill_demo/skill
+
+import skill_demo_msgs/msg/GreetRequest
+import skill_demo_msgs/msg/GreetResult
+
+command greet {
+    input request skill_demo_msgs/msg/GreetRequest
+    result response skill_demo_msgs/msg/GreetResult
+    version 1.0;
+}

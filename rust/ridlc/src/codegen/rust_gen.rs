@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 
-use crate::ast::{
-    Annotation, CommandDef, EventDef, File, Interface, QueryDef, StreamDef, StreamDirection,
-};
+use crate::ast::{Annotation, CommandDef, File, Interface, QueryDef, StreamDef, StreamDirection};
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -490,15 +488,6 @@ fn push_interface_imports(
                     resolver.resolve_ridl_type(&field.type_ref, &ctx)?;
                 }
             }
-            Interface::Event(e) => {
-                let ctx = ResolveContext {
-                    namespace: Some(namespace.to_string()),
-                    interface_kind: Some("event"),
-                    interface_name: Some(e.name.clone()),
-                    field_name: Some(e.payload.name.clone()),
-                };
-                resolver.resolve_ridl_type(&e.payload.type_ref, &ctx)?;
-            }
         }
     }
     Ok(())
@@ -542,7 +531,7 @@ pub fn generate_bindings(
     out.push_str("}\n\n");
 
     out.push_str("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n");
-    out.push_str("pub enum InterfaceKind { Stream, Command, Query, Event }\n\n");
+    out.push_str("pub enum InterfaceKind { Stream, Command, Query }\n\n");
     out.push_str("#[derive(Debug, Clone, Copy)]\n");
     out.push_str("pub struct InterfaceDescriptor {\n");
     out.push_str("    pub kind: InterfaceKind,\n");
@@ -564,7 +553,6 @@ pub fn generate_bindings(
                 Interface::Query(q) => push_query_descriptor(&mut out, namespace, q),
                 Interface::Stream(s) => push_stream_descriptor(&mut out, namespace, s),
                 Interface::Command(c) => push_command_descriptor(&mut out, namespace, c),
-                Interface::Event(e) => push_event_descriptor(&mut out, namespace, e),
             }
         }
     }
@@ -779,22 +767,6 @@ fn push_command_descriptor(out: &mut String, namespace: &str, c: &CommandDef) {
     out.push_str("    },\n");
 }
 
-fn push_event_descriptor(out: &mut String, namespace: &str, e: &EventDef) {
-    let ann = format_annotations_for_descriptor(&e.annotations);
-    out.push_str("    InterfaceDescriptor {\n");
-    out.push_str("        kind: InterfaceKind::Event,\n");
-    out.push_str(&format!("        namespace: \"{}\",\n", namespace));
-    out.push_str(&format!("        name: \"{}\",\n", e.name));
-    out.push_str("        request_type: None,\n        response_type: None,\n        input_type: None,\n        output_type: None,\n        result_type: None,\n");
-    out.push_str(&format!(
-        "        payload_type: Some(\"{}\"),\n",
-        e.payload.type_ref
-    ));
-    out.push_str("        stream_direction: None,\n");
-    out.push_str(&format!("        annotations: \"{}\",\n", ann));
-    out.push_str("    },\n");
-}
-
 fn optional_str(value: Option<&str>) -> String {
     match value {
         Some(v) => format!("Some(\"{}\")", v),
@@ -890,19 +862,6 @@ fn emit_namespace_modules(out: &mut String, namespace: &str, ast: &File) -> Resu
                     optional_str(c.output.as_ref().map(|f| f.type_ref.as_str())),
                     optional_str(c.result.as_ref().map(|f| f.type_ref.as_str())),
                     ann,
-                ));
-                out.push_str(&format!("{base_indent}}}\n"));
-            }
-            Interface::Event(e) => {
-                out.push_str(&format!("{base_indent}pub mod {}_event {{\n", e.name));
-                out.push_str(&format!(
-                    "{base_indent}    pub type Payload = {};\n",
-                    ridl_rust_type(&e.payload.type_ref)?
-                ));
-                let ann = format_annotations_for_descriptor(&e.annotations);
-                out.push_str(&format!(
-                    "{base_indent}    pub const DESCRIPTOR: {RUNTIME_CRATE_ROOT}::generated::InterfaceDescriptor = {RUNTIME_CRATE_ROOT}::generated::InterfaceDescriptor {{ kind: {RUNTIME_CRATE_ROOT}::generated::InterfaceKind::Event, namespace: \"{}\", name: \"{}\", request_type: None, response_type: None, input_type: None, output_type: None, result_type: None, payload_type: Some(\"{}\"), stream_direction: None, annotations: \"{}\" }};\n",
-                    namespace, e.name, e.payload.type_ref, ann
                 ));
                 out.push_str(&format!("{base_indent}}}\n"));
             }

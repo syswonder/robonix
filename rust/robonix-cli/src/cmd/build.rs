@@ -3,10 +3,9 @@
 //
 // Build command implementation for robonix-cli
 
-use crate::manifest::{self, BuildStrategy, PackageManifest};
-use crate::{Config, PackageDatabase, output};
+use robonix_cli::manifest::{self, Manifest};
+use robonix_cli::output;
 use anyhow::{Context, Result};
-use colored::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,10 +22,7 @@ pub struct LocalBuildLayout {
 /// If the package has already been built (rbnx-build/ws/install/setup.bash exists), return its layout so start can skip rebuild.
 pub fn get_existing_build_layout(package_root: &Path) -> Result<Option<LocalBuildLayout>> {
     let detected = manifest::detect_and_load(package_root)?;
-    let package_name = match &detected.manifest {
-        PackageManifest::VNext(m) => m.package.name.clone(),
-        PackageManifest::Legacy(m) => m.package.name.clone(),
-    };
+    let package_name = detected.manifest.package.name.clone();
     let install_setup = package_root
         .join(RBNX_BUILD_DIR)
         .join("ws")
@@ -43,119 +39,6 @@ pub fn get_existing_build_layout(package_root: &Path) -> Result<Option<LocalBuil
     }
 }
 
-/// Build a single package (shared logic)
-fn build_package(pkg_info: &crate::database::PackageInfo) -> Result<()> {
-    println!(
-        "{} {}",
-        format!("[{}]", "Building").green().bold(),
-        pkg_info.name.bright_white().bold()
-    );
-
-    // Load manifest to determine build strategy.
-    let manifest_path = &pkg_info.manifest_path;
-    let manifest = crate::manifest::load_from_path(manifest_path)
-        .with_context(|| format!("Failed to load manifest: {}", manifest_path.display()))?;
-    let summary = manifest.validate_and_summarize()?;
-
-    let build_result = match summary.build_strategy {
-        BuildStrategy::LegacyScript { script } => {
-            let build_script_path = if let Some(script) = script {
-                let script_path = pkg_info.path.join(script);
-                if !script_path.exists() {
-                    anyhow::bail!(
-                        "Build script not found: {} (specified in manifest)",
-                        script_path.display()
-                    );
-                }
-                script_path
-            } else {
-                let default_script = pkg_info.path.join("rbnx").join("build.sh");
-                if !default_script.exists() {
-                    output::info(&format!(
-                        "No build script found for {}, skipping build",
-                        pkg_info.name
-                    ));
-                    return Ok(());
-                }
-                default_script
-            };
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&build_script_path)?.permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&build_script_path, perms)?;
-            }
-
-            output::sub_step(&format!(
-                "Running legacy build script: {}",
-                build_script_path.display()
-            ));
-
-            Command::new(&build_script_path)
-                .current_dir(&pkg_info.path)
-                .status()
-                .with_context(|| {
-                    format!(
-                        "Failed to execute build script: {}",
-                        build_script_path.display()
-                    )
-                })?
-        }
-        BuildStrategy::VNextCommand {
-            command,
-            workspace_root,
-        } => {
-            let work_dir = workspace_root
-                .as_deref()
-                .map(|rel| pkg_info.path.join(rel))
-                .unwrap_or_else(|| pkg_info.path.clone());
-            output::sub_step(&format!("Running manifest build command: {}", command));
-
-            #[cfg(unix)]
-            let status = Command::new("bash")
-                .arg("-lc")
-                .arg(&command)
-                .current_dir(&work_dir)
-                .status()
-                .with_context(|| {
-                    format!("Failed to execute build command in {}", work_dir.display())
-                })?;
-
-            #[cfg(not(unix))]
-            let status = Command::new("sh")
-                .arg("-lc")
-                .arg(&command)
-                .current_dir(&work_dir)
-                .status()
-                .with_context(|| {
-                    format!("Failed to execute build command in {}", work_dir.display())
-                })?;
-
-            status
-        }
-        BuildStrategy::None => {
-            output::info(&format!(
-                "No build metadata found for {}, skipping build",
-                pkg_info.name
-            ));
-            return Ok(());
-        }
-    };
-
-    if !build_result.success() {
-        anyhow::bail!(
-            "Build script failed for {} with exit code: {:?}",
-            pkg_info.name,
-            build_result.code()
-        );
-    }
-
-    output::success(&format!("Package '{}' built successfully", pkg_info.name));
-    Ok(())
-}
-
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -170,7 +53,15 @@ fn robonix_interfaces_root_from_catalog(catalog_root: &Path) -> Result<PathBuf> 
         .context("Interface catalog root should be robonix-interfaces/ridl")
 }
 
-fn copy_package_tree(src: &Path, dst: &Path) -> Result<()> {
+/// Files to skip when copying (e.g. when we auto-generate them).
+const SKIP_ROS_PYTHON_FILES: &[&str] = &["package.xml", "setup.py", "setup.cfg"];
+
+fn copy_package_tree(
+    src: &Path,
+    dst: &Path,
+    skip_msgs_package: Option<&str>,
+    skip_ros_python_files: bool,
+) -> Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
@@ -181,10 +72,27 @@ fn copy_package_tree(src: &Path, dst: &Path) -> Result<()> {
         if file_name == RBNX_BUILD_DIR {
             continue;
         }
+        if skip_ros_python_files && file_name.to_str() == Some("resource") {
+            continue; // resource/ is auto-generated
+        }
+        if let Some(name) = skip_msgs_package {
+            if file_name.to_str() == Some(name) {
+                continue;
+            }
+        }
+        if skip_ros_python_files {
+            if file_name
+                .to_str()
+                .map(|s| SKIP_ROS_PYTHON_FILES.contains(&s))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+        }
 
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            copy_package_tree(&src_path, &dst_path)?;
+            copy_package_tree(&src_path, &dst_path, skip_msgs_package, skip_ros_python_files)?;
         } else if file_type.is_file() {
             fs::copy(&src_path, &dst_path).with_context(|| {
                 format!(
@@ -271,11 +179,48 @@ fn shell_quote(path: &Path) -> String {
     format!("\"{}\"", path.display())
 }
 
-fn build_local_vnext(
-    package_root: &Path,
-    manifest: &manifest::VNextManifest,
-) -> Result<LocalBuildLayout> {
-    let summary = PackageManifest::VNext(manifest.clone()).validate_and_summarize()?;
+/// Collect package names from robonix-interfaces/lib (rcl_interfaces, common_interfaces).
+/// These are our maintained ROS msg/srv/action packages; rbnx build uses them via vendor, not system.
+fn collect_vendor_msg_packages(interfaces_root: &Path) -> Result<Vec<String>> {
+    let lib = interfaces_root.join("lib");
+    let mut names = std::collections::BTreeSet::new();
+    for sub in ["rcl_interfaces", "common_interfaces"] {
+        let sub_path = lib.join(sub);
+        if !sub_path.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(&sub_path)? {
+            let entry = entry?;
+            let pkg_dir = entry.path();
+            if !pkg_dir.is_dir() {
+                continue;
+            }
+            let pkg_xml = pkg_dir.join("package.xml");
+            if !pkg_xml.exists() {
+                continue;
+            }
+            // Skip meta packages, non-msg packages, and packages with external deps we don't have
+            let name = pkg_dir.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            if matches!(name.as_str(), "common_interfaces" | "sensor_msgs_py" | "test_msgs") {
+                continue;
+            }
+            let content = fs::read_to_string(&pkg_xml)?;
+            if let Some(start) = content.find("<name>") {
+                let rest = &content[start + 6..];
+                if let Some(end) = rest.find("</name>") {
+                    let pkg_name = rest[..end].trim().to_string();
+                    if !pkg_name.is_empty() {
+                        names.insert(pkg_name);
+                    }
+                }
+            }
+        }
+    }
+    Ok(names.into_iter().collect())
+}
+
+fn build_local(package_root: &Path, manifest: &Manifest) -> Result<LocalBuildLayout> {
+    let summary = manifest.validate_and_summarize()?;
     let package_name = summary.name.clone();
     let interface_check = manifest::validate_interface_references(&summary, package_root)?;
     let catalog_root = interface_check.catalog_root.with_context(|| {
@@ -297,13 +242,212 @@ fn build_local_vnext(
     fs::create_dir_all(build_root.join("logs"))?;
     fs::create_dir_all(workspace_root.join("src").join("package"))?;
 
+    let package_msg_dir = package_root.join("msg");
+    let skip_msgs = if package_msg_dir.exists() {
+        Some(format!("{package_name}_msgs"))
+    } else {
+        None
+    };
+    let has_python_nodes = manifest
+        .nodes
+        .iter()
+        .any(|n| n.entry.as_ref().map_or(false, |e| e.contains(':')));
     copy_package_tree(
         package_root,
         &workspace_root
             .join("src")
             .join("package")
             .join(&package_name),
+        skip_msgs.as_deref(),
+        has_python_nodes,
     )?;
+
+    // Auto-generate package.xml, setup.py, setup.cfg for Python packages (from robonix_manifest.yaml)
+    let package_pkg_root = workspace_root
+        .join("src")
+        .join("package")
+        .join(&package_name);
+    if has_python_nodes {
+        output::sub_step("Generating ROS2 ament_python package files from manifest");
+        let entry_points: Vec<String> = manifest
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                let entry = n.entry.as_ref()?;
+                let (module, _func) = entry.split_once(':')?;
+                let exe_name = module.split('.').last()?;
+                Some(format!(r#""{exe_name} = {entry}""#))
+            })
+            .collect();
+        let entry_points_str = if entry_points.is_empty() {
+            "{}".to_string()
+        } else {
+            format!(
+                "{{\n        \"console_scripts\": [\n            {},\n        ],\n    }}",
+                entry_points.join(",\n            ")
+            )
+        };
+        let package_ridl_dir = package_root.join("ridl");
+        let mut deps: Vec<String> = vec![
+            "rclpy".into(),
+            "robonix_interfaces".into(),
+            "robonix_interfaces_ros2".into(),
+            "robonix_msgs".into(),
+        ];
+        // Use our maintained ROS msg packages from robonix-interfaces/lib (ridlc copies to vendor)
+        let vendor_pkgs = collect_vendor_msg_packages(&interfaces_root)?;
+        deps.extend(vendor_pkgs);
+        if package_ridl_dir.exists() {
+            deps.push(format!("{package_name}_msgs"));
+            deps.push(format!("{package_name}_interfaces"));
+            deps.push(format!("{package_name}_interfaces_ros2"));
+        }
+        let dep_lines: String = deps
+            .iter()
+            .map(|d| format!("  <depend>{d}</depend>"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let package_xml = format!(
+            r#"<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>{package_name}</name>
+  <version>{version}</version>
+  <description>{description}</description>
+  <maintainer email="robonix@example.com">robonix</maintainer>
+  <license>{license}</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+{dep_lines}
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
+"#,
+            version = manifest.package.version,
+            description = manifest.package.description,
+            license = manifest.package.license,
+        );
+        let setup_cfg = format!(
+            r#"[develop]
+script_dir=$base/lib/{package_name}
+[install]
+install_scripts=$base/lib/{package_name}
+"#
+        );
+        let setup_py = format!(
+            r#"from setuptools import find_packages, setup
+
+package_name = "{package_name}"
+
+setup(
+    name=package_name,
+    version="{version}",
+    packages=find_packages(exclude=["test"]),
+    data_files=[
+        ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
+        ("share/" + package_name, ["package.xml"]),
+    ],
+    install_requires=["setuptools", "grpcio"],
+    zip_safe=True,
+    maintainer="robonix",
+    maintainer_email="robonix@example.com",
+    description="{description}",
+    license="{license}",
+    entry_points={entry_points_str},
+)
+"#,
+            version = manifest.package.version,
+            description = manifest.package.description.replace('"', "\\\""),
+            license = manifest.package.license,
+        );
+        fs::write(package_pkg_root.join("package.xml"), package_xml)?;
+        fs::write(package_pkg_root.join("setup.cfg"), setup_cfg)?;
+        fs::write(package_pkg_root.join("setup.py"), setup_py)?;
+        let resource_dir = package_pkg_root.join("resource");
+        fs::create_dir_all(&resource_dir)?;
+        fs::write(resource_dir.join(&package_name), "")?;
+    }
+
+    // Auto-generate {package}_msgs from package msg/ directory (avoids manual package.xml, CMakeLists.txt)
+    let package_pkg_root = workspace_root
+        .join("src")
+        .join("package")
+        .join(&package_name);
+    if package_msg_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&package_msg_dir) {
+            let msg_files: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .map(|ext| ext == "msg")
+                        .unwrap_or(false)
+                })
+                .collect();
+            if !msg_files.is_empty() {
+                output::sub_step("Generating package-local msgs from msg/");
+                let msgs_pkg_name = format!("{package_name}_msgs");
+                let msgs_pkg_dir = package_pkg_root.join(&msgs_pkg_name);
+                let msgs_msg_dir = msgs_pkg_dir.join("msg");
+                fs::create_dir_all(&msgs_msg_dir)?;
+                for entry in &msg_files {
+                    let src = entry.path();
+                    let name = entry.file_name();
+                    fs::copy(&src, msgs_msg_dir.join(&name))?;
+                }
+                let package_xml = format!(
+                    r#"<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>{msgs_pkg_name}</name>
+  <version>0.1.0</version>
+  <description>Auto-generated from package msg/</description>
+  <maintainer email="robonix@example.com">robonix</maintainer>
+  <license>MulanPSL-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+  <depend>builtin_interfaces</depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
+"#
+                );
+                let msg_entries: String = msg_files
+                    .iter()
+                    .map(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|n| format!(r#"  "msg/{n}""#))
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let cmake = format!(
+                    r#"cmake_minimum_required(VERSION 3.8)
+project({msgs_pkg_name})
+
+find_package(ament_cmake REQUIRED)
+find_package(builtin_interfaces REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+
+rosidl_generate_interfaces(${{PROJECT_NAME}}
+{msg_entries}
+  DEPENDENCIES builtin_interfaces
+)
+
+ament_export_dependencies(rosidl_default_runtime)
+ament_package()
+"#
+                );
+                fs::write(msgs_pkg_dir.join("package.xml"), package_xml)?;
+                fs::write(msgs_pkg_dir.join("CMakeLists.txt"), cmake)?;
+            }
+        }
+    }
+
     link_current_interfaces(&interfaces_root, &build_root)?;
 
     output::sub_step(&format!("Package root: {}", package_root.display()));
@@ -329,17 +473,64 @@ fn build_local_vnext(
     );
     run_shell(&ridlc_command, &repo_root)?;
 
+    // Second ridlc run for package-local RIDL (if package has ridl/ directory)
+    let package_ridl_dir = workspace_root
+        .join("src")
+        .join("package")
+        .join(&package_name)
+        .join("ridl");
+    let package_pkg_root = workspace_root
+        .join("src")
+        .join("package")
+        .join(&package_name);
+    if package_ridl_dir.exists() {
+        output::sub_step("Generating package-local RIDL interfaces");
+        let package_output = package_pkg_root.clone();
+        let interfaces_pkg_name = format!("{}_interfaces", package_name);
+        let ridlc_package_command = format!(
+            "cargo run --manifest-path {} -- --lang python -I {} -I {} -I {} -I {} --package-output {} --package-name {} -i {}",
+            shell_quote(&ridlc_manifest),
+            shell_quote(&runtime_interfaces),
+            shell_quote(&rcl_interfaces),
+            shell_quote(&common_interfaces),
+            shell_quote(&package_pkg_root),
+            shell_quote(&package_output),
+            interfaces_pkg_name,
+            shell_quote(&package_ridl_dir),
+        );
+        run_shell(&ridlc_package_command, &repo_root)?;
+    }
+
     output::step("Building", "colcon workspace under rbnx-build/ws");
     let distro = std::env::var("ROS_DISTRO").unwrap_or_else(|_| "humble".to_string());
     let ros_setup = format!("/opt/ros/{distro}/setup.bash");
+    // When package has ridl/, add nested package dirs to base-paths so colcon finds {pkg}_msgs, {pkg}_interfaces, etc.
+    let pkg_base = if package_ridl_dir.exists() {
+        let mut extra = String::new();
+        for sub in [
+            format!("{package_name}_msgs"),
+            format!("{package_name}_interfaces"),
+            format!("{package_name}_interfaces_ros2"),
+        ] {
+            let p = package_pkg_root.join(&sub);
+            if p.exists() {
+                extra.push(' ');
+                extra.push_str(&shell_quote(&p));
+            }
+        }
+        extra
+    } else {
+        String::new()
+    };
     // Avoid setuptools/packaging canonicalize_version mismatch; do not set PYTHONNOUSERSITE so ~/.local is visible
     let colcon_command = format!(
-        "pip3 install --user --upgrade 'packaging>=22.0' 'setuptools>=72' 2>/dev/null || true; set +u; source {ros_setup}; set -u; colcon --log-base {log_base} build --base-paths {generated} {vendor} {app} {package} --build-base {build_base} --install-base {install_base} --packages-up-to robonix_interfaces_app {pkg}",
+        "pip3 install --user --upgrade 'packaging>=22.0' 'setuptools>=72' 2>/dev/null || true; set +u; source {ros_setup}; set -u; colcon --log-base {log_base} build --base-paths {generated} {vendor} {app} {package}{pkg_base} --build-base {build_base} --install-base {install_base} --packages-up-to robonix_interfaces_app {pkg}",
         ros_setup = shell_quote(Path::new(&ros_setup)),
         generated = shell_quote(&workspace_root.join("src").join("generated")),
         vendor = shell_quote(&workspace_root.join("src").join("vendor")),
         app = shell_quote(&workspace_root.join("src").join("app")),
         package = shell_quote(&workspace_root.join("src").join("package")),
+        pkg_base = pkg_base,
         build_base = shell_quote(&workspace_root.join("build")),
         install_base = shell_quote(&workspace_root.join("install")),
         log_base = shell_quote(&workspace_root.join("log")),
@@ -356,7 +547,7 @@ fn build_local_vnext(
         workspace_root.join("install").join("setup.bash").display()
     ));
     output::success(&format!(
-        "Local vNext package '{}' built into {}",
+        "Package '{}' built into {}",
         summary.name,
         build_root.display()
     ));
@@ -373,12 +564,7 @@ pub fn build_local_package(path: &Path) -> Result<LocalBuildLayout> {
         .with_context(|| format!("Failed to canonicalize package path {}", path.display()))?;
 
     let detected = manifest::detect_and_load(&package_root)?;
-    match detected.manifest {
-        PackageManifest::VNext(vnext) => build_local_vnext(&package_root, &vnext),
-        PackageManifest::Legacy(_) => anyhow::bail!(
-            "build-local currently supports vNext packages only; use 'rbnx package build' for installed legacy packages"
-        ),
-    }
+    build_local(&package_root, &detected.manifest)
 }
 
 pub async fn execute_local(path: PathBuf) -> Result<()> {
@@ -394,44 +580,3 @@ pub async fn execute_local(path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// Build packages from package command (no recipe required)
-pub async fn execute_package(config: Config, target: String) -> Result<()> {
-    let db = PackageDatabase::load(&config.package_storage_path)?;
-
-    let packages_to_build = if target == "all" {
-        // Build all installed packages
-        db.list_packages().iter().map(|p| p.name.clone()).collect()
-    } else {
-        // Build specific package
-        vec![target]
-    };
-
-    let mut built = 0;
-    let mut skipped = 0;
-    let mut errors = 0;
-
-    for package_name in packages_to_build {
-        let pkg_info = db
-            .find_by_name(&package_name)
-            .ok_or_else(|| anyhow::anyhow!("Package not found: {}", package_name))?;
-
-        match build_package(&pkg_info) {
-            Ok(_) => built += 1,
-            Err(e) => {
-                if e.to_string().contains("No build script found") {
-                    skipped += 1;
-                } else {
-                    output::error(&format!("Failed to build {}: {}", package_name, e));
-                    errors += 1;
-                }
-            }
-        }
-    }
-
-    output::summary(&format!(
-        "Summary: {} built, {} skipped, {} errors",
-        built, skipped, errors
-    ));
-
-    Ok(())
-}

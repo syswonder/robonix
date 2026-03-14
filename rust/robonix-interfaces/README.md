@@ -10,7 +10,8 @@ This repository is the source of truth for Robonix public interfaces.
   - canonical namespaces live under:
     - `robonix/prm/*` — primitives (camera, base, sensor, arm, gripper, etc.)
     - `robonix/system/*` — system services (skill, map, model, debug, etc.)
-  - notable system contracts include service-like interfaces and the unified skill invocation contract under `robonix/system/skill/*`
+  - notable system contracts include service-like interfaces
+  - skills use per-skill command pattern: each skill defines its own command RIDL with typed input/result (ROS msg); package-local RIDL in `ridl/` under the package generates `{package}_interfaces` and `{package}_interfaces_ros2`
 - `lib/`
   - reusable ROS message packages and vendored ROS interface dependencies
   - only reusable data structures belong here
@@ -31,4 +32,4 @@ This repository is the source of truth for Robonix public interfaces.
 
 ## Related docs
 
-- package manifest vNext: `../ROBONIX_PACKAGE_MANIFEST.md`
+- package manifest: `../ROBONIX_PACKAGE_MANIFEST.md`
