@@ -2,11 +2,14 @@
 """Query demo: semantic_query server. Example semantic map service implementation.
 Must be run via rbnx start."""
 
+from __future__ import annotations
+
 import grpc
 import rclpy
 
 from robonix_msgs.msg import Object
 from robonix.system.map.semantic_query_query import create_semantic_query_server
+from robonix_interfaces_ros2.srv import SystemMapSemanticQuery
 from robonix_runtime_pb2_grpc import RobonixRuntimeStub
 
 
@@ -18,7 +21,10 @@ def main() -> None:
     runtime_client = RobonixRuntimeStub(grpc_channel)
     server = create_semantic_query_server(runtime_client, node_id=node_id)
 
-    def handler(request, response):
+    def handler(
+        request: SystemMapSemanticQuery.Request,
+        response: SystemMapSemanticQuery.Response,
+    ) -> SystemMapSemanticQuery.Response:
         filter_str = request.filter.data if hasattr(request.filter, "data") else ""
         # Example: return Object[] with id, label (minimal fields)
         obj1 = Object()

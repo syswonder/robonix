@@ -2,10 +2,13 @@
 """Query demo: semantic_query client. Resolves and calls semantic_query server.
 Must be run via rbnx start."""
 
+from __future__ import annotations
+
 import grpc
 import rclpy
 
 from robonix.system.map.semantic_query_query import create_semantic_query_client
+from robonix_interfaces_ros2.srv import SystemMapSemanticQuery
 from robonix_runtime_pb2_grpc import RobonixRuntimeStub
 
 
@@ -22,10 +25,12 @@ def main() -> None:
         target=target,
     )
 
-    request = client._srv_type.Request()
+    request: SystemMapSemanticQuery.Request = client._srv_type.Request()
     request.filter.data = "room"
 
-    response = client.call(request)
+    response: SystemMapSemanticQuery.Response | None = client.call(request)
+    if response is None:
+        raise RuntimeError("Semantic query call failed or timed out")
     for obj in response.objects:
         print(f"  id={obj.id} label={obj.label}")
 

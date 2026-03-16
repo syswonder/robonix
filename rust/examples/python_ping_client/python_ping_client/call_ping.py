@@ -5,6 +5,8 @@ Calls the ping service via robonix-server meta API + ROS2 (Zenoh).
 Must be run via rbnx start (not direct python).
 """
 
+from __future__ import annotations
+
 import sys
 
 import grpc
@@ -15,7 +17,7 @@ from robonix_interfaces_ros2.srv import SystemDebugPing
 from std_msgs.msg import String
 
 
-def main():
+def main() -> None:
     endpoint = "127.0.0.1:50051"
     target = "robonix-server"
     requester_id = "python_ping_client"
@@ -26,11 +28,13 @@ def main():
 
     client = create_ping_client(runtime_client, requester_id, target)
 
-    req = SystemDebugPing.Request()
+    req: SystemDebugPing.Request = SystemDebugPing.Request()
     req.data = String()
     req.data.data = payload
 
-    response = client.call(req, timeout_sec=10.0)
+    response: SystemDebugPing.Response | None = client.call(req, timeout_sec=10.0)
+    if response is None:
+        raise RuntimeError("Ping call failed or timed out")
     print(response.data.data)
 
 

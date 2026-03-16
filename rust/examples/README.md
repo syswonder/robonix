@@ -40,6 +40,17 @@ rbnx build -p python_ping_client && rbnx start -p python_ping_client -n call_pin
 Build and run with rbnx: `rbnx build -p <package>` → `rbnx start -p <package> -n <node>` (one node per start; start blocks until the process exits).
 
 - Each example has `robonix_manifest.yaml` and `package.xml` (custom ROS2 deps; see `skill_demo/package.xml`, `prm_camera_vendor/package.xml`).
+- **Import resolution**: Run `python3 rust/tools/gen_pyrightconfig.py` after building examples to regenerate `pyrightconfig.json` (for VS Code/Basedpyright). Build examples first so `rbnx-build/` exists.
+
+## User logic completion
+
+| Example | Server/Provider | Client/Consumer |
+|---------|-----------------|-----------------|
+| **query_demo** | `server.start(handler)` — handler fills `response` | `client.call(request)` |
+| **stream_demo** | `publisher.publish(msg)` in timer | `subscriber.start(on_msg)` |
+| **skill_demo** | `server.execute = execute` — execute returns result, optionally `goal_handle.publish_feedback()` | `client.send(request)` or `send_goal_async(..., feedback_callback=...)` |
+
+See `docs/src/chapter3-developer-guide/ridlc.md` §5 for full documentation.
 
 ## Test scripts
 

@@ -7,11 +7,14 @@ Code structure:
 - [Hook] Query server: pass handler via start(handler); invoked when request arrives
 """
 
+from __future__ import annotations
+
 import grpc
 import rclpy
 
 from robonix.system.map.semantic_query_query import create_semantic_query_server
 from robonix_msgs.msg import Object
+from robonix_interfaces_ros2.srv import SystemMapSemanticQuery
 from robonix_runtime_pb2_grpc import RobonixRuntimeStub
 
 
@@ -27,7 +30,10 @@ def main() -> None:
     server = create_semantic_query_server(runtime_client, node_id=node_id)
 
     # [You write] handler: request has filter, fill response.objects; passed via start(handler)
-    def handler(request, response):
+    def handler(
+        request: SystemMapSemanticQuery.Request,
+        response: SystemMapSemanticQuery.Response,
+    ) -> SystemMapSemanticQuery.Response:
         filter_str = request.filter.data if hasattr(request.filter, "data") else ""
         # Real impl: query map backend with filter_str
         obj1 = Object()

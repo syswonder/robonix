@@ -1,0 +1,19 @@
+{
+  "extraPaths": [
+    "rust/examples/query_demo/rbnx-build/ws/install/robonix_interfaces/lib/python3.10/site-packages",
+    "rust/examples/query_demo/rbnx-build/ws/install/robonix_interfaces_ros2/local/lib/python3.10/dist-packages",
+    "rust/examples/query_demo/rbnx-build/ws/install/robonix_msgs/local/lib/python3.10/dist-packages",
+    "rust/examples/query_demo/rbnx-build/ws/src/generated/robonix_interfaces",
+    "rust/examples/skill_demo/rbnx-build/ws/install/robonix_interfaces/lib/python3.10/site-packages",
+    "rust/examples/skill_demo/rbnx-build/ws/install/robonix_interfaces_ros2/local/lib/python3.10/dist-packages",
+    "rust/examples/skill_demo/rbnx-build/ws/install/robonix_msgs/local/lib/python3.10/dist-packages",
+    "rust/examples/skill_demo/rbnx-build/ws/install/skill_demo_interfaces/lib/python3.10/site-packages",
+    "rust/examples/skill_demo/rbnx-build/ws/install/skill_demo_interfaces_ros2/local/lib/python3.10/dist-packages",
+    "rust/examples/skill_demo/rbnx-build/ws/install/skill_demo_msgs/local/lib/python3.10/dist-packages",
+    "rust/examples/skill_demo/rbnx-build/ws/src/generated/robonix_interfaces",
+    "rust/examples/stream_demo/rbnx-build/ws/install/robonix_interfaces/lib/python3.10/site-packages",
+    "rust/examples/stream_demo/rbnx-build/ws/install/robonix_interfaces_ros2/local/lib/python3.10/dist-packages",
+    "rust/examples/stream_demo/rbnx-build/ws/install/robonix_msgs/local/lib/python3.10/dist-packages",
+    "rust/examples/stream_demo/rbnx-build/ws/src/generated/robonix_interfaces"
+  ]
+}
