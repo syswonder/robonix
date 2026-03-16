@@ -123,6 +123,16 @@ Instead, customize:
 - generated per-interface skeletons under `src/app/robonix_interfaces_app/...`
 - `combined_runtime.py` when one process needs to host multiple interfaces
 
+## User logic completion (Python)
+
+| Primitive | Server/Provider | Client/Consumer |
+|-----------|-----------------|-----------------|
+| **Query** | `server.start(handler)` — pass `handler(request, response) -> response` | `client.call(request)` → `Response \| None` |
+| **Stream** | Call `publisher.publish(msg)` (e.g. in a timer) | `subscriber.start(callback)` — pass `callback(msg)` |
+| **Command** | Assign `server.execute = fn` where `fn(request, goal_handle) -> result`; optionally `goal_handle.publish_feedback(fb)` | `client.send(request)` → `goal_handle`; then `goal_handle.get_result_async()`; or use `send_goal_async(..., feedback_callback=...)` for feedback |
+
+See `docs/src/chapter3-developer-guide/ridlc.md` §5 for full details.
+
 ## Tests
 
 `ridlc` currently has two main validation paths:

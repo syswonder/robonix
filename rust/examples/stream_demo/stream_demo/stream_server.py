@@ -2,6 +2,8 @@
 """Stream demo: pose output server. Registers with robonix-server and publishes pose.
 Must be run via rbnx start."""
 
+from __future__ import annotations
+
 import grpc
 import rclpy
 

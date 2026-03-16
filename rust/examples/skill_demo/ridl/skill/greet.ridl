@@ -1,10 +1,15 @@
 namespace skill_demo/skill
 
 import skill_demo_msgs/msg/GreetRequest
+import skill_demo_msgs/msg/GreetFeedback
 import skill_demo_msgs/msg/GreetResult
 
-command greet {
+command greet
+    @skill
+    @description("A Simple Skill to Greet a Person")
+{
     input request skill_demo_msgs/msg/GreetRequest
+    output feedback skill_demo_msgs/msg/GreetFeedback
     result response skill_demo_msgs/msg/GreetResult
     version 1.0;
 }

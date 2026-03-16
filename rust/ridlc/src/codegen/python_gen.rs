@@ -1217,10 +1217,13 @@ fn emit_query_python(
     out.push_str("# Query: ");
     out.push_str(&q.name);
     out.push_str(" (ROS2 service client/server)\n\n");
+    out.push_str("from __future__ import annotations\n\n");
+    out.push_str("from typing import Optional, Callable\n\n");
     out.push_str("import rclpy\n");
     out.push_str("from rclpy.node import Node\n");
     out.push_str(&format!("from {} import {}\n", req_import, req_type_name));
     out.push_str(&format!("from {} import {}\n", res_import, res_type_name));
+    out.push_str(&format!("from {}.srv import {}\n", ros_pkg, srv_type_name));
     out.push_str("\n");
     out.push_str(&format!(
         "# Service type: {} / {}\n",
@@ -1235,8 +1238,8 @@ fn emit_query_python(
     ));
 
     out.push_str(&format!(
-        "def {}_call(node, service_name, request, timeout_sec=10.0):\n",
-        q.name
+        "def {}_call(node, service_name: str, request: {}.Request, timeout_sec: float = 10.0) -> Optional[{}.Response]:\n",
+        q.name, srv_type_name, srv_type_name
     ));
     out.push_str("    \"\"\"Blocking call to query (ROS2 service client).\"\"\"\n");
     out.push_str("    from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy\n");
@@ -1268,7 +1271,10 @@ fn emit_query_python(
         "        super().__init__('ridlc_query_client_' + service_name.replace('/', '_'))\n",
     );
     out.push_str("        self._service_name = service_name\n\n");
-    out.push_str("    def call(self, request, timeout_sec=10.0):\n");
+    out.push_str(&format!(
+        "    def call(self, request: {}.Request, timeout_sec: float = 10.0) -> Optional[{}.Response]:\n",
+        srv_type_name, srv_type_name
+    ));
     out.push_str("        \"\"\"Perform the query and return a response.\n");
     out.push_str("\n");
     out.push_str("        Default implementation is abstract; override in subclass.\n");
@@ -1288,8 +1294,11 @@ fn emit_query_python(
         "        super().__init__('ridlc_query_server_' + service_name.replace('/', '_'))\n",
     );
     out.push_str("        self._service_name = service_name\n\n");
-    out.push_str("    def start(self, handler):\n");
-    out.push_str("        \"\"\"Bind a handler(request) -> response and start serving.\n");
+    out.push_str(&format!(
+        "    def start(self, handler: Callable[[{}.Request, {}.Response], {}.Response]) -> None:\n",
+        srv_type_name, srv_type_name, srv_type_name
+    ));
+    out.push_str("        \"\"\"Bind a handler(request, response) -> response and start serving.\n");
     out.push_str("\n");
     out.push_str("        Default implementation is abstract; override in subclass.\n");
     out.push_str("        \"\"\"\n");
@@ -1346,7 +1355,10 @@ fn emit_query_python(
         q.name
     ));
     out.push_str("        self._service = None\n\n");
-    out.push_str("    def start(self, handler):\n");
+    out.push_str(&format!(
+        "    def start(self, handler: Callable[[{}.Request, {}.Response], {}.Response]):\n",
+        srv_type_name, srv_type_name, srv_type_name
+    ));
     out.push_str("        if self._service is None:\n");
     out.push_str("            self._service = self.create_service(self._srv_type, self._service_name, handler)\n");
     out.push_str("        return self._service\n\n");
@@ -1375,7 +1387,10 @@ fn emit_query_python(
     out.push_str(
         "        self._client = self.create_client(self._srv_type, self._service_name)\n\n",
     );
-    out.push_str("    def call(self, request, timeout_sec=10.0):\n");
+    out.push_str(&format!(
+        "    def call(self, request: {}.Request, timeout_sec: float = 10.0) -> Optional[{}.Response]:\n",
+        srv_type_name, srv_type_name
+    ));
     out.push_str("        if not self._client.wait_for_service(timeout_sec=timeout_sec):\n");
     out.push_str(
         "            raise RuntimeError(f'Service {self._service_name!r} not available')\n",
@@ -1387,8 +1402,8 @@ fn emit_query_python(
     out.push_str("        return future.result()\n\n");
 
     out.push_str(&format!(
-        "def create_{}_server(runtime_client, node_id: str, init_rclpy: bool = True):\n",
-        q.name
+        "def create_{}_server(runtime_client, node_id: str, init_rclpy: bool = True) -> Ros2{}Server:\n",
+        q.name, pascal(&q.name)
     ));
     out.push_str("    if init_rclpy and not rclpy.ok():\n");
     out.push_str("        rclpy.init()\n");
@@ -1397,7 +1412,7 @@ fn emit_query_python(
         pascal(&q.name)
     ));
 
-    out.push_str(&format!("def create_{}_client(runtime_client, requester_id: str, target: str, init_rclpy: bool = True):\n", q.name));
+    out.push_str(&format!("def create_{}_client(runtime_client, requester_id: str, target: str, init_rclpy: bool = True) -> Ros2{}Client:\n", q.name, pascal(&q.name)));
     out.push_str("    if init_rclpy and not rclpy.ok():\n");
     out.push_str("        rclpy.init()\n");
     out.push_str(&format!(
@@ -1448,9 +1463,12 @@ fn emit_stream_python(
         StreamDirection::Output => " (ROS2 publisher)\n\n",
         StreamDirection::Input => " (ROS2 subscriber)\n\n",
     });
+    out.push_str("from __future__ import annotations\n\n");
+    out.push_str("from typing import Callable\n\n");
     out.push_str("import rclpy\n");
     out.push_str("from rclpy.node import Node\n");
-    out.push_str("from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy\n\n");
+    out.push_str("from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy\n");
+    out.push_str(&format!("from {} import {}\n\n", msg_import, msg_type_name));
     for field in &s.fields {
         let direction_label = match field.direction {
             StreamDirection::Input => "input",
@@ -1477,7 +1495,10 @@ fn emit_stream_python(
             out.push_str("        self._topic = topic_name\n");
             out.push_str("        self._msg_type = msg_type\n");
             out.push_str("        self._pub = None\n\n");
-            out.push_str("    def publish(self, msg):\n");
+            out.push_str(&format!(
+                "    def publish(self, msg: {}) -> None:\n",
+                msg_type_name
+            ));
             out.push_str("        \"\"\"Publish a message to the stream.\n");
             out.push_str("\n");
             out.push_str("        Default implementation is abstract; override in subclass.\n");
@@ -1526,7 +1547,10 @@ fn emit_stream_python(
             out.push_str("        self._topic = topic_name\n");
             out.push_str("        self._msg_type = msg_type\n");
             out.push_str("        self._sub = None\n\n");
-            out.push_str("    def start(self, callback):\n");
+            out.push_str(&format!(
+                "    def start(self, callback: Callable[[{}], None]) -> None:\n",
+                msg_type_name
+            ));
             out.push_str(
                 "        \"\"\"Start subscribing and dispatch messages to callback(msg).\n",
             );
@@ -1549,7 +1573,10 @@ fn emit_stream_python(
             out.push_str("        self._topic = topic_name\n");
             out.push_str("        self._msg_type = msg_type\n");
             out.push_str("        self._sub = None\n\n");
-            out.push_str("    def start(self, callback):\n");
+            out.push_str(&format!(
+                "    def start(self, callback: Callable[[{}], None]) -> None:\n",
+                msg_type_name
+            ));
             out.push_str(
                 "        \"\"\"Start subscribing and dispatch messages to callback(msg).\n",
             );
@@ -1598,7 +1625,10 @@ fn emit_stream_python(
             out.push_str("        self._runtime_client = runtime_client\n");
             out.push_str("        self._node_id = node_id\n");
             out.push_str("        self._pub = self.create_publisher(self._msg_type, self._topic, QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10))\n\n");
-            out.push_str("    def publish(self, msg):\n");
+            out.push_str(&format!(
+                "    def publish(self, msg: {}) -> None:\n",
+                msg_type_name
+            ));
             out.push_str("        self._pub.publish(msg)\n\n");
 
             out.push_str(&format!(
@@ -1627,7 +1657,10 @@ fn emit_stream_python(
             out.push_str("        self._runtime_client = runtime_client\n");
             out.push_str("        self._requester_id = requester_id\n");
             out.push_str("        self._target = target\n\n");
-            out.push_str("    def start(self, callback):\n");
+            out.push_str(&format!(
+                "    def start(self, callback: Callable[[{}], None]):\n",
+                msg_type_name
+            ));
             out.push_str("        if self._sub is None:\n");
             out.push_str("            self._sub = self.create_subscription(self._msg_type, self._topic, callback, QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10))\n");
             out.push_str("        return self._sub\n\n");
@@ -1665,7 +1698,10 @@ fn emit_stream_python(
             out.push_str("        self._runtime_client = runtime_client\n");
             out.push_str("        self._requester_id = requester_id\n");
             out.push_str("        self._target = target\n\n");
-            out.push_str("    def start(self, callback):\n");
+            out.push_str(&format!(
+                "    def start(self, callback: Callable[[{}], None]):\n",
+                msg_type_name
+            ));
             out.push_str("        if self._sub is None:\n");
             out.push_str("            self._sub = self.create_subscription(self._msg_type, self._topic, callback, QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10))\n");
             out.push_str("        return self._sub\n\n");
@@ -1706,8 +1742,11 @@ fn emit_command_python(
     out.push_str("# Command: ");
     out.push_str(&c.name);
     out.push_str(" (ROS2 action or service server)\n\n");
+    out.push_str("from __future__ import annotations\n\n");
+    out.push_str("from typing import Any, Optional\n\n");
     out.push_str("import rclpy\n");
-    out.push_str("from rclpy.node import Node\n\n");
+    out.push_str("from rclpy.node import Node\n");
+    out.push_str(&format!("from {}.action import {}\n\n", ros_pkg, action_type_name));
     if let Some(ref inp) = c.input {
         out.push_str(&format!("# input: {} ({})\n", inp.name, inp.type_ref));
     }
@@ -1727,7 +1766,10 @@ fn emit_command_python(
     out.push_str("    def __init__(self, service_or_action_name: str):\n");
     out.push_str("        super().__init__('ridlc_command_server_' + service_or_action_name.replace('/', '_'))\n");
     out.push_str("        self._name = service_or_action_name\n\n");
-    out.push_str("    def execute(self, request, goal_handle=None):\n");
+    out.push_str(&format!(
+        "    def execute(self, request: {}.Goal, goal_handle: Any = None) -> {}.Result:\n",
+        action_type_name, action_type_name
+    ));
     out.push_str("        \"\"\"Handle a single command request.\n");
     out.push_str("\n");
     out.push_str("        goal_handle: ROS2 action goal handle, for publishing feedback via goal_handle.publish_feedback().\n");
@@ -1746,7 +1788,10 @@ fn emit_command_python(
     out.push_str("    def __init__(self, service_or_action_name: str):\n");
     out.push_str("        super().__init__('ridlc_command_client_' + service_or_action_name.replace('/', '_'))\n");
     out.push_str("        self._name = service_or_action_name\n\n");
-    out.push_str("    def send(self, request):\n");
+    out.push_str(&format!(
+        "    def send(self, request: {}.Goal, timeout_sec: float = 10.0) -> Any:\n",
+        action_type_name
+    ));
     out.push_str("        \"\"\"Send a command request.\n");
     out.push_str("\n");
     out.push_str("        Default implementation is abstract; override in subclass.\n");
@@ -1841,7 +1886,10 @@ fn emit_command_python(
     ));
     out.push_str("        from rclpy.action import ActionClient\n");
     out.push_str("        self._client = ActionClient(self, self._action_type, self._name)\n\n");
-    out.push_str("    def send(self, request, timeout_sec=10.0):\n");
+    out.push_str(&format!(
+        "    def send(self, request: {}.Goal, timeout_sec: float = 10.0) -> Any:\n",
+        action_type_name
+    ));
     out.push_str("        if not self._client.wait_for_server(timeout_sec=timeout_sec):\n");
     out.push_str("            raise RuntimeError(f'Action {self._name!r} not available')\n");
     out.push_str("        future = self._client.send_goal_async(request)\n");
@@ -1851,8 +1899,8 @@ fn emit_command_python(
     out.push_str("        return future.result()\n\n");
 
     out.push_str(&format!(
-        "def create_{}_server(runtime_client, node_id: str, init_rclpy: bool = True):\n",
-        c.name
+        "def create_{}_server(runtime_client, node_id: str, init_rclpy: bool = True) -> Ros2{}Server:\n",
+        c.name, pascal(&c.name)
     ));
     out.push_str("    if init_rclpy and not rclpy.ok():\n");
     out.push_str("        rclpy.init()\n");
@@ -1861,7 +1909,7 @@ fn emit_command_python(
         pascal(&c.name)
     ));
 
-    out.push_str(&format!("def create_{}_client(runtime_client, requester_id: str, target: str, init_rclpy: bool = True):\n", c.name));
+    out.push_str(&format!("def create_{}_client(runtime_client, requester_id: str, target: str, init_rclpy: bool = True) -> Ros2{}Client:\n", c.name, pascal(&c.name)));
     out.push_str("    if init_rclpy and not rclpy.ok():\n");
     out.push_str("        rclpy.init()\n");
     out.push_str(&format!(

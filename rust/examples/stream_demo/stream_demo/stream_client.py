@@ -2,6 +2,8 @@
 """Stream demo: pose subscriber. Resolves channel from robonix-server and connects to stream_server.
 Must be run via rbnx start."""
 
+from __future__ import annotations
+
 import sys
 import time
 

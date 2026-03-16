@@ -1,0 +1,10 @@
+{
+  "include": ["stream_demo"],
+  "extraPaths": [
+    "rbnx-build/ws/install/robonix_interfaces/lib/python3.10/site-packages",
+    "rbnx-build/ws/src/generated/robonix_interfaces",
+    "rbnx-build/ws/install/robonix_interfaces_ros2/local/lib/python3.10/dist-packages",
+    "rbnx-build/ws/install/robonix_msgs/local/lib/python3.10/dist-packages"
+  ],
+  "reportMissingImports": "warning"
+}

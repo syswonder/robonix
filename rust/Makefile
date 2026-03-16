@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 # Robonix Makefile — build and install robonix-server, rbnx, ridlc
 
-.PHONY: help build install clean build-ridlc build-cli build-server install-ridlc install-cli install-server
+.PHONY: help build install clean build-ridlc build-cli build-server install-ridlc install-cli install-server pyrightconfig
 .DEFAULT_GOAL := help
 
 RUST_DIR := $(shell pwd)
@@ -26,6 +26,9 @@ help:
 	@echo ""
 	@echo "  Clean:"
 	@echo "    make clean         - Remove target dirs and build artifacts"
+	@echo ""
+	@echo "  IDE:"
+	@echo "    make pyrightconfig  - Regenerate pyrightconfig.json from built examples"
 	@echo ""
 
 build: build-ridlc build-cli build-server
@@ -77,6 +80,9 @@ install-server: build-server
 		> ~/.cargo/bin/robonix-server; \
 	chmod +x ~/.cargo/bin/robonix-server; \
 	echo "Installed robonix-server wrapper to ~/.cargo/bin (rust dir: $(RUST_ABS))"
+
+pyrightconfig:
+	@cd $(RUST_DIR)/.. && python3 rust/tools/gen_pyrightconfig.py
 
 clean:
 	@echo "Cleaning ridlc..."
