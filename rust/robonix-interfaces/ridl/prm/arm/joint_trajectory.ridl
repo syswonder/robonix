@@ -3,8 +3,10 @@ namespace robonix/prm/arm
 import trajectory_msgs/msg/JointTrajectory
 import robonix_msg/msg/CommandResult
 
-command joint_trajectory {
-    input trajectory trajectory_msgs/msg/JointTrajectory;
-    result status robonix_msg/msg/CommandResult;
+command joint_trajectory
+    @desc("Execute joint-space trajectory. Use for LLM/agent to move arm along timed path.")
+{
+    input trajectory JointTrajectory @desc("points with positions, velocities, time_from_start");
+    result status CommandResult @desc("Success/failure");
     version 1.0;
 }

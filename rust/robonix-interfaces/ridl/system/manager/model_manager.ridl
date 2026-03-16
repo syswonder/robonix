@@ -3,8 +3,10 @@ namespace robonix/system/manager
 import std_msgs/msg/String
 import robonix_msg/msg/ServiceInstance
 
-query model_manager {
-    request filter std_msgs/msg/String;
-    response models robonix_msg/msg/ServiceInstance[];
+query model_manager
+    @desc("List available LLM/model services. Use for LLM/agent to discover chat, embeddings, vision APIs.")
+{
+    request filter String @desc("JSON filter or empty for all");
+    response models ServiceInstance[] @desc("Model instances with endpoint, capabilities");
     version 1.0;
 }

@@ -2,7 +2,9 @@ namespace robonix/prm/force_torque
 
 import geometry_msgs/msg/WrenchStamped
 
-stream wrench {
-    output wrench geometry_msgs/msg/WrenchStamped;
+stream wrench
+    @desc("Force-torque sensor stream. Use for contact/load sensing.")
+{
+    output wrench WrenchStamped @desc("Force x,y,z and torque x,y,z");
     version 1.0;
 }

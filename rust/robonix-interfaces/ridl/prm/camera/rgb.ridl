@@ -2,7 +2,9 @@ namespace robonix/prm/camera
 
 import sensor_msgs/msg/Image
 
-stream rgb {
-    output rgb sensor_msgs/msg/Image;
+stream rgb
+    @desc("RGB image stream. Use for LLM/agent vision input.")
+{
+    output rgb Image @desc("BGR8 or RGB8 image");
     version 1.0;
 }

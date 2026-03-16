@@ -1,12 +1,60 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // RIDL AST types (RFC001 subset)
 
+use anyhow::{Context, Result, bail};
+
 /// Full RIDL file AST; multiple files merge by namespace.
 #[derive(Default)]
 pub struct File {
     pub namespace: Option<String>,
     pub imports: Vec<Import>,
     pub interfaces: Vec<Interface>,
+}
+
+/// Resolve type_ref using imports: full name (contains '/') is unchanged;
+/// short name is expanded via import. If multiple imports match (conflict), error.
+fn resolve_type_ref(type_ref: &str, imports: &[Import]) -> Result<String> {
+    let trimmed = type_ref.trim();
+    if trimmed.is_empty() {
+        bail!("empty type reference");
+    }
+    // Full name: contains '/'
+    if trimmed.contains('/') {
+        return Ok(trimmed.to_string());
+    }
+    // Short name: strip [] suffix, resolve base, re-append
+    let (base, suffix) = if trimmed.ends_with("[]") {
+        (trimmed[..trimmed.len() - 2].trim_end(), "[]")
+    } else {
+        (trimmed, "")
+    };
+    let matches: Vec<&Import> = imports
+        .iter()
+        .filter(|imp| !imp.wildcard)
+        .filter(|imp| {
+            imp.path.rsplit('/').next().map(|s| s == base).unwrap_or(false)
+        })
+        .collect();
+    match matches.len() {
+        0 => bail!(
+            "type '{}' not found in imports (use full name like pkg/msg/Name)",
+            base
+        ),
+        1 => Ok(format!("{}{}", matches[0].path, suffix)),
+        _ => {
+            // Deduplicate by path: duplicate imports (same path) are not ambiguous
+            let paths: std::collections::HashSet<_> =
+                matches.iter().map(|m| m.path.as_str()).collect();
+            if paths.len() == 1 {
+                Ok(format!("{}{}", matches[0].path, suffix))
+            } else {
+                bail!(
+                    "type '{}' ambiguous: multiple imports match (use full name)",
+                    base
+                )
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -102,5 +150,43 @@ impl File {
 
     pub fn namespace_path(&self) -> Option<&str> {
         self.namespace.as_deref()
+    }
+
+    /// Resolve short type names to full paths using imports.
+    /// After import pkg/msg/Name, field type_ref "Name" or "Name[]" becomes "pkg/msg/Name" or "pkg/msg/Name[]".
+    pub fn resolve_imports(&mut self) -> Result<()> {
+        for iface in &mut self.interfaces {
+            match iface {
+                Interface::Query(q) => {
+                    q.request.type_ref =
+                        resolve_type_ref(&q.request.type_ref, &self.imports)
+                            .with_context(|| format!("query {} request", q.name))?;
+                    q.response.type_ref =
+                        resolve_type_ref(&q.response.type_ref, &self.imports)
+                            .with_context(|| format!("query {} response", q.name))?;
+                }
+                Interface::Stream(s) => {
+                    for f in &mut s.fields {
+                        f.type_ref = resolve_type_ref(&f.type_ref, &self.imports)
+                            .with_context(|| format!("stream {} field {}", s.name, f.name))?;
+                    }
+                }
+                Interface::Command(c) => {
+                    if let Some(ref mut inp) = c.input {
+                        inp.type_ref = resolve_type_ref(&inp.type_ref, &self.imports)
+                            .with_context(|| format!("command {} input", c.name))?;
+                    }
+                    if let Some(ref mut out) = c.output {
+                        out.type_ref = resolve_type_ref(&out.type_ref, &self.imports)
+                            .with_context(|| format!("command {} output", c.name))?;
+                    }
+                    if let Some(ref mut res) = c.result {
+                        res.type_ref = resolve_type_ref(&res.type_ref, &self.imports)
+                            .with_context(|| format!("command {} result", c.name))?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }

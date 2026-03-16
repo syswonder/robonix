@@ -2,7 +2,9 @@ namespace robonix/prm/camera
 
 import sensor_msgs/msg/Image
 
-stream depth {
-    output depth sensor_msgs/msg/Image;
+stream depth
+    @desc("Depth image stream. Use for 3D perception.")
+{
+    output depth Image @desc("32FC1 depth in meters");
     version 1.0;
 }

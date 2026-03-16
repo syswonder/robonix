@@ -2,8 +2,10 @@ namespace robonix/system/manager
 
 import std_msgs/msg/String
 
-query task_manager {
-    request request_json std_msgs/msg/String;
-    response plan_json std_msgs/msg/String;
+query task_manager
+    @desc("Convert natural-language task to RTDL plan. Use for LLM/agent task planning.")
+{
+    request request_json String @desc("JSON: {\"description\":\"user task in natural language\"}");
+    response plan_json String @desc("RTDL plan JSON or error message");
     version 1.0;
 }

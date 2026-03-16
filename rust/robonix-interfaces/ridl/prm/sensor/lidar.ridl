@@ -2,7 +2,9 @@ namespace robonix/prm/sensor
 
 import sensor_msgs/msg/LaserScan
 
-stream lidar {
-    output scan sensor_msgs/msg/LaserScan;
+stream lidar
+    @desc("2D LiDAR scan stream. Use for obstacle detection.")
+{
+    output scan LaserScan @desc("ranges[], angle_min, angle_max");
     version 1.0;
 }

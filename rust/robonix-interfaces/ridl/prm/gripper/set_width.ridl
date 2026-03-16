@@ -3,8 +3,10 @@ namespace robonix/prm/gripper
 import std_msgs/msg/Float64
 import std_msgs/msg/Bool
 
-command set_width {
-    input width std_msgs/msg/Float64;
-    result status std_msgs/msg/Bool;
+command set_width
+    @desc("Set gripper width. Use for LLM/agent to open to specific width.")
+{
+    input width Float64 @desc("Target width in meters");
+    result status Bool @desc("True if width set");
     version 1.0;
 }

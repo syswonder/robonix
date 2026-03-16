@@ -3,8 +3,10 @@ namespace robonix/prm/base
 import std_msgs/msg/String
 import robonix_msg/msg/NavigationStatus
 
-query goal_status {
-    request goal_id std_msgs/msg/String;
-    response status robonix_msg/msg/NavigationStatus;
+query goal_status
+    @desc("Get navigation goal status. Use for LLM/agent to check if navigate completed.")
+{
+    request goal_id String @desc("Goal ID from navigate command");
+    response status NavigationStatus @desc("SUCCEEDED, ABORTED, etc.");
     version 1.0;
 }

@@ -6,8 +6,9 @@ import robonix_msg/msg/Object
 query semantic_query
     @idempotent
     @cacheable(ttl=60)
+    @desc("Query objects in semantic map by filter. Use for LLM/agent to find objects (e.g. room=kitchen).")
 {
-    request filter std_msgs/msg/String @doc("JSON filter, e.g. room=kitchen");
-    response objects robonix_msg/msg/Object[] @ref("Object.id") @doc("Objects matching filter");
+    request filter String @desc("JSON filter, e.g. {\"room\":\"kitchen\"} or {\"label\":\"cup\"}");
+    response objects Object[] @ref("Object.id") @desc("Objects matching filter; each has id, label, pose");
     version 1.0;
 }
