@@ -3,8 +3,10 @@ namespace robonix/prm/base
 import nav_msgs/msg/Path
 import std_msgs/msg/Bool
 
-command controller {
-    input path nav_msgs/msg/Path;
-    result success std_msgs/msg/Bool;
+command controller
+    @desc("Execute path following. Use for LLM/agent to follow predefined path.")
+{
+    input path Path @desc("Sequence of poses to follow");
+    result success Bool @desc("True if path completed");
     version 1.0;
 }

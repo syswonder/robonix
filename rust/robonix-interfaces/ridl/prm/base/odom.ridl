@@ -2,7 +2,9 @@ namespace robonix/prm/base
 
 import nav_msgs/msg/Odometry
 
-stream odom {
-    output odom nav_msgs/msg/Odometry;
+stream odom
+    @desc("Robot odometry stream. Use for LLM/agent to get current position/velocity.")
+{
+    output odom Odometry @desc("Pose and twist in frame_id");
     version 1.0;
 }

@@ -4,8 +4,9 @@ import std_msgs/msg/String
 
 query ping
     @idempotent
+    @desc("Echo test; send string, get same back. Use to verify connectivity.")
 {
-    request data std_msgs/msg/String;
-    response data std_msgs/msg/String;
+    request data String @desc("Arbitrary string to echo");
+    response data String @desc("Same string echoed back");
     version 1.0;
 }

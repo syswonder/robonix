@@ -2,8 +2,10 @@ namespace robonix/system/model
 
 import std_msgs/msg/String
 
-query vision_completions {
-    request request_json std_msgs/msg/String;
-    response response_json std_msgs/msg/String;
+query vision_completions
+    @desc("Vision/multimodal chat API. Use for LLM to analyze images.")
+{
+    request request_json String @desc("JSON: {model, messages: [{role, content: text|image_url}], max_tokens?}");
+    response response_json String @desc("JSON: same as chat_completions");
     version 1.0;
 }

@@ -2,7 +2,9 @@ namespace robonix/prm/arm
 
 import sensor_msgs/msg/JointState
 
-stream state_joint {
-    output joint_states sensor_msgs/msg/JointState;
+stream state_joint
+    @desc("Arm joint state stream. Use for LLM/agent to read current joint angles.")
+{
+    output joint_states JointState @desc("name[], position[], velocity[], effort[]");
     version 1.0;
 }

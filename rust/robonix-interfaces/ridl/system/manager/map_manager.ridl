@@ -3,8 +3,10 @@ namespace robonix/system/manager
 import std_msgs/msg/String
 import robonix_msg/msg/Object
 
-query map_manager {
-    request filter std_msgs/msg/String;
-    response snapshot robonix_msg/msg/Object[];
+query map_manager
+    @desc("Get semantic map snapshot (objects in env). Use for LLM/agent to know scene layout.")
+{
+    request filter String @desc("JSON filter, e.g. {\"room\":\"kitchen\"} or empty for all");
+    response snapshot Object[] @desc("Objects with id, label, pose, relations");
     version 1.0;
 }

@@ -2,7 +2,9 @@ namespace robonix/prm/camera
 
 import sensor_msgs/msg/CameraInfo
 
-stream intrinsics {
-    output intrinsics sensor_msgs/msg/CameraInfo;
+stream intrinsics
+    @desc("Camera intrinsics. Use with rgb/depth for 3D projection.")
+{
+    output intrinsics CameraInfo @desc("K, D, R matrices");
     version 1.0;
 }

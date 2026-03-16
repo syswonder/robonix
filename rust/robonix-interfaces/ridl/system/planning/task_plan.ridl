@@ -2,8 +2,10 @@ namespace robonix/system/planning
 
 import std_msgs/msg/String
 
-query task_plan {
-    request description std_msgs/msg/String;
-    response plan std_msgs/msg/String;
+query task_plan
+    @desc("Plan a task from natural language. Use for LLM/agent to get executable plan.")
+{
+    request description String @desc("Natural language task description");
+    response plan String @desc("Structured plan (RTDL or similar)");
     version 1.0;
 }

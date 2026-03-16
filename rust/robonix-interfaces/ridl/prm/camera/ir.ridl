@@ -2,7 +2,9 @@ namespace robonix/prm/camera
 
 import sensor_msgs/msg/Image
 
-stream ir {
-    output ir sensor_msgs/msg/Image;
+stream ir
+    @desc("Infrared image stream. Use for low-light or thermal.")
+{
+    output ir Image @desc("Mono16 or similar");
     version 1.0;
 }

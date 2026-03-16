@@ -2,7 +2,9 @@ namespace robonix/prm/base
 
 import sensor_msgs/msg/JointState
 
-stream joint_state {
-    output state sensor_msgs/msg/JointState;
+stream joint_state
+    @desc("Joint positions/velocities stream. Use for arm state monitoring.")
+{
+    output state JointState @desc("name[], position[], velocity[], effort[]");
     version 1.0;
 }

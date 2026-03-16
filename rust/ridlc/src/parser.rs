@@ -128,16 +128,25 @@ impl<'a> Lexer<'a> {
                 self.skip_ws_comments();
                 let v = if self.peek_char() == Some('"') {
                     self.next_char(); // consume '"'
-                    let start = self.pos;
+                    let mut s = String::new();
                     while let Some(c) = self.peek_char() {
-                        if c == '"' {
+                        if c == '\\' {
+                            self.next_char();
+                            if let Some(esc) = self.peek_char() {
+                                self.next_char();
+                                match esc {
+                                    '"' => s.push('"'),
+                                    '\\' => s.push('\\'),
+                                    _ => { s.push('\\'); s.push(esc); }
+                                }
+                            }
+                        } else if c == '"' {
+                            self.next_char();
                             break;
+                        } else {
+                            s.push(c);
+                            self.next_char();
                         }
-                        self.next_char();
-                    }
-                    let s = self.s[start..self.pos].to_string();
-                    if self.peek_char() == Some('"') {
-                        self.next_char();
                     }
                     s
                 } else {

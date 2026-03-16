@@ -3,8 +3,10 @@ namespace robonix/prm/base
 import std_msgs/msg/Empty
 import std_msgs/msg/Bool
 
-query battery_ok {
-    request req std_msgs/msg/Empty;
-    response ok std_msgs/msg/Bool;
+query battery_ok
+    @desc("Check if battery OK. Use for LLM/agent to verify power before tasks.")
+{
+    request req Empty;
+    response ok Bool @desc("True if battery OK");
     version 1.0;
 }

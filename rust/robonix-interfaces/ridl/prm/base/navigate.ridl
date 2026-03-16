@@ -2,7 +2,10 @@ namespace robonix/prm/base
 
 import geometry_msgs/msg/PoseStamped
 
-command navigate @interruptible {
-    input goal geometry_msgs/msg/PoseStamped;
+command navigate
+    @interruptible
+    @desc("Navigate robot to goal pose. Use for LLM/agent to move robot to location.")
+{
+    input goal PoseStamped @desc("Target pose (frame_id, position, orientation)");
     version 1.0;
 }

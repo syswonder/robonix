@@ -3,8 +3,10 @@ namespace robonix/prm/base
 import std_msgs/msg/Empty
 import std_msgs/msg/Bool
 
-command relocalize {
-    input req std_msgs/msg/Empty;
-    result success std_msgs/msg/Bool;
+command relocalize
+    @desc("Trigger relocalization. Use when robot loses localization.")
+{
+    input req Empty;
+    result success Bool @desc("True if relocalized");
     version 1.0;
 }

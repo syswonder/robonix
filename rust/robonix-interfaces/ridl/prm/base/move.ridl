@@ -4,9 +4,11 @@ import geometry_msgs/msg/Twist
 import nav_msgs/msg/Odometry
 import robonix_msg/msg/CommandResult
 
-command move {
-    input cmd_vel geometry_msgs/msg/Twist;
-    output odom nav_msgs/msg/Odometry;
-    result status robonix_msg/msg/CommandResult;
+command move
+    @desc("Direct velocity control. Use for LLM/agent to drive robot (linear/angular).")
+{
+    input cmd_vel Twist @desc("Linear x,y,z and angular x,y,z velocities");
+    output odom Odometry @desc("Current odometry during motion");
+    result status CommandResult @desc("Final success/failure");
     version 1.0;
 }

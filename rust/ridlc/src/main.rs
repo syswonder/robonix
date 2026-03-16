@@ -167,6 +167,12 @@ fn main() -> Result<()> {
         }
     }
 
+    // Resolve short type names (e.g. "String") to full paths (e.g. "std_msgs/msg/String") using imports
+    for ast in files_by_ns.values_mut() {
+        ast.resolve_imports()
+            .with_context(|| "[ridlc] failed to resolve type references from imports")?;
+    }
+
     // Package-local mode: namespace must start with manifest package.name (e.g. skill_demo or skill_demo/xxx)
     if package_mode {
         let pkg_name = args.package_name.as_ref().unwrap();

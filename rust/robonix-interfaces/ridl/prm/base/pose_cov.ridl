@@ -2,7 +2,9 @@ namespace robonix/prm/base
 
 import geometry_msgs/msg/PoseWithCovarianceStamped
 
-stream pose_cov {
-    output pose geometry_msgs/msg/PoseWithCovarianceStamped;
+stream pose_cov
+    @desc("Pose with covariance stream. Use for localization uncertainty.")
+{
+    output pose PoseWithCovarianceStamped @desc("Pose + covariance matrix");
     version 1.0;
 }

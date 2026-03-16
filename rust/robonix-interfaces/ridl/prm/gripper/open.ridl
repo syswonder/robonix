@@ -3,8 +3,10 @@ namespace robonix/prm/gripper
 import std_msgs/msg/Empty
 import std_msgs/msg/Bool
 
-command open {
-    input req std_msgs/msg/Empty;
-    result status std_msgs/msg/Bool;
+command open
+    @desc("Open gripper. Use for LLM/agent to release grasped object.")
+{
+    input req Empty;
+    result status Bool @desc("True if opened");
     version 1.0;
 }
