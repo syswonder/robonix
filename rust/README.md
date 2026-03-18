@@ -44,7 +44,7 @@ cd rust
 
 **Note**: `make install` installs a wrapper for robonix-server that sources the colcon workspace; the `rust/` directory must stay in place. Do not move or delete it after install.
 
-See [Quick Start](../docs/src/chapter1-getting-started/quickstart.md) for details (run `./scripts/build-highlight.sh` in docs first to build the book).
+See [Quick Start](https://github.com/syswonder/robonix-book/blob/main/src/chapter1-getting-started/quickstart.md) for details (run `./scripts/build-highlight.sh` in docs first to build the book).
 
 ## Directory layout
 
@@ -61,6 +61,6 @@ rust/
 
 ## Documentation
 
-- [RFC001 RIDL](../docs/src/rfc/RFC001-RIDL.md)
-- [RFC002 Package Management](../docs/src/rfc/RFC002-Package-Management.md)
+- [RFC001 RIDL](https://github.com/syswonder/robonix-book/blob/main/src/rfc/RFC001-RIDL.md)
+- [RFC002 Package Management](https://github.com/syswonder/robonix-book/blob/main/src/rfc/RFC002-Package-Management.md)
 - [Package Manifest](ROBONIX_PACKAGE_MANIFEST.md)
