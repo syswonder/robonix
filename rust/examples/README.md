@@ -50,7 +50,7 @@ Build and run with rbnx: `rbnx build -p <package>` → `rbnx start -p <package> 
 | **stream_demo** | `publisher.publish(msg)` in timer | `subscriber.start(on_msg)` |
 | **skill_demo** | `server.execute = execute` — execute returns result, optionally `goal_handle.publish_feedback()` | `client.send(request)` or `send_goal_async(..., feedback_callback=...)` |
 
-See `docs/src/chapter3-developer-guide/ridlc.md` §5 for full documentation.
+See [ridlc §5](https://github.com/syswonder/robonix-book/blob/main/src/chapter3-developer-guide/ridlc.md#5-用户逻辑补全python) for full documentation.
 
 ## Test scripts
 

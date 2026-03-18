@@ -10,6 +10,7 @@ Code structure:
 
 import grpc
 import rclpy
+from rclpy.executors import MultiThreadedExecutor
 
 # [Generated] ridlc generates create_*_server from RIDL
 from robonix.prm.arm.move_ee_command import create_move_ee_server
@@ -78,10 +79,15 @@ def main() -> None:
     close_srv.start()
     open_srv.start()
 
+    executor = MultiThreadedExecutor()
+    for node in (move_ee_srv, joint_traj_srv, close_srv, open_srv):
+        executor.add_node(node)
     try:
-        rclpy.spin(move_ee_srv)
+        executor.spin()
     finally:
-        move_ee_srv.destroy_node()
+        executor.shutdown()
+        for node in (move_ee_srv, joint_traj_srv, close_srv, open_srv):
+            node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 

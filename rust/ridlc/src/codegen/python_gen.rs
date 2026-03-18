@@ -850,12 +850,10 @@ fn emit_combined_runtime_module(
                             ));
                             let entry = app_entry_name(namespace, &s.name, "subscriber");
                             let node_env = format!("ROBONIX_NODE_ID_{}", entry.to_uppercase());
-                            let target_env = format!("ROBONIX_TARGET_{}", entry.to_uppercase());
                             setup_lines.push(format!(
-                                "    {name}_subscriber = create_{name}_subscriber(runtime_client, requester_id=os.environ.get(\"{node_env}\", \"{entry}\"), target=os.environ.get(\"{target_env}\", \"*\"))",
+                                "    {name}_subscriber = create_{name}_subscriber(runtime_client, node_id=os.environ.get(\"{node_env}\", \"{entry}\"))",
                                 name = s.name,
                                 node_env = node_env,
-                                target_env = target_env,
                                 entry = entry
                             ));
                             setup_lines
@@ -1356,12 +1354,11 @@ fn emit_query_python(
     ));
     out.push_str("        self._service = None\n\n");
     out.push_str(&format!(
-        "    def start(self, handler: Callable[[{}.Request, {}.Response], {}.Response]):\n",
+        "    def start(self, handler: Callable[[{}.Request, {}.Response], {}.Response]) -> None:\n",
         srv_type_name, srv_type_name, srv_type_name
     ));
     out.push_str("        if self._service is None:\n");
-    out.push_str("            self._service = self.create_service(self._srv_type, self._service_name, handler)\n");
-    out.push_str("        return self._service\n\n");
+    out.push_str("            self._service = self.create_service(self._srv_type, self._service_name, handler)\n\n");
 
     out.push_str(&format!(
         "class Ros2{}Client({}Client):\n",
@@ -1560,10 +1557,38 @@ fn emit_stream_python(
             out.push_str("        raise NotImplementedError('override start() in subclass')\n\n");
         }
         StreamDirection::Input => {
-            out.push_str(&format!("class {}Subscriber(Node):\n", pascal(&s.name)));
-            out.push_str("    \"\"\"Base ROS2 subscriber stub for stream '");
+            out.push_str(&format!("class {}Publisher(Node):\n", pascal(&s.name)));
+            out.push_str("    \"\"\"Base ROS2 publisher for stream '");
             out.push_str(&s.name);
-            out.push_str("'. Channel (topic) provided by runtime.\n\n");
+            out.push_str("' (input: consumer sends). Channel (topic) provided by runtime.\n\n");
+            out.push_str("    Subclass this class and override ``publish()`` to connect to a concrete transport.\n");
+            out.push_str("    \"\"\"\n\n");
+            out.push_str("    def __init__(self, topic_name: str, msg_type=None):\n");
+            out.push_str(
+                "        super().__init__('ridlc_stream_pub_' + topic_name.replace('/', '_'))\n",
+            );
+            out.push_str("        self._topic = topic_name\n");
+            out.push_str("        self._msg_type = msg_type\n");
+            out.push_str("        self._pub = None\n\n");
+            out.push_str(&format!(
+                "    def publish(self, msg: {}) -> None:\n",
+                msg_type_name
+            ));
+            out.push_str("        \"\"\"Publish a message to the stream.\n");
+            out.push_str("\n");
+            out.push_str("        Default implementation is abstract; override in subclass.\n");
+            out.push_str("        \"\"\"\n");
+            out.push_str(
+                "        raise NotImplementedError('override publish() in subclass')\n\n\n",
+            );
+
+            out.push_str(&format!(
+                "class {}Subscriber(Node):\n",
+                pascal(&s.name)
+            ));
+            out.push_str("    \"\"\"Base ROS2 subscriber for stream '");
+            out.push_str(&s.name);
+            out.push_str("' (input: provider receives). Channel (topic) provided by runtime.\n\n");
             out.push_str("    Subclass this class and override ``start()`` to connect to a concrete transport.\n");
             out.push_str("    \"\"\"\n\n");
             out.push_str("    def __init__(self, topic_name: str, msg_type=None):\n");
@@ -1586,10 +1611,23 @@ fn emit_stream_python(
             out.push_str("        raise NotImplementedError('override start() in subclass')\n\n");
 
             out.push_str(&format!(
+                "def register_{}_provider(runtime_client, node_id: str) -> str:\n",
+                s.name
+            ));
+            out.push_str("    \"\"\"Register this node as stream provider (subscriber) via robonix-server gRPC meta API. Returns assigned ROS2 topic name.\"\"\"\n");
+            out.push_str("    from robonix_runtime_pb2 import RegisterStreamRequest\n");
+            out.push_str(&format!(
+                "    req = RegisterStreamRequest(node_id=node_id, namespace=\"{}\", stream_name=\"{}\", role=\"provider\")\n",
+                ns_literal, s.name
+            ));
+            out.push_str("    resp = runtime_client.RegisterStream(req)\n");
+            out.push_str("    return resp.channel_name\n\n");
+
+            out.push_str(&format!(
                 "def resolve_{}_consumer_topic(runtime_client, requester_id: str, target: str) -> str:\n",
                 s.name
             ));
-            out.push_str("    \"\"\"Resolve stream consumer topic via robonix-server gRPC meta API. Returns ROS2 topic name to subscribe to.\"\"\"\n");
+            out.push_str("    \"\"\"Resolve stream consumer topic via robonix-server gRPC meta API. Returns ROS2 topic name to publish to.\"\"\"\n");
             out.push_str("    from robonix_runtime_pb2 import ResolveStreamRequest\n");
             out.push_str(&format!(
                 "    req = ResolveStreamRequest(requester_id=requester_id, target=target, namespace=\"{}\", stream_name=\"{}\", role=\"consumer\")\n",
@@ -1658,12 +1696,11 @@ fn emit_stream_python(
             out.push_str("        self._requester_id = requester_id\n");
             out.push_str("        self._target = target\n\n");
             out.push_str(&format!(
-                "    def start(self, callback: Callable[[{}], None]):\n",
+                "    def start(self, callback: Callable[[{}], None]) -> None:\n",
                 msg_type_name
             ));
             out.push_str("        if self._sub is None:\n");
-            out.push_str("            self._sub = self.create_subscription(self._msg_type, self._topic, callback, QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10))\n");
-            out.push_str("        return self._sub\n\n");
+            out.push_str("            self._sub = self.create_subscription(self._msg_type, self._topic, callback, QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10))\n\n");
 
             out.push_str(&format!("def create_{}_subscriber(runtime_client, requester_id: str, target: str, init_rclpy: bool = True):\n", s.name));
             out.push_str("    if init_rclpy and not rclpy.ok():\n");
@@ -1688,7 +1725,34 @@ fn emit_stream_python(
                 pascal(&s.name),
                 pascal(&s.name)
             ));
-            out.push_str("    \"\"\"Concrete ROS2 stream subscriber with automatic runtime resolution.\"\"\"\n\n");
+            out.push_str("    \"\"\"Concrete ROS2 stream subscriber (provider) with automatic runtime registration.\"\"\"\n\n");
+            out.push_str("    def __init__(self, runtime_client, node_id: str):\n");
+            out.push_str(&format!("        topic_name = register_{}_provider(runtime_client, node_id)\n", s.name));
+            out.push_str(&format!("        msg_type = _load_{}_msg_type()\n", s.name));
+            out.push_str("        super().__init__(topic_name, msg_type)\n");
+            out.push_str("        self._runtime_client = runtime_client\n");
+            out.push_str("        self._node_id = node_id\n\n");
+            out.push_str(&format!(
+                "    def start(self, callback: Callable[[{}], None]) -> None:\n",
+                msg_type_name
+            ));
+            out.push_str("        if self._sub is None:\n");
+            out.push_str("            self._sub = self.create_subscription(self._msg_type, self._topic, callback, QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10))\n\n");
+
+            out.push_str(&format!("def create_{}_subscriber(runtime_client, node_id: str, init_rclpy: bool = True):\n", s.name));
+            out.push_str("    if init_rclpy and not rclpy.ok():\n");
+            out.push_str("        rclpy.init()\n");
+            out.push_str(&format!(
+                "    return Ros2{}Subscriber(runtime_client, node_id)\n\n",
+                pascal(&s.name)
+            ));
+
+            out.push_str(&format!(
+                "class Ros2{}Publisher({}Publisher):\n",
+                pascal(&s.name),
+                pascal(&s.name)
+            ));
+            out.push_str("    \"\"\"Concrete ROS2 stream publisher (consumer) with automatic runtime resolution.\"\"\"\n\n");
             out.push_str(
                 "    def __init__(self, runtime_client, requester_id: str, target: str):\n",
             );
@@ -1697,26 +1761,31 @@ fn emit_stream_python(
             out.push_str("        super().__init__(topic_name, msg_type)\n");
             out.push_str("        self._runtime_client = runtime_client\n");
             out.push_str("        self._requester_id = requester_id\n");
-            out.push_str("        self._target = target\n\n");
+            out.push_str("        self._target = target\n");
+            out.push_str("        self._pub = self.create_publisher(self._msg_type, self._topic, QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10))\n\n");
             out.push_str(&format!(
-                "    def start(self, callback: Callable[[{}], None]):\n",
+                "    def publish(self, msg: {}) -> None:\n",
                 msg_type_name
             ));
-            out.push_str("        if self._sub is None:\n");
-            out.push_str("            self._sub = self.create_subscription(self._msg_type, self._topic, callback, QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10))\n");
-            out.push_str("        return self._sub\n\n");
+            out.push_str("        self._pub.publish(msg)\n\n");
 
-            out.push_str(&format!("def create_{}_subscriber(runtime_client, requester_id: str, target: str, init_rclpy: bool = True):\n", s.name));
+            out.push_str(&format!(
+                "def create_{}_publisher(runtime_client, requester_id: str, target: str, init_rclpy: bool = True):\n",
+                s.name
+            ));
             out.push_str("    if init_rclpy and not rclpy.ok():\n");
             out.push_str("        rclpy.init()\n");
             out.push_str(&format!(
-                "    return Ros2{}Subscriber(runtime_client, requester_id, target)\n\n",
+                "    return Ros2{}Publisher(runtime_client, requester_id, target)\n\n",
                 pascal(&s.name)
             ));
 
             vec![
+                format!("{}Publisher", pascal(&s.name)),
                 format!("{}Subscriber", pascal(&s.name)),
+                format!("Ros2{}Publisher", pascal(&s.name)),
                 format!("Ros2{}Subscriber", pascal(&s.name)),
+                format!("create_{}_publisher", s.name),
                 format!("create_{}_subscriber", s.name),
             ]
         }

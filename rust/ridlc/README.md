@@ -131,7 +131,7 @@ Instead, customize:
 | **Stream** | Call `publisher.publish(msg)` (e.g. in a timer) | `subscriber.start(callback)` — pass `callback(msg)` |
 | **Command** | Assign `server.execute = fn` where `fn(request, goal_handle) -> result`; optionally `goal_handle.publish_feedback(fb)` | `client.send(request)` → `goal_handle`; then `goal_handle.get_result_async()`; or use `send_goal_async(..., feedback_callback=...)` for feedback |
 
-See `docs/src/chapter3-developer-guide/ridlc.md` §5 for full details.
+See [ridlc §5](https://github.com/syswonder/robonix-book/blob/main/src/chapter3-developer-guide/ridlc.md#5-用户逻辑补全python) for full details.
 
 ## Tests
 

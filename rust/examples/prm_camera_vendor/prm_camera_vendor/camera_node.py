@@ -10,6 +10,7 @@ Code structure:
 
 import grpc
 import rclpy
+from rclpy.executors import MultiThreadedExecutor
 
 from robonix.prm.camera.rgb_stream import create_rgb_publisher
 from robonix.prm.camera.depth_stream import create_depth_publisher
@@ -69,11 +70,16 @@ def main() -> None:
 
     timer = rgb_pub.create_timer(0.5, publish_mock_frame)
 
+    executor = MultiThreadedExecutor()
+    for node in (rgb_pub, depth_pub, rgbd_pub, intrinsics_pub):
+        executor.add_node(node)
     try:
-        rclpy.spin(rgb_pub)
+        executor.spin()
     finally:
         timer.cancel()
-        rgb_pub.destroy_node()
+        executor.shutdown()
+        for node in (rgb_pub, depth_pub, rgbd_pub, intrinsics_pub):
+            node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 

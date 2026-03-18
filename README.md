@@ -43,7 +43,7 @@ git submodule update --init --recursive
 cd rust && make build && make install
 ```
 
-See [Quick Start](rust/README.md) and [Documentation](docs/).
+See [Quick Start](rust/README.md) and [Documentation](https://github.com/syswonder/robonix-book).
 
 ## License
 

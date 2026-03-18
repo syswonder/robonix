@@ -65,6 +65,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    for ast in files_by_ns.values_mut() {
+        ast.resolve_imports()?;
+    }
+
     let generated_file = manifest_dir
         .join("src")
         .join("generated")
