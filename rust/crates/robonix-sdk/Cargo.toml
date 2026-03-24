@@ -1,0 +1,18 @@
+[package]
+name = "robonix-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Robonix SDK: thin gRPC client for control plane API (register/query/negotiate)"
+
+[dependencies]
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+tonic-prost-build.workspace = true
+protoc-bin-vendored.workspace = true

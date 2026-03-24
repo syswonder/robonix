@@ -1,66 +1,90 @@
-# Robonix (rust/)
+# Robonix (Rust workspace)
 
-Rust/ROS 2 implementation of the Robonix embodied intelligence framework. This directory contains the RIDL toolchain, interface definitions, runtime, and examples.
+Robonix is a robotics control-plane framework: nodes register capabilities, declare interfaces, negotiate channels over pluggable transports, and expose SKILL.md text so agents and tools can discover how to use them.
 
-## Getting the source (with submodules)
+Platform: primary target is Linux (glibc-based and musl-friendly builds are acceptable); ROS 2 workloads are not assumed on the host—use containers or a sourced distro when needed.
 
-```bash
-git clone https://github.com/syswonder/robonix
-cd robonix
-git submodule update --init --recursive
-```
+## Architecture
 
-Submodules include ROS message dependencies under `robonix-interfaces/lib/` (rcl_interfaces, common_interfaces) and the docs. **You must run `git submodule update --init --recursive` after cloning**, or ridlc and robonix-server builds will fail.
+| Crate | Role |
+|--------|------|
+| robonix-server | gRPC control plane: registration, discovery, channel negotiation, skill catalog, heartbeat/unregister |
+| robonix-sdk | Thin Rust client for the runtime API |
+| robonix-agent | System agent: discovers VLM via control plane, runs ReAct loop |
+| ridlc | ROS IDL codegen (Python / Rust / proto, mapping hints) |
 
-## Components
+Other workspace crates (e.g. robonix-cli, robonix-buffer) support tooling and data paths.
 
-| Component | Description |
-|-----------|-------------|
-| `ridlc` | RIDL compiler; compiles `.ridl` into ROS 2 workspace and generates Python/Rust code |
-| `robonix-interfaces` | RIDL definitions and ROS msg packages; `ridl/` for query/command/stream/event, `lib/` for msg deps |
-| `robonix-server` | Runtime gRPC meta API for channel registration and resolution |
-| `robonix-cli` (rbnx) | Package build, start/stop, manifest validation |
-| `examples/` | Python examples (ping, skill, etc.) |
-
-## Quick start
-
-Requirements: Ubuntu 22.04, ROS 2 Humble, Rust, Python 3.10+.
-
-```bash
-cd rust
-source /opt/ros/humble/setup.bash
-export RMW_IMPLEMENTATION=rmw_zenoh_cpp   # optional, Zenoh by default
-
-make build
-make install
-```
-
-Start robonix-server:
-
-```bash
-cd rust
-./start_server   # or run robonix-server after make install (wrapper requires rust/ dir)
-```
-
-**Note**: `make install` installs a wrapper for robonix-server that sources the colcon workspace; the `rust/` directory must stay in place. Do not move or delete it after install.
-
-See [Quick Start](https://github.com/syswonder/robonix-book/blob/main/src/chapter1-getting-started/quickstart.md) for details (run `./scripts/build-highlight.sh` in docs first to build the book).
-
-## Directory layout
+## Workspace layout
 
 ```
 rust/
-├── ridlc/                 # RIDL compiler
-├── robonix-interfaces/    # Interface definitions (lib/ is submodule)
-├── robonix-server/        # Runtime
-├── robonix-cli/           # rbnx CLI
-├── examples/              # Python examples
-├── provider/              # Provider implementations (some legacy)
-└── Makefile               # Top-level build
+├── crates/                  # Rust packages (server, sdk, agent, CLI, ridlc, ...)
+├── docs/                    # Namespace sketch (see docs/NAMESPACE.md)
+├── examples/                # Minimal E2E: packages/, scripts/, run.sh
+├── proto/                   # robonix_runtime.proto (authoritative for gRPC API)
+├── robonix-interfaces/
+│   ├── lib/                 # ROS IDL (.msg) -- canonical type definitions
+│   ├── robonix_proto/       # Hand-authored / generated proto (see ridlc --lang proto)
+│   └── robonix_mapping/     # Cross-distro hints (via ridlc --lang mapping)
+└── _deprecated/             # Legacy sim packages (e.g. tiago_demo_package for Webots)
 ```
 
-## Documentation
+## Quick start
 
-- [RFC001 RIDL](https://github.com/syswonder/robonix-book/blob/main/src/rfc/RFC001-RIDL.md)
-- [RFC002 Package Management](https://github.com/syswonder/robonix-book/blob/main/src/rfc/RFC002-Package-Management.md)
-- [Package Manifest](ROBONIX_PACKAGE_MANIFEST.md)
+Minimal platform (control-plane smoke, proto regeneration, Tiago Docker bridge): see [`examples/MINIMAL_PLATFORM.md`](examples/MINIMAL_PLATFORM.md).
+
+Build everything:
+
+```bash
+cd rust
+cargo build --workspace
+```
+
+Run the control plane:
+
+```bash
+./start_server
+```
+
+Run the E2E example (**`rbnx` validate/build/start** per RFC002 package; server + agent are `cargo run`):
+
+```bash
+cd rust
+cp examples/.env.example examples/.env   # VLM_* keys
+./examples/run.sh                 # VLM + tiago_sim_stack (Docker Webots + Nav2 + bridge; needs Docker + X11)
+START_SIM_STACK=0 ./examples/run.sh  # VLM only (no sim container)
+```
+
+Dockerized Tiago sim (same stack `run_e2e` starts by default); with `robonix-server` already up:
+
+```bash
+cd rust
+cargo run -p robonix-cli -- build -p examples/packages/tiago_sim_stack
+cargo run -p robonix-cli -- start -p examples/packages/tiago_sim_stack -n com.robonix.prm.tiago
+```
+
+Cross-distro mapping hint file (optional, for IDL tooling):
+
+```bash
+cargo run -p ridlc -- --lang mapping \
+  --idl-diff tools/ros_distro_idl_difftest/reports/idl_diff_report.json \
+  --from-distro humble --to-distro jazzy \
+  -o robonix-interfaces/robonix_mapping
+```
+
+See [`examples/README.md`](examples/README.md) and [`docs/NAMESPACE.md`](docs/NAMESPACE.md).
+
+## Key concepts
+
+- Node -- Registered participant (primitive, service, skill, ...) with a namespace and optional SKILL.md.
+- Interface -- Named capability on a node; lists supported transports and opaque metadata.
+- Channel -- Allocated connection from NegotiateChannel (id, transport, endpoint string).
+- Transport -- Concrete wiring (e.g. ROS 2, shared memory, gRPC, MCP); chosen at negotiation time.
+- SKILL.md -- Human/agent-oriented description of how to invoke the node; served via `QueryAllSkills` / `QuerySkillMd`.
+
+## Design docs (RFCs)
+
+Specifications and rationale live in the main repo docs:
+
+- [RFC index](../docs/src/rfc/) -- e.g. control plane (RFC003), RIDL, transports, SKILL format.

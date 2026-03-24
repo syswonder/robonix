@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+# RIDL Compiler (RIDL syntax DEPRECATED -- being repurposed for ROS IDL codegen)
+
+[package]
+name = "ridlc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ridlc: interface codegen tool (RIDL syntax deprecated, ROS IDL codegen planned)"
+
+[[bin]]
+name = "ridlc"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+env_logger.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true

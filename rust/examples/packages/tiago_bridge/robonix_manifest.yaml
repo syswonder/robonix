@@ -1,0 +1,19 @@
+# RFC002: Tiago ROS2 ↔ MCP bridge (host ROS or Docker image).
+manifestVersion: 1
+
+build:
+  script: scripts/build.sh
+
+package:
+  id: com.robonix.example.tiago_bridge
+  name: tiago_bridge
+  version: 0.1.0
+  vendor: robonix
+  description: ROS2 Tiago MCP bridge — RegisterNode, DeclareInterface (mcp_tools)
+  license: MulanPSL-2.0
+
+nodes:
+  - id: com.robonix.prm.tiago
+    type: python
+    entry: tiago_bridge.node:main
+    start: source /opt/ros/${ROS_DISTRO:-humble}/setup.bash && source rbnx-build/ws/install/setup.bash && exec python3 -m tiago_bridge.node

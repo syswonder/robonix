@@ -93,33 +93,18 @@ The script will automatically use values from `.env` if no command-line argument
 
 ## Notes
 
-- The Docker image includes ROS2 Humble, Rust, gRPC Python tooling, and Zenoh RMW support
+- The Docker image includes ROS2 Humble, Rust, and gRPC Python tooling
 - GPU support is enabled if NVIDIA drivers are available on the host
 - The container uses host networking for ROS2 communication
 - X11 forwarding is set up for GUI applications
 
-## gRPC And Zenoh RMW
+## gRPC and ROS 2
 
-The image now includes the pieces needed by the current Robonix stack:
-
-- `ros-humble-rmw-zenoh-cpp` for ROS 2 over Zenoh
-- `grpcio-tools`, `python3-grpcio`, `python3-protobuf`, and `protobuf-compiler` for gRPC and protobuf workflows
-- Default runtime environment:
-  - `RMW_IMPLEMENTATION=rmw_zenoh_cpp`
-  - `ROBONIX_META_GRPC_ADDR=0.0.0.0:50051`
-  - `ROBONIX_META_GRPC_ENDPOINT=127.0.0.1:50051`
-
-You can override these before running `./run.sh`, for example:
+- gRPC: `grpcio-tools`, `python3-grpcio`, protobuf tooling as needed.
+- Default `RMW_IMPLEMENTATION=rmw_fastrtps_cpp` (override if required).
 
 ```bash
-export ZENOH_ROUTER_AUTO_START=1
 export ROBONIX_META_GRPC_ENDPOINT=192.168.1.10:50051
 ./run.sh -b
-```
-
-Inside the container, if you do not auto-start the router, you can start it manually with:
-
-```bash
-start_zenoh_router
 ```
 

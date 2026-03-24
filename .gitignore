@@ -30,3 +30,5 @@ stress_test
 rust/debug
 .artifacts/
 rbnx-deploy
+tmp*
+.libero/

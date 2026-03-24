@@ -1,0 +1,6 @@
+# Trigger a VLM-based scan to detect objects in the current scene
+bool force
+---
+bool success
+string message
+uint32 objects_found

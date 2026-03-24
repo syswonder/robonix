@@ -1,0 +1,8 @@
+# Add a named navigation waypoint to the semantic map
+string name
+float64 x
+float64 y
+float64 z
+---
+bool success
+string message

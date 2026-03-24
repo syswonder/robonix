@@ -7,3 +7,6 @@
 [submodule "docs"]
 	path = docs
 	url = https://github.com/syswonder/robonix-book
+[submodule "rust/examples/third_party/LIBERO"]
+	path = rust/examples/third_party/LIBERO
+	url = https://github.com/enkerewpo/LIBERO

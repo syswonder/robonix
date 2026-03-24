@@ -1,5 +1,0 @@
-string module_id
-robonix_runtime_interfaces/InterfaceDescriptor interface
-string instance_id
-string status
-string metadata_json

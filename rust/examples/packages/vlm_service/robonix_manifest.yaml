@@ -1,0 +1,19 @@
+# RFC002: VLM chat completions over gRPC (OpenAI-compatible backend).
+# Host build: scripts/build.sh sets PYTHONPATH (package + examples/proto_gen).
+manifestVersion: 1
+
+build:
+  script: scripts/build.sh
+
+package:
+  id: com.robonix.example.vlm_service
+  name: vlm_service
+  version: 0.1.0
+  vendor: robonix
+  description: VLM service registered under robonix/sys/model/vlm
+  license: MulanPSL-2.0
+
+nodes:
+  - id: com.robonix.services.vlm
+    type: python
+    start: source rbnx-build/ws/install/setup.bash && exec python3 -m vlm_service.service

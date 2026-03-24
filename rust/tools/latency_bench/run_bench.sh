@@ -3,7 +3,6 @@
 # Prerequisites:
 #   - pip install -r requirements.txt
 #   - For ROS2: build latency_bench_msgs and source install/setup.bash
-#   - For Zenoh: rmw_zenohd running (if using rmw_zenoh_cpp)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -113,29 +112,27 @@ if [[ -d "$ROS2_WS" ]] && [[ -f "$ROS2_WS/install/setup.bash" ]]; then
   source "$ROS2_WS/install/setup.bash"
   set -u
 
-  for RMW in rmw_fastrtps_cpp rmw_zenoh_cpp; do
-    export RMW_IMPLEMENTATION="$RMW"
-    echo "[latency_bench] Starting ROS2 ($RMW) server..."
-    python3 -m latency_bench.servers.ros2_server 2>/dev/null &
-    ROS2_PID=$!
-    sleep 3
+  export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+  echo "[latency_bench] Starting ROS2 ($RMW_IMPLEMENTATION) server..."
+  python3 -m latency_bench.servers.ros2_server 2>/dev/null &
+  ROS2_PID=$!
+  sleep 3
 
-    echo "[latency_bench] Running ROS2 ($RMW) benchmark..."
-    if python3 -m latency_bench.benchmark \
-      --transport ros2 \
-      --iterations "$ITERATIONS" \
-      --warmup "$WARMUP" \
-      --payload-size "$PAYLOAD_SIZE" \
-      -o "$RESULTS_DIR/ros2_${RMW}_$(date +%Y%m%d_%H%M%S).json"; then
-      echo "[latency_bench] ROS2 ($RMW) OK"
-    else
-      echo "[latency_bench] ROS2 ($RMW) FAILED (is rmw_zenohd running for zenoh?)"
-    fi
+  echo "[latency_bench] Running ROS2 benchmark..."
+  if python3 -m latency_bench.benchmark \
+    --transport ros2 \
+    --iterations "$ITERATIONS" \
+    --warmup "$WARMUP" \
+    --payload-size "$PAYLOAD_SIZE" \
+    -o "$RESULTS_DIR/ros2_$(date +%Y%m%d_%H%M%S).json"; then
+    echo "[latency_bench] ROS2 OK"
+  else
+    echo "[latency_bench] ROS2 FAILED"
+  fi
 
-    kill $ROS2_PID 2>/dev/null || true
-    wait $ROS2_PID 2>/dev/null || true
-    sleep 3
-  done
+  kill $ROS2_PID 2>/dev/null || true
+  wait $ROS2_PID 2>/dev/null || true
+  sleep 3
 else
   echo "[latency_bench] Skipping ROS2: build with ./build_ros2.sh first"
 fi

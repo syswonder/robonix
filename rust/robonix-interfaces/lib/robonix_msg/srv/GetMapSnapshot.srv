@@ -1,0 +1,5 @@
+# Return a full snapshot of all objects and waypoints
+---
+Object[] objects
+Waypoint[] waypoints
+builtin_interfaces/Time stamp
