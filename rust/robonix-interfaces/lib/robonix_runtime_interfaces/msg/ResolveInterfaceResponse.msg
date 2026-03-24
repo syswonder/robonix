@@ -1,2 +1,0 @@
-bool ok
-robonix_runtime_interfaces/InterfaceInstance match

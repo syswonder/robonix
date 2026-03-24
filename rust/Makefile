@@ -1,71 +1,49 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-# Robonix Makefile — build and install robonix-server, rbnx, ridlc
+# Robonix Makefile — workspace build commands
 
-.PHONY: help build install clean build-ridlc build-cli build-server install-ridlc install-cli install-server pyrightconfig
+.PHONY: help build release install clean pyrightconfig
 .DEFAULT_GOAL := help
 
 RUST_DIR := $(shell pwd)
-RIDLC_DIR := $(RUST_DIR)/ridlc
-CLI_DIR   := $(RUST_DIR)/robonix-cli
-CORE_DIR  := $(RUST_DIR)/robonix-server
-
 BUILD_MODE ?= debug
 CARGO_FLAGS := $(if $(filter release,$(BUILD_MODE)),--release,)
 
 help:
-	@echo "Robonix Makefile"
+	@echo "Robonix Makefile (Cargo workspace)"
 	@echo ""
 	@echo "  Build:"
-	@echo "    make build         - Build ridlc, rbnx, robonix-server (default: debug)"
-	@echo "    make release       - Build in release mode"
+	@echo "    make build         - Build all workspace crates (debug)"
+	@echo "    make release       - Build all workspace crates (release)"
+	@echo "    make build-server  - Build robonix-server only"
 	@echo ""
 	@echo "  Install:"
-	@echo "    make install       - Install to ~/.cargo/bin (ridlc, rbnx, robonix-server)"
-	@echo "    Note: robonix-server installs a wrapper that sources the colcon workspace;"
-	@echo "    the rust/ directory must remain in place for robonix-server to run."
+	@echo "    make install       - Install binaries to ~/.cargo/bin"
 	@echo ""
 	@echo "  Clean:"
-	@echo "    make clean         - Remove target dirs and build artifacts"
+	@echo "    make clean         - Remove build artifacts"
 	@echo ""
 	@echo "  IDE:"
-	@echo "    make pyrightconfig  - Regenerate pyrightconfig.json from built examples"
+	@echo "    make pyrightconfig - Regenerate pyrightconfig.json"
 	@echo ""
 
-build: build-ridlc build-cli build-server
-	@echo "Build complete."
+build:
+	cargo build --workspace $(CARGO_FLAGS)
 
 release:
 	@$(MAKE) BUILD_MODE=release build
 
-build-ridlc:
-	@echo "Building ridlc..."
-	cd $(RIDLC_DIR) && cargo build $(CARGO_FLAGS)
-	@echo "ridlc done."
-
-build-cli:
-	@echo "Building robonix-cli (rbnx)..."
-	cd $(CLI_DIR) && cargo build $(CARGO_FLAGS)
-	@echo "rbnx done."
-
 build-server:
-	@echo "Building robonix-server..."
-	cd $(CORE_DIR) && cargo build $(CARGO_FLAGS)
-	@echo "robonix-server done."
+	cargo build -p robonix-server $(CARGO_FLAGS)
 
-install: install-ridlc install-cli install-server
-	@echo "Installed to ~/.cargo/bin: ridlc, rbnx, robonix-server"
-
-install-ridlc:
-	cd $(RIDLC_DIR) && cargo install --path . --bin ridlc $(CARGO_FLAGS)
-
-install-cli:
-	cd $(CLI_DIR) && cargo install --path . --bin rbnx $(CARGO_FLAGS)
+install: install-server
+	cargo install --path crates/ridlc --bin ridlc $(CARGO_FLAGS)
+	cargo install --path crates/robonix-cli --bin rbnx $(CARGO_FLAGS)
+	cargo install --path crates/robonix-agent --bin robonix-agent $(CARGO_FLAGS)
 
 RUST_ABS := $(shell cd $(RUST_DIR) && pwd)
 BUILD_SUBDIR := $(if $(filter release,$(BUILD_MODE)),release,debug)
 
 install-server: build-server
-	@# robonix-server needs LD_LIBRARY_PATH from colcon workspace; install a wrapper
 	@mkdir -p ~/.cargo/bin; \
 	printf '%s\n' \
 		'#!/usr/bin/env bash' \
@@ -73,22 +51,14 @@ install-server: build-server
 		'RUST_DIR="$(RUST_ABS)"' \
 		'export ROBONIX_META_GRPC_ADDR="$${ROBONIX_META_GRPC_ADDR:-0.0.0.0:50051}"' \
 		'export ROBONIX_META_GRPC_ENDPOINT="$${ROBONIX_META_GRPC_ENDPOINT:-127.0.0.1:50051}"' \
-		'export RUST_LOG="$${RUST_LOG:-robonix_server=info,rclrs=warn}"' \
-		'export RMW_IMPLEMENTATION="$${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"' \
-		'set +u; . "$$RUST_DIR/setup_zenoh_rclrs_env" "$$RUST_DIR/robonix-server/Cargo.toml" robonix-server; set -u' \
-		'exec "$$RUST_DIR/robonix-server/target/$(BUILD_SUBDIR)/robonix-server" "$$@"' \
+		'export RUST_LOG="$${RUST_LOG:-robonix_server=info}"' \
+		'exec "$$RUST_DIR/target/$(BUILD_SUBDIR)/robonix-server" "$$@"' \
 		> ~/.cargo/bin/robonix-server; \
 	chmod +x ~/.cargo/bin/robonix-server; \
-	echo "Installed robonix-server wrapper to ~/.cargo/bin (rust dir: $(RUST_ABS))"
+	echo "Installed robonix-server wrapper to ~/.cargo/bin"
 
 pyrightconfig:
 	@cd $(RUST_DIR)/.. && python3 rust/tools/gen_pyrightconfig.py
 
 clean:
-	@echo "Cleaning ridlc..."
-	cd $(RIDLC_DIR) && cargo clean
-	@echo "Cleaning robonix-cli..."
-	cd $(CLI_DIR) && cargo clean
-	@echo "Cleaning robonix-server..."
-	cd $(CORE_DIR) && cargo clean
-	@echo "Clean complete."
+	cargo clean

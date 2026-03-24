@@ -1,0 +1,24 @@
+# Build context = repository root (four levels up from this file).
+# Prerequisite: robonix-server reachable at ROBONIX_SERVER (host network: use 127.0.0.1:50051).
+# GUI: host must set DISPLAY and allow X11 (e.g. xhost +local:docker).
+name: robonix_tiago_sim_stack
+
+services:
+  ros2-bridge:
+    build:
+      context: ../../../../
+      dockerfile: rust/examples/packages/tiago_sim_stack/bridge/Dockerfile
+    network_mode: host
+    environment:
+      DISPLAY: "${DISPLAY:-:0}"
+      QT_X11_NO_MITSHM: "1"
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      ROBONIX_SERVER: "${ROBONIX_SERVER:-127.0.0.1:50051}"
+      ROBONIX_DISTRO: humble
+      ROBONIX_CONTAINER_ID: ros2-bridge
+      ROBONIX_NODE_ID: com.robonix.prm.tiago
+      ROBONIX_NAMESPACE: robonix/prm/tiago
+      WEBOTS_WARMUP_SEC: "${WEBOTS_WARMUP_SEC:-25}"
+      NAV2_WARMUP_SEC: "${NAV2_WARMUP_SEC:-15}"
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw

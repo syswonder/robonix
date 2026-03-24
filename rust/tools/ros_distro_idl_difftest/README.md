@@ -1,6 +1,6 @@
 # ROS 2 distro IDL difftest
 
-This directory provides a systematic way to compare **ROS IDL definitions** (.msg / .srv / .action) across ROS 2 distros and to inform cross-distro interoperability (e.g. Zenoh bridging, mixed RMW).
+This directory compares **ROS IDL definitions** (.msg / .srv / .action) across ROS 2 distros.
 
 ## Goals
 
@@ -97,6 +97,3 @@ The report is **one large Markdown table**:
 - **One row per interface** (e.g. `common_interfaces/std_msgs/msg/Header`): each distro column shows `✓ (n)` if present (n = field count) or `—` if missing; the last column summarizes **progressive** changes (e.g. `humble->jazzy: +field_x; jazzy->rolling: type y->z`).
 - **Summary** above the table: repos, distro order, total interfaces, and per-repo counts (only in some distros, with progressive diff).
 
-## Relation to zenoh_cross_ros
-
-This experiment supports the [zenoh_cross_ros](../zenoh_cross_ros/README.md) “different IDL bridging and translation” work: knowing real differences in core interfaces across distros helps design canonical formats and translation layers and to prioritize which message types to support in cross-version setups.

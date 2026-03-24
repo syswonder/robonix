@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""ROS2 service echo server for latency benchmark. Use with RMW_IMPLEMENTATION=rmw_fastrtps_cpp or rmw_zenoh_cpp."""
+"""ROS2 service echo server for latency benchmark (typical RMW: rmw_fastrtps_cpp)."""
 
 import rclpy
 from rclpy.node import Node

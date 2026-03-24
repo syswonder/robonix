@@ -14,10 +14,9 @@ USE_LOCAL=false
 REMOTE_IMAGE="docker.io/enkerewpo/robonix_ros:latest"
 LOCAL_IMAGE="robonix_ros"
 CONTAINER_NAME=robonix_ros_dev
-RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
+RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
 ROBONIX_META_GRPC_ADDR="${ROBONIX_META_GRPC_ADDR:-0.0.0.0:50051}"
 ROBONIX_META_GRPC_ENDPOINT="${ROBONIX_META_GRPC_ENDPOINT:-127.0.0.1:50051}"
-ZENOH_ROUTER_AUTO_START="${ZENOH_ROUTER_AUTO_START:-1}"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -40,10 +39,9 @@ while [[ $# -gt 0 ]]; do
             echo "  -h, --help     Show this help message"
             echo ""
             echo "Environment:"
-            echo "  RMW_IMPLEMENTATION      Default: rmw_zenoh_cpp"
+            echo "  RMW_IMPLEMENTATION      Default: rmw_fastrtps_cpp"
             echo "  ROBONIX_META_GRPC_ADDR  Default: 0.0.0.0:50051"
             echo "  ROBONIX_META_GRPC_ENDPOINT Default: 127.0.0.1:50051"
-            echo "  ZENOH_ROUTER_AUTO_START Default: 1"
             echo ""
             echo "By default, pulls and uses: docker.io/enkerewpo/robonix_ros:latest"
             echo "Use -b to build and use local image instead"
@@ -131,7 +129,6 @@ docker run -it --rm \
   -e RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION} \
   -e ROBONIX_META_GRPC_ADDR=${ROBONIX_META_GRPC_ADDR} \
   -e ROBONIX_META_GRPC_ENDPOINT=${ROBONIX_META_GRPC_ENDPOINT} \
-  -e ZENOH_ROUTER_AUTO_START=${ZENOH_ROUTER_AUTO_START} \
   -e NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all} \
   -e NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-all} \
   -e XDG_RUNTIME_DIR=/tmp/runtime-root \

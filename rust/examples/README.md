@@ -1,67 +1,88 @@
-# Examples
+# Examples (minimal E2E)
 
-Robonix PoC examples: calling queries provided by robonix-server.
+Robonix targets Linux broadly. The control plane (`robonix-server`), agent (`robonix-agent`), and VLM run as native processes when possible. ROS 2 workloads use **RFC002 packages** under `examples/packages/` and/or Docker (`tiago_sim_stack`).
 
-## Prerequisites
+Step-by-step checklist: [MINIMAL_PLATFORM.md](MINIMAL_PLATFORM.md)
 
-1. Build robonix-server: `cargo build --manifest-path robonix-server/Cargo.toml`
-2. Start robonix-server: `../start_server` (in another terminal)
+Abstract to concrete interface: [../docs/POC.md](../docs/POC.md) · script: `scripts/hal_discovery_poc.py`
 
-## Example list
+## RFC002 packages (`examples/packages/`)
 
-| Example | Description |
-|---------|-------------|
-| **callquery** | Rust client calling any registered query |
-| **list_interfaces** | List runtime nodes and channels (gRPC InspectRuntime) |
-| **python_ping_client** | Python client with manifest, calls ping query |
-| **stream_demo** | Stream: stream_server (pose publisher) + stream_client (subscriber), connected via robonix-server |
-| **query_demo** | Query: semantic_server (semantic_query) + semantic_client, with sample semantic map |
-| **skill_demo** | Command: skill_server (greet) + skill_client, per-skill command with typed ROS msg |
-| **prm_camera_vendor** | 相机厂商示例：prm::camera (rgb, depth, rgbd, intrinsics)，不实现 ir |
-| **prm_arm_vendor** | 机械臂厂商示例：prm::arm (move_ee, joint_trajectory) + prm::gripper (close, open) |
-| **map_semantic_service** | 地图服务示例：robonix/system/map/semantic_query |
+| Package | Role |
+|---------|------|
+| `packages/tiago_bridge/` | ROS2 ↔ MCP bridge (`rbnx` colcon path or run `python3 -m tiago_bridge.node` with `PYTHONPATH`). |
+| `packages/vlm_service/` | VLM gRPC service; manifest **`build.native_python: true`** → `rbnx build` skips RIDL/ridlc/colcon and sets `PYTHONPATH` to package + `examples/proto_gen`. |
+| `packages/tiago_sim_stack/` | Docker Compose: Webots (GUI) + Nav2 + `tiago_bridge` (`rbnx` build/start). |
 
-## Run
+Validate:
 
 ```bash
-# List nodes and channels (build robonix-server first)
-./list_interfaces
-./list_interfaces 127.0.0.1:50051
-
-# Call ping (Rust)
-./callquery robonix-server robonix/system/debug/ping '"hello"'
-
-# Call ping (Python): rbnx build and start the node
-rbnx build -p python_ping_client && rbnx start -p python_ping_client -n call_ping
+cd rust
+./examples/scripts/test_examples_packages.sh
 ```
 
-## rbnx package control
-
-Build and run with rbnx: `rbnx build -p <package>` → `rbnx start -p <package> -n <node>` (one node per start; start blocks until the process exits).
-
-- Each example has `robonix_manifest.yaml` and `package.xml` (custom ROS2 deps; see `skill_demo/package.xml`, `prm_camera_vendor/package.xml`).
-- **Import resolution**: Run `python3 rust/tools/gen_pyrightconfig.py` after building examples to regenerate `pyrightconfig.json` (for VS Code/Basedpyright). Build examples first so `rbnx-build/` exists.
-
-## User logic completion
-
-| Example | Server/Provider | Client/Consumer |
-|---------|-----------------|-----------------|
-| **query_demo** | `server.start(handler)` — handler fills `response` | `client.call(request)` |
-| **stream_demo** | `publisher.publish(msg)` in timer | `subscriber.start(on_msg)` |
-| **skill_demo** | `server.execute = execute` — execute returns result, optionally `goal_handle.publish_feedback()` | `client.send(request)` or `send_goal_async(..., feedback_callback=...)` |
-
-See [ridlc §5](https://github.com/syswonder/robonix-book/blob/main/src/chapter3-developer-guide/ridlc.md#5-用户逻辑补全python) for full documentation.
-
-## Test scripts
-
-Start robonix-server (`../start_server`) first, then:
+**Compose stack (no ROS on host):**
 
 ```bash
-# Individual tests
-./test_query_demo.sh   # semantic_query server + client
-./test_skill_demo.sh   # execute command server + client
-./test_stream_demo.sh  # pose stream publisher + subscriber
-
-# Run all
-./test_all_demos.sh
+cd rust
+cargo run -p robonix-cli -- validate examples/packages/tiago_sim_stack
+cargo run -p robonix-cli -- build -p examples/packages/tiago_sim_stack
+# with robonix-server running:
+cargo run -p robonix-cli -- start -p examples/packages/tiago_sim_stack -n com.robonix.prm.tiago
 ```
+
+**Python path** for `-m` modules:
+
+```bash
+export PYTHONPATH=rust/examples/packages/vlm_service:rust/examples/packages/tiago_bridge
+```
+
+## Contents
+
+| Path | Role |
+|------|------|
+| `packages/` | RFC002 manifests + code (`tiago_bridge`, `vlm_service`, `tiago_sim_stack`). |
+| `proto_gen/` | Generated Python `*_pb2.py` (see script below). |
+| `scripts/gen_proto_python.sh` | Regenerate `proto_gen/` from `rust/proto` + `robonix-interfaces/robonix_proto`. |
+| `scripts/smoke_minimal.sh` | Start server + run `smoke_control_plane.py` (no VLM). |
+| `scripts/poc_container_bridge.sh` | Host server + Docker `ros2-bridge` (uses `packages/tiago_sim_stack/compose.yaml`). |
+| `run.sh` | Server + **rbnx** validate/build/start per package + agent. By default starts **`tiago_sim_stack`** (Docker sim). `START_SIM_STACK=0` to skip; `START_TIAGO_NODE=1` only with `START_SIM_STACK=0` (host bridge). |
+| `requirements.txt` | Pinned Python deps; `protobuf<7` so `grpcio-tools` and `openai` coexist. |
+
+## Regenerating `proto_gen/`
+
+After changing any `.proto` used by the Python nodes:
+
+```bash
+cd rust
+pip install -r examples/requirements.txt
+./examples/scripts/gen_proto_python.sh
+```
+
+On PEP 668–restricted systems use a venv, or `pip install -r examples/requirements.txt --break-system-packages` where appropriate.
+
+## Namespaces
+
+See `../docs/NAMESPACE.md`.
+
+## End-to-end (recommended)
+
+1. `cd rust && cargo build`
+2. `pip install -r examples/requirements.txt` and `cp examples/.env.example examples/.env` (set `VLM_*`).
+3. **E2E (rbnx packages):** from `rust/`, `./examples/run.sh` — by default **VLM + `tiago_sim_stack`** (Docker + Webots; needs Docker and X11). **`START_SIM_STACK=0`** for VLM-only (no sim). **`START_TIAGO_NODE=1`** only with **`START_SIM_STACK=0`** for host `tiago_bridge` (source ROS 2 first).
+4. **Manual rbnx:** `cargo run -p robonix-cli -- validate|build|start -p examples/packages/...` with `robonix-server` running.
+
+**Webots + Nav2** run inside the `tiago_sim_stack` image (see `packages/tiago_sim_stack/README.md` for GUI / X11).
+
+Instruction input: the agent reads stdin (interactive). A dedicated job queue is optional for later.
+
+## Python dependencies
+
+Prefer the pinned set (avoids `protobuf 7.x` vs `grpcio-tools` conflicts):
+
+```bash
+cd rust
+pip install -r examples/requirements.txt
+```
+
+ROS bridge on the **host** additionally requires a sourced ROS 2 distro and `rclpy` / message packages.

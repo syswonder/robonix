@@ -1,0 +1,27 @@
+[package]
+name = "robonix-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Robonix Agent: core system agent with VLM + tool-calling ReAct loop"
+
+[[bin]]
+name = "robonix-agent"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+env_logger.workspace = true
+robonix-sdk.workspace = true
+rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+protoc-bin-vendored.workspace = true

@@ -2,23 +2,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVER_MANIFEST="$SCRIPT_DIR/robonix-server/Cargo.toml"
-ROS_DISTRO_NAME="${ROS_DISTRO:-humble}"
 LISTEN_ADDR="${ROBONIX_META_GRPC_ADDR:-0.0.0.0:50051}"
 ADVERTISED_ENDPOINT="${ROBONIX_META_GRPC_ENDPOINT:-127.0.0.1:50051}"
 
 export ROBONIX_META_GRPC_ADDR="$LISTEN_ADDR"
 export ROBONIX_META_GRPC_ENDPOINT="$ADVERTISED_ENDPOINT"
-export RUST_LOG="${RUST_LOG:-robonix_server=info,rclrs=warn}"
-export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
+export RUST_LOG="${RUST_LOG:-robonix_server=info}"
 
 LISTEN_PORT="${LISTEN_ADDR##*:}"
 
+# Kill any existing process on the listen port
 python3 - "$LISTEN_PORT" <<'PY'
-import os
-import signal
-import sys
-import time
+import os, signal, sys, time
 
 port = int(sys.argv[1])
 hex_port = format(port, "04X")
@@ -29,11 +24,8 @@ for path in ("/proc/net/tcp", "/proc/net/tcp6"):
             next(f)
             for line in f:
                 parts = line.split()
-                local = parts[1]
-                state = parts[3]
-                inode = parts[9]
-                _ip_hex, port_hex = local.split(":")
-                if port_hex.upper() == hex_port and state == "0A":
+                local, state, inode = parts[1], parts[3], parts[9]
+                if local.split(":")[1].upper() == hex_port and state == "0A":
                     inodes.add(inode)
     except FileNotFoundError:
         pass
@@ -74,22 +66,17 @@ while time.time() < deadline:
             os.kill(pid, 0)
         except ProcessLookupError:
             continue
-        else:
-            remaining.append(pid)
+        remaining.append(pid)
     if not remaining:
         raise SystemExit(0)
     time.sleep(0.1)
 
 for pid in remaining:
-    print(f"[start_server] force killing process {pid} on port {port}", flush=True)
+    print(f"[start_server] force killing process {pid}", flush=True)
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
 PY
 
-set +u
-source "$SCRIPT_DIR/setup_zenoh_rclrs_env" "$SERVER_MANIFEST" robonix-server
-set -u
-
-exec cargo run --manifest-path "$SERVER_MANIFEST" --bin robonix-server
+exec cargo run -p robonix-server

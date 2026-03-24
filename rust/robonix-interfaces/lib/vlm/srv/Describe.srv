@@ -1,0 +1,5 @@
+# VLM image description
+string prompt
+string image_base64
+---
+string text
