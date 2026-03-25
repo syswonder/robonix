@@ -2,8 +2,6 @@
 
 Source tree for **ROS 2 IDL** (`lib/**`) and **generated** gRPC **`.proto`** (`robonix_proto/**`).
 
-**Control plane:** The stable discovery string for an interface is **`abstract_interface_id`** in `rust/proto/robonix_runtime.proto` (`DeclareInterface` / `InterfaceInfo` / `QueryNodes`). Normative rules (path grammar, `robonix/` vs vendor namespaces, IDL → ridlc → register) live in the book chapter **抽象接口标识（协议 ID）** (`docs/src/chapter3-developer-guide/abstract-interface-id.md`). The tables below name those IDs; use an explicit `abstract_interface_id` when your `DeclareInterface.name` does not match the canonical path (e.g. multi-transport bridges).
-
 ## Policy
 
 - **Single source of truth:** ROS IDL only — `lib/<ros_package>/msg/*.msg`, `srv/*.srv`.
