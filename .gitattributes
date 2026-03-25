@@ -1,1 +1,4 @@
 robonix/** linguist-vendored
+rust/examples/** linguist-vendored
+rust/tools/** linguist-vendored
+rust/_deprecated/** linguist-vendored
