@@ -30,14 +30,40 @@ From `rust/`:
 
 This uses **`rbnx` validate/build/start** for `vlm_service` and `tiago_sim_stack` by default (and starts `robonix-server` + `robonix-agent` unless disabled — see `run.sh` header). Use **`START_SIM_STACK=0`** to skip the sim container.
 
+## Agent skills (`skills/`)
+
+`rbnx start` registers **`skills/* /SKILL.md`** with `robonix-server` for `robonix-agent`. Notable:
+
+- **`object_search_wander`** — find a target (e.g. door) with **`get_robot_pose` + `get_camera_image` + short `move_base`**; explicitly **no** `navigate_to` / nav goals.
+- **`navigation`** — Nav2 map goals when allowed.
+- **`visual_inspection`** — camera-first perception.
+
 ## Layout
 
 | Path | Role |
 |------|------|
-| `ros_ws/src/eaios_webots` | ROS 2 Python package: Webots world + `robot_launch.py` (from deprecated `tiago_demo_package`). |
-| `nav2_bringup/config` | Nav2 + AMCL YAML and map for `nav2_bringup`. |
+| `tiago_bridge/` | Python module: ROS2 ↔ MCP bridge (camera, pose, scan, navigation tools). |
+| `ros_ws/src/eaios_webots` | ROS 2 Python package: Webots world + `robot_launch.py`. |
+| `nav2_bringup/config` | Nav2 + AMCL YAML, map, and rviz config. |
 | `bridge/Dockerfile` | Humble + Webots `.deb` + colcon build of `eaios_webots` + `tiago_bridge`. |
-| `bridge/entrypoint.sh` | Start Webots stack → Nav2 → `tiago_bridge.node`. |
+| `bridge/entrypoint.sh` | Start Webots stack → Nav2 → rviz2 → `tiago_bridge.node`. |
+
+## Webots GUI feels slow?
+
+Compared to the older **`docker/run.sh`** dev image, this Compose file used to start Webots with **only** the X11 socket mounted. Two things hurt a lot:
+
+1. **Default `/dev/shm` (64MB)** — Qt and Webots use shared memory; it is easy to end up swapping or stalling. `compose.yaml` now sets **`shm_size: '2gb'`** (same idea as giving GL apps enough IPC).
+2. **No GPU in the container** — `docker/run.sh` adds **`--gpus all`** when `nvidia-smi` exists and mounts **`/dev/dri`**. Without that, Webots often falls back to **software OpenGL** over X11, which feels “stuck” or single-digit FPS.
+
+**What to do**
+
+- **NVIDIA:** install [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html), then run:
+  ```bash
+  docker compose -f compose.yaml -f compose.gpu.yaml up --build
+  ```
+  (or the same merge from repo root with `-f` paths adjusted).
+- **Intel / AMD:** keep the default `compose.yaml`; **`/dev/dri`** is already mounted for Mesa.
+- Still bad? Try **`ipc: host`** on the service (stronger than large shm; dev-only).
 
 ## Topic notes
 

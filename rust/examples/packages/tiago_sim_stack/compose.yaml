@@ -1,6 +1,9 @@
 # Build context = repository root (four levels up from this file).
 # Prerequisite: robonix-server reachable at ROBONIX_SERVER (host network: use 127.0.0.1:50051).
 # GUI: host must set DISPLAY and allow X11 (e.g. xhost +local:docker).
+#
+# Performance (vs repo root `docker/run.sh`): default Docker /dev/shm is 64MB — Qt/Webots thrash.
+# This file sets shm_size + DRI + NVIDIA hint env; for NVIDIA GPU also use compose.gpu.yaml (see README).
 name: robonix_tiago_sim_stack
 
 services:
@@ -9,6 +12,8 @@ services:
       context: ../../../../
       dockerfile: rust/examples/packages/tiago_sim_stack/bridge/Dockerfile
     network_mode: host
+    # Critical for Webots/Qt: avoid 64MB default shm (MIT-SHM / IPC).
+    shm_size: "2gb"
     environment:
       DISPLAY: "${DISPLAY:-:0}"
       QT_X11_NO_MITSHM: "1"
@@ -17,8 +22,14 @@ services:
       ROBONIX_DISTRO: humble
       ROBONIX_CONTAINER_ID: ros2-bridge
       ROBONIX_NODE_ID: com.robonix.prm.tiago
-      ROBONIX_NAMESPACE: robonix/prm/tiago
+      ROBONIX_NAMESPACE: robonix/prm/camera
       WEBOTS_WARMUP_SEC: "${WEBOTS_WARMUP_SEC:-25}"
       NAV2_WARMUP_SEC: "${NAV2_WARMUP_SEC:-15}"
+      START_RVIZ2: "${START_RVIZ2:-1}"
+      # Match `docker/run.sh` so Webots can use host GL stack when GPU is wired in.
+      NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-all}"
+      NVIDIA_DRIVER_CAPABILITIES: "${NVIDIA_DRIVER_CAPABILITIES:-graphics,utility,compute}"
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Intel/AMD Mesa DRI (same as docker/run.sh -v /dev/dri)
+      - /dev/dri:/dev/dri:rw

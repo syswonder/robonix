@@ -2,12 +2,15 @@
 
 Source tree for **ROS 2 IDL** (`lib/**`) and **generated** gRPC **`.proto`** (`robonix_proto/**`).
 
+**Control plane:** The stable discovery string for an interface is **`abstract_interface_id`** in `rust/proto/robonix_runtime.proto` (`DeclareInterface` / `InterfaceInfo` / `QueryNodes`). Normative rules (path grammar, `robonix/` vs vendor namespaces, IDL → ridlc → register) live in the book chapter **抽象接口标识（协议 ID）** (`docs/src/chapter3-developer-guide/abstract-interface-id.md`). The tables below name those IDs; use an explicit `abstract_interface_id` when your `DeclareInterface.name` does not match the canonical path (e.g. multi-transport bridges).
+
 ## Policy
 
 - **Single source of truth:** ROS IDL only — `lib/<ros_package>/msg/*.msg`, `srv/*.srv`.
-- **All** files under `robonix_proto/` are **produced by** `ridlc --lang proto` from that IDL. **Do not hand-edit** `.proto` in this tree; regenerate after IDL changes.
+- **All** files under `robonix_proto/` are **produced by** `ridlc --lang proto` from that IDL. **Do not hand-edit** `.proto` in this tree; **do not add vendor- or app-specific `.proto` files here** — extend the system by adding or changing ROS IDL under `lib/` and regenerating. Regenerate after IDL changes.
 - **Topic / pub-sub prm:** On ROS, endpoints are normal topics with the same `.msg` payload. On gRPC, use the **generated `message`** types (same shapes as ROS) for streaming or bridging — still **only** from ridlc output, not ad-hoc protos.
 - **RPC (`.srv`):** Generated `service { rpc … }` unary RPCs per ridlc rules below.
+- **Pub-sub over gRPC:** The first line of a `.srv` may be a **codegen-only** directive, e.g. `# @robonix.grpc stream_server sensor_msgs/msg/Image`, to emit **server/client streaming** RPCs (see `docs/.../interface-spec.md`). ROS 2 does not execute these as native services.
 
 Regenerate protos from ROS IDL (writes one file per ROS package; **does not delete** stale `.proto` if you removed a package from `lib/`—delete those files manually or wipe the directory first):
 
@@ -70,6 +73,8 @@ For ROS package **`pkgname`**, output is **`robonix_proto/pkgname.proto`** with 
 |------------------------|------|------------------------|-------------------|---------------------------------------------------|
 | `robonix/prm/base/move` | pub-sub | **input** | `lib/prm_base/msg/MoveCommand.msg` | `message MoveCommand` (payload type) |
 | `robonix/prm/base/navigate` | RPC | — | `lib/prm_base/srv/Navigate.srv` | `PrmBaseService` / `Navigate` → `/robonix.prm_base.PrmBaseService/Navigate` |
+| `robonix/prm/base/nav_status` | RPC | — | `lib/prm_base/srv/GetNavigationStatus.srv` | `PrmBaseService` / `GetNavigationStatus` |
+| `robonix/prm/base/cancel_nav` | RPC | — | `lib/prm_base/srv/CancelNavigation.srv` | `PrmBaseService` / `CancelNavigation` |
 | `robonix/prm/base/stop` | RPC | — | `lib/prm_base/srv/Stop.srv` | `PrmBaseService` / `Stop` |
 
 **Not checked in under this package; standard ROS types** (implementations must declare `msg` + topic in `DeclareInterface.metadata_json`):
@@ -79,7 +84,7 @@ For ROS package **`pkgname`**, output is **`robonix_proto/pkgname.proto`** with 
 | `robonix/prm/base/odom` | pub-sub | **output** | `nav_msgs/msg/Odometry.msg` | `nav_msgs.proto` → `Odometry` |
 | `robonix/prm/base/pose_cov` | pub-sub | **output** | `geometry_msgs/msg/PoseWithCovarianceStamped.msg` | `geometry_msgs.proto` |
 | `robonix/prm/base/joint_state` | pub-sub | **output** | `sensor_msgs/msg/JointState.msg` | `sensor_msgs.proto` |
-| `robonix/prm/base/goal_status` | RPC or topic | TBD | e.g. `robonix_msg/msg/NavigationStatus.msg` | matching generated proto |
+| `robonix/prm/base/goal_status` | RPC (preferred) | — | `lib/prm_base/srv/GetNavigationStatus.srv` | `PrmBaseService` / `GetNavigationStatus` (topic payload may still use `robonix_msg/NavigationStatus.msg` if you publish status) |
 
 **Default topic names** (overridable in metadata): set at registration; prefer instance prefixes, e.g. `.../prm/base/move/cmd_vel`, `.../odom`.
 
@@ -87,11 +92,11 @@ For ROS package **`pkgname`**, output is **`robonix_proto/pkgname.proto`** with 
 
 ## Primitives `robonix/prm/camera` (payloads in **common_interfaces**)
 
-ROS packages **`sensor_msgs`**, **`robonix_msg`**, etc. No separate `prm_camera` msg package required; use the table below.
+ROS packages **`sensor_msgs`**, **`robonix_msg`**, **`prm_camera`** (streaming RPC only). Camera **payload** types live in `sensor_msgs`; `prm_camera` supplies ridlc directives for gRPC streaming (see docs **interface-spec**).
 
 | Abstract interface ID | Mode | Direction | ROS IDL (path) | gRPC (generated) |
 |------------------------|------|-----------|----------------|------------------|
-| `robonix/prm/camera/rgb` | pub-sub | **output** | `lib/common_interfaces/sensor_msgs/msg/Image.msg` | `sensor_msgs.proto` → `Image` |
+| `robonix/prm/camera/rgb` | pub-sub | **output** | Topic: `sensor_msgs/msg/Image.msg`; stream RPC: `lib/prm_camera/srv/SubscribeRgb.srv` (`# @robonix.grpc stream_server …`) | **Server streaming** of `sensor_msgs.Image`: `prm_camera.proto` → `PrmCameraService/SubscribeRgb` |
 | `robonix/prm/camera/depth` | pub-sub | **output** | same `Image.msg` | same |
 | `robonix/prm/camera/ir` | pub-sub | **output** | same | same |
 | `robonix/prm/camera/intrinsics` | pub-sub | **output** | `lib/common_interfaces/sensor_msgs/msg/CameraInfo.msg` | `CameraInfo` |

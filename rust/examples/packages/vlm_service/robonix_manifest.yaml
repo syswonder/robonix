@@ -16,4 +16,4 @@ package:
 nodes:
   - id: com.robonix.services.vlm
     type: python
-    start: source rbnx-build/ws/install/setup.bash && exec python3 -m vlm_service.service
+    start: exec python3 -m vlm_service.service

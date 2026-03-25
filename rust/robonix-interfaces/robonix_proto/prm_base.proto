@@ -15,6 +15,25 @@ message MoveCommand {
   double angular_z = 6;
 }
 
+message CancelNavigation_Request {
+  string goal_id = 1;
+}
+
+message CancelNavigation_Response {
+  bool accepted = 1;
+  string message = 2;
+}
+
+message GetNavigationStatus_Request {
+  string goal_id = 1;
+}
+
+message GetNavigationStatus_Response {
+  bool known = 1;
+  string status = 2;
+  bool terminal = 3;
+}
+
 message Navigate_Request {
   robonix.geometry_msgs.PoseStamped goal = 1;
 }
@@ -33,6 +52,8 @@ message Stop_Response {
 }
 
 service PrmBaseService {
+  rpc CancelNavigation (CancelNavigation_Request) returns (CancelNavigation_Response);
+  rpc GetNavigationStatus (GetNavigationStatus_Request) returns (GetNavigationStatus_Response);
   rpc Navigate (Navigate_Request) returns (Navigate_Response);
   rpc Stop (Stop_Request) returns (Stop_Response);
 }

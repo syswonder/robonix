@@ -8,12 +8,9 @@
 #
 # Env:
 #   START_VLM_SERVICE=1|0     (default 1) — rbnx validate/build/start packages/vlm_service
-#   START_SIM_STACK=1|0     (default 1) — rbnx validate/build/start packages/tiago_sim_stack (Docker + Webots GUI)
-#   START_TIAGO_NODE=1|0    (default 0) — rbnx start packages/tiago_bridge on host ROS (use START_SIM_STACK=0; never both)
+#   START_SIM_STACK=1|0     (default 1) — rbnx validate/build/start packages/tiago_sim_stack (Docker + Webots + Nav2 + MCP bridge)
 #   START_AGENT=1|0         (default 1)
 #   SMOKE_USE_EXISTING_SERVER=1 — do not start robonix-server
-#
-# Do not set START_SIM_STACK=1 and START_TIAGO_NODE=1 together (same node id com.robonix.prm.tiago).
 
 set -euo pipefail
 
@@ -35,10 +32,9 @@ export ROBONIX_META_GRPC_ENDPOINT="${ROBONIX_META_GRPC_ENDPOINT:-$ROBONIX_SERVER
 export RUST_LOG="${RUST_LOG:-robonix_server=info,robonix_agent=info}"
 export START_VLM_SERVICE="${START_VLM_SERVICE:-1}"
 export START_SIM_STACK="${START_SIM_STACK:-1}"
-export START_TIAGO_NODE="${START_TIAGO_NODE:-0}"
 export START_AGENT="${START_AGENT:-1}"
 
-export PYTHONPATH="${PACKAGES}/vlm_service:${PACKAGES}/tiago_bridge${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="${PACKAGES}/vlm_service${PYTHONPATH:+:$PYTHONPATH}"
 
 rbnx() {
   (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "$@")
@@ -77,13 +73,17 @@ if ! python3 -c 'import grpc; p=[int(x) for x in grpc.__version__.split(".")[:3]
   exit 1
 fi
 
-if [ "$START_SIM_STACK" = "1" ] && [ "$START_TIAGO_NODE" = "1" ]; then
-  echo "[e2e] error: START_SIM_STACK=1 and START_TIAGO_NODE=1 both register com.robonix.prm.tiago — pick one."
-  exit 1
-fi
-
-if [ "$START_SIM_STACK" = "1" ] && [ -z "${DISPLAY:-}" ]; then
-  echo "[e2e] warning: DISPLAY is unset — Webots GUI in tiago_sim_stack will not show. Set DISPLAY and X11 auth (see packages/tiago_sim_stack/README.md)."
+if [ "$START_SIM_STACK" = "1" ]; then
+  if [ -z "${DISPLAY:-}" ]; then
+    echo "[e2e] warning: DISPLAY is unset — Webots/rviz2 GUI will not show."
+    echo "[e2e]   Set DISPLAY and X11 auth (see packages/tiago_sim_stack/README.md)."
+  else
+    if command -v xhost &>/dev/null; then
+      xhost +local:docker 2>/dev/null || true
+    else
+      echo "[e2e] warning: xhost not found — run 'xhost +local:docker' manually for GUI."
+    fi
+  fi
 fi
 
 pkill -9 -f 'robonix-server' 2>/dev/null || true
@@ -93,6 +93,11 @@ pkill -9 -f 'tiago_bridge.node' 2>/dev/null || true
 sleep 0.3
 
 SIM_STACK_DIR="${PACKAGES}/tiago_sim_stack"
+
+# Ensure local workspace skills override registry-provided paths.
+# The agent merges skills as: registry (lowest) → ~/.robonix/skills → ROBONIX_SKILLS_EXTRA_DIRS (last wins).
+# Without this, registry Skill.path may point at a different checkout.
+export ROBONIX_SKILLS_EXTRA_DIRS="${SIM_STACK_DIR}/skills${ROBONIX_SKILLS_EXTRA_DIRS:+:${ROBONIX_SKILLS_EXTRA_DIRS}}"
 
 cleanup() {
   echo "[e2e] shutting down..."
@@ -116,10 +121,6 @@ if [ "$START_SIM_STACK" = "1" ]; then
   rbnx_validate_build "$PACKAGES/tiago_sim_stack"
 fi
 
-if [ "$START_TIAGO_NODE" = "1" ]; then
-  rbnx_validate_build "$PACKAGES/tiago_bridge"
-fi
-
 if [[ "${SMOKE_USE_EXISTING_SERVER:-0}" != "1" ]]; then
   echo "[e2e] starting robonix-server..."
   (cd "$RUST_ROOT" && cargo run -p robonix-server) &
@@ -138,12 +139,6 @@ if [ "$START_SIM_STACK" = "1" ]; then
   echo "[e2e] rbnx start tiago_sim_stack (background, docker compose)..."
   (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "${RBNX_START_OPTS[@]}" -p "$PACKAGES/tiago_sim_stack" -n com.robonix.prm.tiago) &
   sleep 4
-fi
-
-if [ "$START_TIAGO_NODE" = "1" ]; then
-  echo "[e2e] rbnx start tiago_bridge (background, host ROS)..."
-  (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "${RBNX_START_OPTS[@]}" -p "$PACKAGES/tiago_bridge" -n com.robonix.prm.tiago) &
-  sleep 1
 fi
 
 if [ "$START_AGENT" = "1" ]; then

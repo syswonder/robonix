@@ -22,12 +22,19 @@ pub async fn execute(config: Config, name: &str) -> Result<()> {
         PackageSource::Local { path } => {
             output::sub_step(&format!("Source: local ({})", path.display()));
         }
-        PackageSource::GitHub { repo, branch, commit } => {
+        PackageSource::GitHub {
+            repo,
+            branch,
+            commit,
+        } => {
             let branch_str = branch
                 .as_ref()
                 .map(|b| format!(" branch={}", b))
                 .unwrap_or_default();
-            output::sub_step(&format!("Source: GitHub {} (commit={}){}", repo, commit, branch_str));
+            output::sub_step(&format!(
+                "Source: GitHub {} (commit={}){}",
+                repo, commit, branch_str
+            ));
         }
     }
 

@@ -25,16 +25,20 @@ class RegisterNodeResponse(_message.Message):
     def __init__(self, node_id: _Optional[str] = ...) -> None: ...
 
 class DeclareInterfaceRequest(_message.Message):
-    __slots__ = ("node_id", "name", "supported_transports", "metadata_json")
+    __slots__ = ("node_id", "name", "supported_transports", "metadata_json", "listen_port", "abstract_interface_id")
     NODE_ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     SUPPORTED_TRANSPORTS_FIELD_NUMBER: _ClassVar[int]
     METADATA_JSON_FIELD_NUMBER: _ClassVar[int]
+    LISTEN_PORT_FIELD_NUMBER: _ClassVar[int]
+    ABSTRACT_INTERFACE_ID_FIELD_NUMBER: _ClassVar[int]
     node_id: str
     name: str
     supported_transports: _containers.RepeatedScalarFieldContainer[str]
     metadata_json: str
-    def __init__(self, node_id: _Optional[str] = ..., name: _Optional[str] = ..., supported_transports: _Optional[_Iterable[str]] = ..., metadata_json: _Optional[str] = ...) -> None: ...
+    listen_port: int
+    abstract_interface_id: str
+    def __init__(self, node_id: _Optional[str] = ..., name: _Optional[str] = ..., supported_transports: _Optional[_Iterable[str]] = ..., metadata_json: _Optional[str] = ..., listen_port: _Optional[int] = ..., abstract_interface_id: _Optional[str] = ...) -> None: ...
 
 class DeclareInterfaceResponse(_message.Message):
     __slots__ = ("ok", "allocated_endpoint")
@@ -69,14 +73,16 @@ class NodeInfo(_message.Message):
     def __init__(self, node_id: _Optional[str] = ..., namespace: _Optional[str] = ..., kind: _Optional[str] = ..., interfaces: _Optional[_Iterable[_Union[InterfaceInfo, _Mapping]]] = ..., has_skill_md: bool = ...) -> None: ...
 
 class InterfaceInfo(_message.Message):
-    __slots__ = ("name", "supported_transports", "metadata_json")
+    __slots__ = ("name", "supported_transports", "metadata_json", "abstract_interface_id")
     NAME_FIELD_NUMBER: _ClassVar[int]
     SUPPORTED_TRANSPORTS_FIELD_NUMBER: _ClassVar[int]
     METADATA_JSON_FIELD_NUMBER: _ClassVar[int]
+    ABSTRACT_INTERFACE_ID_FIELD_NUMBER: _ClassVar[int]
     name: str
     supported_transports: _containers.RepeatedScalarFieldContainer[str]
     metadata_json: str
-    def __init__(self, name: _Optional[str] = ..., supported_transports: _Optional[_Iterable[str]] = ..., metadata_json: _Optional[str] = ...) -> None: ...
+    abstract_interface_id: str
+    def __init__(self, name: _Optional[str] = ..., supported_transports: _Optional[_Iterable[str]] = ..., metadata_json: _Optional[str] = ..., abstract_interface_id: _Optional[str] = ...) -> None: ...
 
 class QueryNodesResponse(_message.Message):
     __slots__ = ("nodes",)

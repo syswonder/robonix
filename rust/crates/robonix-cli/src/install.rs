@@ -89,8 +89,13 @@ impl PackageInstaller {
         }
         std::fs::rename(&temp_path, &target_path)?;
 
-        let manifest_path = target_path
-            .join(detected.path.file_name().and_then(|n| n.to_str()).unwrap_or(manifest::MANIFEST_FILE));
+        let manifest_path = target_path.join(
+            detected
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(manifest::MANIFEST_FILE),
+        );
         let package_info = Self::create_package_info(
             &target_path,
             &manifest_path,
@@ -138,11 +143,20 @@ impl PackageInstaller {
 
         let target_path = self.config.package_storage_path.join(&package_name);
         copy_dir_all(&source_path, &target_path).with_context(|| {
-            format!("Failed to copy from {} to {}", source_path.display(), target_path.display())
+            format!(
+                "Failed to copy from {} to {}",
+                source_path.display(),
+                target_path.display()
+            )
         })?;
 
-        let manifest_path = target_path
-            .join(detected.path.file_name().and_then(|n| n.to_str()).unwrap_or(manifest::MANIFEST_FILE));
+        let manifest_path = target_path.join(
+            detected
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(manifest::MANIFEST_FILE),
+        );
         let package_info = Self::create_package_info(
             &target_path,
             &manifest_path,

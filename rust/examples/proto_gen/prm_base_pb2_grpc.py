@@ -34,6 +34,16 @@ class PrmBaseServiceStub(object):
         Args:
             channel: A grpc.Channel.
         """
+        self.CancelNavigation = channel.unary_unary(
+                '/robonix.prm_base.PrmBaseService/CancelNavigation',
+                request_serializer=prm__base__pb2.CancelNavigation_Request.SerializeToString,
+                response_deserializer=prm__base__pb2.CancelNavigation_Response.FromString,
+                _registered_method=True)
+        self.GetNavigationStatus = channel.unary_unary(
+                '/robonix.prm_base.PrmBaseService/GetNavigationStatus',
+                request_serializer=prm__base__pb2.GetNavigationStatus_Request.SerializeToString,
+                response_deserializer=prm__base__pb2.GetNavigationStatus_Response.FromString,
+                _registered_method=True)
         self.Navigate = channel.unary_unary(
                 '/robonix.prm_base.PrmBaseService/Navigate',
                 request_serializer=prm__base__pb2.Navigate_Request.SerializeToString,
@@ -48,6 +58,18 @@ class PrmBaseServiceStub(object):
 
 class PrmBaseServiceServicer(object):
     """Missing associated documentation comment in .proto file."""
+
+    def CancelNavigation(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetNavigationStatus(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
 
     def Navigate(self, request, context):
         """Missing associated documentation comment in .proto file."""
@@ -64,6 +86,16 @@ class PrmBaseServiceServicer(object):
 
 def add_PrmBaseServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
+            'CancelNavigation': grpc.unary_unary_rpc_method_handler(
+                    servicer.CancelNavigation,
+                    request_deserializer=prm__base__pb2.CancelNavigation_Request.FromString,
+                    response_serializer=prm__base__pb2.CancelNavigation_Response.SerializeToString,
+            ),
+            'GetNavigationStatus': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetNavigationStatus,
+                    request_deserializer=prm__base__pb2.GetNavigationStatus_Request.FromString,
+                    response_serializer=prm__base__pb2.GetNavigationStatus_Response.SerializeToString,
+            ),
             'Navigate': grpc.unary_unary_rpc_method_handler(
                     servicer.Navigate,
                     request_deserializer=prm__base__pb2.Navigate_Request.FromString,
@@ -84,6 +116,60 @@ def add_PrmBaseServiceServicer_to_server(servicer, server):
  # This class is part of an EXPERIMENTAL API.
 class PrmBaseService(object):
     """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def CancelNavigation(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/robonix.prm_base.PrmBaseService/CancelNavigation',
+            prm__base__pb2.CancelNavigation_Request.SerializeToString,
+            prm__base__pb2.CancelNavigation_Response.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetNavigationStatus(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/robonix.prm_base.PrmBaseService/GetNavigationStatus',
+            prm__base__pb2.GetNavigationStatus_Request.SerializeToString,
+            prm__base__pb2.GetNavigationStatus_Response.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
 
     @staticmethod
     def Navigate(request,

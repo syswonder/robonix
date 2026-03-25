@@ -123,6 +123,41 @@ pub async fn execute_start(
         .or_else(|| std::env::var("ROBONIX_META_GRPC_ENDPOINT").ok())
         .unwrap_or_else(|| "127.0.0.1:50051".to_string());
 
+    // Scan skills/ directory and pre-register with robonix-server
+    let skills = manifest::scan_skills(&package_root);
+    if !skills.is_empty() {
+        output::sub_step(&format!("Discovered {} skill(s):", skills.len()));
+        for s in &skills {
+            output::sub_step(&format!("  - {} : {}", s.name, s.description));
+        }
+        let grpc_url = if endpoint.contains("://") {
+            endpoint.clone()
+        } else {
+            format!("http://{}", endpoint)
+        };
+        match robonix_sdk::RobonixClient::connect(&grpc_url).await {
+            Ok(mut sdk) => {
+                let skill_items: Vec<robonix_sdk::SkillInfoItem> = skills.iter().map(|s| {
+                    robonix_sdk::SkillInfoItem {
+                        name: s.name.clone(),
+                        description: s.description.clone(),
+                        path: s.path.display().to_string(),
+                        metadata_json: s.metadata_json.clone(),
+                    }
+                }).collect();
+                match sdk.register_node_with_skills(
+                    &node.id, "", "", "", skill_items, "", "",
+                ).await {
+                    Ok(_) => output::sub_step("Skills registered with robonix-server"),
+                    Err(e) => output::sub_step(&format!("Warning: failed to register skills: {e:#}")),
+                }
+            }
+            Err(e) => {
+                output::sub_step(&format!("Warning: could not connect to server for skill registration: {e:#}"));
+            }
+        }
+    }
+
     let run_root = package_root
         .parent()
         .context("Package root has no parent")?;

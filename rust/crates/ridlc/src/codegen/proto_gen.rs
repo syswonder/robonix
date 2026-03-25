@@ -11,7 +11,7 @@ use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::Path;
 
-use super::msg_parser::{MsgField, MsgResolver, MsgSpec, MsgTypeRef, SrvSpec};
+use super::msg_parser::{GrpcStreamMode, MsgField, MsgResolver, MsgSpec, MsgTypeRef, SrvSpec};
 
 fn ros_to_proto_primitive(ros_type: &str) -> &'static str {
     match ros_type {
@@ -73,17 +73,48 @@ fn emit_srv_messages(out: &mut String, srv: &SrvSpec) {
     emit_message(out, &srv.response);
 }
 
+fn stream_element_proto_type(element: &MsgTypeRef, current_package: &str) -> String {
+    match element {
+        MsgTypeRef::Primitive(p) => ros_to_proto_primitive(p).to_string(),
+        MsgTypeRef::Named { package, name } => {
+            if package == current_package {
+                name.clone()
+            } else {
+                format!("{}.{}", proto_package_name(package), name)
+            }
+        }
+    }
+}
+
 fn emit_service(out: &mut String, package: &str, srvs: &[&SrvSpec]) {
     let service_name = format!("{}Service", to_pascal_case(package));
     let _ = writeln!(out, "service {} {{", service_name);
     for srv in srvs {
-        let _ = writeln!(
-            out,
-            "  rpc {} ({}) returns ({});",
-            srv.name,
-            srv.request.name,
-            srv.response.name,
-        );
+        match &srv.grpc_stream {
+            Some(GrpcStreamMode::ServerStream { element }) => {
+                let el = stream_element_proto_type(element, package);
+                let _ = writeln!(
+                    out,
+                    "  rpc {} ({}) returns (stream {});",
+                    srv.name, srv.request.name, el
+                );
+            }
+            Some(GrpcStreamMode::ClientStream { element }) => {
+                let el = stream_element_proto_type(element, package);
+                let _ = writeln!(
+                    out,
+                    "  rpc {} (stream {}) returns ({});",
+                    srv.name, el, srv.response.name
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "  rpc {} ({}) returns ({});",
+                    srv.name, srv.request.name, srv.response.name,
+                );
+            }
+        }
     }
     let _ = writeln!(out, "}}");
 }
@@ -101,27 +132,35 @@ fn to_pascal_case(s: &str) -> String {
         .collect()
 }
 
+fn import_named_type(imports: &mut BTreeSet<String>, current_package: &str, tr: &MsgTypeRef) {
+    if let MsgTypeRef::Named { package, .. } = tr {
+        if package != current_package {
+            imports.insert(package.clone());
+        }
+    }
+}
+
 fn collect_imports(
     specs: &[&MsgSpec],
     srvs: &[&SrvSpec],
     current_package: &str,
 ) -> BTreeSet<String> {
     let mut imports = BTreeSet::new();
-    let mut check_field = |field: &MsgField| {
-        if let MsgTypeRef::Named { package, .. } = &field.type_ref {
-            if package != current_package {
-                imports.insert(package.clone());
-            }
-        }
-    };
     for spec in specs {
         for field in &spec.fields {
-            check_field(field);
+            import_named_type(&mut imports, current_package, &field.type_ref);
         }
     }
     for srv in srvs {
+        if let Some(mode) = &srv.grpc_stream {
+            let element = match mode {
+                GrpcStreamMode::ServerStream { element }
+                | GrpcStreamMode::ClientStream { element } => element,
+            };
+            import_named_type(&mut imports, current_package, element);
+        }
         for field in srv.request.fields.iter().chain(srv.response.fields.iter()) {
-            check_field(field);
+            import_named_type(&mut imports, current_package, &field.type_ref);
         }
     }
     imports
@@ -188,9 +227,8 @@ pub fn generate(resolver: &MsgResolver, out_dir: &Path) -> Result<()> {
 
         let filename = format!("{}.proto", package);
         let filepath = out_dir.join(&filename);
-        fs::write(&filepath, &out).with_context(|| {
-            format!("failed to write proto file to '{}'", filepath.display())
-        })?;
+        fs::write(&filepath, &out)
+            .with_context(|| format!("failed to write proto file to '{}'", filepath.display()))?;
         eprintln!(
             "[ridlc] generated proto for '{}' ({} msgs, {} srvs) -> {}",
             package,

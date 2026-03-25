@@ -126,19 +126,15 @@ pub enum Commands {
         #[arg(long, env = "ROBONIX_SERVER", default_value = DEFAULT_ENDPOINT)]
         server: String,
     },
-    /// RIDL → ridlc → colcon into `rbnx-build/ws` (for `build.script` shells, not `rbnx build`).
-    Ros2WorkspaceBuild {
-        /// Package directory (contains `robonix_manifest.yaml`)
-        #[arg(short = 'p', long)]
-        package: PathBuf,
-        #[arg(long)]
-        clean: bool,
-    },
 }
 
 pub async fn execute(command: Commands, config: Config) -> Result<()> {
     match command {
-        Commands::Build { path, global, clean } => run_package::execute_build(config, path, global, clean).await,
+        Commands::Build {
+            path,
+            global,
+            clean,
+        } => run_package::execute_build(config, path, global, clean).await,
         Commands::Start {
             package,
             node,
@@ -152,15 +148,17 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             set_storage_path,
             show,
         } => config::execute(config, set_storage_path, show).await,
-        Commands::Nodes { server, distro, container, json } => {
-            runtime::nodes(&server, distro.as_deref(), container.as_deref(), json).await
+        Commands::Nodes {
+            server,
+            distro,
+            container,
+            json,
+        } => runtime::nodes(&server, distro.as_deref(), container.as_deref(), json).await,
+        Commands::Describe { server, node, json } => {
+            runtime::describe(&server, node.as_deref(), json).await
         }
-        Commands::Describe { server, node, json } => runtime::describe(&server, node.as_deref(), json).await,
         Commands::Tools { server, json } => runtime::tools(&server, json).await,
         Commands::Channels { server } => runtime::channels(&server).await,
         Commands::Inspect { server } => runtime::inspect(&server).await,
-        Commands::Ros2WorkspaceBuild { package, clean } => {
-            build::execute_ros2_workspace_build(package, clean).await
-        }
     }
 }

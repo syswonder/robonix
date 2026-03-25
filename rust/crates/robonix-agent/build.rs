@@ -1,4 +1,4 @@
-//! Compile VLM + robonix_msg protos from `robonix-interfaces/robonix_proto` (ridlc output).
+//! Compile VLM + robonix_msg protos from `robonix-interfaces/robonix_proto` (pre-generated).
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -11,7 +11,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vlm_proto = proto_root.join("vlm.proto");
 
     if !vlm_proto.is_file() {
-        panic!("missing {} — run ridlc --lang proto on interfaces", vlm_proto.display());
+        panic!(
+            "missing {} — regenerate with: ridlc --lang proto -I robonix-interfaces/lib -o robonix-interfaces/robonix_proto",
+            vlm_proto.display()
+        );
     }
 
     println!("cargo:rerun-if-changed={}", vlm_proto.display());

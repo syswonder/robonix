@@ -1,14 +1,24 @@
 syntax = "proto3";
 package robonix.runtime;
 
+// Structured skill metadata (name + description + path to SKILL.md)
+message SkillInfo {
+  string name = 1;           // unique skill name (snake_case), from SKILL.md frontmatter
+  string description = 2;    // one-line description for agent prompt
+  string path = 3;           // absolute filesystem path to SKILL.md (agent can read_file)
+  // extras (JSON), e.g. {"disable_model_invocation":true,"user_invocable":true}
+  string metadata_json = 4;
+}
+
 // Node registration
 message RegisterNodeRequest {
   string node_id = 1;        // reverse-DNS, e.g. com.vendor.service (empty => server assigns com.robonix.ephemeral.<uuid>)
   string namespace = 2;      // e.g. "robonix/prm/camera"
   string kind = 3;           // "primitive", "service", "skill"
-  string skill_md = 4;       // optional: SKILL.md content for LLM/agent
+  string skill_md = 4;       // optional: single SKILL.md content (legacy, prefer `skills`)
   string distro = 5;         // ROS distro if applicable: "humble", "jazzy", "" for non-ROS
   string container_id = 6;   // logical container grouping (e.g. docker container name)
+  repeated SkillInfo skills = 7;  // structured skills from package skills/ directory
 }
 message RegisterNodeResponse {
   string node_id = 1;
@@ -34,12 +44,16 @@ message NodeHeartbeatResponse {
 // Interface declaration (a node can declare multiple interfaces)
 message DeclareInterfaceRequest {
   string node_id = 1;
-  string name = 2;                      // e.g. "rgb"
+  string name = 2;                      // e.g. "rgb" — local leaf key for NegotiateChannel
   repeated string supported_transports = 3;  // e.g. ["ros2", "shared_memory", "grpc"]
   string metadata_json = 4;             // opaque JSON, agreed by provider/consumer
   // If non-zero, data-plane endpoint is ROBONIX_DATA_PLANE_HOST:listen_port (client already bound).
   // If zero, server picks the next port from its allocator (may collide with host services).
   uint32 listen_port = 5;
+  // Canonical protocol identifier for discovery (see docs: abstract-interface-id).
+  // Empty = server uses RegisterNode.namespace + "/" + name (backward compatible).
+  // Non-empty = stable ID (e.g. robonix/prm/camera/rgb) even if name is camera_rgb_ros2.
+  string abstract_interface_id = 6;
 }
 message DeclareInterfaceResponse {
   bool ok = 1;
@@ -53,7 +67,8 @@ message QueryNodesRequest {
   string transport = 3;      // filter by supported transport (optional)
   string distro_prefix = 4;  // filter: node.distro has this prefix (optional)
   string container_id = 5;   // filter: exact match on container_id (optional)
-  // Exact abstract ID: node.namespace + "/" + interface.name (e.g. robonix/sys/model/vlm/chat).
+  // Exact match on InterfaceInfo.abstract_interface_id (server fills this on declare;
+  // equals namespace+"/"+name when DeclareInterface.abstract_interface_id was empty).
   // When non-empty, namespace and name filters are ignored; transport still applies if set.
   string abstract_interface_id = 6;
 }
@@ -66,11 +81,14 @@ message NodeInfo {
   string distro = 6;
   string container_id = 7;
   uint64 last_heartbeat_ms = 8;
+  repeated SkillInfo skills = 9;
 }
 message InterfaceInfo {
   string name = 1;
   repeated string supported_transports = 2;
   string metadata_json = 3;
+  // Resolved protocol ID used by QueryNodes.abstract_interface_id (never empty).
+  string abstract_interface_id = 4; // robonix/namespace/name, e.g. robonix/prm/camera/rgb
 }
 message QueryNodesResponse {
   repeated NodeInfo nodes = 1;
@@ -112,6 +130,7 @@ message SkillEntry {
   string namespace = 2;
   string kind = 3;
   string skill_md = 4;
+  repeated SkillInfo skills = 5;
 }
 message QueryAllSkillsResponse {
   repeated SkillEntry skills = 1;

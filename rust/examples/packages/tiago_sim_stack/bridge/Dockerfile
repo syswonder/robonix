@@ -33,7 +33,7 @@ COPY rust/examples/packages/tiago_sim_stack/ros_ws/src/eaios_webots src/eaios_we
 RUN bash -lc "source /opt/ros/humble/setup.bash && colcon build --symlink-install --packages-select eaios_webots"
 
 COPY rust/examples/packages/tiago_sim_stack/nav2_bringup /opt/robonix_nav2
-COPY rust/examples/packages/tiago_bridge/tiago_bridge /app/tiago_bridge
+COPY rust/examples/packages/tiago_sim_stack/tiago_bridge /app/tiago_bridge
 COPY rust/examples/proto_gen /app/proto_gen
 COPY rust/examples/packages/tiago_sim_stack/bridge/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

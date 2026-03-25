@@ -6,8 +6,8 @@ use log::info;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -21,9 +21,19 @@ pub mod pb {
 #[derive(Debug, Clone, Serialize)]
 struct InterfaceRecord {
     name: String,
+    /// Canonical protocol ID for QueryNodes (see `DeclareInterfaceRequest.abstract_interface_id`).
+    abstract_interface_id: String,
     supported_transports: Vec<String>,
     metadata_json: String,
     allocated_endpoint: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SkillInfoRecord {
+    name: String,
+    description: String,
+    path: String,
+    metadata_json: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -34,6 +44,8 @@ struct NodeRecord {
     interfaces: Vec<InterfaceRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     skill_md: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    skills: Vec<SkillInfoRecord>,
     #[serde(skip_serializing_if = "String::is_empty")]
     distro: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -61,6 +73,30 @@ pub(crate) struct State {
 
 const PORT_RANGE_START: u16 = 50100;
 
+/// Abstract interface paths published in `rust/robonix-interfaces/README.md`.
+/// `grpc` / `ros2` declarations must resolve to exactly one of these (`namespace` + `/` + `name`).
+const ROBO_SYSTEM_INTERFACE_CATALOG: &[&str] = &[
+    "robonix/prm/base/cancel_nav",
+    "robonix/prm/base/goal_status",
+    "robonix/prm/base/joint_state",
+    "robonix/prm/base/move",
+    "robonix/prm/base/nav_status",
+    "robonix/prm/base/navigate",
+    "robonix/prm/base/odom",
+    "robonix/prm/base/pose_cov",
+    "robonix/prm/base/stop",
+    "robonix/prm/camera/depth",
+    "robonix/prm/camera/intrinsics",
+    "robonix/prm/camera/ir",
+    "robonix/prm/camera/rgb",
+    "robonix/prm/camera/rgbd",
+    "robonix/prm/sensor/imu",
+    "robonix/prm/sensor/lidar",
+    "robonix/prm/sensor/pointcloud",
+    "robonix/sys/model/vlm/chat",
+    "robonix/sys/model/vlm/describe",
+];
+
 #[derive(Debug)]
 pub struct MetaRuntimeRegistry {
     pub(crate) inner: RwLock<State>,
@@ -77,11 +113,92 @@ impl Default for MetaRuntimeRegistry {
 }
 
 impl MetaRuntimeRegistry {
+    fn join_namespace_leaf(namespace: &str, interface_leaf: &str) -> String {
+        let ns = namespace.trim().trim_end_matches('/');
+        let leaf = interface_leaf.trim().trim_start_matches('/');
+        format!("{ns}/{leaf}")
+    }
+
+    fn transports_require_robonix_catalog(transports: &[String]) -> bool {
+        transports.iter().any(|t| t == "grpc" || t == "ros2")
+    }
+
+    fn is_catalogued_robonix_interface(abstract_path: &str) -> bool {
+        ROBO_SYSTEM_INTERFACE_CATALOG
+            .iter()
+            .any(|&id| id == abstract_path)
+    }
+
+    /// For `grpc` / `ros2`, only documented `robonix/...` interfaces are accepted; no ad-hoc paths
+    /// or mismatched `abstract_interface_id` overrides (`DeclareInterface`).
+    fn validate_robonix_system_interface_for_transports(
+        node_namespace: &str,
+        interface_leaf: &str,
+        abstract_id_override: &str,
+        transports: &[String],
+    ) -> Result<(), Status> {
+        if !Self::transports_require_robonix_catalog(transports) {
+            return Ok(());
+        }
+        let ns = node_namespace.trim();
+        if !ns.starts_with("robonix/") {
+            return Err(Status::invalid_argument(
+                "grpc/ros2 DeclareInterface requires RegisterNode.namespace under robonix/...",
+            ));
+        }
+        let joined = Self::join_namespace_leaf(ns, interface_leaf);
+        let o = abstract_id_override.trim();
+        if !o.is_empty() && o != joined {
+            return Err(Status::invalid_argument(format!(
+                "for grpc/ros2, abstract_interface_id must be empty or exactly \"{joined}\" (got \"{o}\")"
+            )));
+        }
+        if !Self::is_catalogued_robonix_interface(&joined) {
+            return Err(Status::invalid_argument(format!(
+                "unknown robonix interface \"{joined}\" for grpc/ros2 (not in system catalog)"
+            )));
+        }
+        Ok(())
+    }
+
     fn now_ms() -> u128 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis()
+    }
+
+    /// Resolved abstract interface path: non-empty segments, no `..`, no leading/trailing `/`.
+    fn validate_abstract_interface_id(field: &str, value: &str) -> Result<(), Status> {
+        let s = value.trim();
+        if s.is_empty() {
+            return Err(Status::invalid_argument(format!(
+                "{field} must not be empty"
+            )));
+        }
+        if s.contains("..") {
+            return Err(Status::invalid_argument(format!(
+                "{field} must not contain '..'"
+            )));
+        }
+        if s.starts_with('/') || s.ends_with('/') {
+            return Err(Status::invalid_argument(format!(
+                "{field} must not start or end with '/'"
+            )));
+        }
+        if s.len() > 512 {
+            return Err(Status::invalid_argument(format!(
+                "{field} is too long (max 512)"
+            )));
+        }
+        for seg in s.split('/') {
+            if seg.is_empty() {
+                return Err(Status::invalid_argument(format!(
+                    "{field} must not contain empty path segments"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn validate_id(field: &str, value: &str, allow_empty: bool) -> Result<String, Status> {
@@ -90,13 +207,20 @@ impl MetaRuntimeRegistry {
             if allow_empty {
                 return Ok(String::new());
             }
-            return Err(Status::invalid_argument(format!("{field} must not be empty")));
+            return Err(Status::invalid_argument(format!(
+                "{field} must not be empty"
+            )));
         }
         if v.len() > 128 {
             return Err(Status::invalid_argument(format!("{field} too long")));
         }
-        if !v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | '.' | ':' | '*')) {
-            return Err(Status::invalid_argument(format!("{field} contains unsupported characters")));
+        if !v
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | '.' | ':' | '*'))
+        {
+            return Err(Status::invalid_argument(format!(
+                "{field} contains unsupported characters"
+            )));
         }
         Ok(v.to_string())
     }
@@ -106,20 +230,28 @@ impl MetaRuntimeRegistry {
     ///
     /// Segments after `com` are ASCII alphanumeric or `_`. Empty `node_id` on register is allowed
     /// and the server assigns `com.robonix.ephemeral.<uuid>`.
-    pub(crate) fn validate_node_identity(field: &str, value: &str, allow_empty: bool) -> Result<String, Status> {
+    pub(crate) fn validate_node_identity(
+        field: &str,
+        value: &str,
+        allow_empty: bool,
+    ) -> Result<String, Status> {
         let v = value.trim();
         if v.is_empty() {
             if allow_empty {
                 return Ok(String::new());
             }
-            return Err(Status::invalid_argument(format!("{field} must not be empty")));
+            return Err(Status::invalid_argument(format!(
+                "{field} must not be empty"
+            )));
         }
         if v.len() > 128 {
             return Err(Status::invalid_argument(format!("{field} too long")));
         }
         let parts: Vec<&str> = v.split('.').collect();
         if parts.iter().any(|s| s.is_empty()) {
-            return Err(Status::invalid_argument(format!("{field} must not contain empty segments")));
+            return Err(Status::invalid_argument(format!(
+                "{field} must not contain empty segments"
+            )));
         }
         if parts.len() < 3 {
             return Err(Status::invalid_argument(format!(
@@ -127,12 +259,14 @@ impl MetaRuntimeRegistry {
             )));
         }
         if parts[0] != "com" {
-            return Err(Status::invalid_argument(format!("{field} must start with \"com.\"")));
+            return Err(Status::invalid_argument(format!(
+                "{field} must start with \"com.\""
+            )));
         }
-        if !parts[1..].iter().all(|p| {
-            p.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        }) {
+        if !parts[1..]
+            .iter()
+            .all(|p| p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        {
             return Err(Status::invalid_argument(format!(
                 "{field} segments after \"com\" must be ASCII alphanumeric or underscore"
             )));
@@ -192,6 +326,7 @@ impl MetaRuntimeRegistry {
         namespace: String,
         kind: String,
         skill_md: Option<String>,
+        skills: Vec<SkillInfoRecord>,
         distro: String,
         container_id: String,
     ) -> String {
@@ -201,23 +336,33 @@ impl MetaRuntimeRegistry {
         } else {
             node_id
         };
-        st.nodes.entry(node_id.clone()).and_modify(|n| {
-            n.namespace = namespace.clone();
-            n.kind = kind.clone();
-            n.skill_md = skill_md.clone();
-            n.distro = distro.clone();
-            n.container_id = container_id.clone();
-            n.heartbeat_ms = Self::now_ms();
-        }).or_insert_with(|| NodeRecord {
-            node_id: node_id.clone(),
-            namespace,
-            kind,
-            interfaces: Vec::new(),
-            skill_md,
-            distro,
-            container_id,
-            heartbeat_ms: Self::now_ms(),
-        });
+        st.nodes
+            .entry(node_id.clone())
+            .and_modify(|n| {
+                n.namespace = namespace.clone();
+                n.kind = kind.clone();
+                n.skill_md = skill_md.clone();
+                // Only overwrite skills if the caller provides a non-empty list.
+                // This allows `rbnx start` to pre-register skills, and the node
+                // process's own RegisterNode (with empty skills) won't wipe them.
+                if !skills.is_empty() {
+                    n.skills = skills.clone();
+                }
+                n.distro = distro.clone();
+                n.container_id = container_id.clone();
+                n.heartbeat_ms = Self::now_ms();
+            })
+            .or_insert_with(|| NodeRecord {
+                node_id: node_id.clone(),
+                namespace,
+                kind,
+                interfaces: Vec::new(),
+                skill_md,
+                skills,
+                distro,
+                container_id,
+                heartbeat_ms: Self::now_ms(),
+            });
         node_id
     }
 
@@ -228,28 +373,64 @@ impl MetaRuntimeRegistry {
         transports: Vec<String>,
         metadata_json: String,
         listen_port: u32,
+        abstract_interface_id: String,
     ) -> Result<String, Status> {
         if listen_port != 0 && !(1..=65535).contains(&listen_port) {
-            return Err(Status::invalid_argument("listen_port must be 0 or in 1..=65535"));
+            return Err(Status::invalid_argument(
+                "listen_port must be 0 or in 1..=65535",
+            ));
         }
         let mut st = self.inner.write().await;
-        let node = st.nodes.get_mut(node_id)
+        let node = st
+            .nodes
+            .get_mut(node_id)
             .ok_or_else(|| Status::not_found(format!("node '{node_id}' not registered")))?;
 
+        let trimmed_abstract = abstract_interface_id.trim();
+        Self::validate_robonix_system_interface_for_transports(
+            &node.namespace,
+            &name,
+            trimmed_abstract,
+            &transports,
+        )?;
+
+        let joined = Self::join_namespace_leaf(&node.namespace, &name);
+        let effective_abstract = if Self::transports_require_robonix_catalog(&transports) {
+            joined
+        } else if trimmed_abstract.is_empty() {
+            joined
+        } else {
+            trimmed_abstract.to_string()
+        };
+        Self::validate_abstract_interface_id("abstract_interface_id", &effective_abstract)?;
+
         let primary_transport = transports.first().map(|s| s.as_str()).unwrap_or("");
-        let endpoint = self.allocate_endpoint_for_node(primary_transport, &node.interfaces, listen_port);
+        let endpoint =
+            self.allocate_endpoint_for_node(primary_transport, &node.interfaces, listen_port);
 
         // Inject the allocated endpoint into the metadata so consumers
         // can discover it via QueryNodes / NegotiateChannel.
         let enriched_meta = Self::inject_endpoint(&metadata_json, &endpoint);
 
-        if let Some(iface) = node.interfaces.iter_mut().find(|i| i.name == name) {
-            iface.supported_transports = transports;
+        // Allow multiple interfaces with the same `name` on one node as long as they
+        // differ in transport. This enables a standard port leaf like `rgb` to have
+        // both a `grpc` implementation and a `ros2` implementation without ad-hoc
+        // renames (e.g. `camera_rgb` vs `camera_rgb_ros2`).
+        //
+        // Update the matching record if we find one with the same `name` and the same
+        // transport set; otherwise append a new record.
+        if let Some(iface) = node
+            .interfaces
+            .iter_mut()
+            .find(|i| i.name == name && i.supported_transports == transports)
+        {
+            iface.abstract_interface_id = effective_abstract;
             iface.metadata_json = enriched_meta;
             iface.allocated_endpoint = endpoint.clone();
         } else {
             node.interfaces.push(InterfaceRecord {
                 name,
+                abstract_interface_id: effective_abstract,
                 supported_transports: transports,
                 metadata_json: enriched_meta,
                 allocated_endpoint: endpoint.clone(),
@@ -290,7 +471,10 @@ impl MetaRuntimeRegistry {
     fn inject_endpoint(metadata_json: &str, endpoint: &str) -> String {
         if let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(metadata_json) {
             if let Some(obj) = meta.as_object_mut() {
-                obj.insert("endpoint".into(), serde_json::Value::String(endpoint.to_string()));
+                obj.insert(
+                    "endpoint".into(),
+                    serde_json::Value::String(endpoint.to_string()),
+                );
                 return serde_json::to_string(&meta).unwrap_or_else(|_| metadata_json.to_string());
             }
         }
@@ -298,18 +482,39 @@ impl MetaRuntimeRegistry {
         serde_json::json!({ "endpoint": endpoint }).to_string()
     }
 
-    async fn negotiate_channel(&self, consumer_id: String, provider_node_id: String, interface_name: String, transport: String) -> Result<ChannelRecord, Status> {
+    async fn negotiate_channel(
+        &self,
+        consumer_id: String,
+        provider_node_id: String,
+        interface_name: String,
+        transport: String,
+    ) -> Result<ChannelRecord, Status> {
         let st = self.inner.read().await;
-        let node = st.nodes.get(&provider_node_id)
+        let node = st
+            .nodes
+            .get(&provider_node_id)
             .ok_or_else(|| Status::not_found(format!("provider '{provider_node_id}' not found")))?;
-        let iface = node.interfaces.iter().find(|i| i.name == interface_name)
-            .ok_or_else(|| Status::not_found(format!("interface '{interface_name}' not found on '{provider_node_id}'")))?;
-        if !iface.supported_transports.contains(&transport) {
-            return Err(Status::invalid_argument(format!(
-                "transport '{transport}' not supported by interface '{interface_name}' (available: {:?})",
-                iface.supported_transports
-            )));
-        }
+        let iface = node
+            .interfaces
+            .iter()
+            .find(|i| i.name == interface_name && i.supported_transports.contains(&transport))
+            .ok_or_else(|| {
+                let available: Vec<Vec<String>> = node
+                    .interfaces
+                    .iter()
+                    .filter(|i| i.name == interface_name)
+                    .map(|i| i.supported_transports.clone())
+                    .collect();
+                if available.is_empty() {
+                    Status::not_found(format!(
+                        "interface '{interface_name}' not found on '{provider_node_id}'"
+                    ))
+                } else {
+                    Status::invalid_argument(format!(
+                        "transport '{transport}' not supported by interface '{interface_name}' (available transport sets: {available:?})"
+                    ))
+                }
+            })?;
         // Port-based transports reuse the endpoint allocated at declare_interface.
         // Other transports get a fresh unique name per channel.
         let endpoint = match transport.as_str() {
@@ -340,16 +545,29 @@ impl MetaRuntimeRegistry {
 
     async fn query_skill_md(&self, node_id: &str) -> Result<String, Status> {
         let st = self.inner.read().await;
-        let node = st.nodes.get(node_id)
+        let node = st
+            .nodes
+            .get(node_id)
             .ok_or_else(|| Status::not_found(format!("node '{node_id}' not found")))?;
         Ok(node.skill_md.clone().unwrap_or_default())
     }
 
-    async fn query_all_skills(&self) -> Vec<(String, String, String, String)> {
+    async fn query_all_skills(
+        &self,
+    ) -> Vec<(String, String, String, String, Vec<SkillInfoRecord>)> {
         let st = self.inner.read().await;
-        st.nodes.values()
-            .filter(|n| n.skill_md.is_some())
-            .map(|n| (n.node_id.clone(), n.namespace.clone(), n.kind.clone(), n.skill_md.clone().unwrap_or_default()))
+        st.nodes
+            .values()
+            .filter(|n| n.skill_md.is_some() || !n.skills.is_empty())
+            .map(|n| {
+                (
+                    n.node_id.clone(),
+                    n.namespace.clone(),
+                    n.kind.clone(),
+                    n.skill_md.clone().unwrap_or_default(),
+                    n.skills.clone(),
+                )
+            })
             .collect()
     }
 
@@ -378,21 +596,61 @@ impl MetaRuntimeService {
 
 #[tonic::async_trait]
 impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
-    async fn register_node(&self, request: Request<pb::RegisterNodeRequest>) -> Result<Response<pb::RegisterNodeResponse>, Status> {
+    async fn register_node(
+        &self,
+        request: Request<pb::RegisterNodeRequest>,
+    ) -> Result<Response<pb::RegisterNodeResponse>, Status> {
         let r = request.into_inner();
         let node_id = MetaRuntimeRegistry::validate_node_identity("node_id", &r.node_id, true)?;
         let namespace = Self::v("namespace", &r.namespace, true)?;
         let kind = Self::v("kind", &r.kind, true)?;
-        let skill_md = if r.skill_md.is_empty() { None } else { Some(r.skill_md) };
+        let skill_md = if r.skill_md.is_empty() {
+            None
+        } else {
+            Some(r.skill_md)
+        };
+        let skills: Vec<SkillInfoRecord> = r
+            .skills
+            .into_iter()
+            .map(|s| SkillInfoRecord {
+                name: s.name,
+                description: s.description,
+                path: s.path,
+                metadata_json: s.metadata_json,
+            })
+            .collect();
         let distro = r.distro.trim().to_string();
         let container_id = r.container_id.trim().to_string();
-        let id = self.registry.register_node(node_id, namespace, kind, skill_md, distro.clone(), container_id.clone()).await;
-        let extra = if distro.is_empty() { String::new() } else { format!(" distro={distro}") };
-        info!("meta-runtime: registered node '{id}'{extra}");
+        let id = self
+            .registry
+            .register_node(
+                node_id,
+                namespace,
+                kind,
+                skill_md,
+                skills.clone(),
+                distro.clone(),
+                container_id.clone(),
+            )
+            .await;
+        let extra = if distro.is_empty() {
+            String::new()
+        } else {
+            format!(" distro={distro}")
+        };
+        let skill_extra = if skills.is_empty() {
+            String::new()
+        } else {
+            format!(" skills={}", skills.len())
+        };
+        info!("meta-runtime: registered node '{id}'{extra}{skill_extra}");
         Ok(Response::new(pb::RegisterNodeResponse { node_id: id }))
     }
 
-    async fn unregister_node(&self, request: Request<pb::UnregisterNodeRequest>) -> Result<Response<pb::UnregisterNodeResponse>, Status> {
+    async fn unregister_node(
+        &self,
+        request: Request<pb::UnregisterNodeRequest>,
+    ) -> Result<Response<pb::UnregisterNodeResponse>, Status> {
         let r = request.into_inner();
         let node_id = MetaRuntimeRegistry::validate_node_identity("node_id", &r.node_id, false)?;
         let ok = self.registry.unregister_node(&node_id).await;
@@ -402,48 +660,77 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
         Ok(Response::new(pb::UnregisterNodeResponse { ok }))
     }
 
-    async fn node_heartbeat(&self, request: Request<pb::NodeHeartbeatRequest>) -> Result<Response<pb::NodeHeartbeatResponse>, Status> {
+    async fn node_heartbeat(
+        &self,
+        request: Request<pb::NodeHeartbeatRequest>,
+    ) -> Result<Response<pb::NodeHeartbeatResponse>, Status> {
         let r = request.into_inner();
         let node_id = MetaRuntimeRegistry::validate_node_identity("node_id", &r.node_id, false)?;
         let t = self.registry.node_heartbeat(&node_id).await?;
         let server_time_ms = u64::try_from(t).unwrap_or(u64::MAX);
-        Ok(Response::new(pb::NodeHeartbeatResponse { ok: true, server_time_ms }))
+        Ok(Response::new(pb::NodeHeartbeatResponse {
+            ok: true,
+            server_time_ms,
+        }))
     }
 
-    async fn declare_interface(&self, request: Request<pb::DeclareInterfaceRequest>) -> Result<Response<pb::DeclareInterfaceResponse>, Status> {
+    async fn declare_interface(
+        &self,
+        request: Request<pb::DeclareInterfaceRequest>,
+    ) -> Result<Response<pb::DeclareInterfaceResponse>, Status> {
         let r = request.into_inner();
         let node_id = MetaRuntimeRegistry::validate_node_identity("node_id", &r.node_id, false)?;
         let name = Self::v("name", &r.name, false)?;
         let endpoint = self
             .registry
-            .declare_interface(&node_id, name.clone(), r.supported_transports, r.metadata_json, r.listen_port)
+            .declare_interface(
+                &node_id,
+                name.clone(),
+                r.supported_transports,
+                r.metadata_json,
+                r.listen_port,
+                r.abstract_interface_id,
+            )
             .await?;
-        info!("meta-runtime: declared interface '{name}' on node '{node_id}' → endpoint '{endpoint}'");
-        Ok(Response::new(pb::DeclareInterfaceResponse { ok: true, allocated_endpoint: endpoint }))
+        info!(
+            "meta-runtime: declared interface '{name}' on node '{node_id}' → endpoint '{endpoint}'"
+        );
+        Ok(Response::new(pb::DeclareInterfaceResponse {
+            ok: true,
+            allocated_endpoint: endpoint,
+        }))
     }
 
-    async fn query_nodes(&self, request: Request<pb::QueryNodesRequest>) -> Result<Response<pb::QueryNodesResponse>, Status> {
+    async fn query_nodes(
+        &self,
+        request: Request<pb::QueryNodesRequest>,
+    ) -> Result<Response<pb::QueryNodesResponse>, Status> {
         let r = request.into_inner();
         let distro_prefix = r.distro_prefix.trim();
         let container_filter = r.container_id.trim();
         let abstract_id = r.abstract_interface_id.trim();
         let st = self.registry.inner.read().await;
-        let nodes: Vec<pb::NodeInfo> = st.nodes.values()
+        let nodes: Vec<pb::NodeInfo> = st
+            .nodes
+            .values()
             .filter(|n| {
                 if abstract_id.is_empty() {
                     (r.namespace.is_empty() || n.namespace.starts_with(&r.namespace))
                         && (r.name.is_empty() || n.interfaces.iter().any(|i| i.name == r.name))
                 } else {
                     n.interfaces.iter().any(|i| {
-                        let composed = format!("{}/{}", n.namespace, i.name);
-                        composed == abstract_id
-                            && (r.transport.is_empty() || i.supported_transports.contains(&r.transport))
+                        i.abstract_interface_id == abstract_id
+                            && (r.transport.is_empty()
+                                || i.supported_transports.contains(&r.transport))
                     })
                 }
             })
             .filter(|n| {
                 if abstract_id.is_empty() {
-                    r.transport.is_empty() || n.interfaces.iter().any(|i| i.supported_transports.contains(&r.transport))
+                    r.transport.is_empty()
+                        || n.interfaces
+                            .iter()
+                            .any(|i| i.supported_transports.contains(&r.transport))
                 } else {
                     true
                 }
@@ -455,27 +742,56 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
                 namespace: n.namespace.clone(),
                 kind: n.kind.clone(),
                 has_skill_md: n.skill_md.is_some(),
-                interfaces: n.interfaces.iter().map(|i| pb::InterfaceInfo {
-                    name: i.name.clone(),
-                    supported_transports: i.supported_transports.clone(),
-                    metadata_json: i.metadata_json.clone(),
-                }).collect(),
+                interfaces: n
+                    .interfaces
+                    .iter()
+                    .map(|i| pb::InterfaceInfo {
+                        name: i.name.clone(),
+                        supported_transports: i.supported_transports.clone(),
+                        metadata_json: i.metadata_json.clone(),
+                        abstract_interface_id: i.abstract_interface_id.clone(),
+                    })
+                    .collect(),
                 distro: n.distro.clone(),
                 container_id: n.container_id.clone(),
                 last_heartbeat_ms: u64::try_from(n.heartbeat_ms).unwrap_or(0),
+                skills: n
+                    .skills
+                    .iter()
+                    .map(|s| pb::SkillInfo {
+                        name: s.name.clone(),
+                        description: s.description.clone(),
+                        path: s.path.clone(),
+                        metadata_json: s.metadata_json.clone(),
+                    })
+                    .collect(),
             })
             .collect();
         Ok(Response::new(pb::QueryNodesResponse { nodes }))
     }
 
-    async fn negotiate_channel(&self, request: Request<pb::NegotiateChannelRequest>) -> Result<Response<pb::NegotiateChannelResponse>, Status> {
+    async fn negotiate_channel(
+        &self,
+        request: Request<pb::NegotiateChannelRequest>,
+    ) -> Result<Response<pb::NegotiateChannelResponse>, Status> {
         let r = request.into_inner();
-        let consumer_id = MetaRuntimeRegistry::validate_node_identity("consumer_id", &r.consumer_id, false)?;
-        let provider = MetaRuntimeRegistry::validate_node_identity("provider_node_id", &r.provider_node_id, false)?;
+        let consumer_id =
+            MetaRuntimeRegistry::validate_node_identity("consumer_id", &r.consumer_id, false)?;
+        let provider = MetaRuntimeRegistry::validate_node_identity(
+            "provider_node_id",
+            &r.provider_node_id,
+            false,
+        )?;
         let iface = Self::v("interface_name", &r.interface_name, false)?;
         let transport = Self::v("transport", &r.transport, false)?;
-        let ch = self.registry.negotiate_channel(consumer_id, provider, iface, transport).await?;
-        info!("meta-runtime: negotiated channel '{}' endpoint='{}'", ch.channel_id, ch.endpoint);
+        let ch = self
+            .registry
+            .negotiate_channel(consumer_id, provider, iface, transport)
+            .await?;
+        info!(
+            "meta-runtime: negotiated channel '{}' endpoint='{}'",
+            ch.channel_id, ch.endpoint
+        );
         Ok(Response::new(pb::NegotiateChannelResponse {
             channel_id: ch.channel_id,
             transport: ch.transport,
@@ -483,29 +799,63 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
         }))
     }
 
-    async fn release_channel(&self, request: Request<pb::ReleaseChannelRequest>) -> Result<Response<pb::ReleaseChannelResponse>, Status> {
+    async fn release_channel(
+        &self,
+        request: Request<pb::ReleaseChannelRequest>,
+    ) -> Result<Response<pb::ReleaseChannelResponse>, Status> {
         let r = request.into_inner();
         let ok = self.registry.release_channel(&r.channel_id).await;
         Ok(Response::new(pb::ReleaseChannelResponse { ok }))
     }
 
-    async fn query_skill_md(&self, request: Request<pb::QuerySkillMdRequest>) -> Result<Response<pb::QuerySkillMdResponse>, Status> {
+    async fn query_skill_md(
+        &self,
+        request: Request<pb::QuerySkillMdRequest>,
+    ) -> Result<Response<pb::QuerySkillMdResponse>, Status> {
         let r = request.into_inner();
         let node_id = MetaRuntimeRegistry::validate_node_identity("node_id", &r.node_id, false)?;
         let skill_md = self.registry.query_skill_md(&node_id).await?;
         Ok(Response::new(pb::QuerySkillMdResponse { skill_md }))
     }
 
-    async fn query_all_skills(&self, _request: Request<pb::QueryAllSkillsRequest>) -> Result<Response<pb::QueryAllSkillsResponse>, Status> {
-        let skills = self.registry.query_all_skills().await
+    async fn query_all_skills(
+        &self,
+        _request: Request<pb::QueryAllSkillsRequest>,
+    ) -> Result<Response<pb::QueryAllSkillsResponse>, Status> {
+        let skills = self
+            .registry
+            .query_all_skills()
+            .await
             .into_iter()
-            .map(|(node_id, namespace, kind, skill_md)| pb::SkillEntry { node_id, namespace, kind, skill_md })
+            .map(
+                |(node_id, namespace, kind, skill_md, skill_infos)| pb::SkillEntry {
+                    node_id,
+                    namespace,
+                    kind,
+                    skill_md,
+                    skills: skill_infos
+                        .into_iter()
+                        .map(|s| pb::SkillInfo {
+                            name: s.name,
+                            description: s.description,
+                            path: s.path,
+                            metadata_json: s.metadata_json,
+                        })
+                        .collect(),
+                },
+            )
             .collect();
         Ok(Response::new(pb::QueryAllSkillsResponse { skills }))
     }
 
-    async fn inspect_runtime(&self, _request: Request<pb::InspectRuntimeRequest>) -> Result<Response<pb::InspectRuntimeResponse>, Status> {
-        let json = self.registry.inspect_json().await
+    async fn inspect_runtime(
+        &self,
+        _request: Request<pb::InspectRuntimeRequest>,
+    ) -> Result<Response<pb::InspectRuntimeResponse>, Status> {
+        let json = self
+            .registry
+            .inspect_json()
+            .await
             .map_err(|e| Status::internal(format!("inspect failed: {e:#}")))?;
         Ok(Response::new(pb::InspectRuntimeResponse { json }))
     }
@@ -519,7 +869,10 @@ pub async fn serve_meta_runtime(
     runtime_endpoint: String,
 ) -> Result<()> {
     let svc = MetaRuntimeService::new(registry);
-    info!("starting robonix runtime meta API (gRPC) on {}", runtime_endpoint);
+    info!(
+        "starting robonix runtime meta API (gRPC) on {}",
+        runtime_endpoint
+    );
     tonic::transport::Server::builder()
         .add_service(pb::robonix_runtime_server::RobonixRuntimeServer::new(svc))
         .serve(listen_addr)
@@ -534,11 +887,36 @@ mod tests {
     use super::*;
 
     async fn reg_node(reg: &MetaRuntimeRegistry, id: &str, ns: &str, kind: &str) -> String {
-        reg.register_node(id.into(), ns.into(), kind.into(), None, String::new(), String::new()).await
+        reg.register_node(
+            id.into(),
+            ns.into(),
+            kind.into(),
+            None,
+            Vec::new(),
+            String::new(),
+            String::new(),
+        )
+        .await
     }
 
-    async fn reg_node_distro(reg: &MetaRuntimeRegistry, id: &str, ns: &str, kind: &str, distro: &str, container: &str) -> String {
-        reg.register_node(id.into(), ns.into(), kind.into(), None, distro.into(), container.into()).await
+    async fn reg_node_distro(
+        reg: &MetaRuntimeRegistry,
+        id: &str,
+        ns: &str,
+        kind: &str,
+        distro: &str,
+        container: &str,
+    ) -> String {
+        reg.register_node(
+            id.into(),
+            ns.into(),
+            kind.into(),
+            None,
+            Vec::new(),
+            distro.into(),
+            container.into(),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -558,33 +936,91 @@ mod tests {
     #[tokio::test]
     async fn declare_interface_and_negotiate() {
         let reg = MetaRuntimeRegistry::default();
-        reg_node(&reg, "com.test.provider", "robonix/prm/cam", "primitive").await;
-        reg.declare_interface("com.test.provider", "rgb".into(), vec!["ros2".into(), "shared_memory".into()], "{}".into(), 0).await.unwrap();
+        reg_node(&reg, "com.test.provider", "robonix/prm/camera", "primitive").await;
+        reg.declare_interface(
+            "com.test.provider",
+            "rgb".into(),
+            vec!["ros2".into(), "shared_memory".into()],
+            "{}".into(),
+            0,
+            String::new(),
+        )
+        .await
+        .unwrap();
 
-        let ch = reg.negotiate_channel("com.test.consumer".into(), "com.test.provider".into(), "rgb".into(), "ros2".into()).await.unwrap();
+        let ch = reg
+            .negotiate_channel(
+                "com.test.consumer".into(),
+                "com.test.provider".into(),
+                "rgb".into(),
+                "ros2".into(),
+            )
+            .await
+            .unwrap();
         assert!(ch.endpoint.starts_with("/rbnx/ch/n"));
         assert_eq!(ch.transport, "ros2");
 
-        let ch2 = reg.negotiate_channel("com.test.consumer".into(), "com.test.provider".into(), "rgb".into(), "shared_memory".into()).await.unwrap();
+        let ch2 = reg
+            .negotiate_channel(
+                "com.test.consumer".into(),
+                "com.test.provider".into(),
+                "rgb".into(),
+                "shared_memory".into(),
+            )
+            .await
+            .unwrap();
         assert!(ch2.endpoint.starts_with("/rbnx_shm_"));
     }
 
     #[tokio::test]
     async fn negotiate_rejects_unsupported_transport() {
         let reg = MetaRuntimeRegistry::default();
-        reg_node(&reg, "com.test.provider", "ns", "primitive").await;
-        reg.declare_interface("com.test.provider", "rgb".into(), vec!["ros2".into()], "{}".into(), 0).await.unwrap();
+        reg_node(&reg, "com.test.provider", "robonix/prm/camera", "primitive").await;
+        reg.declare_interface(
+            "com.test.provider",
+            "rgb".into(),
+            vec!["ros2".into()],
+            "{}".into(),
+            0,
+            String::new(),
+        )
+        .await
+        .unwrap();
 
-        let err = reg.negotiate_channel("com.test.consumer".into(), "com.test.provider".into(), "rgb".into(), "shared_memory".into()).await;
+        let err = reg
+            .negotiate_channel(
+                "com.test.consumer".into(),
+                "com.test.provider".into(),
+                "rgb".into(),
+                "shared_memory".into(),
+            )
+            .await;
         assert!(err.is_err());
     }
 
     #[tokio::test]
     async fn release_channel_removes_it() {
         let reg = MetaRuntimeRegistry::default();
-        reg_node(&reg, "com.test.provider", "ns", "primitive").await;
-        reg.declare_interface("com.test.provider", "x".into(), vec!["ros2".into()], String::new(), 0).await.unwrap();
-        let ch = reg.negotiate_channel("com.test.consumer".into(), "com.test.provider".into(), "x".into(), "ros2".into()).await.unwrap();
+        reg_node(&reg, "com.test.provider", "robonix/prm/sensor", "primitive").await;
+        reg.declare_interface(
+            "com.test.provider",
+            "lidar".into(),
+            vec!["ros2".into()],
+            String::new(),
+            0,
+            String::new(),
+        )
+        .await
+        .unwrap();
+        let ch = reg
+            .negotiate_channel(
+                "com.test.consumer".into(),
+                "com.test.provider".into(),
+                "lidar".into(),
+                "ros2".into(),
+            )
+            .await
+            .unwrap();
 
         assert!(reg.release_channel(&ch.channel_id).await);
         assert!(!reg.release_channel(&ch.channel_id).await);
@@ -593,7 +1029,16 @@ mod tests {
     #[tokio::test]
     async fn skill_md_round_trip() {
         let reg = MetaRuntimeRegistry::default();
-        reg.register_node("com.test.llm".into(), "ns".into(), "skill".into(), Some("# My Skill\nDoes stuff.".into()), String::new(), String::new()).await;
+        reg.register_node(
+            "com.test.llm".into(),
+            "ns".into(),
+            "skill".into(),
+            Some("# My Skill\nDoes stuff.".into()),
+            Vec::new(),
+            String::new(),
+            String::new(),
+        )
+        .await;
 
         let md = reg.query_skill_md("com.test.llm").await.unwrap();
         assert!(md.contains("My Skill"));
@@ -606,9 +1051,16 @@ mod tests {
     #[tokio::test]
     async fn declare_interface_uses_listen_port_when_set() {
         let reg = MetaRuntimeRegistry::default();
-        reg_node(&reg, "com.test.p", "ns", "primitive").await;
+        reg_node(&reg, "com.test.p", "robonix/sys/model/vlm", "primitive").await;
         let ep = reg
-            .declare_interface("com.test.p", "x".into(), vec!["grpc".into()], "{}".into(), 55221)
+            .declare_interface(
+                "com.test.p",
+                "chat".into(),
+                vec!["grpc".into()],
+                "{}".into(),
+                55221,
+                String::new(),
+            )
             .await
             .unwrap();
         assert_eq!(ep, "localhost:55221");
@@ -617,12 +1069,35 @@ mod tests {
     #[tokio::test]
     async fn server_allocates_grpc_port() {
         let reg = MetaRuntimeRegistry::default();
-        reg_node(&reg, "com.test.sim", "ns", "primitive").await;
+        reg_node(&reg, "com.test.sim", "robonix/prm/base", "primitive").await;
 
-        let ep = reg.declare_interface("com.test.sim", "reset".into(), vec!["grpc".into()], "{}".into(), 0).await.unwrap();
-        assert!(ep.starts_with("localhost:"), "expected localhost:<port>, got {ep}");
+        let ep = reg
+            .declare_interface(
+                "com.test.sim",
+                "navigate".into(),
+                vec!["grpc".into()],
+                "{}".into(),
+                0,
+                String::new(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            ep.starts_with("localhost:"),
+            "expected localhost:<port>, got {ep}"
+        );
 
-        let ep2 = reg.declare_interface("com.test.sim", "step".into(), vec!["grpc".into()], "{}".into(), 0).await.unwrap();
+        let ep2 = reg
+            .declare_interface(
+                "com.test.sim",
+                "stop".into(),
+                vec!["grpc".into()],
+                "{}".into(),
+                0,
+                String::new(),
+            )
+            .await
+            .unwrap();
         assert_eq!(ep, ep2);
     }
 
@@ -630,21 +1105,62 @@ mod tests {
     async fn server_allocates_mcp_port() {
         let reg = MetaRuntimeRegistry::default();
         reg_node(&reg, "com.test.vla", "ns", "service").await;
-        let ep = reg.declare_interface("com.test.vla", "mcp_tools".into(), vec!["mcp".into()], "{}".into(), 0).await.unwrap();
-        assert!(ep.starts_with("localhost:"), "expected localhost:<port>, got {ep}");
+        let ep = reg
+            .declare_interface(
+                "com.test.vla",
+                "mcp_tools".into(),
+                vec!["mcp".into()],
+                "{}".into(),
+                0,
+                String::new(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            ep.starts_with("localhost:"),
+            "expected localhost:<port>, got {ep}"
+        );
 
-        let ch = reg.negotiate_channel("com.test.agent".into(), "com.test.vla".into(), "mcp_tools".into(), "mcp".into()).await.unwrap();
+        let ch = reg
+            .negotiate_channel(
+                "com.test.agent".into(),
+                "com.test.vla".into(),
+                "mcp_tools".into(),
+                "mcp".into(),
+            )
+            .await
+            .unwrap();
         assert_eq!(ch.endpoint, ep);
     }
 
     #[tokio::test]
     async fn different_nodes_get_different_ports() {
         let reg = MetaRuntimeRegistry::default();
-        reg_node(&reg, "com.test.node_a", "ns", "primitive").await;
-        reg_node(&reg, "com.test.node_b", "ns", "primitive").await;
+        reg_node(&reg, "com.test.node_a", "robonix/prm/base", "primitive").await;
+        reg_node(&reg, "com.test.node_b", "robonix/prm/base", "primitive").await;
 
-        let ep_a = reg.declare_interface("com.test.node_a", "x".into(), vec!["grpc".into()], "{}".into(), 0).await.unwrap();
-        let ep_b = reg.declare_interface("com.test.node_b", "x".into(), vec!["grpc".into()], "{}".into(), 0).await.unwrap();
+        let ep_a = reg
+            .declare_interface(
+                "com.test.node_a",
+                "navigate".into(),
+                vec!["grpc".into()],
+                "{}".into(),
+                0,
+                String::new(),
+            )
+            .await
+            .unwrap();
+        let ep_b = reg
+            .declare_interface(
+                "com.test.node_b",
+                "stop".into(),
+                vec!["grpc".into()],
+                "{}".into(),
+                0,
+                String::new(),
+            )
+            .await
+            .unwrap();
         assert_ne!(ep_a, ep_b);
     }
 
@@ -661,8 +1177,24 @@ mod tests {
     #[tokio::test]
     async fn distro_and_container_stored() {
         let reg = MetaRuntimeRegistry::default();
-        reg_node_distro(&reg, "com.test.nav2", "ns", "primitive", "humble", "nav2-container").await;
-        reg_node_distro(&reg, "com.test.isaac", "ns", "primitive", "jazzy", "isaac-container").await;
+        reg_node_distro(
+            &reg,
+            "com.test.nav2",
+            "ns",
+            "primitive",
+            "humble",
+            "nav2-container",
+        )
+        .await;
+        reg_node_distro(
+            &reg,
+            "com.test.isaac",
+            "ns",
+            "primitive",
+            "jazzy",
+            "isaac-container",
+        )
+        .await;
 
         let st = reg.inner.read().await;
         assert_eq!(st.nodes["com.test.nav2"].distro, "humble");
@@ -685,14 +1217,43 @@ mod tests {
     #[tokio::test]
     async fn unregister_node_removes_node_and_channels() {
         let reg = MetaRuntimeRegistry::default();
-        reg_node(&reg, "com.test.provider", "ns", "primitive").await;
-        reg_node(&reg, "com.test.consumer", "ns", "tool").await;
-        reg.declare_interface("com.test.provider", "x".into(), vec!["ros2".into()], "{}".into(), 0).await.unwrap();
-        let ch = reg.negotiate_channel("com.test.consumer".into(), "com.test.provider".into(), "x".into(), "ros2".into()).await.unwrap();
+        reg_node(&reg, "com.test.provider", "robonix/prm/camera", "primitive").await;
+        reg_node(
+            &reg,
+            "com.test.consumer",
+            "robonix/sys/runtime/agent",
+            "tool",
+        )
+        .await;
+        reg.declare_interface(
+            "com.test.provider",
+            "rgb".into(),
+            vec!["ros2".into()],
+            "{}".into(),
+            0,
+            String::new(),
+        )
+        .await
+        .unwrap();
+        let ch = reg
+            .negotiate_channel(
+                "com.test.consumer".into(),
+                "com.test.provider".into(),
+                "rgb".into(),
+                "ros2".into(),
+            )
+            .await
+            .unwrap();
         assert!(reg.inner.read().await.channels.contains_key(&ch.channel_id));
 
         assert!(reg.unregister_node("com.test.provider").await);
-        assert!(!reg.inner.read().await.nodes.contains_key("com.test.provider"));
+        assert!(
+            !reg.inner
+                .read()
+                .await
+                .nodes
+                .contains_key("com.test.provider")
+        );
         assert!(!reg.inner.read().await.channels.contains_key(&ch.channel_id));
 
         assert!(!reg.unregister_node("com.test.provider").await);
@@ -706,33 +1267,48 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let t1 = reg.node_heartbeat("com.test.node").await.unwrap();
         assert!(t1 >= t0);
-        assert_eq!(reg.inner.read().await.nodes["com.test.node"].heartbeat_ms, t1);
+        assert_eq!(
+            reg.inner.read().await.nodes["com.test.node"].heartbeat_ms,
+            t1
+        );
     }
 
     #[test]
     fn validate_node_identity_rejects_non_reverse_dns() {
-        assert!(MetaRuntimeRegistry::validate_node_identity("node_id", "tiago-node", false).is_err());
-        assert!(MetaRuntimeRegistry::validate_node_identity("node_id", "com.short", false).is_err());
-        assert!(MetaRuntimeRegistry::validate_node_identity("node_id", "com.test.ok", false).is_ok());
+        assert!(
+            MetaRuntimeRegistry::validate_node_identity("node_id", "tiago-node", false).is_err()
+        );
+        assert!(
+            MetaRuntimeRegistry::validate_node_identity("node_id", "com.short", false).is_err()
+        );
+        assert!(
+            MetaRuntimeRegistry::validate_node_identity("node_id", "com.test.ok", false).is_ok()
+        );
     }
 
     #[tokio::test]
     async fn abstract_interface_id_matches_namespace_plus_interface_name() {
         let reg = MetaRuntimeRegistry::default();
-        reg
-            .register_node(
-                "com.test.vlm".into(),
-                "robonix/sys/model/vlm".into(),
-                "service".into(),
-                None,
-                String::new(),
-                String::new(),
-            )
-            .await;
-        reg
-            .declare_interface("com.test.vlm", "chat".into(), vec!["grpc".into()], "{}".into(), 0)
-            .await
-            .unwrap();
+        reg.register_node(
+            "com.test.vlm".into(),
+            "robonix/sys/model/vlm".into(),
+            "service".into(),
+            None,
+            Vec::new(),
+            String::new(),
+            String::new(),
+        )
+        .await;
+        reg.declare_interface(
+            "com.test.vlm",
+            "chat".into(),
+            vec!["grpc".into()],
+            "{}".into(),
+            0,
+            String::new(),
+        )
+        .await
+        .unwrap();
         let st = reg.inner.read().await;
         let abstract_id = "robonix/sys/model/vlm/chat";
         let count = st
@@ -740,11 +1316,75 @@ mod tests {
             .values()
             .filter(|n| {
                 n.interfaces.iter().any(|i| {
-                    format!("{}/{}", n.namespace, i.name) == abstract_id
+                    i.abstract_interface_id == abstract_id
                         && i.supported_transports.contains(&"grpc".to_string())
                 })
             })
             .count();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn declare_interface_explicit_abstract_id_used_for_discovery() {
+        let reg = MetaRuntimeRegistry::default();
+        reg_node(&reg, "com.test.tiago", "robonix/prm/camera", "primitive").await;
+        reg.declare_interface(
+            "com.test.tiago",
+            "rgb".into(),
+            vec!["ros2".into()],
+            "{}".into(),
+            0,
+            "robonix/prm/camera/rgb".into(),
+        )
+        .await
+        .unwrap();
+        let st = reg.inner.read().await;
+        let iface = &st.nodes["com.test.tiago"].interfaces[0];
+        assert_eq!(iface.name, "rgb");
+        assert_eq!(iface.abstract_interface_id, "robonix/prm/camera/rgb");
+        let hit = st.nodes.values().any(|n| {
+            n.interfaces
+                .iter()
+                .any(|i| i.abstract_interface_id == "robonix/prm/camera/rgb")
+        });
+        assert!(hit);
+    }
+
+    #[tokio::test]
+    async fn grpc_ros2_rejects_non_catalog_path() {
+        let reg = MetaRuntimeRegistry::default();
+        reg_node(&reg, "com.test.bad", "robonix/prm/tiago", "primitive").await;
+        let err = reg
+            .declare_interface(
+                "com.test.bad",
+                "rgb".into(),
+                vec!["grpc".into()],
+                "{}".into(),
+                0,
+                String::new(),
+            )
+            .await
+            .err()
+            .expect("expected invalid interface");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn grpc_rejects_mismatched_abstract_override() {
+        let reg = MetaRuntimeRegistry::default();
+        reg_node(&reg, "com.test.bad2", "robonix/prm/camera", "primitive").await;
+        let err = reg
+            .declare_interface(
+                "com.test.bad2",
+                "rgb".into(),
+                vec!["grpc".into()],
+                "{}".into(),
+                0,
+                "robonix/prm/camera/depth".into(),
+            )
+            .await
+            .err()
+            .expect("expected abstract mismatch");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 }

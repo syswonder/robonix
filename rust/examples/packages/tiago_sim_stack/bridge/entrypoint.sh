@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MulanPSL-2.0
 # Webots (GUI) + eaios_webots launch → Nav2 bringup → tiago_bridge (foreground).
-set -euo pipefail
-
+set -eo pipefail
+# ROS setup.bash references vars that may be unset; `set -u` before sourcing fails the container.
 source /opt/ros/humble/setup.bash
 source /colcon_ws/install/setup.bash
+set -u
 
 WEBOTS_WARMUP_SEC="${WEBOTS_WARMUP_SEC:-25}"
 NAV2_WARMUP_SEC="${NAV2_WARMUP_SEC:-15}"
@@ -21,5 +22,11 @@ ros2 launch nav2_bringup bringup_launch.py \
 _nav2_launch_pid=$!
 echo "[entrypoint] nav2 pid=${_nav2_launch_pid}"
 sleep "${NAV2_WARMUP_SEC}"
+
+if [[ "${START_RVIZ2:-1}" == "1" ]]; then
+  rviz2 -d /opt/robonix_nav2/config/rviz.config.rviz \
+    --ros-args -p use_sim_time:=true &
+  echo "[entrypoint] rviz2 pid=$!"
+fi
 
 exec python3 -m tiago_bridge.node

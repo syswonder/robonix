@@ -12,13 +12,21 @@ pub async fn execute(config: Config) -> Result<()> {
 
     if packages.is_empty() {
         output::info("No packages installed.");
-        output::sub_step(&format!("Storage: {}", config.package_storage_path.display()));
+        output::sub_step(&format!(
+            "Storage: {}",
+            config.package_storage_path.display()
+        ));
         return Ok(());
     }
 
     output::action("Installed", "packages");
     for pkg in packages {
-        output::sub_step(&format!("{} {}  ({})", pkg.name, pkg.version, pkg.path.display()));
+        output::sub_step(&format!(
+            "{} {}  ({})",
+            pkg.name,
+            pkg.version,
+            pkg.path.display()
+        ));
     }
     Ok(())
 }

@@ -74,7 +74,8 @@ impl ProcessTreeNode {
 /// Manager for processes running capabilities and skills
 pub struct ProcessManager {
     processes: Arc<Mutex<HashMap<String, ProcessInfo>>>, // key: "{package_type}::{std_name}"
-    log_dir: PathBuf,
+    /// Ensures the deploy log directory exists; reserved for future file logging.
+    _log_dir: PathBuf,
     state_file: PathBuf,
     hostname: String,
 }
@@ -101,7 +102,7 @@ impl ProcessManager {
 
         let mut manager = Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
-            log_dir,
+            _log_dir: log_dir,
             state_file,
             hostname,
         };
@@ -235,14 +236,16 @@ impl ProcessManager {
             anyhow::bail!("start_script is empty");
         }
 
+        // Use `bash -c` (not `-lc`) so we inherit the parent environment (PATH, conda, etc.).
+        // A login shell can reset PATH via /etc/profile and pick a different `python3` than the caller.
         #[cfg(unix)]
         let mut cmd = Command::new("bash");
         #[cfg(unix)]
-        cmd.arg("-lc").arg(start_script);
+        cmd.arg("-c").arg(start_script);
         #[cfg(not(unix))]
         let mut cmd = Command::new("sh");
         #[cfg(not(unix))]
-        cmd.arg("-lc").arg(start_script);
+        cmd.arg("-c").arg(start_script);
 
         cmd.current_dir(package_path)
             .stdout(Stdio::inherit())
