@@ -64,7 +64,7 @@ class TaskPlanService(Node):
             )
 
         # Qwen best LLM model for task planning (text); override via QWEN_LLM_MODEL env
-        self.qwen_model = os.getenv("QWEN_LLM_MODEL", "qwen-plus")
+        self.qwen_model = os.getenv("QWEN_LLM_MODEL", "qwen3-vl-plus")
 
         # Initialize Qwen client (DashScope OpenAI-compatible API)
         try:

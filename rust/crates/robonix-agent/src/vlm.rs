@@ -42,6 +42,8 @@ pub struct Message {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_base64: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -87,19 +89,58 @@ impl ToolDef {
 
 impl Message {
     pub fn system(content: &str) -> Self {
-        Self { role: "system".into(), content: Some(content.into()), tool_calls: None, tool_call_id: None }
+        Self {
+            role: "system".into(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+            image_base64: None,
+        }
     }
     pub fn user(content: &str) -> Self {
-        Self { role: "user".into(), content: Some(content.into()), tool_calls: None, tool_call_id: None }
+        Self {
+            role: "user".into(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+            image_base64: None,
+        }
     }
     pub fn assistant(content: &str) -> Self {
-        Self { role: "assistant".into(), content: Some(content.into()), tool_calls: None, tool_call_id: None }
+        Self {
+            role: "assistant".into(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+            image_base64: None,
+        }
     }
     pub fn assistant_tool_calls(tc: Vec<ToolCall>) -> Self {
-        Self { role: "assistant".into(), content: None, tool_calls: Some(tc), tool_call_id: None }
+        Self {
+            role: "assistant".into(),
+            content: None,
+            tool_calls: Some(tc),
+            tool_call_id: None,
+            image_base64: None,
+        }
     }
     pub fn tool_result(id: &str, content: &str) -> Self {
-        Self { role: "tool".into(), content: Some(content.into()), tool_calls: None, tool_call_id: Some(id.into()) }
+        Self {
+            role: "tool".into(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: Some(id.into()),
+            image_base64: None,
+        }
+    }
+    pub fn tool_result_with_image(id: &str, content: &str, image: String) -> Self {
+        Self {
+            role: "tool".into(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: Some(id.into()),
+            image_base64: Some(image),
+        }
     }
 }
 
@@ -110,13 +151,16 @@ pub const VLM_ABSTRACT_INTERFACE_ID: &str = "robonix/sys/model/vlm/chat";
 /// Default `QueryNodes.namespace` prefix for legacy split discovery only.
 pub const DEFAULT_VLM_NAMESPACE_PREFIX: &str = "robonix/sys/model/vlm";
 
-/// `ROBONIX_VLM_ABSTRACT_INTERFACE_ID`: full abstract path `namespace + "/" + interface.name`
-/// (default [`VLM_ABSTRACT_INTERFACE_ID`]). Sent as `QueryNodesRequest.abstract_interface_id`.
+/// `ROBONIX_VLM_ABSTRACT_INTERFACE_ID`: canonical protocol id (default [`VLM_ABSTRACT_INTERFACE_ID`]).
+/// Sent as `QueryNodesRequest.abstract_interface_id` — must match server `InterfaceInfo.abstract_interface_id`.
 ///
 /// If set to an empty string, discovery falls back to split `namespace` + `name` using
 /// `ROBONIX_VLM_NAMESPACE_PREFIX` (default [`DEFAULT_VLM_NAMESPACE_PREFIX`]) + interface leaf from [`VLM_ABSTRACT_INTERFACE_ID`].
 fn vlm_abstract_interface_id_for_query() -> String {
-    std::env::var("ROBONIX_VLM_ABSTRACT_INTERFACE_ID").unwrap_or_else(|_| VLM_ABSTRACT_INTERFACE_ID.to_string())
+    match std::env::var("ROBONIX_VLM_ABSTRACT_INTERFACE_ID") {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => VLM_ABSTRACT_INTERFACE_ID.to_string(),
+    }
 }
 
 fn vlm_query_namespace_prefix() -> String {
@@ -141,26 +185,30 @@ pub struct VlmClient {
 impl VlmClient {
     /// Discover a VLM/LLM service via robonix-server and negotiate a gRPC channel.
     ///
-    /// Uses `QueryNodesRequest.abstract_interface_id` when non-empty (see `robonix_runtime.proto`).
+    /// Uses `QueryNodesRequest.abstract_interface_id` when non-empty; matches `InterfaceInfo.abstract_interface_id`
+    /// on the server. `NegotiateChannel` uses the matching interface's `name` (DeclareInterface leaf), not the full path.
     /// If several nodes match, picks the longest `namespace`.
-    pub async fn discover(sdk: &mut robonix_sdk::RobonixClient, agent_node_id: &str) -> Result<Self> {
+    pub async fn discover(
+        sdk: &mut robonix_sdk::RobonixClient,
+        agent_node_id: &str,
+    ) -> Result<Self> {
         let abstract_id = vlm_abstract_interface_id_for_query();
         let mut nodes = if abstract_id.is_empty() {
             let ns_prefix = vlm_query_namespace_prefix();
             let iface_leaf = vlm_interface_leaf();
-            sdk
-                .query_nodes(&ns_prefix, iface_leaf, "grpc")
+            sdk.query_nodes(&ns_prefix, iface_leaf, "grpc")
                 .await
                 .with_context(|| "failed to query nodes (legacy split namespace + name)")?
         } else {
-            sdk
-                .query_nodes_opts(QueryNodesOpts {
-                    abstract_interface_id: abstract_id.clone(),
-                    transport: "grpc".into(),
-                    ..Default::default()
-                })
-                .await
-                .with_context(|| format!("failed to query nodes for abstract_interface_id={abstract_id}"))?
+            sdk.query_nodes_opts(QueryNodesOpts {
+                abstract_interface_id: abstract_id.clone(),
+                transport: "grpc".into(),
+                ..Default::default()
+            })
+            .await
+            .with_context(|| {
+                format!("failed to query nodes for abstract_interface_id={abstract_id}")
+            })?
         };
 
         if nodes.len() > 1 {
@@ -186,21 +234,41 @@ impl VlmClient {
 
         log::info!(
             "discovered VLM service: node_id='{}' namespace='{}'",
-            vlm_node.node_id, vlm_node.namespace
+            vlm_node.node_id,
+            vlm_node.namespace
         );
 
-        let iface_leaf = vlm_interface_leaf();
-        let iface_name = vlm_node.interfaces.iter()
-            .find(|i| i.name == iface_leaf && i.supported_transports.contains(&"grpc".to_string()))
-            .map(|i| i.name.as_str())
-            .unwrap_or(iface_leaf);
+        let iface_name: &str = if abstract_id.is_empty() {
+            let iface_leaf = vlm_interface_leaf();
+            vlm_node
+                .interfaces
+                .iter()
+                .find(|i| {
+                    i.name == iface_leaf && i.supported_transports.contains(&"grpc".to_string())
+                })
+                .map(|i| i.name.as_str())
+                .unwrap_or(iface_leaf)
+        } else {
+            vlm_node
+                .interfaces
+                .iter()
+                .find(|i| {
+                    i.abstract_interface_id == abstract_id
+                        && i.supported_transports.contains(&"grpc".to_string())
+                })
+                .map(|i| i.name.as_str())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no grpc interface with abstract_interface_id='{abstract_id}' on node '{}'",
+                        vlm_node.node_id
+                    )
+                })?
+        };
 
-        let channel = sdk.negotiate_channel(
-            agent_node_id,
-            &vlm_node.node_id,
-            iface_name,
-            "grpc",
-        ).await.context("failed to negotiate channel with VLM service")?;
+        let channel = sdk
+            .negotiate_channel(agent_node_id, &vlm_node.node_id, iface_name, "grpc")
+            .await
+            .context("failed to negotiate channel with VLM service")?;
 
         log::info!("VLM channel negotiated: endpoint='{}'", channel.endpoint);
 
@@ -220,13 +288,18 @@ impl VlmClient {
         })
     }
 
-    pub async fn chat(&mut self, messages: &[Message], tools: &[ToolDef]) -> Result<(Option<String>, Vec<ToolCall>)> {
+    pub async fn chat(
+        &mut self,
+        messages: &[Message],
+        tools: &[ToolDef],
+    ) -> Result<(Option<String>, Vec<ToolCall>)> {
         let req = ChatRequest {
             messages: messages
                 .iter()
                 .map(|m| PbChatMessage {
                     role: m.role.clone(),
                     content: m.content.clone().unwrap_or_default(),
+                    image_base64: m.image_base64.clone().unwrap_or_default(),
                 })
                 .collect(),
             tools: tools
@@ -237,15 +310,19 @@ impl VlmClient {
                     input_schema_json: t.function.parameters.to_string(),
                 })
                 .collect(),
-            tool_choice: if tools.is_empty() { String::new() } else { "auto".to_string() },
+            tool_choice: if tools.is_empty() {
+                String::new()
+            } else {
+                "auto".to_string()
+            },
             max_tokens: 0,
         };
 
-        let resp: tonic::Response<ChatResponse> = self
-            .inner
-            .chat(tonic::Request::new(req))
-            .await
-            .map_err(|e| anyhow::anyhow!("VLM gRPC Chat failed: {e}"))?;
+        let resp: tonic::Response<ChatResponse> =
+            self.inner
+                .chat(tonic::Request::new(req))
+                .await
+                .map_err(|e| anyhow::anyhow!("VLM gRPC Chat failed: {e}"))?;
 
         let parsed = resp.into_inner();
 
@@ -262,7 +339,11 @@ impl VlmClient {
             })
             .collect::<Vec<_>>();
 
-        let content = if parsed.content.is_empty() { None } else { Some(parsed.content) };
+        let content = if parsed.content.is_empty() {
+            None
+        } else {
+            Some(parsed.content)
+        };
         Ok((content, tool_calls))
     }
 }

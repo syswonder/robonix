@@ -3,9 +3,9 @@
 //
 // Config command implementation for robonix-cli
 
-use robonix_cli::Config;
 use anyhow::Result;
 use colored::*;
+use robonix_cli::Config;
 use std::path::PathBuf;
 
 pub async fn execute(_config: Config, set_storage_path: Option<PathBuf>, show: bool) -> Result<()> {

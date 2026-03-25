@@ -6,11 +6,7 @@ use robonix_cli::output;
 use robonix_cli::{Config, install::PackageInstaller};
 use std::path::PathBuf;
 
-pub async fn execute(
-    config: Config,
-    github: Option<String>,
-    path: Option<PathBuf>,
-) -> Result<()> {
+pub async fn execute(config: Config, github: Option<String>, path: Option<PathBuf>) -> Result<()> {
     let installer = PackageInstaller::new(config.clone());
     config.ensure_storage_dir()?;
 

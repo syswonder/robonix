@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 # Robonix Makefile — workspace build commands
 
-.PHONY: help build release install clean pyrightconfig
+.PHONY: help build release install clean pyrightconfig fmt check
 .DEFAULT_GOAL := help
 
 RUST_DIR := $(shell pwd)
@@ -19,6 +19,10 @@ help:
 	@echo "  Install:"
 	@echo "    make install       - Install binaries to ~/.cargo/bin"
 	@echo ""
+	@echo "  Format & Lint:"
+	@echo "    make fmt           - Format all Rust code"
+	@echo "    make check         - Check formatting + clippy warnings"
+	@echo ""
 	@echo "  Clean:"
 	@echo "    make clean         - Remove build artifacts"
 	@echo ""
@@ -34,6 +38,13 @@ release:
 
 build-server:
 	cargo build -p robonix-server $(CARGO_FLAGS)
+
+fmt:
+	cargo fmt --all
+
+check:
+	cargo fmt --all -- --check
+	cargo clippy --workspace -- -D warnings
 
 install: install-server
 	cargo install --path crates/ridlc --bin ridlc $(CARGO_FLAGS)

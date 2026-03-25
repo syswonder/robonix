@@ -30,7 +30,9 @@ pub struct PackageInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PackageSource {
-    Local { path: PathBuf },
+    Local {
+        path: PathBuf,
+    },
     GitHub {
         repo: String,
         branch: Option<String>,
@@ -57,9 +59,8 @@ impl PackageDatabase {
         }
         let content = std::fs::read_to_string(&db_path)
             .with_context(|| format!("Failed to read database: {}", db_path.display()))?;
-        let db: PackageDatabase =
-            serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse database: {}", db_path.display()))?;
+        let db: PackageDatabase = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse database: {}", db_path.display()))?;
         Ok(db)
     }
 
@@ -123,7 +124,11 @@ impl PackageDatabase {
                 let package_name = match PackageInstaller::parse_manifest_name(&manifest_path) {
                     Ok(n) => n,
                     Err(e) => {
-                        log::warn!("Failed to parse manifest at {}: {}", manifest_path.display(), e);
+                        log::warn!(
+                            "Failed to parse manifest at {}: {}",
+                            manifest_path.display(),
+                            e
+                        );
                         continue;
                     }
                 };
@@ -148,7 +153,9 @@ impl PackageDatabase {
                 match PackageInstaller::create_package_info(&path, &manifest_path, &summary, source)
                 {
                     Ok(info) => db.add_package(info),
-                    Err(e) => log::warn!("Failed to create package info at {}: {}", path.display(), e),
+                    Err(e) => {
+                        log::warn!("Failed to create package info at {}: {}", path.display(), e)
+                    }
                 }
             }
         }
@@ -156,7 +163,11 @@ impl PackageDatabase {
         for name in db.packages.keys().cloned().collect::<Vec<_>>() {
             if !found_packages.contains(&name) {
                 if let Some(removed) = db.remove_package(&name) {
-                    log::info!("Removed '{}' from database (not found: {})", name, removed.path.display());
+                    log::info!(
+                        "Removed '{}' from database (not found: {})",
+                        name,
+                        removed.path.display()
+                    );
                 }
             }
         }

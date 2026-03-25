@@ -10,7 +10,7 @@ Required environment variables:
 
 Optional environment variables:
   VLM_BASE_URL      OpenAI-compatible API base URL (default: Qwen DashScope)
-  VLM_MODEL         Model name (default: qwen-vl-plus-latest)
+  VLM_MODEL         Model name (default: qwen3-vl-plus)
   ROBONIX_SERVER    Control-plane address (default: localhost:50051)
   VLM_BIND_ADDR     If set, try this host first when binding the data-plane (default: try 127.0.0.1 then 0.0.0.0).
                     The service picks a free TCP port (DeclareInterface listen_port) so it does not collide with host services on 50100+.
@@ -54,24 +54,14 @@ Set the following environment variables before running:
 
   export VLM_API_KEY="your-api-key"
   export VLM_BASE_URL="https://api-endpoint/v1"   # optional
-  export VLM_MODEL="model-name"                    # optional
+  export VLM_MODEL="model-name"                   # optional
 
 Examples for common providers:
 
   # Qwen (Alibaba DashScope) — default
   export VLM_API_KEY="sk-xxx"
   export VLM_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
-  export VLM_MODEL="qwen-vl-plus-latest"
-
-  # OpenAI GPT
-  export VLM_API_KEY="sk-xxx"
-  export VLM_BASE_URL="https://api.openai.com/v1"
-  export VLM_MODEL="gpt-4o"
-
-  # Google Gemini (OpenAI-compatible)
-  export VLM_API_KEY="AIza..."
-  export VLM_BASE_URL="https://generativelanguage.googleapis.com/v1beta/openai"
-  export VLM_MODEL="gemini-2.0-flash"
+  export VLM_MODEL="qwen3-vl-plus"
 
   # DeepSeek
   export VLM_API_KEY="sk-xxx"
@@ -128,7 +118,7 @@ def main() -> None:
             "VLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
         ),
     )
-    model = os.environ.get("VLM_MODEL", "qwen-vl-plus-latest")
+    model = os.environ.get("VLM_MODEL", "qwen3-vl-plus")
 
     def _openai_chat(messages, tools=None, tool_choice=None, max_tokens=0):
         kwargs: dict = {"model": model, "messages": messages}
@@ -143,7 +133,19 @@ def main() -> None:
 
     def handle_chat(request, context):
         """OpenAI-compatible chat completions proxy — forwards tools for function calling."""
-        req_messages = [{"role": m.role, "content": m.content} for m in request.messages]
+        req_messages = []
+        for m in request.messages:
+            if m.image_base64:
+                parts = []
+                if m.content:
+                    parts.append({"type": "text", "text": m.content})
+                parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{m.image_base64}"},
+                })
+                req_messages.append({"role": m.role, "content": parts})
+            else:
+                req_messages.append({"role": m.role, "content": m.content})
 
         tools_list = None
         if request.tools:

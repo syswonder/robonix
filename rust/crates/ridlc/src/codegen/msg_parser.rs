@@ -28,12 +28,25 @@ pub struct MsgSpec {
     pub fields: Vec<MsgField>,
 }
 
+/// gRPC mapping for pub-sub-style interfaces (ROS has no native streaming `.srv` wire format;
+/// this directive is **codegen-only** for `ridlc --lang proto`).
+#[derive(Clone, Debug)]
+pub enum GrpcStreamMode {
+    /// Same semantics as a ROS **publisher**: provider pushes a stream of `element` messages.
+    /// gRPC: `rpc Method(Request) returns (stream element);`
+    ServerStream { element: MsgTypeRef },
+    /// Same semantics as a ROS **subscriber**: consumer pushes a stream of `element` messages.
+    /// gRPC: `rpc Method(stream element) returns (Response);`
+    ClientStream { element: MsgTypeRef },
+}
+
 #[derive(Clone, Debug)]
 pub struct SrvSpec {
     pub package: String,
     pub name: String,
     pub request: MsgSpec,
     pub response: MsgSpec,
+    pub grpc_stream: Option<GrpcStreamMode>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -87,9 +100,9 @@ impl MsgResolver {
             return Ok(());
         }
         let full_type = ros_msg_type_fmt(package, name);
-        let path = self.find_msg_path(package, name).with_context(|| {
-            format_resolve_error(&full_type, from, &self.include_paths)
-        })?;
+        let path = self
+            .find_msg_path(package, name)
+            .with_context(|| format_resolve_error(&full_type, from, &self.include_paths))?;
         let spec = parse_msg_file(package, name, &path)?;
         for field in &spec.fields {
             if let MsgTypeRef::Named { package, name } = &field.type_ref {
@@ -142,7 +155,10 @@ impl MsgResolver {
         let keys: Vec<_> = self.srv_index.keys().cloned().collect();
         for (package, name) in keys {
             if let Err(e) = self.resolve_srv(&package, &name) {
-                eprintln!("[ridlc] warning: skipping srv {}/{}: {:#}", package, name, e);
+                eprintln!(
+                    "[ridlc] warning: skipping srv {}/{}: {:#}",
+                    package, name, e
+                );
             }
         }
         Ok(())
@@ -153,24 +169,60 @@ impl MsgResolver {
         if self.srv_cache.contains_key(&key) {
             return Ok(());
         }
-        let path = self.find_srv_path(package, name)
-            .with_context(|| format!("{RIDLC_ERR_PREFIX} .srv file not found: {package}/srv/{name}"))?;
+        let path = self.find_srv_path(package, name).with_context(|| {
+            format!("{RIDLC_ERR_PREFIX} .srv file not found: {package}/srv/{name}")
+        })?;
         let spec = parse_srv_file(package, name, &path)?;
         // Resolve all message types referenced in request and response
-        for field in spec.request.fields.iter().chain(spec.response.fields.iter()) {
-            if let MsgTypeRef::Named { package: pkg, name: nm } = &field.type_ref {
+        for field in spec
+            .request
+            .fields
+            .iter()
+            .chain(spec.response.fields.iter())
+        {
+            if let MsgTypeRef::Named {
+                package: pkg,
+                name: nm,
+            } = &field.type_ref
+            {
                 let dep_ctx = ResolveContext {
                     namespace: Some(spec.package.clone()),
                     interface_kind: Some("srv"),
                     interface_name: Some(spec.name.clone()),
                     field_name: Some(field.name.clone()),
                 };
-                self.resolve_named_type(
-                    pkg,
-                    nm,
-                    Some((&ros_msg_type_fmt(pkg, nm), &dep_ctx)),
-                )?;
+                self.resolve_named_type(pkg, nm, Some((&ros_msg_type_fmt(pkg, nm), &dep_ctx)))?;
             }
+        }
+        match &spec.grpc_stream {
+            Some(GrpcStreamMode::ServerStream {
+                element:
+                    MsgTypeRef::Named {
+                        package: pkg,
+                        name: nm,
+                    },
+            })
+            | Some(GrpcStreamMode::ClientStream {
+                element:
+                    MsgTypeRef::Named {
+                        package: pkg,
+                        name: nm,
+                    },
+            }) => {
+                let dep_ctx = ResolveContext {
+                    namespace: Some(spec.package.clone()),
+                    interface_kind: Some("srv"),
+                    interface_name: Some(spec.name.clone()),
+                    field_name: Some("<stream_element>".into()),
+                };
+                self.resolve_named_type(pkg, nm, Some((&ros_msg_type_fmt(pkg, nm), &dep_ctx)))?;
+            }
+            Some(_) => {
+                bail!(
+                    "{RIDLC_ERR_PREFIX} stream_server/stream_client element must be a named ROS message type"
+                );
+            }
+            None => {}
         }
         self.srv_cache.insert(key, spec);
         Ok(())
@@ -179,7 +231,10 @@ impl MsgResolver {
     pub fn find_srv_path(&self, package: &str, name: &str) -> Option<PathBuf> {
         let candidates = package_aliases(package);
         for candidate in candidates {
-            if let Some(path) = self.srv_index.get(&(candidate.to_string(), name.to_string())) {
+            if let Some(path) = self
+                .srv_index
+                .get(&(candidate.to_string(), name.to_string()))
+            {
                 return Some(path.clone());
             }
         }
@@ -259,16 +314,29 @@ pub fn infer_srv_package_name(path: &Path) -> Option<String> {
     let parent = path.parent()?;
     let parent_name = parent.file_name()?.to_str()?;
     if parent_name == "srv" {
-        return parent.parent()?.file_name()?.to_str().map(|s| s.to_string());
+        return parent
+            .parent()?
+            .file_name()?
+            .to_str()
+            .map(|s| s.to_string());
     }
     Some(parent_name.to_string())
 }
 
 pub fn parse_srv_file(package: &str, name: &str, path: &Path) -> Result<SrvSpec> {
     let src = fs::read_to_string(path).with_context(|| {
-        format!("{RIDLC_ERR_PREFIX} failed to read .srv file '{}'", path.display())
+        format!(
+            "{RIDLC_ERR_PREFIX} failed to read .srv file '{}'",
+            path.display()
+        )
     })?;
-    let parts: Vec<&str> = src.splitn(2, "---").collect();
+    let (body, grpc_stream) = strip_grpc_stream_directive(&src).with_context(|| {
+        format!(
+            "{RIDLC_ERR_PREFIX} invalid @robonix.grpc directive in '{}'",
+            path.display()
+        )
+    })?;
+    let parts: Vec<&str> = body.splitn(2, "---").collect();
     let request_src = parts.first().unwrap_or(&"");
     let response_src = parts.get(1).unwrap_or(&"");
 
@@ -280,7 +348,56 @@ pub fn parse_srv_file(package: &str, name: &str, path: &Path) -> Result<SrvSpec>
         name: name.to_string(),
         request,
         response,
+        grpc_stream,
     })
+}
+
+/// If the first line is `# @robonix.grpc stream_server TYPE` or `stream_client TYPE`, strip it and
+/// return the remainder plus the stream mode. `TYPE` is `pkg/msg/Name` or `pkg/Name`.
+fn strip_grpc_stream_directive(src: &str) -> Result<(&str, Option<GrpcStreamMode>)> {
+    let trimmed = src.trim_start();
+    let Some(first_line_end) = trimmed.find('\n') else {
+        return Ok((src, None));
+    };
+    let first_line = trimmed[..first_line_end].trim();
+    let rest = trimmed[first_line_end + 1..].trim_start();
+    let Some(directive) = first_line.strip_prefix("# @robonix.grpc ") else {
+        return Ok((src, None));
+    };
+    let directive = directive.trim();
+    let mode = if let Some(typ) = directive.strip_prefix("stream_server ") {
+        Some(GrpcStreamMode::ServerStream {
+            element: parse_stream_element_type(typ).with_context(|| {
+                format!("{RIDLC_ERR_PREFIX} bad stream_server element type: {typ:?}")
+            })?,
+        })
+    } else if let Some(typ) = directive.strip_prefix("stream_client ") {
+        Some(GrpcStreamMode::ClientStream {
+            element: parse_stream_element_type(typ).with_context(|| {
+                format!("{RIDLC_ERR_PREFIX} bad stream_client element type: {typ:?}")
+            })?,
+        })
+    } else {
+        bail!("{RIDLC_ERR_PREFIX} unknown @robonix.grpc directive: {directive:?}");
+    };
+    Ok((rest, mode))
+}
+
+fn parse_stream_element_type(typ: &str) -> Result<MsgTypeRef> {
+    let t = typ.trim();
+    if let Some((pkg, name)) = parse_ridl_type_ref(t) {
+        return Ok(MsgTypeRef::Named { package: pkg, name });
+    }
+    let parts: Vec<&str> = t.split('/').collect();
+    if parts.len() == 2 {
+        return Ok(MsgTypeRef::Named {
+            package: parts[0].to_string(),
+            name: parts[1].to_string(),
+        });
+    }
+    bail!(
+        "{RIDLC_ERR_PREFIX} expected TYPE like sensor_msgs/msg/Image or sensor_msgs/Image, got {t:?}"
+    )
 }
 
 fn parse_msg_section(package: &str, name: &str, src: &str) -> Result<MsgSpec> {
@@ -291,8 +408,12 @@ fn parse_msg_section(package: &str, name: &str, src: &str) -> Result<MsgSpec> {
             continue;
         }
         let mut parts = line.split_whitespace();
-        let Some(raw_type) = parts.next() else { continue };
-        let Some(raw_name) = parts.next() else { continue };
+        let Some(raw_type) = parts.next() else {
+            continue;
+        };
+        let Some(raw_name) = parts.next() else {
+            continue;
+        };
         let (type_ref, is_array) = parse_msg_field_type(package, raw_type)?;
         fields.push(MsgField {
             name: raw_name.to_string(),
@@ -300,21 +421,32 @@ fn parse_msg_section(package: &str, name: &str, src: &str) -> Result<MsgSpec> {
             is_array,
         });
     }
-    Ok(MsgSpec { package: package.to_string(), name: name.to_string(), fields })
+    Ok(MsgSpec {
+        package: package.to_string(),
+        name: name.to_string(),
+        fields,
+    })
 }
 
 pub fn infer_package_name(path: &Path) -> Option<String> {
     let parent = path.parent()?;
     let parent_name = parent.file_name()?.to_str()?;
     if parent_name == "msg" {
-        return parent.parent()?.file_name()?.to_str().map(|s| s.to_string());
+        return parent
+            .parent()?
+            .file_name()?
+            .to_str()
+            .map(|s| s.to_string());
     }
     Some(parent_name.to_string())
 }
 
 pub fn parse_msg_file(package: &str, name: &str, path: &Path) -> Result<MsgSpec> {
     let src = fs::read_to_string(path).with_context(|| {
-        format!("{RIDLC_ERR_PREFIX} failed to read .msg file '{}'", path.display())
+        format!(
+            "{RIDLC_ERR_PREFIX} failed to read .msg file '{}'",
+            path.display()
+        )
     })?;
     let mut fields = Vec::new();
     for raw_line in src.lines() {
@@ -323,12 +455,17 @@ pub fn parse_msg_file(package: &str, name: &str, path: &Path) -> Result<MsgSpec>
             continue;
         }
         let mut parts = line.split_whitespace();
-        let Some(raw_type) = parts.next() else { continue };
-        let Some(raw_name) = parts.next() else { continue };
+        let Some(raw_type) = parts.next() else {
+            continue;
+        };
+        let Some(raw_name) = parts.next() else {
+            continue;
+        };
         let (type_ref, is_array) = parse_msg_field_type(package, raw_type).with_context(|| {
             format!(
                 "{RIDLC_ERR_PREFIX} invalid field in '{}' at line with type '{}'",
-                path.display(), raw_type
+                path.display(),
+                raw_type
             )
         })?;
         fields.push(MsgField {
@@ -337,7 +474,11 @@ pub fn parse_msg_file(package: &str, name: &str, path: &Path) -> Result<MsgSpec>
             is_array,
         });
     }
-    Ok(MsgSpec { package: package.to_string(), name: name.to_string(), fields })
+    Ok(MsgSpec {
+        package: package.to_string(),
+        name: name.to_string(),
+        fields,
+    })
 }
 
 pub fn parse_msg_field_type(current_package: &str, raw_type: &str) -> Result<(MsgTypeRef, bool)> {
@@ -355,18 +496,41 @@ pub fn parse_msg_field_type(current_package: &str, raw_type: &str) -> Result<(Ms
         return Ok((MsgTypeRef::Primitive(base_type.to_string()), is_array));
     }
     if let Some((package, name)) = base_type.split_once('/') {
-        return Ok((MsgTypeRef::Named { package: package.to_string(), name: name.to_string() }, is_array));
+        return Ok((
+            MsgTypeRef::Named {
+                package: package.to_string(),
+                name: name.to_string(),
+            },
+            is_array,
+        ));
     }
-    Ok((MsgTypeRef::Named { package: current_package.to_string(), name: base_type.to_string() }, is_array))
+    Ok((
+        MsgTypeRef::Named {
+            package: current_package.to_string(),
+            name: base_type.to_string(),
+        },
+        is_array,
+    ))
 }
 
 pub fn is_ros_primitive(raw: &str) -> bool {
     matches!(
         raw,
-        "bool" | "byte" | "uint8" | "char" | "int8"
-        | "float32" | "float64"
-        | "int16" | "uint16" | "int32" | "uint32" | "int64" | "uint64"
-        | "string" | "wstring"
+        "bool"
+            | "byte"
+            | "uint8"
+            | "char"
+            | "int8"
+            | "float32"
+            | "float64"
+            | "int16"
+            | "uint16"
+            | "int32"
+            | "uint32"
+            | "int64"
+            | "uint64"
+            | "string"
+            | "wstring"
     )
 }
 
@@ -401,14 +565,21 @@ pub fn format_resolve_error(
     from: Option<(&str, &ResolveContext)>,
     include_paths: &[PathBuf],
 ) -> String {
-    let mut msg = format!("{RIDLC_ERR_PREFIX} failed to resolve ROS message type '{}'", full_type);
+    let mut msg = format!(
+        "{RIDLC_ERR_PREFIX} failed to resolve ROS message type '{}'",
+        full_type
+    );
     if let Some((_type_ref, ctx)) = from {
         let mut parts = Vec::new();
-        if let Some(ref ns) = ctx.namespace { parts.push(format!("namespace '{ns}'")); }
+        if let Some(ref ns) = ctx.namespace {
+            parts.push(format!("namespace '{ns}'"));
+        }
         if let (Some(kind), Some(ref name)) = (ctx.interface_kind, ctx.interface_name.as_ref()) {
             parts.push(format!("{kind} '{name}'"));
         }
-        if let Some(ref f) = ctx.field_name { parts.push(format!("field '{f}'")); }
+        if let Some(ref f) = ctx.field_name {
+            parts.push(format!("field '{f}'"));
+        }
         if !parts.is_empty() {
             msg.push_str(&format!("\n  referenced from: {}", parts.join(", ")));
         }

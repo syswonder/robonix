@@ -123,6 +123,8 @@ impl RuntimeClient {
             name: name.to_string(),
             supported_transports,
             metadata_json: metadata_json.to_string(),
+            listen_port: 0,
+            abstract_interface_id: String::new(),
         };
         self.inner
             .declare_interface(req)

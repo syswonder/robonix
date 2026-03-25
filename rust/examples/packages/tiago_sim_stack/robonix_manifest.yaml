@@ -15,4 +15,10 @@ package:
 nodes:
   - id: com.robonix.prm.tiago
     type: compose
-    start: docker compose -f compose.yaml up --build ros2-bridge
+    start: |
+      CF=(-f compose.yaml)
+      if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        CF+=(-f compose.gpu.yaml)
+        echo "[tiago_sim_stack] NVIDIA GPU detected — merging compose.gpu.yaml"
+      fi
+      exec docker compose "${CF[@]}" up --build ros2-bridge

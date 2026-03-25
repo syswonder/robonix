@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// Validate Command Module
-//
-// Manifest validation for robonix-cli
+// Validate command: check package manifest without building
 
+use anyhow::Result;
 use robonix_cli::manifest;
 use robonix_cli::output;
-use anyhow::Result;
 use std::path::PathBuf;
 
 pub async fn execute(path: PathBuf) -> Result<()> {
@@ -49,19 +47,6 @@ pub async fn execute(path: PathBuf) -> Result<()> {
             "Consumes: {}",
             summary.consumed_interfaces.join(", ")
         ));
-    }
-
-    let interface_check = manifest::validate_interface_references(&summary, &package_root)?;
-    if let Some(catalog_root) = interface_check.catalog_root {
-        output::check(&format!("Interface catalog: {}", catalog_root.display()));
-        if !interface_check.checked_interfaces.is_empty() {
-            output::sub_step(&format!(
-                "Validated interfaces: {}",
-                interface_check.checked_interfaces.join(", ")
-            ));
-        }
-    } else if !interface_check.checked_interfaces.is_empty() {
-        output::warning("Interface catalog not found nearby, skipping RIDL existence checks");
     }
 
     output::success("Manifest validation passed");

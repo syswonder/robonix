@@ -95,7 +95,11 @@ pub fn builtin_tool_defs() -> Vec<ToolDef> {
 }
 
 pub const BUILTIN_NAMES: &[&str] = &[
-    "read_file", "write_file", "patch_file", "list_dir", "run_command",
+    "read_file",
+    "write_file",
+    "patch_file",
+    "list_dir",
+    "run_command",
 ];
 
 pub async fn execute_builtin(name: &str, args_json: &str) -> Result<String> {
@@ -138,7 +142,10 @@ pub async fn execute_builtin(name: &str, args_json: &str) -> Result<String> {
                 Ok(entries) => {
                     let mut items: Vec<String> = Vec::new();
                     for e in entries.flatten() {
-                        let ft = e.file_type().map(|t| if t.is_dir() { "dir" } else { "file" }).unwrap_or("?");
+                        let ft = e
+                            .file_type()
+                            .map(|t| if t.is_dir() { "dir" } else { "file" })
+                            .unwrap_or("?");
                         items.push(format!("{} {}", ft, e.file_name().to_string_lossy()));
                     }
                     items.sort();
@@ -161,7 +168,9 @@ pub async fn execute_builtin(name: &str, args_json: &str) -> Result<String> {
                 result.push_str(&truncate(&stdout, 4000));
             }
             if !stderr.is_empty() {
-                if !result.is_empty() { result.push('\n'); }
+                if !result.is_empty() {
+                    result.push('\n');
+                }
                 result.push_str("stderr: ");
                 result.push_str(&truncate(&stderr, 2000));
             }

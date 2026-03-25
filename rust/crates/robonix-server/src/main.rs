@@ -24,13 +24,7 @@ async fn main() {
 
     info!("meta runtime gRPC on {}", grpc_addr);
 
-    if let Err(e) = serve_meta_runtime(
-        registry,
-        grpc_listen_addr,
-        grpc_advertised_endpoint,
-    )
-    .await
-    {
+    if let Err(e) = serve_meta_runtime(registry, grpc_listen_addr, grpc_advertised_endpoint).await {
         eprintln!("robonix-server error: {e:?}");
         std::process::exit(1);
     }

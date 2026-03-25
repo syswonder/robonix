@@ -1,4 +1,5 @@
 mod react;
+mod skills;
 mod tools;
 mod vlm;
 
@@ -21,7 +22,8 @@ async fn main() -> Result<()> {
     };
     let mut sdk = robonix_sdk::RobonixClient::connect(&endpoint).await?;
 
-    sdk.register_node(AGENT_NODE_ID, "robonix/sys/runtime/agent", "service", "").await?;
+    sdk.register_node(AGENT_NODE_ID, "robonix/sys/runtime/agent", "service", "")
+        .await?;
     log::info!("registered as '{AGENT_NODE_ID}'");
 
     log::info!("discovering VLM service...");

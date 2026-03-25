@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 import geometry_msgs_pb2 as geometry__msgs__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0eprm_base.proto\x12\x10robonix.prm_base\x1a\x13geometry_msgs.proto\"|\n\x0bMoveCommand\x12\x10\n\x08linear_x\x18\x01 \x01(\x01\x12\x10\n\x08linear_y\x18\x02 \x01(\x01\x12\x10\n\x08linear_z\x18\x03 \x01(\x01\x12\x11\n\tangular_x\x18\x04 \x01(\x01\x12\x11\n\tangular_y\x18\x05 \x01(\x01\x12\x11\n\tangular_z\x18\x06 \x01(\x01\"D\n\x10Navigate_Request\x12\x30\n\x04goal\x18\x01 \x01(\x0b\x32\".robonix.geometry_msgs.PoseStamped\"=\n\x11Navigate_Response\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x16\n\x0estatus_message\x18\x02 \x01(\t\"\x0e\n\x0cStop_Request\"1\n\rStop_Response\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t2\xae\x01\n\x0ePrmBaseService\x12S\n\x08Navigate\x12\".robonix.prm_base.Navigate_Request\x1a#.robonix.prm_base.Navigate_Response\x12G\n\x04Stop\x12\x1e.robonix.prm_base.Stop_Request\x1a\x1f.robonix.prm_base.Stop_Responseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0eprm_base.proto\x12\x10robonix.prm_base\x1a\x13geometry_msgs.proto\"|\n\x0bMoveCommand\x12\x10\n\x08linear_x\x18\x01 \x01(\x01\x12\x10\n\x08linear_y\x18\x02 \x01(\x01\x12\x10\n\x08linear_z\x18\x03 \x01(\x01\x12\x11\n\tangular_x\x18\x04 \x01(\x01\x12\x11\n\tangular_y\x18\x05 \x01(\x01\x12\x11\n\tangular_z\x18\x06 \x01(\x01\"+\n\x18\x43\x61ncelNavigation_Request\x12\x0f\n\x07goal_id\x18\x01 \x01(\t\">\n\x19\x43\x61ncelNavigation_Response\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\".\n\x1bGetNavigationStatus_Request\x12\x0f\n\x07goal_id\x18\x01 \x01(\t\"O\n\x1cGetNavigationStatus_Response\x12\r\n\x05known\x18\x01 \x01(\x08\x12\x0e\n\x06status\x18\x02 \x01(\t\x12\x10\n\x08terminal\x18\x03 \x01(\x08\"D\n\x10Navigate_Request\x12\x30\n\x04goal\x18\x01 \x01(\x0b\x32\".robonix.geometry_msgs.PoseStamped\"=\n\x11Navigate_Response\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x16\n\x0estatus_message\x18\x02 \x01(\t\"\x0e\n\x0cStop_Request\"1\n\rStop_Response\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t2\x91\x03\n\x0ePrmBaseService\x12k\n\x10\x43\x61ncelNavigation\x12*.robonix.prm_base.CancelNavigation_Request\x1a+.robonix.prm_base.CancelNavigation_Response\x12t\n\x13GetNavigationStatus\x12-.robonix.prm_base.GetNavigationStatus_Request\x1a..robonix.prm_base.GetNavigationStatus_Response\x12S\n\x08Navigate\x12\".robonix.prm_base.Navigate_Request\x1a#.robonix.prm_base.Navigate_Response\x12G\n\x04Stop\x12\x1e.robonix.prm_base.Stop_Request\x1a\x1f.robonix.prm_base.Stop_Responseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,14 +34,22 @@ if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_MOVECOMMAND']._serialized_start=57
   _globals['_MOVECOMMAND']._serialized_end=181
-  _globals['_NAVIGATE_REQUEST']._serialized_start=183
-  _globals['_NAVIGATE_REQUEST']._serialized_end=251
-  _globals['_NAVIGATE_RESPONSE']._serialized_start=253
-  _globals['_NAVIGATE_RESPONSE']._serialized_end=314
-  _globals['_STOP_REQUEST']._serialized_start=316
-  _globals['_STOP_REQUEST']._serialized_end=330
-  _globals['_STOP_RESPONSE']._serialized_start=332
-  _globals['_STOP_RESPONSE']._serialized_end=381
-  _globals['_PRMBASESERVICE']._serialized_start=384
-  _globals['_PRMBASESERVICE']._serialized_end=558
+  _globals['_CANCELNAVIGATION_REQUEST']._serialized_start=183
+  _globals['_CANCELNAVIGATION_REQUEST']._serialized_end=226
+  _globals['_CANCELNAVIGATION_RESPONSE']._serialized_start=228
+  _globals['_CANCELNAVIGATION_RESPONSE']._serialized_end=290
+  _globals['_GETNAVIGATIONSTATUS_REQUEST']._serialized_start=292
+  _globals['_GETNAVIGATIONSTATUS_REQUEST']._serialized_end=338
+  _globals['_GETNAVIGATIONSTATUS_RESPONSE']._serialized_start=340
+  _globals['_GETNAVIGATIONSTATUS_RESPONSE']._serialized_end=419
+  _globals['_NAVIGATE_REQUEST']._serialized_start=421
+  _globals['_NAVIGATE_REQUEST']._serialized_end=489
+  _globals['_NAVIGATE_RESPONSE']._serialized_start=491
+  _globals['_NAVIGATE_RESPONSE']._serialized_end=552
+  _globals['_STOP_REQUEST']._serialized_start=554
+  _globals['_STOP_REQUEST']._serialized_end=568
+  _globals['_STOP_RESPONSE']._serialized_start=570
+  _globals['_STOP_RESPONSE']._serialized_end=619
+  _globals['_PRMBASESERVICE']._serialized_start=622
+  _globals['_PRMBASESERVICE']._serialized_end=1023
 # @@protoc_insertion_point(module_scope)

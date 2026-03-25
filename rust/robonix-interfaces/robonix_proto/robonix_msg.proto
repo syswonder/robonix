@@ -19,6 +19,7 @@ message BoundingBox {
 message ChatMessage {
   string role = 1;
   string content = 2;
+  string image_base64 = 3;
 }
 
 message CommandResult {
