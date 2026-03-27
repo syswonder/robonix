@@ -43,3 +43,6 @@ venv/
 
 # rbnx build
 rbnx-build/
+
+# trae IDE
+.trae/
