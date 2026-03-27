@@ -2,7 +2,13 @@ import json
 import os
 import sys
 import asyncio
+import logging
 from pathlib import Path
+
+# Suppress verbose gRPC / absl warnings from milvus-lite
+os.environ["GRPC_VERBOSITY"] = "ERROR"
+os.environ["GLOG_minloglevel"] = "2"
+logging.getLogger("absl").setLevel(logging.ERROR)
 
 def _ensure_proto_gen() -> None:
     d = Path(__file__).resolve().parent
@@ -136,6 +142,10 @@ def main():
     # Start FastMCP server using streamable HTTP
     print(f"[memsearch-service] Starting MCP Streamable HTTP server on port {port}...")
     import uvicorn
+    import logging
+    # Suppress verbose gRPC / absl warnings from milvus-lite
+    logging.getLogger("absl").setLevel(logging.ERROR)
+    
     app = mcp.streamable_http_app()
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
 
