@@ -29,7 +29,7 @@ fi
 
 export ROBONIX_SERVER="${ROBONIX_SERVER:-127.0.0.1:50051}"
 export ROBONIX_META_GRPC_ENDPOINT="${ROBONIX_META_GRPC_ENDPOINT:-$ROBONIX_SERVER}"
-export RUST_LOG="${RUST_LOG:-robonix_server=info,robonix_agent=info}"
+export RUST_LOG="${RUST_LOG:-robonix_server=info,robonix_agent=warn}"
 export START_VLM_SERVICE="${START_VLM_SERVICE:-1}"
 export START_SIM_STACK="${START_SIM_STACK:-1}"
 export START_AGENT="${START_AGENT:-1}"

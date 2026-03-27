@@ -16,4 +16,5 @@ nodes:
     type: python
     start: |
       export PYTHONPATH="$(pwd):$(pwd)/../../proto_gen:${PYTHONPATH:-}"
-      exec python -m memsearch_service.service
+      # FastMCP internal logs can be verbose, redirect them to a file or suppress
+      exec python -m memsearch_service.service > memsearch.log 2>&1
