@@ -29,12 +29,13 @@ fi
 
 export ROBONIX_SERVER="${ROBONIX_SERVER:-127.0.0.1:50051}"
 export ROBONIX_META_GRPC_ENDPOINT="${ROBONIX_META_GRPC_ENDPOINT:-$ROBONIX_SERVER}"
-export RUST_LOG="${RUST_LOG:-robonix_server=info,robonix_agent=info}"
+export RUST_LOG="${RUST_LOG:-robonix_server=info,robonix_agent=warn}"
 export START_VLM_SERVICE="${START_VLM_SERVICE:-1}"
 export START_SIM_STACK="${START_SIM_STACK:-1}"
 export START_AGENT="${START_AGENT:-1}"
+export START_MEMSEARCH="${START_MEMSEARCH:-1}"
 
-export PYTHONPATH="${PACKAGES}/vlm_service${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="${PACKAGES}/vlm_service:${PACKAGES}/memsearch_service${PYTHONPATH:+:$PYTHONPATH}"
 
 rbnx() {
   (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "$@")
@@ -50,7 +51,7 @@ rbnx_validate_build() {
 
 check_python_dep() {
   local module="$1"
-  python3 - <<PY >/dev/null 2>&1
+  python - <<PY >/dev/null 2>&1
 import importlib.util
 import sys
 sys.exit(0 if importlib.util.find_spec("$module") else 1)
@@ -59,17 +60,18 @@ PY
 
 echo "[e2e] checking required Python modules..."
 missing=()
-for m in grpc openai mcp numpy PIL uvicorn; do
+for m in grpc openai mcp memsearch numpy PIL uvicorn; do
   check_python_dep "$m" || missing+=("$m")
 done
 if [ "${#missing[@]}" -ne 0 ]; then
   echo "[e2e] missing modules: ${missing[*]}"
   echo "[e2e] install: pip install -r \"${EXAMPLES_ROOT}/requirements.txt\""
+  echo "[e2e] or make sure your virtual environment is active."
   exit 1
 fi
 
-if ! python3 -c 'import grpc; p=[int(x) for x in grpc.__version__.split(".")[:3]]; raise SystemExit(0 if tuple(p + [0]*(3-len(p))) >= (1,78,0) else 1)' 2>/dev/null; then
-  echo "[e2e] grpcio>=1.78 required — pip install -r \"${EXAMPLES_ROOT}/requirements.txt\""
+if ! python -c 'import grpc; p=[int(x) for x in grpc.__version__.split(".")[:3]]; raise SystemExit(0 if tuple(p + [0]*(3-len(p))) >= (1,60,0) else 1)' 2>/dev/null; then
+  echo "[e2e] grpcio>=1.60 required — pip install -r \"${EXAMPLES_ROOT}/requirements.txt\""
   exit 1
 fi
 
@@ -89,6 +91,7 @@ fi
 pkill -9 -f 'robonix-server' 2>/dev/null || true
 pkill -9 -f 'robonix-agent' 2>/dev/null || true
 pkill -9 -f 'vlm_service.service' 2>/dev/null || true
+pkill -9 -f 'memsearch_service.service' 2>/dev/null || true
 pkill -9 -f 'tiago_bridge.node' 2>/dev/null || true
 sleep 0.3
 
@@ -132,6 +135,13 @@ RBNX_START_OPTS=(start --endpoint "$ROBONIX_SERVER")
 if [ "$START_VLM_SERVICE" = "1" ]; then
   echo "[e2e] rbnx start vlm_service (background)..."
   (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "${RBNX_START_OPTS[@]}" -p "$PACKAGES/vlm_service" -n com.robonix.services.vlm) &
+  sleep 1
+fi
+
+if [ "$START_MEMSEARCH" = "1" ]; then
+  echo "[e2e] rbnx start memsearch_service (background)..."
+  rbnx_validate_build "$PACKAGES/memsearch_service"
+  (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "${RBNX_START_OPTS[@]}" -p "$PACKAGES/memsearch_service" -n com.robonix.services.memsearch) &
   sleep 1
 fi
 
