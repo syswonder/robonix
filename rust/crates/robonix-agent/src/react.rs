@@ -564,11 +564,11 @@ async fn connect_mcp(endpoint: &str) -> Result<McpClient> {
     } else {
         format!("http://{endpoint}")
     };
-    // FastMCP (Python SDK) serves Streamable HTTP at the `/sse` path by default for SSE.
-    let uri = if base.contains("/sse") {
+    // FastMCP (Python SDK) serves Streamable HTTP at the `/mcp` path by default.
+    let uri = if base.contains("/mcp") {
         base
     } else {
-        format!("{}/sse", base.trim_end_matches('/'))
+        format!("{}/mcp", base.trim_end_matches('/'))
     };
     let transport =
         rmcp::transport::streamable_http_client::StreamableHttpClientTransport::from_uri(

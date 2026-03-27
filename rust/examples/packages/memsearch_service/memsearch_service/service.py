@@ -134,11 +134,11 @@ def main():
     # Initialize memory index once
     asyncio.run(mem.index())
 
-    # Start FastMCP server
-    print(f"[memsearch-service] Starting MCP SSE server on port {port}...")
-    mcp.settings.port = port
-    mcp.settings.host = "127.0.0.1"
-    mcp.run("sse")
+    # Start FastMCP server using streamable HTTP
+    print(f"[memsearch-service] Starting MCP Streamable HTTP server on port {port}...")
+    import uvicorn
+    app = mcp.streamable_http_app()
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
 
 if __name__ == "__main__":
     main()

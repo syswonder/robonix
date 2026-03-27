@@ -91,6 +91,7 @@ fi
 pkill -9 -f 'robonix-server' 2>/dev/null || true
 pkill -9 -f 'robonix-agent' 2>/dev/null || true
 pkill -9 -f 'vlm_service.service' 2>/dev/null || true
+pkill -9 -f 'memsearch_service.service' 2>/dev/null || true
 pkill -9 -f 'tiago_bridge.node' 2>/dev/null || true
 sleep 0.3
 
