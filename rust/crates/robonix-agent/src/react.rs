@@ -111,7 +111,11 @@ pub async fn run_react_loop(sdk: &mut RobonixClient, mut vlm: VlmClient) -> Resu
             }
         };
         let mut memory_context = String::new();
-        if mcp_tools.contains_key("search_memory") {
+        // Do not trigger silent memory recall for simple casual greetings or meta questions
+        let is_casual = input.trim().to_lowercase();
+        let skip_memory = is_casual == "hi" || is_casual == "hello" || is_casual.starts_with("who are you") || is_casual == "你是谁" || is_casual == "你好";
+        
+        if !skip_memory && mcp_tools.contains_key("search_memory") {
             let args = serde_json::json!({
                 "query": input
             });
