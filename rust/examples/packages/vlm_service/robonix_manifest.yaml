@@ -16,4 +16,6 @@ package:
 nodes:
   - id: com.robonix.services.vlm
     type: python
-    start: exec python3 -m vlm_service.service
+    start: |
+      export PYTHONPATH="$(pwd):$(pwd)/../../proto_gen:${PYTHONPATH:-}"
+      exec python -m vlm_service.service

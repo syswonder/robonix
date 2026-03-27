@@ -91,6 +91,12 @@ pub async fn run_react_loop(sdk: &mut RobonixClient, mut vlm: VlmClient) -> Resu
         std::io::stderr().flush()?;
         let input = read_line()?;
         if input.is_empty() || input == "quit" {
+            // Trigger memory compaction at session end if available
+            let mcp_tools_for_quit = load_mcp_tools(sdk).await.unwrap_or_default();
+            if mcp_tools_for_quit.contains_key("compact_memory") {
+                log::info!("[mcp] Compacting memory session before exit...");
+                let _ = execute_mcp_tool(sdk, &mcp_tools_for_quit, "compact_memory", "{}").await;
+            }
             break;
         }
 
@@ -104,11 +110,22 @@ pub async fn run_react_loop(sdk: &mut RobonixClient, mut vlm: VlmClient) -> Resu
                 Vec::new()
             }
         };
+        let mut memory_context = String::new();
+        if mcp_tools.contains_key("search_memory") {
+            let json_input = serde_json::to_string(&input).unwrap_or_else(|_| "\"\"".to_string());
+            let args = format!(r#"{{"query":{}}}"#, json_input);
+            if let Ok(result) = execute_mcp_tool(sdk, &mcp_tools, "search_memory", &args).await {
+                if !result.contains("No relevant memories found") {
+                    memory_context = result;
+                }
+            }
+        }
+
         let mcp_tool_defs = build_mcp_tool_defs(&mcp_tools);
         let mut all_tools = tools::builtin_tool_defs();
         all_tools.extend(mcp_tool_defs);
         let soul = skills::load_agent_soul();
-        let system_prompt = build_system_prompt(soul.as_deref(), &mcp_tools, &merged_skills);
+        let system_prompt = build_system_prompt(soul.as_deref(), &mcp_tools, &merged_skills, &memory_context);
         log::info!(
             "tools for this turn: {} total ({} builtin + {} mcp), skills={}",
             all_tools.len(),
@@ -325,6 +342,7 @@ fn build_system_prompt(
     soul: Option<&str>,
     mcp_tools: &HashMap<String, McpToolSpec>,
     skills: &[AgentSkill],
+    memory_context: &str,
 ) -> String {
     let mut p = String::new();
     if let Some(s) = soul {
@@ -335,6 +353,13 @@ fn build_system_prompt(
             p.push_str("\n\n---\n\n");
         }
     }
+    
+    if !memory_context.is_empty() {
+        p.push_str("## Relevant past memories (System Context)\n\n");
+        p.push_str(memory_context);
+        p.push_str("\n\n---\n\n");
+    }
+
     p.push_str(
         "\
 You are the Robonix system agent running on a robotic platform.
@@ -348,6 +373,8 @@ Rules:
 - If a request requires multiple steps, execute them all before responding.
 - When the user references something from earlier in the conversation, use that context.
 - Keep responses concise and direct.
+- If you are unsure about historical context, user preferences, or past decisions, use the `search_memory` tool.
+- When you learn an important user preference or complete a major milestone, use `save_memory` to record it.
 - When a tool returns a JSON result with a clear outcome (success/failure, error, etc.),
   report that result to the user immediately.
 - Use **list_dir** / **read_file** for skill playbooks (see Skill workflow) or when the user
@@ -537,11 +564,11 @@ async fn connect_mcp(endpoint: &str) -> Result<McpClient> {
     } else {
         format!("http://{endpoint}")
     };
-    // FastMCP (Python SDK) serves Streamable HTTP at the `/mcp` path by default.
-    let uri = if base.contains("/mcp") {
+    // FastMCP (Python SDK) serves Streamable HTTP at the `/sse` path by default for SSE.
+    let uri = if base.contains("/sse") {
         base
     } else {
-        format!("{}/mcp", base.trim_end_matches('/'))
+        format!("{}/sse", base.trim_end_matches('/'))
     };
     let transport =
         rmcp::transport::streamable_http_client::StreamableHttpClientTransport::from_uri(

@@ -1,0 +1,19 @@
+manifestVersion: 1
+
+build:
+  script: scripts/build.sh
+
+package:
+  id: com.robonix.example.memsearch_service
+  name: memsearch_service
+  version: 0.1.0
+  vendor: robonix
+  description: Memsearch MCP Server for Agent memory
+  license: MulanPSL-2.0
+
+nodes:
+  - id: com.robonix.services.memsearch
+    type: python
+    start: |
+      export PYTHONPATH="$(pwd):$(pwd)/../../proto_gen:${PYTHONPATH:-}"
+      exec python -m memsearch_service.service
