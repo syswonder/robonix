@@ -32,3 +32,14 @@ rust/debug
 rbnx-deploy
 tmp*
 .libero/
+
+# memory service
+agent_milvus.db*
+agent_memory/
+
+# python venv
+venv/
+.venv/
+
+# rbnx build
+rbnx-build/
