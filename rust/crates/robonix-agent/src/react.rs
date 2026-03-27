@@ -112,9 +112,11 @@ pub async fn run_react_loop(sdk: &mut RobonixClient, mut vlm: VlmClient) -> Resu
         };
         let mut memory_context = String::new();
         if mcp_tools.contains_key("search_memory") {
-            let json_input = serde_json::to_string(&input).unwrap_or_else(|_| "\"\"".to_string());
-            let args = format!(r#"{{"query":{}}}"#, json_input);
-            if let Ok(result) = execute_mcp_tool(sdk, &mcp_tools, "search_memory", &args).await {
+            let args = serde_json::json!({
+                "query": input
+            });
+            let args_str = args.to_string();
+            if let Ok(result) = execute_mcp_tool(sdk, &mcp_tools, "search_memory", &args_str).await {
                 if !result.contains("No relevant memories found") {
                     memory_context = result;
                 }
