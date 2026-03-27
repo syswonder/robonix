@@ -296,7 +296,12 @@ fn truncate_log(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        // Find the nearest valid character boundary before `max`
+        let mut max_idx = max;
+        while max_idx > 0 && !s.is_char_boundary(max_idx) {
+            max_idx -= 1;
+        }
+        format!("{}...", &s[..max_idx])
     }
 }
 
