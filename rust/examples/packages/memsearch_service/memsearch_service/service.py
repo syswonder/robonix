@@ -34,9 +34,9 @@ mem = MemSearch(
 )
 
 @mcp.tool()
-async def search_memory(query: str, top_k: int = 3) -> str:
+async def search_memory(query: str) -> str:
     """Search the agent's long-term memory for relevant past context, decisions, or user preferences."""
-    results = await mem.search(query, top_k=top_k)
+    results = await mem.search(query, top_k=3)
     if not results:
         return "No relevant memories found."
     context = "\n\n".join(f"- {m['content']}" for m in results)
@@ -83,8 +83,7 @@ def main():
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string"},
-                        "top_k": {"type": "integer"}
+                        "query": {"type": "string"}
                     },
                     "required": ["query"]
                 }
