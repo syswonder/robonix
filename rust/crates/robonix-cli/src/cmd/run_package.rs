@@ -3,11 +3,11 @@
 
 use super::build;
 use super::launch_helpers;
+use anyhow::{Context, Result};
+use robonix_cli::Config;
 use robonix_cli::manifest;
 use robonix_cli::output;
 use robonix_cli::process::ProcessManager;
-use robonix_cli::Config;
-use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 /// Resolve package path from -p (local path) or -g (system-installed name).
@@ -23,7 +23,11 @@ fn resolve_package_path(
         if canonical.join(manifest::MANIFEST_FILE).exists() {
             return Ok(canonical);
         }
-        anyhow::bail!("Path {} does not contain {}", canonical.display(), manifest::MANIFEST_FILE);
+        anyhow::bail!(
+            "Path {} does not contain {}",
+            canonical.display(),
+            manifest::MANIFEST_FILE
+        );
     }
 
     if let Some(name) = global {
@@ -31,7 +35,11 @@ fn resolve_package_path(
         if let Some(pkg) = db.get_package(&name) {
             return Ok(pkg.path.clone());
         }
-        anyhow::bail!("Package '{}' not found in system storage ({})", name, config.package_storage_path.display());
+        anyhow::bail!(
+            "Package '{}' not found in system storage ({})",
+            name,
+            config.package_storage_path.display()
+        );
     }
 
     anyhow::bail!("Specify -p <path> for local package or -g <name> for system-installed package")
@@ -54,7 +62,10 @@ fn resolve_package_path_for_start(config: &Config, spec: &str) -> Result<PathBuf
         cwd.join("examples").join("packages").join(spec),
         cwd.join("examples").join(spec),
         cwd.join(spec),
-        cwd.join("rust").join("examples").join("packages").join(spec),
+        cwd.join("rust")
+            .join("examples")
+            .join("packages")
+            .join(spec),
         cwd.join("rust").join("examples").join(spec),
     ];
 
@@ -137,23 +148,29 @@ pub async fn execute_start(
         };
         match robonix_sdk::RobonixClient::connect(&grpc_url).await {
             Ok(mut sdk) => {
-                let skill_items: Vec<robonix_sdk::SkillInfoItem> = skills.iter().map(|s| {
-                    robonix_sdk::SkillInfoItem {
+                let skill_items: Vec<robonix_sdk::SkillInfoItem> = skills
+                    .iter()
+                    .map(|s| robonix_sdk::SkillInfoItem {
                         name: s.name.clone(),
                         description: s.description.clone(),
                         path: s.path.display().to_string(),
                         metadata_json: s.metadata_json.clone(),
-                    }
-                }).collect();
-                match sdk.register_node_with_skills(
-                    &node.id, "", "", "", skill_items, "", "",
-                ).await {
+                    })
+                    .collect();
+                match sdk
+                    .register_node_with_skills(&node.id, "", "", "", skill_items, "", "")
+                    .await
+                {
                     Ok(_) => output::sub_step("Skills registered with robonix-server"),
-                    Err(e) => output::sub_step(&format!("Warning: failed to register skills: {e:#}")),
+                    Err(e) => {
+                        output::sub_step(&format!("Warning: failed to register skills: {e:#}"))
+                    }
                 }
             }
             Err(e) => {
-                output::sub_step(&format!("Warning: could not connect to server for skill registration: {e:#}"));
+                output::sub_step(&format!(
+                    "Warning: could not connect to server for skill registration: {e:#}"
+                ));
             }
         }
     }
@@ -197,7 +214,11 @@ pub async fn execute_start(
         .join("; ");
     let start_body = node.start.trim();
     if start_body.is_empty() {
-        anyhow::bail!("Node '{}' has empty `start` in {}", node.id, manifest::MANIFEST_FILE);
+        anyhow::bail!(
+            "Node '{}' has empty `start` in {}",
+            node.id,
+            manifest::MANIFEST_FILE
+        );
     }
     let start_command = if exports.is_empty() {
         start_body.to_string()

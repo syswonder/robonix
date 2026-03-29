@@ -1,6 +1,7 @@
 {
   "extraPaths": [
     "rust/examples/proto_gen",
-    "rust/robonix-interfaces"
-  ]
+    "rust/robonix-interfaces",
+    "rust/examples/packages/maniskill_vla_demo/maniskill_vla_demo"
+  ],
 }

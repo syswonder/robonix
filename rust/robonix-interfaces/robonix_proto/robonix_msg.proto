@@ -16,6 +16,25 @@ message BoundingBox {
   double yaw = 4;
 }
 
+message BufferDescriptor {
+  uint64 handle_id = 1;
+  string shm_name = 2;
+  repeated uint32 shape = 3;
+  repeated uint32 strides = 4;
+  uint64 size_bytes = 5;
+  BufferFormat format = 6;
+  MemoryDomain memory_domain = 7;
+  uint64 timestamp_ns = 8;
+  uint64 sequence = 9;
+  uint64 sync_token = 10;
+  uint32 pool_id = 11;
+  bool gpu_pinned = 12;
+}
+
+message BufferFormat {
+  uint32 format = 1;
+}
+
 message ChatMessage {
   string role = 1;
   string content = 2;
@@ -38,6 +57,10 @@ message FrameMapping {
   repeated BoundingBox bbox = 2;
   repeated TextureType texture = 3;
   string frame_id = 4;
+}
+
+message MemoryDomain {
+  uint32 domain = 1;
 }
 
 message NavigationStatus {
@@ -143,6 +166,24 @@ message Waypoint {
   double y = 3;
   double z = 4;
   string frame_id = 5;
+}
+
+message ZeroCopyFrame {
+  robonix.std_msgs.Header header = 1;
+  uint64 buffer_handle_id = 2;
+  string shm_name = 3;
+  uint32 width = 4;
+  uint32 height = 5;
+  uint32 channels = 6;
+  uint32 stride = 7;
+  BufferFormat format = 8;
+  MemoryDomain memory_domain = 9;
+  uint64 data_size = 10;
+  uint64 sequence = 11;
+  uint64 hw_timestamp_ns = 12;
+  uint64 sync_token = 13;
+  bool gpu_pinned = 14;
+  uint32 pool_id = 15;
 }
 
 message AddWaypoint_Request {
