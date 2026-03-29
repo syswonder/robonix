@@ -105,6 +105,7 @@ message NegotiateChannelResponse {
   string channel_id = 1;
   string transport = 2;
   string endpoint = 3;       // system-allocated endpoint (topic name, shm key, etc.)
+  string metadata_json = 4;  // provider interface metadata (geometry, format, IPC handles, etc.)
 }
 
 // Release a channel

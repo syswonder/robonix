@@ -1,0 +1,27 @@
+syntax = "proto3";
+package robonix.agent_chat;
+
+service AgentChat {
+  rpc Chat(AgentChatRequest) returns (stream AgentChatEvent);
+}
+
+message AgentChatRequest {
+  string user_message = 1;
+}
+
+message AgentChatEvent {
+  oneof event {
+    string text_chunk = 1;
+    ToolCallInfo tool_call = 2;
+    string final_text = 3;
+    string status = 4;
+  }
+}
+
+message ToolCallInfo {
+  uint32 round = 1;
+  string tool_name = 2;
+  string arguments = 3;
+  string result = 4;
+  bool completed = 5;
+}

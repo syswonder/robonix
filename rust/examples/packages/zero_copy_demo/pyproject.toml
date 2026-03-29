@@ -1,0 +1,24 @@
+[project]
+name = "robonix-zero-copy-demo"
+version = "0.1.0"
+description = "Robonix zero-copy buffer demo: Rust buffer manager + YOLO + Rerun"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "grpcio>=1.60",
+    "protobuf>=4.25",
+    "ultralytics>=8.3",
+    "tabulate>=0.9",
+    "Pillow>=10.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["zero_copy_demo*"]
+
+[project.optional-dependencies]
+rerun = ["rerun-sdk>=0.22", "opencv-python-headless>=4.8"]
+
+# PyTorch must be installed separately with CUDA support:
+#   uv pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cu124
+# Or with conda:
+#   conda install pytorch torchvision pytorch-cuda=12.4 -c pytorch -c nvidia

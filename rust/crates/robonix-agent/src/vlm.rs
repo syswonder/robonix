@@ -31,7 +31,7 @@ mod robonix {
 
 use robonix::robonix_msg::{ChatMessage as PbChatMessage, ToolSpec as PbToolSpec};
 use robonix::vlm::vlm_service_client::VlmServiceClient;
-use robonix::vlm::{ChatRequest, ChatResponse};
+use robonix::vlm::{ChatRequest, ChatResponse, ChatStreamEvent};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Message {
@@ -293,30 +293,7 @@ impl VlmClient {
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<(Option<String>, Vec<ToolCall>)> {
-        let req = ChatRequest {
-            messages: messages
-                .iter()
-                .map(|m| PbChatMessage {
-                    role: m.role.clone(),
-                    content: m.content.clone().unwrap_or_default(),
-                    image_base64: m.image_base64.clone().unwrap_or_default(),
-                })
-                .collect(),
-            tools: tools
-                .iter()
-                .map(|t| PbToolSpec {
-                    name: t.function.name.clone(),
-                    description: t.function.description.clone(),
-                    input_schema_json: t.function.parameters.to_string(),
-                })
-                .collect(),
-            tool_choice: if tools.is_empty() {
-                String::new()
-            } else {
-                "auto".to_string()
-            },
-            max_tokens: 0,
-        };
+        let req = Self::build_request(messages, tools);
 
         let resp: tonic::Response<ChatResponse> =
             self.inner
@@ -346,4 +323,76 @@ impl VlmClient {
         };
         Ok((content, tool_calls))
     }
+
+    /// Open a ChatStream and return the raw tonic Streaming handle.
+    /// The caller drives the stream to get real-time text deltas.
+    pub async fn chat_stream(
+        &mut self,
+        messages: &[Message],
+        tools: &[ToolDef],
+    ) -> Result<tonic::Streaming<ChatStreamEvent>> {
+        let req = Self::build_request(messages, tools);
+        let resp = self
+            .inner
+            .chat_stream(tonic::Request::new(req))
+            .await
+            .map_err(|e| anyhow::anyhow!("VLM gRPC ChatStream failed: {e}"))?;
+        Ok(resp.into_inner())
+    }
+
+    /// Parse a stream event into typed enum for convenience.
+    pub fn parse_stream_event(event: ChatStreamEvent) -> VlmStreamItem {
+        match event.event {
+            Some(robonix::vlm::chat_stream_event::Event::TextDelta(d)) => {
+                VlmStreamItem::TextDelta(d)
+            }
+            Some(robonix::vlm::chat_stream_event::Event::ToolCall(tc)) => {
+                VlmStreamItem::ToolCall(ToolCall {
+                    id: tc.id,
+                    kind: "function".to_string(),
+                    function: FnCall {
+                        name: tc.name,
+                        arguments: tc.arguments_json,
+                    },
+                })
+            }
+            Some(robonix::vlm::chat_stream_event::Event::FinishReason(_)) => {
+                VlmStreamItem::Finish(())
+            }
+            None => VlmStreamItem::Finish(()),
+        }
+    }
+
+    fn build_request(messages: &[Message], tools: &[ToolDef]) -> ChatRequest {
+        ChatRequest {
+            messages: messages
+                .iter()
+                .map(|m| PbChatMessage {
+                    role: m.role.clone(),
+                    content: m.content.clone().unwrap_or_default(),
+                    image_base64: m.image_base64.clone().unwrap_or_default(),
+                })
+                .collect(),
+            tools: tools
+                .iter()
+                .map(|t| PbToolSpec {
+                    name: t.function.name.clone(),
+                    description: t.function.description.clone(),
+                    input_schema_json: t.function.parameters.to_string(),
+                })
+                .collect(),
+            tool_choice: if tools.is_empty() {
+                String::new()
+            } else {
+                "auto".to_string()
+            },
+            max_tokens: 0,
+        }
+    }
+}
+
+pub enum VlmStreamItem {
+    TextDelta(String),
+    ToolCall(ToolCall),
+    Finish(()),
 }

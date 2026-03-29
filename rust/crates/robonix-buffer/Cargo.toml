@@ -1,0 +1,18 @@
+[package]
+name = "robonix-buffer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Robonix system-level buffer manager: POSIX SHM allocation, GPU pinning, lifecycle management"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+log.workspace = true
+env_logger.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+
+libc = "0.2"
+libloading = "0.8"

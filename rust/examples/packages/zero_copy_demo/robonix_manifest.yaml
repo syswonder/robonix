@@ -1,0 +1,60 @@
+manifestVersion: 1
+
+build:
+  script: scripts/build.sh
+
+package:
+  id: com.robonix.example.zero_copy_demo
+  name: zero_copy_demo
+  version: 0.2.0
+  vendor: robonix
+  description: >
+    Multi-process zero-copy buffer PoC: Camera → SHM → YOLO (GPU) → Sobel
+    (CUDA IPC). Each node runs as an independent OS process launched via
+    `rbnx start`. Proves Robonix eliminates redundant CPU/GPU copies by
+    managing buffers at the system level.
+  license: MulanPSL-2.0
+
+nodes:
+  # Camera node: SHM producer.
+  # DMA target IS the Robonix SHM buffer — downstream consumers mmap it.
+  - id: camera
+    type: python
+    start: exec python3 -m zero_copy_demo.nodes.camera_node
+
+  # YOLO node: SHM consumer + CUDA IPC producer.
+  # Reads camera SHM (zero-copy mmap), pins for GPU DMA, runs YOLOv8,
+  # exports GPU tensor via CUDA IPC handle for downstream.
+  - id: yolo
+    type: python
+    start: exec python3 -m zero_copy_demo.nodes.yolo_node
+
+  # Sobel edge node: CUDA IPC consumer.
+  # Imports GPU memory from YOLO via cudaIpcOpenMemHandle — no CPU, no PCIe.
+  - id: edge
+    type: python
+    start: exec python3 -m zero_copy_demo.nodes.edge_node
+
+interfaces:
+  provides:
+    - abstract_interface_id: robonix/prm/camera/rgb
+    - abstract_interface_id: robonix/sys/perception/yolo/gpu_tensor
+  consumes:
+    - abstract_interface_id: robonix/prm/camera/rgb
+    - abstract_interface_id: robonix/sys/perception/yolo/gpu_tensor
+
+launchProfiles:
+  default:
+    nodes:
+      camera:
+        env:
+          RBNX_WIDTH: "1920"
+          RBNX_HEIGHT: "1080"
+          RBNX_FPS: "30"
+          RBNX_FRAMES: "200"
+      yolo:
+        env:
+          RBNX_FRAMES: "200"
+      edge:
+        env:
+          RBNX_FRAMES: "200"
