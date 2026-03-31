@@ -1,0 +1,6 @@
+mcp
+fastmcp
+memsearch[onnx]
+grpcio
+protobuf
+uvicorn

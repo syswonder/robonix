@@ -1,11 +1,17 @@
 # Robonix examples (vlm_service, tiago_node, smoke scripts).
 # grpcio-tools requires protobuf<7 (see https://github.com/grpc/grpc/issues/39750 — tooling lags protobuf 7).
-# proto_gen/*_grpc.py is generated with grpcio>=1.78; older grpcio raises RuntimeError at import.
-grpcio>=1.78.0
-grpcio-tools>=1.78.0
+# proto_gen/*_grpc.py is generated with grpcio>=1.78; older grpcio raises RuntimeError at import.# Core
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
 protobuf>=6.30,<7
 openai>=1.0
-mcp>=1.0
+jinja2
+typeguard
+
+# Memory Service
+fastmcp>=0.1.0
+mcp>=1.0.0
+memsearch[onnx]
 numpy
 Pillow
 uvicorn
