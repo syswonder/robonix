@@ -1,0 +1,25 @@
+rbnx-build
+proto_stubs
+proto_compat
+# python cache
+__pycache__/
+*.py[cod]
+*$py.class
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+# Environment
+.env
+.env.local
+# Cache directory for debug images
+cache/
+*.jpg
+*.png
+#egg
+*.egg-info/
+dist/
+build/
+#uv
+.venv

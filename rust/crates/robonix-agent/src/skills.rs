@@ -4,7 +4,7 @@
 use anyhow::{Context, Result};
 use robonix_sdk::{RobonixClient, SkillEntry};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -46,8 +46,8 @@ struct FrontMatter {
 }
 
 fn parse_skill_md(path: &Path) -> Result<(FrontMatter, String)> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
         anyhow::bail!("SKILL.md must start with YAML frontmatter (---)");

@@ -1,4 +1,4 @@
-//! Compile VLM + robonix_msg protos from `robonix-interfaces/robonix_proto` (pre-generated).
+//! Compile VLM + robonix_msg protos and agent_chat proto.
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,13 +26,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let agent_chat_proto = workspace_root.join("proto/agent_chat.proto");
+    println!("cargo:rerun-if-changed={}", agent_chat_proto.display());
+
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
     unsafe { std::env::set_var("PROTOC", protoc) };
 
+    // VLM protos (client only)
     tonic_prost_build::configure()
         .build_server(false)
         .build_client(true)
         .compile_protos(&[vlm_proto], &[proto_root])?;
+
+    // AgentChat proto (both server and client)
+    tonic_prost_build::configure()
+        .build_server(true)
+        .build_client(true)
+        .compile_protos(
+            &[agent_chat_proto],
+            &[workspace_root.join("proto")],
+        )?;
 
     Ok(())
 }

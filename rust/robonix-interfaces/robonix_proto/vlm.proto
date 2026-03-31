@@ -18,6 +18,15 @@ message Chat_Response {
   repeated robonix.robonix_msg.ToolCall tool_calls = 2;
 }
 
+// Streaming chat: server yields text deltas, then accumulated tool calls.
+message ChatStreamEvent {
+  oneof event {
+    string text_delta = 1;
+    robonix.robonix_msg.ToolCall tool_call = 2;
+    string finish_reason = 3;
+  }
+}
+
 message Describe_Request {
   string prompt = 1;
   string image_base64 = 2;
@@ -29,6 +38,7 @@ message Describe_Response {
 
 service VlmService {
   rpc Chat (Chat_Request) returns (Chat_Response);
+  rpc ChatStream (Chat_Request) returns (stream ChatStreamEvent);
   rpc Describe (Describe_Request) returns (Describe_Response);
 }
 

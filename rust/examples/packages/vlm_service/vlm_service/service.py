@@ -31,7 +31,15 @@ from pathlib import Path
 def _ensure_proto_gen() -> None:
     d = Path(__file__).resolve().parent
     while d.parent != d:
+        pc = d / "proto_stubs"
         pg = d / "proto_gen"
+        # Prefer proto_stubs/ (stubs built with the active venv's protobuf version)
+        # over proto_gen/ which may have been generated with an incompatible newer version.
+        if pc.is_dir() and (pc / "robonix_runtime_pb2.py").exists():
+            sys.path.insert(0, str(pc))
+            if pg.is_dir():
+                sys.path.append(str(pg))
+            return
         if pg.is_dir() and (pg / "robonix_runtime_pb2.py").exists():
             sys.path.insert(0, str(pg))
             return
@@ -120,8 +128,8 @@ def main() -> None:
     )
     model = os.environ.get("VLM_MODEL", "qwen3-vl-plus")
 
-    def _openai_chat(messages, tools=None, tool_choice=None, max_tokens=0):
-        kwargs: dict = {"model": model, "messages": messages}
+    def _openai_chat(messages, tools=None, tool_choice=None, max_tokens=0, stream=False):
+        kwargs: dict = {"model": model, "messages": messages, "stream": stream}
         if tools:
             kwargs["tools"] = tools
         if tool_choice:
@@ -129,38 +137,14 @@ def main() -> None:
         if max_tokens:
             kwargs["max_tokens"] = max_tokens
         out = client.chat.completions.create(**kwargs)
+        if stream:
+            return out
         return out.choices[0]
 
     def handle_chat(request, context):
         """OpenAI-compatible chat completions proxy — forwards tools for function calling."""
-        req_messages = []
-        for m in request.messages:
-            if m.image_base64:
-                parts = []
-                if m.content:
-                    parts.append({"type": "text", "text": m.content})
-                parts.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{m.image_base64}"},
-                })
-                req_messages.append({"role": m.role, "content": parts})
-            else:
-                req_messages.append({"role": m.role, "content": m.content})
-
-        tools_list = None
-        if request.tools:
-            tools_list = []
-            for t in request.tools:
-                schema = json.loads(t.input_schema_json) if t.input_schema_json else {}
-                tools_list.append({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": schema,
-                    },
-                })
-
+        req_messages = _build_openai_messages(request)
+        tools_list = _build_openai_tools(request)
         tc_mode = request.tool_choice if request.tool_choice else None
 
         choice = _openai_chat(
@@ -193,9 +177,98 @@ def main() -> None:
         choice = _openai_chat([{"role": "user", "content": parts}], max_tokens=512)
         return vlm_pb2.Describe_Response(text=choice.message.content or "")
 
+    def _build_openai_messages(request):
+        req_messages = []
+        for m in request.messages:
+            if m.image_base64:
+                parts = []
+                if m.content:
+                    parts.append({"type": "text", "text": m.content})
+                parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{m.image_base64}"},
+                })
+                req_messages.append({"role": m.role, "content": parts})
+            else:
+                req_messages.append({"role": m.role, "content": m.content})
+        return req_messages
+
+    def _build_openai_tools(request):
+        if not request.tools:
+            return None
+        tools_list = []
+        for t in request.tools:
+            schema = json.loads(t.input_schema_json) if t.input_schema_json else {}
+            tools_list.append({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": schema,
+                },
+            })
+        return tools_list
+
+    def handle_chat_stream(request, context):
+        """Server-streaming chat: yields text deltas, then tool calls, then finish."""
+        req_messages = _build_openai_messages(request)
+        tools_list = _build_openai_tools(request)
+        tc_mode = request.tool_choice if request.tool_choice else None
+
+        stream_iter = _openai_chat(
+            req_messages,
+            tools=tools_list,
+            tool_choice=tc_mode,
+            max_tokens=request.max_tokens,
+            stream=True,
+        )
+
+        # Accumulate tool call deltas: index → {id, name, arguments}
+        tc_acc: dict[int, dict] = {}
+        finish = "stop"
+
+        for chunk in stream_iter:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            fr = chunk.choices[0].finish_reason
+
+            if delta and delta.content:
+                yield vlm_pb2.ChatStreamEvent(text_delta=delta.content)
+
+            if delta and delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tc_acc:
+                        tc_acc[idx] = {"id": "", "name": "", "arguments": ""}
+                    if tc_delta.id:
+                        tc_acc[idx]["id"] = tc_delta.id
+                    if tc_delta.function and tc_delta.function.name:
+                        tc_acc[idx]["name"] += tc_delta.function.name
+                    if tc_delta.function and tc_delta.function.arguments:
+                        tc_acc[idx]["arguments"] += tc_delta.function.arguments
+
+            if fr:
+                finish = fr
+
+        for idx in sorted(tc_acc.keys()):
+            tc = tc_acc[idx]
+            yield vlm_pb2.ChatStreamEvent(
+                tool_call=robonix_msg_pb2.ToolCall(
+                    id=tc["id"],
+                    name=tc["name"],
+                    arguments_json=tc["arguments"],
+                )
+            )
+
+        yield vlm_pb2.ChatStreamEvent(finish_reason=finish)
+
     class VlmHandler(vlm_pb2_grpc.VlmServiceServicer):
         def Chat(self, request, context):
             return handle_chat(request, context)
+
+        def ChatStream(self, request, context):
+            return handle_chat_stream(request, context)
 
         def Describe(self, request, context):
             return handle_describe(request, context)
@@ -231,6 +304,7 @@ def main() -> None:
             supported_transports=["grpc"],
             metadata_json=_iface_meta(),
             listen_port=bound_port,
+            abstract_interface_id="robonix/sys/model/vlm/chat",
         )
     )
     data_endpoint = resp.allocated_endpoint

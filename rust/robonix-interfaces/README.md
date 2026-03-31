@@ -100,6 +100,17 @@ ROS packages **`sensor_msgs`**, **`robonix_msg`**, **`prm_camera`** (streaming R
 | `robonix/prm/camera/intrinsics` | pub-sub | **output** | `lib/common_interfaces/sensor_msgs/msg/CameraInfo.msg` | `CameraInfo` |
 | `robonix/prm/camera/rgbd` | pub-sub | **output** | `lib/robonix_msg/msg/RGBD.msg` | `robonix_msg.proto` |
 
+### Zero-copy transport
+
+When `shared_memory` transport is negotiated, camera interfaces use **`robonix_msg/msg/ZeroCopyFrame.msg`** instead of `sensor_msgs/Image`. The `ZeroCopyFrame` carries a buffer handle (not pixel data), so publishing/subscribing involves only a ~128-byte descriptor. Pixel data remains in the Robonix-managed SHM region and is never serialized.
+
+| Component | Purpose |
+|-----------|---------|
+| `robonix_msg/BufferFormat` | Pixel format constants (RGB8, BGR8, NV12, DEPTH_U16, …) — shared by Rust `BufferFormat` enum and Python `rbnx_buffer.py` |
+| `robonix_msg/MemoryDomain` | Memory domain (CPU / GPU / Unified) |
+| `robonix_msg/ZeroCopyFrame` | Image-specific buffer descriptor with width/height/stride/format |
+| `robonix_msg/BufferDescriptor` | General N-dimensional buffer descriptor (tensors, point clouds, etc.) |
+
 ---
 
 ## Primitives `robonix/prm/sensor`
