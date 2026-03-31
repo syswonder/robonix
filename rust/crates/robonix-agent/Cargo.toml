@@ -22,6 +22,7 @@ log.workspace = true
 env_logger.workspace = true
 robonix-sdk.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+tokio-stream = "0.1"
 
 [build-dependencies]
 tonic-prost-build.workspace = true

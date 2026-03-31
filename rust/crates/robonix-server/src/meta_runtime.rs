@@ -61,6 +61,7 @@ struct ChannelRecord {
     provider_node_id: String,
     consumer_id: String,
     interface_name: String,
+    metadata_json: String,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -154,9 +155,9 @@ impl MetaRuntimeRegistry {
             )));
         }
         if !Self::is_catalogued_robonix_interface(&joined) {
-            return Err(Status::invalid_argument(format!(
-                "unknown robonix interface \"{joined}\" for grpc/ros2 (not in system catalog)"
-            )));
+            log::warn!(
+                "unknown robonix interface \"{joined}\" for grpc/ros2 (not in system catalog) — allowing anyway"
+            );
         }
         Ok(())
     }
@@ -515,12 +516,13 @@ impl MetaRuntimeRegistry {
                     ))
                 }
             })?;
-        // Port-based transports reuse the endpoint allocated at declare_interface.
-        // Other transports get a fresh unique name per channel.
+        // Reuse the producer's endpoint for transports that share state
+        // (grpc, mcp, shared_memory). Other transports get a fresh name.
         let endpoint = match transport.as_str() {
-            "grpc" | "mcp" => iface.allocated_endpoint.clone(),
+            "grpc" | "mcp" | "shared_memory" => iface.allocated_endpoint.clone(),
             _ => Self::allocate_endpoint_static(&transport),
         };
+        let metadata_json = iface.metadata_json.clone();
         drop(st);
 
         let channel_id = format!("ch-{}", Uuid::new_v4().simple());
@@ -531,6 +533,7 @@ impl MetaRuntimeRegistry {
             provider_node_id,
             consumer_id,
             interface_name,
+            metadata_json,
         };
 
         let mut st = self.inner.write().await;
@@ -796,6 +799,7 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
             channel_id: ch.channel_id,
             transport: ch.transport,
             endpoint: ch.endpoint,
+            metadata_json: ch.metadata_json,
         }))
     }
 

@@ -3,7 +3,10 @@ use rmcp::ServiceExt;
 use robonix_sdk::RobonixClient;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::Write;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::skills::{self, AgentSkill};
 use crate::tools;
@@ -11,8 +14,20 @@ use crate::vlm::{Message, ToolDef, VlmClient};
 
 type McpClient = rmcp::service::RunningService<rmcp::RoleClient, ()>;
 
-/// Default `QueryNodes.namespace` prefix for MCP tool providers (HAL `robonix/prm/...`).
-/// Override with `ROBONIX_MCP_NAMESPACE_PREFIX` (empty string = no prefix filter).
+pub enum ChatEvent {
+    TextChunk(String),
+    ToolCall {
+        round: u32,
+        tool_name: String,
+        arguments: String,
+    },
+    ToolResult {
+        round: u32,
+        tool_name: String,
+        result: String,
+    },
+}
+
 fn mcp_namespace_prefix() -> String {
     match std::env::var("ROBONIX_MCP_NAMESPACE_PREFIX") {
         Ok(s) => s,
@@ -25,13 +40,7 @@ const MAX_REPEATED_CALLS: usize = 3;
 const MAX_CONSECUTIVE_EXPLORE: usize = 4;
 const EXPLORE_TOOLS: &[&str] = &["list_dir", "read_file"];
 
-/// Max tool-call rounds per single user input (prevents runaway loops).
-/// Override with `ROBONIX_AGENT_MAX_TOOL_ROUNDS`.
 const DEFAULT_MAX_TOOL_ROUNDS: usize = 64;
-
-/// After any tool round, if the model replies with **text only** (no `tool_calls`), nudge it
-/// to keep calling tools until it gives an **explicit** completion phrase (bounded per user line).
-/// `ROBONIX_AGENT_TOOL_PERSIST_NUDGES` (default 5), `0` disables.
 const DEFAULT_TOOL_PERSIST_NUDGES: u8 = 5;
 
 fn max_tool_persist_nudges() -> u8 {
@@ -58,7 +67,6 @@ fn fold_smart_quotes(s: &str) -> String {
         .collect()
 }
 
-/// Only skip the "keep calling tools" nudge when the model clearly says the robot task is done.
 fn is_explicit_robot_task_done(content: &str) -> bool {
     let t = fold_smart_quotes(content.trim());
     if t.is_empty() {
@@ -83,210 +91,253 @@ fn is_explicit_robot_task_done(content: &str) -> bool {
         || (l.starts_with("complete.") && t.len() < 120)
 }
 
-pub async fn run_react_loop(sdk: &mut RobonixClient, mut vlm: VlmClient) -> Result<()> {
-    let mut history: Vec<Message> = Vec::new();
+/// Run a single user turn of the ReAct loop.
+/// Returns the final agent text response.
+/// Calls `on_event` for each tool call/result so the caller can stream them.
+pub async fn run_single_turn<F>(
+    sdk: &Arc<Mutex<RobonixClient>>,
+    vlm: &Arc<Mutex<VlmClient>>,
+    history: &Arc<Mutex<Vec<Message>>>,
+    user_input: &str,
+    on_event: F,
+) -> Result<String>
+where
+    F: Fn(ChatEvent) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
+{
+    let mut sdk = sdk.lock().await;
+    let mut vlm = vlm.lock().await;
+    let mut history = history.lock().await;
 
-    loop {
-        eprint!("You: ");
-        std::io::stderr().flush()?;
-        let input = read_line()?;
-        if input.is_empty() || input == "quit" {
-            // Trigger memory compaction at session end if available
-            let mcp_tools_for_quit = load_mcp_tools(sdk).await.unwrap_or_default();
-            if mcp_tools_for_quit.contains_key("compact_memory") {
-                log::info!("[mcp] Compacting memory session before exit...");
-                let _ = execute_mcp_tool(sdk, &mcp_tools_for_quit, "compact_memory", "{}").await;
-            }
-            break;
+    if user_input.trim() == "quit" {
+        // Trigger memory compaction at session end if available
+        let mcp_tools_for_quit = load_mcp_tools(&mut sdk).await.unwrap_or_default();
+        if mcp_tools_for_quit.contains_key("compact_memory") {
+            log::info!("[mcp] Compacting memory session before exit...");
+            let _ = execute_mcp_tool(&mut sdk, &mcp_tools_for_quit, "compact_memory", "{}").await;
         }
+        return Ok(String::new());
+    }
 
-        // Re-discover MCP tools and skills every turn: HAL nodes (e.g. tiago_bridge in Docker)
-        // often register long after the agent process starts (Webots/Nav2 warmup).
-        let mcp_tools = load_mcp_tools(sdk).await?;
-        let merged_skills = match skills::load_merged_skills(sdk).await {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("failed to load merged skills: {e:#}");
-                Vec::new()
-            }
-        };
-        let mut memory_context = String::new();
-        // Do not trigger silent memory recall for simple casual greetings or meta questions
-        let is_casual = input.trim().to_lowercase();
-        let skip_memory = is_casual == "hi" || is_casual == "hello" || is_casual.starts_with("who are you") || is_casual == "你是谁" || is_casual == "你好";
-        
-        if !skip_memory && mcp_tools.contains_key("search_memory") {
-            let args = serde_json::json!({
-                "query": input
-            });
-            let args_str = args.to_string();
-            if let Ok(result) = execute_mcp_tool(sdk, &mcp_tools, "search_memory", &args_str).await {
-                if !result.contains("No relevant memories found") {
-                    memory_context = result;
-                }
-            }
+    let mcp_tools = load_mcp_tools(&mut sdk).await?;
+    let merged_skills = match skills::load_merged_skills(&mut sdk).await {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("failed to load merged skills: {e:#}");
+            Vec::new()
         }
+    };
 
-        let mcp_tool_defs = build_mcp_tool_defs(&mcp_tools);
-        let mut all_tools = tools::builtin_tool_defs();
-        all_tools.extend(mcp_tool_defs);
-        let soul = skills::load_agent_soul();
-        let system_prompt = build_system_prompt(soul.as_deref(), &mcp_tools, &merged_skills, &memory_context);
-        log::info!(
-            "tools for this turn: {} total ({} builtin + {} mcp), skills={}",
-            all_tools.len(),
-            tools::BUILTIN_NAMES.len(),
-            mcp_tools.len(),
-            merged_skills.len()
-        );
-
-        history.push(Message::user(&input));
-        trim_history(&mut history);
-
-        let mut round = 0;
-        let mut last_call_sig = String::new();
-        let mut repeat_count: usize = 0;
-        let mut explore_streak: usize = 0;
-        let mut tool_persist_nudges: u8 = 0;
-        let max_persist = max_tool_persist_nudges();
-        let max_rounds = max_tool_rounds();
-        loop {
-            let mut messages = vec![Message::system(&system_prompt)];
-            messages.extend(history.clone());
-
-            let (content, tool_calls) = vlm.chat(&messages, &all_tools).await?;
-
-            if tool_calls.is_empty() {
-                let text = content.unwrap_or_default();
-                let trimmed = text.trim();
-
-                // Physical robot tasks should not stop mid-task. If the model returns no `tool_calls`
-                // after at least one tool round (including empty text), nudge it to continue chaining
-                // tools until an explicit completion phrase.
-                let need_tool_calls = trimmed.is_empty() || !is_explicit_robot_task_done(trimmed);
-                if max_persist > 0
-                    && round > 0
-                    && tool_persist_nudges < max_persist
-                    && need_tool_calls
-                {
-                    tool_persist_nudges += 1;
-                    log::info!(
-                        "[react] no tool_calls after tools (round {}, empty_content={}); nudging ({}/{})",
-                        round,
-                        trimmed.is_empty(),
-                        tool_persist_nudges,
-                        max_persist
-                    );
-                    if !trimmed.is_empty() {
-                        history.push(Message::assistant(&text));
-                    }
-                    history.push(Message::user(
-                        "Continue with **tool_calls only** next. Chain MCP tools in tight sense–act loops \
-                         until the user goal is met or you must report a blocking error. Do not stop after \
-                         one motion or one image. Prefer batched tool_calls (e.g. get_robot_pose + \
-                         get_camera_image together) when supported. When truly finished, start with \
-                         `Task complete:` or `Goal reached:`. If your assistant text was empty, still emit tool_calls.",
-                    ));
-                    trim_history(&mut history);
-                    continue;
-                }
-                let out = if trimmed.is_empty() {
-                    if round > 0 {
-                        log::warn!("VLM still returned no text after nudge (or no nudge applied)");
-                    }
-                    "(The model returned no text. Say \"continue\" or rephrase your request.)"
-                        .to_string()
-                } else {
-                    text
-                };
-                println!("Agent: {out}");
-                history.push(Message::assistant(&out));
-                break;
-            }
-
-            round += 1;
-            if round > max_rounds {
-                let msg = format!(
-                    "(max tool-call rounds reached: {max_rounds}; set ROBONIX_AGENT_MAX_TOOL_ROUNDS to raise, or say continue.)"
-                );
-                eprintln!("[agent] {msg}");
-                history.push(Message::assistant(&msg));
-                break;
-            }
-
-            // --- Guard 1: identical tool calls repeated consecutively ---
-            let call_sig = tool_calls
-                .iter()
-                .map(|tc| format!("{}:{}", tc.function.name, tc.function.arguments))
-                .collect::<Vec<_>>()
-                .join("|");
-            if call_sig == last_call_sig {
-                repeat_count += 1;
-                if repeat_count >= MAX_REPEATED_CALLS {
-                    let all_move_base = tool_calls
-                        .iter()
-                        .all(|tc| tc.function.name.as_str() == "move_base");
-                    if all_move_base {
-                        // Common failure mode for physical skills: the model keeps issuing identical
-                        // motions without sensing. Don't stop; force a sense step instead.
-                        let msg = "(repeated identical move_base calls detected; insert get_robot_pose + get_camera_image before any further motion)".to_string();
-                        eprintln!("[agent] {msg}");
-                        history.push(Message::user(&msg));
-                        trim_history(&mut history);
-                        last_call_sig.clear();
-                        repeat_count = 0;
-                        continue;
-                    } else {
-                        let msg = format!(
-                            "(same tool call repeated {} times, stopping to avoid infinite loop)",
-                            repeat_count + 1
-                        );
-                        eprintln!("[agent] {msg}");
-                        history.push(Message::assistant(&msg));
-                        break;
-                    }
-                }
-            } else {
-                last_call_sig = call_sig;
-                repeat_count = 0;
-            }
-
-            // --- Guard 2: consecutive exploration tools (list_dir/read_file with varying args) ---
-            let all_explore = tool_calls
-                .iter()
-                .all(|tc| EXPLORE_TOOLS.contains(&tc.function.name.as_str()));
-            if all_explore {
-                explore_streak += 1;
-                if explore_streak >= MAX_CONSECUTIVE_EXPLORE {
-                    let msg = format!(
-                        "(filesystem exploration repeated {} rounds without progress, stopping — \
-                        please tell the user what you have found so far)",
-                        explore_streak
-                    );
-                    eprintln!("[agent] {msg}");
-                    history.push(Message::tool_result(&tool_calls[0].id, &msg));
-                    continue;
-                }
-            } else {
-                explore_streak = 0;
-            }
-
-            history.push(Message::assistant_tool_calls(tool_calls.clone()));
-            for tc in &tool_calls {
-                log::info!(
-                    "[round {round}] tool: {}({})",
-                    tc.function.name,
-                    tc.function.arguments
-                );
-                let result =
-                    dispatch_tool(sdk, &mcp_tools, &tc.function.name, &tc.function.arguments)
-                        .await?;
-                log::info!("[round {round}] result: {}", truncate_log(&result, 200));
-                history.push(extract_image_message(&tc.id, &result));
+    let mut memory_context = String::new();
+    let is_casual = user_input.trim().to_lowercase();
+    let skip_memory = is_casual == "hi" || is_casual == "hello" || is_casual.starts_with("who are you") || is_casual == "你是谁" || is_casual == "你好";
+    
+    if !skip_memory && mcp_tools.contains_key("search_memory") {
+        let args = serde_json::json!({
+            "query": user_input
+        });
+        let args_str = args.to_string();
+        if let Ok(result) = execute_mcp_tool(&mut sdk, &mcp_tools, "search_memory", &args_str).await {
+            if !result.contains("No relevant memories found") {
+                memory_context = result;
             }
         }
     }
-    Ok(())
+
+    let mcp_tool_defs = build_mcp_tool_defs(&mcp_tools);
+    let mut all_tools = tools::builtin_tool_defs();
+    all_tools.extend(mcp_tool_defs);
+    let soul = skills::load_agent_soul();
+    let system_prompt = build_system_prompt(soul.as_deref(), &mcp_tools, &merged_skills, &memory_context);
+    log::info!(
+        "tools for this turn: {} total ({} builtin + {} mcp), skills={}",
+        all_tools.len(),
+        tools::BUILTIN_NAMES.len(),
+        mcp_tools.len(),
+        merged_skills.len()
+    );
+
+    history.push(Message::user(user_input));
+    trim_history(&mut history);
+
+    let mut round: u32 = 0;
+    let mut last_call_sig = String::new();
+    let mut repeat_count: usize = 0;
+    let mut explore_streak: usize = 0;
+    let mut tool_persist_nudges: u8 = 0;
+    let max_persist = max_tool_persist_nudges();
+    let max_rounds = max_tool_rounds();
+
+    loop {
+        let mut messages = vec![Message::system(&system_prompt)];
+        messages.extend(history.clone());
+
+        let (content, tool_calls) = match vlm.chat_stream(&messages, &all_tools).await {
+            Ok(mut stream) => {
+                let mut full_text = String::new();
+                let mut tool_calls = Vec::new();
+                while let Some(event) = stream
+                    .message()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("VLM stream error: {e}"))?
+                {
+                    use crate::vlm::VlmStreamItem;
+                    match VlmClient::parse_stream_event(event) {
+                        VlmStreamItem::TextDelta(delta) => {
+                            on_event(ChatEvent::TextChunk(delta.clone())).await;
+                            full_text.push_str(&delta);
+                        }
+                        VlmStreamItem::ToolCall(tc) => {
+                            tool_calls.push(tc);
+                        }
+                        VlmStreamItem::Finish(_) => {}
+                    }
+                }
+                let content = if full_text.is_empty() {
+                    None
+                } else {
+                    Some(full_text)
+                };
+                (content, tool_calls)
+            }
+            Err(e) => {
+                log::warn!("ChatStream failed ({e:#}), falling back to unary Chat");
+                vlm.chat(&messages, &all_tools).await?
+            }
+        };
+
+        if tool_calls.is_empty() {
+            let text = content.unwrap_or_default();
+            let trimmed = text.trim();
+
+            let need_tool_calls = trimmed.is_empty() || !is_explicit_robot_task_done(trimmed);
+            if max_persist > 0
+                && round > 0
+                && tool_persist_nudges < max_persist
+                && need_tool_calls
+            {
+                tool_persist_nudges += 1;
+                log::info!(
+                    "[react] no tool_calls after tools (round {}, empty_content={}); nudging ({}/{})",
+                    round,
+                    trimmed.is_empty(),
+                    tool_persist_nudges,
+                    max_persist
+                );
+                if !trimmed.is_empty() {
+                    history.push(Message::assistant(&text));
+                }
+                history.push(Message::user(
+                    "Continue with **tool_calls only** next. Chain MCP tools in tight sense–act loops \
+                     until the user goal is met or you must report a blocking error. Do not stop after \
+                     one motion or one image. Prefer batched tool_calls (e.g. get_robot_pose + \
+                     get_camera_image together) when supported. When truly finished, start with \
+                     `Task complete:` or `Goal reached:`. If your assistant text was empty, still emit tool_calls.",
+                ));
+                trim_history(&mut history);
+                continue;
+            }
+            let out = if trimmed.is_empty() {
+                if round > 0 {
+                    log::warn!("VLM still returned no text after nudge (or no nudge applied)");
+                }
+                "(The model returned no text. Say \"continue\" or rephrase your request.)"
+                    .to_string()
+            } else {
+                text
+            };
+            history.push(Message::assistant(&out));
+            return Ok(out);
+        }
+
+        round += 1;
+        if round > max_rounds as u32 {
+            let msg = format!(
+                "(max tool-call rounds reached: {max_rounds}; set ROBONIX_AGENT_MAX_TOOL_ROUNDS to raise, or say continue.)"
+            );
+            history.push(Message::assistant(&msg));
+            return Ok(msg);
+        }
+
+        let call_sig = tool_calls
+            .iter()
+            .map(|tc| format!("{}:{}", tc.function.name, tc.function.arguments))
+            .collect::<Vec<_>>()
+            .join("|");
+        if call_sig == last_call_sig {
+            repeat_count += 1;
+            if repeat_count >= MAX_REPEATED_CALLS {
+                let all_move_base = tool_calls
+                    .iter()
+                    .all(|tc| tc.function.name.as_str() == "move_base");
+                if all_move_base {
+                    let msg = "(repeated identical move_base calls detected; insert get_robot_pose + get_camera_image before any further motion)".to_string();
+                    history.push(Message::user(&msg));
+                    trim_history(&mut history);
+                    last_call_sig.clear();
+                    repeat_count = 0;
+                    continue;
+                } else {
+                    let msg = format!(
+                        "(same tool call repeated {} times, stopping to avoid infinite loop)",
+                        repeat_count + 1
+                    );
+                    history.push(Message::assistant(&msg));
+                    return Ok(msg);
+                }
+            }
+        } else {
+            last_call_sig = call_sig;
+            repeat_count = 0;
+        }
+
+        let all_explore = tool_calls
+            .iter()
+            .all(|tc| EXPLORE_TOOLS.contains(&tc.function.name.as_str()));
+        if all_explore {
+            explore_streak += 1;
+            if explore_streak >= MAX_CONSECUTIVE_EXPLORE {
+                let msg = format!(
+                    "(filesystem exploration repeated {} rounds without progress, stopping — \
+                    please tell the user what you have found so far)",
+                    explore_streak
+                );
+                history.push(Message::tool_result(&tool_calls[0].id, &msg));
+                continue;
+            }
+        } else {
+            explore_streak = 0;
+        }
+
+        history.push(Message::assistant_tool_calls(tool_calls.clone()));
+        for tc in &tool_calls {
+            log::info!(
+                "[round {round}] tool: {}({})",
+                tc.function.name,
+                tc.function.arguments
+            );
+
+            on_event(ChatEvent::ToolCall {
+                round,
+                tool_name: tc.function.name.clone(),
+                arguments: tc.function.arguments.clone(),
+            })
+            .await;
+
+            let result =
+                dispatch_tool(&mut sdk, &mcp_tools, &tc.function.name, &tc.function.arguments)
+                    .await?;
+            log::info!("[round {round}] result: {}", truncate_log(&result, 200));
+
+            on_event(ChatEvent::ToolResult {
+                round,
+                tool_name: tc.function.name.clone(),
+                result: truncate_log(&result, 500),
+            })
+            .await;
+
+            history.push(extract_image_message(&tc.id, &result));
+        }
+    }
 }
 
 fn trim_history(history: &mut Vec<Message>) {
@@ -309,8 +360,6 @@ fn truncate_log(s: &str, max: usize) -> String {
     }
 }
 
-/// If the tool result JSON contains `image_base64`, extract it into a dedicated
-/// field so the VLM receives it as a proper image (not opaque text).
 fn extract_image_message(tool_call_id: &str, result: &str) -> Message {
     if let Ok(val) = serde_json::from_str::<Value>(result) {
         if let Some(img) = val.get("image_base64").and_then(|v| v.as_str()) {
@@ -491,14 +540,6 @@ fn build_mcp_tool_defs(mcp_tools: &HashMap<String, McpToolSpec>) -> Vec<ToolDef>
         .collect()
 }
 
-fn read_line() -> Result<String> {
-    let mut buf = String::new();
-    std::io::stdin().read_line(&mut buf)?;
-    Ok(buf.trim().to_string())
-}
-
-// ── MCP tool execution via rmcp client ──────────────────────────────────────
-
 async fn execute_mcp_tool(
     _sdk: &mut RobonixClient,
     mcp_tools: &HashMap<String, McpToolSpec>,
@@ -575,7 +616,6 @@ async fn connect_mcp(endpoint: &str) -> Result<McpClient> {
     } else {
         format!("http://{endpoint}")
     };
-    // FastMCP (Python SDK) serves Streamable HTTP at the `/mcp` path by default.
     let uri = if base.contains("/mcp") {
         base
     } else {
@@ -591,8 +631,6 @@ async fn connect_mcp(endpoint: &str) -> Result<McpClient> {
         .map_err(|e| anyhow::anyhow!("MCP HTTP connect to '{uri}' failed: {e}"))?;
     Ok(client)
 }
-
-// ── MCP tool discovery ──────────────────────────────────────────────────────
 
 async fn load_mcp_tools(sdk: &mut RobonixClient) -> Result<HashMap<String, McpToolSpec>> {
     let ns = mcp_namespace_prefix();
