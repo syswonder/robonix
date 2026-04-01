@@ -7,10 +7,11 @@
 #   ./examples/run.sh
 #
 # Env:
-#   START_VLM_SERVICE=1|0     (default 1) — rbnx validate/build/start packages/vlm_service
+#   START_VLM_SERVICE=1|0   (default 1) — rbnx validate/build/start packages/vlm_service
 #   START_SIM_STACK=1|0     (default 1) — rbnx validate/build/start packages/tiago_sim_stack (Docker + Webots + Nav2 + MCP bridge)
 #   START_AGENT=1|0         (default 1)
 #   SMOKE_USE_EXISTING_SERVER=1 — do not start robonix-server
+#   START_MEMSEARCH=1|0     (default 1) — rbnx validate/build/start packages/memsearch_service
 
 set -euo pipefail
 
