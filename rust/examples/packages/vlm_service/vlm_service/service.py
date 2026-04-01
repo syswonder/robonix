@@ -3,7 +3,10 @@
 """VLM service: registers with robonix-server, serves chat completions over gRPC.
 
 The agent discovers this service via the control plane, negotiates a channel,
-and calls /vlm.Vlm/Chat with an OpenAI-compatible JSON request.
+then calls `VlmService.ChatStream` (server streaming) when available, or falls
+back to unary `VlmService.Chat`. Both are defined in
+`robonix-interfaces/robonix_proto/vlm.proto` (generated from ROS IDL under
+`lib/vlm/`).
 
 Required environment variables:
   VLM_API_KEY       API key for the VLM/LLM provider
@@ -96,6 +99,9 @@ def _iface_meta() -> str:
                 "rpc_method": "/robonix.vlm.VlmService/Chat",
                 "request_type": "Chat_Request",
                 "response_type": "Chat_Response",
+                "streaming_rpc_method": "/robonix.vlm.VlmService/ChatStream",
+                "stream_request_type": "ChatStream_Request",
+                "stream_event_type": "ChatStreamEvent",
             },
         }
     )

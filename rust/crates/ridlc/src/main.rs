@@ -6,11 +6,11 @@ use clap::Parser;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
-use ridlc::codegen::{msg_parser, proto_gen};
+use ridlc::codegen::{msg_parser, proto_gen, python_gen};
 
 #[derive(Parser)]
 #[command(name = "ridlc")]
-#[command(about = "ROS IDL codegen: generate .proto from ROS .msg/.srv definitions")]
+    #[command(about = "ROS IDL codegen: generate .proto / Python ctypes from ROS .msg/.srv definitions")]
 struct Args {
     /// Type search path for resolving ROS IDL packages (e.g. -I path/to/robonix-interfaces/lib)
     #[arg(short = 'I', long = "include", number_of_values = 1)]
@@ -21,6 +21,7 @@ struct Args {
     out: PathBuf,
 
     /// Target language (currently only "proto" is supported)
+    /// Target language: "proto" (protobuf) or "python" (ctypes for iceoryx2)
     #[arg(long = "lang", default_value = "proto")]
     lang: String,
 }
@@ -44,10 +45,9 @@ fn main() -> Result<()> {
     }
 
     match args.lang.as_str() {
-        "proto" => {}
+        "proto" | "python" => {}
         other => bail!(
-            "[ridlc] unsupported --lang '{other}'. Currently only 'proto' is supported.\n\
-             (Python and Rust codegen from ROS IDL are planned.)"
+            "[ridlc] unsupported --lang '{other}'. Supported: 'proto', 'python'."
         ),
     }
 
@@ -70,16 +70,29 @@ fn main() -> Result<()> {
         pkgs.insert(&s.package);
     }
 
-    proto_gen::generate(&resolver, &args.out)?;
-
-    eprintln!(
-        "{} generated proto: {} packages, {} msgs, {} srvs -> {}",
-        ridlc_prefix(),
-        pkgs.len(),
-        specs.len(),
-        srvs.len(),
-        args.out.display()
-    );
+    match args.lang.as_str() {
+        "python" => {
+            python_gen::generate(&resolver, &args.out)?;
+            eprintln!(
+                "{} generated python ctypes: {} packages, {} msgs -> {}",
+                ridlc_prefix(),
+                pkgs.len(),
+                specs.len(),
+                args.out.display()
+            );
+        }
+        _ => {
+            proto_gen::generate(&resolver, &args.out)?;
+            eprintln!(
+                "{} generated proto: {} packages, {} msgs, {} srvs -> {}",
+                ridlc_prefix(),
+                pkgs.len(),
+                specs.len(),
+                srvs.len(),
+                args.out.display()
+            );
+        }
+    }
 
     Ok(())
 }

@@ -1,0 +1,9 @@
+# @robonix.grpc stream_server vlm/msg/ChatStreamEvent
+# Server-streaming VLM chat. Request shape matches `Chat.srv`; stream elements are `vlm/ChatStreamEvent`.
+robonix_msg/ChatMessage[] messages
+robonix_msg/ToolSpec[] tools
+string tool_choice
+int32 max_tokens
+---
+# Unused on the gRPC wire; retained for ROS IDL completeness and tooling.
+bool unused

@@ -1,4 +1,7 @@
 //! VLM gRPC client using protos from `robonix-interfaces/robonix_proto` (ridlc → `vlm.proto` + deps).
+//!
+//! Streaming uses `ChatStreamRequest` / `ChatStreamEvent` (`VlmService.ChatStream`); unary chat uses
+//! `ChatRequest` / `ChatResponse` (`VlmService.Chat`).
 
 use anyhow::{Context, Result};
 use robonix_sdk::QueryNodesOpts;
@@ -31,7 +34,7 @@ mod robonix {
 
 use robonix::robonix_msg::{ChatMessage as PbChatMessage, ToolSpec as PbToolSpec};
 use robonix::vlm::vlm_service_client::VlmServiceClient;
-use robonix::vlm::{ChatRequest, ChatResponse, ChatStreamEvent};
+use robonix::vlm::{ChatRequest, ChatResponse, ChatStreamEvent, ChatStreamRequest};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Message {
@@ -293,7 +296,7 @@ impl VlmClient {
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<(Option<String>, Vec<ToolCall>)> {
-        let req = Self::build_request(messages, tools);
+        let req = Self::build_chat_request(messages, tools);
 
         let resp: tonic::Response<ChatResponse> =
             self.inner
@@ -331,7 +334,7 @@ impl VlmClient {
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<tonic::Streaming<ChatStreamEvent>> {
-        let req = Self::build_request(messages, tools);
+        let req = Self::build_chat_stream_request(messages, tools);
         let resp = self
             .inner
             .chat_stream(tonic::Request::new(req))
@@ -342,51 +345,66 @@ impl VlmClient {
 
     /// Parse a stream event into typed enum for convenience.
     pub fn parse_stream_event(event: ChatStreamEvent) -> VlmStreamItem {
-        match event.event {
-            Some(robonix::vlm::chat_stream_event::Event::TextDelta(d)) => {
-                VlmStreamItem::TextDelta(d)
-            }
-            Some(robonix::vlm::chat_stream_event::Event::ToolCall(tc)) => {
-                VlmStreamItem::ToolCall(ToolCall {
-                    id: tc.id,
-                    kind: "function".to_string(),
-                    function: FnCall {
-                        name: tc.name,
-                        arguments: tc.arguments_json,
-                    },
-                })
-            }
-            Some(robonix::vlm::chat_stream_event::Event::FinishReason(_)) => {
-                VlmStreamItem::Finish(())
-            }
-            None => VlmStreamItem::Finish(()),
+        if !event.text_delta.is_empty() {
+            VlmStreamItem::TextDelta(event.text_delta)
+        } else if let Some(tc) = event.tool_call {
+            VlmStreamItem::ToolCall(ToolCall {
+                id: tc.id,
+                kind: "function".to_string(),
+                function: FnCall {
+                    name: tc.name,
+                    arguments: tc.arguments_json,
+                },
+            })
+        } else {
+            VlmStreamItem::Finish(())
         }
     }
 
-    fn build_request(messages: &[Message], tools: &[ToolDef]) -> ChatRequest {
+    fn build_chat_request(messages: &[Message], tools: &[ToolDef]) -> ChatRequest {
         ChatRequest {
-            messages: messages
-                .iter()
-                .map(|m| PbChatMessage {
-                    role: m.role.clone(),
-                    content: m.content.clone().unwrap_or_default(),
-                    image_base64: m.image_base64.clone().unwrap_or_default(),
-                })
-                .collect(),
-            tools: tools
-                .iter()
-                .map(|t| PbToolSpec {
-                    name: t.function.name.clone(),
-                    description: t.function.description.clone(),
-                    input_schema_json: t.function.parameters.to_string(),
-                })
-                .collect(),
-            tool_choice: if tools.is_empty() {
-                String::new()
-            } else {
-                "auto".to_string()
-            },
+            messages: Self::build_chat_messages(messages),
+            tools: Self::build_tool_specs(tools),
+            tool_choice: Self::build_tool_choice(tools),
             max_tokens: 0,
+        }
+    }
+
+    fn build_chat_stream_request(messages: &[Message], tools: &[ToolDef]) -> ChatStreamRequest {
+        ChatStreamRequest {
+            messages: Self::build_chat_messages(messages),
+            tools: Self::build_tool_specs(tools),
+            tool_choice: Self::build_tool_choice(tools),
+            max_tokens: 0,
+        }
+    }
+
+    fn build_chat_messages(messages: &[Message]) -> Vec<PbChatMessage> {
+        messages
+            .iter()
+            .map(|m| PbChatMessage {
+                role: m.role.clone(),
+                content: m.content.clone().unwrap_or_default(),
+                image_base64: m.image_base64.clone().unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    fn build_tool_specs(tools: &[ToolDef]) -> Vec<PbToolSpec> {
+        tools.iter()
+            .map(|t| PbToolSpec {
+                name: t.function.name.clone(),
+                description: t.function.description.clone(),
+                input_schema_json: t.function.parameters.to_string(),
+            })
+            .collect()
+    }
+
+    fn build_tool_choice(tools: &[ToolDef]) -> String {
+        if tools.is_empty() {
+            String::new()
+        } else {
+            "auto".to_string()
         }
     }
 }

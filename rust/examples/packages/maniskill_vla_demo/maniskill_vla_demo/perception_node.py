@@ -58,7 +58,11 @@ from maniskill_vla_demo.yolo_weights import resolve_yolo_world_weights  # noqa: 
 
 mcp = FastMCP("perception")
 
+_IOX2_TRANSPORT = os.environ.get("OBS_TRANSPORT", "grpc").strip().lower() == "iceoryx2"
+
 _env_stub: env_pb_grpc.EnvDataServiceStub | None = None
+_iox2_rgb_sub = None
+_iox2_dep_sub = None
 _detector = None
 _processor = None
 _detector_use_fp16 = False
@@ -359,28 +363,53 @@ def _detect(rgb: np.ndarray, text_prompt: str, depth: np.ndarray | None = None,
 # ── MCP tool ─────────────────────────────────────────────────────────────────
 
 
+def _get_obs_snapshot():
+    """Return (rgb_hwc_uint8, depth_hw_f32_or_None, intrinsics_or_None)."""
+    if _IOX2_TRANSPORT and _iox2_rgb_sub is not None:
+        rgb_sample = _iox2_rgb_sub.receive()
+        if rgb_sample is None:
+            return None, None, None
+        rf = rgb_sample.payload().contents
+        n_rgb = rf.width * rf.height * rf.channels
+        rgb = np.frombuffer(bytes(rf.pixels[:n_rgb]), dtype=np.uint8).reshape(
+            rf.height, rf.width, rf.channels
+        )
+        depth = None
+        if _iox2_dep_sub is not None:
+            dep_sample = _iox2_dep_sub.receive()
+            if dep_sample is not None:
+                df = dep_sample.payload().contents
+                n_dep = df.width * df.height * 4
+                depth = np.frombuffer(bytes(df.pixels[:n_dep]), dtype=np.float32).reshape(
+                    df.height, df.width
+                )
+        return rgb, depth, None  # no intrinsics in iceoryx2 path
+
+    if _env_stub is None:
+        return None, None, None
+    try:
+        obs = _env_stub.GetObs(env_pb.Empty())
+    except grpc.RpcError as e:
+        print(f"[perception] GetObs error: {e.details()}", file=sys.stderr)
+        return None, None, None
+    rgb = np.frombuffer(obs.rgb, dtype=np.uint8).reshape(obs.height, obs.width, 3)
+    depth = None
+    if obs.depth:
+        depth = np.frombuffer(obs.depth, dtype=np.float32).reshape(obs.height, obs.width)
+    intrinsics = None
+    if obs.fx > 0 and obs.fy > 0:
+        intrinsics = (obs.fx, obs.fy, obs.cx, obs.cy)
+    return rgb, depth, intrinsics
+
+
 @mcp.tool()
 def detect_objects(text_prompt: str, threshold: float = 0.25) -> str:
     """Detect objects matching text_prompt in current env camera view.
     text_prompt: dot-separated labels, e.g. 'red apple . table . cup'.
     Returns JSON list of {label, bbox, score, center_xyz}."""
-    if _env_stub is None:
-        return json.dumps({"error": "env gRPC connection not established"})
-
-    try:
-        obs = _env_stub.GetObs(env_pb.Empty())
-    except grpc.RpcError as e:
-        return json.dumps({"error": f"env GetObs failed: {e.details()}"})
-
-    rgb = np.frombuffer(obs.rgb, dtype=np.uint8).reshape(obs.height, obs.width, 3)
-    depth = None
-    if obs.depth:
-        depth = np.frombuffer(obs.depth, dtype=np.float32).reshape(obs.height, obs.width)
-
-    intrinsics = None
-    if obs.fx > 0 and obs.fy > 0:
-        intrinsics = (obs.fx, obs.fy, obs.cx, obs.cy)
-
+    rgb, depth, intrinsics = _get_obs_snapshot()
+    if rgb is None:
+        return json.dumps({"error": "no observation available (transport not ready)"})
     dets = _detect(rgb, text_prompt, depth, threshold, intrinsics)
     return json.dumps(dets)
 
@@ -447,7 +476,7 @@ def _discover_env_grpc(stub, node_id: str) -> str:
 
 
 def main() -> None:
-    global _env_stub
+    global _env_stub, _iox2_rgb_sub, _iox2_dep_sub
 
     _load_detector()
 
@@ -471,16 +500,40 @@ def main() -> None:
         listen_port=mcp_port,
     ))
 
-    # Start MCP HTTP + heartbeat BEFORE env discovery (so agent can connect)
     threading.Thread(target=_heartbeat_loop, args=(stub, node_id), daemon=True).start()
     threading.Thread(target=_start_mcp_http, args=(mcp_port,), daemon=True).start()
     print(f"[perception] MCP :{mcp_port} (serving)", file=sys.stderr)
 
-    print("[perception] discovering env gRPC endpoint...", file=sys.stderr)
-    env_endpoint = _discover_env_grpc(stub, node_id)
-    env_channel = grpc.insecure_channel(env_endpoint)
-    _env_stub = env_pb_grpc.EnvDataServiceStub(env_channel)
-    print(f"[perception] connected to env gRPC at {env_endpoint}", file=sys.stderr)
+    if _IOX2_TRANSPORT:
+        try:
+            import iceoryx2 as iox2
+            from maniskill_vla_demo.iox2_types import (
+                RgbCameraFrame, DepthCameraFrame,
+                IOX2_SERVICE_RGB, IOX2_SERVICE_DEPTH,
+            )
+            _iox2_node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
+            _iox2_rgb_sub = (
+                _iox2_node.service_builder(iox2.ServiceName.new(IOX2_SERVICE_RGB))
+                          .publish_subscribe(RgbCameraFrame)
+                          .open_or_create()
+                          .subscriber_builder().create()
+            )
+            _iox2_dep_sub = (
+                _iox2_node.service_builder(iox2.ServiceName.new(IOX2_SERVICE_DEPTH))
+                          .publish_subscribe(DepthCameraFrame)
+                          .open_or_create()
+                          .subscriber_builder().create()
+            )
+            print("[perception] iceoryx2 subscriber ready", file=sys.stderr)
+        except Exception as exc:
+            print(f"[perception] iceoryx2 init failed, falling back to gRPC: {exc}", file=sys.stderr)
+    else:
+        print("[perception] discovering env gRPC endpoint...", file=sys.stderr)
+        env_endpoint = _discover_env_grpc(stub, node_id)
+        env_channel = grpc.insecure_channel(env_endpoint)
+        _env_stub = env_pb_grpc.EnvDataServiceStub(env_channel)
+        print(f"[perception] connected to env gRPC at {env_endpoint}", file=sys.stderr)
+
     print("[perception] ready", file=sys.stderr)
 
     try:

@@ -55,6 +55,10 @@ import maniskill_env_pb2 as env_pb  # noqa: E402
 import maniskill_env_pb2_grpc as env_pb_grpc  # noqa: E402
 from maniskill_vla_demo.yolo_weights import resolve_yolo_world_weights  # noqa: E402
 
+# ── Transport selection ───────────────────────────────────────────────────────
+
+_IOX2_TRANSPORT = os.environ.get("OBS_TRANSPORT", "grpc").strip().lower() == "iceoryx2"
+
 
 def _discover_env_grpc(robonix_stub) -> str:
     for attempt in range(60):
@@ -440,6 +444,7 @@ class RealtimeDetector:
 
 
 def main() -> None:
+    global _IOX2_TRANSPORT
     parser = argparse.ArgumentParser(description="Rerun visualizer for maniskill_vla_demo")
     parser.add_argument("--detect-query",
                         default=os.environ.get("VIZ_DETECT_QUERY", "object . cup . box"),
@@ -474,6 +479,17 @@ def main() -> None:
         #  Left column  – live camera feeds (RGB, depth)
         #  Middle column – object detections + joint telemetry
         #  Right column  – incremental 3-D point cloud (depth back-projection)
+
+        # Build 3-D view; try to set white background (Rerun ≥ 0.18).
+        try:
+            cloud_view = Spatial3DView(
+                name="3-D Point Cloud",
+                origin="world",
+                background=[255, 255, 255],
+            )
+        except TypeError:
+            cloud_view = Spatial3DView(name="3-D Point Cloud", origin="world")
+
         blueprint = Blueprint(
             Horizontal(
                 Vertical(
@@ -485,12 +501,7 @@ def main() -> None:
                     Spatial2DView(name="Detections",
                                   origin="camera/detections"),
                 ),
-                Vertical(
-                    Spatial3DView(
-                        name="3-D Point Cloud",
-                        origin="world",
-                    ),
-                ),
+                Vertical(cloud_view),
             ),
             collapse_panels=True,
         )
@@ -512,12 +523,43 @@ def main() -> None:
     except grpc.RpcError as e:
         print(f"[viz] could not register with server (non-fatal): {e.details()}", file=sys.stderr)
 
-    # ── Discover env gRPC ─────────────────────────────────────────────────────
-    print("[viz] waiting for env_node gRPC…", file=sys.stderr)
-    endpoint = _discover_env_grpc(robonix_stub)
-    env_channel = grpc.insecure_channel(endpoint)
-    env_stub = env_pb_grpc.EnvDataServiceStub(env_channel)
-    print(f"[viz] streaming from env at {endpoint}", file=sys.stderr)
+    # ── Transport: gRPC or iceoryx2 ───────────────────────────────────────────
+    env_stub = None
+    _iox2_rgb_sub = None
+    _iox2_dep_sub = None
+    _iox2_node = None
+
+    if _IOX2_TRANSPORT:
+        try:
+            import iceoryx2 as iox2
+            from maniskill_vla_demo.iox2_types import (
+                RgbCameraFrame, DepthCameraFrame,
+                IOX2_SERVICE_RGB, IOX2_SERVICE_DEPTH,
+            )
+            _iox2_node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
+            _iox2_rgb_sub = (
+                _iox2_node.service_builder(iox2.ServiceName.new(IOX2_SERVICE_RGB))
+                          .publish_subscribe(RgbCameraFrame)
+                          .open_or_create()
+                          .subscriber_builder().create()
+            )
+            _iox2_dep_sub = (
+                _iox2_node.service_builder(iox2.ServiceName.new(IOX2_SERVICE_DEPTH))
+                          .publish_subscribe(DepthCameraFrame)
+                          .open_or_create()
+                          .subscriber_builder().create()
+            )
+            print("[viz] iceoryx2 subscriber ready (robonix/camera/{rgb,depth})", file=sys.stderr)
+        except Exception as exc:
+            print(f"[viz] iceoryx2 init failed, falling back to gRPC: {exc}", file=sys.stderr)
+            _IOX2_TRANSPORT = False  # type: ignore[assignment]
+
+    if not _IOX2_TRANSPORT:
+        print("[viz] waiting for env_node gRPC…", file=sys.stderr)
+        endpoint = _discover_env_grpc(robonix_stub)
+        env_channel = grpc.insecure_channel(endpoint)
+        env_stub = env_pb_grpc.EnvDataServiceStub(env_channel)
+        print(f"[viz] streaming from env at {endpoint}", file=sys.stderr)
 
     # ── 3-D point cloud accumulator (depth back-projection) ──────────────────
     cloud_acc = DepthCloudAccumulator()
@@ -536,17 +578,45 @@ def main() -> None:
     frame = 0
     env_id = os.environ.get("MANISKILL_ENV_ID", "?")
     last_det_seq = -1
-    print(f"[viz] streaming at {args.fps:.0f} fps  env={env_id}", file=sys.stderr)
+    print(f"[viz] streaming at {args.fps:.0f} fps  env={env_id}  transport={'iceoryx2' if _IOX2_TRANSPORT else 'grpc'}", file=sys.stderr)
 
     while True:
         t0 = time.monotonic()
 
-        try:
-            obs = env_stub.GetObs(env_pb.Empty())
-        except grpc.RpcError as e:
-            print(f"[viz] GetObs error: {e.details()}", file=sys.stderr)
-            time.sleep(1.0)
-            continue
+        if _IOX2_TRANSPORT:
+            # ── iceoryx2 receive ─────────────────────────────────────────────
+            rgb_sample = _iox2_rgb_sub.receive() if _iox2_rgb_sub else None
+            if rgb_sample is None:
+                time.sleep(0.005)
+                continue
+            rf = rgb_sample.payload().contents          # RgbCameraFrame
+
+            # Build a simple namespace that downstream code reads like a proto obs
+            class _Obs:  # noqa: N801
+                pass
+            obs = _Obs()
+            obs.width    = rf.width
+            obs.height   = rf.height
+            obs.rgb      = bytes(rf.pixels[: rf.width * rf.height * rf.channels])
+            obs.depth    = b""
+            obs.fx = obs.fy = obs.cx = obs.cy = 0.0
+            obs.proprio  = []
+            obs.goal_pos = []
+            obs.camera_pose = []
+
+            dep_sample = _iox2_dep_sub.receive() if _iox2_dep_sub else None
+            if dep_sample is not None:
+                df = dep_sample.payload().contents      # DepthCameraFrame
+                n_dep = df.width * df.height * 4
+                obs.depth = bytes(df.pixels[:n_dep])
+        else:
+            # ── gRPC receive ─────────────────────────────────────────────────
+            try:
+                obs = env_stub.GetObs(env_pb.Empty())
+            except grpc.RpcError as e:
+                print(f"[viz] GetObs error: {e.details()}", file=sys.stderr)
+                time.sleep(1.0)
+                continue
 
         rgb = np.frombuffer(obs.rgb, dtype=np.uint8).reshape(obs.height, obs.width, 3)
 
