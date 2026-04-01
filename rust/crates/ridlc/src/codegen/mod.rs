@@ -3,3 +3,4 @@
 pub mod err;
 pub mod msg_parser;
 pub mod proto_gen;
+pub mod python_gen;

@@ -61,6 +61,7 @@ For ROS package **`pkgname`**, output is **`robonix_proto/pkgname.proto`** with 
 | Abstract interface ID | Mode | Dir | ROS IDL (in repo) | gRPC (generated) |
 |------------------------|------|-----|-------------------|------------------|
 | `robonix/sys/model/vlm/chat` | RPC | — | `lib/vlm/srv/Chat.srv` | `robonix_proto/vlm.proto` → `robonix.vlm.VlmService` / `Chat` |
+| `robonix/sys/model/vlm/chat` | Server streaming | — | `lib/vlm/srv/ChatStream.srv`, `lib/vlm/msg/ChatStreamEvent.msg` | same file → `ChatStream` → `stream ChatStreamEvent` |
 | `robonix/sys/model/vlm/describe` | RPC | — | `lib/vlm/srv/Describe.srv` | same file → `Describe` |
 
 ---

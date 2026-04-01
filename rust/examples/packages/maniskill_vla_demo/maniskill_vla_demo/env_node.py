@@ -67,6 +67,84 @@ _lock = threading.Lock()
 _env = None
 _latest_obs = None
 
+# ── iceoryx2 publish loop (OBS_TRANSPORT=iceoryx2) ────────────────────────────
+
+_IOX2_TRANSPORT = os.environ.get("OBS_TRANSPORT", "grpc").strip().lower() == "iceoryx2"
+
+
+def _iox2_publish_loop(fps: float = 30.0) -> None:
+    """Background thread: publish camera frames to iceoryx2 SHM at `fps`."""
+    try:
+        import iceoryx2 as iox2
+    except ImportError:
+        print("[env-node] ERROR: iceoryx2 not installed — pip install iceoryx2", file=sys.stderr)
+        return
+
+    from maniskill_vla_demo.iox2_types import (
+        RgbCameraFrame, DepthCameraFrame,
+        IOX2_SERVICE_RGB, IOX2_SERVICE_DEPTH,
+    )
+
+    node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
+
+    rgb_svc = (
+        node.service_builder(iox2.ServiceName.new(IOX2_SERVICE_RGB))
+            .publish_subscribe(RgbCameraFrame)
+            .open_or_create()
+    )
+    depth_svc = (
+        node.service_builder(iox2.ServiceName.new(IOX2_SERVICE_DEPTH))
+            .publish_subscribe(DepthCameraFrame)
+            .open_or_create()
+    )
+    rgb_pub   = rgb_svc.publisher_builder().create()
+    depth_pub = depth_svc.publisher_builder().create()
+
+    print(f"[env-node] iceoryx2 publisher ready: {IOX2_SERVICE_RGB}, {IOX2_SERVICE_DEPTH}",
+          file=sys.stderr)
+
+    seq = 0
+    interval = 1.0 / fps
+    while True:
+        t0 = time.monotonic()
+        with _lock:
+            obs = _latest_obs
+        if obs is not None:
+            try:
+                rgb, depth = _get_camera(obs)
+                ts_ns = int(time.time() * 1e9)
+                h, w = rgb.shape[:2]
+                ch = rgb.shape[2] if rgb.ndim == 3 else 1
+
+                # ── Publish RGB ───────────────────────────────────────────────
+                frame_rgb = RgbCameraFrame(
+                    width=w, height=h, channels=ch, seq=seq, ts_ns=ts_ns
+                )
+                n = min(len(rgb.tobytes()), len(frame_rgb.pixels))
+                import ctypes
+                ctypes.memmove(frame_rgb.pixels, rgb.tobytes(), n)
+                rgb_pub.loan_uninit().write_payload(frame_rgb).send()
+
+                # ── Publish Depth ─────────────────────────────────────────────
+                if depth is not None:
+                    import numpy as _np
+                    depth_bytes = _np.ascontiguousarray(depth, dtype=_np.float32).tobytes()
+                    frame_dep = DepthCameraFrame(
+                        width=w, height=h, seq=seq, ts_ns=ts_ns
+                    )
+                    nd = min(len(depth_bytes), len(frame_dep.pixels))
+                    ctypes.memmove(frame_dep.pixels, depth_bytes, nd)
+                    depth_pub.loan_uninit().write_payload(frame_dep).send()
+
+                seq += 1
+            except Exception as exc:
+                print(f"[env-node] iox2 publish error: {exc}", file=sys.stderr)
+
+        elapsed = time.monotonic() - t0
+        sleep_for = interval - elapsed
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+
 # ── Observation helpers ───────────────────────────────────────────────────────
 
 
@@ -457,6 +535,13 @@ def main() -> None:
     threading.Thread(target=_heartbeat_loop, args=(stub, node_id), daemon=True).start()
     threading.Thread(target=_run_grpc_server, args=(grpc_port,), daemon=True).start()
     threading.Thread(target=_start_mcp_http, args=(mcp_port,), daemon=True).start()
+
+    if _IOX2_TRANSPORT:
+        iox2_fps = float(os.environ.get("IOX2_FPS", "30"))
+        threading.Thread(
+            target=_iox2_publish_loop, args=(iox2_fps,), daemon=True, name="iox2-pub"
+        ).start()
+        print(f"[env-node] iceoryx2 publisher started at {iox2_fps:.0f} fps", file=sys.stderr)
 
     print(f"[env-node] MCP :{mcp_port}  gRPC :{grpc_port}", file=sys.stderr)
     print("[env-node] ready", file=sys.stderr)

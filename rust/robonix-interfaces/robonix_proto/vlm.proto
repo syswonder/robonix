@@ -6,6 +6,12 @@ package robonix.vlm;
 
 import "robonix_msg.proto";
 
+message ChatStreamEvent {
+  string text_delta = 1;
+  robonix.robonix_msg.ToolCall tool_call = 2;
+  string finish_reason = 3;
+}
+
 message Chat_Request {
   repeated robonix.robonix_msg.ChatMessage messages = 1;
   repeated robonix.robonix_msg.ToolSpec tools = 2;
@@ -18,13 +24,15 @@ message Chat_Response {
   repeated robonix.robonix_msg.ToolCall tool_calls = 2;
 }
 
-// Streaming chat: server yields text deltas, then accumulated tool calls.
-message ChatStreamEvent {
-  oneof event {
-    string text_delta = 1;
-    robonix.robonix_msg.ToolCall tool_call = 2;
-    string finish_reason = 3;
-  }
+message ChatStream_Request {
+  repeated robonix.robonix_msg.ChatMessage messages = 1;
+  repeated robonix.robonix_msg.ToolSpec tools = 2;
+  string tool_choice = 3;
+  int32 max_tokens = 4;
+}
+
+message ChatStream_Response {
+  bool unused = 1;
 }
 
 message Describe_Request {
@@ -38,7 +46,7 @@ message Describe_Response {
 
 service VlmService {
   rpc Chat (Chat_Request) returns (Chat_Response);
-  rpc ChatStream (Chat_Request) returns (stream ChatStreamEvent);
+  rpc ChatStream (ChatStream_Request) returns (stream ChatStreamEvent);
   rpc Describe (Describe_Request) returns (Describe_Response);
 }
 

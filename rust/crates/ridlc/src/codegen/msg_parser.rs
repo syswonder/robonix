@@ -13,6 +13,8 @@ pub struct MsgField {
     pub name: String,
     pub type_ref: MsgTypeRef,
     pub is_array: bool,
+    /// Fixed array size (e.g. 9 for `float32[9]`). None means unbounded (`T[]`).
+    pub array_size: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -414,11 +416,12 @@ fn parse_msg_section(package: &str, name: &str, src: &str) -> Result<MsgSpec> {
         let Some(raw_name) = parts.next() else {
             continue;
         };
-        let (type_ref, is_array) = parse_msg_field_type(package, raw_type)?;
+        let (type_ref, is_array, array_size) = parse_msg_field_type(package, raw_type)?;
         fields.push(MsgField {
             name: raw_name.to_string(),
             type_ref,
             is_array,
+            array_size,
         });
     }
     Ok(MsgSpec {
@@ -461,17 +464,19 @@ pub fn parse_msg_file(package: &str, name: &str, path: &Path) -> Result<MsgSpec>
         let Some(raw_name) = parts.next() else {
             continue;
         };
-        let (type_ref, is_array) = parse_msg_field_type(package, raw_type).with_context(|| {
-            format!(
-                "{RIDLC_ERR_PREFIX} invalid field in '{}' at line with type '{}'",
-                path.display(),
-                raw_type
-            )
-        })?;
+        let (type_ref, is_array, array_size) =
+            parse_msg_field_type(package, raw_type).with_context(|| {
+                format!(
+                    "{RIDLC_ERR_PREFIX} invalid field in '{}' at line with type '{}'",
+                    path.display(),
+                    raw_type
+                )
+            })?;
         fields.push(MsgField {
             name: raw_name.to_string(),
             type_ref,
             is_array,
+            array_size,
         });
     }
     Ok(MsgSpec {
@@ -481,19 +486,27 @@ pub fn parse_msg_file(package: &str, name: &str, path: &Path) -> Result<MsgSpec>
     })
 }
 
-pub fn parse_msg_field_type(current_package: &str, raw_type: &str) -> Result<(MsgTypeRef, bool)> {
+pub fn parse_msg_field_type(
+    current_package: &str,
+    raw_type: &str,
+) -> Result<(MsgTypeRef, bool, Option<usize>)> {
     let normalized = raw_type.split("<=").next().unwrap_or(raw_type).trim();
-    let (base_type, is_array) = if let Some(idx) = normalized.find('[') {
-        (&normalized[..idx], true)
+    let (base_type, is_array, array_size) = if let Some(idx) = normalized.find('[') {
+        let bracket = &normalized[idx..]; // e.g. "[]" or "[9]"
+        let size = bracket
+            .trim_matches(|c| c == '[' || c == ']')
+            .parse::<usize>()
+            .ok(); // None for "[]", Some(N) for "[N]"
+        (&normalized[..idx], true, size)
     } else {
-        (normalized, false)
+        (normalized, false, None)
     };
     let base_type = base_type.trim();
     if base_type.is_empty() {
         bail!("{RIDLC_ERR_PREFIX} empty message field type in .msg file");
     }
     if is_ros_primitive(base_type) {
-        return Ok((MsgTypeRef::Primitive(base_type.to_string()), is_array));
+        return Ok((MsgTypeRef::Primitive(base_type.to_string()), is_array, array_size));
     }
     if let Some((package, name)) = base_type.split_once('/') {
         return Ok((
@@ -502,6 +515,7 @@ pub fn parse_msg_field_type(current_package: &str, raw_type: &str) -> Result<(Ms
                 name: name.to_string(),
             },
             is_array,
+            array_size,
         ));
     }
     Ok((
@@ -510,6 +524,7 @@ pub fn parse_msg_field_type(current_package: &str, raw_type: &str) -> Result<(Ms
             name: base_type.to_string(),
         },
         is_array,
+        array_size,
     ))
 }
 
