@@ -117,7 +117,7 @@ def main():
         stub.RegisterNode(
             pb.RegisterNodeRequest(
                 node_id="com.robonix.services.memsearch",
-                namespace="robonix/prm/memsearch",
+                namespace="robonix/sys/memory/memsearch",
                 kind="service",
                 skill_md="# Memsearch MCP\nProvides memory operations."
             )
@@ -132,7 +132,7 @@ def main():
                 listen_port=port,
             )
         )
-        print(f"[memsearch-service] Registered node robonix/prm/memsearch with endpoint {endpoint}")
+        print(f"[memsearch-service] Registered node robonix/sys/memory/memsearch with endpoint {endpoint}")
     except Exception as e:
         print(f"[memsearch-service] Warning: Failed to register with control plane: {e}")
 
