@@ -25,27 +25,36 @@ Robonix follows the EAIOS four-layer abstraction — Primitive, Service, Skill, 
 
 | Crate | Role |
 |-------|------|
-| `robonix-atlas` | control plane: node registration, interface declaration, channel negotiation, skill catalog, heartbeat, runtime inspection |
+| `robonix-atlas` | Control plane: registration, discovery, channel negotiation, skill catalog, heartbeat, runtime inspection |
 | `robonix-sdk` | Thin async Rust client for the control-plane API |
-| `robonix-agent` | System agent: VLM-driven ReAct loop with dynamic MCP tool discovery and SKILL.md-based behavior |
-| `robonix-cli` (`rbnx`) | Package validate / build / start, runtime inspection (`nodes`, `describe`, `tools`, `channels`, `inspect`) |
-| `ridlc` | ROS IDL → Proto codegen: reads `.msg` / `.srv` definitions and generates `.proto` files |
+| `robonix-pilot` | VLM-driven reasoning: ReAct-style loop and sessions; streams `PilotEvent`; dispatches **`TaskGraph`** to Executor (v1: linear `TaskCall[]`; BT/RTDL TODO) |
+| `robonix-executor` | Tool dispatch: builtin / MCP / gRPC; **`ExecutorService.Execute`** |
+| `robonix-liaison` | User-facing layer: text → **`Intent`** → **`PilotEvent`** stream |
+| `robonix-cli` (`rbnx`) | Package validate / build / start; runtime inspection; **`rbnx chat`** (TUI → Pilot); **`rbnx graph`** (topology PNG/SVG) |
+| `ridlc` | ROS IDL + **`rust/contracts`** TOML → **`rust/robonix-interfaces/robonix_proto/`** (generated `.proto`, incl. `robonix_contracts.proto`) |
+| `robonix-buffer` | Shared-memory / buffer helpers for high-bandwidth data |
+
+ROS payloads are canonical in **`rust/robonix-interfaces/lib/`**. Stable **`contract_id`** paths live in **`rust/contracts/**/*.toml`** and match control-plane fields (`DeclareInterface` / `QueryNodes`). Regenerate protos with `ridlc` from **`rust/`** (see **[rust/README.md](rust/README.md)**).
 
 ## Project Status
 
 ### Available
 
 - Control plane with multi-transport channels (gRPC, MCP, ROS 2, shared memory)
-- VLM-driven agent with ReAct loop and MCP tool calling
-- SKILL.md format for LLM-driven skill discovery and behavior guidance
+- **Pilot / Executor / Liaison** path: VLM + tools + terminal chat (`rbnx chat`)
+- SKILL.md for skill discovery and LLM-oriented behavior text
 - Package system (`rbnx validate` / `build` / `start`)
-- `ridlc` codegen: ROS `.msg` / `.srv` → `.proto`
+- **`ridlc`**: ROS `.msg` / `.srv` + contracts → generated **`robonix_proto/`** (do not hand-edit)
 - Tiago Webots E2E demo (Docker: Webots + Nav2 + rviz2 + MCP bridge)
 
 ### In Progress
 
-- Namespace catalog validation on server side
-- Standard primitive interface contract enforcement
+- Contract / namespace catalog enforcement on the server
+- **TaskGraph**: behavior-tree / RTDL beyond today’s linear wire encoding
+
+### Documentation
+
+- **[docs/](docs/)** — mdBook: architecture, interface catalog (**primitive/** vs **service/**), integration guides. Build: `cd docs && mdbook build`.
 
 ## Hardware / PRM Support
 
@@ -55,11 +64,15 @@ Robonix follows the EAIOS four-layer abstraction — Primitive, Service, Skill, 
 
 Abstract primitive interfaces are defined for camera, base, arm, gripper, sensor, and force-torque under the `robonix/prm/*` namespace. See `rust/robonix-interfaces/README.md` for the full capability table.
 
-## Services
+## Services (examples)
 
-| Service | Interface | Transport |
-|---------|-----------|-----------|
+| Service | `contract_id` (stable path) | Transport |
+|---------|----------------------------|-----------|
+| Pilot | `robonix/sys/runtime/pilot` | gRPC |
+| Executor | `robonix/sys/runtime/executor` | gRPC |
+| Liaison | `robonix/sys/runtime/liaison` | gRPC |
 | VLM (OpenAI-compatible backend) | `robonix/sys/model/vlm/chat` | gRPC |
+| Memory search (gRPC wire) | `robonix/sys/memory/search` | gRPC |
 
 ## Quick Start
 
@@ -69,7 +82,7 @@ cd robonix
 git submodule update --init --recursive
 cd rust
 cargo build --workspace
-make install          # installs rbnx, ridlc, robonix-agent, robonix-atlas wrapper
+make install          # rbnx, ridlc, robonix-pilot, robonix-executor, robonix-liaison, robonix-atlas wrapper → ~/.cargo/bin
 ```
 
 Run the full E2E demo (requires Docker, X11, and a VLM API key):
@@ -80,7 +93,7 @@ cp examples/.env.example examples/.env   # fill in VLM_API_BASE, VLM_API_KEY, VL
 ./examples/run.sh
 ```
 
-Run without simulation (VLM + agent only):
+Run without simulation (atlas + Pilot + Executor + VLM + Liaison; no Tiago stack):
 
 ```bash
 cd rust

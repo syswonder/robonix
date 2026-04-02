@@ -18,7 +18,7 @@ Optional environment variables:
   VLM_BIND_ADDR     If set, try this host first when binding the data-plane (default: try 127.0.0.1 then 0.0.0.0).
                     The service picks a free TCP port (DeclareInterface listen_port) so it does not collide with host services on 50100+.
 
-Control plane (must match robonix-agent discovery):
+Control plane (must match robonix-pilot discovery):
   Registers under `robonix/sys/model/vlm` with interface `chat` (contract id
   `robonix/sys/model/vlm/chat`). The agent uses `QueryNodes.contract_id`
   by default; override with `ROBONIX_VLM_CONTRACT_ID`, or empty contract

@@ -1,7 +1,7 @@
 [project]
 name = "robonix-maniskill-vla-demo"
 version = "0.1.0"
-description = "ManiSkill3 VLA demo: env + perception + VLA nodes for robonix-agent"
+description = "ManiSkill3 VLA demo: env + perception + VLA nodes for robonix-pilot"
 requires-python = ">=3.11,<3.12"
 
 dependencies = [

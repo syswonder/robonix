@@ -2,7 +2,7 @@
 """VLA (Vision-Language-Action) policy node.
 
 Fetches observations from env_node via gRPC, runs a policy, exposes MCP tool
-for robonix-agent.
+for robonix-pilot.
 
 Policies (--policy flag):
   octo      (default) Octo-small model (~93M params).  Language-conditioned.
