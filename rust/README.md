@@ -14,13 +14,15 @@ Platform: primary target is Linux; ROS 2 workloads are not assumed on the host �
 | robonix-executor | Tool dispatch runtime: builtin / MCP / gRPC routing |
 | robonix-liaison | User-facing interaction layer: text stdin→Intent→PilotEvent |
 | robonix-cli | `rbnx` CLI for package validate / build / start and runtime inspection |
-| ridlc | ROS IDL codegen — generates `.proto` from ROS `.msg`/`.srv` definitions |
+| robonix-buffer | Shared-memory / buffer utilities (optional data-plane paths) |
+| ridlc | ROS IDL + `contracts/` TOML → generates `robonix_proto/*.proto` |
 
 ## Workspace layout
 
 ```
 rust/
-├── crates/                  # Rust packages (atlas, sdk, pilot, executor, liaison, CLI, ridlc)
+├── crates/                  # Rust packages (atlas, sdk, pilot, executor, liaison, CLI, ridlc, buffer)
+├── contracts/               # Contract TOML → stable contract_id + shape; input to ridlc --contracts
 ├── examples/                # E2E demo: packages/, scripts/, run.sh
 ├── proto/                   # Control plane: robonix_runtime.proto, …
 ├── robonix-interfaces/
@@ -28,6 +30,8 @@ rust/
 │   └── robonix_proto/       # ridlc-generated `.proto` only (from `lib/` + `contracts/`)
 └── _deprecated/             # Legacy code kept for reference
 ```
+
+User-facing documentation (mdBook) lives in **../docs/** (`mdbook build`).
 
 ## Quick start
 
