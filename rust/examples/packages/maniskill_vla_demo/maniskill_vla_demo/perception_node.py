@@ -5,7 +5,7 @@ Default backend is YOLO-World via ultralytics (much lower VRAM than GroundingDIN
 Set PERCEPTION_BACKEND=grounding_dino to use the previous HuggingFace model.
 
 Fetches RGB+depth from env_node via gRPC, runs detection, exposes MCP tool
-for robonix-agent.  Agent never needs to transfer images.
+for robonix-pilot.  Agent never needs to transfer images.
 """
 import asyncio
 import json

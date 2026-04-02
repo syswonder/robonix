@@ -3,7 +3,7 @@
 
 Dual-interface node:
   - gRPC EnvDataService: high-bandwidth obs for perception/VLA nodes
-  - MCP tools: lightweight commands for robonix-agent
+  - MCP tools: lightweight commands for robonix-pilot
 """
 import asyncio
 import base64
@@ -300,7 +300,7 @@ def _reset_env():
     return obs
 
 
-# ── MCP tools (for robonix-agent) ────────────────────────────────────────────
+# ── MCP tools (for robonix-pilot) ────────────────────────────────────────────
 
 
 @mcp.tool()

@@ -28,11 +28,11 @@ From `rust/`:
 ./examples/run.sh
 ```
 
-This uses **`rbnx` validate/build/start** for `vlm_service` and `tiago_sim_stack` by default (and starts `robonix-atlas` + `robonix-agent` unless disabled — see `run.sh` header). Use **`START_SIM_STACK=0`** to skip the sim container.
+This uses **`rbnx` validate/build/start** for `vlm_service` and `tiago_sim_stack` by default (and starts `robonix-atlas` + `robonix-pilot` unless disabled — see `run.sh` header). Use **`START_SIM_STACK=0`** to skip the sim container.
 
 ## Agent skills (`skills/`)
 
-`rbnx start` registers **`skills/* /SKILL.md`** with `robonix-atlas` for `robonix-agent`. Notable:
+`rbnx start` registers **`skills/* /SKILL.md`** with `robonix-atlas` for `robonix-pilot`. Notable:
 
 - **`object_search_wander`** — find a target (e.g. door) with **`get_robot_pose` + `get_camera_image` + short `move_base`**; explicitly **no** `navigate_to` / nav goals.
 - **`navigation`** — Nav2 map goals when allowed.
