@@ -120,7 +120,7 @@ class FakeCameraDriver:
 def connect_server(
     addr: str = "127.0.0.1:50051", timeout: float = 10.0
 ) -> pb_grpc.RobonixRuntimeStub:
-    """Connect to robonix-server via gRPC."""
+    """Connect to robonix-atlas via gRPC."""
     ch = grpc.insecure_channel(addr)
     grpc.channel_ready_future(ch).result(timeout=timeout)
     return pb_grpc.RobonixRuntimeStub(ch)

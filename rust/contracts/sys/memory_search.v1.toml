@@ -1,0 +1,20 @@
+# Unary query/response as text; wire uses `std_msgs/String` from `lib/common_interfaces/std_msgs`.
+# Many providers still expose search via MCP tools — this contract is the aligned gRPC/ROS IDL path.
+[contract]
+id      = "robonix/sys/memory/search"
+version = "1"
+kind    = "service"
+
+[io]
+input  = "std_msgs/msg/String"
+output = "std_msgs/msg/String"
+
+[mode]
+type = "rpc"
+
+[semantics]
+persistent        = true
+searchable        = true
+wire_profile      = "mcp_or_future_idl"
+
+# Index parameters, embedding model, top_k: deployment-only (metadata), not contract.

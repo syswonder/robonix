@@ -1,21 +1,29 @@
 # robonix-interfaces
 
-Source tree for **ROS 2 IDL** (`lib/**`) and **generated** gRPC **`.proto`** (`robonix_proto/**`).
+**ROS 2 IDL** (`lib/**`), **generated** Protobuf (`robonix_proto/**`), and optional **iceoryx2 Python payloads** (`robonix_iceoryx2_py/**`).
+
+## Architecture (how the pieces fit)
+
+1. **`rust/contracts/**/*.toml`** — **canonical logical interface** (`[contract].id`), optional semantics, **`[io]`** references into ROS IDL (`pkg/msg/...`, `pkg/srv/...`), and **`[mode].type`** (`rpc` | `stream_in` | `stream_out`) that fixes the gRPC *shape* for that id. See [`rust/contracts/README.md`](../contracts/README.md).
+2. **`lib/**`** — **ROS 2 concrete schemas**: `.msg` and `.srv` are the vocabulary contracts use; they are also what native ROS 2 stacks publish/service-call.
+3. **`ridlc`** — **contract-centric codegen**: resolves all types from `lib`, emits per-package `robonix_proto/<pkg>.proto` (messages + legacy package `*Service` from `.srv` where applicable), and **`robonix_contracts.proto`** (`package robonix.contracts`) — one gRPC service per contract id for cross-runtime bridging.
+4. **`robonix_iceoryx2_py/**`** — **`ridlc --lang python`** ctypes for **messages only** (SHM / iceoryx2); unrelated to contract ids. See `robonix_iceoryx2_py/README.md`.
+
+**ROS mental model vs contract `[mode]`:** pure pub/sub “input-only” / “output-only” is a **registration** concern (who publishes vs subscribes). Contracts still name the **msg** (or `Empty` / srv types) so every transport shares the same payload definition; `stream_out` / `stream_in` describe framing on gRPC (server-streaming vs client-streaming). Unary **`rpc`** matches a `.srv`-like request/response pair.
 
 ## Policy
 
-- **Single source of truth:** ROS IDL only — `lib/<ros_package>/msg/*.msg`, `srv/*.srv`.
-- **All** files under `robonix_proto/` are **produced by** `ridlc --lang proto` from that IDL. **Do not hand-edit** `.proto` in this tree; **do not add vendor- or app-specific `.proto` files here** — extend the system by adding or changing ROS IDL under `lib/` and regenerating. Regenerate after IDL changes.
-- **Topic / pub-sub prm:** On ROS, endpoints are normal topics with the same `.msg` payload. On gRPC, use the **generated `message`** types (same shapes as ROS) for streaming or bridging — still **only** from ridlc output, not ad-hoc protos.
-- **RPC (`.srv`):** Generated `service { rpc … }` unary RPCs per ridlc rules below.
-- **Pub-sub over gRPC:** The first line of a `.srv` may be a **codegen-only** directive, e.g. `# @robonix.grpc stream_server sensor_msgs/msg/Image`, to emit **server/client streaming** RPCs (see `docs/.../interface-spec.md`). ROS 2 does not execute these as native services.
+- **Do not hand-edit** anything under `robonix_proto/` or `robonix_iceoryx2_py/`; change **`lib`** IDL and/or **`rust/contracts`**, then rerun `ridlc`.
+- **Do not add ad-hoc `.proto`** under `robonix_proto/` for Robonix-owned types — extend **`lib`** and regenerate, or reference **`protobuf://...`** from a contract when intentionally pointing at protos outside `lib`.
+- **Prefer contracts** for stable **interface ids** and gRPC service names (`robonix_contracts.proto`). Per-package `*Service` RPCs from `.srv` remain for ROS-shaped unary APIs not yet lifted into a contract file.
 
-Regenerate protos from ROS IDL (writes one file per ROS package; **does not delete** stale `.proto` if you removed a package from `lib/`—delete those files manually or wipe the directory first):
+Regenerate protos (IDL + contracts; writes one file per ROS package **and** `robonix_contracts.proto`; **does not delete** stale `.proto` if you removed a package—delete manually or wipe the dir first):
 
 ```bash
 cd rust
 cargo run -p ridlc -- --lang proto \
   -I robonix-interfaces/lib \
+  --contracts contracts \
   -o robonix-interfaces/robonix_proto
 ```
 
@@ -35,13 +43,15 @@ cd rust && ./examples/scripts/gen_proto_python.sh
 
 | Path | Role |
 |------|------|
+| `../contracts/**` | **Logical interface** TOML (ids + `[io]` + `[mode]`); drives `robonix_contracts.proto` |
 | `lib/prm_base/msg/`, `lib/prm_base/srv/` | ROS IDL for base primitives `robonix/prm/base/*` |
 | `lib/prm/README.md` | Index of `prm_*` packages |
-| `lib/prm_camera/` | Camera: payloads mostly **common_interfaces** (see tables) |
-| `lib/vlm/srv/` | System VLM `robonix/sys/model/vlm` |
+| `lib/prm_camera/` | Camera: payloads mostly **common_interfaces** (see tables); gRPC services from **contracts** |
+| `lib/vlm/srv/` | System VLM `robonix/sys/model/vlm` (payloads referenced by contracts) |
 | `lib/robonix_msg/` | Shared message types |
 | `lib/common_interfaces/` | Upstream ROS message trees (submodule / vendor) |
-| `robonix_proto/` | **Generated** gRPC `.proto` (see command above) |
+| `robonix_proto/` | **Generated** `.proto` (per-package + `robonix_contracts.proto`) |
+| `robonix_iceoryx2_py/` | **Generated** ctypes for `.msg` (iceoryx2); see folder README |
 
 ---
 
@@ -52,7 +62,9 @@ For ROS package **`pkgname`**, output is **`robonix_proto/pkgname.proto`** with 
 - Each **`.msg`** → a **`message`** of the same name.
 - Each **`.srv`** → `Name_Request` / `Name_Response` plus **`rpc Name`** on **`PkgnameService`** (PascalCase package + `Service`).
 
-**Pub-sub only (`.msg` in proto):** there is **no** RPC in that file for the message itself; the **`message`** type is still the gRPC-side payload type for streams or bridges. If you need a streaming RPC wrapper, extend **ridlc** or a small **generated** shim — not hand-written duplicate `.proto` definitions.
+**Contract-bound streaming / unary** for a `robonix/...` id is **not** expressed as extra magic on `.srv`; it is **`rust/contracts` → `robonix_contracts.proto`** (`robonix.contracts.*` services). Per-package protos still expose **message** types and optional **legacy** unary RPCs from `.srv`.
+
+**Pub-sub only (`.msg` in proto):** there is **no** per-message RPC in that package file; the **`message`** type is the shared payload for ROS topics, gRPC streams (via contracts), and bridges.
 
 ---
 
@@ -91,11 +103,11 @@ For ROS package **`pkgname`**, output is **`robonix_proto/pkgname.proto`** with 
 
 ## Primitives `robonix/prm/camera` (payloads in **common_interfaces**)
 
-ROS packages **`sensor_msgs`**, **`robonix_msg`**, **`prm_camera`** (streaming RPC only). Camera **payload** types live in `sensor_msgs`; `prm_camera` supplies ridlc directives for gRPC streaming (see docs **interface-spec**).
+ROS packages **`sensor_msgs`**, **`robonix_msg`**; camera **gRPC** service shapes come from **`rust/contracts/prm/camera_*.toml`** → `ridlc --contracts` → **`robonix_proto/robonix_contracts.proto`** (e.g. `PrmCameraRgb`).
 
 | Abstract interface ID | Mode | Direction | ROS IDL (path) | gRPC (generated) |
 |------------------------|------|-----------|----------------|------------------|
-| `robonix/prm/camera/rgb` | pub-sub | **output** | Topic: `sensor_msgs/msg/Image.msg`; stream RPC: `lib/prm_camera/srv/SubscribeRgb.srv` (`# @robonix.grpc stream_server …`) | **Server streaming** of `sensor_msgs.Image`: `prm_camera.proto` → `PrmCameraService/SubscribeRgb` |
+| `robonix/prm/camera/rgb` | pub-sub | **output** | Topic: `sensor_msgs/msg/Image.msg`; gRPC: contract `rust/contracts/prm/camera_rgb*.toml` → `robonix_contracts.proto` `PrmCameraRgb.Stream` → `stream sensor_msgs.Image` |
 | `robonix/prm/camera/depth` | pub-sub | **output** | same `Image.msg` | same |
 | `robonix/prm/camera/ir` | pub-sub | **output** | same | same |
 | `robonix/prm/camera/intrinsics` | pub-sub | **output** | `lib/common_interfaces/sensor_msgs/msg/CameraInfo.msg` | `CameraInfo` |

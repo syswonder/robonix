@@ -9,19 +9,19 @@ IMAGE_NAME="robonix-ros2-bench:latest"
 WIDTH="${1:-1920}"
 HEIGHT="${2:-1080}"
 FRAMES="${3:-200}"
-SERVER_ADDR="${ROBONIX_SERVER:-127.0.0.1:50051}"
+SERVER_ADDR="${ROBONIX_ATLAS:-127.0.0.1:50051}"
 
 mkdir -p "$RESULTS_DIR"
 
 echo "=================================================================="
 echo "  Robonix vs ROS 2/FastDDS -- Full Pipeline Comparison"
 echo "  Frame: ${WIDTH}x${HEIGHT} RGB8  |  ${FRAMES} frames"
-echo "  Control plane: robonix-server @ ${SERVER_ADDR}"
+echo "  Control plane: robonix-atlas @ ${SERVER_ADDR}"
 echo "=================================================================="
 
-# ── 0. Ensure robonix-server is running ──────────────────────────────
+# ── 0. Ensure robonix-atlas is running ──────────────────────────────
 echo ""
-echo "[Step 0] Check robonix-server"
+echo "[Step 0] Check robonix-atlas"
 echo "-----------------------------------------------------"
 
 _server_started_by_us=false
@@ -33,24 +33,24 @@ import robonix_runtime_pb2_grpc as g
 ch = grpc.insecure_channel('$SERVER_ADDR')
 try:
     grpc.channel_ready_future(ch).result(timeout=2)
-    print('[+] robonix-server is running')
+    print('[+] robonix-atlas is running')
 except:
     sys.exit(1)
 " 2>/dev/null; then
-    echo "[+] Using existing robonix-server at $SERVER_ADDR"
+    echo "[+] Using existing robonix-atlas at $SERVER_ADDR"
 else
-    echo "[!] robonix-server not running. Starting it..."
-    robonix-server &
+    echo "[!] robonix-atlas not running. Starting it..."
+    robonix-atlas &
     _SERVER_PID=$!
     _server_started_by_us=true
     sleep 2
-    echo "[+] Started robonix-server (PID=$_SERVER_PID)"
+    echo "[+] Started robonix-atlas (PID=$_SERVER_PID)"
 fi
 
 # Cleanup server on exit if we started it
 cleanup() {
     if $_server_started_by_us && [ -n "${_SERVER_PID:-}" ]; then
-        echo "[+] Stopping robonix-server (PID=$_SERVER_PID)"
+        echo "[+] Stopping robonix-atlas (PID=$_SERVER_PID)"
         kill "$_SERVER_PID" 2>/dev/null || true
     fi
 }
@@ -82,7 +82,7 @@ docker run --rm --gpus all \
     -v "$RESULTS_DIR:/results" \
     -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
     -e NVIDIA_VISIBLE_DEVICES=all \
-    -e ROBONIX_SERVER="$SERVER_ADDR" \
+    -e ROBONIX_ATLAS="$SERVER_ADDR" \
     "$IMAGE_NAME" \
     bash -c "source /opt/ros/humble/setup.bash && \
              python3 /bench/ros2_bench.py \
@@ -165,7 +165,7 @@ sep = '=' * 78
 print(f'\n{sep}')
 print(f'  COMPARISON: ROS 2/FastDDS vs Robonix')
 print(f'  Frame: {W}x{H} RGB8 ({mb:.2f} MB)  |  Camera -> Node A (YOLO) + Node B (Edge)')
-print(f'  Both paths coordinated by robonix-server')
+print(f'  Both paths coordinated by robonix-atlas')
 print(sep)
 
 def row(label, trad_us, rbnx_us, trad_tag='', rbnx_tag=''):

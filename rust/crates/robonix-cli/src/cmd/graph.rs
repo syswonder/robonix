@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use clap::ValueEnum;
 use resvg::tiny_skia::{Color, Pixmap, Transform};
 use resvg::usvg;
 use std::collections::HashMap;
@@ -10,15 +11,42 @@ const F: &str = "JetBrains Mono,Fira Mono,Fira Code,Consolas,DejaVu Sans Mono,Co
 /// PNG scale factor for sharper output.
 const PNG_SCALE: f32 = 2.0;
 
-// ─── entry ───────────────────────────────────────────────────────────────────
+/// `rbnx graph --format …` (also inferred from `-o` extension when flag omitted).
+/// Both variants use the same layout: SVG via [`render_svg`], PNG by rasterizing that SVG with resvg.
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+#[clap(rename_all = "lower")]
+pub enum GraphOutputFormat {
+    /// Raster PNG (internal SVG → resvg).
+    #[default]
+    Png,
+    /// Vector SVG (internal renderer).
+    Svg,
+}
 
-pub async fn execute(server: &str, output: PathBuf, test: bool) -> Result<()> {
-    let fmt = output
+fn resolve_format(output: &Path, explicit: Option<GraphOutputFormat>) -> GraphOutputFormat {
+    if let Some(f) = explicit {
+        return f;
+    }
+    match output
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_lowercase)
-        .filter(|e| e == "png" || e == "svg")
-        .unwrap_or_else(|| "png".into());
+    {
+        Some(ext) if ext == "svg" => GraphOutputFormat::Svg,
+        Some(ext) if ext == "png" => GraphOutputFormat::Png,
+        _ => GraphOutputFormat::Png,
+    }
+}
+
+// ─── entry ───────────────────────────────────────────────────────────────────
+
+pub async fn execute(
+    server: &str,
+    output: PathBuf,
+    format: Option<GraphOutputFormat>,
+    test: bool,
+) -> Result<()> {
+    let fmt = resolve_format(&output, format);
 
     let (nodes, channels, title) = if test {
         let (n, c) = test_topology();
@@ -39,10 +67,9 @@ pub async fn execute(server: &str, output: PathBuf, test: bool) -> Result<()> {
     };
 
     let svg = render_svg(&nodes, &channels, title);
-    if fmt == "svg" {
-        std::fs::write(&output, &svg).context("write svg")?;
-    } else {
-        to_png(&svg, &output)?;
+    match fmt {
+        GraphOutputFormat::Svg => std::fs::write(&output, &svg).context("write svg")?,
+        GraphOutputFormat::Png => to_png(&svg, &output)?,
     }
     println!("written to {}", output.display());
     Ok(())
@@ -145,7 +172,7 @@ fn test_topology() -> (Vec<robonix_sdk::NodeInfo>, Vec<Channel>) {
                     let port = 50100 + r.range(0, 199) as u16;
                     robonix_sdk::InterfaceInfo {
                         name:                  format!("/io/{pkg}_{i}_{j}"),
-                        abstract_interface_id: format!("robonix/{pkg}/node{i}/port{j}"),
+                        contract_id:           format!("robonix/{pkg}/node{i}/port{j}"),
                         supported_transports:  ts,
                         metadata_json:         format!(r#"{{"endpoint":"127.0.0.1:{port}"}}"#),
                     }
@@ -183,13 +210,13 @@ fn test_topology() -> (Vec<robonix_sdk::NodeInfo>, Vec<Channel>) {
 
         // Clone data needed before borrowing nodes mutably
         let iface_name = iface.name.clone();
-        let abs_id     = iface.abstract_interface_id.clone();
+        let abs_id     = iface.contract_id.clone();
 
         // Add a matching (client-side) interface on the consumer node if missing
         if !nodes[ci].interfaces.iter().any(|x| x.name == iface_name) {
             nodes[ci].interfaces.push(robonix_sdk::InterfaceInfo {
                 name:                  iface_name.clone(),
-                abstract_interface_id: abs_id,
+                contract_id:           abs_id,
                 supported_transports:  vec![tr.clone()],
                 metadata_json:         format!(r#"{{"endpoint":"{ep}"}}"#),
             });
@@ -305,10 +332,10 @@ fn measure(n: &robonix_sdk::NodeInfo, channels: &[Channel]) -> NodeGeom {
             .map(|c| c.endpoint.clone())
             .filter(|e| !e.is_empty())
             .unwrap_or_else(|| meta_ep(&iface.metadata_json));
-        let abs = if iface.abstract_interface_id.is_empty() {
+        let abs = if iface.contract_id.is_empty() {
             iface.name.as_str()
         } else {
-            iface.abstract_interface_id.as_str()
+            iface.contract_id.as_str()
         };
         let ep_line = format!("{tr}::{abs}:{ep}");
 
@@ -542,10 +569,10 @@ fn render_svg(nodes: &[robonix_sdk::NodeInfo], channels: &[Channel], title: &str
                 .map(|c| c.endpoint.clone())
                 .filter(|e| !e.is_empty())
                 .unwrap_or_else(|| meta_ep(&iface.metadata_json));
-            let abs = if iface.abstract_interface_id.is_empty() {
+            let abs = if iface.contract_id.is_empty() {
                 iface.name.as_str()
             } else {
-                iface.abstract_interface_id.as_str()
+                iface.contract_id.as_str()
             };
             let ep_label = format!("{tr}::{abs}:{ep}");
 
@@ -573,7 +600,7 @@ fn render_svg(nodes: &[robonix_sdk::NodeInfo], channels: &[Channel], title: &str
             writeln!(s, "<text x='{:.1}' y='{:.1}' font-family='{F}' font-size='9' fill='#333333'>{}</text>",
                 tx2 + badge_w + 5.0, row1_y + 9.0, esc(&iface.name)).unwrap();
 
-            // Row 2: transport::abstract_interface_id:allocated_endpoint
+            // Row 2: transport::contract_id:allocated_endpoint
             writeln!(s, "<text x='{tx2:.1}' y='{:.1}' font-family='{F}' font-size='9' fill='#111111'>{}</text>",
                 by + BPAD + LH + 8.5, esc(&ep_label)).unwrap();
 

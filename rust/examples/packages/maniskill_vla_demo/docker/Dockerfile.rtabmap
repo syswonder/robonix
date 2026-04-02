@@ -27,7 +27,7 @@ COPY docker/rtabmap.launch.py  /app/rtabmap.launch.py
 COPY docker/entrypoint.sh      /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-# Proto stubs for gRPC communication with robonix-server and env_node
+# Proto stubs for gRPC communication with robonix-atlas and env_node
 COPY proto_stubs/robonix_runtime_pb2.py      /app/proto_stubs/
 COPY proto_stubs/robonix_runtime_pb2_grpc.py /app/proto_stubs/
 COPY maniskill_vla_demo/maniskill_env_pb2.py      /app/proto_stubs/

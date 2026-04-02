@@ -1,0 +1,18 @@
+# Matches `lib/prm_base/msg/MoveCommand.msg` — pub-sub / stream-in payload (README: robonix/prm/base/move).
+[contract]
+id      = "robonix/prm/base/move"
+version = "1"
+kind    = "primitive"
+
+[io]
+input  = "prm_base/msg/MoveCommand"
+output = "std_msgs/msg/Empty"
+
+[mode]
+type = "stream_in"
+
+[semantics]
+preemptable = true
+
+# Actual command rate / timing are deployment-defined; provider documents them in
+# interface metadata at registration, not in this contract.

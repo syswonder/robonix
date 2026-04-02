@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal check: gRPC QueryNodes against a running robonix-server (no VLM, no ROS)."""
+"""Minimal check: gRPC QueryNodes against a running robonix-atlas (no VLM, no ROS)."""
 from __future__ import annotations
 
 import os
@@ -18,7 +18,7 @@ import robonix_runtime_pb2_grpc as pb_grpc  # noqa: E402
 
 
 def _target() -> str:
-    s = os.environ.get("ROBONIX_SERVER", "127.0.0.1:50051")
+    s = os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
     if s.startswith("http://"):
         s = s[len("http://") :]
     if s.startswith("https://"):

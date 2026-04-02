@@ -37,11 +37,11 @@ nodes:
 
 interfaces:
   provides:
-    - abstract_interface_id: robonix/prm/camera/rgb
-    - abstract_interface_id: robonix/sys/perception/yolo/gpu_tensor
+    - contract_id: robonix/prm/camera/rgb
+    - contract_id: robonix/sys/perception/yolo/gpu_tensor
   consumes:
-    - abstract_interface_id: robonix/prm/camera/rgb
-    - abstract_interface_id: robonix/sys/perception/yolo/gpu_tensor
+    - contract_id: robonix/prm/camera/rgb
+    - contract_id: robonix/sys/perception/yolo/gpu_tensor
 
 launchProfiles:
   default:

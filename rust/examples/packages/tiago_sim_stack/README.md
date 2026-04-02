@@ -1,20 +1,20 @@
 # `tiago_sim_stack` (RFC002 + Docker Compose)
 
-Single Compose service **`ros2-bridge`**: **Webots (GUI)** + `eaios_webots` launch + **Nav2** bringup + **`tiago_bridge`** registering MCP with `robonix-server`.
+Single Compose service **`ros2-bridge`**: **Webots (GUI)** + `eaios_webots` launch + **Nav2** bringup + **`tiago_bridge`** registering MCP with `robonix-atlas`.
 
 ## Requirements
 
 - Docker, host **X11** (this stack is **not** headless).
 - Before `docker compose up`, allow local clients to use your display, e.g. `xhost +local:docker` (revert when done).
 - Set **`DISPLAY`** (e.g. `export DISPLAY=:0`) in the shell that runs Compose so the container inherits it.
-- **`robonix-server`** listening on the address in **`ROBONIX_SERVER`** (default `127.0.0.1:50051`). With `network_mode: host`, the container shares the host network namespace.
+- **`robonix-atlas`** listening on the address in **`ROBONIX_ATLAS`** (default `127.0.0.1:50051`). With `network_mode: host`, the container shares the host network namespace.
 
 ## `rbnx` (from repository `rust/`)
 
 ```bash
 cargo run -p robonix-cli -- validate examples/packages/tiago_sim_stack
 cargo run -p robonix-cli -- build -p examples/packages/tiago_sim_stack
-# with robonix-server already running:
+# with robonix-atlas already running:
 cargo run -p robonix-cli -- start -p examples/packages/tiago_sim_stack -n com.robonix.prm.tiago
 ```
 
@@ -28,11 +28,11 @@ From `rust/`:
 ./examples/run.sh
 ```
 
-This uses **`rbnx` validate/build/start** for `vlm_service` and `tiago_sim_stack` by default (and starts `robonix-server` + `robonix-agent` unless disabled — see `run.sh` header). Use **`START_SIM_STACK=0`** to skip the sim container.
+This uses **`rbnx` validate/build/start** for `vlm_service` and `tiago_sim_stack` by default (and starts `robonix-atlas` + `robonix-agent` unless disabled — see `run.sh` header). Use **`START_SIM_STACK=0`** to skip the sim container.
 
 ## Agent skills (`skills/`)
 
-`rbnx start` registers **`skills/* /SKILL.md`** with `robonix-server` for `robonix-agent`. Notable:
+`rbnx start` registers **`skills/* /SKILL.md`** with `robonix-atlas` for `robonix-agent`. Notable:
 
 - **`object_search_wander`** — find a target (e.g. door) with **`get_robot_pose` + `get_camera_image` + short `move_base`**; explicitly **no** `navigate_to` / nav goals.
 - **`navigation`** — Nav2 map goals when allowed.

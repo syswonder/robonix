@@ -1,0 +1,18 @@
+# Payload-level I/O: `lib/pilot/msg/Intent.msg` → stream of `PilotEvent.msg`.
+# Concrete gRPC: `lib/pilot/srv/HandleIntent.srv` → `PilotService.HandleIntent(HandleIntent_Request)`.
+# `robonix_contracts` uses abstract `Stream(Intent)`; see `contracts/README.md`.
+[contract]
+id      = "robonix/sys/runtime/pilot"
+version = "1"
+kind    = "service"
+
+[io]
+input  = "pilot/msg/Intent"
+output = "pilot/msg/PilotEvent"
+
+[mode]
+type = "stream_out"
+
+[semantics]
+stateful      = true
+interruptible = true

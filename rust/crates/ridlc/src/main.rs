@@ -1,27 +1,30 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// ridlc — ROS IDL codegen tool
+// ridlc — ROS IDL + contract codegen
 
 use anyhow::{Result, bail};
 use clap::Parser;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
-use ridlc::codegen::{msg_parser, proto_gen, python_gen};
+use ridlc::codegen::{contract_gen, msg_parser, proto_gen, python_gen};
 
 #[derive(Parser)]
 #[command(name = "ridlc")]
-    #[command(about = "ROS IDL codegen: generate .proto / Python ctypes from ROS .msg/.srv definitions")]
+#[command(about = "ROS IDL + contract TOML codegen: .msg/.srv → .proto / Python; contracts → robonix_contracts.proto")]
 struct Args {
-    /// Type search path for resolving ROS IDL packages (e.g. -I path/to/robonix-interfaces/lib)
+    /// Type search path for ROS IDL (e.g. -I path/to/robonix-interfaces/lib). Optional if only `--contracts` with protobuf-only types (rare).
     #[arg(short = 'I', long = "include", number_of_values = 1)]
     include: Vec<PathBuf>,
+
+    /// Directory of contract `.toml` files (e.g. rust/contracts). Emits `robonix_contracts.proto` (proto only).
+    #[arg(long = "contracts")]
+    contracts: Option<PathBuf>,
 
     /// Output directory for generated code
     #[arg(short = 'o', long = "out")]
     out: PathBuf,
 
-    /// Target language (currently only "proto" is supported)
-    /// Target language: "proto" (protobuf) or "python" (ctypes for iceoryx2)
+    /// Target language: "proto" or "python"
     #[arg(long = "lang", default_value = "proto")]
     lang: String,
 }
@@ -38,9 +41,9 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
 
-    if args.include.is_empty() {
+    if args.include.is_empty() && args.contracts.is_none() {
         bail!(
-            "[ridlc] at least one -I/--include path is required (e.g. -I path/to/robonix-interfaces/lib)"
+            "[ridlc] pass at least one -I/--include and/or --contracts (see --help)"
         );
     }
 
@@ -52,6 +55,11 @@ fn main() -> Result<()> {
     }
 
     eprintln!("{} includes: {:?}", ridlc_prefix(), args.include);
+    eprintln!(
+        "{} contracts: {:?}",
+        ridlc_prefix(),
+        args.contracts.as_ref().map(|p| p.display().to_string())
+    );
     eprintln!("{} out: {}", ridlc_prefix(), args.out.display());
 
     std::fs::create_dir_all(&args.out)?;
@@ -91,6 +99,9 @@ fn main() -> Result<()> {
                 srvs.len(),
                 args.out.display()
             );
+            if let Some(ref cdir) = args.contracts {
+                contract_gen::generate(&mut resolver, cdir, &args.out)?;
+            }
         }
     }
 

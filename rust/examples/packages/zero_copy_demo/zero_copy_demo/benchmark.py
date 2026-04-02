@@ -174,7 +174,7 @@ def run(args) -> dict:
 
 def main():
     ap = argparse.ArgumentParser(description="Robonix multi-process pipeline benchmark")
-    ap.add_argument("--server", default=os.environ.get("ROBONIX_SERVER", "127.0.0.1:50051"))
+    ap.add_argument("--server", default=os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051"))
     ap.add_argument("--width", type=int, default=1920)
     ap.add_argument("--height", type=int, default=1080)
     ap.add_argument("--frames", type=int, default=200)

@@ -503,7 +503,7 @@ def main() -> None:
     _latest_obs = obs
     print("[env-node] env ready", file=sys.stderr)
 
-    server_addr = os.environ.get("ROBONIX_SERVER", "localhost:50051")
+    server_addr = os.environ.get("ROBONIX_ATLAS", "localhost:50051")
     channel = grpc.insecure_channel(server_addr)
     stub = pb_grpc.RobonixRuntimeStub(channel)
 

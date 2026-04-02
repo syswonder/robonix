@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Namespace discovery PoC: list nodes/interfaces from the single global robonix-server (no ROS required).
+"""Namespace discovery PoC: list nodes/interfaces from the single global robonix-atlas (no ROS required).
 
-Run:  ROBONIX_SERVER=127.0.0.1:50051 python3 hal_discovery_poc.py
+Run:  ROBONIX_ATLAS=127.0.0.1:50051 python3 hal_discovery_poc.py
 
 Optional env (legacy HAL_* names still accepted):
-  ABSTRACT_INTERFACE_ID  Exact match on InterfaceInfo.abstract_interface_id (ignores NAMESPACE_PREFIX/INTERFACE_NAME when set)
+  CONTRACT_ID            Exact match on InterfaceInfo.contract_id (ignores NAMESPACE_PREFIX/INTERFACE_NAME when set; legacy: ABSTRACT_INTERFACE_ID)
   NAMESPACE_PREFIX       Prefix filter for QueryNodes (e.g. robonix/prm, robonix/sys)
   INTERFACE_NAME         Filter by DeclareInterface.name
   TRANSPORT              Filter by supported transport
@@ -33,7 +33,7 @@ def _env(primary: str, legacy: str) -> str:
 
 
 def _target() -> str:
-    s = os.environ.get("ROBONIX_SERVER", "127.0.0.1:50051")
+    s = os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
     for prefix in ("http://", "https://"):
         if s.startswith(prefix):
             s = s[len(prefix) :]
@@ -41,7 +41,7 @@ def _target() -> str:
 
 
 def main() -> int:
-    abstract = os.environ.get("ABSTRACT_INTERFACE_ID", "").strip()
+    abstract = _env("CONTRACT_ID", "ABSTRACT_INTERFACE_ID").strip()
     ns = _env("NAMESPACE_PREFIX", "HAL_NAMESPACE_PREFIX")
     name = _env("INTERFACE_NAME", "HAL_INTERFACE_NAME")
     transport = _env("TRANSPORT", "HAL_TRANSPORT")
@@ -55,13 +55,13 @@ def main() -> int:
             transport=transport,
             distro_prefix=_env("DISTRO_PREFIX", "HAL_DISTRO_PREFIX"),
             container_id=_env("CONTAINER_ID", "HAL_CONTAINER_ID"),
-            abstract_interface_id=abstract,
+            contract_id=abstract,
         )
     )
 
     print("[hal_poc] QueryNodes filters:")
     if abstract:
-        print(f"  abstract_interface_id={abstract!r} transport={transport!r}")
+        print(f"  contract_id={abstract!r} transport={transport!r}")
     else:
         print(f"  namespace_prefix={ns!r} name={name!r} transport={transport!r}")
     print(f"[hal_poc] {len(resp.nodes)} node(s)\n")
@@ -79,7 +79,7 @@ def main() -> int:
         print(f"  kind={n.kind!r} distro={n.distro!r} container_id={n.container_id!r}")
         for iface in n.interfaces:
             print(
-                f"    interface name={iface.name!r} abstract_interface_id={iface.abstract_interface_id!r} transports={list(iface.supported_transports)}"
+                f"    interface name={iface.name!r} contract_id={iface.contract_id!r} transports={list(iface.supported_transports)}"
             )
             if iface.metadata_json:
                 try:

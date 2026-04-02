@@ -1,6 +1,6 @@
 # Robonix (Rust workspace)
 
-Robonix is a robotics control-plane framework: nodes register capabilities, declare interfaces, negotiate channels over pluggable transports, and expose SKILL.md text so agents and tools can discover how to use them.
+Robonix is a robotics EAIOS (Embodied AI Operating System) framework: nodes register capabilities, declare interfaces, negotiate channels over pluggable transports, and expose SKILL.md text so agents and tools can discover how to use them.
 
 Platform: primary target is Linux; ROS 2 workloads are not assumed on the host — use containers or a sourced distro when needed.
 
@@ -8,9 +8,11 @@ Platform: primary target is Linux; ROS 2 workloads are not assumed on the host �
 
 | Crate | Role |
 |--------|------|
-| robonix-server | gRPC control plane: registration, discovery, channel negotiation, skill catalog |
+| robonix-atlas | gRPC control plane: registration, discovery, channel negotiation, skill catalog |
 | robonix-sdk | Thin Rust client for the runtime API |
-| robonix-agent | System agent: discovers VLM via control plane, runs ReAct loop with MCP tool calling |
+| robonix-pilot | VLM-driven reasoning service: ReAct loop, session management, `TaskGraph` slices (v1 linear; BT/RTDL TODO) |
+| robonix-executor | Tool dispatch runtime: builtin / MCP / gRPC routing |
+| robonix-liaison | User-facing interaction layer: text stdin→Intent→PilotEvent |
 | robonix-cli | `rbnx` CLI for package validate / build / start and runtime inspection |
 | ridlc | ROS IDL codegen — generates `.proto` from ROS `.msg`/`.srv` definitions |
 
@@ -18,13 +20,12 @@ Platform: primary target is Linux; ROS 2 workloads are not assumed on the host �
 
 ```
 rust/
-├── crates/                  # Rust packages (server, sdk, agent, CLI, ridlc)
-├── docs/                    # Namespace sketch (docs/NAMESPACE.md), PoC walkthrough (docs/POC.md)
-├── examples/                # Minimal E2E: packages/, scripts/, run.sh
-├── proto/                   # robonix_runtime.proto (authoritative control-plane gRPC API)
+├── crates/                  # Rust packages (atlas, sdk, pilot, executor, liaison, CLI, ridlc)
+├── examples/                # E2E demo: packages/, scripts/, run.sh
+├── proto/                   # Control plane: robonix_runtime.proto, …
 ├── robonix-interfaces/
-│   ├── lib/                 # ROS IDL (.msg/.srv) — canonical type definitions
-│   └── robonix_proto/       # Generated .proto (via ridlc --lang proto)
+│   ├── lib/                 # ROS IDL (.msg/.srv) — canonical payload definitions
+│   └── robonix_proto/       # ridlc-generated `.proto` only (from `lib/` + `contracts/`)
 └── _deprecated/             # Legacy code kept for reference
 ```
 
@@ -40,19 +41,19 @@ cargo build --workspace
 Run the control plane:
 
 ```bash
-./start_server
+./start_server   # starts robonix-atlas on 0.0.0.0:50051
 ```
 
-Run the E2E example (server + VLM + Tiago sim + agent):
+Run the full E2E stack (atlas + executor + pilot + VLM + Tiago sim + liaison):
 
 ```bash
 cd rust
 cp examples/.env.example examples/.env   # set VLM_* keys
-./examples/run.sh                         # VLM + tiago_sim_stack (Docker Webots + Nav2 + bridge; needs Docker + X11)
+./examples/run.sh                         # all 4 services + VLM + tiago_sim_stack
 START_SIM_STACK=0 ./examples/run.sh       # VLM only (no sim container)
 ```
 
-Manual Tiago sim (with `robonix-server` already up):
+Manual Tiago sim (with `robonix-atlas` already up):
 
 ```bash
 cd rust
@@ -60,7 +61,7 @@ cargo run -p robonix-cli -- build -p examples/packages/tiago_sim_stack
 cargo run -p robonix-cli -- start -p examples/packages/tiago_sim_stack -n com.robonix.prm.tiago
 ```
 
-See [`examples/README.md`](examples/README.md) and [`docs/NAMESPACE.md`](docs/NAMESPACE.md).
+See [`examples/README.md`](examples/README.md).
 
 ## Key concepts
 
@@ -69,3 +70,5 @@ See [`examples/README.md`](examples/README.md) and [`docs/NAMESPACE.md`](docs/NA
 - **Channel** — Allocated connection from `NegotiateChannel` (id, transport, endpoint).
 - **Transport** — Concrete wiring (gRPC, MCP, ROS 2, shared memory); chosen at negotiation time.
 - **SKILL.md** — Human/agent-oriented description of how to invoke the node; served via `QueryAllSkills`.
+- **Intent** — Single user turn; Liaison sends it to Pilot and streams back `PilotEvent`.
+- **TaskGraph** — One incremental slice of the task (behavior-tree-shaped contract; v1 = linear `TaskCall[]`); dispatched by Executor (TODO: full BT + RTDL).

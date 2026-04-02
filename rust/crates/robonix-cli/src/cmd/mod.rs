@@ -25,12 +25,15 @@ const DEFAULT_ENDPOINT: &str = "localhost:50051";
 
 #[derive(Args)]
 pub struct GraphArgs {
-    /// robonix-server endpoint (ignored with `--test`)
-    #[arg(long, env = "ROBONIX_SERVER", default_value = DEFAULT_ENDPOINT)]
+    /// robonix-atlas endpoint (ignored with `--test`)
+    #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
     pub server: String,
-    /// Output file path (.png or .svg selects format)
+    /// Output file path (extension hints format when `--format` omitted: `.png` / `.svg`)
     #[arg(short, long, default_value = "topology.png")]
     pub output: PathBuf,
+    /// Output format (`png` default when extension is absent or unrecognized)
+    #[arg(long, value_enum)]
+    pub format: Option<graph::GraphOutputFormat>,
     /// Random mock nodes and channels only (no server)
     #[arg(long = "test")]
     pub test_mode: bool,
@@ -95,8 +98,8 @@ pub enum Commands {
 
     /// List all registered nodes and their interfaces
     Nodes {
-        /// robonix-server endpoint
-        #[arg(long, env = "ROBONIX_SERVER", default_value = DEFAULT_ENDPOINT)]
+        /// robonix-atlas endpoint
+        #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
         /// Filter by distro prefix (e.g. humble)
         #[arg(long)]
@@ -110,8 +113,8 @@ pub enum Commands {
     },
     /// Show SKILL.md for registered nodes (all, or one with --node)
     Describe {
-        /// robonix-server endpoint
-        #[arg(long, env = "ROBONIX_SERVER", default_value = DEFAULT_ENDPOINT)]
+        /// robonix-atlas endpoint
+        #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
         /// Show full SKILL.md for a specific node
         #[arg(long)]
@@ -122,8 +125,8 @@ pub enum Commands {
     },
     /// Print all tools visible to the agent (builtin + node skills)
     Tools {
-        /// robonix-server endpoint
-        #[arg(long, env = "ROBONIX_SERVER", default_value = DEFAULT_ENDPOINT)]
+        /// robonix-atlas endpoint
+        #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
         /// Output as JSON
         #[arg(long)]
@@ -131,21 +134,21 @@ pub enum Commands {
     },
     /// Show active channels (negotiated connections)
     Channels {
-        /// robonix-server endpoint
-        #[arg(long, env = "ROBONIX_SERVER", default_value = DEFAULT_ENDPOINT)]
+        /// robonix-atlas endpoint
+        #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
     },
     /// Dump full runtime state as JSON (nodes, interfaces, channels)
     Inspect {
-        /// robonix-server endpoint
-        #[arg(long, env = "ROBONIX_SERVER", default_value = DEFAULT_ENDPOINT)]
+        /// robonix-atlas endpoint
+        #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
     },
 
     /// Chat with the Robonix agent in an interactive TUI
     Chat {
-        /// robonix-server endpoint (used to discover agent)
-        #[arg(long, env = "ROBONIX_SERVER", default_value = DEFAULT_ENDPOINT)]
+        /// robonix-atlas endpoint (used to discover agent)
+        #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
     },
 
@@ -189,6 +192,8 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         Commands::Channels { server } => runtime::channels(&server).await,
         Commands::Inspect { server } => runtime::inspect(&server).await,
         Commands::Chat { server } => chat::execute(&server).await,
-        Commands::Graph { args } => graph::execute(&args.server, args.output, args.test_mode).await,
+        Commands::Graph { args } => {
+            graph::execute(&args.server, args.output, args.format, args.test_mode).await
+        }
     }
 }

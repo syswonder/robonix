@@ -59,5 +59,4 @@ crossterm = "0.28"
 # Internal crates
 ridlc = { path = "crates/ridlc" }
 robonix-sdk = { path = "crates/robonix-sdk" }
-robonix-agent = { path = "crates/robonix-agent" }
 robonix-buffer = { path = "crates/robonix-buffer" }

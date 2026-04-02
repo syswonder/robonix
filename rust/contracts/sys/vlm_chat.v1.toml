@@ -1,0 +1,19 @@
+# `[io].input` = `vlm/srv/ChatStream` → protobuf first arg is `ChatStream_Request` (all request fields).
+# Stream element: `vlm/msg/ChatStreamEvent.msg`. Mirrors `VlmService.ChatStream` in ridlc `vlm.proto`.
+[contract]
+id      = "robonix/sys/model/vlm/chat"
+version = "1"
+kind    = "service"
+
+[io]
+input  = "vlm/srv/ChatStream"
+output = "vlm/msg/ChatStreamEvent"
+
+[mode]
+type = "stream_out"
+
+[semantics]
+multimodal = true
+tool_use   = true
+
+# Model name, token limits, hosting region: provider / deployment metadata, not contract.

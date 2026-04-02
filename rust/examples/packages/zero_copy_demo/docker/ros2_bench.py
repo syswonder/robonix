@@ -196,14 +196,14 @@ def _run_orchestrate(args):
     print(f"[+] GPU: {gpu_name}", file=sys.stderr)
     print(f"[+] Frame: {W}x{H} RGB8 ({frame_mb:.2f} MB)", file=sys.stderr)
 
-    # Register nodes with robonix-server
+    # Register nodes with robonix-atlas
     sys.path.insert(0, str(Path("/bench/proto_gen")))
     sys.path.insert(0, "/bench")
     from common import connect_server
     import robonix_runtime_pb2 as pb
 
     server_addr = args.server.removeprefix("http://").removeprefix("https://")
-    print(f"[+] Connecting to robonix-server @ {server_addr}...", file=sys.stderr)
+    print(f"[+] Connecting to robonix-atlas @ {server_addr}...", file=sys.stderr)
     stub = connect_server(server_addr)
 
     cam_id = "com.robonix.bench.ros2.camera"
@@ -215,7 +215,7 @@ def _run_orchestrate(args):
     stub.DeclareInterface(pb.DeclareInterfaceRequest(
         node_id=cam_id, name="rgb", supported_transports=["ros2"],
         metadata_json=f'{{"width":{W},"height":{H},"encoding":"rgb8","msg_type":"sensor_msgs/Image"}}',
-        abstract_interface_id="robonix/prm/camera/rgb"))
+        contract_id="robonix/prm/camera/rgb"))
     stub.RegisterNode(pb.RegisterNodeRequest(
         node_id=yolo_id, namespace="robonix/sys/perception", kind="service"))
     stub.NegotiateChannel(pb.NegotiateChannelRequest(
@@ -347,7 +347,7 @@ def main():
     ap = argparse.ArgumentParser(description="ROS 2 multi-process benchmark")
     ap.add_argument("--role", choices=["camera", "yolo", "edge"], default=None,
                     help="Internal: run a single node process")
-    ap.add_argument("--server", default=os.environ.get("ROBONIX_SERVER", "127.0.0.1:50051"))
+    ap.add_argument("--server", default=os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051"))
     ap.add_argument("--width", type=int, default=1920)
     ap.add_argument("--height", type=int, default=1080)
     ap.add_argument("--frames", type=int, default=200)

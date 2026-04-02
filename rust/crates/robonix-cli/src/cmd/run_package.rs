@@ -134,7 +134,7 @@ pub async fn execute_start(
         .or_else(|| std::env::var("ROBONIX_META_GRPC_ENDPOINT").ok())
         .unwrap_or_else(|| "127.0.0.1:50051".to_string());
 
-    // Scan skills/ directory and pre-register with robonix-server
+    // Scan skills/ directory and pre-register with robonix-atlas
     let skills = manifest::scan_skills(&package_root);
     if !skills.is_empty() {
         output::sub_step(&format!("Discovered {} skill(s):", skills.len()));
@@ -161,7 +161,7 @@ pub async fn execute_start(
                     .register_node_with_skills(&node.id, "", "", "", skill_items, "", "")
                     .await
                 {
-                    Ok(_) => output::sub_step("Skills registered with robonix-server"),
+                    Ok(_) => output::sub_step("Skills registered with robonix-atlas"),
                     Err(e) => {
                         output::sub_step(&format!("Warning: failed to register skills: {e:#}"))
                     }
@@ -189,7 +189,7 @@ pub async fn execute_start(
 
     let mut env = std::collections::HashMap::new();
     env.insert("ROBONIX_META_GRPC_ENDPOINT".to_string(), endpoint.clone());
-    env.insert("ROBONIX_SERVER".to_string(), endpoint.clone());
+    env.insert("ROBONIX_ATLAS".to_string(), endpoint.clone());
     if let Some(profile) = manifest
         .launch_profiles
         .as_ref()

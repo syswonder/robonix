@@ -1,6 +1,6 @@
 # robonix-sdk
 
-Thin Rust gRPC client for robonix-server, wrapping the `RobonixRuntime` service defined in [`proto/robonix_runtime.proto`](../../proto/robonix_runtime.proto).
+Thin Rust gRPC client for robonix-atlas, wrapping the `RobonixRuntime` service defined in [`proto/robonix_runtime.proto`](../../proto/robonix_runtime.proto).
 
 ## Usage
 

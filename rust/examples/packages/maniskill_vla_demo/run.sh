@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ManiSkill3 VLA demo: env + perception + VLA nodes → robonix-agent.
+# ManiSkill3 VLA demo: env + perception + VLA nodes → robonix-pilot.
 #
 # Usage:
 #   cd rust/examples/packages/maniskill_vla_demo
@@ -20,9 +20,9 @@
 #   PERCEPTION_YOLO_WEIGHTS   (default: yolov8s-worldv2.pt) ultralytics YOLO-World weights (auto-cached)
 #   VIZ_DETECT_BACKEND        (default: yolo_world) same as PERCEPTION_BACKEND for viz overlay
 #   HF_ENDPOINT               (default: https://hf-mirror.com)
-#   ROBONIX_SERVER            (default: 127.0.0.1:50051)
+#   ROBONIX_ATLAS            (default: 127.0.0.1:50051)
 #   START_VLM_SERVICE=1|0     (default: 1)
-#   START_AGENT=1|0           (default: 1)
+#   START_PILOT=1|0           (default: 1)
 #   START_VIZ=1|0             (default: 1) — Rerun visualizer
 #   START_MAPPING=1|0         (default: 0) — ROS2/RTAB-Map Docker container (optional ROS test)
 #   BRIDGE_FPS                (default: 10) — env_node poll rate inside the RTAB-Map container
@@ -44,15 +44,16 @@ PACKAGES="$EXAMPLES_ROOT/packages"
 RUST_ROOT="$(cd "$EXAMPLES_ROOT/.." && pwd)"
 VENV="$PKG_ROOT/.venv"
 
-export ROBONIX_SERVER="${ROBONIX_SERVER:-127.0.0.1:50051}"
-export ROBONIX_META_GRPC_ENDPOINT="${ROBONIX_META_GRPC_ENDPOINT:-$ROBONIX_SERVER}"
-export RUST_LOG="${RUST_LOG:-robonix_server=info,robonix_agent=info}"
+export ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}"
+export ROBONIX_META_GRPC_ENDPOINT="${ROBONIX_META_GRPC_ENDPOINT:-$ROBONIX_ATLAS}"
+export RUST_LOG="${RUST_LOG:-robonix_atlas=info,robonix_pilot=info,robonix_executor=info}"
 export VLA_POLICY="${VLA_POLICY:-octo}"
 export MANISKILL_ENV_ID="${MANISKILL_ENV_ID:-ReplicaCADTidyHouseTrain_SceneManipulation-v1}"
 export MANISKILL_CONTROL_MODE="${MANISKILL_CONTROL_MODE:-pd_ee_delta_pose}"
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 export START_VLM_SERVICE="${START_VLM_SERVICE:-1}"
-export START_AGENT="${START_AGENT:-1}"
+export START_PILOT="${START_PILOT:-1}"
+export START_EXECUTOR="${START_EXECUTOR:-1}"
 export START_VIZ="${START_VIZ:-1}"
 export START_MAPPING="${START_MAPPING:-0}"
 export VIZ_DETECT_QUERY="${VIZ_DETECT_QUERY:-object . cup . box}"
@@ -146,14 +147,16 @@ cleanup() {
     fi
   done
   pkill -TERM -f 'python3 -m maniskill_vla_demo' 2>/dev/null || true
-  pkill -TERM -f 'target/debug/robonix-server'   2>/dev/null || true
-  pkill -TERM -f 'target/debug/robonix-agent'    2>/dev/null || true
+  pkill -TERM -f 'target/debug/robonix-atlas'    2>/dev/null || true
+  pkill -TERM -f 'target/debug/robonix-executor' 2>/dev/null || true
+  pkill -TERM -f 'target/debug/robonix-pilot'    2>/dev/null || true
   pkill -TERM -f 'target/debug/rbnx start'       2>/dev/null || true
   pkill -TERM -f "rerun rerun+http"               2>/dev/null || true
   sleep 0.5
   pkill -KILL -f 'python3 -m maniskill_vla_demo' 2>/dev/null || true
-  pkill -KILL -f 'target/debug/robonix-server'   2>/dev/null || true
-  pkill -KILL -f 'target/debug/robonix-agent'    2>/dev/null || true
+  pkill -KILL -f 'target/debug/robonix-atlas'    2>/dev/null || true
+  pkill -KILL -f 'target/debug/robonix-executor' 2>/dev/null || true
+  pkill -KILL -f 'target/debug/robonix-pilot'    2>/dev/null || true
   pkill -KILL -f "rerun rerun+http"               2>/dev/null || true
   wait 2>/dev/null || true
   "$EXAMPLES_ROOT/stop.sh"
@@ -163,13 +166,15 @@ cleanup() {
 pre_cleanup() {
   echo "[demo] cleaning up any leftover processes..."
   pkill -TERM -f 'python3 -m maniskill_vla_demo' 2>/dev/null || true
-  pkill -TERM -f 'target/debug/robonix-server'   2>/dev/null || true
-  pkill -TERM -f 'target/debug/robonix-agent'    2>/dev/null || true
+  pkill -TERM -f 'target/debug/robonix-atlas'    2>/dev/null || true
+  pkill -TERM -f 'target/debug/robonix-executor' 2>/dev/null || true
+  pkill -TERM -f 'target/debug/robonix-pilot'    2>/dev/null || true
   pkill -TERM -f 'target/debug/rbnx start'       2>/dev/null || true
   sleep 0.5
   pkill -KILL -f 'python3 -m maniskill_vla_demo' 2>/dev/null || true
-  pkill -KILL -f 'target/debug/robonix-server'   2>/dev/null || true
-  pkill -KILL -f 'target/debug/robonix-agent'    2>/dev/null || true
+  pkill -KILL -f 'target/debug/robonix-atlas'    2>/dev/null || true
+  pkill -KILL -f 'target/debug/robonix-executor' 2>/dev/null || true
+  pkill -KILL -f 'target/debug/robonix-pilot'    2>/dev/null || true
 }
 
 # ── setup ────────────────────────────────────────────────────────────────────
@@ -241,11 +246,11 @@ cmd_start() {
     rbnx_validate_build "$PACKAGES/vlm_service"
   fi
 
-  RBNX_START_OPTS=(start --endpoint "$ROBONIX_SERVER")
+  RBNX_START_OPTS=(start --endpoint "$ROBONIX_ATLAS")
 
-  # robonix-server
-  echo "[demo] starting robonix-server..."
-  bg bash -c "cd '$RUST_ROOT' && exec cargo run -p robonix-server"
+  # robonix-atlas (control plane)
+  echo "[demo] starting robonix-atlas..."
+  bg bash -c "cd '$RUST_ROOT' && exec cargo run -p robonix-atlas"
   sleep 2
 
   # vlm_service
@@ -309,7 +314,7 @@ cmd_start() {
       echo "[demo] starting RTAB-Map mapping node (Docker)..."
       echo "[demo]   (first run builds the image — may take ~1 min)"
       bg bash -c "cd '$PKG_ROOT' && \
-        ROBONIX_SERVER='${ROBONIX_SERVER}' \
+        ROBONIX_ATLAS='${ROBONIX_ATLAS}' \
         RERUN_GRPC_URL='rerun+http://localhost:${RERUN_GRPC_PORT}' \
         BRIDGE_FPS='${BRIDGE_FPS:-10}' \
         MAP_LOG_INTERVAL='${MAP_LOG_INTERVAL:-30}' \
@@ -318,10 +323,15 @@ cmd_start() {
     fi
   fi
 
-  # robonix-agent (background headless gRPC service)
-  if [ "$START_AGENT" = "1" ]; then
-    echo "[demo] starting robonix-agent (background, headless gRPC)..."
-    bg bash -c "cd '$RUST_ROOT' && exec cargo run -p robonix-agent"
+  # robonix-executor + robonix-pilot (background gRPC services)
+  if [ "$START_EXECUTOR" = "1" ]; then
+    echo "[demo] starting robonix-executor (background)..."
+    bg bash -c "cd '$RUST_ROOT' && exec cargo run -p robonix-executor"
+    sleep 1
+  fi
+  if [ "$START_PILOT" = "1" ]; then
+    echo "[demo] starting robonix-pilot (background, headless gRPC)..."
+    bg bash -c "cd '$RUST_ROOT' && exec cargo run -p robonix-pilot"
     sleep 3
   fi
 
@@ -329,10 +339,10 @@ cmd_start() {
   echo "============================================================"
   echo "  All nodes running.  Use 'rbnx chat' to interact."
   echo ""
-  echo "  rbnx chat --server ${ROBONIX_SERVER}"
+  echo "  rbnx chat --server ${ROBONIX_ATLAS}"
   echo ""
   echo "  Or generate a topology graph:"
-  echo "  rbnx graph --server ${ROBONIX_SERVER} -o topology.png"
+  echo "  rbnx graph --server ${ROBONIX_ATLAS} -o topology.png"
   echo ""
   echo "  Press Ctrl+C to stop all nodes."
   echo "============================================================"
@@ -349,7 +359,7 @@ case "${1:-help}" in
     echo "Usage: $0 {setup|start}"
     echo ""
     echo "  setup   Create .venv (Python 3.11), install all deps, download assets"
-    echo "  start   Activate .venv and launch all nodes + robonix-agent"
+    echo "  start   Activate .venv and launch all nodes + robonix-pilot"
     echo ""
   echo "Environment variables (see top of this file for full list):"
   echo "  VLA_POLICY=octo|scripted   MANISKILL_ENV_ID=...   HF_ENDPOINT=..."

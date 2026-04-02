@@ -29,17 +29,17 @@ cd rust/provider/tiago_demo_package
 ./start_rviz.sh
 ```
 
-## 4. Start robonix-server and register (new terminal)
+## 4. Start robonix-atlas and register (new terminal)
 
-From the **rust** directory, source the SDK and start robonix-server with environment variables (no CLI flags). Then use `rbnx` to register and deploy.
+From the **rust** directory, source the SDK and start robonix-atlas with environment variables (no CLI flags). Then use `rbnx` to register and deploy.
 
 ```bash
 cd rust
 eval $(make source-sdk)
-ROBONIX_WEB_ASSETS_DIR="$(pwd)/robonix-server/web" \
+ROBONIX_WEB_ASSETS_DIR="$(pwd)/robonix-atlas/web" \
 ROBONIX_WEB_PORT=8000 \
 RUST_LOG=robonix_server=info \
-robonix-server
+robonix-atlas
 ```
 
 In another terminal (with `eval $(make source-sdk)` from `rust`): register the recipe, start services, and create tasks. See the main [rust/README.md](../../README.md) for full steps (Step 4–8).

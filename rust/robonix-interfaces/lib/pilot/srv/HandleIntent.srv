@@ -1,0 +1,4 @@
+# @robonix.grpc stream_server pilot/msg/PilotEvent
+Intent intent
+---
+bool unused

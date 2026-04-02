@@ -480,7 +480,7 @@ def main() -> None:
 
     _load_detector()
 
-    server_addr = os.environ.get("ROBONIX_SERVER", "localhost:50051")
+    server_addr = os.environ.get("ROBONIX_ATLAS", "localhost:50051")
     channel = grpc.insecure_channel(server_addr)
     stub = pb_grpc.RobonixRuntimeStub(channel)
 

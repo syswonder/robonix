@@ -35,7 +35,7 @@ def _ns():
 
 def main():
     ap = argparse.ArgumentParser(description="Robonix YOLO node (SHM consumer, CUDA IPC producer)")
-    ap.add_argument("--server", default=os.environ.get("ROBONIX_SERVER", "127.0.0.1:50051"))
+    ap.add_argument("--server", default=os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051"))
     ap.add_argument("--frames", type=int, default=int(os.environ.get("RBNX_FRAMES", "0")))
     ap.add_argument("--results-dir", default=None,
                     help="Write per-frame timing JSON (benchmark mode)")
@@ -82,7 +82,7 @@ def main():
             "gpu_buf_size": gpu_buf_size,
             "msg_type": "robonix_msg/ZeroCopyFrame",
         }),
-        abstract_interface_id="robonix/sys/perception/yolo/gpu_tensor",
+        contract_id="robonix/sys/perception/yolo/gpu_tensor",
     ))
 
     mgr = RobonixBufferManager()

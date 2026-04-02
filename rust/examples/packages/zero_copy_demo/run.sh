@@ -11,7 +11,7 @@ cd "$(dirname "$0")"
 
 RUST_ROOT="$(cd ../../.. && pwd)"
 VENV=".venv"
-SERVER_ADDR="${ROBONIX_SERVER:-127.0.0.1:50051}"
+SERVER_ADDR="${ROBONIX_ATLAS:-127.0.0.1:50051}"
 PROTO_GEN_DIR="$(cd ../../proto_gen 2>/dev/null && pwd || echo "")"
 
 _build_rust() {
@@ -68,19 +68,19 @@ import robonix_runtime_pb2_grpc as g
 ch = grpc.insecure_channel('$SERVER_ADDR')
 grpc.channel_ready_future(ch).result(timeout=2)
 " 2>/dev/null; then
-        echo "[+] robonix-server already running at $SERVER_ADDR"
+        echo "[+] robonix-atlas already running at $SERVER_ADDR"
     else
-        echo "[+] Starting robonix-server..."
-        robonix-server &
+        echo "[+] Starting robonix-atlas..."
+        robonix-atlas &
         _SERVER_PID=$!
         sleep 2
-        echo "[+] Started robonix-server (PID=$_SERVER_PID)"
+        echo "[+] Started robonix-atlas (PID=$_SERVER_PID)"
     fi
 }
 
 _cleanup_server() {
     if [ -n "$_SERVER_PID" ]; then
-        echo "[+] Stopping robonix-server (PID=$_SERVER_PID)"
+        echo "[+] Stopping robonix-atlas (PID=$_SERVER_PID)"
         kill "$_SERVER_PID" 2>/dev/null || true
         wait "$_SERVER_PID" 2>/dev/null || true
     fi

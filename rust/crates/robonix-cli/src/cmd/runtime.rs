@@ -27,7 +27,7 @@ async fn connect(endpoint: &str) -> Result<RobonixClient> {
     };
     RobonixClient::connect(&url)
         .await
-        .with_context(|| format!("cannot reach robonix-server at {endpoint}"))
+        .with_context(|| format!("cannot reach robonix-atlas at {endpoint}"))
 }
 
 fn fmt_interfaces(n: &NodeInfo) -> String {
@@ -273,7 +273,7 @@ pub async fn nodes(
             transport: String::new(),
             distro_prefix: distro_prefix.unwrap_or("").to_string(),
             container_id: container_id.unwrap_or("").to_string(),
-            abstract_interface_id: String::new(),
+            contract_id: String::new(),
         })
         .await?;
 

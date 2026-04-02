@@ -1,0 +1,17 @@
+# Provider streams `sensor_msgs/Imu`; subscriber issues no payload (`Empty` → `google.protobuf.Empty`).
+[contract]
+id      = "robonix/prm/sensor/imu"
+version = "1"
+kind    = "primitive"
+
+[io]
+input  = "std_msgs/msg/Empty"
+output = "sensor_msgs/msg/Imu"
+
+[mode]
+type = "stream_out"
+
+[semantics]
+realtime = true
+
+# Sample rate is provider-defined (metadata), not in contract.

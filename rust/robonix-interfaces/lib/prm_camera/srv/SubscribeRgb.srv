@@ -1,6 +1,0 @@
-# @robonix.grpc stream_server sensor_msgs/msg/Image
-# Abstract: robonix/prm/camera/rgb (provider publishes Image frames; gRPC = server streaming).
-# ROS 2 data plane: use a normal publisher on a topic with type sensor_msgs/msg/Image.
----
-# Unused on gRPC wire (streaming element is sensor_msgs/Image). Placeholder for tooling.
-bool unused
