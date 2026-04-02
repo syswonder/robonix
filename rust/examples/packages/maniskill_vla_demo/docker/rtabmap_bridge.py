@@ -7,7 +7,7 @@ transforms so RTAB-Map can consume them, then aggregates RTAB-Map output
 (PointCloud2 + OccupancyGrid) and exposes it via a lightweight SlamDataService
 gRPC endpoint.
 
-The host-side viz_node discovers and polls this endpoint via robonix-server
+The host-side viz_node discovers and polls this endpoint via robonix-atlas
 NegotiateChannel and logs the data to Rerun.  No rerun dependency is needed
 inside the container.
 
@@ -26,7 +26,7 @@ Data flow:
     → Rerun
 
 Env vars:
-  ROBONIX_SERVER       robonix-server gRPC address  (default: localhost:50051)
+  ROBONIX_ATLAS       robonix-atlas gRPC address  (default: localhost:50051)
   ENV_GRPC_ENDPOINT    skip NegotiateChannel, use this endpoint directly
   BRIDGE_FPS           env_node poll rate in Hz     (default: 10)
 """
@@ -128,7 +128,7 @@ def _discover_env_grpc() -> str:
     if override:
         return override
 
-    server_addr = os.environ.get("ROBONIX_SERVER", "localhost:50051")
+    server_addr = os.environ.get("ROBONIX_ATLAS", "localhost:50051")
     channel = grpc.insecure_channel(server_addr)
     stub = pb_grpc.RobonixRuntimeStub(channel)
 
@@ -557,9 +557,9 @@ def main():
     _env_stub = env_pb_grpc.EnvDataServiceStub(env_channel)
     print(f"[rtabmap-bridge] connected to env gRPC at {endpoint}", file=sys.stderr)
 
-    server_addr = os.environ.get("ROBONIX_SERVER", "localhost:50051")
+    server_addr = os.environ.get("ROBONIX_ATLAS", "localhost:50051")
 
-    # Start SlamDataService gRPC server and register it with robonix-server
+    # Start SlamDataService gRPC server and register it with robonix-atlas
     slam_port = _pick_port()
     threading.Thread(target=_start_slam_grpc, args=(slam_port,), daemon=True).start()
     _register_slam_interface(server_addr, slam_port)

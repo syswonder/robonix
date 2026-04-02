@@ -42,7 +42,14 @@ mem = MemSearch(
 @mcp.tool()
 async def search_memory(query: str) -> str:
     """Search the agent's long-term memory for relevant past context, decisions, or user preferences."""
-    results = await mem.search(query, top_k=2)
+    try:
+        results = await mem.search(query, top_k=2)
+    except Exception as e:
+        # Milvus-lite can raise if the embedding contains NaN/Inf (e.g. empty
+        # index or degenerate ONNX output).  Return gracefully so the agent can
+        # continue without crashing the service.
+        logging.warning("[memsearch] search_memory failed (returning empty): %s", e)
+        return "No relevant memories found (search unavailable)."
     if not results:
         return "No relevant memories found."
     context = "\n\n".join(f"- {m['content']}" for m in results)
@@ -66,14 +73,17 @@ async def save_memory(content: str) -> str:
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a") as f:
         f.write(f"\n{content}\n")
-    await mem.index()
+    try:
+        await mem.index()
+    except Exception as e:
+        logging.warning("[memsearch] re-index after save failed: %s", e)
     return "Memory saved and indexed."
 
 def main():
     import threading
     
     # 1. Register with Robonix Control Plane
-    channel = grpc.insecure_channel(os.environ.get("ROBONIX_SERVER", "localhost:50051"))
+    channel = grpc.insecure_channel(os.environ.get("ROBONIX_ATLAS", "localhost:50051"))
     stub = pb_grpc.RobonixRuntimeStub(channel)
 
     # Pick a port for FastMCP SSE
@@ -136,8 +146,11 @@ def main():
     except Exception as e:
         print(f"[memsearch-service] Warning: Failed to register with control plane: {e}")
 
-    # Initialize memory index once
-    asyncio.run(mem.index())
+    # Initialize memory index once (may fail on empty corpus — that's fine).
+    try:
+        asyncio.run(mem.index())
+    except Exception as e:
+        logging.warning("[memsearch] initial index failed (empty corpus?): %s", e)
 
     # Start FastMCP server using streamable HTTP
     print(f"[memsearch-service] Starting MCP Streamable HTTP server on port {port}...")

@@ -1,7 +1,7 @@
 # Robonix Zero-Copy Multi-Process Demo
 
 Three independent OS processes share high-bandwidth data without unnecessary
-memory copies, coordinated by `robonix-server`.
+memory copies, coordinated by `robonix-atlas`.
 
 ```
 Camera → YOLO → Sobel   (3 processes, 1 unavoidable copy)
@@ -15,7 +15,7 @@ embeddings, or any contiguous data can flow through the same zero-copy path.
 ## Architecture
 
 ```
-                        robonix-server
+                        robonix-atlas
                      (gRPC control plane)
                     ┌─────────────────────┐
                     │ RegisterNode        │
@@ -61,7 +61,7 @@ cd rust/examples/packages/zero_copy_demo
 ./run.sh setup          # builds Rust lib + installs Python deps
 ```
 
-### Run (auto-starts robonix-server)
+### Run (auto-starts robonix-atlas)
 
 ```bash
 ./run.sh start 200                          # launch 3-process pipeline
@@ -74,7 +74,7 @@ cd rust/examples/packages/zero_copy_demo
 ## Data Flow
 
 ```
-1. Camera registers with robonix-server, declares "rgb" interface (shared_memory).
+1. Camera registers with robonix-atlas, declares "rgb" interface (shared_memory).
    Server assigns SHM name: /rbnx_shm_<uuid>
 
 2. Camera allocates SHM via RobonixBufferManager.allocate().

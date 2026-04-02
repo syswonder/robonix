@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// build.rs — pilot + executor client protos from ridlc output only.
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -7,20 +9,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|p| p.parent())
         .expect("robonix-cli should live at rust/crates/robonix-cli");
 
-    let agent_chat_proto = workspace_root.join("proto/agent_chat.proto");
-    if !agent_chat_proto.is_file() {
-        eprintln!("cargo:warning=agent_chat.proto not found, skipping");
-        return Ok(());
-    }
-    println!("cargo:rerun-if-changed={}", agent_chat_proto.display());
+    let ridl_proto = workspace_root.join("robonix-interfaces/robonix_proto");
+    let pilot_proto = ridl_proto.join("pilot.proto");
+    let executor_proto = ridl_proto.join("executor.proto");
+
+    println!("cargo:rerun-if-changed={}", pilot_proto.display());
+    println!("cargo:rerun-if-changed={}", executor_proto.display());
 
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
     unsafe { std::env::set_var("PROTOC", protoc) };
 
+    let inc = vec![ridl_proto];
     tonic_prost_build::configure()
         .build_server(false)
         .build_client(true)
-        .compile_protos(&[agent_chat_proto], &[workspace_root.join("proto")])?;
+        .compile_protos(&[pilot_proto, executor_proto], &inc)?;
 
     Ok(())
 }

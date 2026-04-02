@@ -3,25 +3,25 @@
 """Tiago robot bridge node: ROS2 ↔ MCP for robonix agent.
 
 Subscribes to ROS2 topics (camera, pose, scan) and exposes them as MCP tools
-that the robonix agent can call.  Data-plane port is allocated by robonix-server.
+that the robonix agent can call.  Data-plane port is allocated by robonix-atlas.
 
 When `nav2_msgs` is available, navigation uses the Nav2 **navigate_to_pose** action;
 otherwise goals are published on `/goal_pose` (PoseStamped).
 
 Optional env vars:
-  ROBONIX_SERVER       Control-plane address (default: localhost:50051)
+  ROBONIX_ATLAS       Control-plane address (default: localhost:50051)
   ROBONIX_NODE_ID      Registry node id, reverse-DNS (default: com.robonix.prm.tiago)
   ROBONIX_NAMESPACE    Registry namespace (default: robonix/prm/camera)
   ROBONIX_DISTRO       Distro label for QueryNodes (default: humble)
   ROBONIX_CONTAINER_ID Container label for QueryNodes (default: empty)
   ROBONIX_MCP_LISTEN_PORT  If unset or 0, pick a free TCP port for MCP HTTP (recommended).
-  ROBONIX_PRM_GRPC_LISTEN_PORT  Fixed port for PrmCameraService gRPC (optional; default: ephemeral)
-  TIAGO_RGB_STREAM_HZ  gRPC SubscribeRgb max rate (default: 2)
+  ROBONIX_PRM_GRPC_LISTEN_PORT  Fixed port for PRM camera gRPC (optional; default: ephemeral)
+  TIAGO_RGB_STREAM_HZ  gRPC PrmCameraRgb.Stream max rate (default: 2)
   TIAGO_RGB_FRAME_ID   frame_id in streamed sensor_msgs/Image (default: head_front_camera_rgb_optical_frame)
   TIAGO_ROS_DOMAIN     ROS_DOMAIN_ID (default: unset)
 
 PRM POC: registers standard port `rgb` for both transports:
-- `grpc`: server-stream of sensor_msgs/Image (PrmCameraService/SubscribeRgb)
+- `grpc`: server-stream of sensor_msgs/Image (`robonix.contracts.PrmCameraRgb` / `Stream`)
 - `ros2`: republish to the robonix-allocated ROS2 endpoint
 See `robonix/prm/camera/rgb` in `rust/robonix-interfaces/README.md`.
 """
@@ -65,7 +65,9 @@ def _ensure_proto_gen() -> None:
 _ensure_proto_gen()
 import grpc
 from concurrent import futures as _grpc_futures
-import prm_camera_pb2_grpc
+from google.protobuf import empty_pb2
+
+import robonix_contracts_pb2_grpc
 import sensor_msgs_pb2
 import robonix_runtime_pb2 as pb
 import robonix_runtime_pb2_grpc as pb_grpc
@@ -125,7 +127,7 @@ _latest_scan: dict | None = None
 _ros_node = None
 _lock = threading.Lock()
 
-# PRM camera_rgb POC: ROS2 republish topic (allocated by robonix-server) + gRPC stream
+# PRM camera_rgb POC: ROS2 republish topic (allocated by robonix-atlas) + gRPC stream
 _RGB_ROS_TOPIC: str | None = None
 _rgb_remap_pub = None
 
@@ -573,8 +575,11 @@ def _jpeg_to_sensor_image_proto(jpg: bytes):
     return img
 
 
-class _PrmCameraServicer(prm_camera_pb2_grpc.PrmCameraServiceServicer):
-    def SubscribeRgb(self, request, context):
+class _PrmCameraRgbServicer(robonix_contracts_pb2_grpc.PrmCameraRgbServicer):
+    """Implements contract `robonix/prm/camera/rgb` (`PrmCameraRgb.Stream` in robonix_contracts.proto)."""
+
+    def Stream(self, request: empty_pb2.Empty, context):
+        _ = request  # google.protobuf.Empty
         hz = float(os.environ.get("TIAGO_RGB_STREAM_HZ", "2"))
         period = 1.0 / max(hz, 0.25)
         while context.is_active():
@@ -584,16 +589,16 @@ class _PrmCameraServicer(prm_camera_pb2_grpc.PrmCameraServiceServicer):
                 try:
                     yield _jpeg_to_sensor_image_proto(jpg)
                 except Exception as e:
-                    print(f"[tiago-node] gRPC SubscribeRgb encode error: {e}")
+                    print(f"[tiago-node] gRPC PrmCameraRgb.Stream encode error: {e}")
             time.sleep(period)
 
 
 def _run_grpc_prm_server(port: int) -> None:
     server = grpc.server(_grpc_futures.ThreadPoolExecutor(max_workers=4))
-    prm_camera_pb2_grpc.add_PrmCameraServiceServicer_to_server(_PrmCameraServicer(), server)
+    robonix_contracts_pb2_grpc.add_PrmCameraRgbServicer_to_server(_PrmCameraRgbServicer(), server)
     server.add_insecure_port(f"0.0.0.0:{port}")
     server.start()
-    print(f"[tiago-node] PrmCameraService (SubscribeRgb server-stream) on 0.0.0.0:{port}")
+    print(f"[tiago-node] robonix.contracts.PrmCameraRgb (Stream) on 0.0.0.0:{port}")
     server.wait_for_termination()
 
 
@@ -625,7 +630,7 @@ def _heartbeat_loop(stub: pb_grpc.RobonixRuntimeStub, node_id: str) -> None:
 def main() -> None:
     global _RGB_ROS_TOPIC
 
-    channel = grpc.insecure_channel(os.environ.get("ROBONIX_SERVER", "localhost:50051"))
+    channel = grpc.insecure_channel(os.environ.get("ROBONIX_ATLAS", "localhost:50051"))
     stub = pb_grpc.RobonixRuntimeStub(channel)
 
     node_id = os.environ.get("ROBONIX_NODE_ID", "com.robonix.prm.tiago")
@@ -659,8 +664,7 @@ def main() -> None:
     assert int(mcp_port_str) == mcp_port, (mcp_endpoint, mcp_port)
 
     prm_grpc_port = _pick_grpc_listen_port()
-    # Camera contract: namespace `robonix/prm/camera` + standard port leaf `rgb`
-    # implies abstract interface id `robonix/prm/camera/rgb`.
+    # Stable contract id matches rust/contracts and system interface catalog.
     resp_cam_g = stub.DeclareInterface(
         pb.DeclareInterfaceRequest(
             node_id=node_id,
@@ -668,6 +672,7 @@ def main() -> None:
             supported_transports=["grpc"],
             metadata_json="{}",
             listen_port=prm_grpc_port,
+            contract_id="robonix/prm/camera/rgb",
         )
     )
     resp_cam_r = stub.DeclareInterface(
@@ -677,6 +682,7 @@ def main() -> None:
             supported_transports=["ros2"],
             metadata_json="{}",
             listen_port=0,
+            contract_id="robonix/prm/camera/rgb",
         )
     )
     _RGB_ROS_TOPIC = resp_cam_r.allocated_endpoint

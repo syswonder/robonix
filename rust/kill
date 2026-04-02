@@ -3,8 +3,10 @@
 set -e
 
 # robonix processes
-pkill -9 -f 'robonix-server'   2>/dev/null || true
-pkill -9 -f 'robonix-agent'    2>/dev/null || true
+pkill -9 -f 'robonix-atlas'    2>/dev/null || true
+pkill -9 -f 'robonix-executor' 2>/dev/null || true
+pkill -9 -f 'robonix-pilot'    2>/dev/null || true
+pkill -9 -f 'robonix-liaison'  2>/dev/null || true
 pkill -9 -f 'rbnx-daemon'      2>/dev/null || true
 
 # example nodes (from rust/examples/nodes/)

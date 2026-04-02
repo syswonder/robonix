@@ -25,7 +25,7 @@ Robonix follows the EAIOS four-layer abstraction — Primitive, Service, Skill, 
 
 | Crate | Role |
 |-------|------|
-| `robonix-server` | gRPC control plane: node registration, interface declaration, channel negotiation, skill catalog, heartbeat, runtime inspection |
+| `robonix-atlas` | control plane: node registration, interface declaration, channel negotiation, skill catalog, heartbeat, runtime inspection |
 | `robonix-sdk` | Thin async Rust client for the control-plane API |
 | `robonix-agent` | System agent: VLM-driven ReAct loop with dynamic MCP tool discovery and SKILL.md-based behavior |
 | `robonix-cli` (`rbnx`) | Package validate / build / start, runtime inspection (`nodes`, `describe`, `tools`, `channels`, `inspect`) |
@@ -69,7 +69,7 @@ cd robonix
 git submodule update --init --recursive
 cd rust
 cargo build --workspace
-make install          # installs rbnx, ridlc, robonix-agent, robonix-server wrapper
+make install          # installs rbnx, ridlc, robonix-agent, robonix-atlas wrapper
 ```
 
 Run the full E2E demo (requires Docker, X11, and a VLM API key):

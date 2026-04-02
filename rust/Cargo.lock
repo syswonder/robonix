@@ -1915,6 +1915,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "toml",
 ]
 
 [[package]]
@@ -1958,7 +1959,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "robonix-agent"
+name = "robonix-atlas"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1966,16 +1967,14 @@ dependencies = [
  "log",
  "prost",
  "protoc-bin-vendored",
- "rmcp",
- "robonix-sdk",
  "serde",
  "serde_json",
- "serde_yaml",
  "tokio",
- "tokio-stream",
  "tonic",
+ "tonic-build",
  "tonic-prost",
  "tonic-prost-build",
+ "uuid",
 ]
 
 [[package]]
@@ -2018,6 +2017,70 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "uuid",
+]
+
+[[package]]
+name = "robonix-executor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "log",
+ "prost",
+ "protoc-bin-vendored",
+ "rmcp",
+ "robonix-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "uuid",
+]
+
+[[package]]
+name = "robonix-liaison"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "log",
+ "prost",
+ "protoc-bin-vendored",
+ "robonix-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "uuid",
+]
+
+[[package]]
+name = "robonix-pilot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "log",
+ "prost",
+ "protoc-bin-vendored",
+ "rmcp",
+ "robonix-sdk",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "uuid",
 ]
 
 [[package]]
@@ -2032,25 +2095,6 @@ dependencies = [
  "tonic-build",
  "tonic-prost",
  "tonic-prost-build",
-]
-
-[[package]]
-name = "robonix-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "env_logger",
- "log",
- "prost",
- "protoc-bin-vendored",
- "serde",
- "serde_json",
- "tokio",
- "tonic",
- "tonic-build",
- "tonic-prost",
- "tonic-prost-build",
- "uuid",
 ]
 
 [[package]]
@@ -2214,6 +2258,15 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_spanned"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
+dependencies = [
+ "serde_core",
 ]
 
 [[package]]
@@ -2556,6 +2609,45 @@ dependencies = [
  "pin-project-lite",
  "tokio",
 ]
+
+[[package]]
+name = "toml"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81f3d15e84cbcd896376e6730314d59fb5a87f31e4b038454184435cd57defee"
+dependencies = [
+ "indexmap",
+ "serde_core",
+ "serde_spanned",
+ "toml_datetime",
+ "toml_parser",
+ "toml_writer",
+ "winnow",
+]
+
+[[package]]
+name = "toml_datetime"
+version = "1.1.1+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
+name = "toml_parser"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
+dependencies = [
+ "winnow",
+]
+
+[[package]]
+name = "toml_writer"
+version = "1.1.1+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
 
 [[package]]
 name = "tonic"
@@ -3252,6 +3344,12 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "winnow"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09dac053f1cd375980747450bfc7250c264eaae0583872e845c0c7cd578872b5"
 
 [[package]]
 name = "wit-bindgen"

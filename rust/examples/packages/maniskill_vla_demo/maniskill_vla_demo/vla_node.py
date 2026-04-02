@@ -417,7 +417,7 @@ def main() -> None:
             print("[vla] falling back to scripted policy", file=sys.stderr)
             _policy_name = "scripted"
 
-    server_addr = os.environ.get("ROBONIX_SERVER", "localhost:50051")
+    server_addr = os.environ.get("ROBONIX_ATLAS", "localhost:50051")
     channel = grpc.insecure_channel(server_addr)
     stub = pb_grpc.RobonixRuntimeStub(channel)
 

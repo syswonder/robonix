@@ -10,7 +10,7 @@ Usage:
   python3 -m maniskill_vla_demo.viz_node --detect-query "cube . red cup . box"
 
 Env:
-  ROBONIX_SERVER     gRPC address of robonix-server  (default: localhost:50051)
+  ROBONIX_ATLAS     gRPC address of robonix-atlas  (default: localhost:50051)
   RERUN_GRPC_PORT    port for the Rerun gRPC data server  (default: 9877)
   VIZ_DETECT_QUERY   detection query (default: "object . cup . box")
   VIZ_DETECT_BACKEND yolo_world | grounding_dino  (default: yolo_world)
@@ -509,8 +509,8 @@ def main() -> None:
     except Exception:
         pass
 
-    # ── Connect to robonix-server ─────────────────────────────────────────────
-    server_addr = os.environ.get("ROBONIX_SERVER", "localhost:50051")
+    # ── Connect to robonix-atlas ─────────────────────────────────────────────
+    server_addr = os.environ.get("ROBONIX_ATLAS", "localhost:50051")
     robonix_channel = grpc.insecure_channel(server_addr)
     robonix_stub = pb_grpc.RobonixRuntimeStub(robonix_channel)
 

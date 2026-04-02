@@ -6,7 +6,7 @@ name = "ridlc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ridlc: ROS IDL codegen tool — generates .proto from ROS .msg/.srv definitions"
+description = "ridlc: ROS IDL + contract TOML codegen — .msg/.srv → .proto; --contracts → robonix_contracts.proto"
 
 [[bin]]
 name = "ridlc"
@@ -20,3 +20,4 @@ log.workspace = true
 env_logger.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+toml = "1.1.2+spec-1.1.0"

@@ -54,7 +54,8 @@ fn proto_field_type(field: &MsgField, current_package: &str) -> String {
     }
 }
 
-fn proto_package_name(ros_package: &str) -> String {
+/// ROS package name (`prm_base`, `sensor_msgs`) → protobuf package (`robonix.prm_base`, …).
+pub fn proto_package_name(ros_package: &str) -> String {
     format!("robonix.{}", ros_package)
 }
 

@@ -24,7 +24,7 @@ from ..common import pb, pb_grpc  # noqa: F401
 
 def main():
     ap = argparse.ArgumentParser(description="Robonix camera node (SHM producer)")
-    ap.add_argument("--server", default=os.environ.get("ROBONIX_SERVER", "127.0.0.1:50051"))
+    ap.add_argument("--server", default=os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051"))
     ap.add_argument("--width", type=int, default=int(os.environ.get("RBNX_WIDTH", "1920")))
     ap.add_argument("--height", type=int, default=int(os.environ.get("RBNX_HEIGHT", "1080")))
     ap.add_argument("--fps", type=float, default=float(os.environ.get("RBNX_FPS", "30")))
@@ -51,7 +51,7 @@ def main():
             "format": FORMAT_RGB8, "memory_domain": "cpu",
             "msg_type": "robonix_msg/ZeroCopyFrame",
         }),
-        abstract_interface_id="robonix/prm/camera/rgb",
+        contract_id="robonix/prm/camera/rgb",
     ))
     shm_name = resp.allocated_endpoint
     print(f"[camera] SHM endpoint: {shm_name}", file=sys.stderr)

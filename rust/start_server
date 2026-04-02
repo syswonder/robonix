@@ -7,7 +7,7 @@ ADVERTISED_ENDPOINT="${ROBONIX_META_GRPC_ENDPOINT:-127.0.0.1:50051}"
 
 export ROBONIX_META_GRPC_ADDR="$LISTEN_ADDR"
 export ROBONIX_META_GRPC_ENDPOINT="$ADVERTISED_ENDPOINT"
-export RUST_LOG="${RUST_LOG:-robonix_server=info}"
+export RUST_LOG="${RUST_LOG:-robonix_atlas=info}"
 
 LISTEN_PORT="${LISTEN_ADDR##*:}"
 
@@ -79,4 +79,4 @@ for pid in remaining:
         pass
 PY
 
-exec cargo run -p robonix-server
+exec cargo run -p robonix-atlas

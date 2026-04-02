@@ -1,0 +1,17 @@
+# Provider streams `sensor_msgs/LaserScan`; gRPC uses `Empty` subscribe pattern.
+[contract]
+id      = "robonix/prm/sensor/lidar"
+version = "1"
+kind    = "primitive"
+
+[io]
+input  = "std_msgs/msg/Empty"
+output = "sensor_msgs/msg/LaserScan"
+
+[mode]
+type = "stream_out"
+
+[semantics]
+realtime = true
+
+# Scan rate / angular resolution: provider metadata, not contract.

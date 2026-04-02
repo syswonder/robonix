@@ -1,0 +1,18 @@
+# gRPC: `robonix_contracts.proto` → `PrmCameraRgb.Stream(Empty) returns (stream Image)`.
+[contract]
+id      = "robonix/prm/camera/rgb"
+version = "1"
+kind    = "primitive"
+
+[io]
+input  = "std_msgs/msg/Empty"
+output = "sensor_msgs/msg/Image"
+
+[mode]
+type = "stream_out"
+
+[semantics]
+realtime = true
+payload  = "image"
+
+# Frame rate, compression, pixel format: negotiation / metadata at registration, not in contract.

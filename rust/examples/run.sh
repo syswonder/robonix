@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end: robonix-server → RFC002 packages via **rbnx** (validate / build / start) → robonix-agent.
+# End-to-end: robonix-atlas → robonix-executor → robonix-pilot → RFC002 packages via **rbnx** → robonix-liaison.
 #
 # From repository `rust/` (or invoke with absolute path to this script):
 #   pip install -r examples/requirements.txt
@@ -9,8 +9,10 @@
 # Env:
 #   START_VLM_SERVICE=1|0   (default 1) — rbnx validate/build/start packages/vlm_service
 #   START_SIM_STACK=1|0     (default 1) — rbnx validate/build/start packages/tiago_sim_stack (Docker + Webots + Nav2 + MCP bridge)
-#   START_AGENT=1|0         (default 1)
-#   SMOKE_USE_EXISTING_SERVER=1 — do not start robonix-server
+#   START_PILOT=1|0         (default 1) — start robonix-pilot (reasoning/planning service)
+#   START_EXECUTOR=1|0      (default 1) — start robonix-executor (tool dispatch service)
+#   START_LIAISON=1|0       (default 1) — start robonix-liaison (text interaction loop)
+#   SMOKE_USE_EXISTING_ATLAS=1 — do not start robonix-atlas
 #   START_MEMSEARCH=1|0     (default 1) — rbnx validate/build/start packages/memsearch_service
 
 set -euo pipefail
@@ -28,12 +30,17 @@ if [ -f .env ]; then
   set +a
 fi
 
-export ROBONIX_SERVER="${ROBONIX_SERVER:-127.0.0.1:50051}"
-export ROBONIX_META_GRPC_ENDPOINT="${ROBONIX_META_GRPC_ENDPOINT:-$ROBONIX_SERVER}"
-export RUST_LOG="${RUST_LOG:-robonix_server=info,robonix_agent=warn}"
+export ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}"
+export ROBONIX_META_GRPC_ENDPOINT="${ROBONIX_META_GRPC_ENDPOINT:-$ROBONIX_ATLAS}"
+export ROBONIX_ATLAS_ENDPOINT="${ROBONIX_ATLAS_ENDPOINT:-http://$ROBONIX_ATLAS}"
+export ROBONIX_EXECUTOR_ENDPOINT="${ROBONIX_EXECUTOR_ENDPOINT:-http://127.0.0.1:50061}"
+export ROBONIX_PILOT_ENDPOINT="${ROBONIX_PILOT_ENDPOINT:-http://127.0.0.1:50071}"
+export RUST_LOG="${RUST_LOG:-robonix_atlas=info,robonix_pilot=info,robonix_executor=info,robonix_liaison=warn}"
 export START_VLM_SERVICE="${START_VLM_SERVICE:-1}"
 export START_SIM_STACK="${START_SIM_STACK:-1}"
-export START_AGENT="${START_AGENT:-1}"
+export START_PILOT="${START_PILOT:-1}"
+export START_EXECUTOR="${START_EXECUTOR:-1}"
+export START_LIAISON="${START_LIAISON:-1}"
 export START_MEMSEARCH="${START_MEMSEARCH:-1}"
 
 export PYTHONPATH="${PACKAGES}/vlm_service:${PACKAGES}/memsearch_service${PYTHONPATH:+:$PYTHONPATH}"
@@ -89,8 +96,10 @@ if [ "$START_SIM_STACK" = "1" ]; then
   fi
 fi
 
-pkill -9 -f 'robonix-server' 2>/dev/null || true
-pkill -9 -f 'robonix-agent' 2>/dev/null || true
+pkill -9 -f 'robonix-atlas' 2>/dev/null || true
+pkill -9 -f 'robonix-executor' 2>/dev/null || true
+pkill -9 -f 'robonix-pilot' 2>/dev/null || true
+pkill -9 -f 'robonix-liaison' 2>/dev/null || true
 pkill -9 -f 'vlm_service.service' 2>/dev/null || true
 pkill -9 -f 'memsearch_service.service' 2>/dev/null || true
 pkill -9 -f 'tiago_bridge.node' 2>/dev/null || true
@@ -99,7 +108,7 @@ sleep 0.3
 SIM_STACK_DIR="${PACKAGES}/tiago_sim_stack"
 
 # Ensure local workspace skills override registry-provided paths.
-# The agent merges skills as: registry (lowest) → ~/.robonix/skills → ROBONIX_SKILLS_EXTRA_DIRS (last wins).
+# Pilot merges skills as: registry (lowest) → ~/.robonix/skills → ROBONIX_SKILLS_EXTRA_DIRS (last wins).
 # Without this, registry Skill.path may point at a different checkout.
 export ROBONIX_SKILLS_EXTRA_DIRS="${SIM_STACK_DIR}/skills${ROBONIX_SKILLS_EXTRA_DIRS:+:${ROBONIX_SKILLS_EXTRA_DIRS}}"
 
@@ -125,13 +134,14 @@ if [ "$START_SIM_STACK" = "1" ]; then
   rbnx_validate_build "$PACKAGES/tiago_sim_stack"
 fi
 
-if [[ "${SMOKE_USE_EXISTING_SERVER:-0}" != "1" ]]; then
-  echo "[e2e] starting robonix-server..."
-  (cd "$RUST_ROOT" && cargo run -p robonix-server) &
+# ── 1. Atlas (control plane) ──────────────────────────────────────────────────
+if [[ "${SMOKE_USE_EXISTING_ATLAS:-0}" != "1" ]]; then
+  echo "[e2e] starting robonix-atlas (control plane)..."
+  (cd "$RUST_ROOT" && cargo run -p robonix-atlas) &
   sleep 2
 fi
 
-RBNX_START_OPTS=(start --endpoint "$ROBONIX_SERVER")
+RBNX_START_OPTS=(start --endpoint "$ROBONIX_ATLAS")
 
 if [ "$START_VLM_SERVICE" = "1" ]; then
   echo "[e2e] rbnx start vlm_service (background)..."
@@ -152,10 +162,26 @@ if [ "$START_SIM_STACK" = "1" ]; then
   sleep 4
 fi
 
-if [ "$START_AGENT" = "1" ]; then
-  echo "[e2e] starting robonix-agent (foreground, stdin)..."
-  (cd "$RUST_ROOT" && cargo run -p robonix-agent)
-else
-  echo "[e2e] START_AGENT=0 — waiting (Ctrl+C to exit)."
-  wait
+# ── 2. Executor (tool dispatch runtime) ──────────────────────────────────────
+if [ "$START_EXECUTOR" = "1" ]; then
+  echo "[e2e] starting robonix-executor (background)..."
+  (cd "$RUST_ROOT" && cargo run -p robonix-executor) &
+  sleep 1
 fi
+
+# ── 3. Pilot (VLM reasoning service) ─────────────────────────────────────────
+if [ "$START_PILOT" = "1" ]; then
+  echo "[e2e] starting robonix-pilot (background)..."
+  (cd "$RUST_ROOT" && cargo run -p robonix-pilot) &
+  sleep 2
+fi
+
+# ── 4. Liaison (user-facing gRPC server) ─────────────────────────────────────
+if [ "$START_LIAISON" = "1" ]; then
+  echo "[e2e] starting robonix-liaison (background, gRPC on :50081)..."
+  (cd "$RUST_ROOT" && cargo run -p robonix-liaison) &
+  sleep 2
+fi
+
+echo "[e2e] stack ready — use 'rbnx chat' to connect (Ctrl+C to stop)."
+wait

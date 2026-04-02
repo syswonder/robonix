@@ -9,8 +9,11 @@ pub struct InterfaceInfo {
     pub name: String,
     pub supported_transports: Vec<String>,
     pub metadata_json: String,
-    /// Canonical protocol ID (same as `QueryNodesOpts.abstract_interface_id` when matching), e.g. `robonix/prm/camera/rgb`.
-    pub abstract_interface_id: String,
+    /// Stable capability path (same as `QueryNodesOpts.contract_id` when matching).
+    /// Example: `robonix/prm/camera/rgb`. Versioning is **not** part of this string — it lives
+    /// in the contract TOML (`[contract] version`) and in generated IDL; discovery uses the
+    /// stable path only.
+    pub contract_id: String,
 }
 
 pub struct NodeInfo {
@@ -58,8 +61,8 @@ pub struct QueryNodesOpts {
     pub transport: String,
     pub distro_prefix: String,
     pub container_id: String,
-    /// When non-empty, server matches `InterfaceInfo.abstract_interface_id` exactly; `namespace` and `interface_name` are ignored.
-    pub abstract_interface_id: String,
+    /// When non-empty, server matches `InterfaceInfo.contract_id` exactly; `namespace` and `interface_name` are ignored.
+    pub contract_id: String,
 }
 
 impl RobonixClient {
@@ -67,7 +70,7 @@ impl RobonixClient {
         let inner =
             proto::robonix_runtime_client::RobonixRuntimeClient::connect(endpoint.to_owned())
                 .await
-                .context("failed to connect to robonix-server")?;
+                .context("failed to connect to robonix-atlas")?;
         Ok(Self { inner })
     }
 
@@ -214,7 +217,8 @@ impl RobonixClient {
         .await
     }
 
-    /// Same as [`Self::declare_interface_with_listen_port`], plus optional `abstract_interface_id` (empty = server uses `namespace + "/" + name`).
+    /// Same as [`Self::declare_interface_with_listen_port`], plus optional `contract_id`
+    /// (stable path e.g. `"robonix/prm/camera/rgb"`; empty = server derives from namespace+name).
     pub async fn declare_interface_full(
         &mut self,
         node_id: impl Into<String>,
@@ -222,7 +226,7 @@ impl RobonixClient {
         supported_transports: Vec<String>,
         metadata_json: impl Into<String>,
         listen_port: u32,
-        abstract_interface_id: impl Into<String>,
+        contract_id: impl Into<String>,
     ) -> Result<()> {
         self.inner
             .declare_interface(proto::DeclareInterfaceRequest {
@@ -231,7 +235,7 @@ impl RobonixClient {
                 supported_transports,
                 metadata_json: metadata_json.into(),
                 listen_port,
-                abstract_interface_id: abstract_interface_id.into(),
+                contract_id: contract_id.into(),
             })
             .await
             .context("declare_interface RPC failed")?;
@@ -262,7 +266,7 @@ impl RobonixClient {
                 transport: opts.transport,
                 distro_prefix: opts.distro_prefix,
                 container_id: opts.container_id,
-                abstract_interface_id: opts.abstract_interface_id,
+                contract_id: opts.contract_id,
             })
             .await
             .context("query_nodes RPC failed")?;
@@ -281,7 +285,7 @@ impl RobonixClient {
                         name: i.name,
                         supported_transports: i.supported_transports,
                         metadata_json: i.metadata_json,
-                        abstract_interface_id: i.abstract_interface_id,
+                        contract_id: i.contract_id,
                     })
                     .collect(),
                 has_skill_md: n.has_skill_md,

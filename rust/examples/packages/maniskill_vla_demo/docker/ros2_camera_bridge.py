@@ -6,7 +6,7 @@ Published topics (on /robonix/camera namespace):
   /robonix/camera/depth   — sensor_msgs/Image  (32FC1, meters)
 
 Environment variables:
-  ROBONIX_SERVER   grpc endpoint of env_node  (default: host.docker.internal:50052)
+  ROBONIX_ATLAS   grpc endpoint of env_node  (default: host.docker.internal:50052)
   BRIDGE_FPS       polling rate               (default: 10)
   FRAME_ID         camera frame_id            (default: camera_optical_frame)
 """
@@ -31,7 +31,7 @@ class CameraBridgeNode(Node):
         super().__init__("robonix_camera_bridge")
 
         fps = float(os.environ.get("BRIDGE_FPS", "10"))
-        server = os.environ.get("ROBONIX_SERVER", "host.docker.internal:50052")
+        server = os.environ.get("ROBONIX_ATLAS", "host.docker.internal:50052")
         self._frame_id = os.environ.get("FRAME_ID", "camera_optical_frame")
 
         self.get_logger().info(f"Connecting to env gRPC at {server}  fps={fps}")

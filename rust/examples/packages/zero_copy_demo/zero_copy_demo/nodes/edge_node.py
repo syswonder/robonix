@@ -46,7 +46,7 @@ class IpcGpuView:
 
 def main():
     ap = argparse.ArgumentParser(description="Robonix Sobel edge node (CUDA IPC consumer)")
-    ap.add_argument("--server", default=os.environ.get("ROBONIX_SERVER", "127.0.0.1:50051"))
+    ap.add_argument("--server", default=os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051"))
     ap.add_argument("--frames", type=int, default=int(os.environ.get("RBNX_FRAMES", "0")))
     ap.add_argument("--results-dir", default=None,
                     help="Write per-frame timing JSON (benchmark mode)")

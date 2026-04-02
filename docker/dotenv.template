@@ -54,7 +54,7 @@ DOCKER_PUSH=true
 # Default ROS 2 middleware inside the container
 RMW_IMPLEMENTATION=rmw_zenoh_cpp
 
-# robonix-server gRPC listen address
+# robonix-atlas gRPC listen address
 ROBONIX_META_GRPC_ADDR=0.0.0.0:50051
 
 # Endpoint advertised back to RIDL-generated clients

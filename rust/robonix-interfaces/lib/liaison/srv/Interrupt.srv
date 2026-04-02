@@ -1,0 +1,5 @@
+string session_id
+string reason
+---
+bool ok
+string session_id

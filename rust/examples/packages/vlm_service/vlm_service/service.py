@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # pyright: reportArgumentType=false
-"""VLM service: registers with robonix-server, serves chat completions over gRPC.
+"""VLM service: registers with robonix-atlas, serves chat completions over gRPC.
 
 The agent discovers this service via the control plane, negotiates a channel,
 then calls `VlmService.ChatStream` (server streaming) when available, or falls
@@ -14,14 +14,14 @@ Required environment variables:
 Optional environment variables:
   VLM_BASE_URL      OpenAI-compatible API base URL (default: Qwen DashScope)
   VLM_MODEL         Model name (default: qwen3-vl-plus)
-  ROBONIX_SERVER    Control-plane address (default: localhost:50051)
+  ROBONIX_ATLAS    Control-plane address (default: localhost:50051)
   VLM_BIND_ADDR     If set, try this host first when binding the data-plane (default: try 127.0.0.1 then 0.0.0.0).
                     The service picks a free TCP port (DeclareInterface listen_port) so it does not collide with host services on 50100+.
 
 Control plane (must match robonix-agent discovery):
-  Registers under `robonix/sys/model/vlm` with interface `chat` (abstract id
-  `robonix/sys/model/vlm/chat`). The agent uses `QueryNodes.abstract_interface_id`
-  by default; override with `ROBONIX_VLM_ABSTRACT_INTERFACE_ID`, or empty abstract
+  Registers under `robonix/sys/model/vlm` with interface `chat` (contract id
+  `robonix/sys/model/vlm/chat`). The agent uses `QueryNodes.contract_id`
+  by default; override with `ROBONIX_VLM_CONTRACT_ID`, or empty contract
   + `ROBONIX_VLM_NAMESPACE_PREFIX` for legacy split queries. See `rust/docs/NAMESPACE.md`.
 """
 import json
@@ -112,7 +112,7 @@ def main() -> None:
         print(_HELP, file=sys.stderr)
         sys.exit(1)
 
-    channel = grpc.insecure_channel(os.environ.get("ROBONIX_SERVER", "localhost:50051"))
+    channel = grpc.insecure_channel(os.environ.get("ROBONIX_ATLAS", "localhost:50051"))
     stub = pb_grpc.RobonixRuntimeStub(channel)
 
     stub.RegisterNode(
@@ -310,7 +310,7 @@ def main() -> None:
             supported_transports=["grpc"],
             metadata_json=_iface_meta(),
             listen_port=bound_port,
-            abstract_interface_id="robonix/sys/model/vlm/chat",
+            contract_id="robonix/sys/model/vlm/chat",
         )
     )
     data_endpoint = resp.allocated_endpoint

@@ -1,0 +1,10 @@
+# ASR streaming recognition
+# @robonix.grpc stream_client stream_server
+# abstract_interface_id: robonix/sys/speech/asr/recognize_stream
+#
+# Client streams AudioChunk messages; server streams back RecognizeStreamEvent.
+# Use for real-time microphone input.
+---
+# (empty — streaming RPC, no single request body)
+===
+# (empty — streaming RPC, no single response body)

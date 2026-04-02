@@ -1,0 +1,28 @@
+[package]
+name = "robonix-atlas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Robonix Atlas: control plane for node registration, discovery, and channel negotiation"
+
+[[bin]]
+name = "robonix-atlas"
+path = "src/main.rs"
+
+[dependencies]
+log.workspace = true
+env_logger.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+prost.workspace = true
+tonic-prost.workspace = true
+uuid.workspace = true
+
+[build-dependencies]
+protoc-bin-vendored.workspace = true
+tonic-build.workspace = true
+tonic-prost-build.workspace = true
+# NOTE: ridlc build-dependency REMOVED (RIDL codegen removed from server build)
