@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-# ridlc — ROS IDL codegen tool
+# robonix-codegen — ROS IDL codegen tool
 
 [package]
-name = "ridlc"
+name = "robonix-codegen"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ridlc: ROS IDL + contract TOML codegen — .msg/.srv → .proto; --contracts → robonix_contracts.proto"
+description = "robonix-codegen: ROS IDL + contract TOML codegen — .msg/.srv → .proto; --contracts → robonix_contracts.proto"
 
 [[bin]]
-name = "ridlc"
+name = "robonix-codegen"
 path = "src/main.rs"
 
 [dependencies]

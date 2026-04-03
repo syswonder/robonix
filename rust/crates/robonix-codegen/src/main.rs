@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// ridlc — ROS IDL + contract codegen
+// robonix-codegen — ROS IDL + contract codegen
 
 use anyhow::{Result, bail};
 use clap::Parser;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
-use ridlc::codegen::{contract_gen, msg_parser, proto_gen, python_gen};
+use robonix_codegen::codegen::{contract_gen, mcp_python_gen, msg_parser, proto_gen, python_gen};
 
 #[derive(Parser)]
-#[command(name = "ridlc")]
-#[command(about = "ROS IDL + contract TOML codegen: .msg/.srv → .proto / Python; contracts → robonix_contracts.proto")]
+#[command(name = "robonix-codegen")]
+#[command(
+    about = "ROS IDL + contract TOML codegen: .msg/.srv → .proto / Python; contracts → robonix_contracts.proto"
+)]
 struct Args {
     /// Type search path for ROS IDL (e.g. -I path/to/robonix-interfaces/lib). Optional if only `--contracts` with protobuf-only types (rare).
     #[arg(short = 'I', long = "include", number_of_values = 1)]
@@ -31,9 +33,9 @@ struct Args {
 
 fn ridlc_prefix() -> &'static str {
     if io::stderr().is_terminal() {
-        "\x1b[1;38;5;45m[ridlc]\x1b[0m"
+        "\x1b[1;38;5;45m[robonix-codegen]\x1b[0m"
     } else {
-        "[ridlc]"
+        "[robonix-codegen]"
     }
 }
 
@@ -42,15 +44,13 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     if args.include.is_empty() && args.contracts.is_none() {
-        bail!(
-            "[ridlc] pass at least one -I/--include and/or --contracts (see --help)"
-        );
+        bail!("[robonix-codegen] pass at least one -I/--include and/or --contracts (see --help)");
     }
 
     match args.lang.as_str() {
-        "proto" | "python" => {}
+        "proto" | "python" | "mcp" => {}
         other => bail!(
-            "[ridlc] unsupported --lang '{other}'. Supported: 'proto', 'python'."
+            "[robonix-codegen] unsupported --lang '{other}'. Supported: 'proto', 'python', 'mcp'."
         ),
     }
 
@@ -82,7 +82,17 @@ fn main() -> Result<()> {
         "python" => {
             python_gen::generate(&resolver, &args.out)?;
             eprintln!(
-                "{} generated python ctypes: {} packages, {} msgs -> {}",
+                "{} generated python ctypes (c-mode): {} packages, {} msgs -> {}",
+                ridlc_prefix(),
+                pkgs.len(),
+                specs.len(),
+                args.out.display()
+            );
+        }
+        "mcp" => {
+            mcp_python_gen::generate(&resolver, &args.out)?;
+            eprintln!(
+                "{} generated python dataclasses (mcp-mode): {} packages, {} msgs -> {}",
                 ridlc_prefix(),
                 pkgs.len(),
                 specs.len(),

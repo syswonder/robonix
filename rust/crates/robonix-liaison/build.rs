@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// build.rs — `liaison.proto` + `pilot.proto` (client to Pilot) from ridlc output only.
+// build.rs — `liaison.proto` + `pilot.proto` (client to Pilot) from robonix-codegen output only.
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parent()
         .and_then(|p| p.parent())
         .expect("robonix-liaison should live at rust/crates/robonix-liaison");
-    let ridl_proto = workspace_root.join("robonix-interfaces/robonix_proto");
+    let ridl_proto = workspace_root.join("crates/robonix-interfaces/robonix_proto");
     let liaison_proto = ridl_proto.join("liaison.proto");
     let pilot_proto = ridl_proto.join("pilot.proto");
 

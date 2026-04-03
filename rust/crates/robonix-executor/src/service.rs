@@ -4,8 +4,8 @@
 use crate::dispatch;
 use crate::exec_wire;
 use crate::executor::{
-    executor_service_server::ExecutorService, ExecuteRequest, ListToolsRequest, ListToolsResponse,
-    TaskCallEvent, ToolSpec,
+    ExecuteRequest, ListToolsRequest, ListToolsResponse, TaskCallEvent, ToolSpec,
+    executor_service_server::ExecutorService,
 };
 use crate::tools;
 use anyhow::Result;
@@ -63,13 +63,22 @@ impl ExecutorService for ExecutorServiceImpl {
                     )))
                     .await;
 
-                log::info!("[executor] dispatching '{}' (call_id={})", call.tool_name, call.call_id);
+                log::info!(
+                    "[executor] dispatching '{}' (call_id={})",
+                    call.tool_name,
+                    call.call_id
+                );
                 let result = dispatch::dispatch(call, &routing_map).await;
 
                 if result.success {
                     let preview: String = result.output.chars().take(120).collect();
                     let ellipsis = if result.output.len() > 120 { "…" } else { "" };
-                    log::info!("[executor] '{}' ok: {}{}", call.tool_name, preview, ellipsis);
+                    log::info!(
+                        "[executor] '{}' ok: {}{}",
+                        call.tool_name,
+                        preview,
+                        ellipsis
+                    );
                 } else {
                     any_failed = true;
                     log::warn!("[executor] '{}' failed: {}", call.tool_name, result.error);
@@ -78,9 +87,7 @@ impl ExecutorService for ExecutorServiceImpl {
                 let _ = tx.send(Ok(exec_wire::result(result))).await;
             }
 
-            let _ = tx
-                .send(Ok(exec_wire::complete(graph_id, any_failed)))
-                .await;
+            let _ = tx.send(Ok(exec_wire::complete(graph_id, any_failed))).await;
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))

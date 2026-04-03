@@ -60,7 +60,7 @@ check:
 	cargo clippy --workspace -- -D warnings
 
 install: install-atlas
-	cargo install --path crates/ridlc        --bin ridlc           $(CARGO_FLAGS)
+	cargo install --path crates/robonix-codegen  --bin robonix-codegen  $(CARGO_FLAGS)
 	cargo install --path crates/robonix-cli  --bin rbnx            $(CARGO_FLAGS)
 	cargo install --path crates/robonix-pilot    --bin robonix-pilot    $(CARGO_FLAGS)
 	cargo install --path crates/robonix-executor --bin robonix-executor $(CARGO_FLAGS)

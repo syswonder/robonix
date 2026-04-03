@@ -44,9 +44,9 @@ from concurrent import futures as _futures
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Proto path setup (stubs copied into /app/proto_stubs by Dockerfile)
+# Proto path setup (stubs copied into /app/proto_gen by Dockerfile)
 # ---------------------------------------------------------------------------
-sys.path.insert(0, "/app/proto_stubs")
+sys.path.insert(0, "/app/proto_gen")
 sys.path.insert(0, "/app")
 
 import grpc

@@ -1,8 +1,8 @@
 [submodule "rcl_interfaces"]
-	path = rust/robonix-interfaces/lib/rcl_interfaces
+	path = rust/crates/robonix-interfaces/lib/rcl_interfaces
 	url = https://github.com/enkerewpo/rcl_interfaces
 [submodule "common_interfaces"]
-	path = rust/robonix-interfaces/lib/common_interfaces
+	path = rust/crates/robonix-interfaces/lib/common_interfaces
 	url = https://github.com/enkerewpo/common_interfaces
 [submodule "docs"]
 	path = docs

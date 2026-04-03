@@ -36,10 +36,17 @@ async fn main() -> Result<()> {
     let atlas_endpoint = atlas_endpoint();
     info!("connecting to Atlas at {}", atlas_endpoint);
 
-    let mut sdk = RobonixClient::connect_with_retry(&atlas_endpoint, 10, std::time::Duration::from_secs(2)).await?;
+    let mut sdk =
+        RobonixClient::connect_with_retry(&atlas_endpoint, 10, std::time::Duration::from_secs(2))
+            .await?;
 
-    sdk.register_node(EXECUTOR_NODE_ID, "robonix/sys/runtime/executor", "service", "")
-        .await?;
+    sdk.register_node(
+        EXECUTOR_NODE_ID,
+        "robonix/sys/runtime/executor",
+        "service",
+        "",
+    )
+    .await?;
     info!("registered as '{}'", EXECUTOR_NODE_ID);
 
     let listen_port: u16 = std::env::var("ROBONIX_EXECUTOR_PORT")
@@ -77,5 +84,9 @@ fn atlas_endpoint() -> String {
     let raw = std::env::var("ROBONIX_ATLAS_ENDPOINT")
         .or_else(|_| std::env::var("ROBONIX_ATLAS"))
         .unwrap_or_else(|_| "localhost:50051".to_string());
-    if raw.starts_with("http") { raw } else { format!("http://{}", raw) }
+    if raw.starts_with("http") {
+        raw
+    } else {
+        format!("http://{}", raw)
+    }
 }

@@ -1,5 +1,5 @@
 # RFC002: VLM chat completions over gRPC (OpenAI-compatible backend).
-# Host build: scripts/build.sh sets PYTHONPATH (package + examples/proto_gen).
+# Host build: scripts/build.sh sets PYTHONPATH (package + package-local proto_gen).
 manifestVersion: 1
 
 build:
@@ -17,5 +17,5 @@ nodes:
   - id: com.robonix.services.vlm
     type: python
     start: |
-      export PYTHONPATH="$(pwd):$(pwd)/../../proto_gen:${PYTHONPATH:-}"
+      export PYTHONPATH="$(pwd)/proto_gen:${PYTHONPATH:-}"
       exec python -m vlm_service.service

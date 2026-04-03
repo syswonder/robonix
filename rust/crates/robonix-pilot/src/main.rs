@@ -46,12 +46,9 @@ async fn main() -> Result<()> {
     let executor_endpoint = resolve_endpoint(&["ROBONIX_EXECUTOR_ENDPOINT"], "localhost:50061");
 
     info!("connecting to Atlas at {}", atlas_endpoint);
-    let mut sdk = RobonixClient::connect_with_retry(
-        &atlas_endpoint,
-        10,
-        std::time::Duration::from_secs(2),
-    )
-    .await?;
+    let mut sdk =
+        RobonixClient::connect_with_retry(&atlas_endpoint, 10, std::time::Duration::from_secs(2))
+            .await?;
 
     sdk.register_node(PILOT_NODE_ID, "robonix/sys/runtime/pilot", "service", "")
         .await?;

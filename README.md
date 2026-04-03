@@ -31,10 +31,10 @@ Robonix follows the EAIOS four-layer abstraction — Primitive, Service, Skill, 
 | `robonix-executor` | Tool dispatch: builtin / MCP / gRPC; **`ExecutorService.Execute`** |
 | `robonix-liaison` | User-facing layer: text → **`Intent`** → **`PilotEvent`** stream |
 | `robonix-cli` (`rbnx`) | Package validate / build / start; runtime inspection; **`rbnx chat`** (TUI → Pilot); **`rbnx graph`** (topology PNG/SVG) |
-| `ridlc` | ROS IDL + **`rust/contracts`** TOML → **`rust/robonix-interfaces/robonix_proto/`** (generated `.proto`, incl. `robonix_contracts.proto`) |
+| `robonix-codegen` | ROS IDL + **`rust/contracts`** TOML → **`rust/crates/robonix-interfaces/robonix_proto/`** (generated `.proto`, incl. `robonix_contracts.proto`) |
 | `robonix-buffer` | Shared-memory / buffer helpers for high-bandwidth data |
 
-ROS payloads are canonical in **`rust/robonix-interfaces/lib/`**. Stable **`contract_id`** paths live in **`rust/contracts/**/*.toml`** and match control-plane fields (`DeclareInterface` / `QueryNodes`). Regenerate protos with `ridlc` from **`rust/`** (see **[rust/README.md](rust/README.md)**).
+ROS payloads are canonical in **`rust/crates/robonix-interfaces/lib/`**. Stable **`contract_id`** paths live in **`rust/contracts/**/*.toml`** and match control-plane fields (`DeclareInterface` / `QueryNodes`). Regenerate protos with `robonix-codegen` from **`rust/`** (see **[rust/README.md](rust/README.md)**).
 
 ## Project Status
 
@@ -44,7 +44,7 @@ ROS payloads are canonical in **`rust/robonix-interfaces/lib/`**. Stable **`cont
 - **Pilot / Executor / Liaison** path: VLM + tools + terminal chat (`rbnx chat`)
 - SKILL.md for skill discovery and LLM-oriented behavior text
 - Package system (`rbnx validate` / `build` / `start`)
-- **`ridlc`**: ROS `.msg` / `.srv` + contracts → generated **`robonix_proto/`** (do not hand-edit)
+- **`robonix-codegen`**: ROS `.msg` / `.srv` + contracts → generated **`robonix_proto/`** (do not hand-edit)
 - Tiago Webots E2E demo (Docker: Webots + Nav2 + rviz2 + MCP bridge)
 
 ### In Progress
@@ -62,7 +62,7 @@ ROS payloads are canonical in **`rust/robonix-interfaces/lib/`**. Stable **`cont
 |----------|------|--------|
 | Tiago (PAL Robotics) | Webots simulation + Nav2 + MCP bridge | Available |
 
-Abstract primitive interfaces are defined for camera, base, arm, gripper, sensor, and force-torque under the `robonix/prm/*` namespace. See `rust/robonix-interfaces/README.md` for the full capability table.
+Abstract primitive interfaces are defined for camera, base, arm, gripper, sensor, and force-torque under the `robonix/prm/*` namespace. See `rust/crates/robonix-interfaces/README.md` for the full capability table.
 
 ## Services (examples)
 
@@ -82,7 +82,7 @@ cd robonix
 git submodule update --init --recursive
 cd rust
 cargo build --workspace
-make install          # rbnx, ridlc, robonix-pilot, robonix-executor, robonix-liaison, robonix-atlas wrapper → ~/.cargo/bin
+make install          # rbnx, robonix-codegen, robonix-pilot, robonix-executor, robonix-liaison, robonix-atlas wrapper → ~/.cargo/bin
 ```
 
 Run the full E2E demo (requires Docker, X11, and a VLM API key):

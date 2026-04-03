@@ -34,7 +34,7 @@ This uses **`rbnx` validate/build/start** for `vlm_service` and `tiago_sim_stack
 
 `rbnx start` registers **`skills/* /SKILL.md`** with `robonix-atlas` for `robonix-pilot`. Notable:
 
-- **`object_search_wander`** — find a target (e.g. door) with **`get_robot_pose` + `get_camera_image` + short `move_base`**; explicitly **no** `navigate_to` / nav goals.
+- **`object_search_wander`** — find a target (e.g. door) with **`robot_state` + `camera_snapshot` + short `base_cmd`**; explicitly **no** `base_navigate` / nav goals.
 - **`navigation`** — Nav2 map goals when allowed.
 - **`visual_inspection`** — camera-first perception.
 

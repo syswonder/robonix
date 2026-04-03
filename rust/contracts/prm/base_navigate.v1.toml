@@ -1,0 +1,17 @@
+# Send a navigation goal to the robot base.
+# Input:  geometry_msgs/PoseStamped — target pose (position + orientation) in a named frame.
+# Output: std_msgs/String.data — JSON: {"accepted": bool, "goal_id": str, "status_message": str}
+[contract]
+id      = "robonix/prm/base/navigate"
+version = "1"
+kind    = "primitive"
+
+[io]
+input  = "geometry_msgs/msg/PoseStamped"
+output = "std_msgs/msg/String"
+
+[mode]
+type = "rpc"
+
+[semantics]
+preemptable = true

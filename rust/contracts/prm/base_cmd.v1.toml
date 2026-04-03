@@ -1,0 +1,19 @@
+# Single MoveCommand execution (RPC variant of robonix/prm/base/move).
+# robonix/prm/base/move is a continuous stream-in for real-time control.
+# This contract is for discrete single-step commands (MCP tools, scripted policies).
+# Input:  one MoveCommand (same type as stream elements in base/move).
+# Output: execution status string (std_msgs/String.data).
+[contract]
+id      = "robonix/prm/base/cmd"
+version = "1"
+kind    = "primitive"
+
+[io]
+input  = "prm_base/msg/MoveCommand"
+output = "std_msgs/msg/String"
+
+[mode]
+type = "rpc"
+
+[semantics]
+preemptable = true

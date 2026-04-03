@@ -15,6 +15,6 @@ nodes:
   - id: com.robonix.services.memsearch
     type: python
     start: |
-      export PYTHONPATH="$(pwd):$(pwd)/../../proto_gen:${PYTHONPATH:-}"
+      export PYTHONPATH="$(pwd)/proto_gen:${PYTHONPATH:-}"
       # FastMCP internal logs can be verbose, redirect them to a file or suppress
       exec python -m memsearch_service.service > memsearch.log 2>&1

@@ -34,15 +34,7 @@ from pathlib import Path
 def _ensure_proto_gen() -> None:
     d = Path(__file__).resolve().parent
     while d.parent != d:
-        pc = d / "proto_stubs"
         pg = d / "proto_gen"
-        # Prefer proto_stubs/ (stubs built with the active venv's protobuf version)
-        # over proto_gen/ which may have been generated with an incompatible newer version.
-        if pc.is_dir() and (pc / "robonix_runtime_pb2.py").exists():
-            sys.path.insert(0, str(pc))
-            if pg.is_dir():
-                sys.path.append(str(pg))
-            return
         if pg.is_dir() and (pg / "robonix_runtime_pb2.py").exists():
             sys.path.insert(0, str(pg))
             return

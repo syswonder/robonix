@@ -26,8 +26,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &[proto_dir.clone()],
         )?;
 
-    // RIDL codegen REMOVED -- RIDL syntax is deprecated.
-    // See robonix-interfaces/ridl/DEPRECATED.md
+    // robonix-codegen build-dependency REMOVED -- robonix-codegen syntax is deprecated.
+    // See crates/robonix-interfaces/ridl/DEPRECATED.md
 
     Ok(())
 }

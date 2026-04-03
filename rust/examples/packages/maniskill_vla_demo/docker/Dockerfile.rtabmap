@@ -28,12 +28,12 @@ COPY docker/entrypoint.sh      /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # Proto stubs for gRPC communication with robonix-atlas and env_node
-COPY proto_stubs/robonix_runtime_pb2.py      /app/proto_stubs/
-COPY proto_stubs/robonix_runtime_pb2_grpc.py /app/proto_stubs/
-COPY maniskill_vla_demo/maniskill_env_pb2.py      /app/proto_stubs/
-COPY maniskill_vla_demo/maniskill_env_pb2_grpc.py  /app/proto_stubs/
+COPY proto_gen/robonix_runtime_pb2.py      /app/proto_gen/
+COPY proto_gen/robonix_runtime_pb2_grpc.py /app/proto_gen/
+COPY maniskill_vla_demo/maniskill_env_pb2.py      /app/proto_gen/
+COPY maniskill_vla_demo/maniskill_env_pb2_grpc.py  /app/proto_gen/
 
-ENV PYTHONPATH=/app:/app/proto_stubs
+ENV PYTHONPATH=/app:/app/proto_gen
 WORKDIR /app
 
 ENTRYPOINT ["/app/entrypoint.sh"]

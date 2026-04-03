@@ -1,0 +1,16 @@
+# On-demand lidar scan snapshot (single scan).
+# Complements robonix/prm/sensor/lidar (continuous stream) — use this for
+# one-shot scan queries (MCP tools, obstacle check, mapping input).
+# Input:  empty trigger.
+# Output: one sensor_msgs/LaserScan frame.
+[contract]
+id      = "robonix/prm/sensor/lidar_snapshot"
+version = "1"
+kind    = "primitive"
+
+[io]
+input  = "std_msgs/msg/Empty"
+output = "sensor_msgs/msg/LaserScan"
+
+[mode]
+type = "rpc"

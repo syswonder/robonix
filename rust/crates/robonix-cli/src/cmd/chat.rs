@@ -15,7 +15,9 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
+use std::cell::RefCell;
 use std::io;
+use std::rc::Rc;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
@@ -127,17 +129,19 @@ async fn run_tui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     pilot_endpoint: &str,
 ) -> Result<()> {
-    let mut messages: Vec<ChatMessage> = vec![ChatMessage {
+    let messages: Rc<RefCell<Vec<ChatMessage>>> = Rc::new(RefCell::new(vec![ChatMessage {
         role: Role::Status,
-        text: format!("Connected to Pilot at {pilot_endpoint}. Type a message and press Enter."),
-    }];
+        text: format!(
+            "Connected to Pilot at {pilot_endpoint}. Enter = send, Esc = abort turn, Ctrl+C = quit."
+        ),
+    }]));
     let mut input = String::new();
     let mut scroll: u16 = 0;
     let mut busy = false;
     let session_id = Uuid::new_v4().to_string();
 
     loop {
-        draw(terminal, &messages, &input, scroll, busy)?;
+        draw(terminal, &messages.borrow(), &input, scroll, busy)?;
 
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
@@ -165,14 +169,27 @@ async fn run_tui(
                             let _ = notify_session_end(pilot_endpoint, &session_id).await;
                             break;
                         }
-                        messages.push(ChatMessage { role: Role::User, text: msg.clone() });
+                        messages.borrow_mut().push(ChatMessage {
+                            role: Role::User,
+                            text: msg.clone(),
+                        });
                         busy = true;
-                        draw(terminal, &messages, &input, scroll, busy)?;
+                        draw(terminal, &messages.borrow(), &input, scroll, busy)?;
 
-                        match send_message(pilot_endpoint, &session_id, &msg, &mut messages, terminal, &input).await {
+                        match run_intent_with_esc_abort(
+                            pilot_endpoint,
+                            &session_id,
+                            &msg,
+                            Rc::clone(&messages),
+                            terminal,
+                            &input,
+                            &mut scroll,
+                        )
+                        .await
+                        {
                             Ok(()) => {}
                             Err(e) => {
-                                messages.push(ChatMessage {
+                                messages.borrow_mut().push(ChatMessage {
                                     role: Role::Status,
                                     text: format!("Error: {e:#}"),
                                 });
@@ -181,7 +198,9 @@ async fn run_tui(
                         busy = false;
                     }
                     KeyCode::Char(c) => input.push(c),
-                    KeyCode::Backspace => { input.pop(); }
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
                     KeyCode::PageUp => scroll = scroll.saturating_add(5),
                     KeyCode::PageDown => scroll = scroll.saturating_sub(5),
                     _ => {}
@@ -224,84 +243,185 @@ async fn notify_session_end(pilot_endpoint: &str, session_id: &str) -> Result<()
     Ok(())
 }
 
-async fn send_message(
+async fn abort_pilot_session(pilot_endpoint: &str, session_id: &str) -> Result<()> {
+    use pb::pilot::{AbortSessionRequest, pilot_service_client::PilotServiceClient};
+
+    let mut client = PilotServiceClient::connect(pilot_endpoint.to_string())
+        .await
+        .context("failed to connect to Pilot for AbortSession")?;
+
+    client
+        .abort_session(AbortSessionRequest {
+            session_id: session_id.to_string(),
+        })
+        .await
+        .context("Pilot AbortSession failed")?;
+    Ok(())
+}
+
+/// Runs one HandleIntent stream while polling the keyboard: **Esc** calls
+/// [`abort_pilot_session`] so the Pilot cancels the in-flight turn (and Executor work
+/// driven from it). Stream I/O runs in a spawned task so this loop can hold
+/// `&mut Terminal` for redraws without conflicting borrows.
+async fn run_intent_with_esc_abort(
     pilot_endpoint: &str,
     session_id: &str,
     user_msg: &str,
-    messages: &mut Vec<ChatMessage>,
+    messages: Rc<RefCell<Vec<ChatMessage>>>,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     input: &str,
+    scroll: &mut u16,
 ) -> Result<()> {
-    use pb::pilot::{HandleIntentRequest, Intent};
+    use pb::pilot::{HandleIntentRequest, Intent, PilotEvent};
+    use tonic::Status;
 
     const INTENT_SOURCE_TEXT: u32 = 0;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(64);
+    let pilot_ep = pilot_endpoint.to_string();
+    let sid = session_id.to_string();
+    let text = user_msg.to_string();
+
+    let _stream_task = tokio::spawn(async move {
+        let mut client =
+            match pb::pilot::pilot_service_client::PilotServiceClient::connect(pilot_ep.clone())
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(Err(Status::unavailable(e.to_string()))).await;
+                    return;
+                }
+            };
+        let intent = Intent {
+            intent_id: Uuid::new_v4().to_string(),
+            session_id: sid,
+            source: INTENT_SOURCE_TEXT,
+            text,
+            audio_data: vec![],
+            context_json: String::new(),
+            timestamp_ms: now_ms(),
+        };
+        let stream = match client
+            .handle_intent(HandleIntentRequest {
+                intent: Some(intent),
+            })
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(e) => {
+                let _ = tx.send(Err(e)).await;
+                return;
+            }
+        };
+        let mut stream = stream;
+        while let Some(item) = stream.next().await {
+            if tx.send(item).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    loop {
+        tokio::select! {
+            biased;
+            item = rx.recv() => {
+                match item {
+                    None => break,
+                    Some(Ok(event)) => {
+                        apply_pilot_event(&messages, &event)?;
+                        draw(terminal, &messages.borrow(), input, 0, true)?;
+                    }
+                    Some(Err(e)) => {
+                        messages.borrow_mut().push(ChatMessage {
+                            role: Role::Status,
+                            text: format!("Pilot stream error: {e}"),
+                        });
+                        draw(terminal, &messages.borrow(), input, 0, true)?;
+                        break;
+                    }
+                }
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
+                if event::poll(std::time::Duration::ZERO)? {
+                    if let Event::Key(key) = event::read()? {
+                        match key.code {
+                            KeyCode::Esc => {
+                                let _ = abort_pilot_session(pilot_endpoint, session_id).await;
+                                messages.borrow_mut().push(ChatMessage {
+                                    role: Role::Status,
+                                    text: "Esc — AbortSession sent (Pilot/Executor should stop this turn)."
+                                        .to_string(),
+                                });
+                                draw(terminal, &messages.borrow(), input, *scroll, true)?;
+                            }
+                            KeyCode::PageUp => {
+                                *scroll = scroll.saturating_add(5);
+                                draw(terminal, &messages.borrow(), input, *scroll, true)?;
+                            }
+                            KeyCode::PageDown => {
+                                *scroll = scroll.saturating_sub(5);
+                                draw(terminal, &messages.borrow(), input, *scroll, true)?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_pilot_event(
+    messages: &Rc<RefCell<Vec<ChatMessage>>>,
+    event: &pb::pilot::PilotEvent,
+) -> Result<()> {
     const EVT_TEXT_CHUNK: u32 = 0;
     const EVT_TASK_GRAPH: u32 = 1;
-    const EVT_BATCH_RESULT: u32 = 2;
-    const EVT_STATUS: u32 = 3;
     const EVT_FINAL_TEXT: u32 = 4;
 
-    let mut client =
-        pb::pilot::pilot_service_client::PilotServiceClient::connect(pilot_endpoint.to_string())
-            .await
-            .context("failed to connect to Pilot")?;
-
-    let intent = Intent {
-        intent_id: Uuid::new_v4().to_string(),
-        session_id: session_id.to_string(),
-        source: INTENT_SOURCE_TEXT,
-        text: user_msg.to_string(),
-        audio_data: vec![],
-        context_json: String::new(),
-        timestamp_ms: now_ms(),
-    };
-
-    let mut stream = client
-        .handle_intent(HandleIntentRequest {
-            intent: Some(intent),
-        })
-        .await
-        .context("HandleIntent RPC failed")?
-        .into_inner();
-
-    while let Some(event) = stream.next().await {
-        let event = event.context("stream error")?;
-        match event.event_kind {
-            EVT_TEXT_CHUNK => {
-                let t = event.text_chunk.clone();
-                if let Some(last) = messages.last_mut() {
-                    if matches!(last.role, Role::Agent) {
-                        last.text.push_str(&t);
-                    } else {
-                        messages.push(ChatMessage { role: Role::Agent, text: t });
-                    }
+    let mut m = messages.borrow_mut();
+    match event.event_kind {
+        EVT_TEXT_CHUNK => {
+            let t = event.text_chunk.clone();
+            if let Some(last) = m.last_mut() {
+                if matches!(last.role, Role::Agent) {
+                    last.text.push_str(&t);
                 } else {
-                    messages.push(ChatMessage { role: Role::Agent, text: t });
+                    m.push(ChatMessage {
+                        role: Role::Agent,
+                        text: t,
+                    });
                 }
+            } else {
+                m.push(ChatMessage {
+                    role: Role::Agent,
+                    text: t,
+                });
             }
-            EVT_FINAL_TEXT => {
-                let t = event.final_text.clone();
-                let has_agent = messages.last().map_or(false, |m| matches!(m.role, Role::Agent));
-                if !has_agent && !t.is_empty() {
-                    messages.push(ChatMessage { role: Role::Agent, text: t });
-                }
-            }
-            EVT_TASK_GRAPH => {
-                if let Some(ref g) = event.task_graph {
-                    for call in &g.calls {
-                        messages.push(ChatMessage {
-                            role: Role::ToolCall,
-                            text: format!(
-                                "[r{}] {}({})",
-                                g.round, call.tool_name, call.args_json
-                            ),
-                        });
-                    }
-                }
-            }
-            EVT_BATCH_RESULT | EVT_STATUS | _ => {}
         }
-        draw(terminal, messages, input, 0, true)?;
+        EVT_FINAL_TEXT => {
+            let t = event.final_text.clone();
+            let has_agent = m.last().map_or(false, |x| matches!(x.role, Role::Agent));
+            if !has_agent && !t.is_empty() {
+                m.push(ChatMessage {
+                    role: Role::Agent,
+                    text: t,
+                });
+            }
+        }
+        EVT_TASK_GRAPH => {
+            if let Some(ref g) = event.task_graph {
+                for call in &g.calls {
+                    m.push(ChatMessage {
+                        role: Role::ToolCall,
+                        text: format!("[r{}] {}({})", g.round, call.tool_name, call.args_json),
+                    });
+                }
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -320,10 +440,22 @@ fn draw(
         let mut lines: Vec<Line> = Vec::new();
         for msg in messages {
             let (prefix, indent, style) = match msg.role {
-                Role::User    => ("You:   ", "       ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Role::Agent   => ("Pilot: ", "       ", Style::default().fg(Color::Green)),
+                Role::User => (
+                    "You:   ",
+                    "       ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Role::Agent => ("Pilot: ", "       ", Style::default().fg(Color::Green)),
                 Role::ToolCall => (">      ", "       ", Style::default().fg(Color::Yellow)),
-                Role::Status  => ("",        "",        Style::default().fg(Color::Magenta).add_modifier(Modifier::ITALIC)),
+                Role::Status => (
+                    "",
+                    "",
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::ITALIC),
+                ),
             };
             for (i, text_line) in msg.text.lines().enumerate() {
                 let lead = if i == 0 { prefix } else { indent };
@@ -342,8 +474,7 @@ fn draw(
 
         // Scroll offset must be in **wrapped** lines (not raw `\n`-split lines), or long replies
         // clip at the bottom while `total` stays small.
-        let text_only = Paragraph::new(lines.clone())
-            .wrap(Wrap { trim: false });
+        let text_only = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
         let total_lines = text_only.line_count(inner.width) as u16;
         let visible = inner.height;
         let auto_scroll = if scroll == 0 {
@@ -358,8 +489,11 @@ fn draw(
             .scroll((auto_scroll, 0));
         f.render_widget(history, chunks[0]);
 
-        let input_widget = Paragraph::new(input.to_string())
-            .block(Block::default().borders(Borders::ALL).title(" > Type message (Enter to send, Ctrl+C quit) "));
+        let input_widget = Paragraph::new(input.to_string()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" > Enter = send · Esc = abort turn · Ctrl+C = quit "),
+        );
         f.render_widget(input_widget, chunks[1]);
     })?;
     Ok(())

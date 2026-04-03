@@ -25,7 +25,7 @@ COPY entrypoint_ros2bridge.sh /entrypoint.sh
 COPY ros2_camera_bridge.py    /ros2_camera_bridge.py
 
 # proto stubs are bind-mounted at runtime
-ENV PYTHONPATH=/proto_stubs
+ENV PYTHONPATH=/proto_gen
 
 RUN chmod +x /entrypoint.sh
 

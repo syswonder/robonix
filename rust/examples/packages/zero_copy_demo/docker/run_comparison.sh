@@ -3,7 +3,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEMO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 RESULTS_DIR="$DEMO_DIR/results"
-PROTO_GEN_DIR="$(cd "$DEMO_DIR/../../proto_gen" && pwd)"
+if [ -d "$DEMO_DIR/proto_gen" ]; then
+  PROTO_GEN_DIR="$(cd "$DEMO_DIR/proto_gen" && pwd)"
+else
+  PROTO_GEN_DIR="$(cd "$DEMO_DIR/../../proto_gen" && pwd)"
+fi
 IMAGE_NAME="robonix-ros2-bench:latest"
 
 WIDTH="${1:-1920}"

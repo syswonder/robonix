@@ -3,9 +3,9 @@
 
 use crate::executor::executor_service_client::ExecutorServiceClient;
 use crate::pilot::{
-    pilot_service_server::PilotService, AbortSessionRequest, AbortSessionResponse,
-    HandleIntentRequest, ListSessionsRequest, ListSessionsResponse, PilotEvent, SessionInfo,
-    SessionStatusEvent,
+    AbortSessionRequest, AbortSessionResponse, HandleIntentRequest, ListSessionsRequest,
+    ListSessionsResponse, PilotEvent, SessionInfo, SessionStatusEvent,
+    pilot_service_server::PilotService,
 };
 use crate::pilot_wire::{self, PilotStreamBody};
 use crate::planner;
@@ -16,7 +16,7 @@ use anyhow::Result;
 use robonix_sdk::RobonixClient;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -65,10 +65,7 @@ impl PilotService for PilotServiceImpl {
             intent.session_id = Uuid::new_v4().to_string();
         }
 
-        let session_arc = self
-            .sessions
-            .get_or_create(&intent.session_id)
-            .await;
+        let session_arc = self.sessions.get_or_create(&intent.session_id).await;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(64);
         let sdk = Arc::clone(&self.sdk);
@@ -83,23 +80,28 @@ impl PilotService for PilotServiceImpl {
 
         tokio::spawn(async move {
             // Emit session-created / active status.
-            let _ = tx.send(Ok(pilot_wire::pack(
-                &session_id,
-                PilotStreamBody::Status(SessionStatusEvent {
-                    session_id: session_id.clone(),
-                    state: SessionState::Active as u32,
-                    message: String::new(),
-                }),
-            ))).await;
+            let _ = tx
+                .send(Ok(pilot_wire::pack(
+                    &session_id,
+                    PilotStreamBody::Status(SessionStatusEvent {
+                        session_id: session_id.clone(),
+                        state: SessionState::Active as u32,
+                        message: String::new(),
+                    }),
+                )))
+                .await;
 
             // Connect to Executor.
-            let mut executor = match ExecutorServiceClient::connect(executor_endpoint.clone()).await {
+            let mut executor = match ExecutorServiceClient::connect(executor_endpoint.clone()).await
+            {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = tx.send(Err(Status::unavailable(format!(
-                        "cannot connect to Executor at '{}': {e}",
-                        executor_endpoint
-                    )))).await;
+                    let _ = tx
+                        .send(Err(Status::unavailable(format!(
+                            "cannot connect to Executor at '{}': {e}",
+                            executor_endpoint
+                        ))))
+                        .await;
                     return;
                 }
             };
@@ -114,7 +116,9 @@ impl PilotService for PilotServiceImpl {
                 &mut executor,
                 &tx,
                 cancel_rx,
-            ).await {
+            )
+            .await
+            {
                 log::error!("[pilot] turn error for session '{}': {e:#}", session_id);
                 let _ = tx.send(Err(Status::internal(e.to_string()))).await;
             }

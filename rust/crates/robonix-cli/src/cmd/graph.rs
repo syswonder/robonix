@@ -7,7 +7,8 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 /// Font stack: JetBrains Mono preferred, then common monospace fallbacks.
-const F: &str = "JetBrains Mono,Fira Mono,Fira Code,Consolas,DejaVu Sans Mono,Courier New,monospace";
+const F: &str =
+    "JetBrains Mono,Fira Mono,Fira Code,Consolas,DejaVu Sans Mono,Courier New,monospace";
 /// PNG scale factor for sharper output.
 const PNG_SCALE: f32 = 2.0;
 
@@ -78,11 +79,11 @@ pub async fn execute(
 // ─── channel data ────────────────────────────────────────────────────────────
 
 struct Channel {
-    consumer_id: String,   // client side
-    provider_id: String,   // server side
+    consumer_id: String, // client side
+    provider_id: String, // server side
     transport: String,
     interface_name: String,
-    endpoint: String,      // allocated / negotiated endpoint
+    endpoint: String, // allocated / negotiated endpoint
 }
 
 fn parse_channels(json: &str) -> Vec<Channel> {
@@ -115,7 +116,11 @@ fn parse_channels(json: &str) -> Vec<Channel> {
 fn meta_ep(json: &str) -> String {
     serde_json::from_str::<serde_json::Value>(json)
         .ok()
-        .and_then(|v| v.get("endpoint").and_then(|e| e.as_str()).map(str::to_string))
+        .and_then(|v| {
+            v.get("endpoint")
+                .and_then(|e| e.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_default()
 }
 
@@ -138,7 +143,11 @@ impl Rng {
         self.0
     }
     fn usize(&mut self, n: usize) -> usize {
-        if n == 0 { 0 } else { (self.next() % n as u64) as usize }
+        if n == 0 {
+            0
+        } else {
+            (self.next() % n as u64) as usize
+        }
     }
     fn range(&mut self, lo: usize, hi: usize) -> usize {
         lo + self.usize(hi.saturating_sub(lo) + 1)
@@ -146,8 +155,8 @@ impl Rng {
 }
 
 const TRANSPORTS: &[&str] = &["grpc", "mcp", "ros2", "shared_memory"];
-const PKGS:       &[&str] = &["perception", "control", "planning", "io", "inference"];
-const KINDS:      &[&str] = &["primitive", "service", "skill"];
+const PKGS: &[&str] = &["perception", "control", "planning", "io", "inference"];
+const KINDS: &[&str] = &["primitive", "service", "skill"];
 
 // ─── random test topology ─────────────────────────────────────────────────────
 
@@ -158,7 +167,7 @@ fn test_topology() -> (Vec<robonix_sdk::NodeInfo>, Vec<Channel>) {
     let n_nodes = r.range(3, 5);
     let mut nodes: Vec<robonix_sdk::NodeInfo> = (0..n_nodes)
         .map(|i| {
-            let pkg  = PKGS[r.usize(PKGS.len())];
+            let pkg = PKGS[r.usize(PKGS.len())];
             let kind = KINDS[r.usize(KINDS.len())];
             let n_if = r.range(1, 2);
             let interfaces = (0..n_if)
@@ -167,26 +176,28 @@ fn test_topology() -> (Vec<robonix_sdk::NodeInfo>, Vec<Channel>) {
                     let mut ts = Vec::<String>::new();
                     for _ in 0..r.range(1, 2) {
                         let t = TRANSPORTS[r.usize(TRANSPORTS.len())].to_string();
-                        if !ts.contains(&t) { ts.push(t); }
+                        if !ts.contains(&t) {
+                            ts.push(t);
+                        }
                     }
                     let port = 50100 + r.range(0, 199) as u16;
                     robonix_sdk::InterfaceInfo {
-                        name:                  format!("/io/{pkg}_{i}_{j}"),
-                        contract_id:           format!("robonix/{pkg}/node{i}/port{j}"),
-                        supported_transports:  ts,
-                        metadata_json:         format!(r#"{{"endpoint":"127.0.0.1:{port}"}}"#),
+                        name: format!("/io/{pkg}_{i}_{j}"),
+                        contract_id: format!("robonix/{pkg}/node{i}/port{j}"),
+                        supported_transports: ts,
+                        metadata_json: format!(r#"{{"endpoint":"127.0.0.1:{port}"}}"#),
                     }
                 })
                 .collect();
             robonix_sdk::NodeInfo {
-                node_id:          format!("{pkg}.node{i}"),
-                namespace:        format!("ns/{pkg}"),
-                kind:             kind.to_string(),
+                node_id: format!("{pkg}.node{i}"),
+                namespace: format!("ns/{pkg}"),
+                kind: kind.to_string(),
                 interfaces,
-                has_skill_md:     false,
-                skills:           vec![],
-                distro:           String::new(),
-                container_id:     String::new(),
+                has_skill_md: false,
+                skills: vec![],
+                distro: String::new(),
+                container_id: String::new(),
                 last_heartbeat_ms: 0,
             }
         })
@@ -199,35 +210,41 @@ fn test_topology() -> (Vec<robonix_sdk::NodeInfo>, Vec<Channel>) {
         let mut pi = r.usize(n_nodes);
         let mut ci = r.usize(n_nodes);
         // avoid self-loop; try once to find a different pair
-        if pi == ci && n_nodes > 1 { ci = (ci + 1) % n_nodes; }
-        if pi == ci { continue; }
+        if pi == ci && n_nodes > 1 {
+            ci = (ci + 1) % n_nodes;
+        }
+        if pi == ci {
+            continue;
+        }
 
-        if nodes[pi].interfaces.is_empty() { continue; }
+        if nodes[pi].interfaces.is_empty() {
+            continue;
+        }
         let iface = &nodes[pi].interfaces[r.usize(nodes[pi].interfaces.len())];
-        let tr    = iface.supported_transports[r.usize(iface.supported_transports.len())].clone();
-        let port  = 50200 + r.range(0, 99) as u16;
-        let ep    = format!("127.0.0.1:{port}");
+        let tr = iface.supported_transports[r.usize(iface.supported_transports.len())].clone();
+        let port = 50200 + r.range(0, 99) as u16;
+        let ep = format!("127.0.0.1:{port}");
 
         // Clone data needed before borrowing nodes mutably
         let iface_name = iface.name.clone();
-        let abs_id     = iface.contract_id.clone();
+        let abs_id = iface.contract_id.clone();
 
         // Add a matching (client-side) interface on the consumer node if missing
         if !nodes[ci].interfaces.iter().any(|x| x.name == iface_name) {
             nodes[ci].interfaces.push(robonix_sdk::InterfaceInfo {
-                name:                  iface_name.clone(),
-                contract_id:           abs_id,
-                supported_transports:  vec![tr.clone()],
-                metadata_json:         format!(r#"{{"endpoint":"{ep}"}}"#),
+                name: iface_name.clone(),
+                contract_id: abs_id,
+                supported_transports: vec![tr.clone()],
+                metadata_json: format!(r#"{{"endpoint":"{ep}"}}"#),
             });
         }
 
         channels.push(Channel {
-            provider_id:    nodes[pi].node_id.clone(),
-            consumer_id:    nodes[ci].node_id.clone(),
-            transport:      tr,
+            provider_id: nodes[pi].node_id.clone(),
+            consumer_id: nodes[ci].node_id.clone(),
+            transport: tr,
             interface_name: iface_name,
-            endpoint:       ep,
+            endpoint: ep,
         });
         // prevent the same pair from being picked again (swap pi to avoid alias)
         pi = pi.wrapping_add(1) % n_nodes;
@@ -249,30 +266,30 @@ fn esc(s: &str) -> String {
 /// Transport-specific color (for edge lines and connection dots).
 fn transport_color(t: &str) -> &'static str {
     match t {
-        "grpc"          => "#2563eb",
-        "mcp"           => "#16a34a",
-        "ros2"          => "#dc2626",
+        "grpc" => "#2563eb",
+        "mcp" => "#16a34a",
+        "ros2" => "#dc2626",
         "shared_memory" => "#7c3aed",
-        _               => "#6b7280",
+        _ => "#6b7280",
     }
 }
 
 /// Role badge background color.
 fn role_bg(server: bool, client: bool) -> &'static str {
     match (server, client) {
-        (true,  false) => "#1d4ed8",  // blue
-        (false, true)  => "#15803d",  // green
-        (true,  true)  => "#6d28d9",  // purple
-        _              => "#94a3b8",  // gray / idle
+        (true, false) => "#1d4ed8", // blue
+        (false, true) => "#15803d", // green
+        (true, true) => "#6d28d9",  // purple
+        _ => "#94a3b8",             // gray / idle
     }
 }
 
 fn role_label(server: bool, client: bool) -> &'static str {
     match (server, client) {
-        (true,  false) => "SERVER",
-        (false, true)  => "CLIENT",
-        (true,  true)  => "S+C",
-        _              => "idle",
+        (true, false) => "SERVER",
+        (false, true) => "CLIENT",
+        (true, true) => "S+C",
+        _ => "idle",
     }
 }
 
@@ -284,15 +301,15 @@ fn tw(s: &str, sz: f64) -> f64 {
 }
 
 const HDR_H: f64 = 58.0; // node header area height
-const INSET: f64 = 8.0;  // iface box inset from card edge
-const BPAD:  f64 = 7.0;  // top/bottom padding inside iface box
-const BGAP:  f64 = 5.0;  // gap between iface boxes
-const LH:    f64 = 13.5; // line height
-const PIN_R: f64 = 5.0;  // connection dot radius
+const INSET: f64 = 8.0; // iface box inset from card edge
+const BPAD: f64 = 7.0; // top/bottom padding inside iface box
+const BGAP: f64 = 5.0; // gap between iface boxes
+const LH: f64 = 13.5; // line height
+const PIN_R: f64 = 5.0; // connection dot radius
 
 #[derive(Clone)]
 struct BoxGeom {
-    y0: f64,       // top of box, relative to node top
+    y0: f64, // top of box, relative to node top
     h: f64,
     y_center: f64, // mid-height, relative to node top
 }
@@ -325,9 +342,13 @@ fn measure(n: &robonix_sdk::NodeInfo, channels: &[Channel]) -> NodeGeom {
             (c.provider_id == n.node_id || c.consumer_id == n.node_id)
                 && c.interface_name == iface.name
         });
-        let tr = active
-            .map(|c| c.transport.as_str())
-            .unwrap_or_else(|| iface.supported_transports.first().map(|s| s.as_str()).unwrap_or("?"));
+        let tr = active.map(|c| c.transport.as_str()).unwrap_or_else(|| {
+            iface
+                .supported_transports
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("?")
+        });
         let ep = active
             .map(|c| c.endpoint.clone())
             .filter(|e| !e.is_empty())
@@ -350,7 +371,11 @@ fn measure(n: &robonix_sdk::NodeInfo, channels: &[Channel]) -> NodeGeom {
 
         boxes.insert(
             iface.name.clone(),
-            BoxGeom { y0: y, h: box_h, y_center: y + box_h * 0.5 },
+            BoxGeom {
+                y0: y,
+                h: box_h,
+                y_center: y + box_h * 0.5,
+            },
         );
         y += box_h + BGAP;
     }
@@ -359,7 +384,11 @@ fn measure(n: &robonix_sdk::NodeInfo, channels: &[Channel]) -> NodeGeom {
     }
     y += 10.0;
 
-    NodeGeom { w: max_w, h: y, boxes }
+    NodeGeom {
+        w: max_w,
+        h: y,
+        boxes,
+    }
 }
 
 // ─── layout ──────────────────────────────────────────────────────────────────
@@ -394,7 +423,9 @@ fn rank_nodes(nodes: &[robonix_sdk::NodeInfo], channels: &[Channel]) -> Vec<usiz
                 changed = true;
             }
         }
-        if !changed { break; }
+        if !changed {
+            break;
+        }
     }
     rank
 }
@@ -410,17 +441,25 @@ fn layout(nodes: &[robonix_sdk::NodeInfo], channels: &[Channel]) -> (Vec<Placed>
     let mut lkeys: Vec<usize> = layers.keys().copied().collect();
     lkeys.sort_unstable();
     for k in &lkeys {
-        layers.get_mut(k).unwrap().sort_by_key(|&i| &nodes[i].node_id);
+        layers
+            .get_mut(k)
+            .unwrap()
+            .sort_by_key(|&i| &nodes[i].node_id);
     }
 
-    const MARGIN:  f64 = 28.0;
+    const MARGIN: f64 = 28.0;
     const COL_GAP: f64 = 76.0;
     const ROW_GAP: f64 = 22.0;
     const TITLE_H: f64 = 26.0;
 
     let col_ws: Vec<f64> = lkeys
         .iter()
-        .map(|k| layers[k].iter().map(|&i| geoms[i].w).fold(0.0_f64, f64::max))
+        .map(|k| {
+            layers[k]
+                .iter()
+                .map(|&i| geoms[i].w)
+                .fold(0.0_f64, f64::max)
+        })
         .collect();
     let col_hs: Vec<f64> = lkeys
         .iter()
@@ -443,7 +482,12 @@ fn layout(nodes: &[robonix_sdk::NodeInfo], channels: &[Channel]) -> (Vec<Placed>
         let stack_h = col_hs[li];
         let mut cy = MARGIN + TITLE_H + (max_h - stack_h) * 0.5;
         for &ni in idxs {
-            placed.push(Placed { idx: ni, x: cx, y: cy, geom: geoms[ni].clone() });
+            placed.push(Placed {
+                idx: ni,
+                x: cx,
+                y: cy,
+                geom: geoms[ni].clone(),
+            });
             cy += geoms[ni].h + ROW_GAP;
         }
         cx += col_ws[li] + COL_GAP;
@@ -463,7 +507,11 @@ fn render_svg(nodes: &[robonix_sdk::NodeInfo], channels: &[Channel], title: &str
     let mut s = String::with_capacity(32_768);
 
     // Pure white background, minimalist.
-    writeln!(s, "<svg xmlns='http://www.w3.org/2000/svg' width='{cw:.0}' height='{ch:.0}'>").unwrap();
+    writeln!(
+        s,
+        "<svg xmlns='http://www.w3.org/2000/svg' width='{cw:.0}' height='{ch:.0}'>"
+    )
+    .unwrap();
     // Arrow marker — small, sharp, dark gray.
     writeln!(s, "<defs><marker id='arr' markerWidth='7' markerHeight='6' refX='6' refY='3' orient='auto'><path d='M0,0 L6,3 L0,6 z' fill='#333333'/></marker></defs>").unwrap();
     writeln!(s, "<rect width='{cw:.0}' height='{ch:.0}' fill='#ffffff'/>").unwrap();
@@ -488,10 +536,20 @@ fn render_svg(nodes: &[robonix_sdk::NodeInfo], channels: &[Channel], title: &str
                 continue;
             };
 
-            let y_srv = pp.y + pp.geom.boxes.get(&ch.interface_name).map(|b| b.y_center).unwrap_or(pp.geom.h * 0.5);
-            let y_cli = pc.y + pc.geom.boxes.get(&ch.interface_name).map(|b| b.y_center).unwrap_or(pc.geom.h * 0.5);
-            let x0    = pp.x + pp.geom.w; // server right edge
-            let x1    = pc.x;             // client left edge
+            let y_srv = pp.y
+                + pp.geom
+                    .boxes
+                    .get(&ch.interface_name)
+                    .map(|b| b.y_center)
+                    .unwrap_or(pp.geom.h * 0.5);
+            let y_cli = pc.y
+                + pc.geom
+                    .boxes
+                    .get(&ch.interface_name)
+                    .map(|b| b.y_center)
+                    .unwrap_or(pc.geom.h * 0.5);
+            let x0 = pp.x + pp.geom.w; // server right edge
+            let x1 = pc.x; // client left edge
             let color = transport_color(&ch.transport);
 
             // For parallel edges between the same (provider, consumer) pair,
@@ -502,8 +560,8 @@ fn render_svg(nodes: &[robonix_sdk::NodeInfo], channels: &[Channel], title: &str
                 .filter(|(_, c)| c.provider_id == ch.provider_id && c.consumer_id == ch.consumer_id)
                 .map(|(i, _)| i)
                 .collect();
-            let k   = same.iter().position(|&i| i == chi).unwrap_or(0) as f64;
-            let n   = same.len() as f64;
+            let k = same.iter().position(|&i| i == chi).unwrap_or(0) as f64;
+            let n = same.len() as f64;
             // Vertical fan: spread control points ±20 px per slot.
             let fan = (k - (n - 1.0) * 0.5) * 20.0;
 
@@ -516,7 +574,9 @@ fn render_svg(nodes: &[robonix_sdk::NodeInfo], channels: &[Channel], title: &str
             let (cx1, cy1) = (x0 + ctrl, y_srv + fan);
             let (cx2, cy2) = (x1 - ctrl, y_cli + fan);
 
-            let d = format!("M{x0:.1},{y_srv:.1} C{cx1:.1},{cy1:.1} {cx2:.1},{cy2:.1} {x1:.1},{y_cli:.1}");
+            let d = format!(
+                "M{x0:.1},{y_srv:.1} C{cx1:.1},{cy1:.1} {cx2:.1},{cy2:.1} {x1:.1},{y_cli:.1}"
+            );
             writeln!(s, "<path d='{d}' fill='none' stroke='{color}' stroke-width='1.5' marker-end='url(#arr)'/>").unwrap();
         }
     }
@@ -552,19 +612,29 @@ fn render_svg(nodes: &[robonix_sdk::NodeInfo], channels: &[Channel], title: &str
         // ── Interface sub-boxes ──────────────────────────────────────────────
         // Each box: thin border, 3px left accent in transport color when active.
         for iface in &n.interfaces {
-            let Some(bg) = p.geom.boxes.get(&iface.name) else { continue };
+            let Some(bg) = p.geom.boxes.get(&iface.name) else {
+                continue;
+            };
             let (bx, by, bw, bh) = (gx + INSET, gy + bg.y0, gw - 2.0 * INSET, bg.h);
 
-            let is_server = channels.iter().any(|c| c.provider_id == n.node_id && c.interface_name == iface.name);
-            let is_client = channels.iter().any(|c| c.consumer_id == n.node_id && c.interface_name == iface.name);
+            let is_server = channels
+                .iter()
+                .any(|c| c.provider_id == n.node_id && c.interface_name == iface.name);
+            let is_client = channels
+                .iter()
+                .any(|c| c.consumer_id == n.node_id && c.interface_name == iface.name);
 
             let active = channels.iter().find(|c| {
                 (c.provider_id == n.node_id || c.consumer_id == n.node_id)
                     && c.interface_name == iface.name
             });
-            let tr = active
-                .map(|c| c.transport.as_str())
-                .unwrap_or_else(|| iface.supported_transports.first().map(|s| s.as_str()).unwrap_or("?"));
+            let tr = active.map(|c| c.transport.as_str()).unwrap_or_else(|| {
+                iface
+                    .supported_transports
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("?")
+            });
             let ep = active
                 .map(|c| c.endpoint.clone())
                 .filter(|e| !e.is_empty())
@@ -576,16 +646,20 @@ fn render_svg(nodes: &[robonix_sdk::NodeInfo], channels: &[Channel], title: &str
             };
             let ep_label = format!("{tr}::{abs}:{ep}");
 
-            let tc  = transport_color(tr);
+            let tc = transport_color(tr);
             let rbg = role_bg(is_server, is_client);
-            let rl  = role_label(is_server, is_client);
+            let rl = role_label(is_server, is_client);
 
             // Box outline: thin light gray
             writeln!(s, "<rect x='{bx:.1}' y='{by:.1}' width='{bw:.1}' height='{bh:.1}' fill='#ffffff' stroke='#cccccc' stroke-width='0.75'/>").unwrap();
 
             // Left accent bar: transport color when active, invisible when idle
             if is_server || is_client {
-                writeln!(s, "<rect x='{bx:.1}' y='{by:.1}' width='3' height='{bh:.1}' fill='{tc}'/>").unwrap();
+                writeln!(
+                    s,
+                    "<rect x='{bx:.1}' y='{by:.1}' width='3' height='{bh:.1}' fill='{tc}'/>"
+                )
+                .unwrap();
             }
 
             // Text starts after the accent bar
@@ -593,8 +667,12 @@ fn render_svg(nodes: &[robonix_sdk::NodeInfo], channels: &[Channel], title: &str
 
             // Row 1: role badge + interface name
             let badge_w = rl.len() as f64 * 5.2 + 8.0;
-            let row1_y  = by + BPAD;
-            writeln!(s, "<rect x='{tx2:.1}' y='{row1_y:.1}' width='{badge_w:.1}' height='11' fill='{rbg}'/>").unwrap();
+            let row1_y = by + BPAD;
+            writeln!(
+                s,
+                "<rect x='{tx2:.1}' y='{row1_y:.1}' width='{badge_w:.1}' height='11' fill='{rbg}'/>"
+            )
+            .unwrap();
             writeln!(s, "<text x='{:.1}' y='{:.1}' font-family='{F}' font-size='7.5' font-weight='bold' fill='#ffffff' text-anchor='middle'>{}</text>",
                 tx2 + badge_w * 0.5, row1_y + 8.5, esc(rl)).unwrap();
             writeln!(s, "<text x='{:.1}' y='{:.1}' font-family='{F}' font-size='9' fill='#333333'>{}</text>",
@@ -609,7 +687,13 @@ fn render_svg(nodes: &[robonix_sdk::NodeInfo], channels: &[Channel], title: &str
                 let consumers: Vec<String> = channels
                     .iter()
                     .filter(|c| c.provider_id == n.node_id && c.interface_name == iface.name)
-                    .map(|c| c.consumer_id.rsplit('.').next().unwrap_or(&c.consumer_id).to_string())
+                    .map(|c| {
+                        c.consumer_id
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(&c.consumer_id)
+                            .to_string()
+                    })
                     .collect();
                 if !consumers.is_empty() {
                     writeln!(s, "<text x='{tx2:.1}' y='{:.1}' font-family='{F}' font-size='8.5' fill='#666666'>consumed by: {}</text>",
@@ -619,7 +703,13 @@ fn render_svg(nodes: &[robonix_sdk::NodeInfo], channels: &[Channel], title: &str
                 if let Some(prov) = channels
                     .iter()
                     .find(|c| c.consumer_id == n.node_id && c.interface_name == iface.name)
-                    .map(|c| c.provider_id.rsplit('.').next().unwrap_or(&c.provider_id).to_string())
+                    .map(|c| {
+                        c.provider_id
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(&c.provider_id)
+                            .to_string()
+                    })
                 {
                     writeln!(s, "<text x='{tx2:.1}' y='{:.1}' font-family='{F}' font-size='8.5' fill='#666666'>provider: {}</text>",
                         by + BPAD + 2.0 * LH + 8.5, esc(&prov)).unwrap();
@@ -629,20 +719,32 @@ fn render_svg(nodes: &[robonix_sdk::NodeInfo], channels: &[Channel], title: &str
 
         // ── Connection dots on card edges (server = right, client = left) ────
         for iface in &n.interfaces {
-            let Some(bg) = p.geom.boxes.get(&iface.name) else { continue };
+            let Some(bg) = p.geom.boxes.get(&iface.name) else {
+                continue;
+            };
             let cy = gy + bg.y_center;
 
-            let is_server = channels.iter().any(|c| c.provider_id == n.node_id && c.interface_name == iface.name);
-            let is_client = channels.iter().any(|c| c.consumer_id == n.node_id && c.interface_name == iface.name);
-            if !is_server && !is_client { continue; }
+            let is_server = channels
+                .iter()
+                .any(|c| c.provider_id == n.node_id && c.interface_name == iface.name);
+            let is_client = channels
+                .iter()
+                .any(|c| c.consumer_id == n.node_id && c.interface_name == iface.name);
+            if !is_server && !is_client {
+                continue;
+            }
 
             let active = channels.iter().find(|c| {
                 (c.provider_id == n.node_id || c.consumer_id == n.node_id)
                     && c.interface_name == iface.name
             });
-            let tr = active
-                .map(|c| c.transport.as_str())
-                .unwrap_or_else(|| iface.supported_transports.first().map(|s| s.as_str()).unwrap_or("?"));
+            let tr = active.map(|c| c.transport.as_str()).unwrap_or_else(|| {
+                iface
+                    .supported_transports
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("?")
+            });
             let tc = transport_color(tr);
 
             // Server: dot on right card edge
@@ -668,11 +770,16 @@ fn to_png(svg: &str, path: &Path) -> Result<()> {
     opt.font_family = "JetBrains Mono".to_string();
     let tree = usvg::Tree::from_str(svg, &opt).context("parse svg")?;
     let sz = tree.size();
-    let w = (sz.width()  * PNG_SCALE).ceil().max(1.0) as u32;
+    let w = (sz.width() * PNG_SCALE).ceil().max(1.0) as u32;
     let h = (sz.height() * PNG_SCALE).ceil().max(1.0) as u32;
     let mut pix = Pixmap::new(w, h).context("alloc pixmap")?;
     pix.fill(Color::WHITE);
-    resvg::render(&tree, Transform::from_scale(PNG_SCALE, PNG_SCALE), &mut pix.as_mut());
-    pix.save_png(path).map_err(|e| anyhow::anyhow!("png encode: {e}"))?;
+    resvg::render(
+        &tree,
+        Transform::from_scale(PNG_SCALE, PNG_SCALE),
+        &mut pix.as_mut(),
+    );
+    pix.save_png(path)
+        .map_err(|e| anyhow::anyhow!("png encode: {e}"))?;
     Ok(())
 }

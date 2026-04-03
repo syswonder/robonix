@@ -78,17 +78,24 @@ const PORT_RANGE_START: u16 = 50100;
 /// grpc/ros2 declarations emit a warning when their contract_id is not in this list, but
 /// are still accepted — unknown contracts are allowed to support rapid iteration.
 const ROBO_SYSTEM_INTERFACE_CATALOG: &[&str] = &[
+    // ── primitives (sensors / base) ───────────────────────────────────────────
     "robonix/prm/base/move",
     "robonix/prm/base/odom",
     "robonix/prm/camera/rgb",
     "robonix/prm/camera/depth",
     "robonix/prm/sensor/imu",
     "robonix/prm/sensor/lidar",
+    // ── primitives — MCP tool groups (rpc, wire_profile=mcp) ─────────────────
+    "robonix/prm/sim/env/tools", // env_node:  get_camera_image, get_robot_state, step_action
+    "robonix/prm/perception/tools", // perception_node: detect_objects
+    "robonix/prm/manipulation/tools", // vla_node: execute_instruction, move_base
+    // ── system services ───────────────────────────────────────────────────────
     "robonix/sys/runtime/pilot",
     "robonix/sys/runtime/executor",
     "robonix/sys/runtime/liaison",
     "robonix/sys/model/vlm/chat",
-    "robonix/sys/memory/search",
+    "robonix/sys/memory/search", // legacy search-only contract (kept for compat)
+    "robonix/sys/memory/tools",  // memsearch_service: search_memory, save_memory, compact_memory
 ];
 
 #[derive(Debug)]
@@ -114,7 +121,9 @@ impl MetaRuntimeRegistry {
     }
 
     fn transports_require_robonix_catalog(transports: &[String]) -> bool {
-        transports.iter().any(|t| t == "grpc" || t == "ros2")
+        transports
+            .iter()
+            .any(|t| t == "grpc" || t == "ros2" || t == "mcp")
     }
 
     fn is_catalogued_robonix_interface(abstract_path: &str) -> bool {
@@ -123,9 +132,12 @@ impl MetaRuntimeRegistry {
             .any(|&id| id == abstract_path)
     }
 
-    /// For `grpc` / `ros2`, namespace must be under `robonix/...`.
+    /// For `grpc` / `ros2` / `mcp`, namespace must be under `robonix/...`.
     /// Explicit `contract_id` (stable path) is preferred; if absent the path derived from
-    /// namespace+name is used. Unknown contracts emit a warning but are still accepted.
+    /// namespace+name is used.  Unknown contracts emit a warning but are still accepted.
+    ///
+    /// MCP-transport interfaces additionally warn when `contract_id` is absent, because each MCP
+    /// tool group must be registered under a stable capability path from `rust/contracts/`.
     fn validate_robonix_system_interface_for_transports(
         node_namespace: &str,
         interface_leaf: &str,
@@ -138,17 +150,31 @@ impl MetaRuntimeRegistry {
         let ns = node_namespace.trim();
         if !ns.starts_with("robonix/") {
             return Err(Status::invalid_argument(
-                "grpc/ros2 DeclareInterface requires RegisterNode.namespace under robonix/...",
+                "grpc/ros2/mcp DeclareInterface requires RegisterNode.namespace under robonix/...",
             ));
         }
-        let effective = if !contract_id_override.trim().is_empty() {
+
+        let is_mcp = transports.iter().any(|t| t == "mcp");
+        let has_explicit_contract = !contract_id_override.trim().is_empty();
+
+        if is_mcp && !has_explicit_contract {
+            // MCP tool groups must bind to a stable contract_id so Executor can route them
+            // correctly and the capability can be discovered by contract path.
+            log::warn!(
+                "mcp DeclareInterface on '{ns}/{interface_leaf}' has no contract_id — \
+                 set contract_id to e.g. 'robonix/prm/…/tools' (see rust/contracts/)"
+            );
+        }
+
+        let effective = if has_explicit_contract {
             contract_id_override.trim().to_string()
         } else {
             Self::join_namespace_leaf(ns, interface_leaf)
         };
         if !Self::is_catalogued_robonix_interface(&effective) {
+            let transport_label = if is_mcp { "mcp" } else { "grpc/ros2" };
             log::warn!(
-                "unknown contract \"{effective}\" for grpc/ros2 (not in catalog) — allowing anyway"
+                "unknown contract \"{effective}\" for {transport_label} (not in catalog) — allowing anyway"
             );
         }
         Ok(())
@@ -165,10 +191,14 @@ impl MetaRuntimeRegistry {
     fn validate_contract_id(field: &str, value: &str) -> Result<(), Status> {
         let s = value.trim();
         if s.is_empty() {
-            return Err(Status::invalid_argument(format!("{field} must not be empty")));
+            return Err(Status::invalid_argument(format!(
+                "{field} must not be empty"
+            )));
         }
         if s.len() > 512 {
-            return Err(Status::invalid_argument(format!("{field} is too long (max 512)")));
+            return Err(Status::invalid_argument(format!(
+                "{field} is too long (max 512)"
+            )));
         }
         if s.contains("..") || s.contains("//") {
             return Err(Status::invalid_argument(format!(
@@ -1294,8 +1324,7 @@ mod tests {
             .values()
             .filter(|n| {
                 n.interfaces.iter().any(|i| {
-                    i.contract_id == derived
-                        && i.supported_transports.contains(&"grpc".to_string())
+                    i.contract_id == derived && i.supported_transports.contains(&"grpc".to_string())
                 })
             })
             .count();
@@ -1343,6 +1372,9 @@ mod tests {
                 "robonix/prm/custom/data".into(),
             )
             .await;
-        assert!(result.is_ok(), "unknown contract should be accepted with warning");
+        assert!(
+            result.is_ok(),
+            "unknown contract should be accepted with warning"
+        );
     }
 }

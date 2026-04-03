@@ -152,18 +152,27 @@ async fn load_mcp_tools(sdk: &mut RobonixClient) -> anyhow::Result<Vec<ToolEntry
             }
             // Same IPv4-only listen + localhost→::1 issue as gRPC clients.
             let endpoint = endpoint.replace("localhost", "127.0.0.1");
-            for t in meta.get("tools").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
-                let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-                let desc = t.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let schema = t.get("input_schema").cloned()
+            for t in meta
+                .get("tools")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+            {
+                let name = t
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let desc = t
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let schema = t
+                    .get("input_schema")
+                    .cloned()
                     .unwrap_or_else(|| serde_json::json!({"type":"object","properties":{}}));
-                out.push(tool(
-                    &name,
-                    &desc,
-                    schema,
-                    RoutingKind::Mcp,
-                    &endpoint,
-                ));
+                out.push(tool(&name, &desc, schema, RoutingKind::Mcp, &endpoint));
             }
         }
     }

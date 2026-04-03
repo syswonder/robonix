@@ -28,21 +28,22 @@ RUN wget -q -O /tmp/webots.deb "${WEBOTS_DEB_URL}" \
     && rm -f /tmp/webots.deb \
     && rm -rf /var/lib/apt/lists/*
 
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+RUN python3 -m pip install --no-cache-dir \
+    "grpcio>=1.78.0" "protobuf>=6.30,<7" mcp "fastmcp>=3" numpy Pillow uvicorn httpx
+
 WORKDIR /colcon_ws
 COPY rust/examples/packages/tiago_sim_stack/ros_ws/src/eaios_webots src/eaios_webots
 RUN bash -lc "source /opt/ros/humble/setup.bash && colcon build --symlink-install --packages-select eaios_webots"
 
 COPY rust/examples/packages/tiago_sim_stack/nav2_bringup /opt/robonix_nav2
 COPY rust/examples/packages/tiago_sim_stack/tiago_bridge /app/tiago_bridge
-COPY rust/examples/proto_gen /app/proto_gen
+COPY rust/examples/packages/robonix_mcp_contract /app/robonix_mcp_contract_pkg
 COPY rust/examples/packages/tiago_sim_stack/bridge/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-ENV PIP_BREAK_SYSTEM_PACKAGES=1
-RUN python3 -m pip install --no-cache-dir \
-    "grpcio>=1.78.0" "protobuf>=6.30,<7" mcp numpy Pillow uvicorn httpx
 
 WORKDIR /app
-ENV PYTHONPATH=/app:/app/proto_gen
+ENV PYTHONPATH=/app:/app/tiago_bridge:/app/tiago_bridge/proto_gen:/app/robonix_mcp_contract_pkg
 
 ENTRYPOINT ["/entrypoint.sh"]

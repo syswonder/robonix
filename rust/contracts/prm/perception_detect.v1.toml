@@ -1,0 +1,15 @@
+# Object detection / scene understanding query.
+# Input:  sensor_msgs/Image — the image to run detection on.
+# Output: std_msgs/String — JSON-encoded detection results
+#         (array of {label, confidence, bbox: [x,y,w,h]}).
+[contract]
+id      = "robonix/prm/perception/detect"
+version = "1"
+kind    = "primitive"
+
+[io]
+input  = "sensor_msgs/msg/Image"
+output = "std_msgs/msg/String"
+
+[mode]
+type = "rpc"

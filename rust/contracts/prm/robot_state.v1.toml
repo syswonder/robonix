@@ -1,0 +1,15 @@
+# Single-shot robot state query.
+# Returns a full RobotState snapshot: base pose, joint state, TCP pose, gripper.
+# Input:  empty trigger.
+# Output: prm_base/RobotState.
+[contract]
+id      = "robonix/prm/robot/state"
+version = "1"
+kind    = "primitive"
+
+[io]
+input  = "std_msgs/msg/Empty"
+output = "prm_base/msg/RobotState"
+
+[mode]
+type = "rpc"

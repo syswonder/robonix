@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// build.rs — protos only from ridlc output (`executor.proto` imports `pilot.proto`).
+// build.rs — protos only from robonix-codegen output (`executor.proto` imports `pilot.proto`).
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parent()
         .and_then(|p| p.parent())
         .expect("robonix-executor should live at rust/crates/robonix-executor");
-    let ridl_proto = workspace_root.join("robonix-interfaces/robonix_proto");
+    let ridl_proto = workspace_root.join("crates/robonix-interfaces/robonix_proto");
     let pilot_proto = ridl_proto.join("pilot.proto");
     let executor_proto = ridl_proto.join("executor.proto");
 

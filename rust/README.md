@@ -15,19 +15,19 @@ Platform: primary target is Linux; ROS 2 workloads are not assumed on the host �
 | robonix-liaison | User-facing interaction layer: text stdin→Intent→PilotEvent |
 | robonix-cli | `rbnx` CLI for package validate / build / start and runtime inspection |
 | robonix-buffer | Shared-memory / buffer utilities (optional data-plane paths) |
-| ridlc | ROS IDL + `contracts/` TOML → generates `robonix_proto/*.proto` |
+| robonix-codegen | ROS IDL + `contracts/` TOML → generates `robonix_proto/*.proto` |
 
 ## Workspace layout
 
 ```
 rust/
-├── crates/                  # Rust packages (atlas, sdk, pilot, executor, liaison, CLI, ridlc, buffer)
-├── contracts/               # Contract TOML → stable contract_id + shape; input to ridlc --contracts
+├── crates/                  # Rust packages (atlas, sdk, pilot, executor, liaison, CLI, robonix-codegen, buffer)
+├── contracts/               # Contract TOML → stable contract_id + shape; input to robonix-codegen --contracts
 ├── examples/                # E2E demo: packages/, scripts/, run.sh
 ├── proto/                   # Control plane: robonix_runtime.proto, …
-├── robonix-interfaces/
+├── crates/robonix-interfaces/
 │   ├── lib/                 # ROS IDL (.msg/.srv) — canonical payload definitions
-│   └── robonix_proto/       # ridlc-generated `.proto` only (from `lib/` + `contracts/`)
+│   └── robonix_proto/       # robonix-codegen-generated `.proto` only (from `lib/` + `contracts/`)
 └── _deprecated/             # Legacy code kept for reference
 ```
 

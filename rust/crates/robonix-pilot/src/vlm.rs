@@ -1,4 +1,4 @@
-//! VLM gRPC client using protos from `robonix-interfaces/robonix_proto` (ridlc → `vlm.proto` + deps).
+//! VLM gRPC client using protos from `crates/robonix-interfaces/robonix_proto` (robonix-codegen → `vlm.proto` + deps).
 //!
 //! Streaming uses `ChatStreamRequest` / `ChatStreamEvent` (`VlmService.ChatStream`); unary chat uses
 //! `ChatRequest` / `ChatResponse` (`VlmService.Chat`).
@@ -209,9 +209,7 @@ impl VlmClient {
                 ..Default::default()
             })
             .await
-            .with_context(|| {
-                format!("failed to query nodes for contract_id={contract_id}")
-            })?
+            .with_context(|| format!("failed to query nodes for contract_id={contract_id}"))?
         };
 
         if nodes.len() > 1 {
@@ -391,7 +389,8 @@ impl VlmClient {
     }
 
     fn build_tool_specs(tools: &[ToolDef]) -> Vec<PbToolSpec> {
-        tools.iter()
+        tools
+            .iter()
             .map(|t| PbToolSpec {
                 name: t.function.name.clone(),
                 description: t.function.description.clone(),
