@@ -1,17 +1,82 @@
 <p align="center">
-  <img src="images/robonix-logo.svg" alt="Robonix logo" width="400" />
-  <br><br>
-  <a href="https://github.com/syswonder/robonix/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MulanPSL--2.0-red" alt="License: MulanPSL-2.0" /></a>    <img src="https://img.shields.io/github/contributors/syswonder/robonix?color=blue" alt="Contributors" />
-  <img src="https://img.shields.io/github/languages/code-size/syswonder/robonix?color=green" alt="Code size" />
-  <img src="https://img.shields.io/github/repo-size/syswonder/robonix?color=white" alt="Repo size" />
-  <img src="https://img.shields.io/github/languages/top/syswonder/robonix?color=orange" alt="Languages" />
-  <br><br>
+  <img src="images/robonix-logo.svg" alt="Robonix" width="420" />
 </p>
 
-**Robonix** is an open-source embodied intelligence framework built with Rust, implementing the EAIOS (Embodied AI Operating System) architecture. It decouples AI models from hardware through a control-plane / data-plane design, so providers (sensors, actuators, algorithm services) register once and any agent or consumer can discover and use them at runtime.
+<h3 align="center">Robonix - The Embodied Intelligence Operating System</h3>
+
+<p align="center">
+  <em>A unified OS platform for robots, agents, and heterogeneous hardware — communication and scheduling in one control plane.</em>
+</p>
+
+<p align="center">
+  <strong>Rust-native EAIOS</strong> (Embodied AI Operating System) — register primitives and services once, negotiate transports at runtime, discover them everywhere.
+</p>
+
+<p align="center">
+  <a href="https://github.com/syswonder/robonix/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MulanPSL--2.0-red?style=flat-square" alt="License" /></a>
+  <a href="https://github.com/syswonder/robonix/graphs/contributors"><img src="https://img.shields.io/github/contributors/syswonder/robonix?color=blue&style=flat-square" alt="Contributors" /></a>
+  <img src="https://img.shields.io/github/languages/code-size/syswonder/robonix?color=green&style=flat-square" alt="Code size" />
+  <img src="https://img.shields.io/github/repo-size/syswonder/robonix?color=lightgray&style=flat-square" alt="Repo size" />
+  <img src="https://img.shields.io/github/languages/top/syswonder/robonix?color=orange&style=flat-square" alt="Top language" />
+</p>
+
+<p align="center">
+  <a href="docs/">Docs (mdBook)</a> ·
+  <a href="rust/README.md">Rust workspace</a> ·
+  <a href="rust/examples/README.md">Examples &amp; E2E</a>
+</p>
+
+<br />
+
+<p align="center">
+  <b>See it run</b> — Atlas, Pilot, Executor, and simulation wired together; <b>Liaison</b> interaction is still a work in progress.
+</p>
+<p align="center">
+  <img src="images/demo_01_readme.gif" alt="Robonix demo: runtime stack in action" width="920" />
+</p>
+
+<br />
+
+## Quick start
+
+```bash
+git clone https://github.com/syswonder/robonix
+cd robonix
+git submodule update --init --recursive
+cd rust
+cargo build --workspace
+make install          # rbnx, robonix-codegen, pilot, executor, liaison, atlas wrapper → ~/.cargo/bin
+```
+
+**E2E demo** (Docker, X11, VLM API key):
+
+```bash
+cd rust
+cp examples/.env.example examples/.env   # VLM_API_BASE, VLM_API_KEY, VLM_MODEL
+./examples/run.sh
+```
+
+**Without simulation** (Atlas + Pilot + Executor + VLM + Liaison process; Liaison interaction still evolving):
+
+```bash
+cd rust
+START_SIM_STACK=0 ./examples/run.sh
+```
+
+More options: **[rust/README.md](rust/README.md)** · walkthrough **[rust/examples/README.md](rust/examples/README.md)**
+
+---
 
 > [!WARNING]
 > Robonix is in an early, fast-moving development phase. Interfaces, IDL layouts, and internal designs may change without notice. No API stability is guaranteed until a versioned release is published.
+
+## Why Robonix
+
+| | |
+| :--- | :--- |
+| **Control plane / data plane** | Register providers once; agents negotiate channels at runtime (gRPC, MCP, ROS 2, shared memory). |
+| **EAIOS layers** | Primitive → Service → Skill → Task, with discovery and SKILL.md-oriented agent UX. |
+| **Ship with Rust** | Atlas, Pilot, Executor, Liaison (interaction TODO), and `rbnx` CLI in one workspace. |
 
 ## Architecture
 
@@ -29,7 +94,7 @@ Robonix follows the EAIOS four-layer abstraction — Primitive, Service, Skill, 
 | `robonix-sdk` | Thin async Rust client for the control-plane API |
 | `robonix-pilot` | VLM-driven reasoning: ReAct-style loop and sessions; streams `PilotEvent`; dispatches **`TaskGraph`** to Executor (v1: linear `TaskCall[]`; BT/RTDL TODO) |
 | `robonix-executor` | Tool dispatch: builtin / MCP / gRPC; **`ExecutorService.Execute`** |
-| `robonix-liaison` | User-facing layer: text → **`Intent`** → **`PilotEvent`** stream |
+| `robonix-liaison` | User-facing layer: text → **`Intent`** → **`PilotEvent`** stream (interaction / UX **TODO**) |
 | `robonix-cli` (`rbnx`) | Package validate / build / start; runtime inspection; **`rbnx chat`** (TUI → Pilot); **`rbnx graph`** (topology PNG/SVG) |
 | `robonix-codegen` | ROS IDL + **`rust/contracts`** TOML → **`rust/crates/robonix-interfaces/robonix_proto/`** (generated `.proto`, incl. `robonix_contracts.proto`) |
 | `robonix-buffer` | Shared-memory / buffer helpers for high-bandwidth data |
@@ -41,14 +106,16 @@ ROS payloads are canonical in **`rust/crates/robonix-interfaces/lib/`**. Stable 
 ### Available
 
 - Control plane with multi-transport channels (gRPC, MCP, ROS 2, shared memory)
-- **Pilot / Executor / Liaison** path: VLM + tools + terminal chat (`rbnx chat`)
+- **Pilot / Executor** path: VLM + tools + **`rbnx chat`** (TUI → Pilot)
 - SKILL.md for skill discovery and LLM-oriented behavior text
 - Package system (`rbnx validate` / `build` / `start`)
 - **`robonix-codegen`**: ROS `.msg` / `.srv` + contracts → generated **`robonix_proto/`** (do not hand-edit)
-- Tiago Webots E2E demo (Docker: Webots + Nav2 + rviz2 + MCP bridge)
+- **Tiago** Webots E2E (`examples/run.sh` + `tiago_sim_stack`: Docker, Webots, Nav2, rviz2, ROS 2–MCP bridge)
+- **ManiSkill3** VLA demo (`examples/packages/maniskill_vla_demo`: Fetch in ReplicaCAD, Octo VLA, no Docker/ROS on host — see **[docs/src/getting-started/maniskill-demo.md](docs/src/getting-started/maniskill-demo.md)**)
 
 ### In Progress
 
+- **Liaison**: user-facing interaction beyond the current wiring (product-grade UX **TODO**)
 - Contract / namespace catalog enforcement on the server
 - **TaskGraph**: behavior-tree / RTDL beyond today’s linear wire encoding
 
@@ -56,13 +123,16 @@ ROS payloads are canonical in **`rust/crates/robonix-interfaces/lib/`**. Stable 
 
 - **[docs/](docs/)** — mdBook: architecture, interface catalog (**primitive/** vs **service/**), integration guides. Build: `cd docs && mdbook build`.
 
-## Hardware / PRM Support
+## Platforms & PRM
 
-| Platform | Type | Status |
-|----------|------|--------|
-| Tiago (PAL Robotics) | Webots simulation + Nav2 + MCP bridge | Available |
+**Integrated demos** (see **[rust/examples/README.md](rust/examples/README.md)**):
 
-Abstract primitive interfaces are defined for camera, base, arm, gripper, sensor, and force-torque under the `robonix/prm/*` namespace. See `rust/crates/robonix-interfaces/README.md` for the full capability table.
+| Platform | What you run | Notes |
+|----------|----------------|-------|
+| **Tiago** (PAL Robotics) | Docker Compose stack: Webots + Nav2 + rviz2 + `tiago_bridge` (ROS 2 ↔ MCP) | Needs Docker, X11, GPU recommended; driven by `./examples/run.sh` or `rbnx start` on `tiago_sim_stack`. |
+| **ManiSkill3** (Fetch, ReplicaCAD) | Native Python: env / VLA / perception nodes + Atlas + Pilot | No host ROS 2; GPU recommended; package `maniskill_vla_demo`. |
+
+**Abstract primitives** — interface IDs under `robonix/prm/*` cover camera, base, arm, gripper, manipulation, sensor, force-torque, and related payloads. Implementations attach to real hardware or simulators by registering with Atlas. Full tables: **[rust/crates/robonix-interfaces/README.md](rust/crates/robonix-interfaces/README.md)**.
 
 ## Services (examples)
 
@@ -73,34 +143,6 @@ Abstract primitive interfaces are defined for camera, base, arm, gripper, sensor
 | Liaison | `robonix/sys/runtime/liaison` | gRPC |
 | VLM (OpenAI-compatible backend) | `robonix/sys/model/vlm/chat` | gRPC |
 | Memory search (gRPC wire) | `robonix/sys/memory/search` | gRPC |
-
-## Quick Start
-
-```bash
-git clone https://github.com/syswonder/robonix
-cd robonix
-git submodule update --init --recursive
-cd rust
-cargo build --workspace
-make install          # rbnx, robonix-codegen, robonix-pilot, robonix-executor, robonix-liaison, robonix-atlas wrapper → ~/.cargo/bin
-```
-
-Run the full E2E demo (requires Docker, X11, and a VLM API key):
-
-```bash
-cd rust
-cp examples/.env.example examples/.env   # fill in VLM_API_BASE, VLM_API_KEY, VLM_MODEL
-./examples/run.sh
-```
-
-Run without simulation (atlas + Pilot + Executor + VLM + Liaison; no Tiago stack):
-
-```bash
-cd rust
-START_SIM_STACK=0 ./examples/run.sh
-```
-
-See [rust/README.md](rust/README.md) for more options and [rust/examples/README.md](rust/examples/README.md) for the demo walkthrough.
 
 ## Contributing
 
