@@ -265,7 +265,7 @@ impl ProcessManager {
             .await
             .with_context(|| "Failed to wait for process")?;
         if !status.success() {
-            anyhow::bail!("Process exited with {}", status);
+            anyhow::bail!("{}: process exited with {}", std_name, status);
         }
 
         #[cfg(unix)]

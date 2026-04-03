@@ -20,9 +20,12 @@ use tokio_stream::StreamExt;
 use uuid::Uuid;
 
 pub mod pb {
+    // gRPC client only: generated server types / unused response structs trigger dead_code.
+    #[allow(dead_code)]
     pub mod pilot {
         tonic::include_proto!("robonix.pilot");
     }
+    #[allow(dead_code)]
     pub mod executor {
         tonic::include_proto!("robonix.executor");
     }
@@ -139,6 +142,7 @@ async fn run_tui(
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    let _ = notify_session_end(pilot_endpoint, &session_id).await;
                     break;
                 }
                 if busy {
@@ -158,6 +162,7 @@ async fn run_tui(
                             continue;
                         }
                         if msg == "quit" || msg == "exit" {
+                            let _ = notify_session_end(pilot_endpoint, &session_id).await;
                             break;
                         }
                         messages.push(ChatMessage { role: Role::User, text: msg.clone() });
@@ -184,6 +189,38 @@ async fn run_tui(
             }
         }
     }
+    Ok(())
+}
+
+async fn notify_session_end(pilot_endpoint: &str, session_id: &str) -> Result<()> {
+    use pb::pilot::{HandleIntentRequest, Intent};
+
+    const INTENT_SOURCE_TEXT: u32 = 0;
+
+    let mut client =
+        pb::pilot::pilot_service_client::PilotServiceClient::connect(pilot_endpoint.to_string())
+            .await
+            .context("failed to connect to Pilot for session_end")?;
+
+    let intent = Intent {
+        intent_id: Uuid::new_v4().to_string(),
+        session_id: session_id.to_string(),
+        source: INTENT_SOURCE_TEXT,
+        text: String::new(),
+        audio_data: vec![],
+        context_json: r#"{"session_end":true}"#.to_string(),
+        timestamp_ms: now_ms(),
+    };
+
+    let mut stream = client
+        .handle_intent(HandleIntentRequest {
+            intent: Some(intent),
+        })
+        .await
+        .context("HandleIntent session_end failed")?
+        .into_inner();
+
+    while stream.next().await.is_some() {}
     Ok(())
 }
 
@@ -297,17 +334,26 @@ fn draw(
             }
         }
 
-        let total = lines.len() as u16;
-        let visible = chunks[0].height.saturating_sub(2);
+        let status = if busy { " [thinking...]" } else { "" };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Robonix{status} "));
+        let inner = block.inner(chunks[0]);
+
+        // Scroll offset must be in **wrapped** lines (not raw `\n`-split lines), or long replies
+        // clip at the bottom while `total` stays small.
+        let text_only = Paragraph::new(lines.clone())
+            .wrap(Wrap { trim: false });
+        let total_lines = text_only.line_count(inner.width) as u16;
+        let visible = inner.height;
         let auto_scroll = if scroll == 0 {
-            total.saturating_sub(visible)
+            total_lines.saturating_sub(visible)
         } else {
-            total.saturating_sub(visible).saturating_sub(scroll)
+            total_lines.saturating_sub(visible).saturating_sub(scroll)
         };
 
-        let status = if busy { " [thinking...]" } else { "" };
         let history = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(format!(" Robonix{status} ")))
+            .block(block)
             .wrap(Wrap { trim: false })
             .scroll((auto_scroll, 0));
         f.render_widget(history, chunks[0]);

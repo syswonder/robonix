@@ -160,6 +160,25 @@ impl LiaisonService for LiaisonServiceImpl {
 // Activated by ROBONIX_LIAISON_SOURCE=text.
 // `rbnx chat` (gRPC TUI) is the preferred interactive interface.
 
+async fn drain_session_end(pipeline: &LiaisonPipeline, session_id: &str) {
+    let intent = Intent {
+        intent_id: Uuid::new_v4().to_string(),
+        session_id: session_id.to_string(),
+        source: INTENT_SOURCE_TEXT,
+        text: String::new(),
+        audio_data: vec![],
+        context_json: r#"{"session_end":true}"#.to_string(),
+        timestamp_ms: now_ms(),
+    };
+    match pipeline.handle_intent(intent).await {
+        Ok(rx) => {
+            let mut stream = ReceiverStream::new(rx);
+            while stream.next().await.is_some() {}
+        }
+        Err(e) => log::debug!("[liaison/text] session_end: {e:#}"),
+    }
+}
+
 async fn run_text_loop(pipeline: Arc<LiaisonPipeline>) -> Result<()> {
     use std::io::{self, Write};
 
@@ -174,6 +193,7 @@ async fn run_text_loop(pipeline: Arc<LiaisonPipeline>) -> Result<()> {
 
         let mut line = String::new();
         if stdin.read_line(&mut line)? == 0 {
+            drain_session_end(&pipeline, &session_id).await;
             break;
         }
         let text = line.trim().to_string();

@@ -23,7 +23,7 @@ uuid.workspace = true
 tonic.workspace = true
 prost.workspace = true
 tonic-prost.workspace = true
-ratatui.workspace = true
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 crossterm.workspace = true
 tokio-stream = "0.1"
 dirs = "6.0"

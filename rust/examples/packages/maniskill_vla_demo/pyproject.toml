@@ -30,7 +30,8 @@ dependencies = [
     # ── Octo exact dependency stack (JAX 0.4.20 ecosystem) ───────────────────
     # Source: https://github.com/octo-models/octo/blob/main/requirements.txt
     # Python 3.11 required: tensorflow==2.15.0 has no py3.12 wheel.
-    "numpy==1.24.3",
+    # >=1.26: pandas (pymilvus / memsearch extra) requires numpy>=1.26; stay <2 for SciPy/trimesh ABI.
+    "numpy>=1.26.4,<2",
     # torch 2.6+cu124 requires nvidia-cudnn-cu12==9.1, but jaxlib 0.4.20+cudnn89 needs 8.9.
     # These are mutually exclusive. Use CPU jaxlib so ManiSkill3/GroundingDINO keep GPU
     # while Octo inference runs on CPU (~2 s/step for octo-small — fine for demos).
@@ -57,9 +58,22 @@ dependencies = [
 [tool.setuptools.packages.find]
 include = ["maniskill_vla_demo*"]
 
+[project.optional-dependencies]
+# Agent memory MCP (same stack as rust/examples/packages/memsearch_service). Use:
+#   uv sync --extra memsearch
+# so memsearch stays in this venv without upgrading NumPy to 2.x (breaks SciPy/ManiSkill).
+memsearch = [
+    "memsearch[onnx]>=0.2",
+    "fastmcp>=3",
+]
+
 # ── uv configuration ──────────────────────────────────────────────────────────
 
 [tool.uv]
+# Keep NumPy 1.x (>=1.26 for pandas/memsearch; <2 so SciPy/trimesh/Sapien wheels stay compatible).
+override-dependencies = [
+    "numpy<2",
+]
 
 [tool.uv.sources]
 # Packages not on PyPI — installed directly from git
