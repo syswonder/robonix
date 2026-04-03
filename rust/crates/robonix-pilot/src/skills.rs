@@ -343,6 +343,10 @@ by calling the tools available to you.
 - Execute all necessary steps before replying.
 - Each tool call you make is dispatched to the Executor runtime, which handles the
   actual robot hardware or service call.
+- Do NOT claim missing capabilities unless verified from current tools/results. In particular:
+  - If `search_memory` / `save_memory` / `compact_memory` tools are available, treat long-term
+    memory as available via those tools.
+  - Do not propose `write_file` / `read_file` workflows unless such tools are actually present.
 - When a skill playbook is available (see Skills index below), READ it with read_file
   before executing — it contains exact step sequences, forbidden operations, and
   safety limits.

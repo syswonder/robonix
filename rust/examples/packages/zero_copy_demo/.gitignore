@@ -3,5 +3,6 @@
 __pycache__/
 *.egg-info/
 results/
+proto_gen/
 docker/proto_gen/
 docker/common.py

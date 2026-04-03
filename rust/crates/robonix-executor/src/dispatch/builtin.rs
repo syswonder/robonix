@@ -27,10 +27,10 @@ pub async fn execute(call_id: &str, name: &str, args_json: &str) -> TaskCallResu
 
 async fn run(name: &str, args_json: &str) -> anyhow::Result<String> {
     match name {
-        "read_file"   => read_file(args_json),
-        "write_file"  => write_file(args_json),
-        "patch_file"  => patch_file(args_json),
-        "list_dir"    => list_dir(args_json),
+        "read_file" => read_file(args_json),
+        "write_file" => write_file(args_json),
+        "patch_file" => patch_file(args_json),
+        "list_dir" => list_dir(args_json),
         "run_command" => run_command(args_json).await,
         other => anyhow::bail!("unknown builtin: {}", other),
     }
@@ -39,15 +39,36 @@ async fn run(name: &str, args_json: &str) -> anyhow::Result<String> {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max { s.to_string() }
-    else { format!("{}…(truncated, {} bytes total)", &s[..max], s.len()) }
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…(truncated, {} bytes total)", &s[..max], s.len())
+    }
 }
 
-#[derive(Deserialize)] struct ReadArgs  { path: String }
-#[derive(Deserialize)] struct WriteArgs { path: String, content: String }
-#[derive(Deserialize)] struct PatchArgs { path: String, old: String, new: String }
-#[derive(Deserialize)] struct ListArgs  { path: Option<String> }
-#[derive(Deserialize)] struct CmdArgs   { command: String }
+#[derive(Deserialize)]
+struct ReadArgs {
+    path: String,
+}
+#[derive(Deserialize)]
+struct WriteArgs {
+    path: String,
+    content: String,
+}
+#[derive(Deserialize)]
+struct PatchArgs {
+    path: String,
+    old: String,
+    new: String,
+}
+#[derive(Deserialize)]
+struct ListArgs {
+    path: Option<String>,
+}
+#[derive(Deserialize)]
+struct CmdArgs {
+    command: String,
+}
 
 fn read_file(args: &str) -> anyhow::Result<String> {
     let a: ReadArgs = serde_json::from_str(args)?;
@@ -79,7 +100,10 @@ fn list_dir(args: &str) -> anyhow::Result<String> {
     let mut items: Vec<String> = std::fs::read_dir(dir)?
         .flatten()
         .map(|e| {
-            let ft = e.file_type().map(|t| if t.is_dir() { "dir" } else { "file" }).unwrap_or("?");
+            let ft = e
+                .file_type()
+                .map(|t| if t.is_dir() { "dir" } else { "file" })
+                .unwrap_or("?");
             format!("{} {}", ft, e.file_name().to_string_lossy())
         })
         .collect();
@@ -90,17 +114,25 @@ fn list_dir(args: &str) -> anyhow::Result<String> {
 async fn run_command(args: &str) -> anyhow::Result<String> {
     let a: CmdArgs = serde_json::from_str(args)?;
     let out = tokio::process::Command::new("bash")
-        .arg("-c").arg(&a.command)
-        .output().await?;
+        .arg("-c")
+        .arg(&a.command)
+        .output()
+        .await?;
     let mut result = String::new();
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    if !stdout.is_empty() { result.push_str(&truncate(&stdout, 4000)); }
+    if !stdout.is_empty() {
+        result.push_str(&truncate(&stdout, 4000));
+    }
     if !stderr.is_empty() {
-        if !result.is_empty() { result.push('\n'); }
+        if !result.is_empty() {
+            result.push('\n');
+        }
         result.push_str("stderr: ");
         result.push_str(&truncate(&stderr, 2000));
     }
-    if result.is_empty() { result = format!("exit code: {}", out.status.code().unwrap_or(-1)); }
+    if result.is_empty() {
+        result = format!("exit code: {}", out.status.code().unwrap_or(-1));
+    }
     Ok(result)
 }

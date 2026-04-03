@@ -32,18 +32,18 @@ mod pb {
 }
 
 use anyhow::Result;
-use pb::pilot::{
-    pilot_service_client::PilotServiceClient, AbortSessionRequest, HandleIntentRequest as PilotHandleIntentRequest,
-    Intent, PilotEvent,
-};
 use pb::liaison::{
-    liaison_service_server::{LiaisonService, LiaisonServiceServer},
     HandleIntentRequest, InterruptRequest, InterruptResponse,
+    liaison_service_server::{LiaisonService, LiaisonServiceServer},
+};
+use pb::pilot::{
+    AbortSessionRequest, HandleIntentRequest as PilotHandleIntentRequest, Intent, PilotEvent,
+    pilot_service_client::PilotServiceClient,
 };
 use robonix_sdk::RobonixClient;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
@@ -70,7 +70,9 @@ pub struct LiaisonPipeline {
 
 impl LiaisonPipeline {
     pub fn new(pilot_endpoint: impl Into<String>) -> Self {
-        Self { pilot_endpoint: pilot_endpoint.into() }
+        Self {
+            pilot_endpoint: pilot_endpoint.into(),
+        }
     }
 
     /// Forward `intent` to Pilot.  Returns a channel that yields `PilotEvent`s.
@@ -79,8 +81,7 @@ impl LiaisonPipeline {
         &self,
         intent: Intent,
     ) -> Result<mpsc::Receiver<Result<PilotEvent, Status>>> {
-        let mut client =
-            PilotServiceClient::connect(self.pilot_endpoint.clone()).await?;
+        let mut client = PilotServiceClient::connect(self.pilot_endpoint.clone()).await?;
         let mut grpc = client
             .handle_intent(PilotHandleIntentRequest {
                 intent: Some(intent),
@@ -90,7 +91,11 @@ impl LiaisonPipeline {
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(async move {
             while let Some(item) = grpc.next().await {
-                if tx.send(item.map_err(|e| Status::internal(e.to_string()))).await.is_err() {
+                if tx
+                    .send(item.map_err(|e| Status::internal(e.to_string())))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -100,10 +105,11 @@ impl LiaisonPipeline {
 
     /// Ask Pilot to abort the active turn for `session_id`.
     pub async fn interrupt(&self, session_id: &str) -> Result<bool> {
-        let mut client =
-            PilotServiceClient::connect(self.pilot_endpoint.clone()).await?;
+        let mut client = PilotServiceClient::connect(self.pilot_endpoint.clone()).await?;
         Ok(client
-            .abort_session(AbortSessionRequest { session_id: session_id.to_string() })
+            .abort_session(AbortSessionRequest {
+                session_id: session_id.to_string(),
+            })
             .await?
             .into_inner()
             .ok)
@@ -197,14 +203,16 @@ async fn run_text_loop(pipeline: Arc<LiaisonPipeline>) -> Result<()> {
             break;
         }
         let text = line.trim().to_string();
-        if text.is_empty() { continue; }
+        if text.is_empty() {
+            continue;
+        }
 
         let intent = Intent {
-            intent_id:    Uuid::new_v4().to_string(),
-            session_id:   session_id.clone(),
-            source:       INTENT_SOURCE_TEXT,
+            intent_id: Uuid::new_v4().to_string(),
+            session_id: session_id.clone(),
+            source: INTENT_SOURCE_TEXT,
             text,
-            audio_data:   vec![],
+            audio_data: vec![],
             context_json: String::new(),
             timestamp_ms: now_ms(),
         };
@@ -217,24 +225,43 @@ async fn run_text_loop(pipeline: Arc<LiaisonPipeline>) -> Result<()> {
                 while let Some(item) = stream.next().await {
                     let ev = match item {
                         Ok(e) => e,
-                        Err(e) => { eprintln!("[liaison/text] stream error: {e}"); break; }
+                        Err(e) => {
+                            eprintln!("[liaison/text] stream error: {e}");
+                            break;
+                        }
                     };
                     match ev.event_kind {
                         EVT_TEXT_CHUNK => {
-                            if !printing { print!("\nPilot: "); printing = true; }
+                            if !printing {
+                                print!("\nPilot: ");
+                                printing = true;
+                            }
                             print!("{}", ev.text_chunk);
                             io::stdout().flush()?;
                         }
                         EVT_FINAL_TEXT => {
                             let t = ev.final_text.clone();
-                            if printing { println!(); } else { println!("\nPilot: {t}"); }
+                            if printing {
+                                println!();
+                            } else {
+                                println!("\nPilot: {t}");
+                            }
                             printing = false;
                         }
                         EVT_TASK_GRAPH => {
                             if let Some(ref g) = ev.task_graph {
-                                if printing { println!(); printing = false; }
-                                println!("[round {}] dispatching {} call(s)…", g.round, g.calls.len());
-                                for c in &g.calls { println!("  · {}", c.tool_name); }
+                                if printing {
+                                    println!();
+                                    printing = false;
+                                }
+                                println!(
+                                    "[round {}] dispatching {} call(s)…",
+                                    g.round,
+                                    g.calls.len()
+                                );
+                                for c in &g.calls {
+                                    println!("  · {}", c.tool_name);
+                                }
                             }
                         }
                         EVT_BATCH_RESULT => {
@@ -297,14 +324,16 @@ async fn main() -> Result<()> {
 
     // Register with Atlas.
     log::info!("connecting to Atlas at {atlas_http}");
-    let mut sdk = RobonixClient::connect_with_retry(
-        &atlas_http,
-        10,
-        std::time::Duration::from_secs(2),
+    let mut sdk =
+        RobonixClient::connect_with_retry(&atlas_http, 10, std::time::Duration::from_secs(2))
+            .await?;
+    sdk.register_node(
+        LIAISON_NODE_ID,
+        "robonix/sys/runtime/liaison",
+        "service",
+        "",
     )
     .await?;
-    sdk.register_node(LIAISON_NODE_ID, "robonix/sys/runtime/liaison", "service", "")
-        .await?;
     sdk.declare_interface_full(
         LIAISON_NODE_ID,
         "liaison",
@@ -329,13 +358,12 @@ async fn main() -> Result<()> {
 
     // ── Optional: stdin text loop (headless / pipe fallback) ──────────────────
     let source = std::env::var("ROBONIX_LIAISON_SOURCE").unwrap_or_default();
-    let text_handle: Option<tokio::task::JoinHandle<Result<()>>> =
-        if source == "text" {
-            log::info!("activating stdin text loop (headless mode)");
-            Some(tokio::spawn(run_text_loop(Arc::clone(&pipeline))))
-        } else {
-            None
-        };
+    let text_handle: Option<tokio::task::JoinHandle<Result<()>>> = if source == "text" {
+        log::info!("activating stdin text loop (headless mode)");
+        Some(tokio::spawn(run_text_loop(Arc::clone(&pipeline))))
+    } else {
+        None
+    };
 
     // ── gRPC server (always running) ──────────────────────────────────────────
     let svc = LiaisonServiceImpl { pipeline };
@@ -360,7 +388,9 @@ async fn main() -> Result<()> {
 fn resolve_endpoint(vars: &[&str], default: &str) -> String {
     for v in vars {
         if let Ok(val) = std::env::var(v) {
-            if !val.is_empty() { return val; }
+            if !val.is_empty() {
+                return val;
+            }
         }
     }
     default.to_string()

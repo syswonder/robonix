@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 ///
 /// Covers image pixels, tensor elements, point cloud scalars, and
 /// raw byte blobs. Values are defined by `robonix_msg/msg/BufferFormat.msg`
-/// in the `robonix-interfaces` IDL — keep them in sync.
+/// in the `crates/robonix-interfaces` IDL — keep them in sync.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferFormat {

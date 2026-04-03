@@ -7,6 +7,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PKG_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUST_ROOT="$(cd "$PKG_ROOT/../../../.." && pwd)"
+RUNTIME_DIR="$RUST_ROOT/proto"
+INTERFACES_DIR="$RUST_ROOT/crates/robonix-interfaces/robonix_proto"
+PROTO_GEN="$PKG_ROOT/proto_gen"
+
+if [[ "${RBNX_BUILD_CLEAN:-}" == "1" ]]; then
+    rm -rf "$PROTO_GEN"
+    rm -rf "$PKG_ROOT/rbnx-build"
+fi
 
 echo "[build] Building librobonix_buffer.so..."
 (cd "$RUST_ROOT" && cargo build -p robonix-buffer --release)
@@ -18,6 +26,25 @@ else
     (cd "$PKG_ROOT" && pip install -e .)
 fi
 
-mkdir -p "$PKG_ROOT/rbnx-build"
+echo "[build] generating package-local proto_gen stubs..."
+mkdir -p "$PROTO_GEN"
+if python3 -m grpc_tools.protoc --version >/dev/null 2>&1; then
+    python3 -m grpc_tools.protoc \
+      -I "$RUNTIME_DIR" \
+      -I "$INTERFACES_DIR" \
+      --python_out="$PROTO_GEN" \
+      --grpc_python_out="$PROTO_GEN" \
+      "$RUNTIME_DIR"/*.proto \
+      "$INTERFACES_DIR"/*.proto 2>/dev/null || true
+else
+    echo "[build] grpcio-tools not found; leaving existing proto_gen/ as-is"
+fi
+
+mkdir -p "$PKG_ROOT/rbnx-build/ws/install"
+cat >"$PKG_ROOT/rbnx-build/ws/install/setup.bash" <<EOF
+#!/usr/bin/env bash
+export PYTHONPATH="$PKG_ROOT:$PROTO_GEN:\${PYTHONPATH:-}"
+EOF
+
 touch "$PKG_ROOT/rbnx-build/.rbnx-built"
 echo "[build] Done."

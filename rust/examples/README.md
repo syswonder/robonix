@@ -35,7 +35,7 @@ cargo run -p robonix-cli -- start -p examples/packages/tiago_sim_stack -n com.ro
 |------|------|
 | `packages/` | Manifests + code per demo. |
 | `proto_gen/` | Generated Python `*_pb2.py` (see script below). |
-| `scripts/gen_proto_python.sh` | Regenerate `proto_gen/` from `rust/proto` + `robonix-interfaces/robonix_proto`. |
+| `scripts/gen_proto_python.sh` | Regenerate `proto_gen/` from `rust/proto` + `crates/robonix-interfaces/robonix_proto`. |
 | `scripts/smoke_minimal.sh` | Start atlas + run `smoke_control_plane.py` (no VLM). |
 | `run.sh` | Full E2E: atlas → executor → pilot → packages → liaison (foreground). |
 | `requirements.txt` | Pinned Python deps; `protobuf<7` so `grpcio-tools` and `openai` coexist. |

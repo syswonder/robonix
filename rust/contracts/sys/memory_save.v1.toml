@@ -1,0 +1,17 @@
+# Persist a fact / user preference to long-term memory.
+# Input: the content to save (std_msgs/String.data).
+# Output: confirmation message (std_msgs/String.data).
+[contract]
+id      = "robonix/sys/memory/save"
+version = "1"
+kind    = "service"
+
+[io]
+input  = "std_msgs/msg/String"
+output = "std_msgs/msg/String"
+
+[mode]
+type = "rpc"
+
+[semantics]
+persistent = true

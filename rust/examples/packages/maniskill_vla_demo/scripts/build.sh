@@ -4,11 +4,14 @@ set -euo pipefail
 PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 EXAMPLES="$(cd "$PKG/../.." && pwd)"
 RUST_ROOT="$(cd "$EXAMPLES/.." && pwd)"
-PROTO_GEN="$EXAMPLES/proto_gen"
+ROBONIX_MCP_CONTRACT_PKG="$(cd "$EXAMPLES/packages/robonix_mcp_contract" && pwd)"
+PROTO_GEN="$PKG/proto_gen"
+MCP_TYPES="$PKG/robonix_mcp_types"
 
 if [[ "${RBNX_BUILD_CLEAN:-}" == "1" ]]; then
   rm -rf "$PKG/rbnx-build"
-  rm -rf "$PKG/proto_stubs"
+  rm -rf "$PROTO_GEN"
+  rm -rf "$MCP_TYPES"
 fi
 
 if ! python3 -m grpc_tools.protoc --version >/dev/null 2>&1; then
@@ -16,7 +19,7 @@ if ! python3 -m grpc_tools.protoc --version >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[build] generating proto stubs..."
+echo "[build] generating proto_gen stubs (control-plane gRPC)..."
 
 # 1. Local package proto (maniskill_env) → maniskill_vla_demo/ (importable as package module)
 python3 -m grpc_tools.protoc \
@@ -25,27 +28,9 @@ python3 -m grpc_tools.protoc \
   --grpc_python_out="$PKG/maniskill_vla_demo" \
   "$PKG/proto/maniskill_env.proto"
 
-# 2. Shared robonix runtime + interface protos → proto_stubs/ (version-matched to active venv).
-#    proto_gen/ used to hold these as committed files; now each package generates its own copy.
-PROTO_STUBS="$PKG/proto_stubs"
-mkdir -p "$PROTO_STUBS"
-RUNTIME_PROTO="$RUST_ROOT/proto/robonix_runtime.proto"
-INTERFACES_DIR="$RUST_ROOT/robonix-interfaces/robonix_proto"
+# 2. Shared robonix runtime + interface protos → package-local proto_gen/.
+INTERFACES_DIR="$RUST_ROOT/crates/robonix-interfaces/robonix_proto"
 RUNTIME_DIR="$RUST_ROOT/proto"
-
-python3 -m grpc_tools.protoc \
-  -I "$RUNTIME_DIR" \
-  -I "$INTERFACES_DIR" \
-  --python_out="$PROTO_STUBS" \
-  --grpc_python_out="$PROTO_STUBS" \
-  "$RUNTIME_PROTO" \
-  "$INTERFACES_DIR/vlm.proto" \
-  "$INTERFACES_DIR/builtin_interfaces.proto" \
-  "$INTERFACES_DIR/std_msgs.proto" \
-  "$INTERFACES_DIR/geometry_msgs.proto" \
-  "$INTERFACES_DIR/robonix_msg.proto"
-
-# 3. Also populate proto_gen/ so other packages that haven't been updated yet still work.
 mkdir -p "$PROTO_GEN"
 python3 -m grpc_tools.protoc \
   -I "$RUNTIME_DIR" \
@@ -55,11 +40,19 @@ python3 -m grpc_tools.protoc \
   "$RUNTIME_DIR"/*.proto \
   "$INTERFACES_DIR"/*.proto 2>/dev/null || true
 
+# 3. IDL data types → Python dataclasses for MCP tool schemas (robonix-codegen --lang mcp).
+#    Import these in MCP tool handlers instead of defining schemas by hand.
+echo "[build] generating robonix_mcp_types (robonix-codegen --lang mcp)..."
+mkdir -p "$MCP_TYPES"
+cargo run -p robonix-codegen --manifest-path "$RUST_ROOT/Cargo.toml" -- \
+  --lang mcp \
+  -I "$RUST_ROOT/crates/robonix-interfaces/lib" \
+  -o "$MCP_TYPES"
+
 mkdir -p "$PKG/rbnx-build/ws/install"
 cat >"$PKG/rbnx-build/ws/install/setup.bash" <<EOF
 #!/usr/bin/env bash
-# proto_stubs (version-matched to this package's venv) takes priority over proto_gen
-export PYTHONPATH="$PKG:$PROTO_STUBS:$PROTO_GEN:\${PYTHONPATH:-}"
+export PYTHONPATH="$PKG:$PROTO_GEN:$MCP_TYPES:$ROBONIX_MCP_CONTRACT_PKG:\${PYTHONPATH:-}"
 EOF
 
 echo "[build] done."

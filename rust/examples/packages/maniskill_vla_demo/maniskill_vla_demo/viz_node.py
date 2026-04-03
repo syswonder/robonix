@@ -33,13 +33,7 @@ def _ensure_proto_paths() -> None:
     sys.path.insert(0, str(pkg))
     d = pkg
     while d.parent != d:
-        pc = d / "proto_stubs"
         pg = d / "proto_gen"
-        if pc.is_dir() and (pc / "robonix_runtime_pb2.py").exists():
-            sys.path.insert(0, str(pc))
-            if pg.is_dir():
-                sys.path.append(str(pg))
-            return
         if pg.is_dir() and (pg / "robonix_runtime_pb2.py").exists():
             sys.path.insert(0, str(pg))
             return

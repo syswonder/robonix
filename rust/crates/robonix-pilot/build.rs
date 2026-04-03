@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// build.rs — protos only from `robonix-interfaces/robonix_proto` (ridlc output).
+// build.rs — protos only from `crates/robonix-interfaces/robonix_proto` (robonix-codegen output).
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -9,7 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|p| p.parent())
         .expect("robonix-pilot should live at rust/crates/robonix-pilot");
 
-    let ridl_proto = workspace_root.join("robonix-interfaces/robonix_proto");
+    let ridl_proto = workspace_root.join("crates/robonix-interfaces/robonix_proto");
 
     let pilot_proto = ridl_proto.join("pilot.proto");
     let executor_proto = ridl_proto.join("executor.proto");
@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if !pilot_proto.is_file() || !vlm_proto.is_file() {
         panic!(
-            "missing generated proto — run: cargo run -p ridlc -- --lang proto -I robonix-interfaces/lib --contracts contracts -o robonix-interfaces/robonix_proto",
+            "missing generated proto — run: cargo run -p robonix-codegen -- --lang proto -I crates/robonix-interfaces/lib --contracts contracts -o crates/robonix-interfaces/robonix_proto",
         );
     }
 

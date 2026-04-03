@@ -73,10 +73,28 @@ async fn connect_mcp(endpoint: &str) -> anyhow::Result<McpClient> {
         command.args(&args);
         let transport = rmcp::transport::TokioChildProcess::new(command)
             .map_err(|e| anyhow::anyhow!("MCP stdio spawn failed: {e}"))?;
-        return Ok(().serve(transport).await.map_err(|e| anyhow::anyhow!("MCP init failed: {e}"))?);
+        return Ok(
+            ().serve(transport)
+                .await
+                .map_err(|e| anyhow::anyhow!("MCP init failed: {e}"))?,
+        );
     }
-    let base = if endpoint.starts_with("http") { endpoint.to_string() } else { format!("http://{}", endpoint) };
-    let uri = if base.contains("/mcp") { base } else { format!("{}/mcp", base.trim_end_matches('/')) };
-    let transport = rmcp::transport::streamable_http_client::StreamableHttpClientTransport::from_uri(uri.clone());
-    Ok(().serve(transport).await.map_err(|e| anyhow::anyhow!("MCP HTTP connect to '{uri}' failed: {e}"))?)
+    let base = if endpoint.starts_with("http") {
+        endpoint.to_string()
+    } else {
+        format!("http://{}", endpoint)
+    };
+    let uri = if base.contains("/mcp") {
+        base
+    } else {
+        format!("{}/mcp", base.trim_end_matches('/'))
+    };
+    let transport =
+        rmcp::transport::streamable_http_client::StreamableHttpClientTransport::from_uri(
+            uri.clone(),
+        );
+    Ok(()
+        .serve(transport)
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP HTTP connect to '{uri}' failed: {e}"))?)
 }

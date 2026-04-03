@@ -21,7 +21,7 @@ from sensor_msgs.msg import Image
 import grpc
 import numpy as np
 
-# proto stubs are in /proto_stubs (mounted or on PYTHONPATH)
+# proto stubs are in /proto_gen (mounted or on PYTHONPATH)
 import maniskill_env_pb2 as env_pb
 import maniskill_env_pb2_grpc as env_pb_grpc
 

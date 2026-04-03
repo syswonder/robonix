@@ -12,7 +12,11 @@ cd "$(dirname "$0")"
 RUST_ROOT="$(cd ../../.. && pwd)"
 VENV=".venv"
 SERVER_ADDR="${ROBONIX_ATLAS:-127.0.0.1:50051}"
-PROTO_GEN_DIR="$(cd ../../proto_gen 2>/dev/null && pwd || echo "")"
+if [ -d "./proto_gen" ]; then
+    PROTO_GEN_DIR="$(cd ./proto_gen && pwd)"
+else
+    PROTO_GEN_DIR="$(cd ../../proto_gen 2>/dev/null && pwd || echo "")"
+fi
 
 _build_rust() {
     echo "[+] Building robonix-buffer (Rust)..."

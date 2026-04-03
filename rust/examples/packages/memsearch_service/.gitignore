@@ -1,0 +1,4 @@
+.agent_milvus.db.lock
+# ridlc --lang mcp generated Python dataclasses
+robonix_mcp_types/
+proto_gen/

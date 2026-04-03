@@ -1,12 +1,8 @@
 # Auto-generated protobuf Python stubs.
 # Each package regenerates these at build time via scripts/build.sh.
 proto_gen/
-# Per-package generated stubs (produced by build.sh, version-matched to local venv)
-*/proto_stubs/
 */proto_compat/
 # Per-package build artifacts
 */rbnx-build/
 # uv virtual environments
 */.venv/
-
-proto_stubs

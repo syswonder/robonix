@@ -12,20 +12,22 @@
 // `TaskCall[]`; TODO: behavior tree + RTDL, see `TaskGraph.msg`).
 // Pilot does NOT pre-plan a full graph — it reasons step by step.
 
-use crate::executor::{executor_service_client::ExecutorServiceClient, ExecuteRequest, ListToolsRequest};
+use crate::executor::{
+    ExecuteRequest, ListToolsRequest, executor_service_client::ExecutorServiceClient,
+};
 use crate::pilot::{
     BatchResult, Intent, PilotEvent, SessionStatusEvent, TaskCall, TaskCallResult, TaskGraph,
     ToolRouting,
 };
 use crate::pilot_wire::{self, PilotStreamBody};
-use crate::session_state::SessionState;
 use crate::session::Session;
+use crate::session_state::SessionState;
 use crate::skills;
 use crate::vlm::{Message, ToolDef, VlmClient, VlmStreamItem};
 use anyhow::Result;
 use robonix_sdk::RobonixClient;
 use std::sync::Arc;
-use tokio::sync::{mpsc::Sender, watch, Mutex};
+use tokio::sync::{Mutex, mpsc::Sender, watch};
 use tonic::transport::Channel;
 use uuid::Uuid;
 
@@ -60,11 +62,7 @@ fn intent_is_session_end(intent: &Intent) -> bool {
 fn skip_memory_prefetch(user_text: &str) -> bool {
     let t = user_text.trim();
     let lower = t.to_lowercase();
-    lower == "hi"
-        || lower == "hello"
-        || lower.starts_with("who are you")
-        || t == "你是谁"
-        || t == "你好"
+    lower == "hi" || lower == "hello" || t == "你是谁" || t == "你好"
 }
 
 // ── Public entry-point ────────────────────────────────────────────────────────
@@ -85,14 +83,16 @@ pub async fn run_turn(
     /// Emit an "interrupted" status event and return Ok to end the turn cleanly.
     macro_rules! return_interrupted {
         () => {{
-            let _ = tx.send(Ok(pilot_wire::pack(
-                &session_id,
-                PilotStreamBody::Status(SessionStatusEvent {
-                    session_id: session_id.clone(),
-                    state: SessionState::Failed as u32,
-                    message: "interrupted".to_string(),
-                }),
-            ))).await;
+            let _ = tx
+                .send(Ok(pilot_wire::pack(
+                    &session_id,
+                    PilotStreamBody::Status(SessionStatusEvent {
+                        session_id: session_id.clone(),
+                        state: SessionState::Failed as u32,
+                        message: "interrupted".to_string(),
+                    }),
+                )))
+                .await;
             return Ok(());
         }};
     }
@@ -117,7 +117,9 @@ pub async fn run_turn(
     let soul = skills::load_agent_soul();
     let merged_skills = {
         let mut sdk = sdk.lock().await;
-        skills::load_merged_skills(&mut sdk).await.unwrap_or_default()
+        skills::load_merged_skills(&mut sdk)
+            .await
+            .unwrap_or_default()
     };
     let base_prompt = skills::build_system_prompt(soul.as_deref(), &merged_skills);
 
@@ -230,7 +232,11 @@ pub async fn run_turn(
                 }
             }
 
-            let content = if full_text.is_empty() { None } else { Some(full_text) };
+            let content = if full_text.is_empty() {
+                None
+            } else {
+                Some(full_text)
+            };
             (content, tool_calls)
         };
         drop(vlm); // release lock before async Executor call
@@ -241,15 +247,19 @@ pub async fn run_turn(
             if !final_text.is_empty() {
                 session.history.push(Message::assistant(&final_text));
             }
-            let _ = tx.send(Ok(pilot_wire::pack(
-                &session_id,
-                PilotStreamBody::FinalText(final_text),
-            ))).await;
+            let _ = tx
+                .send(Ok(pilot_wire::pack(
+                    &session_id,
+                    PilotStreamBody::FinalText(final_text),
+                )))
+                .await;
             break;
         }
 
         // Push assistant message with tool calls into history.
-        session.history.push(Message::assistant_tool_calls(raw_tool_calls.clone()));
+        session
+            .history
+            .push(Message::assistant_tool_calls(raw_tool_calls.clone()));
 
         // ── 5. Build TaskGraph (v1: linear list of calls) ─────────────────────
         let graph_id = Uuid::new_v4().to_string();
@@ -271,16 +281,16 @@ pub async fn run_turn(
         };
 
         // Notify Liaison about the outgoing task graph slice.
-        let _ = tx.send(Ok(pilot_wire::pack(
-            &session_id,
-            PilotStreamBody::TaskGraph(graph.clone()),
-        ))).await;
+        let _ = tx
+            .send(Ok(pilot_wire::pack(
+                &session_id,
+                PilotStreamBody::TaskGraph(graph.clone()),
+            )))
+            .await;
 
         // ── 6. Dispatch to Executor ───────────────────────────────────────────
         let mut exec_stream = executor
-            .execute(ExecuteRequest {
-                graph: Some(graph),
-            })
+            .execute(ExecuteRequest { graph: Some(graph) })
             .await
             .map_err(|e| anyhow::anyhow!("Executor Execute RPC failed: {e}"))?
             .into_inner();
@@ -307,7 +317,12 @@ pub async fn run_turn(
                         if r.success {
                             let preview: String = r.output.chars().take(120).collect();
                             let ellipsis = if r.output.len() > 120 { "…" } else { "" };
-                            log::debug!("[pilot] tool result '{}': {}{}", r.call_id, preview, ellipsis);
+                            log::debug!(
+                                "[pilot] tool result '{}': {}{}",
+                                r.call_id,
+                                preview,
+                                ellipsis
+                            );
                         } else {
                             log::debug!("[pilot] tool error '{}': {}", r.call_id, r.error);
                         }
@@ -321,23 +336,9 @@ pub async fn run_turn(
         // ── 7. Feed results back into history ─────────────────────────────────
         for r in &results {
             if r.success {
-                // If the output JSON contains `image_base64`, pass it as a
-                // proper vision input so the VLM can actually see the image.
-                let msg = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r.output) {
-                    if let Some(b64) = v.get("image_base64").and_then(|v| v.as_str()) {
-                        let fmt = v.get("format").and_then(|v| v.as_str()).unwrap_or("jpeg");
-                        Message::tool_result_with_image(
-                            &r.call_id,
-                            &format!("[{fmt} image]"),
-                            b64.to_string(),
-                        )
-                    } else {
-                        Message::tool_result(&r.call_id, &r.output)
-                    }
-                } else {
-                    Message::tool_result(&r.call_id, &r.output)
-                };
-                session.history.push(msg);
+                session
+                    .history
+                    .push(tool_result_to_message(&r.call_id, &r.output));
             } else {
                 session.history.push(Message::tool_result(
                     &r.call_id,
@@ -356,39 +357,99 @@ pub async fn run_turn(
             results,
             any_failed,
         };
-        let _ = tx.send(Ok(pilot_wire::pack(
-            &session_id,
-            PilotStreamBody::BatchResult(batch_result),
-        ))).await;
+        let _ = tx
+            .send(Ok(pilot_wire::pack(
+                &session_id,
+                PilotStreamBody::BatchResult(batch_result),
+            )))
+            .await;
 
         round += 1;
         if round as usize >= max_rounds {
-            log::warn!("[pilot] hit max tool rounds ({}), stopping turn", max_rounds);
+            log::warn!(
+                "[pilot] hit max tool rounds ({}), stopping turn",
+                max_rounds
+            );
             break;
         }
     }
 
     // ── 8. Mark turn complete ─────────────────────────────────────────────────
     session.turn_count += 1;
-    let _ = tx.send(Ok(pilot_wire::pack(
-        &session_id,
-        PilotStreamBody::Status(SessionStatusEvent {
-            session_id: session_id.clone(),
-            state: SessionState::Completed as u32,
-            message: String::new(),
-        }),
-    ))).await;
+    let _ = tx
+        .send(Ok(pilot_wire::pack(
+            &session_id,
+            PilotStreamBody::Status(SessionStatusEvent {
+                session_id: session_id.clone(),
+                state: SessionState::Completed as u32,
+                message: String::new(),
+            }),
+        )))
+        .await;
 
     Ok(())
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// Map executor tool output to a VLM history message.
+///
+/// - Legacy / convenience: top-level `image_base64` (+ optional `format`) → vision input.
+/// - ROS MCP wire: `sensor_msgs/Image` JSON from robonix-codegen `to_dict()` — pixel data is
+///   base64 in `data`, with `width` / `height` / `encoding` — must also become vision input
+///   (otherwise the model only sees a huge JSON string and cannot decode the image).
+fn tool_result_to_message(call_id: &str, output: &str) -> Message {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(output) else {
+        return Message::tool_result(call_id, output);
+    };
+
+    if let Some(b64) = v.get("image_base64").and_then(|x| x.as_str()) {
+        let fmt = v.get("format").and_then(|x| x.as_str()).unwrap_or("jpeg");
+        return Message::tool_result_with_image(
+            call_id,
+            &format!("[{fmt} image]"),
+            b64.to_string(),
+        );
+    }
+
+    // sensor_msgs/msg/Image — matches e.g. camera_snapshot / camera_depth_snapshot MCP tools.
+    if v.get("width").is_some()
+        && v.get("height").is_some()
+        && v.get("encoding").is_some()
+        && v.get("data")
+            .and_then(|d| d.as_str())
+            .is_some_and(|s| !s.is_empty())
+    {
+        let enc = v.get("encoding").and_then(|e| e.as_str()).unwrap_or("jpeg");
+        let b64 = v.get("data").and_then(|d| d.as_str()).unwrap_or("");
+        return Message::tool_result_with_image(
+            call_id,
+            &format!("[sensor_msgs/Image encoding={enc}]"),
+            b64.to_string(),
+        );
+    }
+
+    Message::tool_result(call_id, output)
+}
+
 fn trim_history(history: &mut Vec<Message>, max: usize) {
     if history.len() > max {
         let remove = history.len() - max;
         history.drain(0..remove);
     }
+}
+
+/// Extract `std_msgs/String.data` from tool output.
+/// Accepts either raw text or JSON object payload: {"data": "..."}.
+fn decode_string_output(output: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(output)
+        .ok()
+        .and_then(|v| {
+            v.get("data")
+                .and_then(|x| x.as_str())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| output.to_string())
 }
 
 /// Dispatch a single `search_memory` call to the Executor and return the
@@ -411,27 +472,24 @@ async fn prefetch_memory(
         calls: vec![TaskCall {
             call_id: Uuid::new_v4().to_string(),
             tool_name: "search_memory".to_string(),
-            args_json: serde_json::json!({ "query": query }).to_string(),
+            // Contract-aligned MCP input uses std_msgs/String.data.
+            args_json: serde_json::json!({ "data": query }).to_string(),
             routing: Some(routing),
         }],
     };
 
     let mut stream = executor
-        .execute(ExecuteRequest {
-            graph: Some(graph),
-        })
+        .execute(ExecuteRequest { graph: Some(graph) })
         .await
         .ok()?
         .into_inner();
     while let Ok(Some(event)) = stream.message().await {
         if event.event_kind == EX_RESULT {
             if let Some(r) = event.result {
-                if r.success
-                    && !r.output.contains("No relevant memories")
-                    && !r.output.is_empty()
-                {
-                    log::debug!("[pilot] memory prefetch: {}", r.output);
-                    return Some(r.output);
+                let out = decode_string_output(&r.output);
+                if r.success && !out.contains("No relevant memories") && !out.is_empty() {
+                    log::debug!("[pilot] memory prefetch: {}", out);
+                    return Some(out);
                 }
                 return None;
             }
@@ -469,15 +527,14 @@ async fn try_compact_memory(executor: &mut ExecutorServiceClient<Channel>) {
         calls: vec![TaskCall {
             call_id: Uuid::new_v4().to_string(),
             tool_name: "compact_memory".to_string(),
+            // Contract-aligned MCP input uses std_msgs/Empty (empty object payload).
             args_json: "{}".to_string(),
             routing: Some(routing),
         }],
     };
 
     let Ok(mut stream) = executor
-        .execute(ExecuteRequest {
-            graph: Some(graph),
-        })
+        .execute(ExecuteRequest { graph: Some(graph) })
         .await
         .map(|r| r.into_inner())
     else {
@@ -486,10 +543,11 @@ async fn try_compact_memory(executor: &mut ExecutorServiceClient<Channel>) {
     while let Ok(Some(event)) = stream.message().await {
         if event.event_kind == EX_RESULT {
             if let Some(r) = event.result {
+                let out = decode_string_output(&r.output);
                 if r.success {
-                    log::debug!("[pilot] compact_memory: {}", r.output);
+                    log::debug!("[pilot] compact_memory: {}", out);
                 } else {
-                    log::debug!("[pilot] compact_memory failed: {}", r.output);
+                    log::debug!("[pilot] compact_memory failed: {}", out);
                 }
             }
             return;

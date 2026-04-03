@@ -25,4 +25,4 @@ uuid.workspace = true
 protoc-bin-vendored.workspace = true
 tonic-build.workspace = true
 tonic-prost-build.workspace = true
-# NOTE: ridlc build-dependency REMOVED (RIDL codegen removed from server build)
+# NOTE: robonix-codegen build-dependency REMOVED (robonix-codegen RIDL codegen removed from server build)

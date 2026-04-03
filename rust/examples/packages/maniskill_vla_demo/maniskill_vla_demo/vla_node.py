@@ -33,28 +33,33 @@ for _n in (
 ):
     logging.getLogger(_n).setLevel(logging.WARNING)
 
-from mcp.server.fastmcp import FastMCP
-
-
 def _ensure_proto_paths() -> None:
     pkg = Path(__file__).resolve().parent
     sys.path.insert(0, str(pkg))
     d = pkg
     while d.parent != d:
-        pc = d / "proto_stubs"
         pg = d / "proto_gen"
-        if pc.is_dir() and (pc / "robonix_runtime_pb2.py").exists():
-            sys.path.insert(0, str(pc))
-            if pg.is_dir():
-                sys.path.append(str(pg))
-            return
         if pg.is_dir() and (pg / "robonix_runtime_pb2.py").exists():
             sys.path.insert(0, str(pg))
             return
         d = d.parent
 
 
+def _ensure_robonix_mcp_contract() -> None:
+    d = Path(__file__).resolve().parent
+    while d.parent != d:
+        cand = d / "robonix_mcp_contract"
+        if cand.is_dir() and (cand / "robonix_mcp_contract" / "__init__.py").exists():
+            if str(cand) not in sys.path:
+                sys.path.insert(0, str(cand))
+            return
+        d = d.parent
+
+
 _ensure_proto_paths()
+_ensure_robonix_mcp_contract()
+
+from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 import grpc  # noqa: E402
 import robonix_runtime_pb2 as pb  # noqa: E402
@@ -435,6 +440,7 @@ def main() -> None:
         supported_transports=["mcp"],
         metadata_json=_iface_meta_mcp(),
         listen_port=mcp_port,
+        contract_id="robonix/prm/manipulation/tools",
     ))
 
     # Start MCP HTTP + heartbeat BEFORE env discovery (so agent can connect)

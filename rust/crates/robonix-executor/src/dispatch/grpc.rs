@@ -8,7 +8,12 @@
 
 use crate::pilot::TaskCallResult;
 
-pub async fn execute(call_id: &str, name: &str, _args_json: &str, endpoint: &str) -> TaskCallResult {
+pub async fn execute(
+    call_id: &str,
+    name: &str,
+    _args_json: &str,
+    endpoint: &str,
+) -> TaskCallResult {
     // Stub: gRPC dispatch not yet implemented.
     log::warn!(
         "[grpc] tool '{}' (interface '{}') — gRPC dispatch not yet implemented",

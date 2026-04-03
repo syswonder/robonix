@@ -13,8 +13,5 @@ output = "std_msgs/msg/String"
 type = "rpc"
 
 [semantics]
-persistent        = true
-searchable        = true
-wire_profile      = "mcp_or_future_idl"
-
-# Index parameters, embedding model, top_k: deployment-only (metadata), not contract.
+persistent = true
+searchable = true

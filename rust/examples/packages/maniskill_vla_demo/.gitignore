@@ -1,6 +1,8 @@
 rbnx-build
-proto_stubs
+proto_gen
 proto_compat
+# ridlc --lang mcp generated Python dataclasses
+robonix_mcp_types/
 # python cache
 __pycache__/
 *.py[cod]

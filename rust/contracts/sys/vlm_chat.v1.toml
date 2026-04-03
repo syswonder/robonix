@@ -1,5 +1,5 @@
 # `[io].input` = `vlm/srv/ChatStream` → protobuf first arg is `ChatStream_Request` (all request fields).
-# Stream element: `vlm/msg/ChatStreamEvent.msg`. Mirrors `VlmService.ChatStream` in ridlc `vlm.proto`.
+# Stream element: `vlm/msg/ChatStreamEvent.msg`. Mirrors `VlmService.ChatStream` in robonix-codegen `vlm.proto`.
 [contract]
 id      = "robonix/sys/model/vlm/chat"
 version = "1"

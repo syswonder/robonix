@@ -31,7 +31,7 @@ pub struct MsgSpec {
 }
 
 /// gRPC mapping for pub-sub-style interfaces (ROS has no native streaming `.srv` wire format;
-/// this directive is **codegen-only** for `ridlc --lang proto`).
+/// this directive is **codegen-only** for `robonix-codegen --lang proto`).
 #[derive(Clone, Debug)]
 pub enum GrpcStreamMode {
     /// Same semantics as a ROS **publisher**: provider pushes a stream of `element` messages.
@@ -129,7 +129,10 @@ impl MsgResolver {
         let keys: Vec<_> = self.index.keys().cloned().collect();
         for (package, name) in keys {
             if let Err(e) = self.resolve_named_type(&package, &name, None) {
-                eprintln!("[ridlc] warning: skipping {}/{}: {:#}", package, name, e);
+                eprintln!(
+                    "[robonix-codegen] warning: skipping {}/{}: {:#}",
+                    package, name, e
+                );
             }
         }
         Ok(())
@@ -158,7 +161,7 @@ impl MsgResolver {
         for (package, name) in keys {
             if let Err(e) = self.resolve_srv(&package, &name) {
                 eprintln!(
-                    "[ridlc] warning: skipping srv {}/{}: {:#}",
+                    "[robonix-codegen] warning: skipping srv {}/{}: {:#}",
                     package, name, e
                 );
             }
@@ -464,8 +467,8 @@ pub fn parse_msg_file(package: &str, name: &str, path: &Path) -> Result<MsgSpec>
         let Some(raw_name) = parts.next() else {
             continue;
         };
-        let (type_ref, is_array, array_size) =
-            parse_msg_field_type(package, raw_type).with_context(|| {
+        let (type_ref, is_array, array_size) = parse_msg_field_type(package, raw_type)
+            .with_context(|| {
                 format!(
                     "{RIDLC_ERR_PREFIX} invalid field in '{}' at line with type '{}'",
                     path.display(),
@@ -506,7 +509,11 @@ pub fn parse_msg_field_type(
         bail!("{RIDLC_ERR_PREFIX} empty message field type in .msg file");
     }
     if is_ros_primitive(base_type) {
-        return Ok((MsgTypeRef::Primitive(base_type.to_string()), is_array, array_size));
+        return Ok((
+            MsgTypeRef::Primitive(base_type.to_string()),
+            is_array,
+            array_size,
+        ));
     }
     if let Some((package, name)) = base_type.split_once('/') {
         return Ok((

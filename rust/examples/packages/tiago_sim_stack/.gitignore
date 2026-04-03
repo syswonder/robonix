@@ -1,1 +1,3 @@
 rbnx-build
+# robonix-codegen --lang mcp generated Python dataclasses
+tiago_bridge/robonix_mcp_types/
