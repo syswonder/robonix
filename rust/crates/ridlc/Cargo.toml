@@ -20,4 +20,4 @@ log.workspace = true
 env_logger.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-toml = "1.1.2+spec-1.1.0"
+toml = "1.1"

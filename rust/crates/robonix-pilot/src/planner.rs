@@ -40,6 +40,33 @@ fn max_tool_rounds() -> usize {
 
 const MAX_HISTORY: usize = 200;
 
+/// `context_json`: `{"session_end": true}` (or `robonix_session_end`) — run memory compaction only, no VLM turn.
+fn intent_is_session_end(intent: &Intent) -> bool {
+    let j = intent.context_json.trim();
+    if j.is_empty() {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(j)
+        .ok()
+        .and_then(|v| {
+            v.get("session_end")
+                .or_else(|| v.get("robonix_session_end"))
+                .and_then(|x| x.as_bool())
+        })
+        .unwrap_or(false)
+}
+
+/// Skip vector memory prefetch for trivial chit-chat (saves latency and noise).
+fn skip_memory_prefetch(user_text: &str) -> bool {
+    let t = user_text.trim();
+    let lower = t.to_lowercase();
+    lower == "hi"
+        || lower == "hello"
+        || lower.starts_with("who are you")
+        || t == "你是谁"
+        || t == "你好"
+}
+
 // ── Public entry-point ────────────────────────────────────────────────────────
 
 /// Run one user turn. Streams PilotEvents into `tx`; completes when the VLM
@@ -70,6 +97,22 @@ pub async fn run_turn(
         }};
     }
 
+    if intent_is_session_end(intent) {
+        log::info!("[pilot] session_end: invoking compact_memory if available");
+        try_compact_memory(executor).await;
+        let _ = tx
+            .send(Ok(pilot_wire::pack(
+                &session_id,
+                PilotStreamBody::Status(SessionStatusEvent {
+                    session_id: session_id.clone(),
+                    state: SessionState::Completed as u32,
+                    message: String::new(),
+                }),
+            )))
+            .await;
+        return Ok(());
+    }
+
     // ── 1. Build system prompt (once per turn — skills don't change mid-turn) ─
     let soul = skills::load_agent_soul();
     let merged_skills = {
@@ -78,12 +121,31 @@ pub async fn run_turn(
     };
     let base_prompt = skills::build_system_prompt(soul.as_deref(), &merged_skills);
 
+    // Tool catalogue (needed before prefetch so MCP tools get correct routing — never dispatch as
+    // unknown builtins when `TaskCall.routing` is missing).
+    let initial_tools = executor
+        .list_tools(ListToolsRequest { refresh: true })
+        .await
+        .map_err(|e| anyhow::anyhow!("ListTools RPC failed: {e}"))?
+        .into_inner()
+        .tools;
+    let search_memory_routing = initial_tools
+        .iter()
+        .find(|t| t.tool_name == "search_memory")
+        .and_then(|t| t.routing.clone());
+
     // ── 1b. Pre-fetch long-term memory ────────────────────────────────────────
     // Silently dispatches search_memory before the first VLM call so that
     // relevant past context is available from the start of the turn.
-    let system_prompt = match prefetch_memory(&intent.text, executor).await {
-        Some(mem) => format!("{base_prompt}\n\n## Relevant memories\n{mem}"),
-        None => base_prompt,
+    let system_prompt = if skip_memory_prefetch(&intent.text) {
+        base_prompt
+    } else {
+        match prefetch_memory(&intent.text, executor, search_memory_routing).await {
+            Some(mem) => format!(
+                "{base_prompt}\n\n## Relevant past memories (System Context)\n\n{mem}\n\n---\n\n"
+            ),
+            None => base_prompt,
+        }
     };
 
     // ── 2. Add user message to history ────────────────────────────────────────
@@ -330,13 +392,16 @@ fn trim_history(history: &mut Vec<Message>, max: usize) {
 }
 
 /// Dispatch a single `search_memory` call to the Executor and return the
-/// result text.  Returns `None` silently if the tool is unavailable, the
-/// index is empty, or any error occurs — the caller should never fail
-/// because of missing memory context.
+/// result text.  Returns `None` if the tool is not registered, the index is
+/// empty, or any error occurs — the caller should never fail because of
+/// missing memory context.
 async fn prefetch_memory(
     query: &str,
     executor: &mut ExecutorServiceClient<Channel>,
+    routing: Option<ToolRouting>,
 ) -> Option<String> {
+    let routing = routing?;
+
     const EX_RESULT: u32 = 1;
 
     let graph = TaskGraph {
@@ -347,7 +412,7 @@ async fn prefetch_memory(
             call_id: Uuid::new_v4().to_string(),
             tool_name: "search_memory".to_string(),
             args_json: serde_json::json!({ "query": query }).to_string(),
-            routing: None,
+            routing: Some(routing),
         }],
     };
 
@@ -373,4 +438,61 @@ async fn prefetch_memory(
         }
     }
     None
+}
+
+/// Best-effort MCP `compact_memory` (session teardown). Ignores failures (tool may be absent).
+async fn try_compact_memory(executor: &mut ExecutorServiceClient<Channel>) {
+    let tools = match executor
+        .list_tools(ListToolsRequest { refresh: false })
+        .await
+    {
+        Ok(r) => r.into_inner().tools,
+        Err(e) => {
+            log::debug!("[pilot] compact_memory: list_tools failed: {e}");
+            return;
+        }
+    };
+    let Some(routing) = tools
+        .iter()
+        .find(|t| t.tool_name == "compact_memory")
+        .and_then(|t| t.routing.clone())
+    else {
+        return;
+    };
+
+    const EX_RESULT: u32 = 1;
+
+    let graph = TaskGraph {
+        graph_id: Uuid::new_v4().to_string(),
+        session_id: "memory-compact".to_string(),
+        round: 0,
+        calls: vec![TaskCall {
+            call_id: Uuid::new_v4().to_string(),
+            tool_name: "compact_memory".to_string(),
+            args_json: "{}".to_string(),
+            routing: Some(routing),
+        }],
+    };
+
+    let Ok(mut stream) = executor
+        .execute(ExecuteRequest {
+            graph: Some(graph),
+        })
+        .await
+        .map(|r| r.into_inner())
+    else {
+        return;
+    };
+    while let Ok(Some(event)) = stream.message().await {
+        if event.event_kind == EX_RESULT {
+            if let Some(r) = event.result {
+                if r.success {
+                    log::debug!("[pilot] compact_memory: {}", r.output);
+                } else {
+                    log::debug!("[pilot] compact_memory failed: {}", r.output);
+                }
+            }
+            return;
+        }
+    }
 }

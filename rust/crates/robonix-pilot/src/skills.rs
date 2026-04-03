@@ -237,6 +237,28 @@ pub fn format_skills_xml(skills: &[&AgentSkill]) -> String {
     lines.join("\n")
 }
 
+fn truncate_str_to_max_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+fn truncate_string_to_max_bytes_in_place(s: &mut String, max_bytes: usize) {
+    if s.len() <= max_bytes {
+        return;
+    }
+    let mut end = max_bytes.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+}
+
 /// Optional injection of markdown bodies (after frontmatter), capped for context size.
 pub fn format_skill_playbooks(skills: &[&AgentSkill]) -> String {
     let max_total: usize = std::env::var("ROBONIX_SKILLS_INJECT_MAX_CHARS")
@@ -266,14 +288,14 @@ pub fn format_skill_playbooks(skills: &[&AgentSkill]) -> String {
             format!(
                 "### {} (truncated)\n{}\n\n… (full instructions: read_file `{}`)\n",
                 s.name,
-                &body[..per_skill.min(body.len())],
+                truncate_str_to_max_bytes(body, per_skill),
                 s.path
             )
         } else {
             format!("### {}\n{}\n", s.name, body)
         };
         if chunk.len() > budget {
-            chunk.truncate(budget);
+            truncate_string_to_max_bytes_in_place(&mut chunk, budget);
             chunk.push_str("\n… (budget exhausted)\n");
         }
         budget = budget.saturating_sub(chunk.len());

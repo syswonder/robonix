@@ -22,6 +22,8 @@
 #   HF_ENDPOINT               (default: https://hf-mirror.com)
 #   ROBONIX_ATLAS            (default: 127.0.0.1:50051)
 #   START_VLM_SERVICE=1|0     (default: 1)
+#   START_MEMSEARCH_SERVICE=1|0 (default: 1) — agent memory MCP (search_memory / save_memory / compact_memory)
+#                               Requires: uv sync --extra memsearch (pins NumPy 1.x; NumPy 2 breaks ManiSkill/SciPy)
 #   START_PILOT=1|0           (default: 1)
 #   START_VIZ=1|0             (default: 1) — Rerun visualizer
 #   START_MAPPING=1|0         (default: 0) — ROS2/RTAB-Map Docker container (optional ROS test)
@@ -52,6 +54,7 @@ export MANISKILL_ENV_ID="${MANISKILL_ENV_ID:-ReplicaCADTidyHouseTrain_SceneManip
 export MANISKILL_CONTROL_MODE="${MANISKILL_CONTROL_MODE:-pd_ee_delta_pose}"
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 export START_VLM_SERVICE="${START_VLM_SERVICE:-1}"
+export START_MEMSEARCH_SERVICE="${START_MEMSEARCH_SERVICE:-1}"
 export START_PILOT="${START_PILOT:-1}"
 export START_EXECUTOR="${START_EXECUTOR:-1}"
 export START_VIZ="${START_VIZ:-1}"
@@ -201,6 +204,11 @@ cmd_setup() {
   rbnx_validate_build "$PKG_ROOT"
 
   echo ""
+  echo "[demo] optional — agent memory (Pilot search_memory / memsearch MCP):"
+  echo "  (cd '$PKG_ROOT' && uv sync --extra memsearch)"
+  echo "  (or set START_MEMSEARCH_SERVICE=0 when running ./run.sh start to skip)"
+
+  echo ""
   echo "[demo] setup complete."
   echo "  Python: $(uv run python3 --version)"
   echo "  Venv:   $VENV"
@@ -229,11 +237,22 @@ cmd_start() {
   if [ "$START_VLM_SERVICE" = "1" ]; then
     check_python_dep "openai" || missing+=("openai")
   fi
+  if [ "$START_MEMSEARCH_SERVICE" = "1" ]; then
+    check_python_dep "fastmcp" || missing+=("fastmcp")
+    python3 - <<'PY' >/dev/null 2>&1 || missing+=("memsearch")
+import memsearch  # noqa: F401 — pip package memsearch[onnx]
+PY
+  fi
   if [ "${#missing[@]}" -ne 0 ]; then
     echo "[demo] missing: ${missing[*]}"
     echo "[demo] run: ./run.sh setup"
     if [[ " ${missing[*]} " == *" openai "* ]]; then
       echo "[demo] note: vlm_service requires Python package 'openai'"
+    fi
+    if [[ " ${missing[*]} " == *" memsearch "* ]] || [[ " ${missing[*]} " == *" fastmcp "* ]]; then
+      echo "[demo] note: memsearch_service (agent memory) needs extra deps. From this package dir run:"
+      echo "  uv sync --extra memsearch"
+      echo "[demo] or skip memory: START_MEMSEARCH_SERVICE=0 ./run.sh start"
     fi
     exit 1
   fi
@@ -244,6 +263,9 @@ cmd_start() {
   rbnx_validate_build "$PKG_ROOT"
   if [ "$START_VLM_SERVICE" = "1" ]; then
     rbnx_validate_build "$PACKAGES/vlm_service"
+  fi
+  if [ "$START_MEMSEARCH_SERVICE" = "1" ]; then
+    rbnx_validate_build "$PACKAGES/memsearch_service"
   fi
 
   RBNX_START_OPTS=(start --endpoint "$ROBONIX_ATLAS")
@@ -258,6 +280,14 @@ cmd_start() {
     echo "[demo] starting vlm_service..."
     bg bash -c "cd '$RUST_ROOT' && exec cargo run -p robonix-cli -- \
       ${RBNX_START_OPTS[*]} -p '$PACKAGES/vlm_service' -n com.robonix.services.vlm"
+    sleep 1
+  fi
+
+  # memsearch_service (MCP: search_memory, save_memory, compact_memory) — registers before env nodes
+  if [ "$START_MEMSEARCH_SERVICE" = "1" ]; then
+    echo "[demo] starting memsearch_service..."
+    bg bash -c "cd '$RUST_ROOT' && exec cargo run -p robonix-cli -- \
+      ${RBNX_START_OPTS[*]} -p '$PACKAGES/memsearch_service' -n com.robonix.services.memsearch"
     sleep 1
   fi
 
@@ -363,6 +393,7 @@ case "${1:-help}" in
     echo ""
   echo "Environment variables (see top of this file for full list):"
   echo "  VLA_POLICY=octo|scripted   MANISKILL_ENV_ID=...   HF_ENDPOINT=..."
+  echo "  START_MEMSEARCH_SERVICE=0  — skip agent memory MCP (if deps not installed)"
   echo "  START_MAPPING=0            — skip RTAB-Map Docker (e.g. if Docker unavailable)"
     ;;
 esac

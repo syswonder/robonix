@@ -1,3 +1,5 @@
+# Pin NumPy 1.x (>=1.26 for pandas via pymilvus; <2 for ManiSkill/scipy/trimesh in shared venv).
+numpy>=1.26,<2
 mcp
 fastmcp
 memsearch[onnx]
