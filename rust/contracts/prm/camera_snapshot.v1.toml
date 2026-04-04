@@ -1,16 +1,14 @@
 # Single-frame image acquisition (on-demand snapshot).
-# Complements robonix/prm/camera/rgb (continuous stream) — use this for
-# one-shot vision queries (MCP tools, VLM input, debug capture).
-# Input:  empty trigger.
-# Output: one sensor_msgs/Image frame (encoding, width, height, data as in stream).
+# Complements robonix/prm/camera/rgb (continuous stream).
+# ROS IDL: `lib/prm_base/srv/GetCameraImage.srv`.
 [contract]
 id      = "robonix/prm/camera/snapshot"
 version = "1"
 kind    = "primitive"
 
-[io]
-input  = "std_msgs/msg/Empty"
-output = "sensor_msgs/msg/Image"
+
+[io.srv]
+srv = "prm_base/srv/GetCameraImage"
 
 [mode]
 type = "rpc"

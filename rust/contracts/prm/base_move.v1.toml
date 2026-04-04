@@ -1,18 +1,14 @@
-# Matches `lib/prm_base/msg/MoveCommand.msg` — pub-sub / stream-in payload (README: robonix/prm/base/move).
+# ROS: `lib/prm_base/srv/StreamMove.srv`. Client stream element in TOML only.
 [contract]
 id      = "robonix/prm/base/move"
 version = "1"
 kind    = "primitive"
 
-[io]
-input  = "prm_base/msg/MoveCommand"
-output = "std_msgs/msg/Empty"
+[io.srv]
+srv = "prm_base/srv/StreamMove"
 
 [mode]
-type = "stream_in"
+type = "rpc_client_stream"
 
 [semantics]
 preemptable = true
-
-# Actual command rate / timing are deployment-defined; provider documents them in
-# interface metadata at registration, not in this contract.

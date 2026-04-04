@@ -4,12 +4,12 @@
 
 ## Architecture (how the pieces fit)
 
-1. **`rust/contracts/**/*.toml`** — **canonical logical interface** (`[contract].id`), optional semantics, **`[io]`** references into ROS IDL (`pkg/msg/...`, `pkg/srv/...`), and **`[mode].type`** (`rpc` | `stream_in` | `stream_out`) that fixes the gRPC *shape* for that id. See [`rust/contracts/README.md`](../contracts/README.md).
+1. **`rust/contracts/**/*.toml`** — **canonical logical interface** (`[contract].id`), optional semantics, **`[io]`** references into ROS IDL, and **`[mode].type`** (`rpc` | `rpc_server_stream` | `rpc_client_stream` | `topic_out` | `topic_in`) that fixes the gRPC *shape* for that id. See [`rust/contracts/README.md`](../contracts/README.md).
 2. **`lib/**`** — **ROS 2 concrete schemas**: `.msg` and `.srv` are the vocabulary contracts use; they are also what native ROS 2 stacks publish/service-call.
 3. **`ridlc`** — **contract-centric codegen**: resolves all types from `lib`, emits per-package `robonix_proto/<pkg>.proto` (messages + legacy package `*Service` from `.srv` where applicable), and **`robonix_contracts.proto`** (`package robonix.contracts`) — one gRPC service per contract id for cross-runtime bridging.
 4. **`robonix_iceoryx2_py/**`** — **`ridlc --lang python`** ctypes for **messages only** (SHM / iceoryx2); unrelated to contract ids. See `robonix_iceoryx2_py/README.md`.
 
-**ROS mental model vs contract `[mode]`:** pure pub/sub “input-only” / “output-only” is a **registration** concern (who publishes vs subscribes). Contracts still name the **msg** (or `Empty` / srv types) so every transport shares the same payload definition; `stream_out` / `stream_in` describe framing on gRPC (server-streaming vs client-streaming). Unary **`rpc`** matches a `.srv`-like request/response pair.
+**ROS mental model vs contract `[mode]`:** pub/sub direction is a **registration** concern. **`topic_out`** / **`topic_in`** use **`[io.msg]`** with **`msg`**; unary **`rpc`** and streaming **`rpc_server_stream`** / **`rpc_client_stream`** use **`[io.srv]`** with **`srv`** (see `rust/contracts/README.md`).
 
 ## Policy
 

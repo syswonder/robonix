@@ -1,14 +1,13 @@
 # Cancel an active navigation goal.
-# Input:  std_msgs/String.data — JSON: {"goal_id": str}
-# Output: std_msgs/String.data — JSON: {"goal_id": str, "accepted": bool, "message": str}
+# ROS IDL: `lib/prm_base/srv/CancelNavigation.srv` (goal_id → accepted + message).
 [contract]
 id      = "robonix/prm/base/nav_cancel"
 version = "1"
 kind    = "primitive"
 
-[io]
-input  = "std_msgs/msg/String"
-output = "std_msgs/msg/String"
+
+[io.srv]
+srv = "prm_base/srv/CancelNavigation"
 
 [mode]
 type = "rpc"

@@ -1,15 +1,13 @@
 # Execute a natural-language or structured manipulation instruction.
-# The VLA / scripted policy interprets the instruction and drives the arm.
-# Input:  std_msgs/String.data — instruction text or JSON-encoded action spec.
-# Output: std_msgs/String.data — execution result / status JSON.
+# ROS IDL: `lib/prm_base/srv/ExecuteManipulation.srv`.
 [contract]
 id      = "robonix/prm/manipulation/exec"
 version = "1"
 kind    = "primitive"
 
-[io]
-input  = "std_msgs/msg/String"
-output = "std_msgs/msg/String"
+
+[io.srv]
+srv = "prm_base/srv/ExecuteManipulation"
 
 [mode]
 type = "rpc"

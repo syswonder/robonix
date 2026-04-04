@@ -1,17 +1,15 @@
-# Matches README: robonix/prm/base/odom → nav_msgs/Odometry publisher.
+# nav_msgs/Odometry stream; gRPC `Stream(Empty) returns (stream Odometry)`.
 [contract]
 id      = "robonix/prm/base/odom"
 version = "1"
 kind    = "primitive"
 
-[io]
-input  = "std_msgs/msg/Empty"
-output = "nav_msgs/msg/Odometry"
+
+[io.msg]
+msg = "nav_msgs/msg/Odometry"
 
 [mode]
-type = "stream_out"
+type = "topic_out"
 
 [semantics]
 realtime = true
-
-# Publication rate is provider-specific (DeclareInterface metadata), not fixed here.

@@ -1,0 +1,4 @@
+# robonix/sys/memory/search — semantic search over long-term memory (unary RPC).
+std_msgs/String query
+---
+std_msgs/String results

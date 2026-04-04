@@ -1,18 +1,16 @@
-# Same wire type as RGB in README until a dedicated depth IDL is split out.
+# Same wire type as RGB; encoding differs (deployment metadata).
 [contract]
 id      = "robonix/prm/camera/depth"
 version = "1"
 kind    = "primitive"
 
-[io]
-input  = "std_msgs/msg/Empty"
-output = "sensor_msgs/msg/Image"
+
+[io.msg]
+msg = "sensor_msgs/msg/Image"
 
 [mode]
-type = "stream_out"
+type = "topic_out"
 
 [semantics]
 realtime = true
 payload  = "depth_image"
-
-# Encoding and rate are deployment-specific (metadata), not fixed here.

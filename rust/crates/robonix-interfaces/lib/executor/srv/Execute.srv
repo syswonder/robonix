@@ -1,4 +1,3 @@
-# @robonix.grpc stream_server executor/msg/TaskCallEvent
 pilot/TaskGraph graph
 ---
-bool unused
+executor/TaskCallEvent event

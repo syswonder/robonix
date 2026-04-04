@@ -1,14 +1,13 @@
 # Persist a fact / user preference to long-term memory.
-# Input: the content to save (std_msgs/String.data).
-# Output: confirmation message (std_msgs/String.data).
+# ROS IDL: `lib/memory/srv/Save.srv`.
 [contract]
 id      = "robonix/sys/memory/save"
 version = "1"
 kind    = "service"
 
-[io]
-input  = "std_msgs/msg/String"
-output = "std_msgs/msg/String"
+
+[io.srv]
+srv = "memory/srv/Save"
 
 [mode]
 type = "rpc"

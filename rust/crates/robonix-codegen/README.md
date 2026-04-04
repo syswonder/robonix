@@ -4,7 +4,7 @@
 
 | `--lang` | Output |
 |----------|--------|
-| `proto` | One `*.proto` per ROS package → **Protobuf messages** (+ per-package `service` RPCs from `.srv`). With `--contracts`, also **`robonix_contracts.proto`** (`package robonix.contracts`) mapping each contract id to gRPC `rpc` / streaming. |
+| `proto` | One `*.proto` per ROS package → **Protobuf messages** (+ per-package `service` RPCs from `.srv`). With `--contracts`, also **`robonix_contracts.proto`** (`package robonix.contracts`): contract **`[mode].type`** is `rpc` \| `rpc_server_stream` \| `rpc_client_stream` \| `topic_out` \| `topic_in` (see `rust/contracts/README.md`). |
 | `python` | `*_iox2.py` ctypes payloads for iceoryx2 Python (from `.msg` only). Does **not** emit contract services. |
 
 Custom `.ridl` syntax is deprecated; see `crates/robonix-interfaces/ridl/DEPRECATED.md`.
