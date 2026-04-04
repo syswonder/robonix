@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // robonix-executor — tool-call dispatch runtime
 //
-// Exposes ExecutorService (gRPC) to Pilot.
-// Dispatches tool calls to: builtin handlers | MCP servers | gRPC primitives.
+// Exposes contract gRPC services from `robonix_contracts.proto` (SysRuntimeExecutor, …).
 
 mod dispatch;
 mod exec_wire;
@@ -10,14 +9,14 @@ mod routing_kind;
 mod service;
 mod tools;
 
-pub(crate) mod pilot {
-    tonic::include_proto!("robonix.pilot");
-}
-pub(crate) mod executor {
-    tonic::include_proto!("robonix.executor");
-}
+#[path = "../../robonix-interfaces/robonix_proto/contract_proto_modules.rs"]
+mod proto;
+
+pub(crate) use proto::{contracts, executor, pilot};
 
 use anyhow::Result;
+use contracts::sys_runtime_executor_list_tools_server::SysRuntimeExecutorListToolsServer;
+use contracts::sys_runtime_executor_server::SysRuntimeExecutorServer;
 use log::info;
 use robonix_sdk::RobonixClient;
 use service::ExecutorServiceImpl;
@@ -67,13 +66,14 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    info!("ExecutorService gRPC on :{}", listen_port);
+    info!("Executor contract gRPC on :{}", listen_port);
 
     let sdk = Arc::new(Mutex::new(sdk));
     let svc = ExecutorServiceImpl::new(sdk);
 
     tonic::transport::Server::builder()
-        .add_service(executor::executor_service_server::ExecutorServiceServer::new(svc))
+        .add_service(SysRuntimeExecutorServer::new(svc.clone()))
+        .add_service(SysRuntimeExecutorListToolsServer::new(svc))
         .serve(listen_addr)
         .await?;
 
@@ -81,12 +81,24 @@ async fn main() -> Result<()> {
 }
 
 fn atlas_endpoint() -> String {
-    let raw = std::env::var("ROBONIX_ATLAS_ENDPOINT")
-        .or_else(|_| std::env::var("ROBONIX_ATLAS"))
-        .unwrap_or_else(|_| "localhost:50051".to_string());
+    let raw = resolve_endpoint(
+        &["ROBONIX_ATLAS_ENDPOINT", "ROBONIX_ATLAS"],
+        "localhost:50051",
+    );
     if raw.starts_with("http") {
         raw
     } else {
         format!("http://{}", raw)
     }
+}
+
+fn resolve_endpoint(vars: &[&str], default: &str) -> String {
+    for v in vars {
+        if let Ok(val) = std::env::var(v) {
+            if !val.is_empty() {
+                return val;
+            }
+        }
+    }
+    default.to_string()
 }

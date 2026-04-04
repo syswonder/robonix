@@ -24,26 +24,3 @@ message KeyValue {
   string value = 2;
 }
 
-message AddDiagnostics_Request {
-  string load_namespace = 1;
-}
-
-message AddDiagnostics_Response {
-  bool success = 1;
-  string message = 2;
-}
-
-message SelfTest_Request {
-}
-
-message SelfTest_Response {
-  string id = 1;
-  uint32 passed = 2;
-  repeated DiagnosticStatus status = 3;
-}
-
-service DiagnosticMsgsService {
-  rpc AddDiagnostics (AddDiagnostics_Request) returns (AddDiagnostics_Response);
-  rpc SelfTest (SelfTest_Request) returns (SelfTest_Response);
-}
-

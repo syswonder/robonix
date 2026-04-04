@@ -27,39 +27,3 @@ message TransitionEvent {
   State goal_state = 4;
 }
 
-message ChangeState_Request {
-  Transition transition = 1;
-}
-
-message ChangeState_Response {
-  bool success = 1;
-}
-
-message GetAvailableStates_Request {
-}
-
-message GetAvailableStates_Response {
-  repeated State available_states = 1;
-}
-
-message GetAvailableTransitions_Request {
-}
-
-message GetAvailableTransitions_Response {
-  repeated TransitionDescription available_transitions = 1;
-}
-
-message GetState_Request {
-}
-
-message GetState_Response {
-  State current_state = 1;
-}
-
-service LifecycleMsgsService {
-  rpc ChangeState (ChangeState_Request) returns (ChangeState_Response);
-  rpc GetAvailableStates (GetAvailableStates_Request) returns (GetAvailableStates_Response);
-  rpc GetAvailableTransitions (GetAvailableTransitions_Request) returns (GetAvailableTransitions_Response);
-  rpc GetState (GetState_Request) returns (GetState_Response);
-}
-

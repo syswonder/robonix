@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// Protobuf (.proto) code generator — ROS .msg/.srv -> proto3
+// Protobuf (.proto) code generator — ROS IDL -> proto3
 //
-// Generates one .proto file per ROS package, containing:
-//   - A `message` block for each .msg type
-//   - A `service` block: unary `rpc Name (Req) returns (Res)` for each .srv
-// Streaming shapes for gRPC are **only** in `robonix_contracts.proto` (from `rust/contracts/*.toml`).
+// Emits **one `{package}.proto` per ROS package** that has content:
+//   - Every `.msg` -> a `message` (always).
+//   - `*_Request` / `*_Response` from `.srv` **only** when `--contracts` is passed and that srv is listed in a contract `[io.srv].srv`.
+// Does **not** emit per-package `service FooService { rpc ... }`; gRPC facades are **only** in `robonix_contracts.proto`.
 
 use anyhow::{Context, Result};
 use std::collections::BTreeSet;
@@ -75,33 +75,6 @@ fn emit_srv_messages(out: &mut String, srv: &SrvSpec) {
     emit_message(out, &srv.response);
 }
 
-fn emit_service(out: &mut String, package: &str, srvs: &[&SrvSpec]) -> Result<()> {
-    let service_name = format!("{}Service", to_pascal_case(package));
-    let _ = writeln!(out, "service {} {{", service_name);
-    for srv in srvs {
-        let _ = writeln!(
-            out,
-            "  rpc {} ({}) returns ({});",
-            srv.name, srv.request.name, srv.response.name,
-        );
-    }
-    let _ = writeln!(out, "}}");
-    Ok(())
-}
-
-fn to_pascal_case(s: &str) -> String {
-    s.split('_')
-        .filter(|p| !p.is_empty())
-        .map(|p| {
-            let mut c = p.chars();
-            match c.next() {
-                None => String::new(),
-                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-            }
-        })
-        .collect()
-}
-
 fn import_named_type(imports: &mut BTreeSet<String>, current_package: &str, tr: &MsgTypeRef) {
     if let MsgTypeRef::Named { package, .. } = tr {
         if package != current_package {
@@ -110,7 +83,11 @@ fn import_named_type(imports: &mut BTreeSet<String>, current_package: &str, tr: 
     }
 }
 
-fn collect_imports(specs: &[&MsgSpec], srvs: &[&SrvSpec], current_package: &str) -> BTreeSet<String> {
+fn collect_imports(
+    specs: &[&MsgSpec],
+    srvs: &[&SrvSpec],
+    current_package: &str,
+) -> BTreeSet<String> {
     let mut imports = BTreeSet::new();
     for spec in specs {
         for field in &spec.fields {
@@ -125,15 +102,21 @@ fn collect_imports(specs: &[&MsgSpec], srvs: &[&SrvSpec], current_package: &str)
     imports
 }
 
-pub fn generate(resolver: &MsgResolver, out_dir: &Path) -> Result<()> {
+pub fn generate(
+    resolver: &MsgResolver,
+    out_dir: &Path,
+    contract_srvs: Option<&BTreeSet<(String, String)>>,
+) -> Result<()> {
     fs::create_dir_all(out_dir)?;
 
     let mut all_packages = BTreeSet::new();
     for spec in resolver.ordered_specs() {
         all_packages.insert(spec.package.clone());
     }
-    for srv in resolver.ordered_srvs() {
-        all_packages.insert(srv.package.clone());
+    if let Some(set) = contract_srvs {
+        for (pkg, _) in set.iter() {
+            all_packages.insert(pkg.clone());
+        }
     }
 
     for package in &all_packages {
@@ -142,11 +125,16 @@ pub fn generate(resolver: &MsgResolver, out_dir: &Path) -> Result<()> {
             .into_iter()
             .filter(|s| &s.package == package)
             .collect();
-        let srvs: Vec<_> = resolver
-            .ordered_srvs()
-            .into_iter()
-            .filter(|s| &s.package == package)
-            .collect();
+        let srvs: Vec<_> = match contract_srvs {
+            Some(set) => resolver
+                .ordered_srvs()
+                .into_iter()
+                .filter(|s| {
+                    &s.package == package && set.contains(&(s.package.clone(), s.name.clone()))
+                })
+                .collect(),
+            None => Vec::new(),
+        };
 
         if specs.is_empty() && srvs.is_empty() {
             continue;
@@ -177,17 +165,13 @@ pub fn generate(resolver: &MsgResolver, out_dir: &Path) -> Result<()> {
             emit_srv_messages(&mut out, srv);
             let _ = writeln!(out);
         }
-        if !srvs.is_empty() {
-            emit_service(&mut out, package, &srvs)?;
-            let _ = writeln!(out);
-        }
 
         let filename = format!("{}.proto", package);
         let filepath = out_dir.join(&filename);
         fs::write(&filepath, &out)
             .with_context(|| format!("failed to write proto file to '{}'", filepath.display()))?;
         eprintln!(
-            "[robonix-codegen] generated proto for '{}' ({} msgs, {} srvs) -> {}",
+            "[robonix-codegen] generated proto for '{}' ({} msgs, {} contract srvs) -> {}",
             package,
             specs.len(),
             srvs.len(),

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// cmd/chat.rs — TUI chat client (connects to robonix-pilot via PilotService)
+// cmd/chat.rs — TUI chat client (connects to robonix-pilot via SysRuntimePilot)
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -20,18 +20,6 @@ use std::io;
 use std::rc::Rc;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
-
-pub mod pb {
-    // gRPC client only: generated server types / unused response structs trigger dead_code.
-    #[allow(dead_code)]
-    pub mod pilot {
-        tonic::include_proto!("robonix.pilot");
-    }
-    #[allow(dead_code)]
-    pub mod executor {
-        tonic::include_proto!("robonix.executor");
-    }
-}
 
 struct ChatMessage {
     role: Role,
@@ -212,14 +200,14 @@ async fn run_tui(
 }
 
 async fn notify_session_end(pilot_endpoint: &str, session_id: &str) -> Result<()> {
-    use pb::pilot::{HandleIntentRequest, Intent};
+    use crate::pb::contracts::sys_runtime_pilot_client::SysRuntimePilotClient;
+    use crate::pb::pilot::Intent;
 
     const INTENT_SOURCE_TEXT: u32 = 0;
 
-    let mut client =
-        pb::pilot::pilot_service_client::PilotServiceClient::connect(pilot_endpoint.to_string())
-            .await
-            .context("failed to connect to Pilot for session_end")?;
+    let mut client = SysRuntimePilotClient::connect(pilot_endpoint.to_string())
+        .await
+        .context("failed to connect to Pilot for session_end")?;
 
     let intent = Intent {
         intent_id: Uuid::new_v4().to_string(),
@@ -232,11 +220,9 @@ async fn notify_session_end(pilot_endpoint: &str, session_id: &str) -> Result<()
     };
 
     let mut stream = client
-        .handle_intent(HandleIntentRequest {
-            intent: Some(intent),
-        })
+        .stream(tonic::Request::new(intent))
         .await
-        .context("HandleIntent session_end failed")?
+        .context("Pilot Stream session_end failed")?
         .into_inner();
 
     while stream.next().await.is_some() {}
@@ -244,25 +230,34 @@ async fn notify_session_end(pilot_endpoint: &str, session_id: &str) -> Result<()
 }
 
 async fn abort_pilot_session(pilot_endpoint: &str, session_id: &str) -> Result<()> {
-    use pb::pilot::{AbortSessionRequest, pilot_service_client::PilotServiceClient};
+    use crate::pb::contracts::sys_runtime_pilot_client::SysRuntimePilotClient;
+    use crate::pb::pilot::Intent;
 
-    let mut client = PilotServiceClient::connect(pilot_endpoint.to_string())
-        .await
-        .context("failed to connect to Pilot for AbortSession")?;
+    const INTENT_SOURCE_TEXT: u32 = 0;
 
-    client
-        .abort_session(AbortSessionRequest {
-            session_id: session_id.to_string(),
-        })
+    let mut client = SysRuntimePilotClient::connect(pilot_endpoint.to_string())
         .await
-        .context("Pilot AbortSession failed")?;
+        .context("failed to connect to Pilot for abort_turn")?;
+
+    let intent = Intent {
+        intent_id: Uuid::new_v4().to_string(),
+        session_id: session_id.to_string(),
+        source: INTENT_SOURCE_TEXT,
+        text: String::new(),
+        audio_data: vec![],
+        context_json: r#"{"abort_turn":true}"#.to_string(),
+        timestamp_ms: now_ms(),
+    };
+
+    let _ = client
+        .stream(tonic::Request::new(intent))
+        .await
+        .context("Pilot abort_turn Stream failed")?;
     Ok(())
 }
 
-/// Runs one HandleIntent stream while polling the keyboard: **Esc** calls
-/// [`abort_pilot_session`] so the Pilot cancels the in-flight turn (and Executor work
-/// driven from it). Stream I/O runs in a spawned task so this loop can hold
-/// `&mut Terminal` for redraws without conflicting borrows.
+/// Runs one `SysRuntimePilot.Stream` while polling the keyboard: **Esc** calls
+/// [`abort_pilot_session`] (abort_turn `Intent`) so Pilot cancels the in-flight turn.
 async fn run_intent_with_esc_abort(
     pilot_endpoint: &str,
     session_id: &str,
@@ -272,7 +267,8 @@ async fn run_intent_with_esc_abort(
     input: &str,
     scroll: &mut u16,
 ) -> Result<()> {
-    use pb::pilot::{HandleIntentRequest, Intent, PilotEvent};
+    use crate::pb::contracts::sys_runtime_pilot_client::SysRuntimePilotClient;
+    use crate::pb::pilot::{Intent, PilotEvent};
     use tonic::Status;
 
     const INTENT_SOURCE_TEXT: u32 = 0;
@@ -283,16 +279,13 @@ async fn run_intent_with_esc_abort(
     let text = user_msg.to_string();
 
     let _stream_task = tokio::spawn(async move {
-        let mut client =
-            match pb::pilot::pilot_service_client::PilotServiceClient::connect(pilot_ep.clone())
-                .await
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = tx.send(Err(Status::unavailable(e.to_string()))).await;
-                    return;
-                }
-            };
+        let mut client = match SysRuntimePilotClient::connect(pilot_ep.clone()).await {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.send(Err(Status::unavailable(e.to_string()))).await;
+                return;
+            }
+        };
         let intent = Intent {
             intent_id: Uuid::new_v4().to_string(),
             session_id: sid,
@@ -302,12 +295,7 @@ async fn run_intent_with_esc_abort(
             context_json: String::new(),
             timestamp_ms: now_ms(),
         };
-        let stream = match client
-            .handle_intent(HandleIntentRequest {
-                intent: Some(intent),
-            })
-            .await
-        {
+        let stream = match client.stream(tonic::Request::new(intent)).await {
             Ok(r) => r.into_inner(),
             Err(e) => {
                 let _ = tx.send(Err(e)).await;
@@ -350,7 +338,7 @@ async fn run_intent_with_esc_abort(
                                 let _ = abort_pilot_session(pilot_endpoint, session_id).await;
                                 messages.borrow_mut().push(ChatMessage {
                                     role: Role::Status,
-                                    text: "Esc — AbortSession sent (Pilot/Executor should stop this turn)."
+                                    text: "Esc — abort_turn sent to Pilot (in-flight turn should stop)."
                                         .to_string(),
                                 });
                                 draw(terminal, &messages.borrow(), input, *scroll, true)?;
@@ -375,7 +363,7 @@ async fn run_intent_with_esc_abort(
 
 fn apply_pilot_event(
     messages: &Rc<RefCell<Vec<ChatMessage>>>,
-    event: &pb::pilot::PilotEvent,
+    event: &crate::pb::pilot::PilotEvent,
 ) -> Result<()> {
     const EVT_TEXT_CHUNK: u32 = 0;
     const EVT_TASK_GRAPH: u32 = 1;

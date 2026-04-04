@@ -6,7 +6,7 @@
 
 1. **`rust/contracts/**/*.toml`** — **canonical logical interface** (`[contract].id`), optional semantics, **`[io]`** references into ROS IDL, and **`[mode].type`** (`rpc` | `rpc_server_stream` | `rpc_client_stream` | `topic_out` | `topic_in`) that fixes the gRPC *shape* for that id. See [`rust/contracts/README.md`](../contracts/README.md).
 2. **`lib/**`** — **ROS 2 concrete schemas**: `.msg` and `.srv` are the vocabulary contracts use; they are also what native ROS 2 stacks publish/service-call.
-3. **`ridlc`** — **contract-centric codegen**: resolves all types from `lib`, emits per-package `robonix_proto/<pkg>.proto` (messages + legacy package `*Service` from `.srv` where applicable), and **`robonix_contracts.proto`** (`package robonix.contracts`) — one gRPC service per contract id for cross-runtime bridging.
+3. **`robonix-codegen`** — resolves types from `lib`, emits per-package **`robonix_proto/<pkg>.proto`**: all **`.msg`** → `message`, and **`_Request` / `_Response`** only for **`.srv` listed in `rust/contracts`**; **no** per-package `service … { rpc … }`. **`robonix_contracts.proto`** holds the only gRPC services (one per contract id).
 4. **`robonix_iceoryx2_py/**`** — **`ridlc --lang python`** ctypes for **messages only** (SHM / iceoryx2); unrelated to contract ids. See `robonix_iceoryx2_py/README.md`.
 
 **ROS mental model vs contract `[mode]`:** pub/sub direction is a **registration** concern. **`topic_out`** / **`topic_in`** use **`[io.msg]`** with **`msg`**; unary **`rpc`** and streaming **`rpc_server_stream`** / **`rpc_client_stream`** use **`[io.srv]`** with **`srv`** (see `rust/contracts/README.md`).
@@ -15,13 +15,13 @@
 
 - **Do not hand-edit** anything under `robonix_proto/` or `robonix_iceoryx2_py/`; change **`lib`** IDL and/or **`rust/contracts`**, then rerun `ridlc`.
 - **Do not add ad-hoc `.proto`** under `robonix_proto/` for Robonix-owned types — extend **`lib`** and regenerate, or reference **`protobuf://...`** from a contract when intentionally pointing at protos outside `lib`.
-- **Prefer contracts** for stable **interface ids** and gRPC service names (`robonix_contracts.proto`). Per-package `*Service` RPCs from `.srv` remain for ROS-shaped unary APIs not yet lifted into a contract file.
+- **Prefer contracts** for stable **interface ids** and gRPC service names (`robonix_contracts.proto`). Unary/stream shapes use the `.srv` request/response messages in `{pkg}.proto` only when that srv is referenced from a contract.
 
-Regenerate protos (IDL + contracts; writes one file per ROS package **and** `robonix_contracts.proto`; **does not delete** stale `.proto` if you removed a package—delete manually or wipe the dir first):
+Regenerate protos (IDL + contracts; writes one file per ROS package **`and`** `robonix_contracts.proto`, **`and`** `contract_proto_modules.rs` for Rust `tonic::include_proto!` of the contracts closure; **does not delete** stale `.proto` if you removed a package—delete manually or wipe the dir first):
 
 ```bash
 cd rust
-cargo run -p ridlc -- --lang proto \
+cargo run -p robonix-codegen -- --lang proto \
   -I robonix-interfaces/lib \
   --contracts contracts \
   -o robonix-interfaces/robonix_proto
@@ -50,7 +50,7 @@ cd rust && ./examples/scripts/gen_proto_python.sh
 | `lib/vlm/srv/` | System VLM `robonix/sys/model/vlm` (payloads referenced by contracts) |
 | `lib/robonix_msg/` | Shared message types |
 | `lib/common_interfaces/` | Upstream ROS message trees (submodule / vendor) |
-| `robonix_proto/` | **Generated** `.proto` (per-package + `robonix_contracts.proto`) |
+| `robonix_proto/` | **Generated** `.proto` (per-package + `robonix_contracts.proto` + `contract_proto_modules.rs` for Rust) |
 | `robonix_iceoryx2_py/` | **Generated** ctypes for `.msg` (iceoryx2); see folder README |
 
 ---

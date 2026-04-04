@@ -1,40 +1,13 @@
-//! VLM gRPC client using protos from `crates/robonix-interfaces/robonix_proto` (robonix-codegen → `vlm.proto` + deps).
-//!
-//! Streaming uses `ChatStreamRequest` / `ChatStreamEvent` (`VlmService.ChatStream`); unary chat uses
-//! `ChatRequest` / `ChatResponse` (`VlmService.Chat`).
+//! VLM gRPC client — contract `SysModelVlmChat` (`robonix_contracts.proto`).
 
+use crate::contracts::sys_model_vlm_chat_client::SysModelVlmChatClient;
+use crate::robonix_msg::{ChatMessage as PbChatMessage, ToolSpec as PbToolSpec};
+use crate::vlm_proto::{ChatStreamEvent, ChatStreamRequest};
 use anyhow::{Context, Result};
 use robonix_sdk::QueryNodesOpts;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-/// Generated prost + tonic modules (`tonic_prost_build` from `build.rs`).
-mod robonix {
-    #![allow(dead_code)]
-    #![allow(clippy::all)]
-    pub mod builtin_interfaces {
-        include!(concat!(env!("OUT_DIR"), "/robonix.builtin_interfaces.rs"));
-    }
-    pub mod std_msgs {
-        include!(concat!(env!("OUT_DIR"), "/robonix.std_msgs.rs"));
-    }
-    pub mod geometry_msgs {
-        include!(concat!(env!("OUT_DIR"), "/robonix.geometry_msgs.rs"));
-    }
-    pub mod sensor_msgs {
-        include!(concat!(env!("OUT_DIR"), "/robonix.sensor_msgs.rs"));
-    }
-    pub mod robonix_msg {
-        include!(concat!(env!("OUT_DIR"), "/robonix.robonix_msg.rs"));
-    }
-    pub mod vlm {
-        include!(concat!(env!("OUT_DIR"), "/robonix.vlm.rs"));
-    }
-}
-
-use robonix::robonix_msg::{ChatMessage as PbChatMessage, ToolSpec as PbToolSpec};
-use robonix::vlm::vlm_service_client::VlmServiceClient;
-use robonix::vlm::{ChatRequest, ChatResponse, ChatStreamEvent, ChatStreamRequest};
+use tonic::Request;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Message {
@@ -154,11 +127,6 @@ pub const VLM_CONTRACT_ID: &str = "robonix/sys/model/vlm/chat";
 /// Default `QueryNodes.namespace` prefix for legacy split discovery only.
 pub const DEFAULT_VLM_NAMESPACE_PREFIX: &str = "robonix/sys/model/vlm";
 
-/// `ROBONIX_VLM_CONTRACT_ID`: canonical protocol id (default [`VLM_CONTRACT_ID`]).
-/// Sent as `QueryNodesRequest.contract_id` — must match server `InterfaceInfo.contract_id`.
-///
-/// If set to an empty string, discovery falls back to split `namespace` + `name` using
-/// `ROBONIX_VLM_NAMESPACE_PREFIX` (default [`DEFAULT_VLM_NAMESPACE_PREFIX`]) + interface leaf from [`VLM_CONTRACT_ID`].
 fn vlm_contract_id_for_query() -> String {
     match std::env::var("ROBONIX_VLM_CONTRACT_ID") {
         Ok(s) => s.trim().to_string(),
@@ -182,15 +150,11 @@ fn vlm_interface_leaf() -> &'static str {
 
 /// VLM client discovered through robonix-atlas's control plane.
 pub struct VlmClient {
-    inner: VlmServiceClient<tonic::transport::Channel>,
+    inner: SysModelVlmChatClient<tonic::transport::Channel>,
 }
 
 impl VlmClient {
     /// Discover a VLM/LLM service via robonix-atlas and negotiate a gRPC channel.
-    ///
-    /// Uses `QueryNodesRequest.contract_id` when non-empty; matches `InterfaceInfo.contract_id`
-    /// on the server. `NegotiateChannel` uses the matching interface's `name` (DeclareInterface leaf), not the full path.
-    /// If several nodes match, picks the longest `namespace`.
     pub async fn discover(
         sdk: &mut robonix_sdk::RobonixClient,
         agent_node_id: &str,
@@ -285,48 +249,11 @@ impl VlmClient {
             .context("failed to connect to VLM service data plane")?;
 
         Ok(Self {
-            inner: VlmServiceClient::new(tonic_channel),
+            inner: SysModelVlmChatClient::new(tonic_channel),
         })
     }
 
-    pub async fn chat(
-        &mut self,
-        messages: &[Message],
-        tools: &[ToolDef],
-    ) -> Result<(Option<String>, Vec<ToolCall>)> {
-        let req = Self::build_chat_request(messages, tools);
-
-        let resp: tonic::Response<ChatResponse> =
-            self.inner
-                .chat(tonic::Request::new(req))
-                .await
-                .map_err(|e| anyhow::anyhow!("VLM gRPC Chat failed: {e}"))?;
-
-        let parsed = resp.into_inner();
-
-        let tool_calls = parsed
-            .tool_calls
-            .into_iter()
-            .map(|tc| ToolCall {
-                id: tc.id,
-                kind: "function".to_string(),
-                function: FnCall {
-                    name: tc.name,
-                    arguments: tc.arguments_json,
-                },
-            })
-            .collect::<Vec<_>>();
-
-        let content = if parsed.content.is_empty() {
-            None
-        } else {
-            Some(parsed.content)
-        };
-        Ok((content, tool_calls))
-    }
-
-    /// Open a ChatStream and return the raw tonic Streaming handle.
-    /// The caller drives the stream to get real-time text deltas.
+    /// Open the contract `Stream` RPC and return the tonic `Streaming` handle.
     pub async fn chat_stream(
         &mut self,
         messages: &[Message],
@@ -335,9 +262,9 @@ impl VlmClient {
         let req = Self::build_chat_stream_request(messages, tools);
         let resp = self
             .inner
-            .chat_stream(tonic::Request::new(req))
+            .stream(Request::new(req))
             .await
-            .map_err(|e| anyhow::anyhow!("VLM gRPC ChatStream failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("VLM gRPC Stream failed: {e}"))?;
         Ok(resp.into_inner())
     }
 
@@ -356,15 +283,6 @@ impl VlmClient {
             })
         } else {
             VlmStreamItem::Finish(())
-        }
-    }
-
-    fn build_chat_request(messages: &[Message], tools: &[ToolDef]) -> ChatRequest {
-        ChatRequest {
-            messages: Self::build_chat_messages(messages),
-            tools: Self::build_tool_specs(tools),
-            tool_choice: Self::build_tool_choice(tools),
-            max_tokens: 0,
         }
     }
 

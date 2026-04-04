@@ -7,6 +7,13 @@ use anyhow::Result;
 use clap::Parser;
 use robonix_cli::Config;
 
+#[path = "../../robonix-interfaces/robonix_proto/contract_proto_modules.rs"]
+mod proto_contracts;
+
+mod pb {
+    pub use super::proto_contracts::{contracts, pilot};
+}
+
 mod cmd;
 
 #[derive(Parser)]

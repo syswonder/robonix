@@ -42,7 +42,7 @@ This uses **`rbnx` validate/build/start** for `vlm_service` and `tiago_sim_stack
 
 | Path | Role |
 |------|------|
-| `tiago_bridge/` | Python module: ROS2 ↔ MCP bridge (camera, pose, scan, navigation tools). |
+| `tiago_bridge/` | Python module: ROS2 ↔ MCP bridge; PRM RGB stream implements `robonix.contracts.PrmCameraRgb` (`robonix_contracts_pb2_grpc`). |
 | `ros_ws/src/eaios_webots` | ROS 2 Python package: Webots world + `robot_launch.py`. |
 | `nav2_bringup/config` | Nav2 + AMCL YAML, map, and rviz config. |
 | `bridge/Dockerfile` | Humble + Webots `.deb` + colcon build of `eaios_webots` + `tiago_bridge`. |

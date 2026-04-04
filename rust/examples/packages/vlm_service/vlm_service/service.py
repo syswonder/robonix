@@ -3,10 +3,9 @@
 """VLM service: registers with robonix-atlas, serves chat completions over gRPC.
 
 The agent discovers this service via the control plane, negotiates a channel,
-then calls `VlmService.ChatStream` (server streaming) when available, or falls
-back to unary `VlmService.Chat`. Both are defined in
-`robonix-interfaces/robonix_proto/vlm.proto` (generated from ROS IDL under
-`lib/vlm/`).
+then calls contract `SysModelVlmChat.Stream` (server streaming). Wire types live in
+`vlm.proto`; the gRPC service is only in `robonix_contracts.proto` (see
+`rust/contracts` + codegen).
 
 Required environment variables:
   VLM_API_KEY       API key for the VLM/LLM provider
@@ -45,9 +44,9 @@ _ensure_proto_gen()
 import grpc
 import robonix_runtime_pb2 as pb
 import robonix_runtime_pb2_grpc as pb_grpc
+import robonix_contracts_pb2_grpc
 import robonix_msg_pb2
 import vlm_pb2
-import vlm_pb2_grpc
 
 _HELP = """\
 ERROR: VLM_API_KEY environment variable is not set.
@@ -86,14 +85,11 @@ def _iface_meta() -> str:
             "transport": "grpc",
             "contract": {
                 "idl_type": "protobuf",
-                "proto_file": "robonix-interfaces/robonix_proto/vlm.proto",
-                "service": "robonix.vlm.VlmService",
-                "rpc_method": "/robonix.vlm.VlmService/Chat",
-                "request_type": "Chat_Request",
-                "response_type": "Chat_Response",
-                "streaming_rpc_method": "/robonix.vlm.VlmService/ChatStream",
-                "stream_request_type": "ChatStream_Request",
-                "stream_event_type": "ChatStreamEvent",
+                "proto_file": "robonix-interfaces/robonix_proto/robonix_contracts.proto",
+                "service": "robonix.contracts.SysModelVlmChat",
+                "streaming_rpc_method": "/robonix.contracts.SysModelVlmChat/Stream",
+                "stream_request_type": "robonix.vlm.ChatStream_Request",
+                "stream_event_type": "robonix.vlm.ChatStreamEvent",
             },
         }
     )
@@ -138,42 +134,6 @@ def main() -> None:
         if stream:
             return out
         return out.choices[0]
-
-    def handle_chat(request, context):
-        """OpenAI-compatible chat completions proxy — forwards tools for function calling."""
-        req_messages = _build_openai_messages(request)
-        tools_list = _build_openai_tools(request)
-        tc_mode = request.tool_choice if request.tool_choice else None
-
-        choice = _openai_chat(
-            req_messages,
-            tools=tools_list,
-            tool_choice=tc_mode,
-            max_tokens=request.max_tokens,
-        )
-        result = vlm_pb2.Chat_Response(content=choice.message.content or "")
-        if choice.message.tool_calls:
-            for tc in choice.message.tool_calls:
-                result.tool_calls.add(
-                    id=tc.id,
-                    name=tc.function.name,
-                    arguments_json=tc.function.arguments,
-                )
-        return result
-
-    def handle_describe(request, context):
-        """Simple image description (legacy interface)."""
-        prompt = request.prompt or "Describe the image."
-        parts = [{"type": "text", "text": prompt}]
-        if request.image_base64:
-            parts.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{request.image_base64}"},
-                }
-            )
-        choice = _openai_chat([{"role": "user", "content": parts}], max_tokens=512)
-        return vlm_pb2.Describe_Response(text=choice.message.content or "")
 
     def _build_openai_messages(request):
         req_messages = []
@@ -261,18 +221,14 @@ def main() -> None:
 
         yield vlm_pb2.ChatStreamEvent(finish_reason=finish)
 
-    class VlmHandler(vlm_pb2_grpc.VlmServiceServicer):
-        def Chat(self, request, context):
-            return handle_chat(request, context)
-
-        def ChatStream(self, request, context):
+    class VlmHandler(robonix_contracts_pb2_grpc.SysModelVlmChatServicer):
+        def Stream(self, request, context):
             return handle_chat_stream(request, context)
 
-        def Describe(self, request, context):
-            return handle_describe(request, context)
-
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-    vlm_pb2_grpc.add_VlmServiceServicer_to_server(VlmHandler(), server)
+    robonix_contracts_pb2_grpc.add_SysModelVlmChatServicer_to_server(
+        VlmHandler(), server
+    )
 
     bind_candidates: list[str] = []
     if os.environ.get("VLM_BIND_ADDR", "").strip():

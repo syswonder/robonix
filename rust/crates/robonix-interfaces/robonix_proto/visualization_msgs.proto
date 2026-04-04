@@ -123,15 +123,3 @@ message UVCoordinate {
   float v = 2;
 }
 
-message GetInteractiveMarkers_Request {
-}
-
-message GetInteractiveMarkers_Response {
-  uint64 sequence_number = 1;
-  repeated InteractiveMarker markers = 2;
-}
-
-service VisualizationMsgsService {
-  rpc GetInteractiveMarkers (GetInteractiveMarkers_Request) returns (GetInteractiveMarkers_Response);
-}
-

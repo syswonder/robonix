@@ -212,8 +212,7 @@ impl MsgResolver {
     }
 
     pub fn srv_spec(&self, package: &str, name: &str) -> Option<&SrvSpec> {
-        self.srv_cache
-            .get(&(package.to_string(), name.to_string()))
+        self.srv_cache.get(&(package.to_string(), name.to_string()))
     }
 }
 

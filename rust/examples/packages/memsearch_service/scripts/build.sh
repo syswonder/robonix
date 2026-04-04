@@ -14,26 +14,35 @@ if [[ "${RBNX_BUILD_CLEAN:-}" == "1" ]]; then
   rm -rf "$PROTO_GEN"
 fi
 
-# IDL data types → Python dataclasses for MCP tool schemas (robonix-codegen --lang mcp).
-echo "[build] generating robonix_mcp_types (robonix-codegen --lang mcp)..."
-mkdir -p "$MCP_TYPES"
-# Prefer system cargo if rustup proxy is unhealthy.
+INTERFACES_LIB="$RUST_ROOT/crates/robonix-interfaces/lib"
+CONTRACTS_DIR="$RUST_ROOT/contracts"
+INTERFACES_DIR="$RUST_ROOT/crates/robonix-interfaces/robonix_proto"
 if [[ -x /usr/bin/cargo ]]; then
   CARGO_BIN=/usr/bin/cargo
 else
   CARGO_BIN="${CARGO:-cargo}"
 fi
+
+echo "[build] regenerating crates/robonix-interfaces/robonix_proto (robonix-codegen --lang proto)..."
+"$CARGO_BIN" run -p robonix-codegen --manifest-path "$RUST_ROOT/Cargo.toml" -- \
+  --lang proto \
+  -I "$INTERFACES_LIB" \
+  --contracts "$CONTRACTS_DIR" \
+  -o "$INTERFACES_DIR"
+
+# IDL data types → Python dataclasses for MCP tool schemas (robonix-codegen --lang mcp).
+echo "[build] generating robonix_mcp_types (robonix-codegen --lang mcp)..."
+mkdir -p "$MCP_TYPES"
 "$CARGO_BIN" run -p robonix-codegen --manifest-path "$RUST_ROOT/Cargo.toml" -- \
   --lang mcp \
-  -I "$RUST_ROOT/crates/robonix-interfaces/lib" \
+  -I "$INTERFACES_LIB" \
   -o "$MCP_TYPES"
 
-# Generate package-local protobuf stubs required by service.py.
+# Package-local *_pb2*.py (includes robonix_contracts_pb2_grpc for tooling); gRPC services only in robonix_contracts.proto.
 mkdir -p "$PROTO_GEN"
 if python3 -m grpc_tools.protoc --version >/dev/null 2>&1; then
   echo "[build] generating proto_gen stubs (grpc_tools.protoc)..."
   RUNTIME_DIR="$RUST_ROOT/proto"
-  INTERFACES_DIR="$RUST_ROOT/crates/robonix-interfaces/robonix_proto"
   python3 -m grpc_tools.protoc \
     -I "$RUNTIME_DIR" \
     -I "$INTERFACES_DIR" \

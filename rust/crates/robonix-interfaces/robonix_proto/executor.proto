@@ -30,28 +30,19 @@ message ToolSpec {
   robonix.pilot.ToolRouting routing = 4;
 }
 
+message Execute_Request {
+  robonix.pilot.TaskGraph graph = 1;
+}
+
+message Execute_Response {
+  TaskCallEvent event = 1;
+}
+
 message ListTools_Request {
   bool refresh = 1;
 }
 
 message ListTools_Response {
   repeated ToolSpec tools = 1;
-}
-
-message Execute_Request {
-  robonix.pilot.TaskGraph graph = 1;
-}
-
-message Execute_Result {
-  TaskCallEvent result = 1;
-}
-
-message Execute_Feedback {
-  TaskCallEvent feedback = 1;
-}
-
-service ExecutorService {
-  rpc ListTools (ListTools_Request) returns (ListTools_Response);
-  rpc Execute (Execute_Request) returns (stream TaskCallEvent);
 }
 

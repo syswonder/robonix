@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// pilot_service.rs — gRPC PilotService implementation
+// pilot_service.rs — gRPC `SysRuntimePilot` (contract facade)
 
-use crate::executor::executor_service_client::ExecutorServiceClient;
-use crate::pilot::{
-    AbortSessionRequest, AbortSessionResponse, HandleIntentRequest, ListSessionsRequest,
-    ListSessionsResponse, PilotEvent, SessionInfo, SessionStatusEvent,
-    pilot_service_server::PilotService,
+use crate::contracts::{
+    sys_runtime_executor_client::SysRuntimeExecutorClient,
+    sys_runtime_executor_list_tools_client::SysRuntimeExecutorListToolsClient,
+    sys_runtime_pilot_server::SysRuntimePilot,
 };
+use crate::pilot::{Intent, PilotEvent, SessionStatusEvent};
 use crate::pilot_wire::{self, PilotStreamBody};
-use crate::planner;
+use crate::planner::{self, ExecutorConn};
 use crate::session::SessionManager;
 use crate::session_state::SessionState;
 use crate::vlm::VlmClient;
-use anyhow::Result;
 use robonix_sdk::RobonixClient;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,8 +25,7 @@ pub struct PilotServiceImpl {
     vlm: Arc<Mutex<VlmClient>>,
     sessions: SessionManager,
     executor_endpoint: String,
-    /// Per-session cancellation senders.  Stored outside the Session lock so
-    /// `abort_session` can cancel without waiting for the turn to release it.
+    /// Per-session cancellation senders. `abort_turn` Intent signals this without holding the session lock.
     cancels: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
 }
 
@@ -47,20 +45,40 @@ impl PilotServiceImpl {
     }
 }
 
+fn intent_is_abort_turn(intent: &Intent) -> bool {
+    let j = intent.context_json.trim();
+    if j.is_empty() {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(j)
+        .ok()
+        .and_then(|v| v.get("abort_turn").and_then(|x| x.as_bool()))
+        .unwrap_or(false)
+}
+
 #[tonic::async_trait]
-impl PilotService for PilotServiceImpl {
-    type HandleIntentStream = ReceiverStream<Result<PilotEvent, Status>>;
+impl SysRuntimePilot for PilotServiceImpl {
+    type StreamStream = ReceiverStream<Result<PilotEvent, Status>>;
 
-    async fn handle_intent(
+    async fn stream(
         &self,
-        request: Request<HandleIntentRequest>,
-    ) -> Result<Response<Self::HandleIntentStream>, Status> {
-        let mut intent = request
-            .into_inner()
-            .intent
-            .ok_or_else(|| Status::invalid_argument("missing intent"))?;
+        request: Request<Intent>,
+    ) -> Result<Response<Self::StreamStream>, Status> {
+        let mut intent = request.into_inner();
 
-        // Assign a session_id if Liaison didn't provide one.
+        if intent_is_abort_turn(&intent) {
+            let id = intent.session_id.clone();
+            let ok = if let Some(tx) = self.cancels.lock().await.get(&id) {
+                let _ = tx.send(true);
+                true
+            } else {
+                false
+            };
+            log::debug!("[pilot] abort_turn intent for session {id} (signaled={ok})");
+            let (_tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(1);
+            return Ok(Response::new(ReceiverStream::new(rx)));
+        }
+
         if intent.session_id.is_empty() {
             intent.session_id = Uuid::new_v4().to_string();
         }
@@ -74,12 +92,10 @@ impl PilotService for PilotServiceImpl {
         let session_id = intent.session_id.clone();
         let cancels = Arc::clone(&self.cancels);
 
-        // Fresh cancel channel for this turn.
         let (cancel_tx, cancel_rx) = watch::channel(false);
         cancels.lock().await.insert(session_id.clone(), cancel_tx);
 
         tokio::spawn(async move {
-            // Emit session-created / active status.
             let _ = tx
                 .send(Ok(pilot_wire::pack(
                     &session_id,
@@ -91,22 +107,36 @@ impl PilotService for PilotServiceImpl {
                 )))
                 .await;
 
-            // Connect to Executor.
-            let mut executor = match ExecutorServiceClient::connect(executor_endpoint.clone()).await
-            {
-                Ok(c) => c,
+            let channel = match tonic::transport::Endpoint::new(executor_endpoint.clone()) {
+                Ok(ep) => match ep.connect().await {
+                    Ok(ch) => ch,
+                    Err(e) => {
+                        let _ = tx
+                            .send(Err(Status::unavailable(format!(
+                                "cannot connect to Executor at '{executor_endpoint}': {e}"
+                            ))))
+                            .await;
+                        cancels.lock().await.remove(&session_id);
+                        return;
+                    }
+                },
                 Err(e) => {
                     let _ = tx
-                        .send(Err(Status::unavailable(format!(
-                            "cannot connect to Executor at '{}': {e}",
+                        .send(Err(Status::internal(format!(
+                            "invalid Executor endpoint '{}': {e}",
                             executor_endpoint
                         ))))
                         .await;
+                    cancels.lock().await.remove(&session_id);
                     return;
                 }
             };
 
-            // Lock session and run one turn.
+            let mut executor = ExecutorConn {
+                graph: SysRuntimeExecutorClient::new(channel.clone()),
+                list_tools: SysRuntimeExecutorListToolsClient::new(channel),
+            };
+
             let mut session = session_arc.lock().await;
             if let Err(e) = planner::run_turn(
                 &intent,
@@ -123,42 +153,9 @@ impl PilotService for PilotServiceImpl {
                 let _ = tx.send(Err(Status::internal(e.to_string()))).await;
             }
 
-            // Clean up cancel entry.
             cancels.lock().await.remove(&session_id);
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
-    }
-
-    async fn abort_session(
-        &self,
-        request: Request<AbortSessionRequest>,
-    ) -> Result<Response<AbortSessionResponse>, Status> {
-        let id = request.into_inner().session_id;
-        // Signal the running turn via the cancel channel (no session lock needed).
-        let ok = if let Some(tx) = self.cancels.lock().await.get(&id) {
-            let _ = tx.send(true);
-            true
-        } else {
-            false
-        };
-        Ok(Response::new(AbortSessionResponse { ok }))
-    }
-
-    async fn list_sessions(
-        &self,
-        _request: Request<ListSessionsRequest>,
-    ) -> Result<Response<ListSessionsResponse>, Status> {
-        let list = self.sessions.list().await;
-        let sessions = list
-            .into_iter()
-            .map(|(id, state, created_at_ms, turn_count)| SessionInfo {
-                session_id: id,
-                state: state as u32,
-                created_at_ms,
-                turn_count,
-            })
-            .collect();
-        Ok(Response::new(ListSessionsResponse { sessions }))
     }
 }

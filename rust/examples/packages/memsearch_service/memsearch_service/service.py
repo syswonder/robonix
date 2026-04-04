@@ -72,14 +72,10 @@ mem = MemSearch(
 
 
 # ── Contract: robonix/sys/memory/search ──────────────────────────────────────
-# input: std_msgs/msg/String, output: std_msgs/msg/String
-# Tool wire JSON == std_msgs_mcp.String.to_dict(); handlers use codegen types via mcp_contract.
 
 @mcp_contract(
     mcp,
     contract_id="robonix/sys/memory/search",
-    input_cls=std_msgs_mcp.String,
-    output_cls=std_msgs_mcp.String,
 )
 async def search_memory(msg: std_msgs_mcp.String) -> std_msgs_mcp.String:
     """Search the agent's long-term memory for relevant past context, decisions, or user preferences.
@@ -98,13 +94,10 @@ async def search_memory(msg: std_msgs_mcp.String) -> std_msgs_mcp.String:
 
 
 # ── Contract: robonix/sys/memory/compact ─────────────────────────────────────
-# input: std_msgs/msg/Empty, output: std_msgs/msg/String
 
 @mcp_contract(
     mcp,
     contract_id="robonix/sys/memory/compact",
-    input_cls=std_msgs_mcp.Empty,
-    output_cls=std_msgs_mcp.String,
 )
 async def compact_memory(msg: std_msgs_mcp.Empty) -> std_msgs_mcp.String:
     """Compact and summarize recent memories. Call this at the end of a session.
@@ -120,13 +113,10 @@ async def compact_memory(msg: std_msgs_mcp.Empty) -> std_msgs_mcp.String:
 
 
 # ── Contract: robonix/sys/memory/save ────────────────────────────────────────
-# input: std_msgs/msg/String, output: std_msgs/msg/String
 
 @mcp_contract(
     mcp,
     contract_id="robonix/sys/memory/save",
-    input_cls=std_msgs_mcp.String,
-    output_cls=std_msgs_mcp.String,
 )
 async def save_memory(msg: std_msgs_mcp.String) -> std_msgs_mcp.String:
     """Save an important fact, user preference, or decision to long-term memory.

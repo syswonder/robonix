@@ -7,7 +7,7 @@ version = "1"
 kind    = "primitive"
 
 [io.srv]
-path = "prm_base/srv/GetLaserScan"
+srv = "prm_base/srv/GetLaserScan"
 
 [mode]
 type = "rpc"

@@ -12,9 +12,11 @@
 // `TaskCall[]`; TODO: behavior tree + RTDL, see `TaskGraph.msg`).
 // Pilot does NOT pre-plan a full graph — it reasons step by step.
 
-use crate::executor::{
-    ExecuteRequest, ListToolsRequest, executor_service_client::ExecutorServiceClient,
+use crate::contracts::{
+    sys_runtime_executor_client::SysRuntimeExecutorClient,
+    sys_runtime_executor_list_tools_client::SysRuntimeExecutorListToolsClient,
 };
+use crate::executor::ListToolsRequest;
 use crate::pilot::{
     BatchResult, Intent, PilotEvent, SessionStatusEvent, TaskCall, TaskCallResult, TaskGraph,
     ToolRouting,
@@ -28,8 +30,15 @@ use anyhow::Result;
 use robonix_sdk::RobonixClient;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc::Sender, watch};
+use tonic::Request;
 use tonic::transport::Channel;
 use uuid::Uuid;
+
+/// gRPC clients for Executor contract services (`SysRuntimeExecutor`, `SysRuntimeExecutorListTools`).
+pub struct ExecutorConn {
+    pub graph: SysRuntimeExecutorClient<Channel>,
+    pub list_tools: SysRuntimeExecutorListToolsClient<Channel>,
+}
 
 // ── Hard limits ───────────────────────────────────────────────────────────────
 
@@ -74,7 +83,7 @@ pub async fn run_turn(
     session: &mut Session,
     sdk: &Arc<Mutex<RobonixClient>>,
     vlm: &Arc<Mutex<VlmClient>>,
-    executor: &mut ExecutorServiceClient<Channel>,
+    executor: &mut ExecutorConn,
     tx: &Sender<Result<PilotEvent, tonic::Status>>,
     mut cancel_rx: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -126,7 +135,8 @@ pub async fn run_turn(
     // Tool catalogue (needed before prefetch so MCP tools get correct routing — never dispatch as
     // unknown builtins when `TaskCall.routing` is missing).
     let initial_tools = executor
-        .list_tools(ListToolsRequest { refresh: true })
+        .list_tools
+        .call(Request::new(ListToolsRequest { refresh: true }))
         .await
         .map_err(|e| anyhow::anyhow!("ListTools RPC failed: {e}"))?
         .into_inner()
@@ -168,7 +178,8 @@ pub async fn run_turn(
         // that registered after the turn started (e.g. Tiago bridge warming up)
         // are visible to the VLM immediately in the next round.
         let tool_list = executor
-            .list_tools(ListToolsRequest { refresh: true })
+            .list_tools
+            .call(Request::new(ListToolsRequest { refresh: true }))
             .await
             .map_err(|e| anyhow::anyhow!("ListTools RPC failed: {e}"))?
             .into_inner()
@@ -290,9 +301,10 @@ pub async fn run_turn(
 
         // ── 6. Dispatch to Executor ───────────────────────────────────────────
         let mut exec_stream = executor
-            .execute(ExecuteRequest { graph: Some(graph) })
+            .graph
+            .stream(Request::new(graph))
             .await
-            .map_err(|e| anyhow::anyhow!("Executor Execute RPC failed: {e}"))?
+            .map_err(|e| anyhow::anyhow!("Executor Stream RPC failed: {e}"))?
             .into_inner();
 
         let mut results: Vec<TaskCallResult> = Vec::new();
@@ -458,7 +470,7 @@ fn decode_string_output(output: &str) -> String {
 /// missing memory context.
 async fn prefetch_memory(
     query: &str,
-    executor: &mut ExecutorServiceClient<Channel>,
+    executor: &mut ExecutorConn,
     routing: Option<ToolRouting>,
 ) -> Option<String> {
     let routing = routing?;
@@ -479,7 +491,8 @@ async fn prefetch_memory(
     };
 
     let mut stream = executor
-        .execute(ExecuteRequest { graph: Some(graph) })
+        .graph
+        .stream(Request::new(graph))
         .await
         .ok()?
         .into_inner();
@@ -499,9 +512,10 @@ async fn prefetch_memory(
 }
 
 /// Best-effort MCP `compact_memory` (session teardown). Ignores failures (tool may be absent).
-async fn try_compact_memory(executor: &mut ExecutorServiceClient<Channel>) {
+async fn try_compact_memory(executor: &mut ExecutorConn) {
     let tools = match executor
-        .list_tools(ListToolsRequest { refresh: false })
+        .list_tools
+        .call(Request::new(ListToolsRequest { refresh: false }))
         .await
     {
         Ok(r) => r.into_inner().tools,
@@ -534,7 +548,8 @@ async fn try_compact_memory(executor: &mut ExecutorServiceClient<Channel>) {
     };
 
     let Ok(mut stream) = executor
-        .execute(ExecuteRequest { graph: Some(graph) })
+        .graph
+        .stream(Request::new(graph))
         .await
         .map(|r| r.into_inner())
     else {

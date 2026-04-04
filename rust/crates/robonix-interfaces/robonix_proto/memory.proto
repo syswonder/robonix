@@ -29,9 +29,3 @@ message Search_Response {
   robonix.std_msgs.String results = 1;
 }
 
-service MemoryService {
-  rpc Compact (Compact_Request) returns (Compact_Response);
-  rpc Save (Save_Request) returns (Save_Response);
-  rpc Search (Search_Request) returns (Search_Response);
-}
-

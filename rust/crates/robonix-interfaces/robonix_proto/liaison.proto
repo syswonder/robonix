@@ -6,30 +6,11 @@ package robonix.liaison;
 
 import "pilot.proto";
 
-message Interrupt_Request {
-  string session_id = 1;
-  string reason = 2;
-}
-
-message Interrupt_Response {
-  bool ok = 1;
-  string session_id = 2;
-}
-
 message HandleIntent_Request {
   robonix.pilot.Intent intent = 1;
 }
 
-message HandleIntent_Result {
-  robonix.pilot.PilotEvent result = 1;
-}
-
-message HandleIntent_Feedback {
-  robonix.pilot.PilotEvent feedback = 1;
-}
-
-service LiaisonService {
-  rpc Interrupt (Interrupt_Request) returns (Interrupt_Response);
-  rpc HandleIntent (HandleIntent_Request) returns (stream robonix.pilot.PilotEvent);
+message HandleIntent_Response {
+  robonix.pilot.PilotEvent event = 1;
 }
 

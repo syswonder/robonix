@@ -6,11 +6,11 @@ Robonix targets Linux broadly. The control plane (`robonix-atlas`), runtime serv
 
 | Package | Role |
 |---------|------|
-| `packages/vlm_service/` | VLM gRPC service (`rbnx build` sets `PYTHONPATH` to package + `examples/proto_gen`). |
-| `packages/tiago_sim_stack/` | Docker Compose: Webots (GUI) + Nav2 + rviz2 + ROS2-MCP bridge (`tiago_bridge` module inside the image). |
-| `packages/maniskill_vla_demo/` | ManiSkill3 VLA demo: env, perception, VLA nodes for Pilot ReAct loop. |
-| `packages/zero_copy_demo/` | Zero-copy shared-memory demo comparing Robonix buffer vs ROS 2/FastDDS. |
-| `packages/memsearch_service/` | Semantic memory search service. |
+| `packages/vlm_service/` | VLM data plane: implements contract `SysModelVlmChat` from `robonix_contracts.proto` (wire types in `vlm.proto`). `rbnx build` refreshes **package-local** `proto_gen/`. |
+| `packages/tiago_sim_stack/` | Docker Compose: Webots (GUI) + Nav2 + rviz2 + `tiago_bridge` (MCP tools + `PrmCameraRgb` gRPC stream from `robonix_contracts.proto`). |
+| `packages/maniskill_vla_demo/` | ManiSkill3 VLA demo: MCP contracts + **demo-local** `EnvDataService` gRPC (`maniskill_env.proto`, not merged contract services). |
+| `packages/zero_copy_demo/` | Zero-copy shared-memory demo (`RobonixRuntime` control plane only; no contract gRPC servicer). |
+| `packages/memsearch_service/` | Semantic memory over MCP (`RobonixRuntime` registration only). |
 
 Validate:
 
@@ -34,8 +34,8 @@ cargo run -p robonix-cli -- start -p examples/packages/tiago_sim_stack -n com.ro
 | Path | Role |
 |------|------|
 | `packages/` | Manifests + code per demo. |
-| `proto_gen/` | Generated Python `*_pb2.py` (see script below). |
-| `scripts/gen_proto_python.sh` | Regenerate `proto_gen/` from `rust/proto` + `crates/robonix-interfaces/robonix_proto`. |
+| `proto_gen/` | Optional **workspace-level** Python stubs (`scripts/gen_proto_python.sh`). Each package under `packages/*/` also has its own `proto_gen/` from its `scripts/build.sh`. |
+| `scripts/gen_proto_python.sh` | Regenerate `examples/proto_gen/` from `rust/proto` + `crates/robonix-interfaces/robonix_proto`. gRPC **service** RPCs are defined only in `robonix_contracts.proto`. |
 | `scripts/smoke_minimal.sh` | Start atlas + run `smoke_control_plane.py` (no VLM). |
 | `run.sh` | Full E2E: atlas → executor → pilot → packages → liaison (foreground). |
 | `requirements.txt` | Pinned Python deps; `protobuf<7` so `grpcio-tools` and `openai` coexist. |

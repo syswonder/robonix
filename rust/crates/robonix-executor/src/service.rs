@@ -1,20 +1,22 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// service.rs — gRPC ExecutorService implementation
+// service.rs — gRPC contract services (SysRuntimeExecutor, SysRuntimeExecutorListTools)
 
+use crate::contracts::{
+    sys_runtime_executor_list_tools_server::SysRuntimeExecutorListTools,
+    sys_runtime_executor_server::SysRuntimeExecutor,
+};
 use crate::dispatch;
 use crate::exec_wire;
-use crate::executor::{
-    ExecuteRequest, ListToolsRequest, ListToolsResponse, TaskCallEvent, ToolSpec,
-    executor_service_server::ExecutorService,
-};
+use crate::executor::{ListToolsRequest, ListToolsResponse, TaskCallEvent, ToolSpec};
+use crate::pilot::TaskGraph;
 use crate::tools;
-use anyhow::Result;
 use robonix_sdk::RobonixClient;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
+#[derive(Clone)]
 pub struct ExecutorServiceImpl {
     sdk: Arc<Mutex<RobonixClient>>,
 }
@@ -26,17 +28,14 @@ impl ExecutorServiceImpl {
 }
 
 #[tonic::async_trait]
-impl ExecutorService for ExecutorServiceImpl {
-    type ExecuteStream = ReceiverStream<Result<TaskCallEvent, Status>>;
+impl SysRuntimeExecutor for ExecutorServiceImpl {
+    type StreamStream = ReceiverStream<Result<TaskCallEvent, Status>>;
 
-    async fn execute(
+    async fn stream(
         &self,
-        request: Request<ExecuteRequest>,
-    ) -> Result<Response<Self::ExecuteStream>, Status> {
-        let graph = request
-            .into_inner()
-            .graph
-            .ok_or_else(|| Status::invalid_argument("missing graph"))?;
+        request: Request<TaskGraph>,
+    ) -> Result<Response<Self::StreamStream>, Status> {
+        let graph = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let sdk = Arc::clone(&self.sdk);
 
@@ -92,8 +91,11 @@ impl ExecutorService for ExecutorServiceImpl {
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
+}
 
-    async fn list_tools(
+#[tonic::async_trait]
+impl SysRuntimeExecutorListTools for ExecutorServiceImpl {
+    async fn call(
         &self,
         request: Request<ListToolsRequest>,
     ) -> Result<Response<ListToolsResponse>, Status> {

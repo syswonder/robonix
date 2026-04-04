@@ -3,6 +3,7 @@
 
 use anyhow::{Result, bail};
 use clap::Parser;
+use std::collections::BTreeSet;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
@@ -68,6 +69,11 @@ fn main() -> Result<()> {
     resolver.resolve_all_in_index()?;
     resolver.resolve_all_srv()?;
 
+    let contract_srvs: Option<BTreeSet<(String, String)>> = match &args.contracts {
+        Some(cdir) => Some(contract_gen::collect_referenced_srvs(cdir)?),
+        None => None,
+    };
+
     let specs = resolver.ordered_specs();
     let srvs = resolver.ordered_srvs();
     let mut pkgs = std::collections::BTreeSet::new();
@@ -100,9 +106,9 @@ fn main() -> Result<()> {
             );
         }
         _ => {
-            proto_gen::generate(&resolver, &args.out)?;
+            proto_gen::generate(&resolver, &args.out, contract_srvs.as_ref())?;
             eprintln!(
-                "{} generated proto: {} packages, {} msgs, {} srvs -> {}",
+                "{} generated proto: {} packages, {} msgs, {} srv indexed -> {}",
                 ridlc_prefix(),
                 pkgs.len(),
                 specs.len(),

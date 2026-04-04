@@ -55,6 +55,31 @@ struct ModeSpec {
     mode_type: String,
 }
 
+/// `(ROS package, srv interface name)` pairs from every contract `[io.srv].srv` path.
+/// Used by proto generation: only these `.srv` files get `*_Request` / `*_Response` messages; per-package `service` RPCs are not emitted.
+pub fn collect_referenced_srvs(contracts_dir: &Path) -> Result<BTreeSet<(String, String)>> {
+    let paths = collect_tomls(contracts_dir)?;
+    let mut set = BTreeSet::new();
+    for p in paths {
+        let raw =
+            fs::read_to_string(&p).with_context(|| format!("read contract {}", p.display()))?;
+        let c: ContractToml =
+            toml::from_str(&raw).with_context(|| format!("parse TOML {}", p.display()))?;
+        if let Some(ref io_srv) = c.io.srv {
+            let path = io_srv.srv.trim();
+            if let Some((pkg, "srv", name)) = parse_ros_path(path) {
+                set.insert((pkg.to_string(), name.to_string()));
+            } else {
+                bail!(
+                    "contract {}: [io.srv].srv must be pkg/srv/Name, got {path:?}",
+                    c.contract.id
+                );
+            }
+        }
+    }
+    Ok(set)
+}
+
 pub fn generate(resolver: &mut MsgResolver, contracts_dir: &Path, out_dir: &Path) -> Result<()> {
     let paths = collect_tomls(contracts_dir)?;
     if paths.is_empty() {
@@ -147,6 +172,8 @@ pub fn generate(resolver: &mut MsgResolver, contracts_dir: &Path, out_dir: &Path
         outfile.display(),
         contracts.len()
     );
+
+    super::contract_proto_modules_gen::write(out_dir)?;
     Ok(())
 }
 
@@ -243,7 +270,12 @@ fn resolve_contract_io(
 
     match mode {
         "rpc" => {
-            let s = s.ok_or_else(|| anyhow::anyhow!("contract {}: [mode].type = \"rpc\" requires [io.srv]", c.contract.id))?;
+            let s = s.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "contract {}: [mode].type = \"rpc\" requires [io.srv]",
+                    c.contract.id
+                )
+            })?;
             resolve_srv_contract_pair(&s.srv, resolver, imports, needs_string_wire)
         }
         "rpc_server_stream" => {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// build.rs — `liaison.proto` + `pilot.proto` (client to Pilot) from robonix-codegen output only.
+// build.rs — `robonix_contracts.proto` (+ imports) from robonix-codegen output.
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -8,21 +8,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parent()
         .and_then(|p| p.parent())
         .expect("robonix-liaison should live at rust/crates/robonix-liaison");
-    let ridl_proto = workspace_root.join("crates/robonix-interfaces/robonix_proto");
-    let liaison_proto = ridl_proto.join("liaison.proto");
-    let pilot_proto = ridl_proto.join("pilot.proto");
 
-    println!("cargo:rerun-if-changed={}", liaison_proto.display());
-    println!("cargo:rerun-if-changed={}", pilot_proto.display());
+    let ridl_proto = workspace_root.join("crates/robonix-interfaces/robonix_proto");
+    let contracts_proto = ridl_proto.join("robonix_contracts.proto");
+
+    if !contracts_proto.is_file() {
+        panic!(
+            "missing generated proto — run: cargo run -p robonix-codegen -- --lang proto -I crates/robonix-interfaces/lib --contracts contracts -o crates/robonix-interfaces/robonix_proto",
+        );
+    }
+
+    println!("cargo:rerun-if-changed={}", contracts_proto.display());
 
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
     unsafe { std::env::set_var("PROTOC", protoc) };
 
-    let inc = vec![ridl_proto];
+    let google_inc = protoc_bin_vendored::include_path()?;
+    let inc = vec![ridl_proto, google_inc];
+
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile_protos(&[liaison_proto, pilot_proto], &inc)?;
+        .compile_protos(&[contracts_proto], &inc)?;
 
     Ok(())
 }

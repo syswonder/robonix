@@ -4,7 +4,6 @@ syntax = "proto3";
 
 package robonix.robonix_msg;
 
-import "builtin_interfaces.proto";
 import "geometry_msgs.proto";
 import "sensor_msgs.proto";
 import "std_msgs.proto";
@@ -184,63 +183,5 @@ message ZeroCopyFrame {
   uint64 sync_token = 13;
   bool gpu_pinned = 14;
   uint32 pool_id = 15;
-}
-
-message AddWaypoint_Request {
-  string name = 1;
-  double x = 2;
-  double y = 3;
-  double z = 4;
-}
-
-message AddWaypoint_Response {
-  bool success = 1;
-  string message = 2;
-}
-
-message GetMapSnapshot_Request {
-}
-
-message GetMapSnapshot_Response {
-  repeated Object objects = 1;
-  repeated Waypoint waypoints = 2;
-  robonix.builtin_interfaces.Time stamp = 3;
-}
-
-message QuerySemanticMap_Request {
-  repeated string types = 1;
-  string label_filter = 2;
-}
-
-message QuerySemanticMap_Response {
-  repeated Object objects = 1;
-  robonix.builtin_interfaces.Time stamp = 2;
-}
-
-message RemoveObject_Request {
-  string object_id = 1;
-}
-
-message RemoveObject_Response {
-  bool success = 1;
-  string message = 2;
-}
-
-message TriggerScan_Request {
-  bool force = 1;
-}
-
-message TriggerScan_Response {
-  bool success = 1;
-  string message = 2;
-  uint32 objects_found = 3;
-}
-
-service RobonixMsgService {
-  rpc AddWaypoint (AddWaypoint_Request) returns (AddWaypoint_Response);
-  rpc GetMapSnapshot (GetMapSnapshot_Request) returns (GetMapSnapshot_Response);
-  rpc QuerySemanticMap (QuerySemanticMap_Request) returns (QuerySemanticMap_Response);
-  rpc RemoveObject (RemoveObject_Request) returns (RemoveObject_Response);
-  rpc TriggerScan (TriggerScan_Request) returns (TriggerScan_Response);
 }
 

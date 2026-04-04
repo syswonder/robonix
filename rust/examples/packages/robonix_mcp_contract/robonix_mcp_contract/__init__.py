@@ -3,15 +3,13 @@
 
 Goals (see repo ``rust/contracts/*.toml`` + ``robonix-codegen --lang mcp``):
 
-- **Input / output types** in your handler **must** be the generated Python message classes
-  that match the contract's ``[io]`` (same names as ROS IDL under
-  ``rust/crates/robonix-interfaces/lib``).
-- You **declare** ``contract_id``, ``input_cls``, and ``output_cls``; we **validate** that
-  your function's type annotations match those classes (runtime check at import).
-- **MCP wire**: tool ``arguments`` JSON is exactly ``input_cls.to_dict()`` / ``from_dict()``
+- **Declare** ``contract_id`` on ``@mcp_contract``; **input/output codegen types** come from
+  the handler's type annotations (single parameter + return). Those types must match the
+  contract's ``[io]`` (``robonix-codegen --lang mcp``).
+- **MCP wire**: tool ``arguments`` JSON matches ``input_cls.to_dict()`` / ``from_dict()``
   (top-level keys = ROS message fields). FastMCP normally maps Python *parameter names*
   to JSON keys; we generate a **shim** whose parameters match those wire keys, then call
-  your handler as ``user_fn(msg: input_cls) -> output_cls``.
+  your handler.
 
 Handlers may be **sync or async**; the shim is always async and awaits only when needed.
 
@@ -29,59 +27,54 @@ from __future__ import annotations
 
 import inspect
 import logging
-from typing import Any, Callable, TypeVar, get_type_hints
+from typing import Any, Callable, get_type_hints
 
 from mcp.server.fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar("T")
 
-
-def _validate_handler_matches_contract(
-    user_fn: Callable[..., Any],
-    *,
-    contract_id: str,
-    input_cls: type,
-    output_cls: type | None,
-) -> None:
-    """Ensure annotations match ``input_cls`` / ``output_cls`` (mandatory contract alignment)."""
-    hints = get_type_hints(user_fn, globalns=getattr(user_fn, "__globals__", None))
+def _io_types_from_handler(
+    user_fn: Callable[..., Any], *, contract_id: str
+) -> tuple[type, type | None]:
+    """Resolve codegen input/output classes from the handler's annotations."""
+    globalns = getattr(user_fn, "__globals__", None) or {}
+    hints = get_type_hints(user_fn, globalns=globalns, localns=globalns)
     sig = inspect.signature(user_fn)
-    params = list(sig.parameters.values())
+    params = [
+        p
+        for p in sig.parameters.values()
+        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    ]
     if len(params) != 1:
         raise TypeError(
             f"[mcp_contract:{contract_id}] {user_fn.__name__} must have exactly one parameter "
             f"(input message), got {sig}"
         )
     p0 = params[0]
-    if p0.kind not in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
-        raise TypeError(
-            f"[mcp_contract:{contract_id}] invalid parameter kind for {user_fn.__name__}"
-        )
     ann_in = hints.get(p0.name)
     if ann_in is None:
         raise TypeError(
-            f"[mcp_contract:{contract_id}] parameter {p0.name!r} must be annotated "
-            f"as {input_cls.__qualname__}"
+            f"[mcp_contract:{contract_id}] parameter {p0.name!r} must be annotated with the "
+            "codegen input message type"
         )
-    if ann_in is not input_cls:
+    if not isinstance(ann_in, type):
         raise TypeError(
-            f"[mcp_contract:{contract_id}] {user_fn.__name__}: parameter {p0.name!r} "
-            f"must be annotated as {input_cls!r}, got {ann_in!r}"
+            f"[mcp_contract:{contract_id}] parameter {p0.name!r} must be a class, got {ann_in!r}"
         )
-    if output_cls is not None:
-        ann_out = hints.get("return")
-        if ann_out is None:
-            raise TypeError(
-                f"[mcp_contract:{contract_id}] {user_fn.__name__} must annotate return as "
-                f"{output_cls!r}"
-            )
-        if ann_out is not output_cls:
-            raise TypeError(
-                f"[mcp_contract:{contract_id}] {user_fn.__name__}: return must be "
-                f"{output_cls!r}, got {ann_out!r}"
-            )
+    ann_out = hints.get("return")
+    if ann_out is None:
+        raise TypeError(
+            f"[mcp_contract:{contract_id}] {user_fn.__name__} must annotate return type "
+            "(codegen output message class)"
+        )
+    if ann_out is type(None):
+        return ann_in, None
+    if not isinstance(ann_out, type):
+        raise TypeError(
+            f"[mcp_contract:{contract_id}] return must be a codegen message class, got {ann_out!r}"
+        )
+    return ann_in, ann_out
 
 
 def _json_prop_to_py_type(prop: dict[str, Any]) -> type:
@@ -186,36 +179,24 @@ def mcp_contract(
     mcp: FastMCP,
     *,
     contract_id: str,
-    input_cls: type,
-    output_cls: type | None = None,
     name: str | None = None,
     structured_output: bool | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Register an MCP tool with contract-bound, codegen-typed handler.
+    """Register an MCP tool bound to a contract.
 
     Parameters
     ----------
     contract_id
         Same string as ``[contract] id`` in the TOML under ``rust/contracts/`` (e.g.
-        ``robonix/sys/memory/search``). Used for error messages and traceability.
-    input_cls / output_cls
-        Generated module (e.g. ``std_msgs_mcp.String``) for the ROS types listed in that
-        contract's ``[io]`` section.
+        ``robonix/sys/memory/search``).
 
-    The user function **must** be annotated as::
-
-        def tool(msg: <input_cls>) -> <output_cls>:
-        # or
-        async def tool(msg: <input_cls>) -> <output_cls>:
+    The handler **must** annotate exactly one parameter and the return type with the codegen
+    message classes for that contract's ``[io]`` section, e.g.
+    ``async def f(msg: std_msgs_mcp.String) -> std_msgs_mcp.String: ...``
     """
 
     def decorator(user_fn: Callable[..., Any]) -> Callable[..., Any]:
-        _validate_handler_matches_contract(
-            user_fn,
-            contract_id=contract_id,
-            input_cls=input_cls,
-            output_cls=output_cls,
-        )
+        input_cls, output_cls = _io_types_from_handler(user_fn, contract_id=contract_id)
         shim = _make_shim(user_fn, input_cls, output_cls)
         mcp.add_tool(
             shim,
