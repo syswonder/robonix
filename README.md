@@ -2,7 +2,7 @@
   <img src="images/robonix-logo.svg" alt="Robonix" width="420" />
 </p>
 
-<h3 align="center">Robonix - The Embodied Intelligence Operating System</h3>
+<h3 align="center">Robonix - The Embodied AI Operating System</h3>
 
 <p align="center">
   <em>A unified OS platform for robots, agents, and heterogeneous hardware — communication and scheduling in one control plane.</em>
