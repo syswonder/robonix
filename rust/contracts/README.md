@@ -62,4 +62,6 @@ cargo run -p robonix-codegen -- --lang proto \
   -o crates/robonix-interfaces/robonix_proto
 ```
 
+Pass **`--contracts`** so contract-referenced `.srv` get `*_Request` / `*_Response` in `{pkg}.proto` and `robonix_contracts.proto` is emitted. Without `--contracts`, only **`.msg`** types are written (no srv shim).
+
 Do not hand-edit generated `robonix_proto/*.proto`.

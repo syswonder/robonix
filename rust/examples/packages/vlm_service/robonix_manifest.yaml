@@ -1,5 +1,6 @@
 # RFC002: VLM chat completions over gRPC (OpenAI-compatible backend).
-# Host build: scripts/build.sh sets PYTHONPATH (package + package-local proto_gen).
+# Data plane: SysModelVlmChat.Stream (robonix_contracts.proto); stubs in package-local proto_gen/.
+# Host build: scripts/build.sh runs robonix-codegen --lang proto then grpc_tools.protoc.
 manifestVersion: 1
 
 build:

@@ -227,16 +227,3 @@ message TimeReference {
   string source = 3;
 }
 
-message SetCameraInfo_Request {
-  CameraInfo camera_info = 1;
-}
-
-message SetCameraInfo_Response {
-  bool success = 1;
-  string status_message = 2;
-}
-
-service SensorMsgsService {
-  rpc SetCameraInfo (SetCameraInfo_Request) returns (SetCameraInfo_Response);
-}
-

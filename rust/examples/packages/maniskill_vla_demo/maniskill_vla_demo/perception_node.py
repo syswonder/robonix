@@ -434,8 +434,6 @@ def _get_obs_snapshot():
 @mcp_contract(
     mcp,
     contract_id="robonix/prm/perception/detect",
-    input_cls=sensor_msgs_mcp.Image,
-    output_cls=std_msgs_mcp.String,
 )
 def perception_detect(msg: sensor_msgs_mcp.Image) -> std_msgs_mcp.String:
     """Detect objects in the current camera frame.

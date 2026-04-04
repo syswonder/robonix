@@ -1,3 +1,4 @@
+# SHM/CUDA IPC demo; registers via RobonixRuntime only (no robonix_contracts gRPC server in this package).
 manifestVersion: 1
 
 build:
@@ -37,11 +38,11 @@ nodes:
 
 interfaces:
   provides:
-    - contract_id: robonix/prm/camera/rgb
-    - contract_id: robonix/sys/perception/yolo/gpu_tensor
+    - id: robonix/prm/camera/rgb
+    - id: robonix/sys/perception/yolo/gpu_tensor
   consumes:
-    - contract_id: robonix/prm/camera/rgb
-    - contract_id: robonix/sys/perception/yolo/gpu_tensor
+    - id: robonix/prm/camera/rgb
+    - id: robonix/sys/perception/yolo/gpu_tensor
 
 launchProfiles:
   default:

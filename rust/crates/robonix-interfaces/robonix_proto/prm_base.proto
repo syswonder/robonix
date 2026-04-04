@@ -99,35 +99,10 @@ message PerceptionDetect_Response {
   robonix.std_msgs.String results = 1;
 }
 
-message Stop_Request {
-}
-
-message Stop_Response {
-  bool success = 1;
-  string message = 2;
-}
-
 message StreamMove_Request {
   MoveCommand cmd = 1;
 }
 
-message StreamMove_Result {
-}
-
-message StreamMove_Feedback {
-}
-
-service PrmBaseService {
-  rpc CancelNavigation (CancelNavigation_Request) returns (CancelNavigation_Response);
-  rpc ExecuteManipulation (ExecuteManipulation_Request) returns (ExecuteManipulation_Response);
-  rpc ExecuteMoveCommand (ExecuteMoveCommand_Request) returns (ExecuteMoveCommand_Response);
-  rpc GetCameraImage (GetCameraImage_Request) returns (GetCameraImage_Response);
-  rpc GetLaserScan (GetLaserScan_Request) returns (GetLaserScan_Response);
-  rpc GetNavigationStatus (GetNavigationStatus_Request) returns (GetNavigationStatus_Response);
-  rpc GetRobotState (GetRobotState_Request) returns (GetRobotState_Response);
-  rpc Navigate (Navigate_Request) returns (Navigate_Response);
-  rpc PerceptionDetect (PerceptionDetect_Request) returns (PerceptionDetect_Response);
-  rpc Stop (Stop_Request) returns (Stop_Response);
-  rpc StreamMove (stream MoveCommand) returns (StreamMove_Result);
+message StreamMove_Response {
 }
 

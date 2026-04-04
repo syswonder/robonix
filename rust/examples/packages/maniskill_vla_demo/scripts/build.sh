@@ -19,9 +19,27 @@ if ! python3 -m grpc_tools.protoc --version >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[build] generating proto_gen stubs (control-plane gRPC)..."
+INTERFACES_LIB="$RUST_ROOT/crates/robonix-interfaces/lib"
+CONTRACTS_DIR="$RUST_ROOT/contracts"
+INTERFACES_DIR="$RUST_ROOT/crates/robonix-interfaces/robonix_proto"
+RUNTIME_DIR="$RUST_ROOT/proto"
 
-# 1. Local package proto (maniskill_env) → maniskill_vla_demo/ (importable as package module)
+# 0. Regenerate `robonix_proto/*.proto` from `lib/**` + `rust/contracts` (messages + contract srv shims; gRPC services only in `robonix_contracts.proto`).
+echo "[build] regenerating crates/robonix-interfaces/robonix_proto (robonix-codegen --lang proto)..."
+if [[ -x /usr/bin/cargo ]]; then
+  CARGO_BIN=/usr/bin/cargo
+else
+  CARGO_BIN="${CARGO:-cargo}"
+fi
+"$CARGO_BIN" run -p robonix-codegen --manifest-path "$RUST_ROOT/Cargo.toml" -- \
+  --lang proto \
+  -I "$INTERFACES_LIB" \
+  --contracts "$CONTRACTS_DIR" \
+  -o "$INTERFACES_DIR"
+
+echo "[build] generating proto_gen stubs (runtime + robonix interfaces; gRPC services only in robonix_contracts.proto)..."
+
+# 1. Demo-local env/slam gRPC (maniskill_env.proto — not merged into robonix_contracts.proto)
 python3 -m grpc_tools.protoc \
   -I "$PKG/proto" \
   --python_out="$PKG/maniskill_vla_demo" \
@@ -29,8 +47,6 @@ python3 -m grpc_tools.protoc \
   "$PKG/proto/maniskill_env.proto"
 
 # 2. Shared robonix runtime + interface protos → package-local proto_gen/.
-INTERFACES_DIR="$RUST_ROOT/crates/robonix-interfaces/robonix_proto"
-RUNTIME_DIR="$RUST_ROOT/proto"
 mkdir -p "$PROTO_GEN"
 python3 -m grpc_tools.protoc \
   -I "$RUNTIME_DIR" \
@@ -44,9 +60,9 @@ python3 -m grpc_tools.protoc \
 #    Import these in MCP tool handlers instead of defining schemas by hand.
 echo "[build] generating robonix_mcp_types (robonix-codegen --lang mcp)..."
 mkdir -p "$MCP_TYPES"
-cargo run -p robonix-codegen --manifest-path "$RUST_ROOT/Cargo.toml" -- \
+"$CARGO_BIN" run -p robonix-codegen --manifest-path "$RUST_ROOT/Cargo.toml" -- \
   --lang mcp \
-  -I "$RUST_ROOT/crates/robonix-interfaces/lib" \
+  -I "$INTERFACES_LIB" \
   -o "$MCP_TYPES"
 
 mkdir -p "$PKG/rbnx-build/ws/install"

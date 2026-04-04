@@ -1,3 +1,4 @@
+# Env/perception/VLA nodes: MCP contracts + demo-local gRPC (maniskill_env.proto EnvDataService/SlamDataService). Robonix contract gRPC lives in robonix_contracts.proto only.
 manifestVersion: 1
 
 build:

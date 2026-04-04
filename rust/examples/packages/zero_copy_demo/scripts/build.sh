@@ -6,7 +6,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PKG_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-RUST_ROOT="$(cd "$PKG_ROOT/../../../.." && pwd)"
+# Package is at rust/examples/packages/zero_copy_demo → workspace root is rust/ (three levels up).
+RUST_ROOT="$(cd "$PKG_ROOT/../../.." && pwd)"
+INTERFACES_LIB="$RUST_ROOT/crates/robonix-interfaces/lib"
+CONTRACTS_DIR="$RUST_ROOT/contracts"
 RUNTIME_DIR="$RUST_ROOT/proto"
 INTERFACES_DIR="$RUST_ROOT/crates/robonix-interfaces/robonix_proto"
 PROTO_GEN="$PKG_ROOT/proto_gen"
@@ -26,6 +29,19 @@ else
     (cd "$PKG_ROOT" && pip install -e .)
 fi
 
+echo "[build] regenerating crates/robonix-interfaces/robonix_proto (robonix-codegen --lang proto)..."
+if [[ -x /usr/bin/cargo ]]; then
+  CARGO_BIN=/usr/bin/cargo
+else
+  CARGO_BIN="${CARGO:-cargo}"
+fi
+"$CARGO_BIN" run -p robonix-codegen --manifest-path "$RUST_ROOT/Cargo.toml" -- \
+  --lang proto \
+  -I "$INTERFACES_LIB" \
+  --contracts "$CONTRACTS_DIR" \
+  -o "$INTERFACES_DIR"
+
+# Stubs include robonix_contracts_pb2*.py; gRPC service definitions only in robonix_contracts.proto.
 echo "[build] generating package-local proto_gen stubs..."
 mkdir -p "$PROTO_GEN"
 if python3 -m grpc_tools.protoc --version >/dev/null 2>&1; then

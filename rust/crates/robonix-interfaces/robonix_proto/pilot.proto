@@ -73,36 +73,11 @@ message ToolRouting {
   string metadata_json = 3;
 }
 
-message AbortSession_Request {
-  string session_id = 1;
-}
-
-message AbortSession_Response {
-  bool ok = 1;
-}
-
-message ListSessions_Request {
-}
-
-message ListSessions_Response {
-  repeated SessionInfo sessions = 1;
-}
-
 message HandleIntent_Request {
   Intent intent = 1;
 }
 
-message HandleIntent_Result {
-  PilotEvent result = 1;
-}
-
-message HandleIntent_Feedback {
-  PilotEvent feedback = 1;
-}
-
-service PilotService {
-  rpc AbortSession (AbortSession_Request) returns (AbortSession_Response);
-  rpc ListSessions (ListSessions_Request) returns (ListSessions_Response);
-  rpc HandleIntent (HandleIntent_Request) returns (stream PilotEvent);
+message HandleIntent_Response {
+  PilotEvent event = 1;
 }
 

@@ -12,25 +12,6 @@ message ChatStreamEvent {
   string finish_reason = 3;
 }
 
-message ChatStreamGoal {
-  repeated robonix.robonix_msg.ChatMessage messages = 1;
-  repeated robonix.robonix_msg.ToolSpec tools = 2;
-  string tool_choice = 3;
-  int32 max_tokens = 4;
-}
-
-message Chat_Request {
-  repeated robonix.robonix_msg.ChatMessage messages = 1;
-  repeated robonix.robonix_msg.ToolSpec tools = 2;
-  string tool_choice = 3;
-  int32 max_tokens = 4;
-}
-
-message Chat_Response {
-  string content = 1;
-  repeated robonix.robonix_msg.ToolCall tool_calls = 2;
-}
-
 message ChatStream_Request {
   repeated robonix.robonix_msg.ChatMessage messages = 1;
   repeated robonix.robonix_msg.ToolSpec tools = 2;
@@ -39,34 +20,6 @@ message ChatStream_Request {
 }
 
 message ChatStream_Response {
-  bool unused = 1;
-}
-
-message Describe_Request {
-  string prompt = 1;
-  string image_base64 = 2;
-}
-
-message Describe_Response {
-  string text = 1;
-}
-
-message VlmChat_Request {
-  ChatStreamGoal goal = 1;
-}
-
-message VlmChat_Result {
-  ChatStreamEvent result = 1;
-}
-
-message VlmChat_Feedback {
-  ChatStreamEvent feedback = 1;
-}
-
-service VlmService {
-  rpc Chat (Chat_Request) returns (Chat_Response);
-  rpc ChatStream (ChatStream_Request) returns (stream ChatStreamEvent);
-  rpc Describe (Describe_Request) returns (Describe_Response);
-  rpc VlmChat (VlmChat_Request) returns (stream ChatStreamEvent);
+  ChatStreamEvent event = 1;
 }
 

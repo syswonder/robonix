@@ -1,4 +1,4 @@
-# Tiago sim stack — stack-specific build/start via scripts + manifest `start`.
+# Tiago sim stack — Docker Compose. tiago_bridge serves PrmCameraRgb (robonix_contracts.proto) + MCP tools.
 manifestVersion: 1
 
 build:

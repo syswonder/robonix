@@ -311,8 +311,6 @@ def _laserscan_error(message: str) -> LaserScan:
 @mcp_contract(
     mcp,
     contract_id="robonix/prm/camera/snapshot",
-    input_cls=Empty,
-    output_cls=Image,
 )
 def camera_snapshot(msg: Empty) -> Image:
     """Get the current RGB camera image from the robot's head camera.
@@ -332,8 +330,6 @@ def camera_snapshot(msg: Empty) -> Image:
 @mcp_contract(
     mcp,
     contract_id="robonix/prm/camera/depth_snapshot",
-    input_cls=Empty,
-    output_cls=Image,
 )
 def camera_depth_snapshot(msg: Empty) -> Image:
     """Get the current depth image from the robot's head camera (normalized to grayscale JPEG).
@@ -353,8 +349,6 @@ def camera_depth_snapshot(msg: Empty) -> Image:
 @mcp_contract(
     mcp,
     contract_id="robonix/prm/robot/state",
-    input_cls=Empty,
-    output_cls=RobotState,
 )
 def robot_state(msg: Empty) -> RobotState:
     """Get the robot's current state (pose, joint state, gripper).
@@ -385,8 +379,6 @@ def robot_state(msg: Empty) -> RobotState:
 @mcp_contract(
     mcp,
     contract_id="robonix/prm/sensor/lidar_snapshot",
-    input_cls=Empty,
-    output_cls=LaserScan,
 )
 def lidar_snapshot(msg: Empty) -> LaserScan:
     """Get the latest lidar scan.
@@ -405,8 +397,6 @@ def lidar_snapshot(msg: Empty) -> LaserScan:
 @mcp_contract(
     mcp,
     contract_id="robonix/prm/base/navigate",
-    input_cls=PoseStamped,
-    output_cls=String,
 )
 def base_navigate(msg: PoseStamped) -> String:
     """Send the robot to a target pose.
@@ -436,8 +426,6 @@ def base_navigate(msg: PoseStamped) -> String:
 @mcp_contract(
     mcp,
     contract_id="robonix/prm/base/nav_status",
-    input_cls=String,
-    output_cls=String,
 )
 def base_nav_status(msg: String) -> String:
     """Return stored navigation status for a goal_id.
@@ -459,8 +447,6 @@ def base_nav_status(msg: String) -> String:
 @mcp_contract(
     mcp,
     contract_id="robonix/prm/base/nav_cancel",
-    input_cls=String,
-    output_cls=String,
 )
 def base_nav_cancel(msg: String) -> String:
     """Request cancellation of a navigation goal (Nav2 action only).
@@ -483,8 +469,6 @@ def base_nav_cancel(msg: String) -> String:
 @mcp_contract(
     mcp,
     contract_id="robonix/prm/base/cmd",
-    input_cls=MoveCommand,
-    output_cls=String,
 )
 def base_cmd(msg: MoveCommand) -> String:
     """Send a velocity command to the robot base.

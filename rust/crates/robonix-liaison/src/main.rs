@@ -4,10 +4,9 @@
 // ── Design ───────────────────────────────────────────────────────────────────
 //
 //  All input modalities ultimately produce the same `Intent` and receive the
-//  same `PilotEvent` stream.  The transport is always gRPC (`LiaisonService`);
-//  speech is the only modality that needs pre/post processing:
+//  same `PilotEvent` stream.  The liaison gRPC facade is contract `SysRuntimeLiaison`
+//  (`robonix_contracts.proto`); speech is the only modality that needs pre/post processing:
 //
-
 //
 //  Key principle: liaison itself does NOT contain ASR/TTS logic.  ASR and TTS
 //  are Atlas-registered system nodes (robonix/sys/speech/asr,
@@ -17,29 +16,20 @@
 //
 // ── Runtime topology ─────────────────────────────────────────────────────────
 //
-//   Always started:  LiaisonService gRPC server on ROBONIX_LIAISON_PORT
+//   Always started:  SysRuntimeLiaison gRPC server on ROBONIX_LIAISON_PORT
 //   Optional module: SpeechBridge   (set ROBONIX_LIAISON_SPEECH=1)
 //   Fallback stdin:  text loop      (set ROBONIX_LIAISON_SOURCE=text,
 //                                    useful for headless / pipe mode)
 
-mod pb {
-    pub mod pilot {
-        tonic::include_proto!("robonix.pilot");
-    }
-    pub mod liaison {
-        tonic::include_proto!("robonix.liaison");
-    }
-}
+#[path = "../../robonix-interfaces/robonix_proto/contract_proto_modules.rs"]
+mod proto;
+
+pub(crate) use proto::{contracts, pilot};
 
 use anyhow::Result;
-use pb::liaison::{
-    HandleIntentRequest, InterruptRequest, InterruptResponse,
-    liaison_service_server::{LiaisonService, LiaisonServiceServer},
-};
-use pb::pilot::{
-    AbortSessionRequest, HandleIntentRequest as PilotHandleIntentRequest, Intent, PilotEvent,
-    pilot_service_client::PilotServiceClient,
-};
+use contracts::sys_runtime_liaison_server::{SysRuntimeLiaison, SysRuntimeLiaisonServer};
+use contracts::sys_runtime_pilot_client::SysRuntimePilotClient;
+use pilot::{Intent, PilotEvent};
 use robonix_sdk::RobonixClient;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -60,7 +50,7 @@ const EVT_FINAL_TEXT: u32 = 4;
 
 // ── LiaisonPipeline ───────────────────────────────────────────────────────────
 //
-// Core: forward an Intent to Pilot, return the event channel.
+// Core: forward an Intent to Pilot (`SysRuntimePilot.Stream`), return the event channel.
 // Opens a new gRPC channel per call so liaison can start before Pilot and
 // survive Pilot restarts without restarting itself.
 
@@ -81,13 +71,8 @@ impl LiaisonPipeline {
         &self,
         intent: Intent,
     ) -> Result<mpsc::Receiver<Result<PilotEvent, Status>>> {
-        let mut client = PilotServiceClient::connect(self.pilot_endpoint.clone()).await?;
-        let mut grpc = client
-            .handle_intent(PilotHandleIntentRequest {
-                intent: Some(intent),
-            })
-            .await?
-            .into_inner();
+        let mut client = SysRuntimePilotClient::connect(self.pilot_endpoint.clone()).await?;
+        let mut grpc = client.stream(Request::new(intent)).await?.into_inner();
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(async move {
             while let Some(item) = grpc.next().await {
@@ -102,41 +87,28 @@ impl LiaisonPipeline {
         });
         Ok(rx)
     }
-
-    /// Ask Pilot to abort the active turn for `session_id`.
-    pub async fn interrupt(&self, session_id: &str) -> Result<bool> {
-        let mut client = PilotServiceClient::connect(self.pilot_endpoint.clone()).await?;
-        Ok(client
-            .abort_session(AbortSessionRequest {
-                session_id: session_id.to_string(),
-            })
-            .await?
-            .into_inner()
-            .ok)
-    }
 }
 
-// ── LiaisonService gRPC impl ──────────────────────────────────────────────────
+// ── SysRuntimeLiaison gRPC impl ─────────────────────────────────────────────
 //
 // All clients — rbnx chat, mobile app, GUI, and the SpeechBridge below — use
-// this single gRPC service.  There is no special-cased input path per modality.
+// this contract service.  There is no special-cased input path per modality.
+// Interrupt / turn-cancel is expressed as an `Intent` with `context_json` `{"abort_turn":true}`
+// end-to-end (Pilot handles it); there is no separate liaison RPC.
 
 struct LiaisonServiceImpl {
     pipeline: Arc<LiaisonPipeline>,
 }
 
 #[tonic::async_trait]
-impl LiaisonService for LiaisonServiceImpl {
-    type HandleIntentStream = ReceiverStream<Result<PilotEvent, Status>>;
+impl SysRuntimeLiaison for LiaisonServiceImpl {
+    type StreamStream = ReceiverStream<Result<PilotEvent, Status>>;
 
-    async fn handle_intent(
+    async fn stream(
         &self,
-        request: Request<HandleIntentRequest>,
-    ) -> Result<Response<Self::HandleIntentStream>, Status> {
-        let intent = request
-            .into_inner()
-            .intent
-            .ok_or_else(|| Status::invalid_argument("missing intent"))?;
+        request: Request<Intent>,
+    ) -> Result<Response<Self::StreamStream>, Status> {
+        let intent = request.into_inner();
         let rx = self
             .pipeline
             .handle_intent(intent)
@@ -144,23 +116,9 @@ impl LiaisonService for LiaisonServiceImpl {
             .map_err(|e| Status::unavailable(format!("Pilot unreachable: {e:#}")))?;
         Ok(Response::new(ReceiverStream::new(rx)))
     }
-
-    async fn interrupt(
-        &self,
-        request: Request<InterruptRequest>,
-    ) -> Result<Response<InterruptResponse>, Status> {
-        let req = request.into_inner();
-        let session_id = req.session_id.clone();
-        let ok = self
-            .pipeline
-            .interrupt(&req.session_id)
-            .await
-            .map_err(|e| Status::unavailable(e.to_string()))?;
-        Ok(Response::new(InterruptResponse { ok, session_id }))
-    }
 }
 
-// ── Stdin text loop ───────────────────────────────────────────────────────────
+// ── Stdin text loop ─────────────────────────────────────────────────────────
 //
 // Convenience fallback for headless / pipe usage.
 // Activated by ROBONIX_LIAISON_SOURCE=text.
@@ -343,7 +301,7 @@ async fn main() -> Result<()> {
         "robonix/sys/runtime/liaison",
     )
     .await?;
-    log::info!("registered as '{LIAISON_NODE_ID}', LiaisonService gRPC on :{listen_port}");
+    log::info!("registered as '{LIAISON_NODE_ID}', SysRuntimeLiaison gRPC on :{listen_port}");
     eprintln!("robonix-liaison ready on :{listen_port}  (pilot={pilot_http})");
 
     let pipeline = Arc::new(LiaisonPipeline::new(pilot_http));
@@ -368,7 +326,7 @@ async fn main() -> Result<()> {
     // ── gRPC server (always running) ──────────────────────────────────────────
     let svc = LiaisonServiceImpl { pipeline };
     let server = tonic::transport::Server::builder()
-        .add_service(LiaisonServiceServer::new(svc))
+        .add_service(SysRuntimeLiaisonServer::new(svc))
         .serve(listen_addr);
 
     if let Some(handle) = text_handle {

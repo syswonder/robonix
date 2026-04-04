@@ -2,8 +2,8 @@
 """ManiSkill3 environment bridge.
 
 Dual-interface node:
-  - gRPC EnvDataService: high-bandwidth obs for perception/VLA nodes
-  - MCP tools: lightweight commands for robonix-pilot
+  - gRPC EnvDataService (demo-local ``maniskill_env.proto`` — not a merged ``robonix_contracts`` service)
+  - MCP tools: lightweight commands for robonix-pilot (contract IDs under ``rust/contracts``)
 """
 import asyncio
 import base64
@@ -325,14 +325,10 @@ def _reset_env():
 
 # ── MCP tools (one per contract) ─────────────────────────────────────────────
 
-
 # Contract: robonix/prm/camera/snapshot
-# input: std_msgs/msg/Empty  output: sensor_msgs/msg/Image
 @mcp_contract(
     mcp,
     contract_id="robonix/prm/camera/snapshot",
-    input_cls=std_msgs_mcp.Empty,
-    output_cls=sensor_msgs_mcp.Image,
 )
 def camera_snapshot(msg: std_msgs_mcp.Empty) -> sensor_msgs_mcp.Image:
     """Get current RGB camera image from the ManiSkill3 environment.
@@ -355,12 +351,9 @@ def camera_snapshot(msg: std_msgs_mcp.Empty) -> sensor_msgs_mcp.Image:
 
 
 # Contract: robonix/prm/robot/state
-# input: std_msgs/msg/Empty  output: prm_base/msg/RobotState
 @mcp_contract(
     mcp,
     contract_id="robonix/prm/robot/state",
-    input_cls=std_msgs_mcp.Empty,
-    output_cls=prm_base_mcp.RobotState,
 )
 def robot_state(msg: std_msgs_mcp.Empty) -> prm_base_mcp.RobotState:
     """Get robot state: joints, end-effector pose, gripper state.
@@ -397,8 +390,6 @@ def robot_state(msg: std_msgs_mcp.Empty) -> prm_base_mcp.RobotState:
 @mcp_contract(
     mcp,
     contract_id="robonix/prm/manipulation/exec",
-    input_cls=std_msgs_mcp.String,
-    output_cls=std_msgs_mcp.String,
 )
 def manipulation_exec(msg: std_msgs_mcp.String) -> std_msgs_mcp.String:
     """Apply a manipulation action to the ManiSkill3 environment.

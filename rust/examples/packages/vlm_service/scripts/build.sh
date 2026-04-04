@@ -11,12 +11,27 @@ if [[ "${RBNX_BUILD_CLEAN:-}" == "1" ]]; then
   rm -rf "$PROTO_GEN"
 fi
 
-# Generate package-local proto_gen stubs.
+INTERFACES_LIB="$RUST_ROOT/crates/robonix-interfaces/lib"
+CONTRACTS_DIR="$RUST_ROOT/contracts"
+INTERFACES_DIR="$RUST_ROOT/crates/robonix-interfaces/robonix_proto"
+if [[ -x /usr/bin/cargo ]]; then
+  CARGO_BIN=/usr/bin/cargo
+else
+  CARGO_BIN="${CARGO:-cargo}"
+fi
+
+echo "[build] regenerating crates/robonix-interfaces/robonix_proto (robonix-codegen --lang proto)..."
+"$CARGO_BIN" run -p robonix-codegen --manifest-path "$RUST_ROOT/Cargo.toml" -- \
+  --lang proto \
+  -I "$INTERFACES_LIB" \
+  --contracts "$CONTRACTS_DIR" \
+  -o "$INTERFACES_DIR"
+
+# Package-local proto_gen (robonix_contracts_pb2_grpc.SysModelVlmChat, etc.).
 if python3 -m grpc_tools.protoc --version >/dev/null 2>&1; then
   echo "[build] generating proto_gen stubs..."
   mkdir -p "$PROTO_GEN"
   RUNTIME_DIR="$RUST_ROOT/proto"
-  INTERFACES_DIR="$RUST_ROOT/crates/robonix-interfaces/robonix_proto"
   python3 -m grpc_tools.protoc \
     -I "$RUNTIME_DIR" \
     -I "$INTERFACES_DIR" \

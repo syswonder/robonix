@@ -1,3 +1,4 @@
+# MCP-only tools (robonix/sys/memory/*). Control plane: RobonixRuntime RegisterNode/DeclareInterface — no contract gRPC servicer.
 manifestVersion: 1
 
 build:

@@ -19,7 +19,7 @@ def _find_proto_gen() -> Path:
     candidate = here / "proto_gen"
     if candidate.is_dir():
         return candidate
-    # Host: .../zero_copy_demo/zero_copy_demo/common.py -> .../examples/proto_gen/
+    # Host: .../zero_copy_demo/zero_copy_demo/common.py -> .../zero_copy_demo/proto_gen/ (see scripts/build.sh)
     parents = here.parents
     for i in range(len(parents)):
         candidate = parents[i] / "proto_gen"
