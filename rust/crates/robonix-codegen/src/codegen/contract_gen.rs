@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Generate `robonix_contracts.proto` from `rust/contracts/**/*.toml`.
 //
-// Contract id + `[mode].type` is the source of truth for gRPC service shape (unary /
-// client-streaming / server-streaming). `[io]` references ROS paths under `-I` (msg/srv) or
-// escapes; message layouts come from ROS IDL, not duplicated in TOML. See `rust/contracts/README.md`.
+// `[mode].type` → `robonix_contracts.proto` (see `rust/contracts/README.md`).
+// Streaming: `rpc_server_stream` uses the .srv response (exactly one field) as stream element; `rpc_client_stream` uses the request (exactly one field).
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -12,7 +11,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::msg_parser::MsgResolver;
+use super::msg_parser::{MsgField, MsgResolver, MsgTypeRef, SrvSpec};
 use super::proto_gen::proto_package_name;
 
 #[derive(Debug, Deserialize)]
@@ -31,10 +30,23 @@ struct ContractMeta {
     kind: String,
 }
 
-#[derive(Debug, Deserialize)]
+/// Exactly **one** of `[io.msg]` (`msg = …`) or `[io.srv]` (`srv = …`).
+#[derive(Debug, Deserialize, Default)]
 struct IoSpec {
-    input: String,
-    output: String,
+    #[serde(default)]
+    msg: Option<IoMsgIo>,
+    #[serde(default)]
+    srv: Option<IoSrvIo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IoMsgIo {
+    msg: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct IoSrvIo {
+    srv: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,7 +55,6 @@ struct ModeSpec {
     mode_type: String,
 }
 
-/// Generate `robonix_contracts.proto` next to package protos from `contracts_dir`.
 pub fn generate(resolver: &mut MsgResolver, contracts_dir: &Path, out_dir: &Path) -> Result<()> {
     let paths = collect_tomls(contracts_dir)?;
     if paths.is_empty() {
@@ -81,11 +92,9 @@ pub fn generate(resolver: &mut MsgResolver, contracts_dir: &Path, out_dir: &Path
     let mut imports: BTreeSet<String> = BTreeSet::new();
     let mut needs_string_wire = false;
 
-    // Pre-resolve all referenced ROS types.
     let mut proto_types: Vec<(String, ResolvedType, ResolvedType)> = Vec::new();
     for (_, c) in &contracts {
-        let in_t = resolve_io(&c.io.input, resolver, &mut imports, &mut needs_string_wire)?;
-        let out_t = resolve_io(&c.io.output, resolver, &mut imports, &mut needs_string_wire)?;
+        let (in_t, out_t) = resolve_contract_io(c, resolver, &mut imports, &mut needs_string_wire)?;
         proto_types.push((c.contract.id.clone(), in_t, out_t));
     }
 
@@ -118,11 +127,11 @@ pub fn generate(resolver: &mut MsgResolver, contracts_dir: &Path, out_dir: &Path
         writeln!(&mut out, "service {svc} {{")?;
 
         let rpc = match mode {
-            "stream_out" => format_stream_out(in_t, out_t),
-            "stream_in" => format_stream_in(in_t, out_t),
             "rpc" => format_unary(in_t, out_t),
+            "rpc_server_stream" | "topic_out" => format_stream_out(in_t, out_t),
+            "rpc_client_stream" | "topic_in" => format_stream_in(in_t, out_t),
             other => bail!(
-                "unknown [mode].type '{other}' in contract {}",
+                "unknown [mode].type '{other}' in contract {} (expected rpc | rpc_server_stream | rpc_client_stream | topic_out | topic_in)",
                 c.contract.id
             ),
         };
@@ -143,7 +152,7 @@ pub fn generate(resolver: &mut MsgResolver, contracts_dir: &Path, out_dir: &Path
 
 #[derive(Clone)]
 enum ResolvedType {
-    ProtoFqn(String), // e.g. robonix.sensor_msgs.Image
+    ProtoFqn(String),
     GoogleEmpty,
     StringWire,
 }
@@ -193,10 +202,255 @@ fn unary_return(t: &ResolvedType) -> String {
 }
 
 fn stream_element(t: &ResolvedType) -> String {
-    match t {
-        ResolvedType::GoogleEmpty => "google.protobuf.Empty".to_string(),
-        ResolvedType::ProtoFqn(s) => s.clone(),
-        ResolvedType::StringWire => "robonix.contracts.StringWire".to_string(),
+    unary_arg(t)
+}
+
+fn srv_stream_field_to_resolved(
+    contract_id: &str,
+    srv_path: &str,
+    section: &str,
+    field: &MsgField,
+    resolver: &mut MsgResolver,
+    imports: &mut BTreeSet<String>,
+    needs_string_wire: &mut bool,
+) -> Result<ResolvedType> {
+    if field.is_array {
+        bail!(
+            "contract {contract_id}: [{section}] stream element must be a single message, not an array (in {srv_path})"
+        );
+    }
+    field_to_resolved_type(field, resolver, imports, needs_string_wire)
+}
+
+fn resolve_contract_io(
+    c: &ContractToml,
+    resolver: &mut MsgResolver,
+    imports: &mut BTreeSet<String>,
+    needs_string_wire: &mut bool,
+) -> Result<(ResolvedType, ResolvedType)> {
+    let n_msg = c.io.msg.is_some() as u8;
+    let n_srv = c.io.srv.is_some() as u8;
+    if n_msg + n_srv != 1 {
+        bail!(
+            "contract {}: set exactly one of [io.msg] or [io.srv]",
+            c.contract.id
+        );
+    }
+
+    let mode = c.mode.mode_type.trim();
+    let s = c.io.srv.as_ref();
+    let m = c.io.msg.as_ref();
+
+    match mode {
+        "rpc" => {
+            let s = s.ok_or_else(|| anyhow::anyhow!("contract {}: [mode].type = \"rpc\" requires [io.srv]", c.contract.id))?;
+            resolve_srv_contract_pair(&s.srv, resolver, imports, needs_string_wire)
+        }
+        "rpc_server_stream" => {
+            let s = s.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "contract {}: [mode].type = \"rpc_server_stream\" requires [io.srv]",
+                    c.contract.id
+                )
+            })?;
+            resolve_srv_server_stream(s, &c.contract.id, resolver, imports, needs_string_wire)
+        }
+        "rpc_client_stream" => {
+            let s = s.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "contract {}: [mode].type = \"rpc_client_stream\" requires [io.srv]",
+                    c.contract.id
+                )
+            })?;
+            resolve_srv_client_stream(s, &c.contract.id, resolver, imports, needs_string_wire)
+        }
+        "topic_out" => {
+            let m = m.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "contract {}: [mode].type = \"topic_out\" requires [io.msg] with `msg`",
+                    c.contract.id
+                )
+            })?;
+            let elem = resolve_io(&m.msg, resolver, imports, needs_string_wire)?;
+            Ok((ResolvedType::GoogleEmpty, elem))
+        }
+        "topic_in" => {
+            let m = m.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "contract {}: [mode].type = \"topic_in\" requires [io.msg] with `msg`",
+                    c.contract.id
+                )
+            })?;
+            let elem = resolve_io(&m.msg, resolver, imports, needs_string_wire)?;
+            Ok((elem, ResolvedType::GoogleEmpty))
+        }
+        other => bail!(
+            "unknown [mode].type '{}' in contract {}",
+            other,
+            c.contract.id
+        ),
+    }
+}
+
+fn resolve_srv_server_stream(
+    io: &IoSrvIo,
+    contract_id: &str,
+    resolver: &mut MsgResolver,
+    imports: &mut BTreeSet<String>,
+    needs_string_wire: &mut bool,
+) -> Result<(ResolvedType, ResolvedType)> {
+    let p = io.srv.trim();
+    let Some((pkg, "srv", name)) = parse_ros_path(p) else {
+        bail!("[io.srv].srv must be pkg/srv/Name, got {p:?}");
+    };
+    resolver
+        .resolve_srv(pkg, name)
+        .with_context(|| format!("resolve srv {p}"))?;
+    let spec = resolver
+        .srv_spec(pkg, name)
+        .ok_or_else(|| anyhow::anyhow!("internal: srv {p} not cached"))?
+        .clone();
+
+    let res = &spec.response;
+    if res.fields.len() != 1 {
+        bail!(
+            "contract {contract_id}: [mode] rpc_server_stream requires the .srv response section to have exactly one field (stream element type), got {} in {p}",
+            res.fields.len()
+        );
+    }
+    let in_t = srv_request_to_contract_input(&spec, resolver, imports, needs_string_wire)?;
+    let out_t = srv_stream_field_to_resolved(
+        contract_id,
+        p,
+        "response",
+        &res.fields[0],
+        resolver,
+        imports,
+        needs_string_wire,
+    )?;
+    Ok((in_t, out_t))
+}
+
+fn resolve_srv_client_stream(
+    io: &IoSrvIo,
+    contract_id: &str,
+    resolver: &mut MsgResolver,
+    imports: &mut BTreeSet<String>,
+    needs_string_wire: &mut bool,
+) -> Result<(ResolvedType, ResolvedType)> {
+    let p = io.srv.trim();
+    let Some((pkg, "srv", name)) = parse_ros_path(p) else {
+        bail!("[io.srv].srv must be pkg/srv/Name, got {p:?}");
+    };
+    resolver
+        .resolve_srv(pkg, name)
+        .with_context(|| format!("resolve srv {p}"))?;
+    let spec = resolver
+        .srv_spec(pkg, name)
+        .ok_or_else(|| anyhow::anyhow!("internal: srv {p} not cached"))?
+        .clone();
+
+    let req = &spec.request;
+    if req.fields.len() != 1 {
+        bail!(
+            "contract {contract_id}: [mode] rpc_client_stream requires the .srv request section to have exactly one field (stream element type), got {} in {p}",
+            req.fields.len()
+        );
+    }
+    let in_t = srv_stream_field_to_resolved(
+        contract_id,
+        p,
+        "request",
+        &req.fields[0],
+        resolver,
+        imports,
+        needs_string_wire,
+    )?;
+    let out_t = srv_response_to_contract_output(&spec, resolver, imports, needs_string_wire)?;
+    Ok((in_t, out_t))
+}
+
+fn srv_request_to_contract_input(
+    srv: &SrvSpec,
+    resolver: &mut MsgResolver,
+    imports: &mut BTreeSet<String>,
+    needs_string_wire: &mut bool,
+) -> Result<ResolvedType> {
+    let req = &srv.request;
+    if req.fields.len() == 1 {
+        return field_to_resolved_type(&req.fields[0], resolver, imports, needs_string_wire);
+    }
+    imports.insert(format!("{}.proto", srv.package));
+    Ok(ResolvedType::ProtoFqn(format!(
+        "{}.{}",
+        proto_package_name(&srv.package),
+        req.name
+    )))
+}
+
+/// Empty `.srv` response section → `google.protobuf.Empty`; else the generated `*_Response` message.
+fn srv_response_to_contract_output(
+    srv: &SrvSpec,
+    resolver: &mut MsgResolver,
+    imports: &mut BTreeSet<String>,
+    _needs_string_wire: &mut bool,
+) -> Result<ResolvedType> {
+    let res = &srv.response;
+    if res.fields.is_empty() {
+        return Ok(ResolvedType::GoogleEmpty);
+    }
+    for f in &res.fields {
+        if let MsgTypeRef::Named { package, name } = &f.type_ref {
+            resolver.resolve_named_type(package, name, None)?;
+        }
+    }
+    imports.insert(format!("{}.proto", srv.package));
+    Ok(ResolvedType::ProtoFqn(format!(
+        "{}.{}",
+        proto_package_name(&srv.package),
+        res.name
+    )))
+}
+
+fn resolve_srv_contract_pair(
+    path: &str,
+    resolver: &mut MsgResolver,
+    imports: &mut BTreeSet<String>,
+    _needs_string_wire: &mut bool,
+) -> Result<(ResolvedType, ResolvedType)> {
+    let p = path.trim();
+    if let Some((pkg, "srv", name)) = parse_ros_path(p) {
+        resolver
+            .resolve_srv(pkg, name)
+            .with_context(|| format!("resolve srv {p}"))?;
+        imports.insert(format!("{pkg}.proto"));
+        let req = format!("{name}_Request");
+        let res = format!("{name}_Response");
+        return Ok((
+            ResolvedType::ProtoFqn(format!("{}.{}", proto_package_name(pkg), req)),
+            ResolvedType::ProtoFqn(format!("{}.{}", proto_package_name(pkg), res)),
+        ));
+    }
+    bail!("[io.srv].srv must be pkg/srv/Name, got {p:?}");
+}
+
+fn field_to_resolved_type(
+    field: &MsgField,
+    resolver: &mut MsgResolver,
+    imports: &mut BTreeSet<String>,
+    needs_string_wire: &mut bool,
+) -> Result<ResolvedType> {
+    match &field.type_ref {
+        MsgTypeRef::Primitive(_) => bail!(
+            "contract I/O field `{}` must use a named ROS message type, not a primitive",
+            field.name
+        ),
+        MsgTypeRef::Named { package, name } => resolve_io(
+            &format!("{package}/msg/{name}"),
+            resolver,
+            imports,
+            needs_string_wire,
+        ),
     }
 }
 
@@ -216,7 +470,6 @@ fn resolve_io(
         imports.insert(proto_file_for_dot_package(pkg));
         return Ok(ResolvedType::ProtoFqn(format!("{}.{}", pkg, typ)));
     }
-    // std_msgs/msg/Empty → google.protobuf.Empty (no generated Empty.msg in tree)
     if s == "std_msgs/msg/Empty" {
         return Ok(ResolvedType::GoogleEmpty);
     }
@@ -248,7 +501,6 @@ fn resolve_io(
     )
 }
 
-/// `sensor_msgs/msg/Image` → Some(("sensor_msgs", "msg", "Image"))
 fn parse_ros_path(s: &str) -> Option<(&str, &str, &str)> {
     let parts: Vec<&str> = s.split('/').collect();
     if parts.len() != 3 {
@@ -257,7 +509,6 @@ fn parse_ros_path(s: &str) -> Option<(&str, &str, &str)> {
     Some((parts[0], parts[1], parts[2]))
 }
 
-/// `robonix.pilot/Intent` → ("robonix.pilot", "Intent")
 fn split_proto_fqn(s: &str) -> Result<(&str, &str)> {
     let s = s.trim();
     let (pkg, typ) = s
@@ -270,7 +521,6 @@ fn split_proto_fqn(s: &str) -> Result<(&str, &str)> {
 }
 
 fn proto_file_for_dot_package(pkg: &str) -> String {
-    // robonix.pilot → pilot.proto ; robonix.executor → executor.proto (robonix-codegen package files)
     let segs: Vec<&str> = pkg.split('.').collect();
     if segs.len() >= 2 {
         return format!("{}_{}.proto", segs[0], segs[1]);

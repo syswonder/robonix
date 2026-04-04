@@ -17,7 +17,7 @@ pub struct MsgField {
     pub array_size: Option<usize>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MsgTypeRef {
     Primitive(String),
     Named { package: String, name: String },
@@ -30,25 +30,12 @@ pub struct MsgSpec {
     pub fields: Vec<MsgField>,
 }
 
-/// gRPC mapping for pub-sub-style interfaces (ROS has no native streaming `.srv` wire format;
-/// this directive is **codegen-only** for `robonix-codegen --lang proto`).
-#[derive(Clone, Debug)]
-pub enum GrpcStreamMode {
-    /// Same semantics as a ROS **publisher**: provider pushes a stream of `element` messages.
-    /// gRPC: `rpc Method(Request) returns (stream element);`
-    ServerStream { element: MsgTypeRef },
-    /// Same semantics as a ROS **subscriber**: consumer pushes a stream of `element` messages.
-    /// gRPC: `rpc Method(stream element) returns (Response);`
-    ClientStream { element: MsgTypeRef },
-}
-
 #[derive(Clone, Debug)]
 pub struct SrvSpec {
     pub package: String,
     pub name: String,
     pub request: MsgSpec,
     pub response: MsgSpec,
-    pub grpc_stream: Option<GrpcStreamMode>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -199,36 +186,6 @@ impl MsgResolver {
                 self.resolve_named_type(pkg, nm, Some((&ros_msg_type_fmt(pkg, nm), &dep_ctx)))?;
             }
         }
-        match &spec.grpc_stream {
-            Some(GrpcStreamMode::ServerStream {
-                element:
-                    MsgTypeRef::Named {
-                        package: pkg,
-                        name: nm,
-                    },
-            })
-            | Some(GrpcStreamMode::ClientStream {
-                element:
-                    MsgTypeRef::Named {
-                        package: pkg,
-                        name: nm,
-                    },
-            }) => {
-                let dep_ctx = ResolveContext {
-                    namespace: Some(spec.package.clone()),
-                    interface_kind: Some("srv"),
-                    interface_name: Some(spec.name.clone()),
-                    field_name: Some("<stream_element>".into()),
-                };
-                self.resolve_named_type(pkg, nm, Some((&ros_msg_type_fmt(pkg, nm), &dep_ctx)))?;
-            }
-            Some(_) => {
-                bail!(
-                    "{RIDLC_ERR_PREFIX} stream_server/stream_client element must be a named ROS message type"
-                );
-            }
-            None => {}
-        }
         self.srv_cache.insert(key, spec);
         Ok(())
     }
@@ -252,6 +209,11 @@ impl MsgResolver {
         keys.iter()
             .filter_map(|key| self.srv_cache.get(key))
             .collect::<Vec<_>>()
+    }
+
+    pub fn srv_spec(&self, package: &str, name: &str) -> Option<&SrvSpec> {
+        self.srv_cache
+            .get(&(package.to_string(), name.to_string()))
     }
 }
 
@@ -328,6 +290,25 @@ pub fn infer_srv_package_name(path: &Path) -> Option<String> {
     Some(parent_name.to_string())
 }
 
+/// Strip legacy `# @robonix.grpc ...` lines from the top of `.srv` files.
+fn strip_leading_robonix_grpc_lines(src: &str) -> String {
+    let mut s = src.to_string();
+    loop {
+        let t = s.trim_start();
+        let first = t.lines().next().unwrap_or("").trim();
+        if first.starts_with("# @robonix.grpc") {
+            if let Some(pos) = s.find('\n') {
+                s = s[pos + 1..].to_string();
+                continue;
+            }
+            s.clear();
+            break;
+        }
+        break;
+    }
+    s
+}
+
 pub fn parse_srv_file(package: &str, name: &str, path: &Path) -> Result<SrvSpec> {
     let src = fs::read_to_string(path).with_context(|| {
         format!(
@@ -335,12 +316,7 @@ pub fn parse_srv_file(package: &str, name: &str, path: &Path) -> Result<SrvSpec>
             path.display()
         )
     })?;
-    let (body, grpc_stream) = strip_grpc_stream_directive(&src).with_context(|| {
-        format!(
-            "{RIDLC_ERR_PREFIX} invalid @robonix.grpc directive in '{}'",
-            path.display()
-        )
-    })?;
+    let body = strip_leading_robonix_grpc_lines(&src);
     let parts: Vec<&str> = body.splitn(2, "---").collect();
     let request_src = parts.first().unwrap_or(&"");
     let response_src = parts.get(1).unwrap_or(&"");
@@ -353,56 +329,7 @@ pub fn parse_srv_file(package: &str, name: &str, path: &Path) -> Result<SrvSpec>
         name: name.to_string(),
         request,
         response,
-        grpc_stream,
     })
-}
-
-/// If the first line is `# @robonix.grpc stream_server TYPE` or `stream_client TYPE`, strip it and
-/// return the remainder plus the stream mode. `TYPE` is `pkg/msg/Name` or `pkg/Name`.
-fn strip_grpc_stream_directive(src: &str) -> Result<(&str, Option<GrpcStreamMode>)> {
-    let trimmed = src.trim_start();
-    let Some(first_line_end) = trimmed.find('\n') else {
-        return Ok((src, None));
-    };
-    let first_line = trimmed[..first_line_end].trim();
-    let rest = trimmed[first_line_end + 1..].trim_start();
-    let Some(directive) = first_line.strip_prefix("# @robonix.grpc ") else {
-        return Ok((src, None));
-    };
-    let directive = directive.trim();
-    let mode = if let Some(typ) = directive.strip_prefix("stream_server ") {
-        Some(GrpcStreamMode::ServerStream {
-            element: parse_stream_element_type(typ).with_context(|| {
-                format!("{RIDLC_ERR_PREFIX} bad stream_server element type: {typ:?}")
-            })?,
-        })
-    } else if let Some(typ) = directive.strip_prefix("stream_client ") {
-        Some(GrpcStreamMode::ClientStream {
-            element: parse_stream_element_type(typ).with_context(|| {
-                format!("{RIDLC_ERR_PREFIX} bad stream_client element type: {typ:?}")
-            })?,
-        })
-    } else {
-        bail!("{RIDLC_ERR_PREFIX} unknown @robonix.grpc directive: {directive:?}");
-    };
-    Ok((rest, mode))
-}
-
-fn parse_stream_element_type(typ: &str) -> Result<MsgTypeRef> {
-    let t = typ.trim();
-    if let Some((pkg, name)) = parse_ridl_type_ref(t) {
-        return Ok(MsgTypeRef::Named { package: pkg, name });
-    }
-    let parts: Vec<&str> = t.split('/').collect();
-    if parts.len() == 2 {
-        return Ok(MsgTypeRef::Named {
-            package: parts[0].to_string(),
-            name: parts[1].to_string(),
-        });
-    }
-    bail!(
-        "{RIDLC_ERR_PREFIX} expected TYPE like sensor_msgs/msg/Image or sensor_msgs/Image, got {t:?}"
-    )
 }
 
 fn parse_msg_section(package: &str, name: &str, src: &str) -> Result<MsgSpec> {
@@ -511,6 +438,18 @@ pub fn parse_msg_field_type(
     if is_ros_primitive(base_type) {
         return Ok((
             MsgTypeRef::Primitive(base_type.to_string()),
+            is_array,
+            array_size,
+        ));
+    }
+    // `pkg/msg/TypeName` (ROS fully-qualified message type)
+    let segs: Vec<&str> = base_type.split('/').collect();
+    if segs.len() == 3 && segs[1] == "msg" {
+        return Ok((
+            MsgTypeRef::Named {
+                package: segs[0].to_string(),
+                name: segs[2].to_string(),
+            },
             is_array,
             array_size,
         ));

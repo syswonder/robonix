@@ -1,14 +1,13 @@
 # Compact and summarise recent memory entries.
-# Input: empty (no parameters needed).
-# Output: status / summary path (std_msgs/String.data).
+# ROS IDL: `lib/memory/srv/Compact.srv` — unary RPC, empty request, `std_msgs/String` summary.
 [contract]
 id      = "robonix/sys/memory/compact"
 version = "1"
 kind    = "service"
 
-[io]
-input  = "std_msgs/msg/Empty"
-output = "std_msgs/msg/String"
+
+[io.srv]
+srv = "memory/srv/Compact"
 
 [mode]
 type = "rpc"

@@ -1,13 +1,13 @@
-# Unary query/response as text; wire uses `std_msgs/String` from `lib/common_interfaces/std_msgs`.
-# Many providers still expose search via MCP tools — this contract is the aligned gRPC/ROS IDL path.
+# Unary query/response as text. ROS IDL: `lib/memory/srv/Search.srv`.
+# MCP providers may still expose tools; this contract is the aligned gRPC / ROS `.srv` path.
 [contract]
 id      = "robonix/sys/memory/search"
 version = "1"
 kind    = "service"
 
-[io]
-input  = "std_msgs/msg/String"
-output = "std_msgs/msg/String"
+
+[io.srv]
+srv = "memory/srv/Search"
 
 [mode]
 type = "rpc"

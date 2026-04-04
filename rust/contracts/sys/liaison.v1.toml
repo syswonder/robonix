@@ -1,17 +1,14 @@
-# Same **payload** contract as Pilot (Intent → stream PilotEvent).
-# Concrete gRPC: `lib/liaison/srv/HandleIntent.srv` → `LiaisonService.HandleIntent(HandleIntent_Request)`.
-# `Interrupt` etc. are extra RPCs on LiaisonService, not separate contract ids in this file.
+# Same as Pilot. ROS: `lib/liaison/srv/HandleIntent.srv`.
 [contract]
 id      = "robonix/sys/runtime/liaison"
 version = "1"
 kind    = "service"
 
-[io]
-input  = "pilot/msg/Intent"
-output = "pilot/msg/PilotEvent"
+[io.srv]
+srv = "liaison/srv/HandleIntent"
 
 [mode]
-type = "stream_out"
+type = "rpc_server_stream"
 
 [semantics]
 unified_entry = true

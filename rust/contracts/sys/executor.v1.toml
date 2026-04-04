@@ -1,17 +1,14 @@
-# Payload-level: `TaskGraph` in → stream `TaskCallEvent` (BT-shaped contract; v1 = linear `TaskCall[]`).
-# Concrete gRPC: `lib/executor/srv/Execute.srv` → `ExecutorService.Execute(Execute_Request { graph })`.
-# `ListTools` is a separate RPC on ExecutorService, not this contract id.
+# ROS: `lib/executor/srv/Execute.srv`.
 [contract]
 id      = "robonix/sys/runtime/executor"
 version = "1"
 kind    = "service"
 
-[io]
-input  = "pilot/msg/TaskGraph"
-output = "executor/msg/TaskCallEvent"
+[io.srv]
+srv = "executor/srv/Execute"
 
 [mode]
-type = "stream_out"
+type = "rpc_server_stream"
 
 [semantics]
 stateless = true

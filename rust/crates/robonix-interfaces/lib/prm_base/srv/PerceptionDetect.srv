@@ -1,0 +1,4 @@
+# robonix/prm/perception/detect — detection / scene understanding on one image.
+sensor_msgs/Image image
+---
+std_msgs/String results

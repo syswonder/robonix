@@ -3,7 +3,8 @@
 //
 // Generates one .proto file per ROS package, containing:
 //   - A `message` block for each .msg type
-//   - A `service` block grouping all RPCs derived from .srv files
+//   - A `service` block: unary `rpc Name (Req) returns (Res)` for each .srv
+// Streaming shapes for gRPC are **only** in `robonix_contracts.proto` (from `rust/contracts/*.toml`).
 
 use anyhow::{Context, Result};
 use std::collections::BTreeSet;
@@ -11,7 +12,7 @@ use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::Path;
 
-use super::msg_parser::{GrpcStreamMode, MsgField, MsgResolver, MsgSpec, MsgTypeRef, SrvSpec};
+use super::msg_parser::{MsgField, MsgResolver, MsgSpec, MsgTypeRef, SrvSpec};
 
 fn ros_to_proto_primitive(ros_type: &str) -> &'static str {
     match ros_type {
@@ -74,50 +75,18 @@ fn emit_srv_messages(out: &mut String, srv: &SrvSpec) {
     emit_message(out, &srv.response);
 }
 
-fn stream_element_proto_type(element: &MsgTypeRef, current_package: &str) -> String {
-    match element {
-        MsgTypeRef::Primitive(p) => ros_to_proto_primitive(p).to_string(),
-        MsgTypeRef::Named { package, name } => {
-            if package == current_package {
-                name.clone()
-            } else {
-                format!("{}.{}", proto_package_name(package), name)
-            }
-        }
-    }
-}
-
-fn emit_service(out: &mut String, package: &str, srvs: &[&SrvSpec]) {
+fn emit_service(out: &mut String, package: &str, srvs: &[&SrvSpec]) -> Result<()> {
     let service_name = format!("{}Service", to_pascal_case(package));
     let _ = writeln!(out, "service {} {{", service_name);
     for srv in srvs {
-        match &srv.grpc_stream {
-            Some(GrpcStreamMode::ServerStream { element }) => {
-                let el = stream_element_proto_type(element, package);
-                let _ = writeln!(
-                    out,
-                    "  rpc {} ({}) returns (stream {});",
-                    srv.name, srv.request.name, el
-                );
-            }
-            Some(GrpcStreamMode::ClientStream { element }) => {
-                let el = stream_element_proto_type(element, package);
-                let _ = writeln!(
-                    out,
-                    "  rpc {} (stream {}) returns ({});",
-                    srv.name, el, srv.response.name
-                );
-            }
-            None => {
-                let _ = writeln!(
-                    out,
-                    "  rpc {} ({}) returns ({});",
-                    srv.name, srv.request.name, srv.response.name,
-                );
-            }
-        }
+        let _ = writeln!(
+            out,
+            "  rpc {} ({}) returns ({});",
+            srv.name, srv.request.name, srv.response.name,
+        );
     }
     let _ = writeln!(out, "}}");
+    Ok(())
 }
 
 fn to_pascal_case(s: &str) -> String {
@@ -141,11 +110,7 @@ fn import_named_type(imports: &mut BTreeSet<String>, current_package: &str, tr: 
     }
 }
 
-fn collect_imports(
-    specs: &[&MsgSpec],
-    srvs: &[&SrvSpec],
-    current_package: &str,
-) -> BTreeSet<String> {
+fn collect_imports(specs: &[&MsgSpec], srvs: &[&SrvSpec], current_package: &str) -> BTreeSet<String> {
     let mut imports = BTreeSet::new();
     for spec in specs {
         for field in &spec.fields {
@@ -153,13 +118,6 @@ fn collect_imports(
         }
     }
     for srv in srvs {
-        if let Some(mode) = &srv.grpc_stream {
-            let element = match mode {
-                GrpcStreamMode::ServerStream { element }
-                | GrpcStreamMode::ClientStream { element } => element,
-            };
-            import_named_type(&mut imports, current_package, element);
-        }
         for field in srv.request.fields.iter().chain(srv.response.fields.iter()) {
             import_named_type(&mut imports, current_package, &field.type_ref);
         }
@@ -210,19 +168,17 @@ pub fn generate(resolver: &MsgResolver, out_dir: &Path) -> Result<()> {
             let _ = writeln!(out);
         }
 
-        // Emit all message definitions
         for spec in &specs {
             emit_message(&mut out, spec);
             let _ = writeln!(out);
         }
 
-        // Emit request/response messages for services, then the service block
+        for srv in &srvs {
+            emit_srv_messages(&mut out, srv);
+            let _ = writeln!(out);
+        }
         if !srvs.is_empty() {
-            for srv in &srvs {
-                emit_srv_messages(&mut out, srv);
-                let _ = writeln!(out);
-            }
-            emit_service(&mut out, package, &srvs);
+            emit_service(&mut out, package, &srvs)?;
             let _ = writeln!(out);
         }
 
