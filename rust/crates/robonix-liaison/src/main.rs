@@ -21,10 +21,7 @@
 //   Fallback stdin:  text loop      (set ROBONIX_LIAISON_SOURCE=text,
 //                                    useful for headless / pipe mode)
 
-#[path = "../../robonix-interfaces/robonix_proto/contract_proto_modules.rs"]
-mod proto;
-
-pub(crate) use proto::{contracts, pilot};
+use robonix_interfaces::{contracts, pilot};
 
 use anyhow::Result;
 use contracts::sys_runtime_liaison_server::{SysRuntimeLiaison, SysRuntimeLiaisonServer};

@@ -26,3 +26,6 @@ build/
 #uv
 .venv
 demos
+yoloe-11l-seg-pf.pt
+yoloe-11l-seg.pt
+mobileclip_blt.ts

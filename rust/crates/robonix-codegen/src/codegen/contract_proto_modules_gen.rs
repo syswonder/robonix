@@ -115,7 +115,10 @@ pub fn write(out_dir: &Path) -> Result<()> {
         &mut out,
         "// Most generated types are unused in any single binary."
     )?;
-    writeln!(&mut out, "#![allow(dead_code)]")?;
+    writeln!(
+        &mut out,
+        "// (Suppress dead_code on the `robonix-interfaces` crate — not `#![allow]` here: included via `include!`.)"
+    )?;
     writeln!(&mut out)?;
 
     for proto_file in &order {

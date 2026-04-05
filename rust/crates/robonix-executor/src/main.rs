@@ -9,10 +9,7 @@ mod routing_kind;
 mod service;
 mod tools;
 
-#[path = "../../robonix-interfaces/robonix_proto/contract_proto_modules.rs"]
-mod proto;
-
-pub(crate) use proto::{contracts, executor, pilot};
+use robonix_interfaces::{contracts, executor, pilot};
 
 use anyhow::Result;
 use contracts::sys_runtime_executor_list_tools_server::SysRuntimeExecutorListToolsServer;

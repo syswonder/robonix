@@ -29,6 +29,7 @@ message Observation {
   float cy = 11;
   repeated float goal_pos = 12; // target object position [x,y,z]
   repeated float camera_pose = 13; // 4x4 row-major T_world_camera (camera-to-world transform)
+  repeated float tcp_pose = 14;    // [x,y,z,qx,qy,qz,qw] end-effector pose in world frame
 }
 
 message Action {

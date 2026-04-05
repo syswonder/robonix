@@ -22,8 +22,5 @@ log.workspace = true
 env_logger.workspace = true
 uuid.workspace = true
 robonix-sdk.workspace = true
+robonix-interfaces.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
-
-[build-dependencies]
-tonic-prost-build.workspace = true
-protoc-bin-vendored.workspace = true

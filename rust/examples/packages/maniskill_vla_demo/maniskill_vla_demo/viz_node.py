@@ -2,7 +2,7 @@
 """Visualization node: streams env camera + real-time detection overlays to Rerun.
 
 Connects to env_node via gRPC, polls observations at target FPS, and logs to a
-live Rerun viewer.  A background thread runs YOLO-World (default) or GroundingDINO
+live Rerun viewer.  A background thread runs YOLOE (default) or GroundingDINO
 on the latest camera frame for detection overlays.
 
 Usage:
@@ -13,8 +13,8 @@ Env:
   ROBONIX_ATLAS     gRPC address of robonix-atlas  (default: localhost:50051)
   RERUN_GRPC_PORT    port for the Rerun gRPC data server  (default: 9877)
   VIZ_DETECT_QUERY   detection query (default: "object . cup . box")
-  VIZ_DETECT_BACKEND yolo_world | grounding_dino  (default: yolo_world)
-  VIZ_YOLO_WEIGHTS   ultralytics YOLO-World weights (default: yolov8s-worldv2.pt)
+  VIZ_DETECT_BACKEND yoloe | grounding_dino  (default: yoloe)
+  VIZ_YOLO_WEIGHTS   ultralytics/HF YOLOE weights
   VIZ_DETECT_DEVICE  detector device: auto|cuda|cpu  (default: auto)
   VIZ_DETECT_FP16    use FP16 on CUDA (default: 1)
 """
@@ -47,7 +47,7 @@ import robonix_runtime_pb2 as pb  # noqa: E402
 import robonix_runtime_pb2_grpc as pb_grpc  # noqa: E402
 import maniskill_env_pb2 as env_pb  # noqa: E402
 import maniskill_env_pb2_grpc as env_pb_grpc  # noqa: E402
-from maniskill_vla_demo.yolo_weights import resolve_yolo_world_weights  # noqa: E402
+from maniskill_vla_demo.yolo_weights import resolve_open_vocab_weights  # noqa: E402
 
 # ── Transport selection ───────────────────────────────────────────────────────
 
@@ -89,7 +89,7 @@ class DepthCloudAccumulator:
     VOXEL_SIZE = 0.03   # metres — 3 cm resolution
     DEPTH_STEP = 4      # process every Nth pixel in u and v (4 → 160×120 @ 640×480)
     MIN_DEPTH  = 0.15   # metres — ignore artefacts very close to the lens
-    MAX_DEPTH  = 8.0    # metres — clip far background
+    MAX_DEPTH  = float(os.environ.get("VIZ_CLOUD_MAX_DEPTH", "2.0"))    # metres
 
     def __init__(self) -> None:
         self._voxels: dict = {}   # (xi, yi, zi) → np.ndarray shape (3,) uint8 RGB
@@ -172,7 +172,7 @@ def _viz_classes_from_query(q: str) -> list[str]:
 
 
 class RealtimeDetector:
-    """YOLO-World (default) or GroundingDINO; runs on frames fed by the main loop."""
+    """YOLOE (default) or GroundingDINO; runs on frames fed by the main loop."""
 
     def __init__(self, query: str, threshold: float, device: str, use_fp16: bool):
         self._query = query
@@ -192,7 +192,11 @@ class RealtimeDetector:
         self._yolo_model = None
         self._yolo_device: str | int = "cpu"
         self._yolo_half = False
-        self._backend: str | None = None  # "yolo_world" | "grounding_dino"
+        self._backend: str | None = None  # "yoloe" | "grounding_dino"
+        self._sam2_predictor = None
+        self._sam2_device = "cpu"
+        self._segment_enabled = os.environ.get("VIZ_SEGMENT", "1") not in ("0", "false", "False")
+        self._segment_topk = max(1, int(os.environ.get("VIZ_SEGMENT_TOPK", "4")))
         self._ready = threading.Event()
         self._stop = threading.Event()
 
@@ -259,31 +263,35 @@ class RealtimeDetector:
         return "cpu"
 
     def _load_model(self) -> None:
-        be = os.environ.get("VIZ_DETECT_BACKEND", "yolo_world").strip().lower()
+        be = os.environ.get("VIZ_DETECT_BACKEND", "yoloe").strip().lower()
         if be in ("grounding_dino", "grounding-dino", "gdino", "dino"):
             self._load_grounding_dino()
         else:
             self._load_yolo_world()
             if self._yolo_model is None:
-                print("[viz-detect] YOLO-World failed → trying GroundingDINO", file=sys.stderr)
+                print("[viz-detect] YOLOE failed → trying GroundingDINO", file=sys.stderr)
                 self._load_grounding_dino()
+        if self._segment_enabled:
+            self._load_sam2()
 
     def _load_yolo_world(self) -> None:
         try:
-            from ultralytics import YOLO
+            from ultralytics import YOLOE
             import torch
             from PIL import Image as PILImage
         except ImportError:
-            print("[viz-detect] ultralytics not installed — skipping YOLO-World", file=sys.stderr)
+            print("[viz-detect] ultralytics not installed — skipping YOLOE", file=sys.stderr)
             return
 
         device = self._pick_device()
         dev_arg: str | int = 0 if device == "cuda" else "cpu"
         self._yolo_half = bool(device == "cuda" and self._use_fp16)
-        weights = resolve_yolo_world_weights(os.environ.get("VIZ_YOLO_WEIGHTS"))
-        print(f"[viz-detect] loading YOLO-World {weights} on {device}…", file=sys.stderr)
+        weights = resolve_open_vocab_weights(
+            os.environ.get("VIZ_YOLOE_WEIGHTS") or os.environ.get("VIZ_YOLO_WEIGHTS")
+        )
+        print(f"[viz-detect] loading YOLOE {weights} on {device}…", file=sys.stderr)
         try:
-            self._yolo_model = YOLO(weights)
+            self._yolo_model = YOLOE(weights)
         except OSError as e:
             print(f"[viz-detect] YOLO load error: {e}", file=sys.stderr)
             return
@@ -300,7 +308,7 @@ class RealtimeDetector:
                 dummy, conf=0.5, verbose=False, device=dev_arg, half=self._yolo_half)
         except (RuntimeError, torch.OutOfMemoryError) as exc:
             if device == "cuda" and "out of memory" in str(exc).lower():
-                print("[viz-detect] YOLO CUDA OOM → CPU", file=sys.stderr)
+                print("[viz-detect] YOLOE CUDA OOM → CPU", file=sys.stderr)
                 torch.cuda.empty_cache()
                 device = "cpu"
                 dev_arg = "cpu"
@@ -313,8 +321,8 @@ class RealtimeDetector:
 
         self._yolo_device = dev_arg
         self._yolo_classes = actual_classes  # frozen; never re-encoded at runtime
-        self._backend = "yolo_world"
-        print(f"[viz-detect] YOLO-World ready (classes={actual_classes})", file=sys.stderr)
+        self._backend = "yoloe"
+        print(f"[viz-detect] YOLOE ready (classes={actual_classes})", file=sys.stderr)
 
     def _load_grounding_dino(self) -> None:
         try:
@@ -353,11 +361,15 @@ class RealtimeDetector:
         print(f"[viz-detect] GroundingDINO ready (device={device_str})", file=sys.stderr)
 
     def _run(self, rgb: np.ndarray) -> list[dict]:
-        if self._backend == "yolo_world" and self._yolo_model is not None:
-            return self._run_yolo(rgb)
-        if self._processor is None or self._model is None:
-            return []
-        return self._run_grounding_dino(rgb)
+        if self._backend == "yoloe" and self._yolo_model is not None:
+            detections = self._run_yolo(rgb)
+        elif self._processor is None or self._model is None:
+            detections = []
+        else:
+            detections = self._run_grounding_dino(rgb)
+        if detections and self._sam2_predictor is not None:
+            self._attach_segmentation(rgb, detections)
+        return detections
 
     def _run_yolo(self, rgb: np.ndarray) -> list[dict]:
         # Classes are set once during _load_yolo_world; never re-call set_classes
@@ -433,6 +445,126 @@ class RealtimeDetector:
             })
         return detections
 
+    def _load_sam2(self) -> None:
+        try:
+            import torch
+            from sam2.sam2_image_predictor import SAM2ImagePredictor
+        except ImportError as exc:
+            print(f"[viz-detect] SAM2 unavailable: {exc}", file=sys.stderr)
+            return
+
+        requested = os.environ.get("VIZ_SEGMENT_DEVICE", self._device_pref).strip().lower()
+        if requested == "auto":
+            requested = self._pick_device()
+        if requested not in ("cpu", "cuda"):
+            requested = "cpu"
+        if requested == "cuda" and not torch.cuda.is_available():
+            requested = "cpu"
+
+        model_id = os.environ.get("VIZ_SAM2_MODEL", "facebook/sam2.1-hiera-tiny")
+        print(f"[viz-detect] loading SAM2 {model_id} on {requested}…", file=sys.stderr)
+        try:
+            predictor = SAM2ImagePredictor.from_pretrained(model_id, device=requested)
+            predictor.model.to(requested)
+            dummy = np.zeros((64, 64, 3), dtype=np.uint8)
+            with torch.inference_mode():
+                predictor.set_image(dummy)
+            self._sam2_predictor = predictor
+            self._sam2_device = requested
+            print(f"[viz-detect] SAM2 ready (device={requested})", file=sys.stderr)
+        except Exception as exc:
+            if requested == "cuda":
+                print(f"[viz-detect] SAM2 CUDA init failed ({exc}) → CPU", file=sys.stderr)
+                try:
+                    predictor = SAM2ImagePredictor.from_pretrained(model_id, device="cpu")
+                    predictor.model.to("cpu")
+                    dummy = np.zeros((64, 64, 3), dtype=np.uint8)
+                    with torch.inference_mode():
+                        predictor.set_image(dummy)
+                    self._sam2_predictor = predictor
+                    self._sam2_device = "cpu"
+                    print("[viz-detect] SAM2 ready (device=cpu)", file=sys.stderr)
+                except Exception as exc2:
+                    print(f"[viz-detect] SAM2 disabled: {exc2}", file=sys.stderr)
+            else:
+                print(f"[viz-detect] SAM2 disabled: {exc}", file=sys.stderr)
+
+    def _attach_segmentation(self, rgb: np.ndarray, detections: list[dict]) -> None:
+        if self._sam2_predictor is None:
+            return
+        try:
+            import torch
+        except ImportError:
+            return
+
+        ordered = sorted(
+            enumerate(detections),
+            key=lambda item: float(item[1].get("score", 0.0)),
+            reverse=True,
+        )[: self._segment_topk]
+        if not ordered:
+            return
+
+        try:
+            with torch.inference_mode():
+                self._sam2_predictor.set_image(rgb)
+                for rank, (idx, det) in enumerate(ordered, start=1):
+                    bbox = det.get("bbox", [])
+                    if len(bbox) < 4:
+                        continue
+                    box_arr = np.array(list(bbox[:4]), dtype=np.float32)
+                    masks, _, _ = self._sam2_predictor.predict(
+                        point_coords=None,
+                        point_labels=None,
+                        box=box_arr,
+                        multimask_output=False,
+                    )
+                    mask = masks[0].astype(bool)
+                    if int(mask.sum()) <= 0:
+                        continue
+                    det["mask"] = mask
+                    det["mask_id"] = rank
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            if ("same device" in msg or ("cuda" in msg and "cpu" in msg)) and self._sam2_device == "cuda":
+                print("[viz-detect] SAM2 CUDA/CPU mismatch → CPU", file=sys.stderr)
+                try:
+                    self._sam2_predictor.model.to("cpu")
+                    self._sam2_device = "cpu"
+                    self._attach_segmentation(rgb, detections)
+                except Exception as exc2:
+                    print(f"[viz-detect] SAM2 segmentation disabled: {exc2}", file=sys.stderr)
+            else:
+                print(f"[viz-detect] SAM2 segmentation failed: {exc}", file=sys.stderr)
+
+
+def _detection_overlay(rgb: np.ndarray, detections: list[dict]) -> tuple[np.ndarray, np.ndarray | None]:
+    overlay = rgb.copy()
+    seg = np.zeros(rgb.shape[:2], dtype=np.uint16)
+    any_mask = False
+    palette = np.array(
+        [
+            [255, 90, 90],
+            [90, 255, 140],
+            [90, 170, 255],
+            [255, 210, 90],
+            [220, 120, 255],
+            [120, 255, 245],
+        ],
+        dtype=np.float32,
+    )
+    for idx, det in enumerate(detections):
+        mask = det.get("mask")
+        if mask is None:
+            continue
+        color = palette[idx % len(palette)]
+        overlay[mask] = (
+            overlay[mask].astype(np.float32) * 0.35 + color * 0.65
+        ).astype(np.uint8)
+        seg[mask] = np.uint16(det.get("mask_id", idx + 1))
+        any_mask = True
+    return overlay, seg if any_mask else None
+
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
@@ -441,7 +573,7 @@ def main() -> None:
     global _IOX2_TRANSPORT
     parser = argparse.ArgumentParser(description="Rerun visualizer for maniskill_vla_demo")
     parser.add_argument("--detect-query",
-                        default=os.environ.get("VIZ_DETECT_QUERY", "object . cup . box"),
+                        default=os.environ.get("VIZ_DETECT_QUERY", "red cube . cube . object . cup . box"),
                         help="Detection classes (dot-separated; YOLO-World / GroundingDINO)")
     parser.add_argument("--fps", type=float, default=10.0, help="target polling rate (Hz)")
     parser.add_argument("--threshold", type=float, default=0.25,
@@ -456,7 +588,7 @@ def main() -> None:
         print("[viz] rerun-sdk not installed.  pip install rerun-sdk>=0.22", file=sys.stderr)
         sys.exit(1)
 
-    rr.init("maniskill_vla_demo")
+    rr.init("maniskill_vla_demo", recording_id="maniskill_demo")
 
     grpc_port = int(os.environ.get("RERUN_GRPC_PORT", "9877"))
     grpc_addr = rr.serve_grpc(grpc_port=grpc_port)
@@ -494,8 +626,15 @@ def main() -> None:
                     TimeSeriesView(name="Joint Positions", origin="robot/joint"),
                     Spatial2DView(name="Detections",
                                   origin="camera/detections"),
+                    Spatial2DView(name="Segmentation",
+                                  origin="camera/segmentation"),
+                    Spatial2DView(name="Grasp Camera",
+                                  origin="grasp/camera"),
                 ),
-                Vertical(cloud_view),
+                Vertical(
+                    cloud_view,
+                    Spatial3DView(name="Grasp Poses", origin="world/grasps"),
+                ),
             ),
             collapse_panels=True,
         )
@@ -572,7 +711,12 @@ def main() -> None:
     frame = 0
     env_id = os.environ.get("MANISKILL_ENV_ID", "?")
     last_det_seq = -1
-    print(f"[viz] streaming at {args.fps:.0f} fps  env={env_id}  transport={'iceoryx2' if _IOX2_TRANSPORT else 'grpc'}", file=sys.stderr)
+    print(
+        f"[viz] streaming at {args.fps:.0f} fps  env={env_id}  "
+        f"transport={'iceoryx2' if _IOX2_TRANSPORT else 'grpc'} "
+        f"detect_query={args.detect_query!r}",
+        file=sys.stderr,
+    )
 
     while True:
         t0 = time.monotonic()
@@ -628,6 +772,7 @@ def main() -> None:
 
         # Always log RGB as detection background so the panel is never black
         rr.log("camera/detections/image", rr.Image(rgb, color_model="RGB"))
+        rr.log("camera/segmentation/image", rr.Image(rgb, color_model="RGB"))
 
         # ── Depth map ─────────────────────────────────────────────────────────
         if obs.depth:
@@ -675,6 +820,9 @@ def main() -> None:
 
             detections, det_rgb = detector.get_results()
             if detections and det_rgb is not None:
+                overlay, seg = _detection_overlay(det_rgb, detections)
+                rr.log("camera/detections/image", rr.Image(overlay, color_model="RGB"))
+                rr.log("camera/segmentation/image", rr.Image(overlay, color_model="RGB"))
                 boxes_min = []
                 boxes_size = []
                 labels = []
@@ -702,14 +850,36 @@ def main() -> None:
                            rr.Boxes2D(mins=np.array(boxes_min),
                                       sizes=np.array(boxes_size),
                                       labels=labels, colors=colors))
+                    rr.log("camera/segmentation/boxes",
+                           rr.Boxes2D(mins=np.array(boxes_min),
+                                      sizes=np.array(boxes_size),
+                                      labels=labels, colors=colors))
                 else:
                     rr.log("camera/detections/boxes", rr.Clear(recursive=False))
+                    rr.log("camera/segmentation/boxes", rr.Clear(recursive=False))
+
+                if seg is not None:
+                    rr.log("camera/segmentation/mask", rr.SegmentationImage(seg))
+                else:
+                    rr.log("camera/segmentation/mask", rr.Clear(recursive=False))
 
                 if pts3d:
                     rr.log("world/detections",
                            rr.Points3D(pts3d, radii=0.02,
                                        colors=[[50, 220, 50]] * len(pts3d),
                                        labels=labels[:len(pts3d)]))
+                if frame % 30 == 0:
+                    print(
+                        f"[viz-detect] detections={len(detections)} "
+                        f"labels={[d.get('label', '?') for d in detections]}",
+                        file=sys.stderr,
+                    )
+            else:
+                rr.log("camera/detections/boxes", rr.Clear(recursive=False))
+                rr.log("camera/segmentation/boxes", rr.Clear(recursive=False))
+                rr.log("camera/segmentation/mask", rr.Clear(recursive=False))
+                if frame % 30 == 0:
+                    print("[viz-detect] detections=0", file=sys.stderr)
 
         frame += 1
         elapsed = time.monotonic() - t0

@@ -2,7 +2,7 @@
 // Do not edit by hand.
 // `tonic::include_proto!` order matches prost `super::` sibling resolution.
 // Most generated types are unused in any single binary.
-#![allow(dead_code)]
+// (Suppress dead_code on the `robonix-interfaces` crate — not `#![allow]` here: included via `include!`.)
 
 pub mod pilot {
     tonic::include_proto!("robonix.pilot");

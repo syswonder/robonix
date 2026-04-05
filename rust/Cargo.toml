@@ -1,6 +1,5 @@
 [workspace]
 members = ["crates/*"]
-exclude = ["crates/robonix-interfaces"]
 resolver = "2"
 
 [workspace.package]
@@ -61,3 +60,4 @@ crossterm = "0.29.0"
 robonix-codegen = { path = "crates/robonix-codegen" }
 robonix-sdk = { path = "crates/robonix-sdk" }
 robonix-buffer = { path = "crates/robonix-buffer" }
+robonix-interfaces = { path = "crates/robonix-interfaces" }
