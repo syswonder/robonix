@@ -5,7 +5,7 @@
 <h3 align="center">Robonix — The Embodied AI Operating System</h3>
 
 <p align="center">
-  <em>Rust-native EAIOS: register primitives and services once, negotiate transports at runtime, discover them everywhere.</em>
+  <em>Rust-native EAIOS: Robonix is a skill-centric embodied AI operating system composed of five core roles: Liaison, Pilot, Atlas, Nexus, and Executor, forming a complete pipeline from human intent to embodied action.</em>
 </p>
 
 <p align="center">

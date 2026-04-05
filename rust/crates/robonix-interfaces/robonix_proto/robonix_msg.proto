@@ -36,8 +36,24 @@ message BufferFormat {
 
 message ChatMessage {
   string role = 1;
-  string content = 2;
-  string image_base64 = 3;
+  string name = 2;
+  string content = 3;
+  string image_base64 = 4;
+  string tool_call_id = 5;
+  repeated ToolCall tool_calls = 6;
+  repeated ChatPart parts = 7;
+}
+
+message ChatPart {
+  string kind = 1;
+  string text = 2;
+  string mime_type = 3;
+  string data_base64 = 4;
+  string uri = 5;
+  string tool_name = 6;
+  string tool_arguments_json = 7;
+  string tool_call_id = 8;
+  string tool_result_json = 9;
 }
 
 message CommandResult {

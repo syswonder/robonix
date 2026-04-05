@@ -200,7 +200,7 @@ pub async fn run_turn(
             .collect();
 
         let mut messages = vec![Message::system(&system_prompt)];
-        messages.extend(session.history.clone());
+        messages.extend(sanitize_history_for_vlm(&session.history));
 
         let mut vlm = vlm.lock().await;
         let (content, raw_tool_calls) = {
@@ -346,11 +346,12 @@ pub async fn run_turn(
         }
 
         // ── 7. Feed results back into history ─────────────────────────────────
+        let mut deferred_followups: Vec<Message> = Vec::new();
         for r in &results {
             if r.success {
-                session
-                    .history
-                    .push(tool_result_to_message(&r.call_id, &r.output));
+                let mapped = tool_result_to_messages(&r.call_id, &r.output);
+                session.history.extend(mapped.tool_messages);
+                deferred_followups.extend(mapped.followup_messages);
             } else {
                 session.history.push(Message::tool_result(
                     &r.call_id,
@@ -358,6 +359,7 @@ pub async fn run_turn(
                 ));
             }
         }
+        session.history.extend(deferred_followups);
         trim_history(&mut session.history, MAX_HISTORY);
 
         // Emit BatchResult to Liaison.
@@ -404,24 +406,33 @@ pub async fn run_turn(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Map executor tool output to a VLM history message.
+/// Map executor tool output to VLM history messages.
 ///
-/// - Legacy / convenience: top-level `image_base64` (+ optional `format`) → vision input.
-/// - ROS MCP wire: `sensor_msgs/Image` JSON from robonix-codegen `to_dict()` — pixel data is
-///   base64 in `data`, with `width` / `height` / `encoding` — must also become vision input
-///   (otherwise the model only sees a huge JSON string and cannot decode the image).
-fn tool_result_to_message(call_id: &str, output: &str) -> Message {
+/// OpenAI-compatible VLM endpoints reject `image_url` content on `tool` role
+/// messages. When a tool returns an image, keep the tool result textual and
+/// append a synthetic `user` vision message that carries the image.
+struct ToolResultHistory {
+    tool_messages: Vec<Message>,
+    followup_messages: Vec<Message>,
+}
+
+fn tool_result_to_messages(call_id: &str, output: &str) -> ToolResultHistory {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(output) else {
-        return Message::tool_result(call_id, output);
+        return ToolResultHistory {
+            tool_messages: vec![Message::tool_result(call_id, output)],
+            followup_messages: vec![],
+        };
     };
 
     if let Some(b64) = v.get("image_base64").and_then(|x| x.as_str()) {
         let fmt = v.get("format").and_then(|x| x.as_str()).unwrap_or("jpeg");
-        return Message::tool_result_with_image(
-            call_id,
-            &format!("[{fmt} image]"),
-            b64.to_string(),
-        );
+        return ToolResultHistory {
+            tool_messages: vec![Message::tool_result(call_id, &format!("[{fmt} image attached]"))],
+            followup_messages: vec![Message::user_with_image(
+                "Tool returned an image. Analyze this image together with the tool result above.",
+                b64.to_string(),
+            )],
+        };
     }
 
     // sensor_msgs/msg/Image — matches e.g. camera_snapshot / camera_depth_snapshot MCP tools.
@@ -434,14 +445,22 @@ fn tool_result_to_message(call_id: &str, output: &str) -> Message {
     {
         let enc = v.get("encoding").and_then(|e| e.as_str()).unwrap_or("jpeg");
         let b64 = v.get("data").and_then(|d| d.as_str()).unwrap_or("");
-        return Message::tool_result_with_image(
-            call_id,
-            &format!("[sensor_msgs/Image encoding={enc}]"),
-            b64.to_string(),
-        );
+        return ToolResultHistory {
+            tool_messages: vec![Message::tool_result(
+                call_id,
+                &format!("[sensor_msgs/Image encoding={enc}]"),
+            )],
+            followup_messages: vec![Message::user_with_image(
+                "Tool returned an image. Analyze this image together with the tool result above.",
+                b64.to_string(),
+            )],
+        };
     }
 
-    Message::tool_result(call_id, output)
+    ToolResultHistory {
+        tool_messages: vec![Message::tool_result(call_id, output)],
+        followup_messages: vec![],
+    }
 }
 
 fn trim_history(history: &mut Vec<Message>, max: usize) {
@@ -449,6 +468,41 @@ fn trim_history(history: &mut Vec<Message>, max: usize) {
         let remove = history.len() - max;
         history.drain(0..remove);
     }
+}
+
+fn sanitize_history_for_vlm(history: &[Message]) -> Vec<Message> {
+    let mut out: Vec<Message> = Vec::with_capacity(history.len());
+    let mut open_tool_call_ids: std::collections::HashSet<String> = Default::default();
+
+    for msg in history {
+        match msg.role.as_str() {
+            "assistant" => {
+                if let Some(calls) = &msg.tool_calls {
+                    open_tool_call_ids.clear();
+                    for tc in calls {
+                        open_tool_call_ids.insert(tc.id.clone());
+                    }
+                } else {
+                    open_tool_call_ids.clear();
+                }
+                out.push(msg.clone());
+            }
+            "tool" => {
+                let Some(call_id) = msg.tool_call_id.as_ref() else {
+                    continue;
+                };
+                if open_tool_call_ids.remove(call_id) {
+                    out.push(msg.clone());
+                }
+            }
+            _ => {
+                open_tool_call_ids.clear();
+                out.push(msg.clone());
+            }
+        }
+    }
+
+    out
 }
 
 /// Extract `std_msgs/String.data` from tool output.

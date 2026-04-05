@@ -1,7 +1,10 @@
 //! VLM gRPC client — contract `SysModelVlmChat` (`robonix_contracts.proto`).
 
 use crate::contracts::sys_model_vlm_chat_client::SysModelVlmChatClient;
-use crate::robonix_msg::{ChatMessage as PbChatMessage, ToolSpec as PbToolSpec};
+use crate::robonix_msg::{
+    ChatMessage as PbChatMessage, ChatPart as PbChatPart, ToolCall as PbWireToolCall,
+    ToolSpec as PbToolSpec,
+};
 use crate::vlm_proto::{ChatStreamEvent, ChatStreamRequest};
 use anyhow::{Context, Result};
 use robonix_sdk::QueryNodesOpts;
@@ -13,6 +16,8 @@ use tonic::Request;
 pub struct Message {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
@@ -20,6 +25,8 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parts: Option<Vec<ChatPart>>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -34,6 +41,27 @@ pub struct ToolCall {
 pub struct FnCall {
     pub name: String,
     pub arguments: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ChatPart {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_arguments_json: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_result_json: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -67,55 +95,143 @@ impl Message {
     pub fn system(content: &str) -> Self {
         Self {
             role: "system".into(),
+            name: None,
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
             image_base64: None,
+            parts: Some(vec![ChatPart::text(content)]),
         }
     }
     pub fn user(content: &str) -> Self {
         Self {
             role: "user".into(),
+            name: None,
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
             image_base64: None,
+            parts: Some(vec![ChatPart::text(content)]),
+        }
+    }
+    pub fn user_with_image(content: &str, image: String) -> Self {
+        Self {
+            role: "user".into(),
+            name: None,
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+            image_base64: Some(image.clone()),
+            parts: Some(vec![
+                ChatPart::text(content),
+                ChatPart::inline_data("image/jpeg", image),
+            ]),
         }
     }
     pub fn assistant(content: &str) -> Self {
         Self {
             role: "assistant".into(),
+            name: None,
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
             image_base64: None,
+            parts: Some(vec![ChatPart::text(content)]),
         }
     }
     pub fn assistant_tool_calls(tc: Vec<ToolCall>) -> Self {
+        let parts = tc.iter().map(ChatPart::function_call).collect();
         Self {
             role: "assistant".into(),
+            name: None,
             content: None,
             tool_calls: Some(tc),
             tool_call_id: None,
             image_base64: None,
+            parts: Some(parts),
         }
     }
     pub fn tool_result(id: &str, content: &str) -> Self {
         Self {
             role: "tool".into(),
+            name: None,
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: Some(id.into()),
             image_base64: None,
+            parts: Some(vec![ChatPart::function_response(id, content)]),
         }
     }
     pub fn tool_result_with_image(id: &str, content: &str, image: String) -> Self {
         Self {
             role: "tool".into(),
+            name: None,
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: Some(id.into()),
-            image_base64: Some(image),
+            image_base64: Some(image.clone()),
+            parts: Some(vec![
+                ChatPart::function_response(id, content),
+                ChatPart::inline_data("image/jpeg", image),
+            ]),
+        }
+    }
+}
+
+impl ChatPart {
+    pub fn text(text: &str) -> Self {
+        Self {
+            kind: "text".into(),
+            text: Some(text.into()),
+            mime_type: None,
+            data_base64: None,
+            uri: None,
+            tool_name: None,
+            tool_arguments_json: None,
+            tool_call_id: None,
+            tool_result_json: None,
+        }
+    }
+
+    pub fn inline_data(mime_type: &str, data_base64: String) -> Self {
+        Self {
+            kind: "inline_data".into(),
+            text: None,
+            mime_type: Some(mime_type.into()),
+            data_base64: Some(data_base64),
+            uri: None,
+            tool_name: None,
+            tool_arguments_json: None,
+            tool_call_id: None,
+            tool_result_json: None,
+        }
+    }
+
+    pub fn function_call(tc: &ToolCall) -> Self {
+        Self {
+            kind: "function_call".into(),
+            text: None,
+            mime_type: None,
+            data_base64: None,
+            uri: None,
+            tool_name: Some(tc.function.name.clone()),
+            tool_arguments_json: Some(tc.function.arguments.clone()),
+            tool_call_id: Some(tc.id.clone()),
+            tool_result_json: None,
+        }
+    }
+
+    pub fn function_response(tool_call_id: &str, result_json: &str) -> Self {
+        Self {
+            kind: "function_response".into(),
+            text: None,
+            mime_type: None,
+            data_base64: None,
+            uri: None,
+            tool_name: None,
+            tool_arguments_json: None,
+            tool_call_id: Some(tool_call_id.into()),
+            tool_result_json: Some(result_json.into()),
         }
     }
 }
@@ -300,8 +416,38 @@ impl VlmClient {
             .iter()
             .map(|m| PbChatMessage {
                 role: m.role.clone(),
+                name: m.name.clone().unwrap_or_default(),
                 content: m.content.clone().unwrap_or_default(),
                 image_base64: m.image_base64.clone().unwrap_or_default(),
+                tool_call_id: m.tool_call_id.clone().unwrap_or_default(),
+                tool_calls: m
+                    .tool_calls
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|tc| PbWireToolCall {
+                        id: tc.id,
+                        name: tc.function.name,
+                        arguments_json: tc.function.arguments,
+                    })
+                    .collect(),
+                parts: m
+                    .parts
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|p| PbChatPart {
+                        kind: p.kind,
+                        text: p.text.unwrap_or_default(),
+                        mime_type: p.mime_type.unwrap_or_default(),
+                        data_base64: p.data_base64.unwrap_or_default(),
+                        uri: p.uri.unwrap_or_default(),
+                        tool_name: p.tool_name.unwrap_or_default(),
+                        tool_arguments_json: p.tool_arguments_json.unwrap_or_default(),
+                        tool_call_id: p.tool_call_id.unwrap_or_default(),
+                        tool_result_json: p.tool_result_json.unwrap_or_default(),
+                    })
+                    .collect(),
             })
             .collect()
     }
