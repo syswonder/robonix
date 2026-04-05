@@ -18,6 +18,7 @@ from concurrent import futures as _grpc_futures
 from io import BytesIO
 from pathlib import Path
 
+from . import numpy_compat  # noqa: F401 — np.float shim before Sapien/transforms3d
 import numpy as np
 from PIL import Image as PILImage
 
@@ -89,6 +90,8 @@ mcp = FastMCP("maniskill-env")
 _lock = threading.Lock()
 _env = None
 _latest_obs = None
+_latest_done = False
+_latest_reward = 0.0
 
 # ── iceoryx2 publish loop (OBS_TRANSPORT=iceoryx2) ────────────────────────────
 
@@ -289,7 +292,7 @@ def _step_env(action_list, repeat_steps: int = 1):
     repeat_steps holds the same action for multiple simulator steps so motion
     is visible for small delta actions.
     """
-    global _latest_obs
+    global _latest_obs, _latest_done, _latest_reward
     import torch
 
     act_dim = _env.action_space.shape[-1]
@@ -306,6 +309,8 @@ def _step_env(action_list, repeat_steps: int = 1):
             _latest_obs = obs
             r += _scalar(reward)
             done = _bool_scalar(terminated) or _bool_scalar(truncated)
+            _latest_done = done
+            _latest_reward = float(r)
             if done:
                 break
     info_dict = {}
@@ -316,10 +321,12 @@ def _step_env(action_list, repeat_steps: int = 1):
 
 
 def _reset_env():
-    global _latest_obs
+    global _latest_obs, _latest_done, _latest_reward
     with _lock:
         obs, _ = _env.reset()
         _latest_obs = obs
+        _latest_done = False
+        _latest_reward = 0.0
     return obs
 
 
@@ -448,6 +455,9 @@ def _obs_to_proto(obs, done=False, reward=0.0):
     cam_pose = _get_camera_extrinsic(obs)
     if cam_pose:
         kwargs["camera_pose"] = cam_pose
+    tcp = _get_extra(obs).get("tcp_pose")
+    if tcp:
+        kwargs["tcp_pose"] = [float(v) for v in tcp]
     return env_pb.Observation(**kwargs)
 
 
@@ -456,10 +466,12 @@ class _EnvDataServicer(env_pb_grpc.EnvDataServiceServicer):
     def GetObs(self, request, context):
         with _lock:
             obs = _latest_obs
+            done = _latest_done
+            reward = _latest_reward
         if obs is None:
             context.abort(grpc.StatusCode.UNAVAILABLE, "env not initialized")
             return env_pb.Observation()
-        return _obs_to_proto(obs)
+        return _obs_to_proto(obs, done=done, reward=reward)
 
     def Step(self, request, context):
         obs, r, done, info_dict = _step_env(list(request.values))
@@ -524,7 +536,7 @@ def _heartbeat_loop(stub, node_id: str) -> None:
 
 
 def main() -> None:
-    global _env, _latest_obs
+    global _env, _latest_obs, _latest_done, _latest_reward
 
     import gymnasium as gym
     try:
@@ -571,8 +583,22 @@ def main() -> None:
             render_mode="rgb_array",
             sensor_configs=sensor_configs,
         )
+    except NotImplementedError as exc:
+        print(f"[env-node] WARNING: {env_id} does not support robot_uids=fetch in this task path: {exc}", file=sys.stderr)
+        print("[env-node] Falling back to StackCube-v1 for the current Fetch-based demo.", file=sys.stderr)
+        env_id = "StackCube-v1"
+        _env = gym.make(
+            env_id,
+            obs_mode="rgbd",
+            control_mode=control_mode,
+            robot_uids="fetch",
+            render_mode="rgb_array",
+            sensor_configs=sensor_configs,
+        )
     obs, _ = _env.reset()
     _latest_obs = obs
+    _latest_done = False
+    _latest_reward = 0.0
     print("[env-node] env ready", file=sys.stderr)
 
     server_addr = os.environ.get("ROBONIX_ATLAS", "localhost:50051")

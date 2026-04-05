@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x13maniskill_env.proto\x12\tmaniskill\"\x07\n\x05\x45mpty\"\xce\x01\n\x0bObservation\x12\x0b\n\x03rgb\x18\x01 \x01(\x0c\x12\r\n\x05\x64\x65pth\x18\x02 \x01(\x0c\x12\r\n\x05width\x18\x03 \x01(\x05\x12\x0e\n\x06height\x18\x04 \x01(\x05\x12\x0f\n\x07proprio\x18\x05 \x03(\x02\x12\x0c\n\x04\x64one\x18\x06 \x01(\x08\x12\x0e\n\x06reward\x18\x07 \x01(\x02\x12\n\n\x02\x66x\x18\x08 \x01(\x02\x12\n\n\x02\x66y\x18\t \x01(\x02\x12\n\n\x02\x63x\x18\n \x01(\x02\x12\n\n\x02\x63y\x18\x0b \x01(\x02\x12\x10\n\x08goal_pos\x18\x0c \x03(\x02\x12\x13\n\x0b\x63\x61mera_pose\x18\r \x03(\x02\"\x18\n\x06\x41\x63tion\x12\x0e\n\x06values\x18\x01 \x03(\x02\"b\n\nStepResult\x12#\n\x03obs\x18\x01 \x01(\x0b\x32\x16.maniskill.Observation\x12\x0e\n\x06reward\x18\x02 \x01(\x02\x12\x0c\n\x04\x64one\x18\x03 \x01(\x08\x12\x11\n\tinfo_json\x18\x04 \x01(\t\":\n\x0cSlamCloudMap\x12\x0b\n\x03xyz\x18\x01 \x01(\x0c\x12\x0b\n\x03rgb\x18\x02 \x01(\x0c\x12\x10\n\x08n_points\x18\x03 \x01(\r\"x\n\x10SlamOccupancyMap\x12\r\n\x05image\x18\x01 \x01(\x0c\x12\r\n\x05width\x18\x02 \x01(\r\x12\x0e\n\x06height\x18\x03 \x01(\r\x12\x12\n\nresolution\x18\x04 \x01(\x02\x12\x10\n\x08origin_x\x18\x05 \x01(\x02\x12\x10\n\x08origin_y\x18\x06 \x01(\x02\"j\n\x08SlamData\x12*\n\tcloud_map\x18\x01 \x01(\x0b\x32\x17.maniskill.SlamCloudMap\x12\x32\n\roccupancy_map\x18\x02 \x01(\x0b\x32\x1b.maniskill.SlamOccupancyMap2\xa9\x01\n\x0e\x45nvDataService\x12\x32\n\x06GetObs\x12\x10.maniskill.Empty\x1a\x16.maniskill.Observation\x12\x30\n\x04Step\x12\x11.maniskill.Action\x1a\x15.maniskill.StepResult\x12\x31\n\x05Reset\x12\x10.maniskill.Empty\x1a\x16.maniskill.Observation2G\n\x0fSlamDataService\x12\x34\n\x0bGetSlamData\x12\x10.maniskill.Empty\x1a\x13.maniskill.SlamDatab\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x13maniskill_env.proto\x12\tmaniskill\"\x07\n\x05\x45mpty\"\xe0\x01\n\x0bObservation\x12\x0b\n\x03rgb\x18\x01 \x01(\x0c\x12\r\n\x05\x64\x65pth\x18\x02 \x01(\x0c\x12\r\n\x05width\x18\x03 \x01(\x05\x12\x0e\n\x06height\x18\x04 \x01(\x05\x12\x0f\n\x07proprio\x18\x05 \x03(\x02\x12\x0c\n\x04\x64one\x18\x06 \x01(\x08\x12\x0e\n\x06reward\x18\x07 \x01(\x02\x12\n\n\x02\x66x\x18\x08 \x01(\x02\x12\n\n\x02\x66y\x18\t \x01(\x02\x12\n\n\x02\x63x\x18\n \x01(\x02\x12\n\n\x02\x63y\x18\x0b \x01(\x02\x12\x10\n\x08goal_pos\x18\x0c \x03(\x02\x12\x13\n\x0b\x63\x61mera_pose\x18\r \x03(\x02\x12\x10\n\x08tcp_pose\x18\x0e \x03(\x02\"\x18\n\x06\x41\x63tion\x12\x0e\n\x06values\x18\x01 \x03(\x02\"b\n\nStepResult\x12#\n\x03obs\x18\x01 \x01(\x0b\x32\x16.maniskill.Observation\x12\x0e\n\x06reward\x18\x02 \x01(\x02\x12\x0c\n\x04\x64one\x18\x03 \x01(\x08\x12\x11\n\tinfo_json\x18\x04 \x01(\t\":\n\x0cSlamCloudMap\x12\x0b\n\x03xyz\x18\x01 \x01(\x0c\x12\x0b\n\x03rgb\x18\x02 \x01(\x0c\x12\x10\n\x08n_points\x18\x03 \x01(\r\"x\n\x10SlamOccupancyMap\x12\r\n\x05image\x18\x01 \x01(\x0c\x12\r\n\x05width\x18\x02 \x01(\r\x12\x0e\n\x06height\x18\x03 \x01(\r\x12\x12\n\nresolution\x18\x04 \x01(\x02\x12\x10\n\x08origin_x\x18\x05 \x01(\x02\x12\x10\n\x08origin_y\x18\x06 \x01(\x02\"j\n\x08SlamData\x12*\n\tcloud_map\x18\x01 \x01(\x0b\x32\x17.maniskill.SlamCloudMap\x12\x32\n\roccupancy_map\x18\x02 \x01(\x0b\x32\x1b.maniskill.SlamOccupancyMap2\xa9\x01\n\x0e\x45nvDataService\x12\x32\n\x06GetObs\x12\x10.maniskill.Empty\x1a\x16.maniskill.Observation\x12\x30\n\x04Step\x12\x11.maniskill.Action\x1a\x15.maniskill.StepResult\x12\x31\n\x05Reset\x12\x10.maniskill.Empty\x1a\x16.maniskill.Observation2G\n\x0fSlamDataService\x12\x34\n\x0bGetSlamData\x12\x10.maniskill.Empty\x1a\x13.maniskill.SlamDatab\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -24,19 +24,19 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   _globals['_EMPTY']._serialized_start=34
   _globals['_EMPTY']._serialized_end=41
   _globals['_OBSERVATION']._serialized_start=44
-  _globals['_OBSERVATION']._serialized_end=250
-  _globals['_ACTION']._serialized_start=252
-  _globals['_ACTION']._serialized_end=276
-  _globals['_STEPRESULT']._serialized_start=278
-  _globals['_STEPRESULT']._serialized_end=376
-  _globals['_SLAMCLOUDMAP']._serialized_start=378
-  _globals['_SLAMCLOUDMAP']._serialized_end=436
-  _globals['_SLAMOCCUPANCYMAP']._serialized_start=438
-  _globals['_SLAMOCCUPANCYMAP']._serialized_end=558
-  _globals['_SLAMDATA']._serialized_start=560
-  _globals['_SLAMDATA']._serialized_end=666
-  _globals['_ENVDATASERVICE']._serialized_start=669
-  _globals['_ENVDATASERVICE']._serialized_end=838
-  _globals['_SLAMDATASERVICE']._serialized_start=840
-  _globals['_SLAMDATASERVICE']._serialized_end=911
+  _globals['_OBSERVATION']._serialized_end=268
+  _globals['_ACTION']._serialized_start=270
+  _globals['_ACTION']._serialized_end=294
+  _globals['_STEPRESULT']._serialized_start=296
+  _globals['_STEPRESULT']._serialized_end=394
+  _globals['_SLAMCLOUDMAP']._serialized_start=396
+  _globals['_SLAMCLOUDMAP']._serialized_end=454
+  _globals['_SLAMOCCUPANCYMAP']._serialized_start=456
+  _globals['_SLAMOCCUPANCYMAP']._serialized_end=576
+  _globals['_SLAMDATA']._serialized_start=578
+  _globals['_SLAMDATA']._serialized_end=684
+  _globals['_ENVDATASERVICE']._serialized_start=687
+  _globals['_ENVDATASERVICE']._serialized_end=856
+  _globals['_SLAMDATASERVICE']._serialized_start=858
+  _globals['_SLAMDATASERVICE']._serialized_end=929
 # @@protoc_insertion_point(module_scope)

@@ -35,14 +35,6 @@ message CancelNavigation_Response {
   string message = 2;
 }
 
-message ExecuteManipulation_Request {
-  robonix.std_msgs.String instruction = 1;
-}
-
-message ExecuteManipulation_Response {
-  robonix.std_msgs.String result = 1;
-}
-
 message ExecuteMoveCommand_Request {
   MoveCommand command = 1;
 }

@@ -1,0 +1,15 @@
+[package]
+name = "robonix-interfaces"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Robonix IDL outputs: contract protobuf types for tonic/prost consumers"
+
+[dependencies]
+tonic.workspace = true
+prost.workspace = true
+tonic-prost.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+protoc-bin-vendored.workspace = true

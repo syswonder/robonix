@@ -32,6 +32,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import numpy_compat  # noqa: F401 — np.float shim before Sapien/transforms3d
 import numpy as np
 
 import matplotlib

@@ -9,10 +9,7 @@ mod session_state;
 mod skills;
 mod vlm;
 
-#[path = "../../robonix-interfaces/robonix_proto/contract_proto_modules.rs"]
-mod proto;
-
-pub(crate) use proto::{contracts, executor, pilot, robonix_msg, vlm as vlm_proto};
+use robonix_interfaces::{contracts, executor, pilot, robonix_msg, vlm as vlm_proto};
 
 use anyhow::Result;
 use contracts::sys_runtime_pilot_server::SysRuntimePilotServer;

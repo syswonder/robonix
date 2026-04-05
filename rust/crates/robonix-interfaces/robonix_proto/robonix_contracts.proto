@@ -70,11 +70,6 @@ service PrmCameraSnapshot {
   rpc Call(robonix.prm_base.GetCameraImage_Request) returns (robonix.prm_base.GetCameraImage_Response);
 }
 
-// contract: robonix/prm/manipulation/exec (v1)
-service PrmManipulationExec {
-  rpc Call(robonix.prm_base.ExecuteManipulation_Request) returns (robonix.prm_base.ExecuteManipulation_Response);
-}
-
 // contract: robonix/prm/perception/detect (v1)
 service PrmPerceptionDetect {
   rpc Call(robonix.prm_base.PerceptionDetect_Request) returns (robonix.prm_base.PerceptionDetect_Response);

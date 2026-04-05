@@ -2464,9 +2464,9 @@ dependencies = [
  "log",
  "nix 0.31.2",
  "prost",
- "protoc-bin-vendored",
  "ratatui",
  "resvg",
+ "robonix-interfaces",
  "robonix-sdk",
  "serde",
  "serde_json",
@@ -2475,7 +2475,6 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-prost",
- "tonic-prost-build",
  "uuid",
 ]
 
@@ -2501,8 +2500,8 @@ dependencies = [
  "env_logger",
  "log",
  "prost",
- "protoc-bin-vendored",
  "rmcp",
+ "robonix-interfaces",
  "robonix-sdk",
  "serde",
  "serde_json",
@@ -2510,8 +2509,18 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-prost",
- "tonic-prost-build",
  "uuid",
+]
+
+[[package]]
+name = "robonix-interfaces"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "protoc-bin-vendored",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
 ]
 
 [[package]]
@@ -2522,7 +2531,7 @@ dependencies = [
  "env_logger",
  "log",
  "prost",
- "protoc-bin-vendored",
+ "robonix-interfaces",
  "robonix-sdk",
  "serde",
  "serde_json",
@@ -2530,7 +2539,6 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-prost",
- "tonic-prost-build",
  "uuid",
 ]
 
@@ -2542,8 +2550,8 @@ dependencies = [
  "env_logger",
  "log",
  "prost",
- "protoc-bin-vendored",
  "rmcp",
+ "robonix-interfaces",
  "robonix-sdk",
  "serde",
  "serde_json",
@@ -2552,7 +2560,6 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-prost",
- "tonic-prost-build",
  "uuid",
 ]
 

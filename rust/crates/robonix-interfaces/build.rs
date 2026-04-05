@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// build.rs — `robonix_contracts.proto` (+ imports) from robonix-codegen output.
+// `robonix_contracts.proto` (+ imports) from robonix-codegen output.
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -7,7 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workspace_root = manifest_dir
         .parent()
         .and_then(|p| p.parent())
-        .expect("robonix-liaison should live at rust/crates/robonix-liaison");
+        .expect("robonix-interfaces should live at rust/crates/robonix-interfaces");
 
     let ridl_proto = workspace_root.join("crates/robonix-interfaces/robonix_proto");
     let contracts_proto = ridl_proto.join("robonix_contracts.proto");

@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""VLA (Vision-Language-Action) policy node.
+# [ARCHIVED — Octo VLA shelved; use graspnet_node.py instead.]
+# The Octo loading path below is commented out. This node now runs in
+# "scripted" mode only and serves as a reference / lightweight fallback.
+# To enable the GraspNet pick skill, start graspnet_node instead:
+#   python3 -m maniskill_vla_demo.graspnet_node
+"""VLA (Vision-Language-Action) policy node — scripted fallback only.
 
-Fetches observations from env_node via gRPC, runs a policy, exposes MCP tool
-for robonix-pilot.
+Fetches observations from env_node via gRPC, runs the scripted heuristic
+policy, and exposes MCP tools for robonix-pilot.
 
-Policies (--policy flag):
-  octo      (default) Octo-small model (~93M params).  Language-conditioned.
-  scripted  Heuristic reach-toward-target + close gripper.  No model.
-
-Install Octo (requires JAX+CUDA):
-  pip install git+https://github.com/octo-models/octo
-  pip install --upgrade "jax[cuda12]" \\
-    -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+Octo model support has been removed from the active path. See pyproject.octo.toml
+for the original full dependency set if you want to restore it.
 """
 import argparse
 import asyncio
@@ -417,7 +416,13 @@ def main() -> None:
     args = ap.parse_args()
     _policy_name = args.policy
 
+    # Octo loading is disabled — always use scripted policy.
+    # See pyproject.octo.toml for the original Octo dependency stack.
     if _policy_name == "octo":
+        print("[vla] Octo is shelved — using scripted policy. "
+              "Start graspnet_node for model-based grasping.", file=sys.stderr)
+        _policy_name = "scripted"
+    if False:  # noqa: SIM210 — preserved for reference, never executed
         if not _load_octo():
             print("[vla] falling back to scripted policy", file=sys.stderr)
             _policy_name = "scripted"

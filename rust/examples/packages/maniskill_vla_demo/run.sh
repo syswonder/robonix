@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ManiSkill3 VLA demo: env + perception + VLA nodes → robonix-pilot.
+# ManiSkill3 GraspNet demo: env + perception + GraspNet manipulation nodes → robonix-pilot.
 #
 # Usage:
 #   cd rust/examples/packages/maniskill_vla_demo
@@ -7,32 +7,40 @@
 #   ./run.sh start   # activate venv + launch all nodes + agent
 #
 # Env:
-#   VLA_POLICY=scripted|octo  (default: octo)
-#   MANISKILL_ENV_ID          (default: ReplicaCADTidyHouseTrain_SceneManipulation-v1)
-#                              Others: ReplicaCADSetTableTrain_SceneManipulation-v1
-#                                      ReplicaCADPrepareGroceriesTrain_SceneManipulation-v1
-#                              Simple: PickCube-v1  (no asset download needed)
+#   GRASP_BACKEND=open3d|heuristic  (default: open3d)
+#     open3d    — SAM2 segmentation + Open3D surface-normal grasp candidates (default)
+#                   SAM2_MODEL=facebook/sam2.1-hiera-tiny  (HuggingFace model id or local path)
+#                   SAM2_FORCE_CPU=1 — force SAM2 on CPU if you hit CUDA/CPU tensor errors
+#     heuristic — geometric top-down fallback, no model required
+#   GRASP_YOLO_WEIGHTS        default YOLOE weights for bbox detection
+#   MANISKILL_ENV_ID          (default: StackCube-v1)
+#                              Recommended defaults for current Fetch demo:
+#                                StackCube-v1
+#                                PickCube-v1
+#                              Scene envs (need asset download):
+#                                ReplicaCADTidyHouseTrain_SceneManipulation-v1
+#                                ReplicaCADSetTableTrain_SceneManipulation-v1
 #   MANISKILL_CONTROL_MODE    (default: pd_ee_delta_pose)
 #   MANISKILL_CAM_W / _CAM_H  (default: 640x480)
-#   MANISKILL_SHADER_PACK     (default:  rt-fast) sensor camera shader:
+#   MANISKILL_SHADER_PACK     (default: rt-fast) sensor camera shader:
 #                               minimal | default | rt-fast | rt-med | rt
-#   PERCEPTION_BACKEND        (default: yolo_world) yolo_world | grounding_dino
-#   PERCEPTION_YOLO_WEIGHTS   (default: yolov8s-worldv2.pt) ultralytics YOLO-World weights (auto-cached)
-#   VIZ_DETECT_BACKEND        (default: yolo_world) same as PERCEPTION_BACKEND for viz overlay
+#   PERCEPTION_BACKEND        (default: yoloe) yoloe | grounding_dino
+#   PERCEPTION_YOLO_WEIGHTS   default YOLOE weights
+#   VIZ_DETECT_BACKEND        (default: yoloe) same as PERCEPTION_BACKEND for viz overlay
 #   HF_ENDPOINT               (default: https://hf-mirror.com)
-#   ROBONIX_ATLAS            (default: 127.0.0.1:50051)
+#   ROBONIX_ATLAS             (default: 127.0.0.1:50051)
 #   START_VLM_SERVICE=1|0     (default: 1)
-#   START_MEMSEARCH_SERVICE=1|0 (default: 1) — agent memory MCP (search_memory / save_memory / compact_memory)
-#                               Requires: uv sync --extra memsearch (pins NumPy 1.x; NumPy 2 breaks ManiSkill/SciPy)
+#   START_MEMSEARCH_SERVICE=1|0 (default: 1) — agent memory MCP
+#                               Requires: uv sync --extra memsearch
 #   START_PILOT=1|0           (default: 1)
 #   START_VIZ=1|0             (default: 1) — Rerun visualizer
-#   START_MAPPING=1|0         (default: 0) — ROS2/RTAB-Map Docker container (optional ROS test)
+#   START_MAPPING=1|0         (default: 0) — ROS2/RTAB-Map Docker container
 #   BRIDGE_FPS                (default: 10) — env_node poll rate inside the RTAB-Map container
-#   VIZ_DETECT_QUERY          (default: "object . cup . box") detection query
+#   VIZ_DETECT_QUERY          (default: "red cube . green cube . cube . object . box") detection query
 #   VIZ_DETECT_DEVICE         (default: auto) detector device: auto|cuda|cpu
 #   VIZ_DETECT_FP16           (default: 1) use fp16 on CUDA for lower VRAM
 #   VIZ_NO_DETECT=1           disable detection overlay in viz_node
-#   VIZ_FPS                   (default: 30, lower memory/CPU pressure)
+#   VIZ_FPS                   (default: 30)
 #   RERUN_GRPC_PORT           (default: 9877)
 #   DEMO_MEMORY_PROFILE       (default: balanced) low|balanced
 #   PERCEPTION_DEVICE         (default: auto) auto|cuda|cpu
@@ -49,8 +57,10 @@ VENV="$PKG_ROOT/.venv"
 export ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}"
 export ROBONIX_META_GRPC_ENDPOINT="${ROBONIX_META_GRPC_ENDPOINT:-$ROBONIX_ATLAS}"
 export RUST_LOG="${RUST_LOG:-robonix_atlas=info,robonix_pilot=info,robonix_executor=info}"
-export VLA_POLICY="${VLA_POLICY:-octo}"
-export MANISKILL_ENV_ID="${MANISKILL_ENV_ID:-ReplicaCADTidyHouseTrain_SceneManipulation-v1}"
+export GRASP_BACKEND="${GRASP_BACKEND:-open3d}"
+export GRASP_YOLO_WEIGHTS="${GRASP_YOLO_WEIGHTS:-$PKG_ROOT/yoloe-11l-seg.pt}"
+export SAM2_MODEL="${SAM2_MODEL:-facebook/sam2.1-hiera-tiny}"
+export MANISKILL_ENV_ID="${MANISKILL_ENV_ID:-StackCube-v1}"
 export MANISKILL_CONTROL_MODE="${MANISKILL_CONTROL_MODE:-pd_ee_delta_pose}"
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 export START_VLM_SERVICE="${START_VLM_SERVICE:-1}"
@@ -59,16 +69,16 @@ export START_PILOT="${START_PILOT:-1}"
 export START_EXECUTOR="${START_EXECUTOR:-1}"
 export START_VIZ="${START_VIZ:-1}"
 export START_MAPPING="${START_MAPPING:-0}"
-export VIZ_DETECT_QUERY="${VIZ_DETECT_QUERY:-object . cup . box}"
+export VIZ_DETECT_QUERY="${VIZ_DETECT_QUERY:-red cube . green cube . cube . object . box}"
 export VIZ_FPS="${VIZ_FPS:-30}"
 export RERUN_GRPC_PORT="${RERUN_GRPC_PORT:-9877}"
 export DEMO_MEMORY_PROFILE="${DEMO_MEMORY_PROFILE:-balanced}"
 export PERCEPTION_DEVICE="${PERCEPTION_DEVICE:-auto}"
 export PERCEPTION_FP16="${PERCEPTION_FP16:-1}"
-export PERCEPTION_BACKEND="${PERCEPTION_BACKEND:-yolo_world}"
-export PERCEPTION_YOLO_WEIGHTS="${PERCEPTION_YOLO_WEIGHTS:-yolov8s-worldv2.pt}"
-export VIZ_DETECT_BACKEND="${VIZ_DETECT_BACKEND:-yolo_world}"
-export VIZ_YOLO_WEIGHTS="${VIZ_YOLO_WEIGHTS:-yolov8s-worldv2.pt}"
+export PERCEPTION_BACKEND="${PERCEPTION_BACKEND:-yoloe}"
+export PERCEPTION_YOLO_WEIGHTS="${PERCEPTION_YOLO_WEIGHTS:-$PKG_ROOT/yoloe-11l-seg.pt}"
+export VIZ_DETECT_BACKEND="${VIZ_DETECT_BACKEND:-yoloe}"
+export VIZ_YOLO_WEIGHTS="${VIZ_YOLO_WEIGHTS:-$PKG_ROOT/yoloe-11l-seg.pt}"
 export MANISKILL_SHADER_PACK="${MANISKILL_SHADER_PACK:-rt-fast}"
 
 # Memory-focused defaults (safe for long runs on smaller GPUs)
@@ -156,6 +166,7 @@ cleanup() {
     fi
   done
   pkill -TERM -f 'python3 -m maniskill_vla_demo' 2>/dev/null || true
+  pkill -TERM -f 'grasp_node'                    2>/dev/null || true
   pkill -TERM -f 'target/debug/robonix-atlas'    2>/dev/null || true
   pkill -TERM -f 'target/debug/robonix-executor' 2>/dev/null || true
   pkill -TERM -f 'target/debug/robonix-pilot'    2>/dev/null || true
@@ -163,6 +174,7 @@ cleanup() {
   pkill -TERM -f "rerun rerun+http"               2>/dev/null || true
   sleep 0.5
   pkill -KILL -f 'python3 -m maniskill_vla_demo' 2>/dev/null || true
+  pkill -KILL -f 'grasp_node'                    2>/dev/null || true
   pkill -KILL -f 'target/debug/robonix-atlas'    2>/dev/null || true
   pkill -KILL -f 'target/debug/robonix-executor' 2>/dev/null || true
   pkill -KILL -f 'target/debug/robonix-pilot'    2>/dev/null || true
@@ -177,12 +189,14 @@ cleanup() {
 pre_cleanup() {
   echo "[demo] cleaning up any leftover processes..."
   pkill -TERM -f 'python3 -m maniskill_vla_demo' 2>/dev/null || true
+  pkill -TERM -f 'grasp_node'                    2>/dev/null || true
   pkill -TERM -f 'target/debug/robonix-atlas'    2>/dev/null || true
   pkill -TERM -f 'target/debug/robonix-executor' 2>/dev/null || true
   pkill -TERM -f 'target/debug/robonix-pilot'    2>/dev/null || true
   pkill -TERM -f 'target/debug/rbnx start'       2>/dev/null || true
   sleep 0.5
   pkill -KILL -f 'python3 -m maniskill_vla_demo' 2>/dev/null || true
+  pkill -KILL -f 'grasp_node'                    2>/dev/null || true
   pkill -KILL -f 'target/debug/robonix-atlas'    2>/dev/null || true
   pkill -KILL -f 'target/debug/robonix-executor' 2>/dev/null || true
   pkill -KILL -f 'target/debug/robonix-pilot'    2>/dev/null || true
@@ -197,8 +211,9 @@ cmd_setup() {
   uv python install 3.11
 
   echo "[demo] creating venv + installing all dependencies (uv sync)..."
-  echo "  This installs Octo's full dependency stack (JAX 0.4.20, TF 2.15, etc.)"
-  echo "  First run may take 10-20 minutes due to large packages."
+  echo "  Installs ManiSkill3, PyTorch, YOLO-World, scipy, etc."
+  echo "  First run may take 5-10 minutes."
+  echo "  For GraspNet-1B backend: also clone graspnet-baseline and set env vars (see run.sh header)."
   # UV_INDEX_URL can be overridden for PyPI mirrors
   uv sync
 
@@ -207,6 +222,8 @@ cmd_setup() {
     || echo "[demo] WARNING: ReplicaCAD download failed — indoor scene envs will not work"
   HF_ENDPOINT="$HF_ENDPOINT" uv run python3 -m mani_skill.utils.download_asset ReplicaCADRearrange \
     || echo "[demo] WARNING: ReplicaCADRearrange download failed — rearrange tasks will not work"
+  HF_ENDPOINT="$HF_ENDPOINT" uv run python3 -m mani_skill.utils.download_asset ycb \
+    || echo "[demo] WARNING: YCB download failed — PickSingleYCB-v1 will not work"
 
   echo "[demo] building gRPC proto stubs..."
   rbnx_validate_build "$PKG_ROOT"
@@ -241,7 +258,7 @@ cmd_start() {
 
   echo "[demo] checking Python deps..."
   missing=()
-  for m in grpc mcp numpy PIL uvicorn gymnasium mani_skill rerun; do
+  for m in grpc mcp numpy PIL uvicorn gymnasium mani_skill rerun scipy; do
     check_python_dep "$m" || missing+=("$m")
   done
   if [ "$START_VLM_SERVICE" = "1" ]; then
@@ -266,6 +283,8 @@ PY
     fi
     exit 1
   fi
+
+  echo "[demo] grasp_backend=${GRASP_BACKEND}  sam2_model=${SAM2_MODEL}"
 
   pre_cleanup
   trap cleanup INT TERM EXIT
@@ -313,10 +332,14 @@ PY
     ${RBNX_START_OPTS[*]} -p '$PKG_ROOT' -n com.robonix.demo.perception"
   sleep 3
 
-  # vla_node
-  echo "[demo] starting vla_node (policy=$VLA_POLICY)..."
-  bg bash -c "cd '$RUST_ROOT' && VLA_POLICY='$VLA_POLICY' exec cargo run -p robonix-cli -- \
-    ${RBNX_START_OPTS[*]} -p '$PKG_ROOT' -n com.robonix.demo.vla"
+  # grasp_node
+  echo "[demo] starting grasp_node (backend=${GRASP_BACKEND})..."
+  bg bash -c "cd '$RUST_ROOT' && \
+    GRASP_BACKEND='$GRASP_BACKEND' \
+    GRASP_YOLO_WEIGHTS='$GRASP_YOLO_WEIGHTS' \
+    SAM2_MODEL='$SAM2_MODEL' \
+    exec cargo run -p robonix-cli -- \
+    ${RBNX_START_OPTS[*]} -p '$PKG_ROOT' -n com.robonix.demo.grasp"
   sleep 2
 
   # viz_node + Rerun desktop viewer
@@ -401,9 +424,9 @@ case "${1:-help}" in
     echo "  setup   Create .venv (Python 3.11), install all deps, download assets"
     echo "  start   Activate .venv and launch all nodes + robonix-pilot"
     echo ""
-  echo "Environment variables (see top of this file for full list):"
-  echo "  VLA_POLICY=octo|scripted   MANISKILL_ENV_ID=...   HF_ENDPOINT=..."
-  echo "  START_MEMSEARCH_SERVICE=0  — skip agent memory MCP (if deps not installed)"
-  echo "  START_MAPPING=0            — skip RTAB-Map Docker (e.g. if Docker unavailable)"
+    echo "Environment variables (see top of this file for full list):"
+    echo "  GRASPNET_BACKEND=heuristic|graspnet   MANISKILL_ENV_ID=...   HF_ENDPOINT=..."
+    echo "  START_MEMSEARCH_SERVICE=0  — skip agent memory MCP (if deps not installed)"
+    echo "  START_MAPPING=0            — skip RTAB-Map Docker (e.g. if Docker unavailable)"
     ;;
 esac

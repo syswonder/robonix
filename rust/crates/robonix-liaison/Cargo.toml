@@ -22,7 +22,4 @@ log.workspace = true
 env_logger.workspace = true
 uuid.workspace = true
 robonix-sdk.workspace = true
-
-[build-dependencies]
-tonic-prost-build.workspace = true
-protoc-bin-vendored.workspace = true
+robonix-interfaces.workspace = true
