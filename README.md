@@ -45,7 +45,7 @@ make install          # rbnx, robonix-codegen, pilot, executor, liaison, atlas â
 
 ```bash
 cd rust
-cp examples/.env.example examples/.env   # VLM_API_BASE, VLM_API_KEY, VLM_MODEL
+cp examples/.env.example examples/.env   # VLM_API_BASE, VLM_API_KEY, VLM_MODEL, VLM_MESSAGE_FORMAT
 ./examples/run.sh
 ```
 
