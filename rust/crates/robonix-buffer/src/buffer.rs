@@ -118,18 +118,24 @@ pub struct BufferSpec {
 
 impl BufferSpec {
     pub fn frame_bytes(&self) -> usize {
-        self.width as usize
-            * self.height as usize
-            * self.channels as usize
-            * self.format.bytes_per_element()
+        (self.width as usize)
+            .checked_mul(self.height as usize)
+            .and_then(|v| v.checked_mul(self.channels as usize))
+            .and_then(|v| v.checked_mul(self.format.bytes_per_element()))
+            .expect("buffer frame size overflow")
     }
 
     pub fn total_bytes(&self) -> usize {
-        HEADER_SIZE + self.frame_bytes()
+        HEADER_SIZE
+            .checked_add(self.frame_bytes())
+            .expect("buffer total size overflow")
     }
 
     pub fn stride(&self) -> u32 {
-        self.width * self.channels * self.format.bytes_per_element() as u32
+        self.width
+            .checked_mul(self.channels)
+            .and_then(|v| v.checked_mul(self.format.bytes_per_element() as u32))
+            .expect("buffer stride overflow")
     }
 }
 

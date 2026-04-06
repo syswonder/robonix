@@ -251,6 +251,8 @@ class RobonixBufferManager:
             if rc != 0:
                 raise RuntimeError(f"Failed to GPU-pin opened buffer: {shm_name}")
         header_ptr = lib.rbnx_buf_header_ptr(self._ptr, handle_id)
+        if not header_ptr:
+            raise RuntimeError(f"Failed to read buffer header: {shm_name}")
         width = ctypes.c_uint32.from_address(header_ptr + 24).value
         height = ctypes.c_uint32.from_address(header_ptr + 28).value
         channels = ctypes.c_uint32.from_address(header_ptr + 32).value
@@ -267,6 +269,8 @@ class RobonixBufferManager:
         if rc != 0:
             raise RuntimeError(f"Failed to attach to buffer handle={handle_id}")
         header_ptr = lib.rbnx_buf_header_ptr(self._ptr, handle_id)
+        if not header_ptr:
+            raise RuntimeError(f"Failed to read buffer header for handle={handle_id}")
         width = ctypes.c_uint32.from_address(header_ptr + 24).value
         height = ctypes.c_uint32.from_address(header_ptr + 28).value
         channels = ctypes.c_uint32.from_address(header_ptr + 32).value

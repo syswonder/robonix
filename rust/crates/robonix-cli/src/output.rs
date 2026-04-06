@@ -84,7 +84,7 @@ impl Spinner {
                 let spinner_char = frames[frame % frames.len()];
                 let line = format!("  {} {}", spinner_char, message);
                 print!("\r{}", line);
-                io::stdout().flush().unwrap();
+                let _ = io::stdout().flush();
                 frame += 1;
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
@@ -102,7 +102,7 @@ impl Spinner {
         print!("\r\x1b[K");
         let line = format!("  {} {}", "✓".green(), final_message.green());
         print!("{}\n", line);
-        io::stdout().flush().unwrap();
+        let _ = io::stdout().flush();
     }
 
     /// Stop the spinner and show error message
@@ -114,7 +114,7 @@ impl Spinner {
         print!("\r\x1b[K");
         let line = format!("  {} {}", "✗".red(), final_message.red());
         print!("{}\n", line);
-        io::stdout().flush().unwrap();
+        let _ = io::stdout().flush();
     }
 }
 
