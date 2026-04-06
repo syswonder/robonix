@@ -208,3 +208,199 @@ async fn run_command(args: &str) -> anyhow::Result<String> {
     }
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Path traversal tests ─────────────────────────────────────────────
+
+    #[test]
+    fn path_traversal_dotdot_is_rejected() {
+        // Set workspace to a temp dir so we have a known root
+        let tmp = std::env::temp_dir().join("rbnx_test_ws");
+        std::fs::create_dir_all(&tmp).unwrap();
+        unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
+
+        // ../../../etc/passwd must be rejected
+        let result = safe_resolve("../../../etc/passwd");
+        assert!(
+            result.is_err(),
+            "path traversal with ../../../etc/passwd should fail"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("path traversal denied") || err_msg.contains("does not exist"),
+            "error should mention traversal or nonexistent path, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn path_traversal_absolute_outside_workspace_is_rejected() {
+        let tmp = std::env::temp_dir().join("rbnx_test_ws2");
+        std::fs::create_dir_all(&tmp).unwrap();
+        unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
+
+        // /etc/hostname is a real file outside workspace
+        let result = safe_resolve("/etc/hostname");
+        assert!(
+            result.is_err(),
+            "absolute path /etc/hostname outside workspace should fail"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("path traversal denied"),
+            "error should mention traversal, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn path_resolve_within_workspace_is_allowed() {
+        let tmp = std::env::temp_dir().join("rbnx_test_ws3");
+        std::fs::create_dir_all(&tmp).unwrap();
+        // Create a test file inside workspace
+        let test_file = tmp.join("allowed.txt");
+        std::fs::write(&test_file, "hello").unwrap();
+        unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
+
+        let result = safe_resolve("allowed.txt");
+        assert!(
+            result.is_ok(),
+            "path within workspace should be allowed: {:?}",
+            result.err()
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_file(&test_file);
+        let _ = std::fs::remove_dir(&tmp);
+    }
+
+    // ── execute() integration tests for path traversal ───────────────────
+
+    #[tokio::test]
+    async fn read_file_rejects_path_traversal() {
+        let tmp = std::env::temp_dir().join("rbnx_test_read");
+        std::fs::create_dir_all(&tmp).unwrap();
+        unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
+
+        let result = execute("test-1", "read_file", r#"{"path": "../../../etc/passwd"}"#).await;
+        assert!(!result.success, "read_file should fail for path traversal");
+        assert!(
+            result.error.contains("traversal") || result.error.contains("does not exist"),
+            "error should explain traversal, got: {}",
+            result.error
+        );
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_path_traversal() {
+        let tmp = std::env::temp_dir().join("rbnx_test_write");
+        std::fs::create_dir_all(&tmp).unwrap();
+        unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
+
+        let result = execute(
+            "test-2",
+            "write_file",
+            r#"{"path": "/tmp/outside_workspace_evil.txt", "content": "pwned"}"#,
+        )
+        .await;
+        assert!(
+            !result.success,
+            "write_file should fail for path outside workspace"
+        );
+
+        // File should NOT have been created
+        assert!(
+            !std::path::Path::new("/tmp/outside_workspace_evil.txt").exists(),
+            "file outside workspace must not be created"
+        );
+    }
+
+    // ── Command length limit test ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_command_rejects_oversized_command() {
+        let long_cmd = "a".repeat(MAX_COMMAND_LEN + 1);
+        let args = format!(r#"{{"command": "{}"}}"#, long_cmd);
+        let result = execute("test-3", "run_command", &args).await;
+        assert!(!result.success, "oversized command should be rejected");
+        assert!(
+            result.error.contains("command too long"),
+            "error should mention 'command too long', got: {}",
+            result.error
+        );
+    }
+
+    #[tokio::test]
+    async fn run_command_accepts_normal_command() {
+        let result = execute("test-4", "run_command", r#"{"command": "echo hello"}"#).await;
+        assert!(
+            result.success,
+            "normal command should succeed: {}",
+            result.error
+        );
+        assert!(
+            result.output.contains("hello"),
+            "output should contain 'hello', got: {}",
+            result.output
+        );
+    }
+
+    // ── UTF-8 truncation safety test ─────────────────────────────────────
+
+    #[test]
+    fn truncate_ascii_works() {
+        let s = "hello world";
+        assert_eq!(truncate(s, 100), "hello world");
+        let t = truncate(s, 5);
+        assert!(
+            t.starts_with("hello"),
+            "should start with 'hello', got: {t}"
+        );
+        assert!(
+            t.contains("truncated"),
+            "should contain 'truncated', got: {t}"
+        );
+    }
+
+    #[test]
+    fn truncate_multibyte_utf8_does_not_panic() {
+        // Each Chinese char is 3 bytes in UTF-8
+        let s = "你好世界测试数据"; // 8 chars × 3 bytes = 24 bytes
+        // Truncate at byte 7 — in the middle of the 3rd char '世'
+        let result = truncate(s, 7);
+        // Should NOT panic, and should truncate at a valid boundary
+        assert!(
+            result.contains("truncated"),
+            "should be truncated, got: {result}"
+        );
+        // The truncated prefix should be valid UTF-8 (it is, since we're returning a String)
+        assert!(
+            result.starts_with("你好"),
+            "should keep first 2 chars, got: {result}"
+        );
+    }
+
+    #[test]
+    fn truncate_emoji_boundary() {
+        // 🚀 is 4 bytes in UTF-8
+        let s = "A🚀B🚀C"; // 1 + 4 + 1 + 4 + 1 = 11 bytes
+        // Truncate at byte 3, which is in the middle of 🚀
+        let result = truncate(s, 3);
+        assert!(result.contains("truncated"), "should be truncated");
+        // Should only keep "A" since 🚀 starts at byte 1 and ends at byte 5
+        assert!(
+            result.starts_with("A"),
+            "should start with 'A', got: {result}"
+        );
+    }
+
+    // ── Unknown builtin test ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn unknown_builtin_returns_error() {
+        let result = execute("test-5", "evil_tool", "{}").await;
+        assert!(!result.success);
+        assert!(result.error.contains("unknown builtin"));
+    }
+}
