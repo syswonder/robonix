@@ -699,8 +699,8 @@ fn render_svg(nodes: &[robonix_sdk::NodeInfo], channels: &[Channel], title: &str
                     writeln!(s, "<text x='{tx2:.1}' y='{:.1}' font-family='{F}' font-size='8.5' fill='#666666'>consumed by: {}</text>",
                         by + BPAD + 2.0 * LH + 8.5, esc(&consumers.join(", "))).unwrap();
                 }
-            } else if is_client {
-                if let Some(prov) = channels
+            } else if is_client
+                && let Some(prov) = channels
                     .iter()
                     .find(|c| c.consumer_id == n.node_id && c.interface_name == iface.name)
                     .map(|c| {
@@ -710,10 +710,9 @@ fn render_svg(nodes: &[robonix_sdk::NodeInfo], channels: &[Channel], title: &str
                             .unwrap_or(&c.provider_id)
                             .to_string()
                     })
-                {
-                    writeln!(s, "<text x='{tx2:.1}' y='{:.1}' font-family='{F}' font-size='8.5' fill='#666666'>provider: {}</text>",
+            {
+                writeln!(s, "<text x='{tx2:.1}' y='{:.1}' font-family='{F}' font-size='8.5' fill='#666666'>provider: {}</text>",
                         by + BPAD + 2.0 * LH + 8.5, esc(&prov)).unwrap();
-                }
             }
         }
 

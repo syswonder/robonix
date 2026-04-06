@@ -162,6 +162,7 @@ impl Message {
             parts: Some(vec![ChatPart::function_response(id, content)]),
         }
     }
+    #[allow(dead_code)]
     pub fn tool_result_with_image(id: &str, content: &str, image: String) -> Self {
         Self {
             role: "tool".into(),

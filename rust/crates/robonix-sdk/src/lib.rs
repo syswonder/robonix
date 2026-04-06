@@ -124,6 +124,7 @@ impl RobonixClient {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn register_node_with_skills(
         &mut self,
         node_id: impl Into<String>,

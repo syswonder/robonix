@@ -98,15 +98,15 @@ async fn try_discover_pilot_once(atlas_endpoint: &str) -> Result<String> {
 
     for node in &nodes {
         for iface in &node.interfaces {
-            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&iface.metadata_json) {
-                if let Some(ep) = meta.get("endpoint").and_then(|v| v.as_str()) {
-                    let uri = if ep.starts_with("http") {
-                        ep.to_string()
-                    } else {
-                        format!("http://{ep}")
-                    };
-                    return Ok(localhost_to_ipv4_loopback(&uri));
-                }
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&iface.metadata_json)
+                && let Some(ep) = meta.get("endpoint").and_then(|v| v.as_str())
+            {
+                let uri = if ep.starts_with("http") {
+                    ep.to_string()
+                } else {
+                    format!("http://{ep}")
+                };
+                return Ok(localhost_to_ipv4_loopback(&uri));
             }
         }
     }
@@ -131,68 +131,68 @@ async fn run_tui(
     loop {
         draw(terminal, &messages.borrow(), &input, scroll, busy)?;
 
-        if event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    let _ = notify_session_end(pilot_endpoint, &session_id).await;
-                    break;
-                }
-                if busy {
-                    match key.code {
-                        KeyCode::PageUp => scroll = scroll.saturating_add(5),
-                        KeyCode::PageDown => scroll = scroll.saturating_sub(5),
-                        _ => {}
-                    }
-                    continue;
-                }
+        if event::poll(std::time::Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                let _ = notify_session_end(pilot_endpoint, &session_id).await;
+                break;
+            }
+            if busy {
                 match key.code {
-                    KeyCode::Enter => {
-                        let msg = input.trim().to_string();
-                        input.clear();
-                        scroll = 0;
-                        if msg.is_empty() {
-                            continue;
-                        }
-                        if msg == "quit" || msg == "exit" {
-                            let _ = notify_session_end(pilot_endpoint, &session_id).await;
-                            break;
-                        }
-                        messages.borrow_mut().push(ChatMessage {
-                            role: Role::User,
-                            text: msg.clone(),
-                        });
-                        busy = true;
-                        draw(terminal, &messages.borrow(), &input, scroll, busy)?;
-
-                        match run_intent_with_esc_abort(
-                            pilot_endpoint,
-                            &session_id,
-                            &msg,
-                            Rc::clone(&messages),
-                            terminal,
-                            &input,
-                            &mut scroll,
-                        )
-                        .await
-                        {
-                            Ok(()) => {}
-                            Err(e) => {
-                                messages.borrow_mut().push(ChatMessage {
-                                    role: Role::Status,
-                                    text: format!("Error: {e:#}"),
-                                });
-                            }
-                        }
-                        busy = false;
-                    }
-                    KeyCode::Char(c) => input.push(c),
-                    KeyCode::Backspace => {
-                        input.pop();
-                    }
                     KeyCode::PageUp => scroll = scroll.saturating_add(5),
                     KeyCode::PageDown => scroll = scroll.saturating_sub(5),
                     _ => {}
                 }
+                continue;
+            }
+            match key.code {
+                KeyCode::Enter => {
+                    let msg = input.trim().to_string();
+                    input.clear();
+                    scroll = 0;
+                    if msg.is_empty() {
+                        continue;
+                    }
+                    if msg == "quit" || msg == "exit" {
+                        let _ = notify_session_end(pilot_endpoint, &session_id).await;
+                        break;
+                    }
+                    messages.borrow_mut().push(ChatMessage {
+                        role: Role::User,
+                        text: msg.clone(),
+                    });
+                    busy = true;
+                    draw(terminal, &messages.borrow(), &input, scroll, busy)?;
+
+                    match run_intent_with_esc_abort(
+                        pilot_endpoint,
+                        &session_id,
+                        &msg,
+                        Rc::clone(&messages),
+                        terminal,
+                        &input,
+                        &mut scroll,
+                    )
+                    .await
+                    {
+                        Ok(()) => {}
+                        Err(e) => {
+                            messages.borrow_mut().push(ChatMessage {
+                                role: Role::Status,
+                                text: format!("Error: {e:#}"),
+                            });
+                        }
+                    }
+                    busy = false;
+                }
+                KeyCode::Char(c) => input.push(c),
+                KeyCode::Backspace => {
+                    input.pop();
+                }
+                KeyCode::PageUp => scroll = scroll.saturating_add(5),
+                KeyCode::PageDown => scroll = scroll.saturating_sub(5),
+                _ => {}
             }
         }
     }
@@ -331,8 +331,8 @@ async fn run_intent_with_esc_abort(
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
-                if event::poll(std::time::Duration::ZERO)? {
-                    if let Event::Key(key) = event::read()? {
+                if event::poll(std::time::Duration::ZERO)?
+                    && let Event::Key(key) = event::read()? {
                         match key.code {
                             KeyCode::Esc => {
                                 let _ = abort_pilot_session(pilot_endpoint, session_id).await;
@@ -354,7 +354,6 @@ async fn run_intent_with_esc_abort(
                             _ => {}
                         }
                     }
-                }
             }
         }
     }
@@ -391,7 +390,7 @@ fn apply_pilot_event(
         }
         EVT_FINAL_TEXT => {
             let t = event.final_text.clone();
-            let has_agent = m.last().map_or(false, |x| matches!(x.role, Role::Agent));
+            let has_agent = m.last().is_some_and(|x| matches!(x.role, Role::Agent));
             if !has_agent && !t.is_empty() {
                 m.push(ChatMessage {
                     role: Role::Agent,

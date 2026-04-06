@@ -130,7 +130,7 @@ pub fn scan_extra_skill_dirs() -> Vec<AgentSkill> {
     };
     let node_id = "com.robonix.local.workspace".to_string();
     let mut merged: HashMap<String, AgentSkill> = HashMap::new();
-    for part in raw.split(|c| c == ':' || c == ';') {
+    for part in raw.split([':', ';']) {
         let p = part.trim();
         if p.is_empty() {
             continue;

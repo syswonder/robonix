@@ -70,10 +70,10 @@ fn ros_to_json_schema_type(t: &str) -> &'static str {
 fn cross_package_deps(spec: &MsgSpec) -> BTreeSet<String> {
     let mut pkgs = BTreeSet::new();
     for f in &spec.fields {
-        if let MsgTypeRef::Named { package, .. } = &f.type_ref {
-            if package != &spec.package {
-                pkgs.insert(package.clone());
-            }
+        if let MsgTypeRef::Named { package, .. } = &f.type_ref
+            && package != &spec.package
+        {
+            pkgs.insert(package.clone());
         }
     }
     pkgs

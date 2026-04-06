@@ -311,6 +311,7 @@ pub async fn run_turn(
 
         const EX_STARTED: u32 = 0;
         const EX_RESULT: u32 = 1;
+        #[allow(dead_code)]
         const EX_COMPLETE: u32 = 2;
 
         while let Some(event) = exec_stream
@@ -341,7 +342,7 @@ pub async fn run_turn(
                         results.push(r);
                     }
                 }
-                EX_COMPLETE | _ => {}
+                _ => {}
             }
         }
 
@@ -427,7 +428,10 @@ fn tool_result_to_messages(call_id: &str, output: &str) -> ToolResultHistory {
     if let Some(b64) = v.get("image_base64").and_then(|x| x.as_str()) {
         let fmt = v.get("format").and_then(|x| x.as_str()).unwrap_or("jpeg");
         return ToolResultHistory {
-            tool_messages: vec![Message::tool_result(call_id, &format!("[{fmt} image attached]"))],
+            tool_messages: vec![Message::tool_result(
+                call_id,
+                &format!("[{fmt} image attached]"),
+            )],
             followup_messages: vec![Message::user_with_image(
                 "Tool returned an image. Analyze this image together with the tool result above.",
                 b64.to_string(),
@@ -551,15 +555,15 @@ async fn prefetch_memory(
         .ok()?
         .into_inner();
     while let Ok(Some(event)) = stream.message().await {
-        if event.event_kind == EX_RESULT {
-            if let Some(r) = event.result {
-                let out = decode_string_output(&r.output);
-                if r.success && !out.contains("No relevant memories") && !out.is_empty() {
-                    log::debug!("[pilot] memory prefetch: {}", out);
-                    return Some(out);
-                }
-                return None;
+        if event.event_kind == EX_RESULT
+            && let Some(r) = event.result
+        {
+            let out = decode_string_output(&r.output);
+            if r.success && !out.contains("No relevant memories") && !out.is_empty() {
+                log::debug!("[pilot] memory prefetch: {}", out);
+                return Some(out);
             }
+            return None;
         }
     }
     None

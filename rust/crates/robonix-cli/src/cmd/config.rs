@@ -30,8 +30,7 @@ pub async fn execute(_config: Config, set_storage_path: Option<PathBuf>, show: b
         let real_path = std::fs::canonicalize(&config_path).unwrap_or_else(|_| config_path.clone());
 
         println!(
-            "{} {}",
-            "Current robonix system config are located at:",
+            "Current robonix system config are located at: {}",
             real_path.display().to_string().bold().cyan()
         );
         println!("\n{}", "Configuration:".bold().cyan());
