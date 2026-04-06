@@ -229,3 +229,95 @@ pub enum BufferState {
     /// One or more consumers are reading / processing.
     Processing,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_bytes_normal() {
+        let spec = BufferSpec {
+            width: 1920,
+            height: 1080,
+            channels: 3,
+            format: BufferFormat::Rgb8,
+        };
+        assert_eq!(spec.frame_bytes(), 1920 * 1080 * 3 * 1);
+    }
+
+    #[test]
+    fn frame_bytes_float32() {
+        let spec = BufferSpec {
+            width: 640,
+            height: 480,
+            channels: 1,
+            format: BufferFormat::Float32,
+        };
+        assert_eq!(spec.frame_bytes(), 640 * 480 * 1 * 4);
+    }
+
+    #[test]
+    fn total_bytes_includes_header() {
+        let spec = BufferSpec {
+            width: 100,
+            height: 100,
+            channels: 3,
+            format: BufferFormat::Rgb8,
+        };
+        assert_eq!(spec.total_bytes(), HEADER_SIZE + 100 * 100 * 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "buffer frame size overflow")]
+    fn frame_bytes_overflow_panics() {
+        let spec = BufferSpec {
+            width: u32::MAX,
+            height: u32::MAX,
+            channels: u32::MAX,
+            format: BufferFormat::Float64, // 8 bytes per element
+        };
+        // This should panic with overflow instead of silently wrapping
+        let _ = spec.frame_bytes();
+    }
+
+    #[test]
+    #[should_panic(expected = "buffer stride overflow")]
+    fn stride_overflow_panics() {
+        let spec = BufferSpec {
+            width: u32::MAX,
+            height: 1,
+            channels: u32::MAX,
+            format: BufferFormat::Float64,
+        };
+        let _ = spec.stride();
+    }
+
+    #[test]
+    fn stride_normal() {
+        let spec = BufferSpec {
+            width: 1920,
+            height: 1080,
+            channels: 3,
+            format: BufferFormat::Rgb8,
+        };
+        assert_eq!(spec.stride(), 1920 * 3 * 1);
+    }
+
+    #[test]
+    fn buffer_format_roundtrip() {
+        for v in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 16, 17, 18, 19, 20, 255] {
+            let fmt = BufferFormat::from_u32(v).expect(&format!("format {v} should be valid"));
+            assert_eq!(fmt as u32, v);
+        }
+        assert!(
+            BufferFormat::from_u32(99).is_none(),
+            "unknown format should return None"
+        );
+    }
+
+    #[test]
+    fn header_size_is_64() {
+        assert_eq!(HEADER_SIZE, 64);
+        assert_eq!(std::mem::size_of::<BufferHeader>(), HEADER_SIZE);
+    }
+}
