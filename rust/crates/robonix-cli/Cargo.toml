@@ -33,6 +33,7 @@ hostname = "0.4"
 colored = "3.0"
 git2 = "0.20.4"
 resvg = "0.47.0"
+toml = "0.8"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["signal", "process"] }

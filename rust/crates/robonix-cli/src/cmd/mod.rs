@@ -13,11 +13,14 @@ mod build;
 mod chat;
 mod codegen;
 mod config;
+mod deploy;
 mod graph;
 mod info;
+mod init;
 mod install;
 mod launch_helpers;
 mod list;
+mod package_new;
 mod path;
 mod run_package;
 mod runtime;
@@ -44,7 +47,18 @@ pub struct GraphArgs {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Build a package (local path or system-installed)
+    /// Initialize a new robonix workspace
+    Init {
+        /// Workspace name (creates a directory with this name)
+        name: String,
+    },
+    /// Create a new package under packages/
+    #[command(name = "package-new")]
+    PackageNew {
+        /// Package name
+        name: String,
+    },
+    /// Build a package (local path or system-installed) or all packages from a config
     Build {
         /// Local package path (relative to $RBNX_INVOCATION_CWD, else process cwd)
         #[arg(short = 'p', long)]
@@ -52,6 +66,9 @@ pub enum Commands {
         /// Build by system-installed package name
         #[arg(short = 'g', long)]
         global: Option<String>,
+        /// Build all packages from a config.yaml file
+        #[arg(short = 'c', long = "config")]
+        config: Option<PathBuf>,
         /// Clean build (remove rbnx-build before building). Default: incremental.
         #[arg(long)]
         clean: bool,
@@ -192,15 +209,31 @@ pub enum Commands {
         #[command(flatten)]
         args: GraphArgs,
     },
+
+    /// Deploy a full stack from a config.yaml file (runtime + services + packages)
+    Deploy {
+        /// Path to config.yaml
+        #[arg(required = true)]
+        config: PathBuf,
+    },
 }
 
 pub async fn execute(command: Commands, config: Config) -> Result<()> {
     match command {
+        Commands::Init { name } => init::execute(&name).await,
+        Commands::PackageNew { name } => package_new::execute(&name).await,
         Commands::Build {
             path,
             global,
+            config: config_file,
             clean,
-        } => run_package::execute_build(config, path, global, clean).await,
+        } => {
+            if let Some(cfg_path) = config_file {
+                build::execute_from_config(cfg_path, clean).await
+            } else {
+                run_package::execute_build(config, path, global, clean).await
+            }
+        }
         Commands::Start {
             package,
             node,
@@ -237,6 +270,12 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         Commands::Chat { server } => chat::execute(&server).await,
         Commands::Graph { args } => {
             graph::execute(&args.server, args.output, args.format, args.test_mode).await
+        }
+        Commands::Deploy { config } => {
+            let config_path = config
+                .canonicalize()
+                .unwrap_or_else(|_| config.clone());
+            deploy::execute(&config_path).await
         }
     }
 }
