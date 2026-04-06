@@ -99,9 +99,12 @@ def run(args) -> dict:
             print(f"[!] Missing results: {f}", file=sys.stderr)
             sys.exit(1)
 
-    cam_data = json.load(open(cam_file))
-    yolo_data = json.load(open(yolo_file))
-    edge_data = json.load(open(edge_file))
+    with open(cam_file) as f:
+        cam_data = json.load(f)
+    with open(yolo_file) as f:
+        yolo_data = json.load(f)
+    with open(edge_file) as f:
+        edge_data = json.load(f)
 
     # Skip warmup frames from each node's timing
     w = args.warmup

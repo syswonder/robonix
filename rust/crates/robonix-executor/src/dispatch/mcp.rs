@@ -30,7 +30,8 @@ pub async fn execute(call_id: &str, name: &str, args_json: &str, endpoint: &str)
 
 async fn call_mcp(name: &str, args_json: &str, endpoint: &str) -> anyhow::Result<String> {
     let mut client = connect_mcp(endpoint).await?;
-    let args_val: serde_json::Value = serde_json::from_str(args_json).unwrap_or_default();
+    let args_val: serde_json::Value = serde_json::from_str(args_json)
+        .map_err(|e| anyhow::anyhow!("invalid tool arguments JSON: {e}"))?;
     let args_obj = args_val.as_object().cloned();
 
     let result = client

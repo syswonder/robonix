@@ -3,7 +3,54 @@
 
 use crate::pilot::TaskCallResult;
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Workspace root for file operations. All file paths are resolved relative to
+/// this directory, and path traversal beyond it is rejected.
+fn workspace_root() -> PathBuf {
+    std::env::var("ROBONIX_WORKSPACE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+/// Resolve a user-supplied path and ensure it stays within the workspace root.
+/// Returns the canonical path on success, or an error if the path escapes the
+/// allowed directory (path traversal).
+fn safe_resolve(user_path: &str) -> anyhow::Result<PathBuf> {
+    let root = workspace_root()
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root());
+    let candidate = if Path::new(user_path).is_absolute() {
+        PathBuf::from(user_path)
+    } else {
+        root.join(user_path)
+    };
+    // Canonicalize to resolve ".." components. If the file doesn't exist yet
+    // (write_file), canonicalize the parent directory instead.
+    let resolved = if candidate.exists() {
+        candidate.canonicalize()?
+    } else {
+        let parent = candidate
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("invalid path: no parent directory"))?;
+        let parent_resolved = parent.canonicalize().map_err(|_| {
+            anyhow::anyhow!("parent directory does not exist: {}", parent.display())
+        })?;
+        parent_resolved.join(
+            candidate
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("invalid path: no file name"))?,
+        )
+    };
+    if !resolved.starts_with(&root) {
+        anyhow::bail!(
+            "path traversal denied: {} resolves outside workspace {}",
+            user_path,
+            root.display()
+        );
+    }
+    Ok(resolved)
+}
 
 pub async fn execute(call_id: &str, name: &str, args_json: &str) -> TaskCallResult {
     let output = run(name, args_json).await;
@@ -42,7 +89,9 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}…(truncated, {} bytes total)", &s[..max], s.len())
+        // Find a valid UTF-8 char boundary at or before `max` to avoid panic.
+        let end = s.floor_char_boundary(max);
+        format!("{}…(truncated, {} bytes total)", &s[..end], s.len())
     }
 }
 
@@ -72,32 +121,36 @@ struct CmdArgs {
 
 fn read_file(args: &str) -> anyhow::Result<String> {
     let a: ReadArgs = serde_json::from_str(args)?;
-    Ok(truncate(&std::fs::read_to_string(&a.path)?, 8000))
+    let path = safe_resolve(&a.path)?;
+    Ok(truncate(&std::fs::read_to_string(path)?, 8000))
 }
 
 fn write_file(args: &str) -> anyhow::Result<String> {
     let a: WriteArgs = serde_json::from_str(args)?;
-    if let Some(parent) = Path::new(&a.path).parent() {
+    let path = safe_resolve(&a.path)?;
+    if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(&a.path, &a.content)?;
-    Ok(format!("wrote {} bytes to {}", a.content.len(), a.path))
+    std::fs::write(&path, &a.content)?;
+    Ok(format!("wrote {} bytes to {}", a.content.len(), path.display()))
 }
 
 fn patch_file(args: &str) -> anyhow::Result<String> {
     let a: PatchArgs = serde_json::from_str(args)?;
-    let content = std::fs::read_to_string(&a.path)?;
+    let path = safe_resolve(&a.path)?;
+    let content = std::fs::read_to_string(&path)?;
     if !content.contains(&a.old) {
         anyhow::bail!("old string not found in file");
     }
-    std::fs::write(&a.path, content.replacen(&a.old, &a.new, 1))?;
-    Ok(format!("patched {}", a.path))
+    std::fs::write(&path, content.replacen(&a.old, &a.new, 1))?;
+    Ok(format!("patched {}", path.display()))
 }
 
 fn list_dir(args: &str) -> anyhow::Result<String> {
     let a: ListArgs = serde_json::from_str(args)?;
     let dir = a.path.as_deref().unwrap_or(".");
-    let mut items: Vec<String> = std::fs::read_dir(dir)?
+    let resolved = safe_resolve(dir)?;
+    let mut items: Vec<String> = std::fs::read_dir(resolved)?
         .flatten()
         .map(|e| {
             let ft = e
@@ -111,13 +164,28 @@ fn list_dir(args: &str) -> anyhow::Result<String> {
     Ok(items.join("\n"))
 }
 
+/// Maximum command length to prevent abuse.
+const MAX_COMMAND_LEN: usize = 8192;
+/// Command execution timeout.
+const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 async fn run_command(args: &str) -> anyhow::Result<String> {
     let a: CmdArgs = serde_json::from_str(args)?;
-    let out = tokio::process::Command::new("bash")
+    if a.command.len() > MAX_COMMAND_LEN {
+        anyhow::bail!(
+            "command too long ({} bytes, max {})",
+            a.command.len(),
+            MAX_COMMAND_LEN
+        );
+    }
+    let child = tokio::process::Command::new("bash")
         .arg("-c")
         .arg(&a.command)
-        .output()
-        .await?;
+        .output();
+    let out = tokio::time::timeout(COMMAND_TIMEOUT, child)
+        .await
+        .map_err(|_| anyhow::anyhow!("command timed out after {}s", COMMAND_TIMEOUT.as_secs()))?
+        .map_err(|e| anyhow::anyhow!("failed to execute command: {e}"))?;
     let mut result = String::new();
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
