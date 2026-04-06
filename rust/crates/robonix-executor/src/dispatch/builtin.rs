@@ -132,7 +132,11 @@ fn write_file(args: &str) -> anyhow::Result<String> {
         std::fs::create_dir_all(parent).ok();
     }
     std::fs::write(&path, &a.content)?;
-    Ok(format!("wrote {} bytes to {}", a.content.len(), path.display()))
+    Ok(format!(
+        "wrote {} bytes to {}",
+        a.content.len(),
+        path.display()
+    ))
 }
 
 fn patch_file(args: &str) -> anyhow::Result<String> {

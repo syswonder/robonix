@@ -63,6 +63,7 @@ impl Config {
         Ok(())
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn default() -> Self {
         let default_path = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))

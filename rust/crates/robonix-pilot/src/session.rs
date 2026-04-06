@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// One ongoing user session.
+#[allow(dead_code)]
 pub struct Session {
     pub session_id: String,
     /// Full VLM conversation history (system prompt excluded — added per turn).
@@ -44,6 +45,7 @@ pub struct SessionManager {
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<Session>>>>>,
 }
 
+#[allow(dead_code)]
 impl SessionManager {
     /// Get or create a session by ID.
     pub async fn get_or_create(&self, session_id: &str) -> Arc<Mutex<Session>> {

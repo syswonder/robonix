@@ -101,7 +101,7 @@ impl Spinner {
         // Clear the line first (using ANSI escape code)
         print!("\r\x1b[K");
         let line = format!("  {} {}", "✓".green(), final_message.green());
-        print!("{}\n", line);
+        println!("{}", line);
         let _ = io::stdout().flush();
     }
 
@@ -113,7 +113,7 @@ impl Spinner {
         // Clear the line first (using ANSI escape code)
         print!("\r\x1b[K");
         let line = format!("  {} {}", "✗".red(), final_message.red());
-        print!("{}\n", line);
+        println!("{}", line);
         let _ = io::stdout().flush();
     }
 }

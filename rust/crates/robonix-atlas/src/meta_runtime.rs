@@ -127,9 +127,7 @@ impl MetaRuntimeRegistry {
     }
 
     fn is_catalogued_robonix_interface(abstract_path: &str) -> bool {
-        ROBO_SYSTEM_INTERFACE_CATALOG
-            .iter()
-            .any(|&id| id == abstract_path)
+        ROBO_SYSTEM_INTERFACE_CATALOG.contains(&abstract_path)
     }
 
     /// For `grpc` / `ros2` / `mcp`, namespace must be under `robonix/...`.
@@ -334,6 +332,7 @@ impl MetaRuntimeRegistry {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn register_node(
         &self,
         node_id: String,
@@ -472,14 +471,14 @@ impl MetaRuntimeRegistry {
     }
 
     fn inject_endpoint(metadata_json: &str, endpoint: &str) -> String {
-        if let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(metadata_json) {
-            if let Some(obj) = meta.as_object_mut() {
-                obj.insert(
-                    "endpoint".into(),
-                    serde_json::Value::String(endpoint.to_string()),
-                );
-                return serde_json::to_string(&meta).unwrap_or_else(|_| metadata_json.to_string());
-            }
+        if let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(metadata_json)
+            && let Some(obj) = meta.as_object_mut()
+        {
+            obj.insert(
+                "endpoint".into(),
+                serde_json::Value::String(endpoint.to_string()),
+            );
+            return serde_json::to_string(&meta).unwrap_or_else(|_| metadata_json.to_string());
         }
         // If metadata_json is empty or not an object, create a minimal one.
         serde_json::json!({ "endpoint": endpoint }).to_string()

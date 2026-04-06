@@ -373,11 +373,10 @@ impl ProcessManager {
                 .arg("-g")
                 .arg(pgid.as_raw().to_string())
                 .output()
+                && !output.status.success()
             {
-                if !output.status.success() {
-                    // No processes in group, they've all terminated
-                    break;
-                }
+                // No processes in group, they've all terminated
+                break;
             }
             std::thread::sleep(check_interval);
         }
@@ -393,10 +392,10 @@ impl ProcessManager {
                 let reader = BufReader::new(&*output.stdout);
                 let mut still_alive = Vec::new();
                 for line in reader.lines() {
-                    if let Ok(pid_str) = line {
-                        if let Ok(proc_pid) = pid_str.parse::<u32>() {
-                            still_alive.push(proc_pid);
-                        }
+                    if let Ok(pid_str) = line
+                        && let Ok(proc_pid) = pid_str.parse::<u32>()
+                    {
+                        still_alive.push(proc_pid);
                     }
                 }
 
@@ -421,10 +420,9 @@ impl ProcessManager {
                 .arg("-p")
                 .arg(pid.to_string())
                 .output()
+                && output.status.success()
             {
-                if output.status.success() {
-                    let _ = kill(pid_obj, Signal::SIGKILL);
-                }
+                let _ = kill(pid_obj, Signal::SIGKILL);
             }
         }
 
@@ -443,12 +441,11 @@ impl ProcessManager {
             .arg("-p")
             .arg(pid.to_string())
             .output()
+            && output.status.success()
         {
-            if output.status.success() {
-                let pgid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if let Ok(pgid) = pgid_str.parse::<u32>() {
-                    return Ok(pgid);
-                }
+            let pgid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if let Ok(pgid) = pgid_str.parse::<u32>() {
+                return Ok(pgid);
             }
         }
 
@@ -470,15 +467,14 @@ impl ProcessManager {
             .arg(pgid.to_string())
             .stdout(Stdio::piped())
             .output()
+            && output.status.success()
         {
-            if output.status.success() {
-                let reader = BufReader::new(&*output.stdout);
-                for line in reader.lines() {
-                    if let Ok(pid_str) = line {
-                        if let Ok(pid) = pid_str.parse::<u32>() {
-                            pids.push(pid);
-                        }
-                    }
+            let reader = BufReader::new(&*output.stdout);
+            for line in reader.lines() {
+                if let Ok(pid_str) = line
+                    && let Ok(pid) = pid_str.parse::<u32>()
+                {
+                    pids.push(pid);
                 }
             }
         }
@@ -512,38 +508,35 @@ impl ProcessManager {
             .arg("--no-headers")
             .stdout(Stdio::piped())
             .output()
+            && output.status.success()
         {
-            if output.status.success() {
-                let reader = BufReader::new(&*output.stdout);
-                for line in reader.lines() {
-                    if let Ok(line_str) = line {
-                        // Parse line: PID PPID COMMAND...
-                        // We need to handle spaces in command, so split by first two numbers
-                        let trimmed = line_str.trim();
-                        if let Some(first_space) = trimmed.find(' ') {
-                            if let Ok(proc_pid) = trimmed[..first_space].parse::<u32>() {
-                                let rest = &trimmed[first_space + 1..].trim_start();
-                                if let Some(second_space) = rest.find(' ') {
-                                    if let Ok(proc_ppid) = rest[..second_space].parse::<u32>() {
-                                        let cmd = rest[second_space + 1..].trim().to_string();
-                                        // Truncate long commands for display
-                                        let cmd_display = if cmd.len() > 60 {
-                                            format!("{}...", &cmd[..57])
-                                        } else {
-                                            cmd
-                                        };
-                                        processes.insert(
-                                            proc_pid,
-                                            ProcessInfo {
-                                                pid: proc_pid,
-                                                ppid: proc_ppid,
-                                                cmd: cmd_display,
-                                            },
-                                        );
-                                    }
-                                }
-                            }
-                        }
+            let reader = BufReader::new(&*output.stdout);
+            for line_str in reader.lines().map_while(Result::ok) {
+                // Parse line: PID PPID COMMAND...
+                // We need to handle spaces in command, so split by first two numbers
+                let trimmed = line_str.trim();
+                if let Some(first_space) = trimmed.find(' ')
+                    && let Ok(proc_pid) = trimmed[..first_space].parse::<u32>()
+                {
+                    let rest = &trimmed[first_space + 1..].trim_start();
+                    if let Some(second_space) = rest.find(' ')
+                        && let Ok(proc_ppid) = rest[..second_space].parse::<u32>()
+                    {
+                        let cmd = rest[second_space + 1..].trim().to_string();
+                        // Truncate long commands for display
+                        let cmd_display = if cmd.len() > 60 {
+                            format!("{}...", &cmd[..57])
+                        } else {
+                            cmd
+                        };
+                        processes.insert(
+                            proc_pid,
+                            ProcessInfo {
+                                pid: proc_pid,
+                                ppid: proc_ppid,
+                                cmd: cmd_display,
+                            },
+                        );
                     }
                 }
             }
