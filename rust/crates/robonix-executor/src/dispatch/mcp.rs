@@ -65,8 +65,7 @@ async fn call_mcp(name: &str, args_json: &str, endpoint: &str) -> anyhow::Result
 }
 
 async fn connect_mcp(endpoint: &str) -> anyhow::Result<McpClient> {
-    if endpoint.starts_with("stdio://") {
-        let cmd_str = &endpoint["stdio://".len()..];
+    if let Some(cmd_str) = endpoint.strip_prefix("stdio://") {
         let mut parts = cmd_str.split_whitespace();
         let program = parts.next().unwrap_or("python3");
         let args: Vec<&str> = parts.collect();
@@ -74,11 +73,7 @@ async fn connect_mcp(endpoint: &str) -> anyhow::Result<McpClient> {
         command.args(&args);
         let transport = rmcp::transport::TokioChildProcess::new(command)
             .map_err(|e| anyhow::anyhow!("MCP stdio spawn failed: {e}"))?;
-        return Ok(
-            ().serve(transport)
-                .await
-                .map_err(|e| anyhow::anyhow!("MCP init failed: {e}"))?,
-        );
+        return ().serve(transport).await.map_err(|e| anyhow::anyhow!("MCP init failed: {e}"));
     }
     let base = if endpoint.starts_with("http") {
         endpoint.to_string()
@@ -94,8 +89,7 @@ async fn connect_mcp(endpoint: &str) -> anyhow::Result<McpClient> {
         rmcp::transport::streamable_http_client::StreamableHttpClientTransport::from_uri(
             uri.clone(),
         );
-    Ok(()
-        .serve(transport)
+    ().serve(transport)
         .await
-        .map_err(|e| anyhow::anyhow!("MCP HTTP connect to '{uri}' failed: {e}"))?)
+        .map_err(|e| anyhow::anyhow!("MCP HTTP connect to '{uri}' failed: {e}"))
 }

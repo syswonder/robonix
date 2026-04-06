@@ -161,14 +161,14 @@ impl PackageDatabase {
         }
 
         for name in db.packages.keys().cloned().collect::<Vec<_>>() {
-            if !found_packages.contains(&name) {
-                if let Some(removed) = db.remove_package(&name) {
-                    log::info!(
-                        "Removed '{}' from database (not found: {})",
-                        name,
-                        removed.path.display()
-                    );
-                }
+            if !found_packages.contains(&name)
+                && let Some(removed) = db.remove_package(&name)
+            {
+                log::info!(
+                    "Removed '{}' from database (not found: {})",
+                    name,
+                    removed.path.display()
+                );
             }
         }
 

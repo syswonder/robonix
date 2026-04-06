@@ -342,10 +342,10 @@ async fn main() -> Result<()> {
 
 fn resolve_endpoint(vars: &[&str], default: &str) -> String {
     for v in vars {
-        if let Ok(val) = std::env::var(v) {
-            if !val.is_empty() {
-                return val;
-            }
+        if let Ok(val) = std::env::var(v)
+            && !val.is_empty()
+        {
+            return val;
         }
     }
     default.to_string()

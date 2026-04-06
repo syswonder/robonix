@@ -35,7 +35,7 @@ impl PackageInstaller {
         let repo_url = repo.to_string();
         let repo_name = repo
             .split('/')
-            .last()
+            .next_back()
             .context("Invalid GitHub repository format")?
             .trim_end_matches(".git");
 

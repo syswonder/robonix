@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_client(true)
         .compile_protos(
             &[proto_dir.join("robonix_runtime.proto")],
-            &[proto_dir.clone()],
+            std::slice::from_ref(&proto_dir),
         )?;
 
     // robonix-codegen build-dependency REMOVED -- robonix-codegen syntax is deprecated.

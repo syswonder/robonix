@@ -245,15 +245,14 @@ fn iface_summary(metadata_json: &str, transport: &str) -> String {
                 parts.push(format!("tools={} total", names.len()));
             }
         }
-    } else if transport.contains("grpc") {
-        if let Some(rpc) = meta
+    } else if transport.contains("grpc")
+        && let Some(rpc) = meta
             .get("contract")
             .and_then(|c| c.get("rpc_method"))
             .and_then(|v| v.as_str())
-        {
-            let short = rpc.rsplit('/').next().unwrap_or(rpc);
-            parts.push(format!("rpc={short}"));
-        }
+    {
+        let short = rpc.rsplit('/').next().unwrap_or(rpc);
+        parts.push(format!("rpc={short}"));
     }
 
     parts.join("  ")
@@ -411,7 +410,7 @@ pub async fn describe(endpoint: &str, node_id: Option<&str>, json: bool) -> Resu
 
     for s in &skills {
         let node = nodes.iter().find(|n| n.node_id == s.node_id);
-        let iface_str = node.map(|n| fmt_interfaces(n)).unwrap_or_default();
+        let iface_str = node.map(fmt_interfaces).unwrap_or_default();
         println!("== {} ({}) [{}] ==", s.node_id, s.namespace, s.kind);
         println!("  interfaces: {}", iface_str);
         let preview: String = s.skill_md.lines().take(5).collect::<Vec<_>>().join("\n");
@@ -492,7 +491,7 @@ pub async fn inspect(endpoint: &str) -> Result<()> {
     let mut sdk = connect(endpoint).await?;
     let raw = sdk.inspect_runtime().await?;
     let parsed: serde_json::Value =
-        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::Value::String(raw));
+        serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw));
     println!("{}", serde_json::to_string_pretty(&parsed)?);
     Ok(())
 }
@@ -514,8 +513,8 @@ pub async fn channels(endpoint: &str) -> Result<()> {
     }
 
     println!(
-        "{:<38} {:<12} {:<24} {:<18} {}",
-        "CHANNEL_ID", "TRANSPORT", "ENDPOINT", "PROVIDER", "CONSUMER"
+        "{:<38} {:<12} {:<24} {:<18} CONSUMER",
+        "CHANNEL_ID", "TRANSPORT", "ENDPOINT", "PROVIDER"
     );
     println!("{}", "-".repeat(115));
     for ch in &chs {

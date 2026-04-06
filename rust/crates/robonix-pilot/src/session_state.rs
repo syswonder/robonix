@@ -3,6 +3,7 @@
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[repr(u32)]
+#[allow(dead_code)]
 pub enum SessionState {
     #[default]
     Active = 0,

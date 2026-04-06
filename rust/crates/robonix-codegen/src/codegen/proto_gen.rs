@@ -76,10 +76,10 @@ fn emit_srv_messages(out: &mut String, srv: &SrvSpec) {
 }
 
 fn import_named_type(imports: &mut BTreeSet<String>, current_package: &str, tr: &MsgTypeRef) {
-    if let MsgTypeRef::Named { package, .. } = tr {
-        if package != current_package {
-            imports.insert(package.clone());
-        }
+    if let MsgTypeRef::Named { package, .. } = tr
+        && package != current_package
+    {
+        imports.insert(package.clone());
     }
 }
 

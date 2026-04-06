@@ -194,11 +194,10 @@ pub async fn execute_start(
         .launch_profiles
         .as_ref()
         .and_then(|p| p.get("default"))
+        && let Some(launch) = profile.nodes.get(&node.id)
     {
-        if let Some(launch) = profile.nodes.get(&node.id) {
-            for (k, v) in &launch.env {
-                env.insert(k.clone(), v.clone());
-            }
+        for (k, v) in &launch.env {
+            env.insert(k.clone(), v.clone());
         }
     }
 
