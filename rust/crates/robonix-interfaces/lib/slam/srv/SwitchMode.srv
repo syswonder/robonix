@@ -1,0 +1,9 @@
+# Switch SLAM operating mode.
+# Request: target mode ("mapping", "localization", "idle")
+# Response: success flag and resulting mode
+
+string mode
+---
+bool success
+string current_mode
+string message

@@ -40,6 +40,10 @@ pub mod prm_base {
     tonic::include_proto!("robonix.prm_base");
 }
 
+pub mod slam {
+    tonic::include_proto!("robonix.slam");
+}
+
 pub mod robonix_msg {
     tonic::include_proto!("robonix.robonix_msg");
 }

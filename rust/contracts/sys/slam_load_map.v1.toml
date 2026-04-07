@@ -1,0 +1,14 @@
+# Load a pre-built map for relocalization.
+[contract]
+id      = "robonix/sys/slam/load_map"
+version = "1"
+kind    = "service"
+
+[io.srv]
+srv = "slam/srv/LoadMap"
+
+[mode]
+type = "rpc"
+
+[semantics]
+stateless = false
