@@ -221,7 +221,7 @@ cargo run -p robonix-codegen -- --lang proto \
 ### System services
 
 > [!NOTE]
-> Robonix system services are still in early design phase regarding deployment and lifecycle management. Currently, system services (VLM, memory search, SLAM mapping, etc.) are deployed as **example packages** under `rust/examples/packages/` or as standalone repos. A formal service deployment framework (systemd integration, declarative orchestration, health management) is planned but not yet implemented.
+> Robonix system services are still in early design phase regarding deployment and lifecycle management. Currently, system services (VLM, memory search, SLAM mapping, etc.) are deployed as **example packages** under `rust/examples/packages/` or as standalone repos. A formal service deployment framework is planned but not yet implemented.
 
 The current system services:
 
