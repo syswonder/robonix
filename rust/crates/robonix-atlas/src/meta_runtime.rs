@@ -97,10 +97,10 @@ const ROBO_SYSTEM_INTERFACE_CATALOG: &[&str] = &[
     "robonix/sys/memory/search", // legacy search-only contract (kept for compat)
     "robonix/sys/memory/tools",  // memsearch_service: search_memory, save_memory, compact_memory
     // ── SLAM services ────────────────────────────────────────────────────────
-    "robonix/sys/slam/status",          // get_slam_status
-    "robonix/sys/slam/save_map",        // save point cloud map
-    "robonix/sys/slam/load_map",        // load pre-built map
-    "robonix/sys/slam/switch_mode",     // mapping / localization / idle
+    "robonix/sys/slam/status",           // get_slam_status
+    "robonix/sys/slam/save_map",         // save point cloud map
+    "robonix/sys/slam/load_map",         // load pre-built map
+    "robonix/sys/slam/switch_mode",      // mapping / localization / idle
     "robonix/sys/slam/set_initial_pose", // relocalization pose hint
 ];
 
