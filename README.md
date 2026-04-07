@@ -243,6 +243,55 @@ The current system services:
 | `tiago_sim_stack` | Docker Compose | Tiago robot sim: Webots + Nav2 + rviz2 + ROS 2 ↔ MCP bridge |
 | `maniskill_vla_demo` | Python multi-node | ManiSkill3 VLA demo: Fetch in ReplicaCAD, Octo VLA |
 | `zero_copy_demo` | Python + CUDA | Zero-copy shared memory / CUDA IPC demo |
+| `clawhub_skills` | Python bridge | Import Agent Skills from OpenClaw ClawHub into Robonix |
+
+## Agent Skills (agentskills.io)
+
+Robonix natively supports the **[Agent Skills](https://agentskills.io/)** open standard for AI agent capabilities. This is the same format used by **30+ AI tools** including Claude Code, Cursor, VS Code, GitHub Copilot, OpenCode, Gemini CLI, and OpenClaw/ClawHub.
+
+### Skill format
+
+Each skill is a directory with a `SKILL.md` file containing YAML frontmatter + markdown body:
+
+```
+skills/
+└── my-skill/
+    ├── SKILL.md          # required: metadata + instructions
+    ├── scripts/          # optional: executable code
+    ├── references/       # optional: documentation
+    └── assets/           # optional: templates, configs
+```
+
+```yaml
+---
+name: my-skill                           # required (1-64 chars, lowercase)
+description: What it does and when       # required (1-1024 chars)
+license: Apache-2.0                      # optional
+compatibility: Requires Python 3.10+    # optional
+---
+
+# Instructions for the agent (markdown body)
+Step-by-step procedures, examples, edge cases...
+```
+
+### How Robonix uses skills
+
+1. **Discovery**: `rbnx start` scans the package's `skills/` directory, parses each `SKILL.md` frontmatter, and registers `name` + `description` with Atlas
+2. **Activation**: Pilot examines skill descriptions at conversation time; when a user request matches semantically, the skill is activated
+3. **Execution**: The full `SKILL.md` content is loaded and provided to the VLM as context for reasoning
+
+### Importing skills from ClawHub
+
+The `clawhub_skills` example package demonstrates importing community skills from [OpenClaw ClawHub](https://clawhub.ai/) (3000+ skills):
+
+```bash
+cd rust
+rbnx build -p examples/packages/clawhub_skills    # pulls skills from openclaw/skills
+rbnx start -p examples/packages/clawhub_skills -n com.robonix.skills.clawhub &
+rbnx describe   # see imported skills
+```
+
+Skills from ClawHub, Claude Code, Cursor, or any Agent Skills-compatible source can be placed in a package's `skills/` directory and will be automatically discovered by Robonix.
 
 ### Abstract primitives
 

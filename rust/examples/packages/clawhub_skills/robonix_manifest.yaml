@@ -1,0 +1,32 @@
+# clawhub_skills — Import Agent Skills (agentskills.io) from OpenClaw ClawHub.
+#
+# Robonix natively supports the Agent Skills open standard (agentskills.io),
+# which is used by 30+ AI tools including Claude Code, Cursor, VS Code,
+# GitHub Copilot, OpenCode, Gemini CLI, and OpenClaw/ClawHub.
+#
+# This package pulls selected skills from OpenClaw's community skill
+# repository (openclaw/skills), registers a bridge node with Atlas,
+# and auto-imports all SKILL.md files for Robonix Pilot to discover.
+manifestVersion: 1
+
+build:
+  script: scripts/build.sh
+
+package:
+  id: com.robonix.example.clawhub_skills
+  name: clawhub_skills
+  version: 0.1.0
+  vendor: robonix
+  description: >-
+    Bridge package that imports community skills from OpenClaw ClawHub
+    into Robonix. Demonstrates native compatibility with the Agent Skills
+    open standard (agentskills.io) — SKILL.md files are directly usable
+    by Robonix Pilot without any format conversion.
+  license: MulanPSL-2.0
+
+nodes:
+  - id: com.robonix.skills.clawhub
+    type: python
+    start: |
+      export PYTHONPATH="$(pwd)/src:${PYTHONPATH:-}"
+      exec python -m clawhub_bridge

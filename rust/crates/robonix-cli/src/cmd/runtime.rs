@@ -408,23 +408,45 @@ pub async fn describe(endpoint: &str, node_id: Option<&str>, json: bool) -> Resu
         return Ok(());
     }
 
+    let mut total_skills = 0usize;
     for s in &skills {
         let node = nodes.iter().find(|n| n.node_id == s.node_id);
         let iface_str = node.map(fmt_interfaces).unwrap_or_default();
         println!("== {} ({}) [{}] ==", s.node_id, s.namespace, s.kind);
         println!("  interfaces: {}", iface_str);
-        let preview: String = s.skill_md.lines().take(5).collect::<Vec<_>>().join("\n");
-        println!("{}", preview);
-        if s.skill_md.lines().count() > 5 {
-            println!(
-                "  ... ({} lines total, use `rbnx describe --node {}` for full text)",
-                s.skill_md.lines().count(),
-                s.node_id
-            );
+
+        // Show structured skills (Agent Skills / agentskills.io format)
+        if !s.skills.is_empty() {
+            println!("  skills ({}):", s.skills.len());
+            for sk in &s.skills {
+                let desc_preview = if sk.description.len() > 80 {
+                    format!("{}...", &sk.description[..77])
+                } else {
+                    sk.description.clone()
+                };
+                println!("    - {} : {}", sk.name, desc_preview);
+            }
+            total_skills += s.skills.len();
+        }
+
+        // Also show legacy skill_md if present (backward compat)
+        if !s.skill_md.is_empty() {
+            let preview: String = s.skill_md.lines().take(5).collect::<Vec<_>>().join("\n");
+            println!("{}", preview);
+            if s.skill_md.lines().count() > 5 {
+                println!(
+                    "  ... ({} lines total, use `rbnx describe --node {}` for full text)",
+                    s.skill_md.lines().count(),
+                    s.node_id
+                );
+            }
+            if s.skills.is_empty() {
+                total_skills += 1;
+            }
         }
         println!();
     }
-    println!("{} skill(s) total", skills.len());
+    println!("{} node(s), {} skill(s) total", skills.len(), total_skills);
     Ok(())
 }
 
