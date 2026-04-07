@@ -1,0 +1,6 @@
+# Query current SLAM system status.
+# Request: empty
+# Response: full status
+
+---
+slam/SlamStatus status

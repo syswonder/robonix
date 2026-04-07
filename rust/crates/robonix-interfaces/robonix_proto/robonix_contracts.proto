@@ -13,6 +13,7 @@ import "nav_msgs.proto";
 import "pilot.proto";
 import "prm_base.proto";
 import "sensor_msgs.proto";
+import "slam.proto";
 import "vlm.proto";
 
 // contract: robonix/prm/base/cmd (v1)
@@ -133,5 +134,30 @@ service SysRuntimeLiaison {
 // contract: robonix/sys/runtime/pilot (v1)
 service SysRuntimePilot {
   rpc Stream(robonix.pilot.Intent) returns (stream robonix.pilot.PilotEvent);
+}
+
+// contract: robonix/sys/slam/load_map (v1)
+service SysSlamLoadMap {
+  rpc Call(robonix.slam.LoadMap_Request) returns (robonix.slam.LoadMap_Response);
+}
+
+// contract: robonix/sys/slam/save_map (v1)
+service SysSlamSaveMap {
+  rpc Call(robonix.slam.SaveMap_Request) returns (robonix.slam.SaveMap_Response);
+}
+
+// contract: robonix/sys/slam/set_initial_pose (v1)
+service SysSlamSetInitialPose {
+  rpc Call(robonix.slam.SetInitialPose_Request) returns (robonix.slam.SetInitialPose_Response);
+}
+
+// contract: robonix/sys/slam/status (v1)
+service SysSlamStatus {
+  rpc Call(robonix.slam.GetSlamStatus_Request) returns (robonix.slam.GetSlamStatus_Response);
+}
+
+// contract: robonix/sys/slam/switch_mode (v1)
+service SysSlamSwitchMode {
+  rpc Call(robonix.slam.SwitchMode_Request) returns (robonix.slam.SwitchMode_Response);
 }
 
