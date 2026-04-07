@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Init command: generate a new robonix workspace skeleton.
 //
-// Usage:  rbnx init <name>
+// Usage:  rbnx init <name> [--path <dir>]
 // Creates:
 //   <name>/
 //   ├── robonix_workspace.yaml   (upstream workspace config template)
-//   ├── config.yaml              (project-level deploy config)
+//   ├── deploy/
+//   │   └── config.yaml          (project-level deploy config)
 //   ├── packages/                (empty directory for user packages)
 //   └── .gitignore
 
@@ -59,7 +60,7 @@ system: []
   #   description: VLM vision-language model
 "#;
 
-const CONFIG_YAML_TEMPLATE: &str = r#"upstream_config: robonix_workspace.yaml
+const CONFIG_YAML_TEMPLATE: &str = r#"upstream_config: ../robonix_workspace.yaml
 target: default
 
 # Downstream packages
@@ -90,24 +91,31 @@ install/
 log/
 "#;
 
-pub async fn execute(name: &str) -> Result<()> {
+pub async fn execute(name: &str, path: Option<&Path>) -> Result<()> {
     output::action("Init", &format!("creating workspace '{}'", name));
 
-    let workspace_dir = Path::new(name);
+    let base_dir = path.unwrap_or_else(|| Path::new("."));
+    let workspace_dir = base_dir.join(name);
 
     // Check if directory already exists.
     if workspace_dir.exists() {
         anyhow::bail!(
             "directory '{}' already exists — choose a different name or remove it first",
-            name
+            workspace_dir.display()
         );
+    }
+
+    // Ensure the parent directory exists.
+    if !base_dir.exists() {
+        fs::create_dir_all(base_dir)
+            .with_context(|| format!("failed to create parent directory '{}'", base_dir.display()))?;
     }
 
     // Create directory structure.
     output::step("Creating", "workspace directory structure");
 
     fs::create_dir_all(workspace_dir.join("packages"))
-        .with_context(|| format!("failed to create {}/packages", name))?;
+        .with_context(|| format!("failed to create {}/packages", workspace_dir.display()))?;
     output::check("packages/");
 
     // Write robonix_workspace.yaml.
@@ -121,12 +129,14 @@ pub async fn execute(name: &str) -> Result<()> {
     })?;
     output::check("robonix_workspace.yaml");
 
-    // Write config.yaml.
-    let config_yaml_path = workspace_dir.join("config.yaml");
+    // Create deploy/ directory and write config.yaml.
+    fs::create_dir_all(workspace_dir.join("deploy"))
+        .with_context(|| format!("failed to create {}/deploy", workspace_dir.display()))?;
+    let config_yaml_path = workspace_dir.join("deploy").join("config.yaml");
     fs::write(&config_yaml_path, CONFIG_YAML_TEMPLATE).with_context(|| {
         format!("failed to write {}", config_yaml_path.display())
     })?;
-    output::check("config.yaml");
+    output::check("deploy/config.yaml");
 
     // Write .gitignore.
     let gitignore_path = workspace_dir.join(".gitignore");
@@ -135,16 +145,16 @@ pub async fn execute(name: &str) -> Result<()> {
     output::check(".gitignore");
 
     // Summary.
-    output::success(&format!("Workspace '{}' created successfully", name));
+    output::success(&format!("Workspace '{}' created at {}", name, workspace_dir.display()));
     output::info("");
     output::info("Next steps:");
     output::info(&format!(
         "  cd {}",
-        name
+        workspace_dir.display()
     ));
     output::info("  rbnx package new my_package    # create a new package");
-    output::info("  rbnx build --config config.yaml # build all packages");
-    output::info("  rbnx deploy config.yaml         # deploy the full stack");
+    output::info("  rbnx build --config deploy/config.yaml # build all packages");
+    output::info("  rbnx deploy deploy/config.yaml         # deploy the full stack");
 
     Ok(())
 }

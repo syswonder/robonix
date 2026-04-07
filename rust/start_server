@@ -11,43 +11,66 @@ export RUST_LOG="${RUST_LOG:-robonix_atlas=info}"
 
 LISTEN_PORT="${LISTEN_ADDR##*:}"
 
-# Kill any existing process on the listen port
+# Kill any existing process on the listen port (cross-platform: Linux + macOS)
 python3 - "$LISTEN_PORT" <<'PY'
-import os, signal, sys, time
+import os, signal, subprocess, sys, time, platform
 
 port = int(sys.argv[1])
-hex_port = format(port, "04X")
-inodes = set()
-for path in ("/proc/net/tcp", "/proc/net/tcp6"):
-    try:
-        with open(path) as f:
-            next(f)
-            for line in f:
-                parts = line.split()
-                local, state, inode = parts[1], parts[3], parts[9]
-                if local.split(":")[1].upper() == hex_port and state == "0A":
-                    inodes.add(inode)
-    except FileNotFoundError:
-        pass
 
-pids = []
-for pid in os.listdir("/proc"):
-    if not pid.isdigit():
-        continue
-    fd_dir = f"/proc/{pid}/fd"
+def find_pids_lsof(port):
+    """Use lsof to find PIDs listening on the given port (works on macOS and Linux)."""
     try:
-        for fd in os.listdir(fd_dir):
-            try:
-                target = os.readlink(os.path.join(fd_dir, fd))
-            except OSError:
-                continue
-            if target.startswith("socket:[") and target[8:-1] in inodes:
-                pids.append(int(pid))
-                break
-    except OSError:
-        continue
+        out = subprocess.check_output(
+            ["lsof", "-iTCP:" + str(port), "-sTCP:LISTEN", "-t"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return sorted(set(int(p) for p in out.strip().splitlines() if p.strip()))
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
 
-pids = sorted(set(pids))
+def find_pids_proc(port):
+    """Use /proc (Linux) to find PIDs listening on the given port."""
+    hex_port = format(port, "04X")
+    inodes = set()
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(path) as f:
+                next(f)
+                for line in f:
+                    parts = line.split()
+                    local, state, inode = parts[1], parts[3], parts[9]
+                    if local.split(":")[1].upper() == hex_port and state == "0A":
+                        inodes.add(inode)
+        except FileNotFoundError:
+            pass
+    if not inodes:
+        return []
+
+    pids = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        fd_dir = f"/proc/{pid}/fd"
+        try:
+            for fd in os.listdir(fd_dir):
+                try:
+                    target = os.readlink(os.path.join(fd_dir, fd))
+                except OSError:
+                    continue
+                if target.startswith("socket:[") and target[8:-1] in inodes:
+                    pids.append(int(pid))
+                    break
+        except OSError:
+            continue
+    return sorted(set(pids))
+
+# Prefer /proc on Linux, fall back to lsof everywhere else
+if platform.system() == "Linux" and os.path.isdir("/proc"):
+    pids = find_pids_proc(port)
+else:
+    pids = find_pids_lsof(port)
+
 if not pids:
     raise SystemExit(0)
 

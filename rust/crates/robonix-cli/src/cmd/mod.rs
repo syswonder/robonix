@@ -51,12 +51,18 @@ pub enum Commands {
     Init {
         /// Workspace name (creates a directory with this name)
         name: String,
+        /// Parent directory where the workspace will be created (default: current directory)
+        #[arg(short = 'p', long)]
+        path: Option<PathBuf>,
     },
     /// Create a new package under packages/
     #[command(name = "package-new")]
     PackageNew {
         /// Package name
         name: String,
+        /// Parent directory where the package will be created (default: current directory)
+        #[arg(short = 'p', long)]
+        path: Option<PathBuf>,
     },
     /// Build a package (local path or system-installed) or all packages from a config
     Build {
@@ -220,8 +226,8 @@ pub enum Commands {
 
 pub async fn execute(command: Commands, config: Config) -> Result<()> {
     match command {
-        Commands::Init { name } => init::execute(&name).await,
-        Commands::PackageNew { name } => package_new::execute(&name).await,
+        Commands::Init { name, path } => init::execute(&name, path.as_deref()).await,
+        Commands::PackageNew { name, path } => package_new::execute(&name, path.as_deref()).await,
         Commands::Build {
             path,
             global,

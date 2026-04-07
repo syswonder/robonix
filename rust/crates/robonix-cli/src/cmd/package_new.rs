@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Package-new command: create a new package under packages/ with scaffolding.
 //
-// Usage:  rbnx package new <name>
+// Usage:  rbnx package new <name> [--path <dir>]
 // Creates:
 //   packages/<name>/
 //   ├── robonix_manifest.yaml
@@ -80,7 +80,7 @@ echo "Starting {name} ..."
 #   exec ./rbnx-build/{name}
 "#;
 
-pub async fn execute(name: &str) -> Result<()> {
+pub async fn execute(name: &str, path: Option<&Path>) -> Result<()> {
     output::action("Package", &format!("creating new package '{}'", name));
 
     // Validate package name: must be non-empty, alphanumeric + underscores.
@@ -94,14 +94,25 @@ pub async fn execute(name: &str) -> Result<()> {
         );
     }
 
-    // Determine where to create: if `packages/` exists (inside a workspace), use it.
-    // Otherwise, create in the current directory.
-    let packages_dir = Path::new("packages");
-    let pkg_root = if packages_dir.is_dir() {
-        packages_dir.join(name)
+    // Determine where to create:
+    // 1. If --path is given, create under that directory.
+    // 2. Else if `packages/` exists (inside a workspace), use it.
+    // 3. Otherwise, create in the current directory.
+    let pkg_root = if let Some(base) = path {
+        // Ensure the parent directory exists.
+        if !base.exists() {
+            fs::create_dir_all(base)
+                .with_context(|| format!("failed to create directory '{}'", base.display()))?;
+        }
+        base.join(name)
     } else {
-        output::warning("'packages/' directory not found — creating package in current directory");
-        Path::new(name).to_path_buf()
+        let packages_dir = Path::new("packages");
+        if packages_dir.is_dir() {
+            packages_dir.join(name)
+        } else {
+            output::warning("'packages/' directory not found — creating package in current directory");
+            Path::new(name).to_path_buf()
+        }
     };
 
     if pkg_root.exists() {
