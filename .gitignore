@@ -47,3 +47,6 @@ rbnx-build/
 # trae IDE
 .trae/
 target
+
+.cursor/
+.claude/

@@ -440,14 +440,17 @@ fn tool_result_to_messages(call_id: &str, output: &str) -> ToolResultHistory {
     }
 
     // sensor_msgs/msg/Image — matches e.g. camera_snapshot / camera_depth_snapshot MCP tools.
+    // Skip images with encoding="error" — these are error placeholders, not real images.
+    let img_encoding = v.get("encoding").and_then(|e| e.as_str());
     if v.get("width").is_some()
         && v.get("height").is_some()
-        && v.get("encoding").is_some()
+        && img_encoding.is_some()
+        && img_encoding != Some("error")
         && v.get("data")
             .and_then(|d| d.as_str())
             .is_some_and(|s| !s.is_empty())
     {
-        let enc = v.get("encoding").and_then(|e| e.as_str()).unwrap_or("jpeg");
+        let enc = img_encoding.unwrap_or("jpeg");
         let b64 = v.get("data").and_then(|d| d.as_str()).unwrap_or("");
         return ToolResultHistory {
             tool_messages: vec![Message::tool_result(

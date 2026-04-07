@@ -90,7 +90,10 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         // Find a valid UTF-8 char boundary at or before `max` to avoid panic.
-        let end = s.floor_char_boundary(max);
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
         format!("{}…(truncated, {} bytes total)", &s[..end], s.len())
     }
 }
