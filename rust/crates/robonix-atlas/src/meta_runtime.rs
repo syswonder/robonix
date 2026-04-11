@@ -103,10 +103,10 @@ const ROBO_SYSTEM_INTERFACE_CATALOG: &[&str] = &[
     "robonix/srv/slam/switch_mode",      // mapping / localization / idle
     "robonix/srv/slam/set_initial_pose", // relocalization pose hint
     // ── map data plane ──────────────────────────────────────────────────────
-    "robonix/prm/sensor/lidar3d",             // 3D point cloud input
-    "robonix/srv/common/map/pointcloud",      // registered 3D cloud
-    "robonix/srv/common/map/occupancy_grid",  // 2D grid for Nav2
-    "robonix/srv/common/map/scan_2d",         // 2D scan for Nav2 costmap
+    "robonix/prm/sensor/lidar3d",            // 3D point cloud input
+    "robonix/srv/common/map/pointcloud",     // registered 3D cloud
+    "robonix/srv/common/map/occupancy_grid", // 2D grid for Nav2
+    "robonix/srv/common/map/scan_2d",        // 2D scan for Nav2 costmap
 ];
 
 #[derive(Debug)]

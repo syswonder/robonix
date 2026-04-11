@@ -4,7 +4,7 @@
 // `[mode].type` → `robonix_contracts.proto` (see `rust/contracts/README.md`).
 // Streaming: `rpc_server_stream` uses the .srv response (exactly one field) as stream element; `rpc_client_stream` uses the request (exactly one field).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
