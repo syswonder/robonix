@@ -94,6 +94,23 @@ log/
 pub async fn execute(name: &str, path: Option<&Path>) -> Result<()> {
     output::action("Init", &format!("creating workspace '{}'", name));
 
+    // Validate workspace name to prevent path traversal and invalid names.
+    if name.is_empty() {
+        anyhow::bail!("workspace name must not be empty");
+    }
+    if name.contains('/') || name.contains('\\') || name == "." || name == ".." || name.starts_with('.') {
+        anyhow::bail!(
+            "invalid workspace name '{}': must not contain path separators or start with '.'",
+            name
+        );
+    }
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+        anyhow::bail!(
+            "invalid workspace name '{}': only alphanumeric characters, hyphens and underscores are allowed",
+            name
+        );
+    }
+
     let base_dir = path.unwrap_or_else(|| Path::new("."));
     let workspace_dir = base_dir.join(name);
 

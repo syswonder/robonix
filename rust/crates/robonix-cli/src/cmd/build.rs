@@ -11,10 +11,11 @@ use anyhow::{Context, Result};
 use robonix_cli::manifest;
 use robonix_cli::output;
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use super::deploy; // Reuse topo_sort from deploy module.
 
 const RBNX_BUILD_DIR: &str = "rbnx-build";
 const RBNX_BUILT_STAMP: &str = "rbnx-build/.rbnx-built";
@@ -294,10 +295,12 @@ pub async fn execute_from_config(config_path: PathBuf, clean: bool) -> Result<()
     for pkg in &resolved {
         if let Some(ref interfaces) = pkg.manifest.interfaces {
             for consumed in &interfaces.consumes {
-                // Check if the consumed interface matches an upstream contract_id.
+                // Exact match only — avoid prefix matching which could produce
+                // false positives (e.g. "robonix/sys/model" matching
+                // "robonix/sys/model_evil").
                 let matched = upstream_contracts
                     .iter()
-                    .any(|cid| *cid == consumed.id || consumed.id.starts_with(cid));
+                    .any(|cid| *cid == consumed.id);
                 if matched {
                     output::check(&format!(
                         "{}: consumed interface '{}' ← upstream OK",
@@ -322,10 +325,12 @@ pub async fn execute_from_config(config_path: PathBuf, clean: bool) -> Result<()
         ));
     }
 
-    // ── Topological sort ────────────────────────────────────────────────────
-    let build_order = topo_sort_by_name_deps(
-        &resolved.iter().map(|p| (p.name.as_str(), &p.depends_on)).collect::<Vec<_>>(),
-    )?;
+    // ── Topological sort (reuse shared implementation) ──────────────────────
+    let items: Vec<(&str, &[String])> = resolved
+        .iter()
+        .map(|p| (p.name.as_str(), p.depends_on.as_slice()))
+        .collect();
+    let build_order = deploy::topo_sort(&items)?;
     let order_names: Vec<&str> = build_order.iter().map(|&i| resolved[i].name.as_str()).collect();
     output::step("Build order", &order_names.join(" → "));
 
@@ -362,54 +367,4 @@ pub async fn execute_from_config(config_path: PathBuf, clean: bool) -> Result<()
     ));
 
     Ok(())
-}
-
-/// Topological sort by (name, depends_on) pairs using Kahn's algorithm.
-/// Returns indices in dependency-first order.
-fn topo_sort_by_name_deps(items: &[(&str, &Vec<String>)]) -> Result<Vec<usize>> {
-    let name_to_idx: HashMap<&str, usize> = items
-        .iter()
-        .enumerate()
-        .map(|(i, (name, _))| (*name, i))
-        .collect();
-
-    let n = items.len();
-    let mut in_degree = vec![0usize; n];
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-
-    for (i, (_, deps)) in items.iter().enumerate() {
-        for dep in *deps {
-            if let Some(&dep_idx) = name_to_idx.get(dep.as_str()) {
-                adj[dep_idx].push(i);
-                in_degree[i] += 1;
-            }
-        }
-    }
-
-    // Kahn's algorithm with stable name-based ordering.
-    let mut queue: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
-    queue.sort_by(|a, b| items[*a].0.cmp(items[*b].0));
-
-    let mut order = Vec::with_capacity(n);
-    while let Some(node) = queue.pop() {
-        order.push(node);
-        for &nb in &adj[node] {
-            in_degree[nb] -= 1;
-            if in_degree[nb] == 0 {
-                queue.push(nb);
-                queue.sort_by(|a, b| items[*a].0.cmp(items[*b].0));
-            }
-        }
-    }
-
-    if order.len() != n {
-        let missing: Vec<&str> = items
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !order.contains(i))
-            .map(|(_, (name, _))| *name)
-            .collect();
-        anyhow::bail!("circular dependency detected among packages: {:?}", missing);
-    }
-    Ok(order)
 }

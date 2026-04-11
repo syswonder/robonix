@@ -176,12 +176,13 @@ pub async fn execute(name: &str, path: Option<&Path>) -> Result<()> {
 }
 
 /// Make a file executable (chmod +x) on Unix systems.
+/// Only adds the execute bit for user/group/other — does not alter read/write bits.
 #[cfg(unix)]
 fn make_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let metadata = fs::metadata(path)?;
     let mut perms = metadata.permissions();
-    perms.set_mode(perms.mode() | 0o755);
+    perms.set_mode(perms.mode() | 0o111);
     fs::set_permissions(path, perms)?;
     Ok(())
 }

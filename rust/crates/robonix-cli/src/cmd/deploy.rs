@@ -14,10 +14,10 @@ use anyhow::{Context, Result};
 use robonix_cli::manifest;
 use robonix_cli::output;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::time::{Duration, sleep};
 
 // ── YAML schema ─────────────────────────────────────────────────────────────
@@ -137,14 +137,17 @@ fn runtime_cargo_package(name: &str) -> Option<&'static str> {
     }
 }
 
-/// Spawn a background process.  Returns its PID on success.
+/// Spawn a background process.  Returns the Child handle (caller must store it).
+///
+/// On Unix, the child is placed into its own process group via `pre_exec(setsid)`
+/// so that we can cleanly terminate it later without killing the parent shell.
 async fn spawn_background(
     label: &str,
     cmd: &str,
     args: &[&str],
     cwd: &Path,
     env: &HashMap<String, String>,
-) -> Result<u32> {
+) -> Result<Child> {
     let mut command = Command::new(cmd);
     command
         .args(args)
@@ -153,16 +156,20 @@ async fn spawn_background(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
+    // Place child in its own process group so we can kill it independently.
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            // Create a new session / process group for this child.
+            nix::unistd::setsid().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            Ok(())
+        });
+    }
+
     let child = command
         .spawn()
         .with_context(|| format!("failed to spawn {label}"))?;
-    let pid = child
-        .id()
-        .ok_or_else(|| anyhow::anyhow!("failed to get PID for {label}"))?;
-    // Don't await — let it run in the background.
-    // Leak the child handle so it doesn't get killed when dropped.
-    std::mem::forget(child);
-    Ok(pid)
+    Ok(child)
 }
 
 /// Wait for a TCP endpoint to become reachable (connect-only check).
@@ -177,102 +184,69 @@ async fn wait_for_endpoint(addr: &str, timeout: Duration) -> bool {
     false
 }
 
-/// Topological sort of packages by depends_on (works on Vec<PackageEntry>).
-fn topo_sort_packages(packages: &[PackageEntry]) -> Result<Vec<usize>> {
-    let name_to_idx: HashMap<&str, usize> = packages
+/// Generic topological sort using Kahn's algorithm with FIFO (VecDeque)
+/// for correct alphabetical ordering.
+///
+/// `items` is a slice of (name, depends_on) pairs.
+/// Returns indices in dependency-first order.
+/// Reports an error if any `depends_on` reference is unknown.
+pub(crate) fn topo_sort(items: &[(&str, &[String])]) -> Result<Vec<usize>> {
+    let name_to_idx: HashMap<&str, usize> = items
         .iter()
         .enumerate()
-        .map(|(i, p)| (p.name.as_str(), i))
+        .map(|(i, (name, _))| (*name, i))
         .collect();
 
-    let n = packages.len();
+    let n = items.len();
     let mut in_degree = vec![0usize; n];
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
 
-    for (i, pkg) in packages.iter().enumerate() {
-        for dep in &pkg.depends_on {
+    for (i, (item_name, deps)) in items.iter().enumerate() {
+        for dep in *deps {
             if let Some(&dep_idx) = name_to_idx.get(dep.as_str()) {
                 adj[dep_idx].push(i);
                 in_degree[i] += 1;
+            } else {
+                anyhow::bail!(
+                    "'{}' depends on '{}', but '{}' is not defined",
+                    item_name,
+                    dep,
+                    dep
+                );
             }
         }
     }
 
-    // Kahn's algorithm.
-    let mut queue: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
-    queue.sort_by(|a, b| packages[*a].name.cmp(&packages[*b].name));
+    // Kahn's algorithm with a VecDeque (FIFO) for stable alphabetical order.
+    let mut ready: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
+    ready.sort_by(|a, b| items[*a].0.cmp(items[*b].0));
+    let mut queue: VecDeque<usize> = ready.into_iter().collect();
 
     let mut order = Vec::with_capacity(n);
-    while let Some(node) = queue.pop() {
+    while let Some(node) = queue.pop_front() {
         order.push(node);
+        // Collect newly-ready neighbors, sort alphabetically, then enqueue.
+        let mut newly_ready = Vec::new();
         for &nb in &adj[node] {
             in_degree[nb] -= 1;
             if in_degree[nb] == 0 {
-                queue.push(nb);
-                queue.sort_by(|a, b| packages[*a].name.cmp(&packages[*b].name));
+                newly_ready.push(nb);
             }
+        }
+        newly_ready.sort_by(|a, b| items[*a].0.cmp(items[*b].0));
+        for idx in newly_ready {
+            queue.push_back(idx);
         }
     }
 
     if order.len() != n {
-        let missing: Vec<&str> = packages
+        let missing: Vec<&str> = items
             .iter()
             .enumerate()
             .filter(|(i, _)| !order.contains(i))
-            .map(|(_, p)| p.name.as_str())
+            .map(|(_, (name, _))| *name)
             .collect();
-        anyhow::bail!("circular dependency detected among packages: {:?}", missing);
-    }
-    Ok(order)
-}
-
-/// Topological sort of runtime entries by depends_on.
-fn topo_sort_runtime(entries: &[RuntimeEntry]) -> Result<Vec<usize>> {
-    let name_to_idx: HashMap<&str, usize> = entries
-        .iter()
-        .enumerate()
-        .map(|(i, e)| (e.name.as_str(), i))
-        .collect();
-
-    let n = entries.len();
-    let mut in_degree = vec![0usize; n];
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-
-    for (i, entry) in entries.iter().enumerate() {
-        for dep in &entry.depends_on {
-            if let Some(&dep_idx) = name_to_idx.get(dep.as_str()) {
-                adj[dep_idx].push(i);
-                in_degree[i] += 1;
-            }
-        }
-    }
-
-    let mut queue: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
-    queue.sort_by(|a, b| entries[*a].name.cmp(&entries[*b].name));
-
-    let mut order = Vec::with_capacity(n);
-    while let Some(node) = queue.pop() {
-        order.push(node);
-        for &nb in &adj[node] {
-            in_degree[nb] -= 1;
-            if in_degree[nb] == 0 {
-                queue.push(nb);
-                queue.sort_by(|a, b| entries[*a].name.cmp(&entries[*b].name));
-            }
-        }
-    }
-
-    if order.len() != n {
-        let missing: Vec<&str> = entries
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !order.contains(i))
-            .map(|(_, e)| e.name.as_str())
-            .collect();
-        anyhow::bail!(
-            "circular dependency detected among runtime entries: {:?}",
-            missing
-        );
+        anyhow::bail!("circular dependency detected: {:?}", missing);
     }
     Ok(order)
 }
@@ -347,6 +321,34 @@ fn load_and_merge(config_path: &Path) -> Result<(MergedConfig, PathBuf)> {
     ))
 }
 
+/// Gracefully shut down all tracked child processes by sending SIGTERM
+/// to each child's process group, then waiting for them.
+#[cfg(unix)]
+async fn shutdown_children(children: &mut Vec<Child>) {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+
+    for child in children.iter_mut() {
+        if let Some(pid) = child.id() {
+            // Send SIGTERM to the child's process group (negative PID).
+            let _ = kill(Pid::from_raw(-(pid as i32)), Signal::SIGTERM);
+        }
+    }
+    // Give children a moment to exit gracefully.
+    sleep(Duration::from_secs(2)).await;
+    for child in children.iter_mut() {
+        // Force kill any remaining.
+        let _ = child.kill().await;
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_children(children: &mut Vec<Child>) {
+    for child in children.iter_mut() {
+        let _ = child.kill().await;
+    }
+}
+
 // ── Core deploy logic ────────────────────────────────────────────────────────
 
 pub async fn execute(config_path: &Path) -> Result<()> {
@@ -355,9 +357,10 @@ pub async fn execute(config_path: &Path) -> Result<()> {
     let (merged, base_dir) = load_and_merge(config_path)?;
 
     // Build global env map (merged config env + current process env).
-    let mut global_env: HashMap<String, String> = merged.env.clone();
-    for (k, v) in std::env::vars() {
-        global_env.entry(k).or_insert(v);
+    // Config env takes priority over inherited process env.
+    let mut global_env: HashMap<String, String> = std::env::vars().collect();
+    for (k, v) in &merged.env {
+        global_env.insert(k.clone(), v.clone());
     }
 
     // Inject runtime endpoints into env so packages can discover them.
@@ -382,11 +385,19 @@ pub async fn execute(config_path: &Path) -> Result<()> {
     // Detect Rust workspace root for cargo run.
     let rust_root = detect_rust_root(&base_dir);
 
+    // Track all spawned child processes for graceful shutdown.
+    let mut children: Vec<Child> = Vec::new();
+
     // ── Phase 1: Start runtime components ────────────────────────────────────
     if !merged.runtime.is_empty() {
         output::action("Phase 1", "Starting runtime components");
 
-        let runtime_order = topo_sort_runtime(&merged.runtime)?;
+        let items: Vec<(&str, &[String])> = merged
+            .runtime
+            .iter()
+            .map(|e| (e.name.as_str(), e.depends_on.as_slice()))
+            .collect();
+        let runtime_order = topo_sort(&items)?;
         let runtime_names: Vec<&str> = runtime_order
             .iter()
             .map(|&i| merged.runtime[i].name.as_str())
@@ -415,10 +426,12 @@ pub async fn execute(config_path: &Path) -> Result<()> {
 
                 let cwd = rust_root.as_deref().unwrap_or(&base_dir);
 
-                let pid =
+                let child =
                     spawn_background(&entry.name, "cargo", &["run", "-p", pkg], cwd, &global_env)
                         .await?;
+                let pid = child.id().unwrap_or(0);
                 output::sub_step(&format!("PID {}", pid));
+                children.push(child);
 
                 // Wait for the endpoint to become reachable.
                 if !entry.endpoint.is_empty() {
@@ -464,7 +477,7 @@ pub async fn execute(config_path: &Path) -> Result<()> {
                 if let Some(pkg_path) = service_pkg_path {
                     let cwd = rust_root.as_deref().unwrap_or(&base_dir);
                     let pkg_str = pkg_path.to_string_lossy().to_string();
-                    let pid = spawn_background(
+                    let child = spawn_background(
                         &entry.name,
                         "cargo",
                         &[
@@ -484,7 +497,9 @@ pub async fn execute(config_path: &Path) -> Result<()> {
                         &global_env,
                     )
                     .await?;
+                    let pid = child.id().unwrap_or(0);
                     output::sub_step(&format!("PID {} (rbnx start {})", pid, entry.node_id));
+                    children.push(child);
                     sleep(Duration::from_secs(2)).await;
                     output::check(&format!("{} started", entry.name));
                 } else {
@@ -506,7 +521,12 @@ pub async fn execute(config_path: &Path) -> Result<()> {
     if !merged.packages.is_empty() {
         output::action("Phase 3", "Starting packages");
 
-        let launch_order = topo_sort_packages(&merged.packages)?;
+        let items: Vec<(&str, &[String])> = merged
+            .packages
+            .iter()
+            .map(|p| (p.name.as_str(), p.depends_on.as_slice()))
+            .collect();
+        let launch_order = topo_sort(&items)?;
         let pkg_names: Vec<&str> = launch_order
             .iter()
             .map(|&i| merged.packages[i].name.as_str())
@@ -568,6 +588,8 @@ pub async fn execute(config_path: &Path) -> Result<()> {
                 continue;
             }
 
+            // ── Validate manifest start command (security) ──────────────────
+            // Log the command being executed for auditability.
             output::sub_step(&format!(
                 "manifest: {} v{} — node '{}' ({})",
                 pkg_manifest.package.name,
@@ -575,17 +597,19 @@ pub async fn execute(config_path: &Path) -> Result<()> {
                 node.id,
                 node.node_type.as_deref().unwrap_or("unknown")
             ));
+            output::sub_step(&format!("executing start command: {}", start_cmd));
 
-            // Build the full launch command with optional params.
-            let mut full_cmd = String::new();
+            // Build per-package env: inject params via environment variables
+            // instead of shell string interpolation (prevents command injection).
+            let mut pkg_env = global_env.clone();
 
             // Inject params_file if specified in config.yaml.
             if let Some(ref params_file) = entry.params_file {
                 let params_abs = pkg_path.join(params_file);
-                full_cmd.push_str(&format!(
-                    "export RBNX_PARAMS_FILE={}; ",
-                    params_abs.display()
-                ));
+                pkg_env.insert(
+                    "RBNX_PARAMS_FILE".to_string(),
+                    params_abs.display().to_string(),
+                );
             }
 
             // Inject inline params as environment variables.
@@ -602,21 +626,23 @@ pub async fn execute(config_path: &Path) -> Result<()> {
                         "RBNX_PARAM_{}",
                         k.to_uppercase().replace('.', "_").replace('-', "_")
                     );
-                    full_cmd.push_str(&format!("export {}={}; ", env_key, val_str));
+                    pkg_env.insert(env_key, val_str);
                 }
             }
 
-            full_cmd.push_str(start_cmd);
-
-            let pid = spawn_background(
+            // Launch via bash -c with the start command; params are in env,
+            // not interpolated into the shell string.
+            let child = spawn_background(
                 &entry.name,
                 "bash",
-                &["-c", &full_cmd],
+                &["-c", start_cmd],
                 &pkg_path,
-                &global_env,
+                &pkg_env,
             )
             .await?;
+            let pid = child.id().unwrap_or(0);
             output::sub_step(&format!("PID {} — {}", pid, start_cmd));
+            children.push(child);
 
             // If this package has robonix integration, log it.
             if let Some(ref rbnx) = entry.robonix {
@@ -652,13 +678,7 @@ pub async fn execute(config_path: &Path) -> Result<()> {
         .context("failed to listen for Ctrl+C")?;
 
     output::action("Shutdown", "stopping deployed components...");
-    #[cfg(unix)]
-    {
-        use nix::sys::signal::{Signal, killpg};
-        use nix::unistd::getpgrp;
-        let pgid = getpgrp();
-        let _ = killpg(pgid, Signal::SIGTERM);
-    }
+    shutdown_children(&mut children).await;
 
     Ok(())
 }

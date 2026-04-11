@@ -66,14 +66,14 @@ pub enum Commands {
     },
     /// Build a package (local path or system-installed) or all packages from a config
     Build {
-        /// Local package path (relative to $RBNX_INVOCATION_CWD, else process cwd)
-        #[arg(short = 'p', long)]
+        /// Build by local path (e.g. examples/skill_demo)
+        #[arg(short = 'p', long, conflicts_with = "config")]
         path: Option<PathBuf>,
         /// Build by system-installed package name
-        #[arg(short = 'g', long)]
+        #[arg(short = 'g', long, conflicts_with = "config")]
         global: Option<String>,
         /// Build all packages from a config.yaml file
-        #[arg(short = 'c', long = "config")]
+        #[arg(short = 'c', long = "config", conflicts_with_all = ["path", "global"])]
         config: Option<PathBuf>,
         /// Clean build (remove rbnx-build before building). Default: incremental.
         #[arg(long)]
