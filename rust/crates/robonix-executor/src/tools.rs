@@ -121,7 +121,7 @@ fn tool(name: &str, desc: &str, schema: Value, kind: RoutingKind, endpoint: &str
 
 async fn load_mcp_tools(sdk: &mut RobonixClient) -> anyhow::Result<Vec<ToolEntry>> {
     // Empty prefix = match all registered nodes (QueryNodes treats empty namespace as wildcard).
-    // Default empty so `robonix/sys/...` MCP providers are included alongside `robonix/prm/...`.
+    // Default empty so `robonix/srv/...` MCP providers are included alongside `robonix/prm/...`.
     let ns = std::env::var("ROBONIX_MCP_NAMESPACE_PREFIX").unwrap_or_default();
     let nodes = sdk.query_nodes(&ns, "", "mcp").await?;
     let mut out = Vec::new();

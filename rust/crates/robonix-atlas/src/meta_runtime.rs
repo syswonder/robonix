@@ -90,18 +90,23 @@ const ROBO_SYSTEM_INTERFACE_CATALOG: &[&str] = &[
     "robonix/prm/perception/tools", // perception_node: detect_objects
     "robonix/prm/manipulation/tools", // vla_node: execute_instruction, move_base
     // ── system services ───────────────────────────────────────────────────────
-    "robonix/sys/runtime/pilot",
-    "robonix/sys/runtime/executor",
-    "robonix/sys/runtime/liaison",
-    "robonix/sys/cognition/reason",
-    "robonix/sys/memory/search", // legacy search-only contract (kept for compat)
-    "robonix/sys/memory/tools",  // memsearch_service: search_memory, save_memory, compact_memory
+    "robonix/srv/runtime/pilot",
+    "robonix/srv/runtime/executor",
+    "robonix/srv/runtime/liaison",
+    "robonix/srv/cognition/reason",
+    "robonix/srv/memory/search", // legacy search-only contract (kept for compat)
+    "robonix/srv/memory/tools",  // memsearch_service: search_memory, save_memory, compact_memory
     // ── SLAM services ────────────────────────────────────────────────────────
-    "robonix/sys/slam/status",           // get_slam_status
-    "robonix/sys/slam/save_map",         // save point cloud map
-    "robonix/sys/slam/load_map",         // load pre-built map
-    "robonix/sys/slam/switch_mode",      // mapping / localization / idle
-    "robonix/sys/slam/set_initial_pose", // relocalization pose hint
+    "robonix/srv/slam/status",           // get_slam_status
+    "robonix/srv/slam/save_map",         // save point cloud map
+    "robonix/srv/slam/load_map",         // load pre-built map
+    "robonix/srv/slam/switch_mode",      // mapping / localization / idle
+    "robonix/srv/slam/set_initial_pose", // relocalization pose hint
+    // ── map data plane ──────────────────────────────────────────────────────
+    "robonix/prm/sensor/lidar3d",             // 3D point cloud input
+    "robonix/srv/common/map/pointcloud",      // registered 3D cloud
+    "robonix/srv/common/map/occupancy_grid",  // 2D grid for Nav2
+    "robonix/srv/common/map/scan_2d",         // 2D scan for Nav2 costmap
 ];
 
 #[derive(Debug)]
@@ -1171,7 +1176,7 @@ mod tests {
     #[tokio::test]
     async fn declare_interface_uses_listen_port_when_set() {
         let reg = MetaRuntimeRegistry::default();
-        reg_node(&reg, "com.test.p", "robonix/sys/model/vlm", "primitive").await;
+        reg_node(&reg, "com.test.p", "robonix/srv/model/vlm", "primitive").await;
         let ep = reg
             .declare_interface(
                 "com.test.p",
@@ -1341,7 +1346,7 @@ mod tests {
         reg_node(
             &reg,
             "com.test.consumer",
-            "robonix/sys/runtime/agent",
+            "robonix/srv/runtime/agent",
             "tool",
         )
         .await;
@@ -1412,7 +1417,7 @@ mod tests {
         let reg = MetaRuntimeRegistry::default();
         reg.register_node(
             "com.test.vlm".into(),
-            "robonix/sys/model/vlm".into(),
+            "robonix/srv/model/vlm".into(),
             "service".into(),
             None,
             Vec::new(),
@@ -1432,7 +1437,7 @@ mod tests {
         .unwrap();
         let st = reg.inner.read().await;
         // Legacy derived contract_id uses slash notation.
-        let derived = "robonix/sys/cognition/reason";
+        let derived = "robonix/srv/cognition/reason";
         let count = st
             .nodes
             .values()

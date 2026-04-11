@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
 
     sdk.register_node(
         EXECUTOR_NODE_ID,
-        "robonix/sys/runtime/executor",
+        "robonix/srv/runtime/executor",
         "service",
         "",
     )
@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
         vec!["grpc".to_string()],
         serde_json::json!({"endpoint": advertised}).to_string(),
         listen_port as u32,
-        "robonix/sys/runtime/executor",
+        "robonix/srv/runtime/executor",
     )
     .await?;
 

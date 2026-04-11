@@ -9,8 +9,8 @@
 //
 //
 //  Key principle: liaison itself does NOT contain ASR/TTS logic.  ASR and TTS
-//  are Atlas-registered system nodes (robonix/sys/speech/asr,
-//  robonix/sys/speech/tts) discovered and called via gRPC — the same pattern
+//  are Atlas-registered system nodes (robonix/srv/speech/asr,
+//  robonix/srv/speech/tts) discovered and called via gRPC — the same pattern
 //  as the VLM service in Pilot.  The `Recorder` and `Speaker` traits abstract
 //  platform audio I/O (ALSA, PulseAudio, CoreAudio …) from the service calls.
 //
@@ -284,7 +284,7 @@ async fn main() -> Result<()> {
             .await?;
     sdk.register_node(
         LIAISON_NODE_ID,
-        "robonix/sys/runtime/liaison",
+        "robonix/srv/runtime/liaison",
         "service",
         "",
     )
@@ -295,7 +295,7 @@ async fn main() -> Result<()> {
         vec!["grpc".to_string()],
         serde_json::json!({ "endpoint": advertised }).to_string(),
         listen_port as u32,
-        "robonix/sys/runtime/liaison",
+        "robonix/srv/runtime/liaison",
     )
     .await?;
     log::info!("registered as '{LIAISON_NODE_ID}', SysRuntimeLiaison gRPC on :{listen_port}");

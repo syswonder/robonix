@@ -1,6 +1,6 @@
 # Switch SLAM operating mode (mapping / localization / idle).
 [contract]
-id      = "robonix/sys/slam/switch_mode"
+id      = "robonix/srv/slam/switch_mode"
 version = "1"
 kind    = "service"
 
