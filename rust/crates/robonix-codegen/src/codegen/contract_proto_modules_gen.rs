@@ -88,7 +88,7 @@ fn dfs_postorder(
 }
 
 /// After `robonix_contracts.proto` is written, emit sibling `contract_proto_modules.rs`.
-pub fn write(out_dir: &Path) -> Result<()> {
+pub fn write(out_dir: &Path, verbose: bool) -> Result<()> {
     let root = "robonix_contracts.proto";
     let contracts_path = out_dir.join(root);
     if !contracts_path.is_file() {
@@ -135,10 +135,12 @@ pub fn write(out_dir: &Path) -> Result<()> {
 
     let outfile = out_dir.join("contract_proto_modules.rs");
     fs::write(&outfile, &out).with_context(|| format!("write {}", outfile.display()))?;
-    eprintln!(
-        "[robonix-codegen] contracts: wrote {} ({} include_proto modules)",
-        outfile.display(),
-        order.len()
-    );
+    if verbose {
+        eprintln!(
+            "[robonix-codegen] contracts: wrote {} ({} include_proto modules)",
+            outfile.display(),
+            order.len()
+        );
+    }
     Ok(())
 }

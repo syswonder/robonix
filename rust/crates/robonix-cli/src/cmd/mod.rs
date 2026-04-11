@@ -43,7 +43,7 @@ pub struct GraphArgs {
 pub enum Commands {
     /// Build a package (local path or system-installed)
     Build {
-        /// Build by local path (e.g. examples/skill_demo)
+        /// Local package path (relative to $RBNX_INVOCATION_CWD, else process cwd)
         #[arg(short = 'p', long)]
         path: Option<PathBuf>,
         /// Build by system-installed package name
@@ -55,7 +55,7 @@ pub enum Commands {
     },
     /// Start one node of a package (package and node required). Blocks until the process exits.
     Start {
-        /// Package name or path
+        /// Package path or installed name; relative paths use $RBNX_INVOCATION_CWD, else process cwd
         #[arg(short = 'p', long, required = true)]
         package: String,
         /// Node id to start (e.g. call_ping). Exactly one node per invocation.
@@ -83,7 +83,7 @@ pub enum Commands {
     },
     /// Validate a package manifest without building
     Validate {
-        /// Local path to package directory
+        /// Package directory (relative paths use $RBNX_INVOCATION_CWD, else process cwd)
         path: PathBuf,
     },
     /// Configure robonix-cli

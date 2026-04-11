@@ -338,6 +338,98 @@ impl MetaRuntimeRegistry {
         }
     }
 
+    /// Optional preferred ROS 2 topic or service name from `DeclareInterface.metadata_json`
+    /// (`ros2_topic` or `ros2_service`, same convention as PRM registration helpers).
+    fn preferred_ros2_from_metadata(metadata_json: &str) -> Option<String> {
+        let v: serde_json::Value = serde_json::from_str(metadata_json).ok()?;
+        let obj = v.as_object()?;
+        for key in ["ros2_topic", "ros2_service"] {
+            if let Some(s) = obj.get(key).and_then(|x| x.as_str()) {
+                let t = s.trim();
+                if !t.is_empty() {
+                    return Some(t.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    fn normalize_ros2_graph_name(raw: &str) -> String {
+        let t = raw.trim();
+        if t.is_empty() {
+            return String::new();
+        }
+        if t.starts_with('/') {
+            t.to_string()
+        } else {
+            format!("/{t}")
+        }
+    }
+
+    /// Reject obvious injection / invalid names (ROS graph names are a constrained charset).
+    fn is_plausible_ros2_graph_name(s: &str) -> bool {
+        if s.is_empty() || s.len() > 512 {
+            return false;
+        }
+        if s.contains("..") {
+            return false;
+        }
+        s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/_~-.".contains(c))
+    }
+
+    /// True if another interface already uses this `allocated_endpoint` for transport `ros2`.
+    fn ros2_endpoint_conflicts_with_other_iface(
+        st: &State,
+        endpoint: &str,
+        except_node_id: &str,
+        except_iface_name: &str,
+    ) -> bool {
+        for (nid, node) in &st.nodes {
+            for iface in &node.interfaces {
+                if !iface.supported_transports.iter().any(|t| t == "ros2") {
+                    continue;
+                }
+                if iface.allocated_endpoint != endpoint {
+                    continue;
+                }
+                if nid == except_node_id && iface.name == except_iface_name {
+                    continue;
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// For `ros2`: use `metadata_json` topic/service name when valid and free; else UUID path.
+    fn allocate_ros2_endpoint(
+        &self,
+        st: &State,
+        metadata_json: &str,
+        node_id: &str,
+        iface_name: &str,
+        existing_interfaces: &[InterfaceRecord],
+        listen_port: u32,
+    ) -> String {
+        if let Some(pref) = Self::preferred_ros2_from_metadata(metadata_json) {
+            let norm = Self::normalize_ros2_graph_name(&pref);
+            if !norm.is_empty()
+                && Self::is_plausible_ros2_graph_name(&norm)
+                && !Self::ros2_endpoint_conflicts_with_other_iface(st, &norm, node_id, iface_name)
+            {
+                log::info!(
+                    "meta-runtime: ros2 DeclareInterface '{iface_name}' on '{node_id}' → declared graph name '{norm}'"
+                );
+                return norm;
+            }
+            log::info!(
+                "meta-runtime: ros2 DeclareInterface '{iface_name}' on '{node_id}' — declared name unavailable or invalid, falling back to allocator"
+            );
+        }
+        self.allocate_endpoint_for_node("ros2", existing_interfaces, listen_port)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn register_node(
         &self,
@@ -400,14 +492,16 @@ impl MetaRuntimeRegistry {
             ));
         }
         let mut st = self.inner.write().await;
-        let node = st
+        let node_ref = st
             .nodes
-            .get_mut(node_id)
+            .get(node_id)
             .ok_or_else(|| Status::not_found(format!("node '{node_id}' not registered")))?;
+        let namespace = node_ref.namespace.clone();
+        let existing_interfaces = node_ref.interfaces.clone();
 
         let trimmed_contract = contract_id.trim();
         Self::validate_robonix_system_interface_for_transports(
-            &node.namespace,
+            &namespace,
             &name,
             trimmed_contract,
             &transports,
@@ -415,17 +509,32 @@ impl MetaRuntimeRegistry {
 
         // Prefer explicit contract_id (stable path). Else derive namespace+name.
         let effective_contract = if trimmed_contract.is_empty() {
-            Self::join_namespace_leaf(&node.namespace, &name)
+            Self::join_namespace_leaf(&namespace, &name)
         } else {
             trimmed_contract.to_string()
         };
         Self::validate_contract_id("contract_id", &effective_contract)?;
 
         let primary_transport = transports.first().map(|s| s.as_str()).unwrap_or("");
-        let endpoint =
-            self.allocate_endpoint_for_node(primary_transport, &node.interfaces, listen_port);
+        let endpoint = if primary_transport == "ros2" {
+            self.allocate_ros2_endpoint(
+                &st,
+                &metadata_json,
+                node_id,
+                &name,
+                &existing_interfaces,
+                listen_port,
+            )
+        } else {
+            self.allocate_endpoint_for_node(primary_transport, &existing_interfaces, listen_port)
+        };
 
         let enriched_meta = Self::inject_endpoint(&metadata_json, &endpoint);
+
+        let node = st
+            .nodes
+            .get_mut(node_id)
+            .ok_or_else(|| Status::not_found(format!("node '{node_id}' not registered")))?;
 
         if let Some(iface) = node
             .interfaces

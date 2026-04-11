@@ -1,6 +1,6 @@
 # robonix-atlas
 
-**robonix-atlas** is the **gRPC control plane** for Robonix: **service registration**, **discovery**, **interface** metadata, **channel negotiation** across **transports**, and **skill** (SKILL.md) queries for agents.
+**robonix-atlas** is the **control plane** for Robonix: **service registration**, **discovery**, **interface** metadata, **channel negotiation** across **transports**, and **skill** (SKILL.md) queries for agents.
 
 It implements the `RobonixRuntime` service from [`proto/robonix_runtime.proto`](../../proto/robonix_runtime.proto) (also vendored under `robonix-codegen` for codegen).
 

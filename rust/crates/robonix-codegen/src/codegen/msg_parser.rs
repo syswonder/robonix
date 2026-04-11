@@ -112,14 +112,18 @@ impl MsgResolver {
         Ok(())
     }
 
-    pub fn resolve_all_in_index(&mut self) -> Result<()> {
+    pub fn resolve_all_in_index(&mut self, verbose: bool, skip_count: &mut usize) -> Result<()> {
         let keys: Vec<_> = self.index.keys().cloned().collect();
         for (package, name) in keys {
             if let Err(e) = self.resolve_named_type(&package, &name, None) {
-                eprintln!(
-                    "[robonix-codegen] warning: skipping {}/{}: {:#}",
-                    package, name, e
-                );
+                if verbose {
+                    eprintln!(
+                        "[robonix-codegen] warning: skipping {}/{}: {:#}",
+                        package, name, e
+                    );
+                } else {
+                    *skip_count += 1;
+                }
             }
         }
         Ok(())
@@ -143,14 +147,18 @@ impl MsgResolver {
             .collect::<Vec<_>>()
     }
 
-    pub fn resolve_all_srv(&mut self) -> Result<()> {
+    pub fn resolve_all_srv(&mut self, verbose: bool, skip_count: &mut usize) -> Result<()> {
         let keys: Vec<_> = self.srv_index.keys().cloned().collect();
         for (package, name) in keys {
             if let Err(e) = self.resolve_srv(&package, &name) {
-                eprintln!(
-                    "[robonix-codegen] warning: skipping srv {}/{}: {:#}",
-                    package, name, e
-                );
+                if verbose {
+                    eprintln!(
+                        "[robonix-codegen] warning: skipping srv {}/{}: {:#}",
+                        package, name, e
+                    );
+                } else {
+                    *skip_count += 1;
+                }
             }
         }
         Ok(())

@@ -262,7 +262,7 @@ const UNBOUNDED_ELEM_MAX: usize = 256; // all other primitive element types
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-pub fn generate(resolver: &MsgResolver, out_dir: &Path) -> Result<()> {
+pub fn generate(resolver: &MsgResolver, out_dir: &Path, verbose: bool) -> Result<()> {
     fs::create_dir_all(out_dir)?;
 
     let mut all_packages = BTreeSet::new();
@@ -334,12 +334,14 @@ pub fn generate(resolver: &MsgResolver, out_dir: &Path) -> Result<()> {
         let filepath = out_dir.join(&filename);
         fs::write(&filepath, &out)
             .with_context(|| format!("failed to write '{}'", filepath.display()))?;
-        eprintln!(
-            "[robonix-codegen] python: '{}' ({} msgs) -> {}",
-            package,
-            specs.len(),
-            filepath.display()
-        );
+        if verbose {
+            eprintln!(
+                "[robonix-codegen] python: '{}' ({} msgs) -> {}",
+                package,
+                specs.len(),
+                filepath.display()
+            );
+        }
     }
 
     // Write package __init__.py so the directory is importable as a Python package

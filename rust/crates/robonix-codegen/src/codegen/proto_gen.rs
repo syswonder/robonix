@@ -106,6 +106,7 @@ pub fn generate(
     resolver: &MsgResolver,
     out_dir: &Path,
     contract_srvs: Option<&BTreeSet<(String, String)>>,
+    verbose: bool,
 ) -> Result<()> {
     fs::create_dir_all(out_dir)?;
 
@@ -170,13 +171,15 @@ pub fn generate(
         let filepath = out_dir.join(&filename);
         fs::write(&filepath, &out)
             .with_context(|| format!("failed to write proto file to '{}'", filepath.display()))?;
-        eprintln!(
-            "[robonix-codegen] generated proto for '{}' ({} msgs, {} contract srvs) -> {}",
-            package,
-            specs.len(),
-            srvs.len(),
-            filepath.display()
-        );
+        if verbose {
+            eprintln!(
+                "[robonix-codegen] generated proto for '{}' ({} msgs, {} contract srvs) -> {}",
+                package,
+                specs.len(),
+                srvs.len(),
+                filepath.display()
+            );
+        }
     }
 
     Ok(())
