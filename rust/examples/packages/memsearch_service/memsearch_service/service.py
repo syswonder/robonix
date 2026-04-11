@@ -66,7 +66,7 @@ MILVUS_URI = os.environ.get("AGENT_MILVUS_URI", "./agent_milvus.db")
 
 mem = MemSearch(
     paths=[MEMORY_DIR],
-    embedding_provider="ollama",
+    embedding_provider="onnx",
     milvus_uri=MILVUS_URI
 )
 
