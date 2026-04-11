@@ -71,6 +71,7 @@ struct RuntimeEntry {
 
 /// A system service entry (from upstream_config).
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 struct SystemEntry {
     name: String,
     #[serde(default)]
@@ -85,6 +86,7 @@ struct SystemEntry {
 
 /// A package entry (from the user's config.yaml).
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 struct PackageEntry {
     name: String,
     path: String,
@@ -101,6 +103,7 @@ struct PackageEntry {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 struct RobonixIntegration {
     #[serde(default)]
     namespace: String,

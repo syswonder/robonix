@@ -9,5 +9,6 @@ pub enum SessionState {
     Active = 0,
     Completed = 1,
     Failed = 2,
+    #[allow(dead_code)]
     WaitingInput = 3,
 }

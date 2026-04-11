@@ -40,6 +40,7 @@ struct UpstreamWorkspace {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 struct SystemEntry {
     #[serde(default)]
     name: String,

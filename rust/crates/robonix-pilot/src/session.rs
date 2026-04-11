@@ -19,7 +19,9 @@ pub struct Session {
     pub history: Vec<Message>,
     /// Current turn count (incremented on each SubmitTask call).
     pub turn_count: u32,
+    #[allow(dead_code)]
     pub state: SessionState,
+    #[allow(dead_code)]
     pub created_at_ms: u64,
 }
 
@@ -55,10 +57,12 @@ impl SessionManager {
             .clone()
     }
 
+    #[allow(dead_code)]
     pub async fn get(&self, session_id: &str) -> Option<Arc<Mutex<Session>>> {
         self.sessions.lock().await.get(session_id).cloned()
     }
 
+    #[allow(dead_code)]
     pub async fn list(&self) -> Vec<(String, SessionState, u64, u32)> {
         let map = self.sessions.lock().await;
         let mut out = Vec::new();
