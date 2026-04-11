@@ -80,13 +80,20 @@ pub fn collect_referenced_srvs(contracts_dir: &Path) -> Result<BTreeSet<(String,
     Ok(set)
 }
 
-pub fn generate(resolver: &mut MsgResolver, contracts_dir: &Path, out_dir: &Path) -> Result<()> {
+pub fn generate(
+    resolver: &mut MsgResolver,
+    contracts_dir: &Path,
+    out_dir: &Path,
+    verbose: bool,
+) -> Result<()> {
     let paths = collect_tomls(contracts_dir)?;
     if paths.is_empty() {
-        eprintln!(
-            "[robonix-codegen] contracts: no .toml under {}",
-            contracts_dir.display()
-        );
+        if verbose {
+            eprintln!(
+                "[robonix-codegen] contracts: no .toml under {}",
+                contracts_dir.display()
+            );
+        }
         return Ok(());
     }
 
@@ -167,13 +174,15 @@ pub fn generate(resolver: &mut MsgResolver, contracts_dir: &Path, out_dir: &Path
 
     let outfile = out_dir.join("robonix_contracts.proto");
     fs::write(&outfile, &out).with_context(|| format!("write {}", outfile.display()))?;
-    eprintln!(
-        "[robonix-codegen] contracts: wrote {} ({} services)",
-        outfile.display(),
-        contracts.len()
-    );
+    if verbose {
+        eprintln!(
+            "[robonix-codegen] contracts: wrote {} ({} services)",
+            outfile.display(),
+            contracts.len()
+        );
+    }
 
-    super::contract_proto_modules_gen::write(out_dir)?;
+    super::contract_proto_modules_gen::write(out_dir, verbose)?;
     Ok(())
 }
 

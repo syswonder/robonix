@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Validate command: check package manifest without building
 
-use anyhow::Result;
+use super::run_package::resolve_local_path_for_filesystem;
+use anyhow::{Context, Result};
 use robonix_cli::manifest;
 use robonix_cli::output;
 use std::path::PathBuf;
 
 pub async fn execute(path: PathBuf) -> Result<()> {
+    let path = resolve_local_path_for_filesystem(&path)?;
     let package_root = path
         .canonicalize()
-        .map_err(anyhow::Error::from)
-        .unwrap_or(path.clone());
+        .with_context(|| format!("Failed to canonicalize: {}", path.display()))?;
 
     output::action(
         "Validating",

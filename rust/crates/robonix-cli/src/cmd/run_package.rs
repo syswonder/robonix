@@ -8,7 +8,32 @@ use robonix_cli::Config;
 use robonix_cli::manifest;
 use robonix_cli::output;
 use robonix_cli::process::ProcessManager;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Directory against which relative `-p` is resolved: **the pwd of the command invocation**.
+/// When `cargo run` runs from `robonix/rust`, the process cwd is not the user's shell cwd — wrappers
+/// should `export RBNX_INVOCATION_CWD="$(pwd)"` before `cd`+`cargo run`. If unset, `std::env::current_dir()` is used.
+pub(crate) const RBNX_INVOCATION_CWD: &str = "RBNX_INVOCATION_CWD";
+
+fn path_base_for_dash_p() -> Result<PathBuf> {
+    if let Ok(s) = std::env::var(RBNX_INVOCATION_CWD) {
+        Ok(PathBuf::from(s))
+    } else {
+        std::env::current_dir().context("Failed to get current directory")
+    }
+}
+
+/// Resolve `-p` to a filesystem path before `canonicalize`: relative paths and `.` use
+/// [`path_base_for_dash_p`] as the prefix (invocation pwd, or process cwd).
+pub(crate) fn resolve_local_path_for_filesystem(p: &Path) -> Result<PathBuf> {
+    if p.as_os_str() == "." || p.as_os_str() == "./" {
+        return path_base_for_dash_p();
+    }
+    if p.is_absolute() {
+        return Ok(p.to_path_buf());
+    }
+    Ok(path_base_for_dash_p()?.join(p))
+}
 
 /// Resolve package path from -p (local path) or -g (system-installed name).
 fn resolve_package_path(
@@ -17,6 +42,7 @@ fn resolve_package_path(
     global: Option<String>,
 ) -> Result<PathBuf> {
     if let Some(p) = path {
+        let p = resolve_local_path_for_filesystem(&p)?;
         let canonical = p
             .canonicalize()
             .with_context(|| format!("Failed to canonicalize: {}", p.display()))?;
@@ -45,36 +71,13 @@ fn resolve_package_path(
     anyhow::bail!("Specify -p <path> for local package or -g <name> for system-installed package")
 }
 
-/// Resolve package path for start: accepts path or name (looks in examples, cwd, system storage).
+/// Resolve package path for `start`: same `-p` rules as `build`, then system-installed name fallback.
 fn resolve_package_path_for_start(config: &Config, spec: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(spec);
-    if path.exists() {
-        let canonical = path
+    let path = resolve_local_path_for_filesystem(Path::new(spec))?;
+    if path.join(manifest::MANIFEST_FILE).is_file() {
+        return path
             .canonicalize()
-            .with_context(|| format!("Failed to canonicalize: {}", path.display()))?;
-        if canonical.join(manifest::MANIFEST_FILE).exists() {
-            return Ok(canonical);
-        }
-    }
-
-    let cwd = std::env::current_dir().context("Failed to get current directory")?;
-    let candidates = [
-        cwd.join("examples").join("packages").join(spec),
-        cwd.join("examples").join(spec),
-        cwd.join(spec),
-        cwd.join("rust")
-            .join("examples")
-            .join("packages")
-            .join(spec),
-        cwd.join("rust").join("examples").join(spec),
-    ];
-
-    for candidate in &candidates {
-        if candidate.join(manifest::MANIFEST_FILE).exists() {
-            return candidate
-                .canonicalize()
-                .with_context(|| format!("Failed to canonicalize: {}", candidate.display()));
-        }
+            .with_context(|| format!("Failed to canonicalize: {}", path.display()));
     }
 
     let db = robonix_cli::PackageDatabase::load(&config.package_storage_path)?;
@@ -83,12 +86,11 @@ fn resolve_package_path_for_start(config: &Config, spec: &str) -> Result<PathBuf
     }
 
     anyhow::bail!(
-        "Package '{}' not found. Tried: {:?} and system storage",
+        "Package '{}' not found at {} (relative -p uses {} or process cwd). Try -g <installed name> or export {}=\"$(pwd)\" before cargo run.",
         spec,
-        candidates
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
+        path.display(),
+        RBNX_INVOCATION_CWD,
+        RBNX_INVOCATION_CWD
     )
 }
 

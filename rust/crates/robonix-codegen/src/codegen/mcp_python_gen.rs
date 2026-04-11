@@ -367,7 +367,7 @@ fn emit_class(out: &mut String, spec: &MsgSpec) {
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-pub fn generate(resolver: &MsgResolver, out_dir: &Path) -> Result<()> {
+pub fn generate(resolver: &MsgResolver, out_dir: &Path, verbose: bool) -> Result<()> {
     fs::create_dir_all(out_dir)?;
 
     let mut all_packages: BTreeSet<String> = BTreeSet::new();
@@ -437,12 +437,14 @@ pub fn generate(resolver: &MsgResolver, out_dir: &Path) -> Result<()> {
         let filepath = out_dir.join(&filename);
         fs::write(&filepath, &out)
             .with_context(|| format!("failed to write '{}'", filepath.display()))?;
-        eprintln!(
-            "[robonix-codegen] mcp: '{}' ({} msgs) -> {}",
-            package,
-            specs.len(),
-            filepath.display()
-        );
+        if verbose {
+            eprintln!(
+                "[robonix-codegen] mcp: '{}' ({} msgs) -> {}",
+                package,
+                specs.len(),
+                filepath.display()
+            );
+        }
     }
 
     // Package __init__.py

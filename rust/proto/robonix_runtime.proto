@@ -74,7 +74,7 @@ message DeclareInterfaceRequest {
   string node_id = 1;
   string name = 2;                      // e.g. "rgb" — local leaf key for NegotiateChannel
   repeated string supported_transports = 3;  // e.g. ["ros2", "shared_memory", "grpc"]
-  string metadata_json = 4;             // opaque JSON, agreed by provider/consumer
+  string metadata_json = 4;             // opaque JSON; for transport "ros2", optional "ros2_topic" / "ros2_service" may be used as the allocated data-plane name when free (else /rbnx/ch/n<uuid>)
   // If non-zero, data-plane endpoint is ROBONIX_DATA_PLANE_HOST:listen_port (client already bound).
   // If zero, server picks the next port from its allocator (may collide with host services).
   uint32 listen_port = 5;

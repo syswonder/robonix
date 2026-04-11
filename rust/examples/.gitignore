@@ -6,3 +6,5 @@ proto_gen/
 */rbnx-build/
 # uv virtual environments
 */.venv/
+
+*.egg-info/
