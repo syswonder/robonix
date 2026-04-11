@@ -19,8 +19,8 @@ Optional environment variables:
                     The service picks a free TCP port (DeclareInterface listen_port) so it does not collide with host services on 50100+.
 
 Control plane (must match robonix-pilot discovery):
-  Registers under `robonix/sys/model/vlm` with interface `chat` (contract id
-  `robonix/sys/model/vlm/chat`). The agent uses `QueryNodes.contract_id`
+  Registers under `robonix/sys/cognition` with interface `reason` (contract id
+  `robonix/sys/cognition/reason`). The agent uses `QueryNodes.contract_id`
   by default; override with `ROBONIX_VLM_CONTRACT_ID`, or empty contract
   + `ROBONIX_VLM_NAMESPACE_PREFIX` for legacy split queries. See `rust/docs/NAMESPACE.md`.
 """
@@ -375,7 +375,7 @@ def main() -> None:
             supported_transports=["grpc"],
             metadata_json=_iface_meta(),
             listen_port=bound_port,
-            contract_id="robonix/sys/model/vlm/chat",
+            contract_id="robonix/sys/cognition/reason",
         )
     )
     data_endpoint = resp.allocated_endpoint

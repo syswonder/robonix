@@ -93,7 +93,7 @@ const ROBO_SYSTEM_INTERFACE_CATALOG: &[&str] = &[
     "robonix/sys/runtime/pilot",
     "robonix/sys/runtime/executor",
     "robonix/sys/runtime/liaison",
-    "robonix/sys/model/vlm/chat",
+    "robonix/sys/cognition/reason",
     "robonix/sys/memory/search", // legacy search-only contract (kept for compat)
     "robonix/sys/memory/tools",  // memsearch_service: search_memory, save_memory, compact_memory
     // ── SLAM services ────────────────────────────────────────────────────────
@@ -1432,7 +1432,7 @@ mod tests {
         .unwrap();
         let st = reg.inner.read().await;
         // Legacy derived contract_id uses slash notation.
-        let derived = "robonix/sys/model/vlm/chat";
+        let derived = "robonix/sys/cognition/reason";
         let count = st
             .nodes
             .values()

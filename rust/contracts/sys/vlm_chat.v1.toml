@@ -1,6 +1,6 @@
 # ROS: `lib/vlm/srv/ChatStream.srv`. Stream element type in TOML only.
 [contract]
-id      = "robonix/sys/model/vlm/chat"
+id      = "robonix/sys/cognition/reason"
 version = "1"
 kind    = "service"
 
