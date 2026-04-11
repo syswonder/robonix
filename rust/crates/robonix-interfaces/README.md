@@ -47,7 +47,7 @@ cd rust && ./examples/scripts/gen_proto_python.sh
 | `lib/prm_base/msg/`, `lib/prm_base/srv/` | ROS IDL for base primitives `robonix/prm/base/*` |
 | `lib/prm/README.md` | Index of `prm_*` packages |
 | `lib/prm_camera/` | Camera: payloads mostly **common_interfaces** (see tables); gRPC services from **contracts** |
-| `lib/vlm/srv/` | System VLM `robonix/sys/model/vlm` (payloads referenced by contracts) |
+| `lib/vlm/srv/` | System VLM `robonix/srv/model/vlm` (payloads referenced by contracts) |
 | `lib/robonix_msg/` | Shared message types |
 | `lib/common_interfaces/` | Upstream ROS message trees (submodule / vendor) |
 | `robonix_proto/` | **Generated** `.proto` (per-package + `robonix_contracts.proto` + `contract_proto_modules.rs` for Rust) |
@@ -68,13 +68,13 @@ For ROS package **`pkgname`**, output is **`robonix_proto/pkgname.proto`** with 
 
 ---
 
-## System services (`robonix/sys/...`)
+## System services (`robonix/srv/...`)
 
 | Abstract interface ID | Mode | Dir | ROS IDL (in repo) | gRPC (generated) |
 |------------------------|------|-----|-------------------|------------------|
-| `robonix/sys/cognition/reason` | RPC | — | `lib/vlm/srv/Chat.srv` | `robonix_proto/vlm.proto` → `robonix.vlm.VlmService` / `Chat` |
-| `robonix/sys/cognition/reason` | Server streaming | — | `lib/vlm/srv/ChatStream.srv`, `lib/vlm/msg/ChatStreamEvent.msg` | same file → `ChatStream` → `stream ChatStreamEvent` |
-| `robonix/sys/model/vlm/describe` | RPC | — | `lib/vlm/srv/Describe.srv` | same file → `Describe` |
+| `robonix/srv/cognition/reason` | RPC | — | `lib/vlm/srv/Chat.srv` | `robonix_proto/vlm.proto` → `robonix.vlm.VlmService` / `Chat` |
+| `robonix/srv/cognition/reason` | Server streaming | — | `lib/vlm/srv/ChatStream.srv`, `lib/vlm/msg/ChatStreamEvent.msg` | same file → `ChatStream` → `stream ChatStreamEvent` |
+| `robonix/srv/model/vlm/describe` | RPC | — | `lib/vlm/srv/Describe.srv` | same file → `Describe` |
 
 ---
 

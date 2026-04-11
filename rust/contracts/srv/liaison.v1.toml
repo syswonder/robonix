@@ -1,6 +1,6 @@
 # Same as Pilot. ROS: `lib/liaison/srv/HandleIntent.srv`.
 [contract]
-id      = "robonix/sys/runtime/liaison"
+id      = "robonix/srv/runtime/liaison"
 version = "1"
 kind    = "service"
 

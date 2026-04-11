@@ -91,73 +91,93 @@ service PrmSensorLidar {
   rpc Stream(google.protobuf.Empty) returns (stream robonix.sensor_msgs.LaserScan);
 }
 
+// contract: robonix/prm/sensor/lidar3d (v1)
+service PrmSensorLidar3d {
+  rpc Stream(google.protobuf.Empty) returns (stream robonix.sensor_msgs.PointCloud2);
+}
+
 // contract: robonix/prm/sensor/lidar_snapshot (v1)
 service PrmSensorLidarSnapshot {
   rpc Call(robonix.prm_base.GetLaserScan_Request) returns (robonix.prm_base.GetLaserScan_Response);
 }
 
-// contract: robonix/sys/cognition/reason (v1)
-service SysCognitionReason {
+// contract: robonix/srv/cognition/reason (v1)
+service SrvCognitionReason {
   rpc Stream(robonix.vlm.ChatStream_Request) returns (stream robonix.vlm.ChatStreamEvent);
 }
 
-// contract: robonix/sys/memory/compact (v1)
-service SysMemoryCompact {
+// contract: robonix/srv/common/map/occupancy_grid (v1)
+service SrvCommonMapOccupancyGrid {
+  rpc Stream(google.protobuf.Empty) returns (stream robonix.nav_msgs.OccupancyGrid);
+}
+
+// contract: robonix/srv/common/map/pointcloud (v1)
+service SrvCommonMapPointcloud {
+  rpc Stream(google.protobuf.Empty) returns (stream robonix.sensor_msgs.PointCloud2);
+}
+
+// contract: robonix/srv/common/map/scan_2d (v1)
+service SrvCommonMapScan2d {
+  rpc Stream(google.protobuf.Empty) returns (stream robonix.sensor_msgs.LaserScan);
+}
+
+// contract: robonix/srv/memory/compact (v1)
+service SrvMemoryCompact {
   rpc Call(robonix.memory.Compact_Request) returns (robonix.memory.Compact_Response);
 }
 
-// contract: robonix/sys/memory/save (v1)
-service SysMemorySave {
+// contract: robonix/srv/memory/save (v1)
+service SrvMemorySave {
   rpc Call(robonix.memory.Save_Request) returns (robonix.memory.Save_Response);
 }
 
-// contract: robonix/sys/memory/search (v1)
-service SysMemorySearch {
+// contract: robonix/srv/memory/search (v1)
+service SrvMemorySearch {
   rpc Call(robonix.memory.Search_Request) returns (robonix.memory.Search_Response);
 }
 
-// contract: robonix/sys/runtime/executor (v1)
-service SysRuntimeExecutor {
+// contract: robonix/srv/runtime/executor (v1)
+service SrvRuntimeExecutor {
   rpc Stream(robonix.pilot.TaskGraph) returns (stream robonix.executor.TaskCallEvent);
 }
 
-// contract: robonix/sys/runtime/executor/list_tools (v1)
-service SysRuntimeExecutorListTools {
+// contract: robonix/srv/runtime/executor/list_tools (v1)
+service SrvRuntimeExecutorListTools {
   rpc Call(robonix.executor.ListTools_Request) returns (robonix.executor.ListTools_Response);
 }
 
-// contract: robonix/sys/runtime/liaison (v1)
-service SysRuntimeLiaison {
+// contract: robonix/srv/runtime/liaison (v1)
+service SrvRuntimeLiaison {
   rpc Stream(robonix.pilot.Intent) returns (stream robonix.pilot.PilotEvent);
 }
 
-// contract: robonix/sys/runtime/pilot (v1)
-service SysRuntimePilot {
+// contract: robonix/srv/runtime/pilot (v1)
+service SrvRuntimePilot {
   rpc Stream(robonix.pilot.Intent) returns (stream robonix.pilot.PilotEvent);
 }
 
-// contract: robonix/sys/slam/load_map (v1)
-service SysSlamLoadMap {
+// contract: robonix/srv/slam/load_map (v1)
+service SrvSlamLoadMap {
   rpc Call(robonix.slam.LoadMap_Request) returns (robonix.slam.LoadMap_Response);
 }
 
-// contract: robonix/sys/slam/save_map (v1)
-service SysSlamSaveMap {
+// contract: robonix/srv/slam/save_map (v1)
+service SrvSlamSaveMap {
   rpc Call(robonix.slam.SaveMap_Request) returns (robonix.slam.SaveMap_Response);
 }
 
-// contract: robonix/sys/slam/set_initial_pose (v1)
-service SysSlamSetInitialPose {
+// contract: robonix/srv/slam/set_initial_pose (v1)
+service SrvSlamSetInitialPose {
   rpc Call(robonix.slam.SetInitialPose_Request) returns (robonix.slam.SetInitialPose_Response);
 }
 
-// contract: robonix/sys/slam/status (v1)
-service SysSlamStatus {
+// contract: robonix/srv/slam/status (v1)
+service SrvSlamStatus {
   rpc Call(robonix.slam.GetSlamStatus_Request) returns (robonix.slam.GetSlamStatus_Response);
 }
 
-// contract: robonix/sys/slam/switch_mode (v1)
-service SysSlamSwitchMode {
+// contract: robonix/srv/slam/switch_mode (v1)
+service SrvSlamSwitchMode {
   rpc Call(robonix.slam.SwitchMode_Request) returns (robonix.slam.SwitchMode_Response);
 }
 

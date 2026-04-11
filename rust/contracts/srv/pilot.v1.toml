@@ -1,6 +1,6 @@
 # ROS IDL: `lib/pilot/srv/HandleIntent.srv`. Stream element type is **only** in this TOML.
 [contract]
-id      = "robonix/sys/runtime/pilot"
+id      = "robonix/srv/runtime/pilot"
 version = "1"
 kind    = "service"
 

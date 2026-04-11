@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
         RobonixClient::connect_with_retry(&atlas_endpoint, 10, std::time::Duration::from_secs(2))
             .await?;
 
-    sdk.register_node(PILOT_NODE_ID, "robonix/sys/runtime/pilot", "service", "")
+    sdk.register_node(PILOT_NODE_ID, "robonix/srv/runtime/pilot", "service", "")
         .await?;
     info!("registered as '{}'", PILOT_NODE_ID);
 
@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
         vec!["grpc".to_string()],
         serde_json::json!({"endpoint": advertised}).to_string(),
         listen_port as u32,
-        "robonix/sys/runtime/pilot",
+        "robonix/srv/runtime/pilot",
     )
     .await?;
 

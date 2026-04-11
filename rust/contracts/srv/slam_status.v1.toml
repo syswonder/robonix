@@ -1,6 +1,6 @@
 # Query SLAM system status (mode, health, map info).
 [contract]
-id      = "robonix/sys/slam/status"
+id      = "robonix/srv/slam/status"
 version = "1"
 kind    = "service"
 

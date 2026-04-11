@@ -1,7 +1,7 @@
 # Persist a fact / user preference to long-term memory.
 # ROS IDL: `lib/memory/srv/Save.srv`.
 [contract]
-id      = "robonix/sys/memory/save"
+id      = "robonix/srv/memory/save"
 version = "1"
 kind    = "service"
 

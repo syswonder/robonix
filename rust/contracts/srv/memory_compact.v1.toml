@@ -1,7 +1,7 @@
 # Compact and summarise recent memory entries.
 # ROS IDL: `lib/memory/srv/Compact.srv` — unary RPC, empty request, `std_msgs/String` summary.
 [contract]
-id      = "robonix/sys/memory/compact"
+id      = "robonix/srv/memory/compact"
 version = "1"
 kind    = "service"
 

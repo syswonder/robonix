@@ -91,7 +91,7 @@ async fn try_discover_pilot_once(atlas_endpoint: &str) -> Result<String> {
     let mut sdk = robonix_sdk::RobonixClient::connect(atlas_endpoint).await?;
     let nodes = sdk
         .query_nodes_opts(robonix_sdk::QueryNodesOpts {
-            contract_id: "robonix/sys/runtime/pilot".to_string(),
+            contract_id: "robonix/srv/runtime/pilot".to_string(),
             ..Default::default()
         })
         .await?;

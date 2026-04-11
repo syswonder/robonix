@@ -239,10 +239,10 @@ impl ChatPart {
 
 /// Stable contract id for the VLM cognition/reason capability (path + interface leaf).
 /// See `rust/docs/NAMESPACE.md` (“System abstract interfaces”).
-pub const VLM_CONTRACT_ID: &str = "robonix/sys/cognition/reason";
+pub const VLM_CONTRACT_ID: &str = "robonix/srv/cognition/reason";
 
 /// Default `QueryNodes.namespace` prefix for legacy split discovery only.
-pub const DEFAULT_VLM_NAMESPACE_PREFIX: &str = "robonix/sys/model/vlm";
+pub const DEFAULT_VLM_NAMESPACE_PREFIX: &str = "robonix/srv/model/vlm";
 
 fn vlm_contract_id_for_query() -> String {
     match std::env::var("ROBONIX_VLM_CONTRACT_ID") {

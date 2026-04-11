@@ -1,6 +1,6 @@
 # Save current point cloud map to disk.
 [contract]
-id      = "robonix/sys/slam/save_map"
+id      = "robonix/srv/slam/save_map"
 version = "1"
 kind    = "service"
 

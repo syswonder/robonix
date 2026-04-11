@@ -1,6 +1,6 @@
 # ROS: `lib/executor/srv/ListTools.srv`.
 [contract]
-id      = "robonix/sys/runtime/executor/list_tools"
+id      = "robonix/srv/runtime/executor/list_tools"
 version = "1"
 kind    = "service"
 
