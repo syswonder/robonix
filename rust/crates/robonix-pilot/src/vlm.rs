@@ -237,9 +237,9 @@ impl ChatPart {
     }
 }
 
-/// Stable contract id for the VLM chat capability (path + interface leaf).
+/// Stable contract id for the VLM cognition/reason capability (path + interface leaf).
 /// See `rust/docs/NAMESPACE.md` (“System abstract interfaces”).
-pub const VLM_CONTRACT_ID: &str = "robonix/sys/model/vlm/chat";
+pub const VLM_CONTRACT_ID: &str = "robonix/sys/cognition/reason";
 
 /// Default `QueryNodes.namespace` prefix for legacy split discovery only.
 pub const DEFAULT_VLM_NAMESPACE_PREFIX: &str = "robonix/sys/model/vlm";
