@@ -1,0 +1,106 @@
+# End-to-end smoke test: atlas + vlm_service (mock) + rbnx chat wire format.
+# No secrets required — vlm_service runs with VLM_CI_MODE=1 and returns a canned reply.
+# Webots-based packages (tiago_sim_stack) are not exercised here; CI runners have
+# no display server and the Webots GUI install is ~700 MB. Run those locally.
+name: e2e smoke
+
+on:
+  push:
+    branches: [main, dev, dev/**]
+  pull_request:
+    branches: [main, dev, dev/**]
+
+jobs:
+  smoke:
+    name: atlas + vlm(mock) + chat-stream
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+
+    env:
+      RUST_DIR: rust
+      RUST_LOG: robonix_atlas=info,robonix_cli=info
+      ROBONIX_ATLAS: 127.0.0.1:50051
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python deps (grpcio-tools, fastmcp, openai)
+        run: |
+          python -m pip install --upgrade pip
+          pip install "grpcio>=1.60" "grpcio-tools>=1.60" "protobuf>=4.25,<7" \
+                      mcp "fastmcp>=3" openai
+
+      - name: cargo build (release binaries for atlas / rbnx)
+        working-directory: ${{ env.RUST_DIR }}
+        run: cargo build --release -p robonix-atlas -p robonix-cli
+
+      - name: Install rbnx to PATH
+        working-directory: ${{ env.RUST_DIR }}
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          cp target/release/rbnx "$HOME/.cargo/bin/rbnx"
+          cp target/release/robonix-atlas "$HOME/.cargo/bin/robonix-atlas" || true
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: rbnx setup (register source root)
+        run: rbnx setup "$GITHUB_WORKSPACE"
+
+      - name: rbnx codegen vlm_service
+        run: rbnx codegen -p "$GITHUB_WORKSPACE/${{ env.RUST_DIR }}/examples/packages/vlm_service"
+
+      - name: Start robonix-atlas (background)
+        run: |
+          nohup "$HOME/.cargo/bin/robonix-atlas" > /tmp/atlas.log 2>&1 &
+          echo $! > /tmp/atlas.pid
+          # Wait for control plane to accept connections.
+          for i in $(seq 1 30); do
+            if python -c "import socket; socket.create_connection(('127.0.0.1', 50051), timeout=1).close()" 2>/dev/null; then
+              echo "atlas up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "atlas did not come up"; tail -50 /tmp/atlas.log; exit 1
+
+      - name: Start vlm_service in CI mode (background)
+        working-directory: ${{ env.RUST_DIR }}/examples/packages/vlm_service
+        env:
+          VLM_CI_MODE: "1"
+        run: |
+          export PYTHONPATH="$PWD:$PWD/proto_gen:${PYTHONPATH:-}"
+          nohup python3 -m vlm_service.service > /tmp/vlm.log 2>&1 &
+          echo $! > /tmp/vlm.pid
+          # Wait for vlm to register + declare its interface on atlas.
+          for i in $(seq 1 30); do
+            if grep -q 'using model=' /tmp/vlm.log 2>/dev/null; then
+              echo "vlm registered"; exit 0
+            fi
+            sleep 1
+          done
+          echo "vlm did not register"; tail -50 /tmp/vlm.log; exit 1
+
+      - name: Run ci_smoke_chat (asserts mock reply round-trip)
+        working-directory: ${{ env.RUST_DIR }}
+        run: python3 examples/scripts/ci_smoke_chat.py
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          echo "===== atlas ====="; tail -200 /tmp/atlas.log || true
+          echo "===== vlm   ====="; tail -200 /tmp/vlm.log   || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          [ -f /tmp/vlm.pid   ] && kill "$(cat /tmp/vlm.pid)"   2>/dev/null || true
+          [ -f /tmp/atlas.pid ] && kill "$(cat /tmp/atlas.pid)" 2>/dev/null || true

@@ -98,7 +98,13 @@ def _iface_meta() -> str:
 
 
 def main() -> None:
-    if "VLM_API_KEY" not in os.environ:
+    # CI / smoke-test mode: skip the real VLM backend entirely and register
+    # a mock handler that yields a single canned reply. Lets end-to-end CI
+    # verify the control plane + `rbnx chat` wire format without needing an
+    # API key or network egress. Enable via VLM_CI_MODE=1.
+    ci_mode = os.environ.get("VLM_CI_MODE", "").strip() in ("1", "true", "yes")
+
+    if not ci_mode and "VLM_API_KEY" not in os.environ:
         print(_HELP, file=sys.stderr)
         sys.exit(1)
 
@@ -114,15 +120,20 @@ def main() -> None:
         )
     )
 
-    from openai import OpenAI
+    if ci_mode:
+        print("[vlm-service] VLM_CI_MODE=1 — running mock handler (no real VLM backend)", file=sys.stderr)
+        model = "mock-ci"
+        client = None  # type: ignore[assignment]
+    else:
+        from openai import OpenAI
 
-    client = OpenAI(
-        api_key=os.environ["VLM_API_KEY"],
-        base_url=os.environ.get(
-            "VLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        ),
-    )
-    model = os.environ.get("VLM_MODEL", "qwen3-vl-plus")
+        client = OpenAI(
+            api_key=os.environ["VLM_API_KEY"],
+            base_url=os.environ.get(
+                "VLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            ),
+        )
+        model = os.environ.get("VLM_MODEL", "qwen3-vl-plus")
     message_format = os.environ.get("VLM_MESSAGE_FORMAT", "openai").strip().lower()
 
     def _openai_chat(messages, tools=None, tool_choice=None, max_tokens=0, stream=False):
@@ -279,6 +290,13 @@ def main() -> None:
 
     def handle_chat_stream(request, context):
         """Server-streaming chat: yields text deltas, then tool calls, then finish."""
+        # CI mock: return a fixed reply split into a few deltas, then finish.
+        if ci_mode:
+            for chunk in ("[vlm-ci-mock] ", "hello ", "from ", "robonix"):
+                yield vlm_pb2.ChatStreamEvent(text_delta=chunk)
+            yield vlm_pb2.ChatStreamEvent(finish_reason="stop")
+            return
+
         if message_format == "gemini":
             raise NotImplementedError(
                 "VLM_MESSAGE_FORMAT=gemini is defined in the wire model, but vlm_service "
