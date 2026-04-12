@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// cmd/chat.rs — TUI chat client (connects to robonix-pilot via SysRuntimePilot)
+// cmd/chat.rs — TUI chat client (connects to robonix-pilot via SrvRuntimePilot)
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -200,12 +200,12 @@ async fn run_tui(
 }
 
 async fn notify_session_end(pilot_endpoint: &str, session_id: &str) -> Result<()> {
-    use crate::pb::contracts::sys_runtime_pilot_client::SysRuntimePilotClient;
+    use crate::pb::contracts::srv_runtime_pilot_client::SrvRuntimePilotClient;
     use crate::pb::pilot::Intent;
 
     const INTENT_SOURCE_TEXT: u32 = 0;
 
-    let mut client = SysRuntimePilotClient::connect(pilot_endpoint.to_string())
+    let mut client = SrvRuntimePilotClient::connect(pilot_endpoint.to_string())
         .await
         .context("failed to connect to Pilot for session_end")?;
 
@@ -230,12 +230,12 @@ async fn notify_session_end(pilot_endpoint: &str, session_id: &str) -> Result<()
 }
 
 async fn abort_pilot_session(pilot_endpoint: &str, session_id: &str) -> Result<()> {
-    use crate::pb::contracts::sys_runtime_pilot_client::SysRuntimePilotClient;
+    use crate::pb::contracts::srv_runtime_pilot_client::SrvRuntimePilotClient;
     use crate::pb::pilot::Intent;
 
     const INTENT_SOURCE_TEXT: u32 = 0;
 
-    let mut client = SysRuntimePilotClient::connect(pilot_endpoint.to_string())
+    let mut client = SrvRuntimePilotClient::connect(pilot_endpoint.to_string())
         .await
         .context("failed to connect to Pilot for abort_turn")?;
 
@@ -256,7 +256,7 @@ async fn abort_pilot_session(pilot_endpoint: &str, session_id: &str) -> Result<(
     Ok(())
 }
 
-/// Runs one `SysRuntimePilot.Stream` while polling the keyboard: **Esc** calls
+/// Runs one `SrvRuntimePilot.Stream` while polling the keyboard: **Esc** calls
 /// [`abort_pilot_session`] (abort_turn `Intent`) so Pilot cancels the in-flight turn.
 async fn run_intent_with_esc_abort(
     pilot_endpoint: &str,
@@ -267,7 +267,7 @@ async fn run_intent_with_esc_abort(
     input: &str,
     scroll: &mut u16,
 ) -> Result<()> {
-    use crate::pb::contracts::sys_runtime_pilot_client::SysRuntimePilotClient;
+    use crate::pb::contracts::srv_runtime_pilot_client::SrvRuntimePilotClient;
     use crate::pb::pilot::{Intent, PilotEvent};
     use tonic::Status;
 
@@ -279,7 +279,7 @@ async fn run_intent_with_esc_abort(
     let text = user_msg.to_string();
 
     let _stream_task = tokio::spawn(async move {
-        let mut client = match SysRuntimePilotClient::connect(pilot_ep.clone()).await {
+        let mut client = match SrvRuntimePilotClient::connect(pilot_ep.clone()).await {
             Ok(c) => c,
             Err(e) => {
                 let _ = tx.send(Err(Status::unavailable(e.to_string()))).await;

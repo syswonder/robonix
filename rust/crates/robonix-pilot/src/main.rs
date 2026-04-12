@@ -12,7 +12,7 @@ mod vlm;
 use robonix_interfaces::{contracts, executor, pilot, robonix_msg, vlm as vlm_proto};
 
 use anyhow::Result;
-use contracts::sys_runtime_pilot_server::SysRuntimePilotServer;
+use contracts::srv_runtime_pilot_server::SrvRuntimePilotServer;
 use log::info;
 use pilot_service::PilotServiceImpl;
 use robonix_sdk::RobonixClient;
@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    info!("SysRuntimePilot gRPC on :{}", listen_port);
+    info!("SrvRuntimePilot gRPC on :{}", listen_port);
     eprintln!("robonix-pilot ready on :{listen_port} (executor={executor_endpoint})");
 
     let sdk = Arc::new(Mutex::new(sdk));
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
     let svc = PilotServiceImpl::new(sdk, vlm, executor_http);
 
     tonic::transport::Server::builder()
-        .add_service(SysRuntimePilotServer::new(svc))
+        .add_service(SrvRuntimePilotServer::new(svc))
         .serve(listen_addr)
         .await?;
 
