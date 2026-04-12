@@ -49,12 +49,13 @@ RUN bash -lc "source /opt/ros/humble/setup.bash && colcon build --symlink-instal
 
 COPY rust/examples/packages/tiago_sim_stack/nav2_bringup /opt/robonix_nav2
 COPY rust/examples/packages/tiago_sim_stack/tiago_bridge /app/tiago_bridge
-COPY rust/examples/packages/robonix_mcp_contract /app/robonix_mcp_contract_pkg
+# Shared Python helper (moved from examples/packages/robonix_mcp_contract to crates/robonix-py).
+COPY rust/crates/robonix-py /app/robonix_py_pkg
 COPY rust/examples/packages/tiago_sim_stack/bridge/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 
 WORKDIR /app
-ENV PYTHONPATH=/app:/app/tiago_bridge:/app/tiago_bridge/proto_gen:/app/robonix_mcp_contract_pkg
+ENV PYTHONPATH=/app:/app/tiago_bridge:/app/tiago_bridge/proto_gen:/app/robonix_py_pkg
 
 ENTRYPOINT ["/entrypoint.sh"]

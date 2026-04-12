@@ -137,9 +137,9 @@ pub async fn execute(
 
     // 3. Package-local Python stubs via grpc_tools.protoc.
     println!(
-        "{} grpc_tools.protoc → {}/proto_gen",
+        "{} grpc_tools.protoc → {}",
         "[codegen]".bold(),
-        pkg_root.display()
+        proto_gen.display()
     );
     std::fs::create_dir_all(&proto_gen)?;
     let proto_files: Vec<PathBuf> = std::fs::read_dir(&runtime_proto)?
