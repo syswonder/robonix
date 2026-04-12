@@ -56,6 +56,6 @@ RUN chmod +x /entrypoint.sh
 
 
 WORKDIR /app
-ENV PYTHONPATH=/app:/app/tiago_bridge:/app/tiago_bridge/proto_gen:/app/robonix_py_pkg
+ENV PYTHONPATH=/app:/app/tiago_bridge:/app/tiago_bridge/proto_gen:/app/tiago_bridge/robonix_mcp_types:/app/robonix_py_pkg
 
 ENTRYPOINT ["/entrypoint.sh"]
