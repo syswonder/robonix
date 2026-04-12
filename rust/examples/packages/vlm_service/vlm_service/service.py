@@ -304,45 +304,69 @@ def main() -> None:
                 "Use openai for now or implement a Gemini transport adapter."
             )
 
-        req_messages = _build_openai_messages(request)
-        tools_list = _build_openai_tools(request)
-        tc_mode = request.tool_choice if request.tool_choice else None
+        try:
+            req_messages = _build_openai_messages(request)
+            tools_list = _build_openai_tools(request)
+            tc_mode = request.tool_choice if request.tool_choice else None
 
-        stream_iter = _openai_chat(
-            req_messages,
-            tools=tools_list,
-            tool_choice=tc_mode,
-            max_tokens=request.max_tokens,
-            stream=True,
-        )
+            stream_iter = _openai_chat(
+                req_messages,
+                tools=tools_list,
+                tool_choice=tc_mode,
+                max_tokens=request.max_tokens,
+                stream=True,
+            )
+        except Exception as e:
+            # Upstream LLM refused (bad model / unsupported input / rate limit / auth / …).
+            # Emit as a user-visible error event and finish cleanly so the pilot session
+            # survives and the agent can retry with another message. Do NOT re-raise —
+            # that closes the gRPC stream with UNKNOWN status and kills the pilot turn.
+            import traceback as _tb
+            _tb.print_exc()
+            yield vlm_pb2.ChatStreamEvent(
+                text_delta=f"[vlm-service] upstream error: {type(e).__name__}: {e}"
+            )
+            yield vlm_pb2.ChatStreamEvent(finish_reason="error")
+            return
 
         # Accumulate tool call deltas: index → {id, name, arguments}
         tc_acc: dict[int, dict] = {}
         finish = "stop"
 
-        for chunk in stream_iter:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            fr = chunk.choices[0].finish_reason
+        try:
+            for chunk in stream_iter:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                fr = chunk.choices[0].finish_reason
 
-            if delta and delta.content:
-                yield vlm_pb2.ChatStreamEvent(text_delta=delta.content)
+                if delta and delta.content:
+                    yield vlm_pb2.ChatStreamEvent(text_delta=delta.content)
 
-            if delta and delta.tool_calls:
-                for tc_delta in delta.tool_calls:
-                    idx = tc_delta.index
-                    if idx not in tc_acc:
-                        tc_acc[idx] = {"id": "", "name": "", "arguments": ""}
-                    if tc_delta.id:
-                        tc_acc[idx]["id"] = tc_delta.id
-                    if tc_delta.function and tc_delta.function.name:
-                        tc_acc[idx]["name"] += tc_delta.function.name
-                    if tc_delta.function and tc_delta.function.arguments:
-                        tc_acc[idx]["arguments"] += tc_delta.function.arguments
+                if delta and delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        if idx not in tc_acc:
+                            tc_acc[idx] = {"id": "", "name": "", "arguments": ""}
+                        if tc_delta.id:
+                            tc_acc[idx]["id"] = tc_delta.id
+                        if tc_delta.function and tc_delta.function.name:
+                            tc_acc[idx]["name"] += tc_delta.function.name
+                        if tc_delta.function and tc_delta.function.arguments:
+                            tc_acc[idx]["arguments"] += tc_delta.function.arguments
 
-            if fr:
-                finish = fr
+                if fr:
+                    finish = fr
+        except Exception as e:
+            # Stream died mid-flight (network drop, API 5xx, timeout, …).
+            # Report what we got, surface the failure, and end cleanly.
+            import traceback as _tb
+            _tb.print_exc()
+            yield vlm_pb2.ChatStreamEvent(
+                text_delta=f"\n[vlm-service] stream interrupted: {type(e).__name__}: {e}"
+            )
+            yield vlm_pb2.ChatStreamEvent(finish_reason="error")
+            return
 
         for idx in sorted(tc_acc.keys()):
             tc = tc_acc[idx]
