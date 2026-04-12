@@ -5,7 +5,7 @@
 <h3 align="center">Robonix — The Embodied AI Operating System</h3>
 
 <p align="center">
-  <em>Rust-native EAIOS: Robonix is a skill-centric embodied AI operating system composed of five core roles: Liaison, Pilot, Atlas, Nexus, and Executor, forming a complete pipeline from human intent to embodied action.</em>
+  <em>Rust-native EAIOS. Skill-centric runtime with Liaison, Pilot, Atlas, Nexus, Executor — human intent to embodied action.</em>
 </p>
 
 <p align="center">
@@ -17,6 +17,7 @@
 </p>
 
 <p align="center">
+  <a href="README-zh.md">简体中文</a> ·
   <a href="docs/">Docs (mdBook)</a> ·
   <a href="rust/README.md">Rust workspace</a> ·
   <a href="rust/examples/README.md">Examples &amp; E2E</a>
@@ -24,324 +25,82 @@
 
 <br />
 
-<p align="center">
-  <b>See it run</b> — Atlas, Pilot, Executor, and simulation wired together.
-</p>
 
-<br />
-
-## Installation
-
-### Prerequisites
-
-- Rust toolchain (1.85+): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- protoc: installed automatically via `protoc-bin-vendored` crate
-- Python 3.10+ with `grpcio-tools` (for Python proto stubs and example packages)
-- Docker (optional, for simulation stacks and containerized packages)
-
-### Build & Install
+## Quickstart
 
 ```bash
-git clone https://github.com/syswonder/robonix
-cd robonix
-git submodule update --init --recursive
-
-cd rust
-cargo build --workspace      # compile all crates
-make install                 # install binaries to ~/.cargo/bin
-```
-
-`make install` runs `robonix-codegen` to regenerate protos, then installs all binaries:
-
-| Binary | Description | Default port |
-|--------|-------------|-------------|
-| `robonix-atlas` | Control plane (registration, discovery, channel negotiation) | `:50051` |
-| `robonix-executor` | Tool dispatch runtime (builtin / MCP / gRPC) | `:50061` |
-| `robonix-pilot` | VLM reasoning service (ReAct loop, TaskGraph) | `:50071` |
-| `robonix-liaison` | User-facing interaction layer (text → Intent → PilotEvent) | `:50081` |
-| `rbnx` | CLI: package management, runtime inspection, chat TUI, topology graph | — |
-| `robonix-codegen` | ROS IDL + contracts TOML → generated `.proto` files | — |
-
-### Verify installation
-
-```bash
-rbnx --help
-robonix-atlas --help
-```
-
-### Build targets
-
-From `rust/`:
-
-| Command | Description |
-|---------|-------------|
-| `make build` | Debug build (all crates) |
-| `make release` | Release build |
-| `make build-atlas` | Build Atlas only |
-| `make install` | Regenerate protos + install all binaries |
-| `make proto-interfaces` | Regenerate `robonix_proto/` from ROS IDL + contracts |
-| `make fmt` | Format all Rust code |
-| `make check` | Check formatting + clippy |
-| `make clean` | Remove build artifacts |
-
-## Running Robonix
-
-### E2E demo (full stack with simulation)
-
-```bash
-cd rust
+git clone --recursive https://github.com/syswonder/robonix
+cd robonix/rust
+make install                              # → ~/.cargo/bin (rbnx, robonix-atlas, …)
 pip install -r examples/requirements.txt
-cp examples/.env.example examples/.env   # set VLM_API_BASE, VLM_API_KEY, VLM_MODEL
-./examples/run.sh
+cp examples/.env.example examples/.env    # fill VLM_API_KEY + VLM_BASE_URL + VLM_MODEL
+./examples/run.sh                         # atlas + vlm + tiago sim + pilot + …
 ```
 
-### What `run.sh` does
-
-`run.sh` is the E2E demo orchestrator. It starts the full Robonix stack in sequence:
-
-```
-1. Validate Python deps (grpc, openai, mcp, memsearch, numpy, PIL, uvicorn)
-2. Check X11 DISPLAY for GUI (Webots/rviz2)
-3. Kill stale processes
-4. rbnx validate + build for each example package
-5. Start robonix-atlas (control plane, :50051)
-6. rbnx start vlm_service        → VLM chat backend (:50105)
-7. rbnx start memsearch_service  → semantic memory MCP server (:50105)
-8. rbnx start tiago_sim_stack    → Docker Compose (Webots + Nav2 + rviz2 + MCP bridge)
-9. Start robonix-executor        → tool dispatch (:50061)
-10. Start robonix-pilot           → VLM reasoning (:50071)
-11. Start robonix-liaison         → user interaction (:50081)
-12. "stack ready — use 'rbnx chat' to connect"
-```
-
-Each component can be toggled via environment variables:
+Open another terminal and talk to the agent:
 
 ```bash
-START_VLM_SERVICE=0 START_SIM_STACK=0 ./examples/run.sh   # runtime only, no sim
-START_MEMSEARCH=0 ./examples/run.sh                        # skip memory service
-```
-
-### Manual startup (step by step)
-
-```bash
-cd rust
-
-# 1. Start control plane
-robonix-atlas &
-
-# 2. Build and start packages
-rbnx build -p examples/packages/vlm_service
-rbnx start -p examples/packages/vlm_service -n com.robonix.services.vlm &
-
-# 3. Start system services
-robonix-executor &
-robonix-pilot &
-robonix-liaison &
-
-# 4. Interact
 rbnx chat
 ```
 
-## `rbnx` CLI
+Full first-run walkthrough: [**docs/src/getting-started/quickstart.md**](docs/src/getting-started/quickstart.md).
 
-`rbnx` is the primary CLI for package management and runtime inspection.
+## What's here
 
-### Package commands
+| | |
+|---|---|
+| [`rust/`](rust/) | Cargo workspace — atlas / pilot / executor / liaison / cli / codegen / sdk / interfaces / buffer |
+| [`rust/contracts/`](rust/contracts/) | Stable `contract_id` definitions (TOML). Map to ROS IDL under `rust/crates/robonix-interfaces/lib/`. |
+| [`rust/examples/packages/`](rust/examples/packages/) | Example packages: `vlm_service`, `memsearch_service`, `tiago_sim_stack`, `maniskill_vla_demo`, `zero_copy_demo`, `clawhub_skills` |
+| [`docs/`](docs/) | mdBook — architecture, interface catalog, integration guides |
+| [`images/`](images/) | Logo + demo assets |
 
-| Command | Description | Example |
-|---------|-------------|---------|
-| `rbnx validate <path>` | Validate `robonix_manifest.yaml` | `rbnx validate examples/packages/vlm_service` |
-| `rbnx build -p <path>` | Run package build script | `rbnx build -p examples/packages/vlm_service` |
-| `rbnx start -p <path> -n <node_id>` | Start a node from a package | `rbnx start -p ... -n com.robonix.services.vlm` |
-| `rbnx install --github <repo>` | Install package from GitHub | `rbnx install --github user/repo` |
-| `rbnx install --path <dir>` | Install package from local directory | `rbnx install --path ./my_package` |
-| `rbnx list` | List installed packages | |
-| `rbnx info <name>` | Show package details | `rbnx info vlm_service` |
-| `rbnx config --show` | Show CLI configuration | |
-
-### Runtime inspection
-
-These commands query the running Atlas control plane. Use `--server <addr>` to override the default `localhost:50051`.
-
-| Command | Description |
-|---------|-------------|
-| `rbnx nodes` | List all registered nodes and their interfaces |
-| `rbnx describe` | Show SKILL.md content for registered nodes |
-| `rbnx tools` | Print all tools visible to the agent (builtin + discovered) |
-| `rbnx channels` | Show active negotiated channels |
-| `rbnx inspect` | Dump full runtime state as JSON |
-| `rbnx graph -o topology.png` | Generate topology graph (PNG or SVG with `--format svg`) |
-
-### Interactive chat
-
-```bash
-rbnx chat                             # connect to localhost:50051
-rbnx chat --server 192.168.1.10:50051 # remote Atlas
-```
-
-The chat TUI connects to Liaison → Pilot → Executor, allowing you to interact with the agent in natural language. The agent discovers available skills and tools from Atlas, reasons via VLM, and dispatches actions.
-
-## Architecture
+## Architecture — 30 seconds
 
 <p align="center">
   <img src="images/robonix-layers.png" alt="Robonix software architecture layers" width="580" />
 </p>
 
-Robonix follows the EAIOS four-layer abstraction — Primitive, Service, Skill, Task — with a unified control plane that handles registration, discovery, and channel negotiation across pluggable transports (gRPC, MCP, ROS 2, shared memory).
+Four-layer EAIOS abstraction: **primitive → service → skill → task**. A unified control plane (Atlas) handles registration, discovery, and channel negotiation across transports (gRPC, MCP, ROS 2, shared memory). Agent reasoning lives in Pilot (VLM + ReAct + TaskGraph), tool dispatch in Executor, user-facing interaction in Liaison.
 
-### Workspace crates
-
-| Crate | Role |
-|-------|------|
-| `robonix-atlas` | Control plane: registration, discovery, channel negotiation, skill catalog, heartbeat, runtime inspection |
-| `robonix-sdk` | Thin async Rust client for the control-plane API |
-| `robonix-pilot` | VLM-driven reasoning: ReAct-style loop; streams `PilotEvent`; dispatches `TaskGraph` to Executor |
-| `robonix-executor` | Tool dispatch: builtin / MCP / gRPC; `ExecutorService.Execute` |
-| `robonix-liaison` | User-facing layer: text → `Intent` → `PilotEvent` stream |
-| `robonix-cli` (`rbnx`) | Package validate / build / start; runtime inspection; `rbnx chat` (TUI); `rbnx graph` (topology PNG/SVG) |
-| `robonix-codegen` | ROS IDL + `rust/contracts` TOML → `robonix_proto/` (generated `.proto`, incl. `robonix_contracts.proto`) |
-| `robonix-buffer` | Shared-memory / buffer helpers for high-bandwidth data |
-
-### Contracts & IDL
-
-ROS payloads are canonical in `rust/crates/robonix-interfaces/lib/`. Stable `contract_id` paths live in `rust/contracts/**/*.toml` and match control-plane fields (`DeclareInterface` / `QueryNodes`). Regenerate protos:
-
-```bash
-cd rust
-make proto-interfaces
-# or directly:
-cargo run -p robonix-codegen -- --lang proto \
-  -I crates/robonix-interfaces/lib \
-  --contracts contracts \
-  -o crates/robonix-interfaces/robonix_proto
-```
-
-## Services & Packages
-
-### System services
-
-> [!NOTE]
-> Robonix system services are still in early design phase regarding deployment and lifecycle management. Currently, system services (VLM, memory search, SLAM mapping, etc.) are deployed as **example packages** under `rust/examples/packages/` or as standalone repos. A formal service deployment framework is planned but not yet implemented.
-
-The current system services:
-
-| Service | Package location | Contract IDs | Transport |
-|---------|-----------------|--------------|-----------|
-| Pilot | built-in binary | `robonix/sys/runtime/pilot` | gRPC |
-| Executor | built-in binary | `robonix/sys/runtime/executor` | gRPC |
-| Liaison | built-in binary | `robonix/sys/runtime/liaison` | gRPC |
-| VLM chat | `examples/packages/vlm_service` | `robonix/sys/model/vlm/chat` | gRPC |
-| Memory search | `examples/packages/memsearch_service` | `robonix/sys/memory/{search,save,compact}` | MCP |
-| SLAM mapping | [`enkerewpo/mapping_rbnx`](https://github.com/enkerewpo/mapping_rbnx) (standalone repo) | `robonix/prm/base/odom`, `robonix/sys/slam/*` | gRPC + ROS 2 |
-
-### Example packages
-
-| Package | Type | Purpose |
-|---------|------|---------|
-| `vlm_service` | Python gRPC | OpenAI-compatible VLM chat backend |
-| `memsearch_service` | Python MCP | Semantic memory search/save/compact over Milvus |
-| `tiago_sim_stack` | Docker Compose | Tiago robot sim: Webots + Nav2 + rviz2 + ROS 2 ↔ MCP bridge |
-| `maniskill_vla_demo` | Python multi-node | ManiSkill3 VLA demo: Fetch in ReplicaCAD, Octo VLA |
-| `zero_copy_demo` | Python + CUDA | Zero-copy shared memory / CUDA IPC demo |
-| `clawhub_skills` | Python bridge | Import Agent Skills from OpenClaw ClawHub into Robonix |
+Dive deeper:
+- [**Overview**](docs/src/architecture/overview.md) — control/data plane, one full request end-to-end
+- [**Crates**](docs/src/architecture/crates.md) — each binary's role and port
+- [**Namespaces & contracts**](docs/src/architecture/namespace-and-interfaces.md) — how `robonix/prm/*` and `robonix/srv/*` work
+- [**Interface catalog**](docs/src/interface-catalog/index.md) — every primitive + service contract
 
 ## Agent Skills (agentskills.io)
 
-Robonix natively supports the **[Agent Skills](https://agentskills.io/)** open standard for AI agent capabilities. This is the same format used by **30+ AI tools** including Claude Code, Cursor, VS Code, GitHub Copilot, OpenCode, Gemini CLI, and OpenClaw/ClawHub.
+Robonix natively supports [**Agent Skills**](https://agentskills.io/) — the same `SKILL.md`+frontmatter format used by Claude Code, Cursor, GitHub Copilot, OpenCode, Gemini CLI, OpenClaw, etc. Drop skills into a package's `skills/` directory and `rbnx start` registers them with Atlas automatically. See [**docs/src/skill-library.md**](docs/src/skill-library.md).
 
-### Skill format
+## `rbnx` CLI
 
-Each skill is a directory with a `SKILL.md` file containing YAML frontmatter + markdown body:
-
-```
-skills/
-└── my-skill/
-    ├── SKILL.md          # required: metadata + instructions
-    ├── scripts/          # optional: executable code
-    ├── references/       # optional: documentation
-    └── assets/           # optional: templates, configs
-```
-
-```yaml
----
-name: my-skill                           # required (1-64 chars, lowercase)
-description: What it does and when       # required (1-1024 chars)
-license: Apache-2.0                      # optional
-compatibility: Requires Python 3.10+    # optional
----
-
-# Instructions for the agent (markdown body)
-Step-by-step procedures, examples, edge cases...
-```
-
-### How Robonix uses skills
-
-1. **Discovery**: `rbnx start` scans the package's `skills/` directory, parses each `SKILL.md` frontmatter, and registers `name` + `description` with Atlas
-2. **Activation**: Pilot examines skill descriptions at conversation time; when a user request matches semantically, the skill is activated
-3. **Execution**: The full `SKILL.md` content is loaded and provided to the VLM as context for reasoning
-
-### Importing skills from ClawHub
-
-The `clawhub_skills` example package demonstrates importing community skills from [OpenClaw ClawHub](https://clawhub.ai/) (3000+ skills):
+`rbnx --help` for the full list. Most-used:
 
 ```bash
-cd rust
-rbnx build -p examples/packages/clawhub_skills    # pulls skills from openclaw/skills
-rbnx start -p examples/packages/clawhub_skills -n com.robonix.skills.clawhub &
-rbnx describe   # see imported skills
+rbnx setup                # register the clone so other packages find contracts/IDL
+rbnx build -p <pkg>       # run the package's build.sh (codegen + whatever)
+rbnx codegen -p <pkg>     # just the codegen part (proto + Python stubs)
+rbnx start -p <pkg> -n <node>
+rbnx chat                 # TUI → Pilot → Executor
+rbnx nodes / tools / channels / inspect / graph
 ```
 
-Skills from ClawHub, Claude Code, Cursor, or any Agent Skills-compatible source can be placed in a package's `skills/` directory and will be automatically discovered by Robonix.
+Package authors: see [**Build & Codegen**](docs/src/integration-guide/build-and-codegen.md).
 
-### Abstract primitives
-
-Interface IDs under `robonix/prm/*` cover camera, base, arm, gripper, manipulation, sensor, and force-torque. Implementations attach to real hardware or simulators by registering with Atlas. Full tables: **[docs/src/interface-catalog/](docs/src/interface-catalog/)**.
-
-## Platforms & PRM
-
-**Integrated demos** (see **[rust/examples/README.md](rust/examples/README.md)**):
-
-| Platform | What you run | Notes |
-|----------|----------------|-------|
-| **Tiago** (PAL Robotics) | Docker Compose stack: Webots + Nav2 + rviz2 + `tiago_bridge` (ROS 2 ↔ MCP) | Requires Docker, X11; GPU recommended. |
-| **ManiSkill3** (Fetch, ReplicaCAD) | Native Python: env / VLA / perception nodes + Atlas + Pilot | No host ROS 2; GPU recommended. |
-
-## Project Status
+## Status
 
 > [!WARNING]
-> Robonix is in an early, fast-moving development phase. Interfaces, IDL layouts, and internal designs may change without notice. No API stability is guaranteed until a versioned release is published.
+> Early, fast-moving development. Interfaces, IDL layouts, internal designs may change without notice. No API stability until a versioned release.
 
-### Available
+Working today: Atlas control plane, Pilot/Executor ReAct loop, SKILL.md discovery, `rbnx` package flow (`validate` / `build` / `codegen` / `start` / `install`), Tiago Webots E2E, ManiSkill3 VLA demo.
 
-- Control plane with multi-transport channels (gRPC, MCP, ROS 2, shared memory)
-- **Pilot / Executor** path: VLM + tools + `rbnx chat` (TUI)
-- SKILL.md for skill discovery and LLM-oriented behavior text
-- Package system (`rbnx validate` / `build` / `start` / `install`)
-- **`robonix-codegen`**: ROS `.msg` / `.srv` + contracts → generated `robonix_proto/`
-- **Tiago** Webots E2E (`examples/run.sh` + `tiago_sim_stack`: Docker, Webots, Nav2, rviz2, ROS 2–MCP bridge)
-- **ManiSkill3** VLA demo (`examples/packages/maniskill_vla_demo`: Fetch in ReplicaCAD, Octo VLA — see **[docs/src/getting-started/maniskill-demo.md](docs/src/getting-started/maniskill-demo.md)**)
-
-### In Progress
-
-- **System service deployment**: formal lifecycle management, systemd integration, declarative orchestration (services are currently example packages)
-- **Liaison**: product-grade user-facing interaction
-- Contract / namespace catalog enforcement on the server
-- **TaskGraph**: behavior-tree / RTDL beyond today's linear wire encoding
-
-### Documentation
-
-**[docs/](docs/)** — mdBook: architecture, interface catalog (primitive / service), integration guides. Build: `cd docs && mdbook build`.
+In progress: formal system-service deployment (services are example packages today), TaskGraph beyond linear, catalog enforcement on the server, product-grade Liaison.
 
 ## Contributing
 
-Contributions are welcome. Please:
-
-1. Fork the repository
-2. Create a feature branch from `dev`
-3. Format code with `cd rust && make fmt`
-4. Ensure `make check` passes (formatting + clippy)
-5. Submit a pull request
+Fork from `dev`, `make fmt`, `make check`, PR. See `CONTRIBUTING.md` if present.
 
 ## License
 
-Mulan Permissive Software License, Version 2 (MulanPSL-2.0). See [LICENSE](LICENSE) for details.
+Mulan Permissive Software License, Version 2 (MulanPSL-2.0). See [LICENSE](LICENSE).
