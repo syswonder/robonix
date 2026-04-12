@@ -242,7 +242,7 @@ mod tests {
             channels: 3,
             format: BufferFormat::Rgb8,
         };
-        assert_eq!(spec.frame_bytes(), 1920 * 1080 * 3 * 1);
+        assert_eq!(spec.frame_bytes(), 1920 * 1080 * 3);
     }
 
     #[test]
@@ -253,7 +253,7 @@ mod tests {
             channels: 1,
             format: BufferFormat::Float32,
         };
-        assert_eq!(spec.frame_bytes(), 640 * 480 * 1 * 4);
+        assert_eq!(spec.frame_bytes(), 640 * 480 * 4);
     }
 
     #[test]
@@ -300,13 +300,14 @@ mod tests {
             channels: 3,
             format: BufferFormat::Rgb8,
         };
-        assert_eq!(spec.stride(), 1920 * 3 * 1);
+        assert_eq!(spec.stride(), 1920 * 3);
     }
 
     #[test]
     fn buffer_format_roundtrip() {
         for v in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 16, 17, 18, 19, 20, 255] {
-            let fmt = BufferFormat::from_u32(v).expect(&format!("format {v} should be valid"));
+            let fmt =
+                BufferFormat::from_u32(v).unwrap_or_else(|| panic!("format {v} should be valid"));
             assert_eq!(fmt as u32, v);
         }
         assert!(
