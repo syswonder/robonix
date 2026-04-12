@@ -21,12 +21,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Webots simulator (Cyberbotics .deb; apt "webots" is often unavailable on minimal images)
 # Match ros-humble-webots-ros2 (~2025.x) — see https://github.com/cyberbotics/webots/releases
-ARG WEBOTS_DEB_URL=https://github.com/cyberbotics/webots/releases/download/R2025a/webots_2025a_amd64.deb
+# Default URL uses ghfast.top mirror for reliable access; override with
+# --build-arg WEBOTS_DEB_URL=https://github.com/... for direct GitHub.
+ARG WEBOTS_DEB_URL=https://ghfast.top/https://github.com/cyberbotics/webots/releases/download/R2025a/webots_2025a_amd64.deb
 RUN wget -q -O /tmp/webots.deb "${WEBOTS_DEB_URL}" \
     && apt-get update \
     && apt-get install -y --no-install-recommends /tmp/webots.deb \
     && rm -f /tmp/webots.deb \
     && rm -rf /var/lib/apt/lists/*
+
+# Pre-populate Webots asset cache. Without this, Webots fetches ~100 files from
+# raw.githubusercontent.com at first run — often blocked or painfully slow.
+# The seed tarball is exported from a successful run; see scripts/update-webots-seed.sh.
+COPY rust/examples/packages/tiago_sim_stack/bridge/webots_assets_seed.tar.gz /tmp/webots_seed.tar.gz
+RUN mkdir -p /root/.cache/Cyberbotics/Webots \
+    && tar -xzf /tmp/webots_seed.tar.gz -C /root/.cache/Cyberbotics/Webots \
+    && rm -f /tmp/webots_seed.tar.gz \
+    && echo "[dockerfile] webots asset cache: $(ls /root/.cache/Cyberbotics/Webots/assets | wc -l) files pre-populated"
 
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN python3 -m pip install --no-cache-dir \

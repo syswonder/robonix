@@ -72,6 +72,16 @@ install: install-atlas proto-interfaces
 	cargo install --path crates/robonix-pilot    --bin robonix-pilot    $(CARGO_FLAGS)
 	cargo install --path crates/robonix-executor --bin robonix-executor $(CARGO_FLAGS)
 	cargo install --path crates/robonix-liaison  --bin robonix-liaison  $(CARGO_FLAGS)
+	@# Register this clone as the robonix source tree so packages anywhere
+	@# on disk can resolve contracts/IDL via `rbnx path`. This updates
+	@# ~/.robonix/config.yaml robonix_source_path = <repo-root> (the parent of rust/).
+	@REPO_ROOT="$$(cd "$(RUST_ABS)/.." && pwd)"; \
+	echo ""; \
+	echo "[make install] registering robonix_source_path → $$REPO_ROOT"; \
+	"$$HOME/.cargo/bin/rbnx" setup "$$REPO_ROOT" || { \
+		echo "[make install] WARNING: automatic 'rbnx setup' failed — run it manually:"; \
+		echo "                cd $$REPO_ROOT && rbnx setup"; \
+	}
 
 RUST_ABS := $(shell cd $(RUST_DIR) && pwd)
 BUILD_SUBDIR := $(if $(filter release,$(BUILD_MODE)),release,debug)

@@ -78,24 +78,39 @@ const PORT_RANGE_START: u16 = 50100;
 /// grpc/ros2 declarations emit a warning when their contract_id is not in this list, but
 /// are still accepted — unknown contracts are allowed to support rapid iteration.
 const ROBO_SYSTEM_INTERFACE_CATALOG: &[&str] = &[
-    // ── primitives (sensors / base) ───────────────────────────────────────────
+    // ── primitives: base (chassis / locomotion) ──────────────────────────────
+    "robonix/prm/base/cmd",
     "robonix/prm/base/move",
     "robonix/prm/base/odom",
+    "robonix/prm/base/twist_in",
+    // ── primitives: camera ───────────────────────────────────────────────────
     "robonix/prm/camera/rgb",
     "robonix/prm/camera/depth",
+    "robonix/prm/camera/snapshot",
+    "robonix/prm/camera/depth_snapshot",
+    // ── primitives: sensor ───────────────────────────────────────────────────
     "robonix/prm/sensor/imu",
     "robonix/prm/sensor/lidar",
-    // ── primitives — MCP tool groups (rpc, wire_profile=mcp) ─────────────────
-    "robonix/prm/sim/env/tools", // env_node:  get_camera_image, get_robot_state, step_action
-    "robonix/prm/perception/tools", // perception_node: detect_objects
-    "robonix/prm/manipulation/tools", // vla_node: execute_instruction, move_base
-    // ── system services ───────────────────────────────────────────────────────
+    "robonix/prm/sensor/lidar_snapshot",
+    "robonix/prm/sensor/lidar3d",
+    // ── primitives: robot state ──────────────────────────────────────────────
+    "robonix/prm/robot/state",
+    // ── system services: navigation (Nav2-backed) ───────────────────────────
+    "robonix/srv/navigation/navigate",
+    "robonix/srv/navigation/status",
+    "robonix/srv/navigation/cancel",
+    // ── system services: perception (ML inference) ──────────────────────────
+    "robonix/srv/perception/detect",
+    // ── system services: runtime ─────────────────────────────────────────────
     "robonix/srv/runtime/pilot",
     "robonix/srv/runtime/executor",
+    "robonix/srv/runtime/executor/list_tools",
     "robonix/srv/runtime/liaison",
+    // ── system services: cognition / memory ──────────────────────────────────
     "robonix/srv/cognition/reason",
-    "robonix/srv/memory/search", // legacy search-only contract (kept for compat)
-    "robonix/srv/memory/tools",  // memsearch_service: search_memory, save_memory, compact_memory
+    "robonix/srv/memory/search",
+    "robonix/srv/memory/save",
+    "robonix/srv/memory/compact",
     // ── SLAM services ────────────────────────────────────────────────────────
     "robonix/srv/slam/status",           // get_slam_status
     "robonix/srv/slam/save_map",         // save point cloud map

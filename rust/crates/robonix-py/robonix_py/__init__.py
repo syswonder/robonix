@@ -188,7 +188,7 @@ def mcp_contract(
     ----------
     contract_id
         Same string as ``[contract] id`` in the TOML under ``rust/contracts/`` (e.g.
-        ``robonix/sys/memory/search``).
+        ``robonix/srv/memory/search``).
 
     The handler **must** annotate exactly one parameter and the return type with the codegen
     message classes for that contract's ``[io]`` section, e.g.

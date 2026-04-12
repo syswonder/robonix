@@ -252,7 +252,7 @@ cmd_start() {
   # shellcheck source=/dev/null
   source "$VENV/bin/activate"
   # Shared FastMCP contract decorator (also on PYTHONPATH via scripts/build.sh setup.bash).
-  export PYTHONPATH="$PACKAGES/robonix_mcp_contract${PYTHONPATH:+:$PYTHONPATH}"
+  export PYTHONPATH="$PACKAGES/robonix_py${PYTHONPATH:+:$PYTHONPATH}"
   echo "[demo] venv activated  ($(python3 --version), $(which python3))"
   echo "[demo] memory profile=${DEMO_MEMORY_PROFILE}  cam=${MANISKILL_CAM_W}x${MANISKILL_CAM_H}  viz_fps=${VIZ_FPS}"
 

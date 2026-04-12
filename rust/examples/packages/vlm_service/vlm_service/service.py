@@ -3,7 +3,7 @@
 """VLM service: registers with robonix-atlas, serves chat completions over gRPC.
 
 The agent discovers this service via the control plane, negotiates a channel,
-then calls contract `SysModelVlmChat.Stream` (server streaming). Wire types live in
+then calls contract `SrvCognitionReason.Stream` (server streaming). Wire types live in
 `vlm.proto`; the gRPC service is only in `robonix_contracts.proto` (see
 `rust/contracts` + codegen).
 
@@ -19,8 +19,8 @@ Optional environment variables:
                     The service picks a free TCP port (DeclareInterface listen_port) so it does not collide with host services on 50100+.
 
 Control plane (must match robonix-pilot discovery):
-  Registers under `robonix/sys/cognition` with interface `reason` (contract id
-  `robonix/sys/cognition/reason`). The agent uses `QueryNodes.contract_id`
+  Registers under `robonix/srv/cognition` with interface `reason` (contract id
+  `robonix/srv/cognition/reason`). The agent uses `QueryNodes.contract_id`
   by default; override with `ROBONIX_VLM_CONTRACT_ID`, or empty contract
   + `ROBONIX_VLM_NAMESPACE_PREFIX` for legacy split queries. See `rust/docs/NAMESPACE.md`.
 """
@@ -88,8 +88,8 @@ def _iface_meta() -> str:
             "contract": {
                 "idl_type": "protobuf",
                 "proto_file": "robonix-interfaces/robonix_proto/robonix_contracts.proto",
-                "service": "robonix.contracts.SysModelVlmChat",
-                "streaming_rpc_method": "/robonix.contracts.SysModelVlmChat/Stream",
+                "service": "robonix.contracts.SrvCognitionReason",
+                "streaming_rpc_method": "/robonix.contracts.SrvCognitionReason/Stream",
                 "stream_request_type": "robonix.vlm.ChatStream_Request",
                 "stream_event_type": "robonix.vlm.ChatStreamEvent",
             },
@@ -108,7 +108,7 @@ def main() -> None:
     stub.RegisterNode(
         pb.RegisterNodeRequest(
             node_id="com.robonix.services.vlm",
-            namespace="robonix/sys/model/vlm",
+            namespace="robonix/srv/cognition",
             kind="service",
             skill_md=_load_skill_md(),
         )
@@ -338,12 +338,12 @@ def main() -> None:
 
         yield vlm_pb2.ChatStreamEvent(finish_reason=finish)
 
-    class VlmHandler(robonix_contracts_pb2_grpc.SysModelVlmChatServicer):
+    class VlmHandler(robonix_contracts_pb2_grpc.SrvCognitionReasonServicer):
         def Stream(self, request, context):
             return handle_chat_stream(request, context)
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-    robonix_contracts_pb2_grpc.add_SysModelVlmChatServicer_to_server(
+    robonix_contracts_pb2_grpc.add_SrvCognitionReasonServicer_to_server(
         VlmHandler(), server
     )
 
@@ -375,7 +375,7 @@ def main() -> None:
             supported_transports=["grpc"],
             metadata_json=_iface_meta(),
             listen_port=bound_port,
-            contract_id="robonix/sys/cognition/reason",
+            contract_id="robonix/srv/cognition/reason",
         )
     )
     data_endpoint = resp.allocated_endpoint

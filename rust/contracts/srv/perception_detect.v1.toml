@@ -1,9 +1,9 @@
 # Object detection / scene understanding query.
 # ROS IDL: `lib/prm_base/srv/PerceptionDetect.srv`.
 [contract]
-id      = "robonix/prm/perception/detect"
+id      = "robonix/srv/perception/detect"
 version = "1"
-kind    = "primitive"
+kind    = "service"
 
 
 [io.srv]

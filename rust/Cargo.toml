@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/*"]
+# robonix-py is a Python-only library (no Cargo.toml) — exclude from the Rust workspace.
+exclude = ["crates/robonix-py"]
 resolver = "2"
 
 [workspace.package]

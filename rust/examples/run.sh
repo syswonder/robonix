@@ -51,9 +51,9 @@ rbnx() {
 
 rbnx_validate_build() {
   local abs_pkg="$1"
-  echo "[e2e] rbnx validate $abs_pkg"
+  echo "[example] rbnx validate $abs_pkg"
   rbnx validate "$abs_pkg"
-  echo "[e2e] rbnx build -p $abs_pkg"
+  echo "[example] rbnx build -p $abs_pkg"
   rbnx build -p "$abs_pkg"
 }
 
@@ -66,32 +66,32 @@ sys.exit(0 if importlib.util.find_spec("$module") else 1)
 PY
 }
 
-echo "[e2e] checking required Python modules..."
+echo "[example] checking required Python modules..."
 missing=()
 for m in grpc openai mcp memsearch numpy PIL uvicorn; do
   check_python_dep "$m" || missing+=("$m")
 done
 if [ "${#missing[@]}" -ne 0 ]; then
-  echo "[e2e] missing modules: ${missing[*]}"
-  echo "[e2e] install: pip install -r \"${EXAMPLES_ROOT}/requirements.txt\""
-  echo "[e2e] or make sure your virtual environment is active."
+  echo "[example] missing modules: ${missing[*]}"
+  echo "[example] install: pip install -r \"${EXAMPLES_ROOT}/requirements.txt\""
+  echo "[example] or make sure your virtual environment is active."
   exit 1
 fi
 
 if ! python -c 'import grpc; p=[int(x) for x in grpc.__version__.split(".")[:3]]; raise SystemExit(0 if tuple(p + [0]*(3-len(p))) >= (1,60,0) else 1)' 2>/dev/null; then
-  echo "[e2e] grpcio>=1.60 required — pip install -r \"${EXAMPLES_ROOT}/requirements.txt\""
+  echo "[example] grpcio>=1.60 required — pip install -r \"${EXAMPLES_ROOT}/requirements.txt\""
   exit 1
 fi
 
 if [ "$START_SIM_STACK" = "1" ]; then
   if [ -z "${DISPLAY:-}" ]; then
-    echo "[e2e] warning: DISPLAY is unset — Webots/rviz2 GUI will not show."
-    echo "[e2e]   Set DISPLAY and X11 auth (see packages/tiago_sim_stack/README.md)."
+    echo "[example] warning: DISPLAY is unset — Webots/rviz2 GUI will not show."
+    echo "[example]   Set DISPLAY and X11 auth (see packages/tiago_sim_stack/README.md)."
   else
     if command -v xhost &>/dev/null; then
       xhost +local:docker 2>/dev/null || true
     else
-      echo "[e2e] warning: xhost not found — run 'xhost +local:docker' manually for GUI."
+      echo "[example] warning: xhost not found — run 'xhost +local:docker' manually for GUI."
     fi
   fi
 fi
@@ -113,7 +113,7 @@ SIM_STACK_DIR="${PACKAGES}/tiago_sim_stack"
 export ROBONIX_SKILLS_EXTRA_DIRS="${SIM_STACK_DIR}/skills${ROBONIX_SKILLS_EXTRA_DIRS:+:${ROBONIX_SKILLS_EXTRA_DIRS}}"
 
 cleanup() {
-  echo "[e2e] shutting down..."
+  echo "[example] shutting down..."
   if [ "${START_SIM_STACK:-0}" = "1" ] && [ -d "${SIM_STACK_DIR}" ]; then
     (cd "$SIM_STACK_DIR" && docker compose -f compose.yaml down) 2>/dev/null || true
   fi
@@ -128,7 +128,7 @@ fi
 
 if [ "$START_SIM_STACK" = "1" ]; then
   if ! command -v docker >/dev/null 2>&1; then
-    echo "[e2e] START_SIM_STACK=1 requires Docker."
+    echo "[example] START_SIM_STACK=1 requires Docker."
     exit 1
   fi
   rbnx_validate_build "$PACKAGES/tiago_sim_stack"
@@ -136,7 +136,7 @@ fi
 
 # ── 1. Atlas (control plane) ──────────────────────────────────────────────────
 if [[ "${SMOKE_USE_EXISTING_ATLAS:-0}" != "1" ]]; then
-  echo "[e2e] starting robonix-atlas (control plane)..."
+  echo "[example] starting robonix-atlas (control plane)..."
   (cd "$RUST_ROOT" && cargo run -p robonix-atlas) &
   sleep 2
 fi
@@ -144,44 +144,44 @@ fi
 RBNX_START_OPTS=(start --endpoint "$ROBONIX_ATLAS")
 
 if [ "$START_VLM_SERVICE" = "1" ]; then
-  echo "[e2e] rbnx start vlm_service (background)..."
+  echo "[example] rbnx start vlm_service (background)..."
   (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "${RBNX_START_OPTS[@]}" -p "$PACKAGES/vlm_service" -n com.robonix.services.vlm) &
   sleep 1
 fi
 
 if [ "$START_MEMSEARCH" = "1" ]; then
-  echo "[e2e] rbnx start memsearch_service (background)..."
+  echo "[example] rbnx start memsearch_service (background)..."
   rbnx_validate_build "$PACKAGES/memsearch_service"
   (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "${RBNX_START_OPTS[@]}" -p "$PACKAGES/memsearch_service" -n com.robonix.services.memsearch) &
   sleep 1
 fi
 
 if [ "$START_SIM_STACK" = "1" ]; then
-  echo "[e2e] rbnx start tiago_sim_stack (background, docker compose)..."
+  echo "[example] rbnx start tiago_sim_stack (background, docker compose)..."
   (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "${RBNX_START_OPTS[@]}" -p "$PACKAGES/tiago_sim_stack" -n com.robonix.prm.tiago) &
   sleep 4
 fi
 
 # ── 2. Executor (tool dispatch runtime) ──────────────────────────────────────
 if [ "$START_EXECUTOR" = "1" ]; then
-  echo "[e2e] starting robonix-executor (background)..."
+  echo "[example] starting robonix-executor (background)..."
   (cd "$RUST_ROOT" && cargo run -p robonix-executor) &
   sleep 1
 fi
 
 # ── 3. Pilot (VLM reasoning service) ─────────────────────────────────────────
 if [ "$START_PILOT" = "1" ]; then
-  echo "[e2e] starting robonix-pilot (background)..."
+  echo "[example] starting robonix-pilot (background)..."
   (cd "$RUST_ROOT" && cargo run -p robonix-pilot) &
   sleep 2
 fi
 
 # ── 4. Liaison (user-facing gRPC server) ─────────────────────────────────────
 if [ "$START_LIAISON" = "1" ]; then
-  echo "[e2e] starting robonix-liaison (background, gRPC on :50081)..."
+  echo "[example] starting robonix-liaison (background, gRPC on :50081)..."
   (cd "$RUST_ROOT" && cargo run -p robonix-liaison) &
   sleep 2
 fi
 
-echo "[e2e] stack ready — use 'rbnx chat' to connect (Ctrl+C to stop)."
+echo "[example] stack ready — use 'rbnx chat' to connect (Ctrl+C to stop)."
 wait

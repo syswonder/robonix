@@ -53,22 +53,29 @@ def _ensure_mcp_types() -> None:
         d = d.parent
 
 
-def _ensure_robonix_mcp_contract() -> None:
-    d = Path(__file__).resolve().parent
-    while d.parent != d:
-        cand = d / "robonix_mcp_contract"
-        if cand.is_dir() and (cand / "robonix_mcp_contract" / "__init__.py").exists():
-            if str(cand) not in sys.path:
-                sys.path.insert(0, str(cand))
-            return
-        d = d.parent
+def _ensure_robonix_py() -> None:
+    """Add the shared Python helper lib (crates/robonix-py) to sys.path.
+
+    Uses `rbnx path robonix-py` when available; falls back to PYTHONPATH
+    injected by the package build.sh (rbnx-build/ws/install/setup.bash).
+    """
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["rbnx", "path", "robonix-py"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if out.returncode == 0:
+            lib = Path(out.stdout.strip())
+            if lib.is_dir() and str(lib) not in sys.path:
+                sys.path.insert(0, str(lib))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass  # rbnx not installed → rely on PYTHONPATH set by build.sh
 
 
-_ensure_proto_paths()
-_ensure_mcp_types()
-_ensure_robonix_mcp_contract()
+_ensure_robonix_py()
 
-from robonix_mcp_contract import mcp_contract  # noqa: E402
+from robonix_py import mcp_contract  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 import grpc  # noqa: E402

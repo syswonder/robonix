@@ -11,14 +11,17 @@ use robonix_cli::Config;
 
 mod build;
 mod chat;
+mod codegen;
 mod config;
 mod graph;
 mod info;
 mod install;
 mod launch_helpers;
 mod list;
+mod path;
 mod run_package;
 mod runtime;
+mod setup;
 mod validate;
 
 const DEFAULT_ENDPOINT: &str = "localhost:50051";
@@ -94,6 +97,38 @@ pub enum Commands {
         /// Show current configuration
         #[arg(short, long)]
         show: bool,
+    },
+    /// Run codegen for a package (wraps robonix-codegen + grpc_tools.protoc).
+    /// Regenerates robonix_proto, <pkg>/proto_gen/, and optional <pkg>/robonix_mcp_types/.
+    /// Replaces the copy-pasted boilerplate in package build.sh scripts.
+    Codegen {
+        /// Package path (relative to $RBNX_INVOCATION_CWD, else process cwd)
+        #[arg(short = 'p', long, required = true)]
+        package: PathBuf,
+        /// Also generate robonix_mcp_types/ (for MCP-based packages)
+        #[arg(long)]
+        mcp: bool,
+        /// Remove previous proto_gen/, robonix_mcp_types/, rbnx-build/ before regenerating
+        #[arg(long)]
+        clean: bool,
+        /// Directory (relative to package root, or absolute) where proto_gen/ and robonix_mcp_types/
+        /// should be placed. Defaults to package root; use e.g. `--out-dir tiago_bridge` to put
+        /// stubs inside a package subdirectory.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+    },
+    /// Register this directory as the robonix source tree (persists to ~/.robonix/config.yaml).
+    /// Call once from a cloned robonix repo so packages anywhere on disk can find contracts/IDL.
+    Setup {
+        /// Path to the robonix repo root (default: $RBNX_INVOCATION_CWD or process cwd).
+        /// If the given path is a sub-directory, walks up to find the root.
+        path: Option<PathBuf>,
+    },
+    /// Print an absolute path rooted in the configured robonix source tree (for build scripts).
+    /// Keys: root, rust, contracts, interfaces-lib, interfaces-proto, runtime-proto, robonix-py
+    Path {
+        /// Path key to resolve (see above).
+        key: String,
     },
 
     /// List all registered nodes and their interfaces
@@ -179,6 +214,14 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             set_storage_path,
             show,
         } => config::execute(config, set_storage_path, show).await,
+        Commands::Codegen {
+            package,
+            mcp,
+            clean,
+            out_dir,
+        } => codegen::execute(config, package, mcp, clean, out_dir).await,
+        Commands::Setup { path } => setup::execute(config, path).await,
+        Commands::Path { key } => path::execute(config, key).await,
         Commands::Nodes {
             server,
             distro,
