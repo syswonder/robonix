@@ -1,6 +1,6 @@
-//! VLM gRPC client — contract `SysModelVlmChat` (`robonix_contracts.proto`).
+//! VLM gRPC client — contract `SrvCognitionReason` (`robonix_contracts.proto`).
 
-use crate::contracts::sys_model_vlm_chat_client::SysModelVlmChatClient;
+use crate::contracts::srv_cognition_reason_client::SrvCognitionReasonClient;
 use crate::robonix_msg::{
     ChatMessage as PbChatMessage, ChatPart as PbChatPart, ToolCall as PbWireToolCall,
     ToolSpec as PbToolSpec,
@@ -267,7 +267,7 @@ fn vlm_interface_leaf() -> &'static str {
 
 /// VLM client discovered through robonix-atlas's control plane.
 pub struct VlmClient {
-    inner: SysModelVlmChatClient<tonic::transport::Channel>,
+    inner: SrvCognitionReasonClient<tonic::transport::Channel>,
 }
 
 impl VlmClient {
@@ -366,7 +366,7 @@ impl VlmClient {
             .context("failed to connect to VLM service data plane")?;
 
         Ok(Self {
-            inner: SysModelVlmChatClient::new(tonic_channel),
+            inner: SrvCognitionReasonClient::new(tonic_channel),
         })
     }
 
