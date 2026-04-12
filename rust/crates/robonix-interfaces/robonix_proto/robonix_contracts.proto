@@ -26,21 +26,6 @@ service PrmBaseMove {
   rpc Stream(stream robonix.prm_base.MoveCommand) returns (google.protobuf.Empty);
 }
 
-// contract: robonix/prm/base/nav_cancel (v1)
-service PrmBaseNavCancel {
-  rpc Call(robonix.prm_base.CancelNavigation_Request) returns (robonix.prm_base.CancelNavigation_Response);
-}
-
-// contract: robonix/prm/base/nav_status (v1)
-service PrmBaseNavStatus {
-  rpc Call(robonix.prm_base.GetNavigationStatus_Request) returns (robonix.prm_base.GetNavigationStatus_Response);
-}
-
-// contract: robonix/prm/base/navigate (v1)
-service PrmBaseNavigate {
-  rpc Call(robonix.prm_base.Navigate_Request) returns (robonix.prm_base.Navigate_Response);
-}
-
 // contract: robonix/prm/base/odom (v1)
 service PrmBaseOdom {
   rpc Stream(google.protobuf.Empty) returns (stream robonix.nav_msgs.Odometry);
@@ -69,11 +54,6 @@ service PrmCameraRgb {
 // contract: robonix/prm/camera/snapshot (v1)
 service PrmCameraSnapshot {
   rpc Call(robonix.prm_base.GetCameraImage_Request) returns (robonix.prm_base.GetCameraImage_Response);
-}
-
-// contract: robonix/prm/perception/detect (v1)
-service PrmPerceptionDetect {
-  rpc Call(robonix.prm_base.PerceptionDetect_Request) returns (robonix.prm_base.PerceptionDetect_Response);
 }
 
 // contract: robonix/prm/robot/state (v1)
@@ -134,6 +114,26 @@ service SrvMemorySave {
 // contract: robonix/srv/memory/search (v1)
 service SrvMemorySearch {
   rpc Call(robonix.memory.Search_Request) returns (robonix.memory.Search_Response);
+}
+
+// contract: robonix/srv/navigation/cancel (v1)
+service SrvNavigationCancel {
+  rpc Call(robonix.prm_base.CancelNavigation_Request) returns (robonix.prm_base.CancelNavigation_Response);
+}
+
+// contract: robonix/srv/navigation/navigate (v1)
+service SrvNavigationNavigate {
+  rpc Call(robonix.prm_base.Navigate_Request) returns (robonix.prm_base.Navigate_Response);
+}
+
+// contract: robonix/srv/navigation/status (v1)
+service SrvNavigationStatus {
+  rpc Call(robonix.prm_base.GetNavigationStatus_Request) returns (robonix.prm_base.GetNavigationStatus_Response);
+}
+
+// contract: robonix/srv/perception/detect (v1)
+service SrvPerceptionDetect {
+  rpc Call(robonix.prm_base.PerceptionDetect_Request) returns (robonix.prm_base.PerceptionDetect_Response);
 }
 
 // contract: robonix/srv/runtime/executor (v1)

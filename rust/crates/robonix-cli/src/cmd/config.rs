@@ -40,6 +40,20 @@ pub async fn execute(_config: Config, set_storage_path: Option<PathBuf>, show: b
             label1.bright_white(),
             config.package_storage_path.display().to_string().white()
         );
+        let label2 = format!("{:<25}", "Robonix source path:");
+        match &config.robonix_source_path {
+            Some(p) => println!(
+                "  {} {}",
+                label2.bright_white(),
+                p.display().to_string().white()
+            ),
+            None => println!(
+                "  {} {} ({})",
+                label2.bright_white(),
+                "<not set>".yellow(),
+                "run `rbnx setup` in the robonix repo".dimmed()
+            ),
+        }
         println!();
     } else if !updated {
         eprintln!("Error: Either --set-storage-path or --show must be specified");

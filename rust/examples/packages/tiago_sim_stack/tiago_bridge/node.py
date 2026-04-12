@@ -10,9 +10,9 @@ Contract → MCP tool mapping:
   robonix/prm/camera/depth_snapshot → camera_depth_snapshot()
   robonix/prm/robot/state           → robot_state()
   robonix/prm/sensor/lidar_snapshot → lidar_snapshot()
-  robonix/prm/base/navigate         → base_navigate(pose: PoseStamped)
-  robonix/prm/base/nav_status       → base_nav_status(msg: String)
-  robonix/prm/base/nav_cancel       → base_nav_cancel(msg: String)
+  robonix/srv/navigation/navigate         → base_navigate(pose: PoseStamped)
+  robonix/srv/navigation/status       → base_nav_status(msg: String)
+  robonix/srv/navigation/cancel       → base_nav_cancel(msg: String)
   robonix/prm/base/cmd              → base_cmd(msg: MoveCommand)
 
 Optional env vars:
@@ -73,23 +73,29 @@ def _ensure_mcp_types() -> None:
         d = d.parent
 
 
-def _ensure_robonix_mcp_contract() -> None:
-    """Find ``examples/packages/robonix_mcp_contract`` and add to ``sys.path``."""
-    d = Path(__file__).resolve().parent
-    while d.parent != d:
-        cand = d / "robonix_mcp_contract"
-        if cand.is_dir() and (cand / "robonix_mcp_contract" / "__init__.py").exists():
-            if str(cand) not in sys.path:
-                sys.path.insert(0, str(cand))
-            return
-        d = d.parent
+def _ensure_robonix_py() -> None:
+    """Add the shared Python helper lib (crates/robonix-py) to sys.path.
+
+    Uses `rbnx path robonix-py` when available; falls back to PYTHONPATH
+    injected by the package build.sh (rbnx-build/ws/install/setup.bash).
+    """
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["rbnx", "path", "robonix-py"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if out.returncode == 0:
+            lib = Path(out.stdout.strip())
+            if lib.is_dir() and str(lib) not in sys.path:
+                sys.path.insert(0, str(lib))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass  # rbnx not installed → rely on PYTHONPATH set by build.sh
 
 
-_ensure_proto_gen()
-_ensure_mcp_types()
-_ensure_robonix_mcp_contract()
+_ensure_robonix_py()
 
-from robonix_mcp_contract import mcp_contract  # noqa: E402
+from robonix_py import mcp_contract  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 import grpc
@@ -392,15 +398,15 @@ def lidar_snapshot(msg: Empty) -> LaserScan:
     return _ros_laserscan_to_mcp(ros_scan)
 
 
-# Contract: robonix/prm/base/navigate
+# Contract: robonix/srv/navigation/navigate
 # input: geometry_msgs/msg/PoseStamped  output: std_msgs/msg/String
 @mcp_contract(
     mcp,
-    contract_id="robonix/prm/base/navigate",
+    contract_id="robonix/srv/navigation/navigate",
 )
 def base_navigate(msg: PoseStamped) -> String:
     """Send the robot to a target pose.
-    Contract: robonix/prm/base/navigate.
+    Contract: robonix/srv/navigation/navigate.
     pose: geometry_msgs/PoseStamped (codegen).
     Returns codegen `std_msgs/String`; `data` is JSON with goal_id / error."""
     if _ros_node is None:
@@ -421,15 +427,15 @@ def base_navigate(msg: PoseStamped) -> String:
     return String(data=json.dumps(result))
 
 
-# Contract: robonix/prm/base/nav_status
+# Contract: robonix/srv/navigation/status
 # input: std_msgs/msg/String (data = goal_id)  output: std_msgs/msg/String (data = status JSON)
 @mcp_contract(
     mcp,
-    contract_id="robonix/prm/base/nav_status",
+    contract_id="robonix/srv/navigation/status",
 )
 def base_nav_status(msg: String) -> String:
     """Return stored navigation status for a goal_id.
-    Contract: robonix/prm/base/nav_status.
+    Contract: robonix/srv/navigation/status.
     msg.data is the goal_id from base_navigate.
     Returns codegen `std_msgs/String`; `data` is JSON status."""
     gid = msg.data
@@ -442,15 +448,15 @@ def base_nav_status(msg: String) -> String:
     return String(data=json.dumps(result))
 
 
-# Contract: robonix/prm/base/nav_cancel
+# Contract: robonix/srv/navigation/cancel
 # input: std_msgs/msg/String (data = goal_id)  output: std_msgs/msg/String (data = status JSON)
 @mcp_contract(
     mcp,
-    contract_id="robonix/prm/base/nav_cancel",
+    contract_id="robonix/srv/navigation/cancel",
 )
 def base_nav_cancel(msg: String) -> String:
     """Request cancellation of a navigation goal (Nav2 action only).
-    Contract: robonix/prm/base/nav_cancel.
+    Contract: robonix/srv/navigation/cancel.
     msg.data is the goal_id from base_navigate.
     Returns codegen `std_msgs/String`; `data` is JSON status."""
     gid = msg.data
@@ -846,7 +852,7 @@ def main() -> None:
         contract_id="robonix/prm/sensor/lidar_snapshot",
     ))
 
-    # robonix/prm/base/navigate — PoseStamped → String
+    # robonix/srv/navigation/navigate — PoseStamped → String
     stub.DeclareInterface(pb.DeclareInterfaceRequest(
         node_id=node_id, name="base_navigate",
         supported_transports=["mcp"],
@@ -856,10 +862,10 @@ def main() -> None:
             PoseStamped.json_schema(),
         ),
         listen_port=mcp_port,
-        contract_id="robonix/prm/base/navigate",
+        contract_id="robonix/srv/navigation/navigate",
     ))
 
-    # robonix/prm/base/nav_status — String → String
+    # robonix/srv/navigation/status — String → String
     stub.DeclareInterface(pb.DeclareInterfaceRequest(
         node_id=node_id, name="base_nav_status",
         supported_transports=["mcp"],
@@ -869,10 +875,10 @@ def main() -> None:
             String.json_schema(),
         ),
         listen_port=mcp_port,
-        contract_id="robonix/prm/base/nav_status",
+        contract_id="robonix/srv/navigation/status",
     ))
 
-    # robonix/prm/base/nav_cancel — String → String
+    # robonix/srv/navigation/cancel — String → String
     stub.DeclareInterface(pb.DeclareInterfaceRequest(
         node_id=node_id, name="base_nav_cancel",
         supported_transports=["mcp"],
@@ -882,7 +888,7 @@ def main() -> None:
             String.json_schema(),
         ),
         listen_port=mcp_port,
-        contract_id="robonix/prm/base/nav_cancel",
+        contract_id="robonix/srv/navigation/cancel",
     ))
 
     # robonix/prm/base/cmd — MoveCommand → String

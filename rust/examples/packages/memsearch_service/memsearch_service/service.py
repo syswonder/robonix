@@ -33,21 +33,27 @@ def _ensure_mcp_types() -> None:
         d = d.parent
 
 
-def _ensure_robonix_mcp_contract() -> None:
-    """Find ``examples/packages/robonix_mcp_contract`` and add to ``sys.path``."""
-    d = Path(__file__).resolve().parent
-    while d.parent != d:
-        cand = d / "robonix_mcp_contract"
-        if cand.is_dir() and (cand / "robonix_mcp_contract" / "__init__.py").exists():
-            if str(cand) not in sys.path:
-                sys.path.insert(0, str(cand))
-            return
-        d = d.parent
+def _ensure_robonix_py() -> None:
+    """Add the shared Python helper lib (crates/robonix-py) to sys.path.
+
+    Uses `rbnx path robonix-py` when available; falls back to PYTHONPATH
+    injected by the package build.sh (rbnx-build/ws/install/setup.bash).
+    """
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["rbnx", "path", "robonix-py"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if out.returncode == 0:
+            lib = Path(out.stdout.strip())
+            if lib.is_dir() and str(lib) not in sys.path:
+                sys.path.insert(0, str(lib))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass  # rbnx not installed → rely on PYTHONPATH set by build.sh
 
 
-_ensure_proto_gen()
-_ensure_mcp_types()
-_ensure_robonix_mcp_contract()
+_ensure_robonix_py()
 
 import grpc
 import robonix_runtime_pb2 as pb
@@ -57,7 +63,7 @@ import std_msgs_mcp
 from mcp.server.fastmcp import FastMCP
 from memsearch import MemSearch
 
-from robonix_mcp_contract import mcp_contract
+from robonix_py import mcp_contract
 
 mcp = FastMCP("memsearch_provider")
 
@@ -160,15 +166,15 @@ mem = MemSearch(
 )
 
 
-# ── Contract: robonix/sys/memory/search ──────────────────────────────────────
+# ── Contract: robonix/srv/memory/search ──────────────────────────────────────
 
 @mcp_contract(
     mcp,
-    contract_id="robonix/sys/memory/search",
+    contract_id="robonix/srv/memory/search",
 )
 async def search_memory(msg: std_msgs_mcp.String) -> std_msgs_mcp.String:
     """Search the agent's long-term memory for relevant past context, decisions, or user preferences.
-    Contract: robonix/sys/memory/search (input/output std_msgs/String)."""
+    Contract: robonix/srv/memory/search (input/output std_msgs/String)."""
     try:
         results = await mem.search(msg.data, top_k=2)
     except Exception as e:
@@ -182,15 +188,15 @@ async def search_memory(msg: std_msgs_mcp.String) -> std_msgs_mcp.String:
     return std_msgs_mcp.String(data=f"Relevant memories:\n{context}")
 
 
-# ── Contract: robonix/sys/memory/compact ─────────────────────────────────────
+# ── Contract: robonix/srv/memory/compact ─────────────────────────────────────
 
 @mcp_contract(
     mcp,
-    contract_id="robonix/sys/memory/compact",
+    contract_id="robonix/srv/memory/compact",
 )
 async def compact_memory(msg: std_msgs_mcp.Empty) -> std_msgs_mcp.String:
     """Compact and summarize recent memories. Call this at the end of a session.
-    Contract: robonix/sys/memory/compact (input std_msgs/Empty, output std_msgs/String)."""
+    Contract: robonix/srv/memory/compact (input std_msgs/Empty, output std_msgs/String)."""
     _ = msg
     try:
         summary_path = await mem.compact(llm_provider="openai")
@@ -201,15 +207,15 @@ async def compact_memory(msg: std_msgs_mcp.Empty) -> std_msgs_mcp.String:
         return std_msgs_mcp.String(data=f"Failed to compact memory: {e}")
 
 
-# ── Contract: robonix/sys/memory/save ────────────────────────────────────────
+# ── Contract: robonix/srv/memory/save ────────────────────────────────────────
 
 @mcp_contract(
     mcp,
-    contract_id="robonix/sys/memory/save",
+    contract_id="robonix/srv/memory/save",
 )
 async def save_memory(msg: std_msgs_mcp.String) -> std_msgs_mcp.String:
     """Save an important fact, user preference, or decision to long-term memory.
-    Contract: robonix/sys/memory/save (input/output std_msgs/String)."""
+    Contract: robonix/srv/memory/save (input/output std_msgs/String)."""
     from datetime import date
     p = Path(MEMORY_DIR) / f"{date.today()}_notes.md"
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -244,7 +250,7 @@ def main():
         stub.RegisterNode(
             pb.RegisterNodeRequest(
                 node_id=node_id,
-                namespace="robonix/sys/memory",
+                namespace="robonix/srv/memory",
                 kind="service",
                 skill_md="# Memsearch MCP\nProvides memory search, save, and compact operations.",
             )
@@ -252,7 +258,7 @@ def main():
 
         # One DeclareInterface per contract —————————————————————————————————
 
-        # robonix/sys/memory/search
+        # robonix/srv/memory/search
         stub.DeclareInterface(
             pb.DeclareInterfaceRequest(
                 node_id=node_id,
@@ -264,11 +270,11 @@ def main():
                     std_msgs_mcp.String.json_schema(),
                 ),
                 listen_port=port,
-                contract_id="robonix/sys/memory/search",
+                contract_id="robonix/srv/memory/search",
             )
         )
 
-        # robonix/sys/memory/save
+        # robonix/srv/memory/save
         stub.DeclareInterface(
             pb.DeclareInterfaceRequest(
                 node_id=node_id,
@@ -280,11 +286,11 @@ def main():
                     std_msgs_mcp.String.json_schema(),
                 ),
                 listen_port=port,
-                contract_id="robonix/sys/memory/save",
+                contract_id="robonix/srv/memory/save",
             )
         )
 
-        # robonix/sys/memory/compact  (input: Empty → no parameters)
+        # robonix/srv/memory/compact  (input: Empty → no parameters)
         stub.DeclareInterface(
             pb.DeclareInterfaceRequest(
                 node_id=node_id,
@@ -296,7 +302,7 @@ def main():
                     std_msgs_mcp.Empty.json_schema(),
                 ),
                 listen_port=port,
-                contract_id="robonix/sys/memory/compact",
+                contract_id="robonix/srv/memory/compact",
             )
         )
 

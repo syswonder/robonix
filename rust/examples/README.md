@@ -34,8 +34,6 @@ cargo run -p robonix-cli -- start -p examples/packages/tiago_sim_stack -n com.ro
 | Path | Role |
 |------|------|
 | `packages/` | Manifests + code per demo. |
-| `proto_gen/` | Optional **workspace-level** Python stubs (`scripts/gen_proto_python.sh`). Each package under `packages/*/` also has its own `proto_gen/` from its `scripts/build.sh`. |
-| `scripts/gen_proto_python.sh` | Regenerate `examples/proto_gen/` from `rust/proto` + `crates/robonix-interfaces/robonix_proto`. gRPC **service** RPCs are defined only in `robonix_contracts.proto`. |
 | `scripts/smoke_minimal.sh` | Start atlas + run `smoke_control_plane.py` (no VLM). |
 | `run.sh` | Full E2E: atlas → executor → pilot → packages → liaison (foreground). |
 | `requirements.txt` | Pinned Python deps; `protobuf<7` so `grpcio-tools` and `openai` coexist. |

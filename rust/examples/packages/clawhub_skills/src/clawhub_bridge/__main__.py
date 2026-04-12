@@ -35,6 +35,9 @@ log = logging.getLogger("clawhub_bridge")
 
 
 def _ensure_proto_gen() -> None:
+    """Walk up from this file to find a package-local `proto_gen/` populated by
+    `rbnx codegen` (or the legacy build.sh path). The shared
+    `rust/examples/proto_gen/` is deprecated and no longer regenerated."""
     d = Path(__file__).resolve().parent
     while d.parent != d:
         pg = d / "proto_gen"
@@ -42,14 +45,6 @@ def _ensure_proto_gen() -> None:
             sys.path.insert(0, str(pg))
             return
         d = d.parent
-    # Also check examples/proto_gen
-    examples_pg = Path(__file__).resolve().parent
-    while examples_pg.parent != examples_pg:
-        pg = examples_pg / "proto_gen"
-        if pg.is_dir():
-            sys.path.insert(0, str(pg))
-            return
-        examples_pg = examples_pg.parent
 
 
 _ensure_proto_gen()

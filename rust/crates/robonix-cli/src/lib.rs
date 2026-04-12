@@ -10,7 +10,7 @@ pub mod manifest;
 pub mod output;
 pub mod process;
 
-pub use config::Config;
+pub use config::{Config, SourcePathKey};
 pub use database::{PackageDatabase, PackageInfo, PackageSource};
 pub use manifest::{Manifest, PackageSummary};
 pub use process::ProcessManager;

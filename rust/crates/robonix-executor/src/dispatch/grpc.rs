@@ -2,7 +2,7 @@
 // dispatch/grpc.rs — gRPC primitive / service dispatch
 //
 // TODO(executor owner): implement gRPC dispatch via Atlas endpoint resolution.
-// `endpoint` here is an abstract_interface_id (e.g. "robonix/prm/base/navigate").
+// `endpoint` here is an abstract_interface_id (e.g. "robonix/srv/navigation/navigate").
 // Executor should resolve the concrete gRPC endpoint via Atlas QueryNodes and
 // call the generated proto service.
 

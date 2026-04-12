@@ -83,8 +83,8 @@ For ROS package **`pkgname`**, output is **`robonix_proto/pkgname.proto`** with 
 | Abstract interface ID | Mode | Direction (pub-sub) | ROS IDL (in repo) | gRPC (`robonix_proto/prm_base.proto`, generated) |
 |------------------------|------|------------------------|-------------------|---------------------------------------------------|
 | `robonix/prm/base/move` | pub-sub | **input** | `lib/prm_base/msg/MoveCommand.msg` | `message MoveCommand` (payload type) |
-| `robonix/prm/base/navigate` | RPC | — | `lib/prm_base/srv/Navigate.srv` | `PrmBaseService` / `Navigate` → `/robonix.prm_base.PrmBaseService/Navigate` |
-| `robonix/prm/base/nav_status` | RPC | — | `lib/prm_base/srv/GetNavigationStatus.srv` | `PrmBaseService` / `GetNavigationStatus` |
+| `robonix/srv/navigation/navigate` | RPC | — | `lib/prm_base/srv/Navigate.srv` | `PrmBaseService` / `Navigate` → `/robonix.prm_base.PrmBaseService/Navigate` |
+| `robonix/srv/navigation/status` | RPC | — | `lib/prm_base/srv/GetNavigationStatus.srv` | `PrmBaseService` / `GetNavigationStatus` |
 | `robonix/prm/base/cancel_nav` | RPC | — | `lib/prm_base/srv/CancelNavigation.srv` | `PrmBaseService` / `CancelNavigation` |
 | `robonix/prm/base/stop` | RPC | — | `lib/prm_base/srv/Stop.srv` | `PrmBaseService` / `Stop` |
 
