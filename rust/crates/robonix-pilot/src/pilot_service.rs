@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// pilot_service.rs — gRPC `SysRuntimePilot` (contract facade)
+// pilot_service.rs — gRPC `SrvRuntimePilot` (contract facade)
 
 use crate::contracts::{
-    sys_runtime_executor_client::SysRuntimeExecutorClient,
-    sys_runtime_executor_list_tools_client::SysRuntimeExecutorListToolsClient,
-    sys_runtime_pilot_server::SysRuntimePilot,
+    srv_runtime_executor_client::SrvRuntimeExecutorClient,
+    srv_runtime_executor_list_tools_client::SrvRuntimeExecutorListToolsClient,
+    srv_runtime_pilot_server::SrvRuntimePilot,
 };
 use crate::pilot::{Intent, PilotEvent, SessionStatusEvent};
 use crate::pilot_wire::{self, PilotStreamBody};
@@ -57,7 +57,7 @@ fn intent_is_abort_turn(intent: &Intent) -> bool {
 }
 
 #[tonic::async_trait]
-impl SysRuntimePilot for PilotServiceImpl {
+impl SrvRuntimePilot for PilotServiceImpl {
     type StreamStream = ReceiverStream<Result<PilotEvent, Status>>;
 
     async fn stream(
@@ -133,8 +133,8 @@ impl SysRuntimePilot for PilotServiceImpl {
             };
 
             let mut executor = ExecutorConn {
-                graph: SysRuntimeExecutorClient::new(channel.clone()),
-                list_tools: SysRuntimeExecutorListToolsClient::new(channel),
+                graph: SrvRuntimeExecutorClient::new(channel.clone()),
+                list_tools: SrvRuntimeExecutorListToolsClient::new(channel),
             };
 
             let mut session = session_arc.lock().await;

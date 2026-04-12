@@ -4,7 +4,7 @@
 // ── Design ───────────────────────────────────────────────────────────────────
 //
 //  All input modalities ultimately produce the same `Intent` and receive the
-//  same `PilotEvent` stream.  The liaison gRPC facade is contract `SysRuntimeLiaison`
+//  same `PilotEvent` stream.  The liaison gRPC facade is contract `SrvRuntimeLiaison`
 //  (`robonix_contracts.proto`); speech is the only modality that needs pre/post processing:
 //
 //
@@ -16,7 +16,7 @@
 //
 // ── Runtime topology ─────────────────────────────────────────────────────────
 //
-//   Always started:  SysRuntimeLiaison gRPC server on ROBONIX_LIAISON_PORT
+//   Always started:  SrvRuntimeLiaison gRPC server on ROBONIX_LIAISON_PORT
 //   Optional module: SpeechBridge   (set ROBONIX_LIAISON_SPEECH=1)
 //   Fallback stdin:  text loop      (set ROBONIX_LIAISON_SOURCE=text,
 //                                    useful for headless / pipe mode)
@@ -24,8 +24,8 @@
 use robonix_interfaces::{contracts, pilot};
 
 use anyhow::Result;
-use contracts::sys_runtime_liaison_server::{SysRuntimeLiaison, SysRuntimeLiaisonServer};
-use contracts::sys_runtime_pilot_client::SysRuntimePilotClient;
+use contracts::srv_runtime_liaison_server::{SrvRuntimeLiaison, SrvRuntimeLiaisonServer};
+use contracts::srv_runtime_pilot_client::SrvRuntimePilotClient;
 use pilot::{Intent, PilotEvent};
 use robonix_sdk::RobonixClient;
 use std::sync::Arc;
@@ -47,7 +47,7 @@ const EVT_FINAL_TEXT: u32 = 4;
 
 // ── LiaisonPipeline ───────────────────────────────────────────────────────────
 //
-// Core: forward an Intent to Pilot (`SysRuntimePilot.Stream`), return the event channel.
+// Core: forward an Intent to Pilot (`SrvRuntimePilot.Stream`), return the event channel.
 // Opens a new gRPC channel per call so liaison can start before Pilot and
 // survive Pilot restarts without restarting itself.
 
@@ -68,7 +68,7 @@ impl LiaisonPipeline {
         &self,
         intent: Intent,
     ) -> Result<mpsc::Receiver<Result<PilotEvent, Status>>> {
-        let mut client = SysRuntimePilotClient::connect(self.pilot_endpoint.clone()).await?;
+        let mut client = SrvRuntimePilotClient::connect(self.pilot_endpoint.clone()).await?;
         let mut grpc = client.stream(Request::new(intent)).await?.into_inner();
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(async move {
@@ -86,7 +86,7 @@ impl LiaisonPipeline {
     }
 }
 
-// ── SysRuntimeLiaison gRPC impl ─────────────────────────────────────────────
+// ── SrvRuntimeLiaison gRPC impl ─────────────────────────────────────────────
 //
 // All clients — rbnx chat, mobile app, GUI, and the SpeechBridge below — use
 // this contract service.  There is no special-cased input path per modality.
@@ -98,7 +98,7 @@ struct LiaisonServiceImpl {
 }
 
 #[tonic::async_trait]
-impl SysRuntimeLiaison for LiaisonServiceImpl {
+impl SrvRuntimeLiaison for LiaisonServiceImpl {
     type StreamStream = ReceiverStream<Result<PilotEvent, Status>>;
 
     async fn stream(
@@ -298,7 +298,7 @@ async fn main() -> Result<()> {
         "robonix/srv/runtime/liaison",
     )
     .await?;
-    log::info!("registered as '{LIAISON_NODE_ID}', SysRuntimeLiaison gRPC on :{listen_port}");
+    log::info!("registered as '{LIAISON_NODE_ID}', SrvRuntimeLiaison gRPC on :{listen_port}");
     eprintln!("robonix-liaison ready on :{listen_port}  (pilot={pilot_http})");
 
     let pipeline = Arc::new(LiaisonPipeline::new(pilot_http));
@@ -323,7 +323,7 @@ async fn main() -> Result<()> {
     // ── gRPC server (always running) ──────────────────────────────────────────
     let svc = LiaisonServiceImpl { pipeline };
     let server = tonic::transport::Server::builder()
-        .add_service(SysRuntimeLiaisonServer::new(svc))
+        .add_service(SrvRuntimeLiaisonServer::new(svc))
         .serve(listen_addr);
 
     if let Some(handle) = text_handle {

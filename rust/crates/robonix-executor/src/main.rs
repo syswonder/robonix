@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // robonix-executor — tool-call dispatch runtime
 //
-// Exposes contract gRPC services from `robonix_contracts.proto` (SysRuntimeExecutor, …).
+// Exposes contract gRPC services from `robonix_contracts.proto` (SrvRuntimeExecutor, …).
 
 mod dispatch;
 mod exec_wire;
@@ -12,8 +12,8 @@ mod tools;
 use robonix_interfaces::{contracts, executor, pilot};
 
 use anyhow::Result;
-use contracts::sys_runtime_executor_list_tools_server::SysRuntimeExecutorListToolsServer;
-use contracts::sys_runtime_executor_server::SysRuntimeExecutorServer;
+use contracts::srv_runtime_executor_list_tools_server::SrvRuntimeExecutorListToolsServer;
+use contracts::srv_runtime_executor_server::SrvRuntimeExecutorServer;
 use log::info;
 use robonix_sdk::RobonixClient;
 use service::ExecutorServiceImpl;
@@ -69,8 +69,8 @@ async fn main() -> Result<()> {
     let svc = ExecutorServiceImpl::new(sdk);
 
     tonic::transport::Server::builder()
-        .add_service(SysRuntimeExecutorServer::new(svc.clone()))
-        .add_service(SysRuntimeExecutorListToolsServer::new(svc))
+        .add_service(SrvRuntimeExecutorServer::new(svc.clone()))
+        .add_service(SrvRuntimeExecutorListToolsServer::new(svc))
         .serve(listen_addr)
         .await?;
 

@@ -13,8 +13,8 @@
 // Pilot does NOT pre-plan a full graph — it reasons step by step.
 
 use crate::contracts::{
-    sys_runtime_executor_client::SysRuntimeExecutorClient,
-    sys_runtime_executor_list_tools_client::SysRuntimeExecutorListToolsClient,
+    srv_runtime_executor_client::SrvRuntimeExecutorClient,
+    srv_runtime_executor_list_tools_client::SrvRuntimeExecutorListToolsClient,
 };
 use crate::executor::ListToolsRequest;
 use crate::pilot::{
@@ -34,10 +34,10 @@ use tonic::Request;
 use tonic::transport::Channel;
 use uuid::Uuid;
 
-/// gRPC clients for Executor contract services (`SysRuntimeExecutor`, `SysRuntimeExecutorListTools`).
+/// gRPC clients for Executor contract services (`SrvRuntimeExecutor`, `SrvRuntimeExecutorListTools`).
 pub struct ExecutorConn {
-    pub graph: SysRuntimeExecutorClient<Channel>,
-    pub list_tools: SysRuntimeExecutorListToolsClient<Channel>,
+    pub graph: SrvRuntimeExecutorClient<Channel>,
+    pub list_tools: SrvRuntimeExecutorListToolsClient<Channel>,
 }
 
 // ── Hard limits ───────────────────────────────────────────────────────────────

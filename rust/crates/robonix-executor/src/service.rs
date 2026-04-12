@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// service.rs — gRPC contract services (SysRuntimeExecutor, SysRuntimeExecutorListTools)
+// service.rs — gRPC contract services (SrvRuntimeExecutor, SrvRuntimeExecutorListTools)
 
 use crate::contracts::{
-    sys_runtime_executor_list_tools_server::SysRuntimeExecutorListTools,
-    sys_runtime_executor_server::SysRuntimeExecutor,
+    srv_runtime_executor_list_tools_server::SrvRuntimeExecutorListTools,
+    srv_runtime_executor_server::SrvRuntimeExecutor,
 };
 use crate::dispatch;
 use crate::exec_wire;
@@ -28,7 +28,7 @@ impl ExecutorServiceImpl {
 }
 
 #[tonic::async_trait]
-impl SysRuntimeExecutor for ExecutorServiceImpl {
+impl SrvRuntimeExecutor for ExecutorServiceImpl {
     type StreamStream = ReceiverStream<Result<TaskCallEvent, Status>>;
 
     async fn stream(
@@ -94,7 +94,7 @@ impl SysRuntimeExecutor for ExecutorServiceImpl {
 }
 
 #[tonic::async_trait]
-impl SysRuntimeExecutorListTools for ExecutorServiceImpl {
+impl SrvRuntimeExecutorListTools for ExecutorServiceImpl {
     async fn call(
         &self,
         request: Request<ListToolsRequest>,
