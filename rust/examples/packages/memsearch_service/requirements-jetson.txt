@@ -5,7 +5,7 @@
 numpy>=1.26,<2
 mcp
 fastmcp
-memsearch[onnx]
+memsearch[ollama] # onnxruntime may cause problems on jetson pytorch, so we use ollama embedding backend
 grpcio
 protobuf
 uvicorn

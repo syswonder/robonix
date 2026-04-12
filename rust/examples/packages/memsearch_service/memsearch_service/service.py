@@ -64,9 +64,98 @@ mcp = FastMCP("memsearch_provider")
 MEMORY_DIR = os.environ.get("AGENT_MEMORY_DIR", "./agent_memory")
 MILVUS_URI = os.environ.get("AGENT_MILVUS_URI", "./agent_milvus.db")
 
+import importlib.util
+import shutil
+import subprocess
+
+
+OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
+
+
+def _has_onnx() -> bool:
+    """Return True iff onnxruntime is importable."""
+    try:
+        return importlib.util.find_spec("onnxruntime") is not None
+    except Exception:
+        return False
+
+
+def _has_ollama() -> tuple[bool, bool]:
+    """Return (binary_present, model_pulled)."""
+    if shutil.which("ollama") is None:
+        return (False, False)
+    try:
+        # `ollama list` lists locally-cached models, one per line
+        out = subprocess.run(
+            ["ollama", "list"],
+            capture_output=True, text=True, timeout=5,
+        )
+        model_pulled = OLLAMA_EMBEDDING_MODEL in (out.stdout or "")
+        return (True, model_pulled)
+    except Exception:
+        return (True, False)
+
+
+def _print_ollama_help_and_exit() -> None:
+    """Neither onnx nor ollama available — print install guide and exit."""
+    msg = f"""
+[memsearch_service] no embedding backend available.
+
+Tried:
+  1. onnxruntime  — not importable (install via `pip install onnxruntime` or the Jetson wheel)
+  2. ollama       — binary or model not found
+
+To install ollama + the embedding model, run:
+
+  # install ollama (Linux):
+  curl -fsSL https://ollama.com/install.sh | sh
+
+  # start the daemon (systemd or manual):
+  sudo systemctl enable --now ollama        # systemd
+  # or, for a foreground run:
+  ollama serve &
+
+  # pull the embedding model:
+  ollama pull {OLLAMA_EMBEDDING_MODEL}
+
+Then re-run this service. It will auto-detect ollama.
+"""
+    print(msg, file=sys.stderr, flush=True)
+    sys.exit(2)
+
+
+def _select_embedding_backend() -> tuple[str, str | None]:
+    """Return (provider_name, model_override).
+
+    Preference: onnx > ollama. Exits with help text if neither is usable.
+    """
+    if _has_onnx():
+        logging.info("[memsearch] embedding backend: onnx (onnxruntime detected)")
+        return ("onnx", None)
+
+    ollama_bin, ollama_model = _has_ollama()
+    if ollama_bin and ollama_model:
+        logging.info(
+            "[memsearch] embedding backend: ollama (model=%s)",
+            OLLAMA_EMBEDDING_MODEL,
+        )
+        return ("ollama", OLLAMA_EMBEDDING_MODEL)
+
+    if ollama_bin and not ollama_model:
+        logging.warning(
+            "[memsearch] ollama binary found but model %s not pulled.",
+            OLLAMA_EMBEDDING_MODEL,
+        )
+    _print_ollama_help_and_exit()
+    raise SystemExit(2)  # unreachable; for type-checkers
+
+
+_EMB_PROVIDER, _EMB_MODEL = _select_embedding_backend()
+
 mem = MemSearch(
     paths=[MEMORY_DIR],
-    embedding_provider="onnx",
+    embedding_provider=_EMB_PROVIDER,
+    embedding_model=_EMB_MODEL,
     milvus_uri=MILVUS_URI
 )
 
