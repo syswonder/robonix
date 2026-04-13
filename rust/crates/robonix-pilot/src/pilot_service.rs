@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// pilot_service.rs — gRPC `SrvRuntimePilot` (contract facade)
+// pilot_service.rs — gRPC `SrvPilot` (contract facade)
 
 use crate::contracts::{
-    srv_runtime_executor_client::SrvRuntimeExecutorClient,
-    srv_runtime_executor_list_tools_client::SrvRuntimeExecutorListToolsClient,
-    srv_runtime_pilot_server::SrvRuntimePilot,
+    srv_executor_client::SrvExecutorClient,
+    srv_executor_list_tools_client::SrvExecutorListToolsClient,
+    srv_pilot_server::SrvPilot,
 };
-use crate::pilot::{Intent, PilotEvent, SessionStatusEvent};
+use crate::pilot::{Task, PilotEvent, SessionStatusEvent};
 use crate::pilot_wire::{self, PilotStreamBody};
 use crate::planner::{self, ExecutorConn};
 use crate::session::SessionManager;
@@ -25,7 +25,7 @@ pub struct PilotServiceImpl {
     vlm: Arc<Mutex<VlmClient>>,
     sessions: SessionManager,
     executor_endpoint: String,
-    /// Per-session cancellation senders. `abort_turn` Intent signals this without holding the session lock.
+    /// Per-session cancellation senders. `abort_turn` Task signals this without holding the session lock.
     cancels: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
 }
 
@@ -45,8 +45,8 @@ impl PilotServiceImpl {
     }
 }
 
-fn intent_is_abort_turn(intent: &Intent) -> bool {
-    let j = intent.context_json.trim();
+fn task_is_abort_turn(task: &Task) -> bool {
+    let j = task.context_json.trim();
     if j.is_empty() {
         return false;
     }
@@ -57,39 +57,39 @@ fn intent_is_abort_turn(intent: &Intent) -> bool {
 }
 
 #[tonic::async_trait]
-impl SrvRuntimePilot for PilotServiceImpl {
+impl SrvPilot for PilotServiceImpl {
     type StreamStream = ReceiverStream<Result<PilotEvent, Status>>;
 
     async fn stream(
         &self,
-        request: Request<Intent>,
+        request: Request<Task>,
     ) -> Result<Response<Self::StreamStream>, Status> {
-        let mut intent = request.into_inner();
+        let mut task = request.into_inner();
 
-        if intent_is_abort_turn(&intent) {
-            let id = intent.session_id.clone();
+        if task_is_abort_turn(&task) {
+            let id = task.session_id.clone();
             let ok = if let Some(tx) = self.cancels.lock().await.get(&id) {
                 let _ = tx.send(true);
                 true
             } else {
                 false
             };
-            log::debug!("[pilot] abort_turn intent for session {id} (signaled={ok})");
+            log::debug!("[pilot] abort_turn task for session {id} (signaled={ok})");
             let (_tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(1);
             return Ok(Response::new(ReceiverStream::new(rx)));
         }
 
-        if intent.session_id.is_empty() {
-            intent.session_id = Uuid::new_v4().to_string();
+        if task.session_id.is_empty() {
+            task.session_id = Uuid::new_v4().to_string();
         }
 
-        let session_arc = self.sessions.get_or_create(&intent.session_id).await;
+        let session_arc = self.sessions.get_or_create(&task.session_id).await;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(64);
         let sdk = Arc::clone(&self.sdk);
         let vlm = Arc::clone(&self.vlm);
         let executor_endpoint = self.executor_endpoint.clone();
-        let session_id = intent.session_id.clone();
+        let session_id = task.session_id.clone();
         let cancels = Arc::clone(&self.cancels);
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -133,13 +133,13 @@ impl SrvRuntimePilot for PilotServiceImpl {
             };
 
             let mut executor = ExecutorConn {
-                graph: SrvRuntimeExecutorClient::new(channel.clone()),
-                list_tools: SrvRuntimeExecutorListToolsClient::new(channel),
+                graph: SrvExecutorClient::new(channel.clone()),
+                list_tools: SrvExecutorListToolsClient::new(channel),
             };
 
             let mut session = session_arc.lock().await;
             if let Err(e) = planner::run_turn(
-                &intent,
+                &task,
                 &mut session,
                 &sdk,
                 &vlm,

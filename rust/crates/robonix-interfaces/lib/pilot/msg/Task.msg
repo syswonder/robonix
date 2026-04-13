@@ -1,5 +1,5 @@
-# IntentSource: TEXT=0 AUDIO=1 API=2
-string intent_id
+# TaskSource: TEXT=0 AUDIO=1 API=2
+string task_id
 string session_id
 uint32 source
 string text

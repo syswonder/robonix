@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// cmd/chat.rs — TUI chat client (connects to robonix-pilot via SrvRuntimePilot)
+// cmd/chat.rs — TUI chat client (connects to robonix-pilot via SrvPilot)
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -91,7 +91,7 @@ async fn try_discover_pilot_once(atlas_endpoint: &str) -> Result<String> {
     let mut sdk = robonix_sdk::RobonixClient::connect(atlas_endpoint).await?;
     let nodes = sdk
         .query_nodes_opts(robonix_sdk::QueryNodesOpts {
-            contract_id: "robonix/srv/runtime/pilot".to_string(),
+            contract_id: "robonix/srv/pilot".to_string(),
             ..Default::default()
         })
         .await?;
@@ -200,17 +200,17 @@ async fn run_tui(
 }
 
 async fn notify_session_end(pilot_endpoint: &str, session_id: &str) -> Result<()> {
-    use crate::pb::contracts::srv_runtime_pilot_client::SrvRuntimePilotClient;
-    use crate::pb::pilot::Intent;
+    use crate::pb::contracts::srv_pilot_client::SrvPilotClient;
+    use crate::pb::pilot::Task;
 
     const INTENT_SOURCE_TEXT: u32 = 0;
 
-    let mut client = SrvRuntimePilotClient::connect(pilot_endpoint.to_string())
+    let mut client = SrvPilotClient::connect(pilot_endpoint.to_string())
         .await
         .context("failed to connect to Pilot for session_end")?;
 
-    let intent = Intent {
-        intent_id: Uuid::new_v4().to_string(),
+    let task = Task {
+        task_id: Uuid::new_v4().to_string(),
         session_id: session_id.to_string(),
         source: INTENT_SOURCE_TEXT,
         text: String::new(),
@@ -220,7 +220,7 @@ async fn notify_session_end(pilot_endpoint: &str, session_id: &str) -> Result<()
     };
 
     let mut stream = client
-        .stream(tonic::Request::new(intent))
+        .stream(tonic::Request::new(task))
         .await
         .context("Pilot Stream session_end failed")?
         .into_inner();
@@ -230,17 +230,17 @@ async fn notify_session_end(pilot_endpoint: &str, session_id: &str) -> Result<()
 }
 
 async fn abort_pilot_session(pilot_endpoint: &str, session_id: &str) -> Result<()> {
-    use crate::pb::contracts::srv_runtime_pilot_client::SrvRuntimePilotClient;
-    use crate::pb::pilot::Intent;
+    use crate::pb::contracts::srv_pilot_client::SrvPilotClient;
+    use crate::pb::pilot::Task;
 
     const INTENT_SOURCE_TEXT: u32 = 0;
 
-    let mut client = SrvRuntimePilotClient::connect(pilot_endpoint.to_string())
+    let mut client = SrvPilotClient::connect(pilot_endpoint.to_string())
         .await
         .context("failed to connect to Pilot for abort_turn")?;
 
-    let intent = Intent {
-        intent_id: Uuid::new_v4().to_string(),
+    let task = Task {
+        task_id: Uuid::new_v4().to_string(),
         session_id: session_id.to_string(),
         source: INTENT_SOURCE_TEXT,
         text: String::new(),
@@ -250,14 +250,14 @@ async fn abort_pilot_session(pilot_endpoint: &str, session_id: &str) -> Result<(
     };
 
     let _ = client
-        .stream(tonic::Request::new(intent))
+        .stream(tonic::Request::new(task))
         .await
         .context("Pilot abort_turn Stream failed")?;
     Ok(())
 }
 
-/// Runs one `SrvRuntimePilot.Stream` while polling the keyboard: **Esc** calls
-/// [`abort_pilot_session`] (abort_turn `Intent`) so Pilot cancels the in-flight turn.
+/// Runs one `SrvPilot.Stream` while polling the keyboard: **Esc** calls
+/// [`abort_pilot_session`] (abort_turn `Task`) so Pilot cancels the in-flight turn.
 async fn run_intent_with_esc_abort(
     pilot_endpoint: &str,
     session_id: &str,
@@ -267,8 +267,8 @@ async fn run_intent_with_esc_abort(
     input: &str,
     scroll: &mut u16,
 ) -> Result<()> {
-    use crate::pb::contracts::srv_runtime_pilot_client::SrvRuntimePilotClient;
-    use crate::pb::pilot::{Intent, PilotEvent};
+    use crate::pb::contracts::srv_pilot_client::SrvPilotClient;
+    use crate::pb::pilot::{Task, PilotEvent};
     use tonic::Status;
 
     const INTENT_SOURCE_TEXT: u32 = 0;
@@ -279,15 +279,15 @@ async fn run_intent_with_esc_abort(
     let text = user_msg.to_string();
 
     let _stream_task = tokio::spawn(async move {
-        let mut client = match SrvRuntimePilotClient::connect(pilot_ep.clone()).await {
+        let mut client = match SrvPilotClient::connect(pilot_ep.clone()).await {
             Ok(c) => c,
             Err(e) => {
                 let _ = tx.send(Err(Status::unavailable(e.to_string()))).await;
                 return;
             }
         };
-        let intent = Intent {
-            intent_id: Uuid::new_v4().to_string(),
+        let task = Task {
+            task_id: Uuid::new_v4().to_string(),
             session_id: sid,
             source: INTENT_SOURCE_TEXT,
             text,
@@ -295,7 +295,7 @@ async fn run_intent_with_esc_abort(
             context_json: String::new(),
             timestamp_ms: now_ms(),
         };
-        let stream = match client.stream(tonic::Request::new(intent)).await {
+        let stream = match client.stream(tonic::Request::new(task)).await {
             Ok(r) => r.into_inner(),
             Err(e) => {
                 let _ = tx.send(Err(e)).await;

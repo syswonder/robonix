@@ -102,10 +102,10 @@ const ROBO_SYSTEM_INTERFACE_CATALOG: &[&str] = &[
     // ── system services: perception (ML inference) ──────────────────────────
     "robonix/srv/perception/detect",
     // ── system services: runtime ─────────────────────────────────────────────
-    "robonix/srv/runtime/pilot",
-    "robonix/srv/runtime/executor",
-    "robonix/srv/runtime/executor/list_tools",
-    "robonix/srv/runtime/liaison",
+    "robonix/srv/pilot",
+    "robonix/srv/executor",
+    "robonix/srv/executor/list_tools",
+    "robonix/srv/liaison",
     // ── system services: cognition / memory ──────────────────────────────────
     "robonix/srv/cognition/reason",
     "robonix/srv/memory/search",
@@ -1361,7 +1361,7 @@ mod tests {
         reg_node(
             &reg,
             "com.test.consumer",
-            "robonix/srv/runtime/agent",
+            "robonix/srv/agent",
             "tool",
         )
         .await;

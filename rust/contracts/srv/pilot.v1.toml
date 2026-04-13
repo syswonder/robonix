@@ -1,11 +1,11 @@
-# ROS IDL: `lib/pilot/srv/HandleIntent.srv`. Stream element type is **only** in this TOML.
+# ROS IDL: `lib/pilot/srv/SubmitTask.srv`. Stream element type is **only** in this TOML.
 [contract]
-id      = "robonix/srv/runtime/pilot"
+id      = "robonix/srv/pilot"
 version = "1"
 kind    = "service"
 
 [io.srv]
-srv = "pilot/srv/HandleIntent"
+srv = "pilot/srv/SubmitTask"
 
 [mode]
 type = "rpc_server_stream"

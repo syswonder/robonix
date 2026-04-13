@@ -1,11 +1,11 @@
-# Same as Pilot. ROS: `lib/liaison/srv/HandleIntent.srv`.
+# Same as Pilot. ROS: `lib/liaison/srv/SubmitTask.srv`.
 [contract]
-id      = "robonix/srv/runtime/liaison"
+id      = "robonix/srv/liaison"
 version = "1"
 kind    = "service"
 
 [io.srv]
-srv = "liaison/srv/HandleIntent"
+srv = "liaison/srv/SubmitTask"
 
 [mode]
 type = "rpc_server_stream"

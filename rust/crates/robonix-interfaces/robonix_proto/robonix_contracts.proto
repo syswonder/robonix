@@ -101,6 +101,21 @@ service SrvCommonMapScan2d {
   rpc Stream(google.protobuf.Empty) returns (stream robonix.sensor_msgs.LaserScan);
 }
 
+// contract: robonix/srv/executor (v1)
+service SrvExecutor {
+  rpc Stream(robonix.pilot.TaskGraph) returns (stream robonix.executor.TaskCallEvent);
+}
+
+// contract: robonix/srv/executor/list_tools (v1)
+service SrvExecutorListTools {
+  rpc Call(robonix.executor.ListTools_Request) returns (robonix.executor.ListTools_Response);
+}
+
+// contract: robonix/srv/liaison (v1)
+service SrvLiaison {
+  rpc Stream(robonix.pilot.Task) returns (stream robonix.pilot.PilotEvent);
+}
+
 // contract: robonix/srv/memory/compact (v1)
 service SrvMemoryCompact {
   rpc Call(robonix.memory.Compact_Request) returns (robonix.memory.Compact_Response);
@@ -136,24 +151,9 @@ service SrvPerceptionDetect {
   rpc Call(robonix.prm_base.PerceptionDetect_Request) returns (robonix.prm_base.PerceptionDetect_Response);
 }
 
-// contract: robonix/srv/runtime/executor (v1)
-service SrvRuntimeExecutor {
-  rpc Stream(robonix.pilot.TaskGraph) returns (stream robonix.executor.TaskCallEvent);
-}
-
-// contract: robonix/srv/runtime/executor/list_tools (v1)
-service SrvRuntimeExecutorListTools {
-  rpc Call(robonix.executor.ListTools_Request) returns (robonix.executor.ListTools_Response);
-}
-
-// contract: robonix/srv/runtime/liaison (v1)
-service SrvRuntimeLiaison {
-  rpc Stream(robonix.pilot.Intent) returns (stream robonix.pilot.PilotEvent);
-}
-
-// contract: robonix/srv/runtime/pilot (v1)
-service SrvRuntimePilot {
-  rpc Stream(robonix.pilot.Intent) returns (stream robonix.pilot.PilotEvent);
+// contract: robonix/srv/pilot (v1)
+service SrvPilot {
+  rpc Stream(robonix.pilot.Task) returns (stream robonix.pilot.PilotEvent);
 }
 
 // contract: robonix/srv/slam/load_map (v1)
