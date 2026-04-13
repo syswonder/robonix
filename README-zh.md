@@ -74,7 +74,11 @@ EAIOS 四层抽象：**原语 (primitive) → 服务 (service) → 技能 (skill
 
 ## Agent Skills（agentskills.io）
 
-Robonix 原生支持 [**Agent Skills**](https://agentskills.io/) 开放标准 —— 与 Claude Code、Cursor、GitHub Copilot、OpenCode、Gemini CLI、OpenClaw 等 30+ 个 AI 工具共用的 `SKILL.md` + frontmatter 格式。把 skill 放进包的 `skills/` 目录，`rbnx start` 会自动注册到 Atlas。详见 [**docs/src/skill-library.md**](https://github.com/syswonder/robonix-book/blob/main/src/skill-library.md)。
+Robonix 可摄入 [**Agent Skills**](https://agentskills.io/) 开放标准 —— 与 Claude Code、Cursor、GitHub Copilot、OpenCode、Gemini CLI、OpenClaw 等 30+ 个 AI 工具共用的 `SKILL.md` + frontmatter 格式。把 skill 文件放到 `~/.robonix/skills/<name>/`（或 `ROBONIX_SKILLS_EXTRA_DIRS` 指定目录），Pilot 启动时自动加载。
+
+> **概念区分**：这里的 "Agent Skill" 指的是 **Agent 上下文里的说明书**——一份 Markdown 文件，告诉 LLM 如何使用一组工具。它与 Robonix 白皮书里的**技能层**不是一回事——白皮书的"技能"指部署到系统上的可执行行为单元（基本技能 = 预训练 VLA/RL 进程；RTDL 技能 = 运行时生成的结构化方案）。两者只是同名，处于不同抽象层。详见 [**docs/src/skill-library.md**](https://github.com/syswonder/robonix-book/blob/main/src/skill-library.md)；Agent Skills 只是注入到 VLM prompt 的 `SkillInfo` 的其中一种来源。
+
+> 早期 `rbnx start` 会自动扫描包内 `<package>/skills/` 并注册到 Atlas，这一机制**已取消**——包与 skill 现在完全解耦。详见 `skill-library.md` 中的迁移说明。
 
 ## `rbnx` CLI
 

@@ -71,7 +71,11 @@ Dive deeper:
 
 ## Agent Skills (agentskills.io)
 
-Robonix natively supports [**Agent Skills**](https://agentskills.io/) — the same `SKILL.md`+frontmatter format used by Claude Code, Cursor, GitHub Copilot, OpenCode, Gemini CLI, OpenClaw, etc. Drop skills into a package's `skills/` directory and `rbnx start` registers them with Atlas automatically. See [**docs/src/skill-library.md**](https://github.com/syswonder/robonix-book/blob/main/src/skill-library.md).
+Robonix can ingest [**Agent Skills**](https://agentskills.io/) — the same `SKILL.md`+frontmatter format used by Claude Code, Cursor, GitHub Copilot, OpenCode, Gemini CLI, OpenClaw, etc. Place them under `~/.robonix/skills/<name>/` (or any directory in `ROBONIX_SKILLS_EXTRA_DIRS`); Pilot picks them up at startup.
+
+> **Disambiguation**: an "Agent Skill" here is an **agent-context playbook** — a Markdown file telling an LLM how to use a set of tools. It is **not** the same thing as the **Skill layer** in the Robonix whitepaper, which refers to deployable agent behaviors (basic skills = pretrained VLA/RL processes; RTDL skills = runtime-generated structured plans). The two share a name but live at different abstraction levels. See [**docs/src/skill-library.md**](https://github.com/syswonder/robonix-book/blob/main/src/skill-library.md) for the Robonix Skill model — Agent Skills are just one possible source of `SkillInfo` injected into the VLM prompt.
+
+> Earlier versions auto-scanned `<package>/skills/` and registered entries to Atlas. That mechanism has been **removed** — packages and skills are now decoupled. See the migration note in `skill-library.md`.
 
 ## `rbnx` CLI
 
