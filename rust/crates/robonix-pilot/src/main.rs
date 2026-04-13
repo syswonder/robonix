@@ -12,7 +12,7 @@ mod vlm;
 use robonix_interfaces::{contracts, executor, pilot, robonix_msg, vlm as vlm_proto};
 
 use anyhow::Result;
-use contracts::srv_runtime_pilot_server::SrvRuntimePilotServer;
+use contracts::srv_pilot_server::SrvPilotServer;
 use log::info;
 use pilot_service::PilotServiceImpl;
 use robonix_sdk::RobonixClient;
@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
         RobonixClient::connect_with_retry(&atlas_endpoint, 10, std::time::Duration::from_secs(2))
             .await?;
 
-    sdk.register_node(PILOT_NODE_ID, "robonix/srv/runtime/pilot", "service", "")
+    sdk.register_node(PILOT_NODE_ID, "robonix/srv/pilot", "service", "")
         .await?;
     info!("registered as '{}'", PILOT_NODE_ID);
 
@@ -69,11 +69,11 @@ async fn main() -> Result<()> {
         vec!["grpc".to_string()],
         serde_json::json!({"endpoint": advertised}).to_string(),
         listen_port as u32,
-        "robonix/srv/runtime/pilot",
+        "robonix/srv/pilot",
     )
     .await?;
 
-    info!("SrvRuntimePilot gRPC on :{}", listen_port);
+    info!("SrvPilot gRPC on :{}", listen_port);
     eprintln!("robonix-pilot ready on :{listen_port} (executor={executor_endpoint})");
 
     let sdk = Arc::new(Mutex::new(sdk));
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
     let svc = PilotServiceImpl::new(sdk, vlm, executor_http);
 
     tonic::transport::Server::builder()
-        .add_service(SrvRuntimePilotServer::new(svc))
+        .add_service(SrvPilotServer::new(svc))
         .serve(listen_addr)
         .await?;
 

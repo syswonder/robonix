@@ -13,12 +13,12 @@
 // Pilot does NOT pre-plan a full graph — it reasons step by step.
 
 use crate::contracts::{
-    srv_runtime_executor_client::SrvRuntimeExecutorClient,
-    srv_runtime_executor_list_tools_client::SrvRuntimeExecutorListToolsClient,
+    srv_executor_client::SrvExecutorClient,
+    srv_executor_list_tools_client::SrvExecutorListToolsClient,
 };
 use crate::executor::ListToolsRequest;
 use crate::pilot::{
-    BatchResult, Intent, PilotEvent, SessionStatusEvent, TaskCall, TaskCallResult, TaskGraph,
+    BatchResult, Task, PilotEvent, SessionStatusEvent, TaskCall, TaskCallResult, TaskGraph,
     ToolRouting,
 };
 use crate::pilot_wire::{self, PilotStreamBody};
@@ -34,10 +34,10 @@ use tonic::Request;
 use tonic::transport::Channel;
 use uuid::Uuid;
 
-/// gRPC clients for Executor contract services (`SrvRuntimeExecutor`, `SrvRuntimeExecutorListTools`).
+/// gRPC clients for Executor contract services (`SrvExecutor`, `SrvExecutorListTools`).
 pub struct ExecutorConn {
-    pub graph: SrvRuntimeExecutorClient<Channel>,
-    pub list_tools: SrvRuntimeExecutorListToolsClient<Channel>,
+    pub graph: SrvExecutorClient<Channel>,
+    pub list_tools: SrvExecutorListToolsClient<Channel>,
 }
 
 // ── Hard limits ───────────────────────────────────────────────────────────────
@@ -52,8 +52,8 @@ fn max_tool_rounds() -> usize {
 const MAX_HISTORY: usize = 200;
 
 /// `context_json`: `{"session_end": true}` (or `robonix_session_end`) — run memory compaction only, no VLM turn.
-fn intent_is_session_end(intent: &Intent) -> bool {
-    let j = intent.context_json.trim();
+fn task_is_session_end(task: &Task) -> bool {
+    let j = task.context_json.trim();
     if j.is_empty() {
         return false;
     }
@@ -79,7 +79,7 @@ fn skip_memory_prefetch(user_text: &str) -> bool {
 /// Run one user turn. Streams PilotEvents into `tx`; completes when the VLM
 /// decides it is done or the round limit is reached.
 pub async fn run_turn(
-    intent: &Intent,
+    task: &Task,
     session: &mut Session,
     sdk: &Arc<Mutex<RobonixClient>>,
     vlm: &Arc<Mutex<VlmClient>>,
@@ -87,7 +87,7 @@ pub async fn run_turn(
     tx: &Sender<Result<PilotEvent, tonic::Status>>,
     mut cancel_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    let session_id = intent.session_id.clone();
+    let session_id = task.session_id.clone();
 
     /// Emit an "interrupted" status event and return Ok to end the turn cleanly.
     macro_rules! return_interrupted {
@@ -106,7 +106,7 @@ pub async fn run_turn(
         }};
     }
 
-    if intent_is_session_end(intent) {
+    if task_is_session_end(task) {
         log::info!("[pilot] session_end: invoking compact_memory if available");
         try_compact_memory(executor).await;
         let _ = tx
@@ -149,10 +149,10 @@ pub async fn run_turn(
     // ── 1b. Pre-fetch long-term memory ────────────────────────────────────────
     // Silently dispatches search_memory before the first VLM call so that
     // relevant past context is available from the start of the turn.
-    let system_prompt = if skip_memory_prefetch(&intent.text) {
+    let system_prompt = if skip_memory_prefetch(&task.text) {
         base_prompt
     } else {
-        match prefetch_memory(&intent.text, executor, search_memory_routing).await {
+        match prefetch_memory(&task.text, executor, search_memory_routing).await {
             Some(mem) => format!(
                 "{base_prompt}\n\n## Relevant past memories (System Context)\n\n{mem}\n\n---\n\n"
             ),
@@ -161,7 +161,7 @@ pub async fn run_turn(
     };
 
     // ── 2. Add user message to history ────────────────────────────────────────
-    session.history.push(Message::user(&intent.text));
+    session.history.push(Message::user(&task.text));
     trim_history(&mut session.history, MAX_HISTORY);
 
     let max_rounds = max_tool_rounds();

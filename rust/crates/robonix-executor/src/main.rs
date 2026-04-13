@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // robonix-executor — tool-call dispatch runtime
 //
-// Exposes contract gRPC services from `robonix_contracts.proto` (SrvRuntimeExecutor, …).
+// Exposes contract gRPC services from `robonix_contracts.proto` (SrvExecutor, …).
 
 mod dispatch;
 mod exec_wire;
@@ -12,8 +12,8 @@ mod tools;
 use robonix_interfaces::{contracts, executor, pilot};
 
 use anyhow::Result;
-use contracts::srv_runtime_executor_list_tools_server::SrvRuntimeExecutorListToolsServer;
-use contracts::srv_runtime_executor_server::SrvRuntimeExecutorServer;
+use contracts::srv_executor_list_tools_server::SrvExecutorListToolsServer;
+use contracts::srv_executor_server::SrvExecutorServer;
 use log::info;
 use robonix_sdk::RobonixClient;
 use service::ExecutorServiceImpl;
@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
 
     sdk.register_node(
         EXECUTOR_NODE_ID,
-        "robonix/srv/runtime/executor",
+        "robonix/srv/executor",
         "service",
         "",
     )
@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
         vec!["grpc".to_string()],
         serde_json::json!({"endpoint": advertised}).to_string(),
         listen_port as u32,
-        "robonix/srv/runtime/executor",
+        "robonix/srv/executor",
     )
     .await?;
 
@@ -69,8 +69,8 @@ async fn main() -> Result<()> {
     let svc = ExecutorServiceImpl::new(sdk);
 
     tonic::transport::Server::builder()
-        .add_service(SrvRuntimeExecutorServer::new(svc.clone()))
-        .add_service(SrvRuntimeExecutorListToolsServer::new(svc))
+        .add_service(SrvExecutorServer::new(svc.clone()))
+        .add_service(SrvExecutorListToolsServer::new(svc))
         .serve(listen_addr)
         .await?;
 

@@ -12,16 +12,6 @@ message BatchResult {
   bool any_failed = 5;
 }
 
-message Intent {
-  string intent_id = 1;
-  string session_id = 2;
-  uint32 source = 3;
-  string text = 4;
-  bytes audio_data = 5;
-  string context_json = 6;
-  uint64 timestamp_ms = 7;
-}
-
 message PilotEvent {
   uint32 event_kind = 1;
   string session_id = 2;
@@ -43,6 +33,16 @@ message SessionStatusEvent {
   string session_id = 1;
   uint32 state = 2;
   string message = 3;
+}
+
+message Task {
+  string task_id = 1;
+  string session_id = 2;
+  uint32 source = 3;
+  string text = 4;
+  bytes audio_data = 5;
+  string context_json = 6;
+  uint64 timestamp_ms = 7;
 }
 
 message TaskCall {
@@ -73,11 +73,11 @@ message ToolRouting {
   string metadata_json = 3;
 }
 
-message HandleIntent_Request {
-  Intent intent = 1;
+message SubmitTask_Request {
+  Task task = 1;
 }
 
-message HandleIntent_Response {
+message SubmitTask_Response {
   PilotEvent event = 1;
 }
 

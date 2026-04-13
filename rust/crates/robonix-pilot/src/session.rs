@@ -2,7 +2,7 @@
 // session.rs — Session and SessionManager
 //
 // A Session tracks one user conversation (potentially many VLM rounds and many
-// user turns).  Pilot creates a Session on the first Intent, then continues the
+// user turns).  Pilot creates a Session on the first Task, then continues the
 // same Session for subsequent turns with the same session_id.
 
 use crate::session_state::SessionState;
@@ -17,7 +17,7 @@ pub struct Session {
     pub session_id: String,
     /// Full VLM conversation history (system prompt excluded — added per turn).
     pub history: Vec<Message>,
-    /// Current turn count (incremented on each HandleIntent call).
+    /// Current turn count (incremented on each SubmitTask call).
     pub turn_count: u32,
     pub state: SessionState,
     pub created_at_ms: u64,

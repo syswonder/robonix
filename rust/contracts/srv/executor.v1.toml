@@ -1,6 +1,6 @@
 # ROS: `lib/executor/srv/Execute.srv`.
 [contract]
-id      = "robonix/srv/runtime/executor"
+id      = "robonix/srv/executor"
 version = "1"
 kind    = "service"
 

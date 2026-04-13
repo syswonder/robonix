@@ -6,11 +6,11 @@ package robonix.liaison;
 
 import "pilot.proto";
 
-message HandleIntent_Request {
-  robonix.pilot.Intent intent = 1;
+message SubmitTask_Request {
+  robonix.pilot.Task task = 1;
 }
 
-message HandleIntent_Response {
+message SubmitTask_Response {
   robonix.pilot.PilotEvent event = 1;
 }
 
