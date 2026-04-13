@@ -652,10 +652,13 @@ impl MetaRuntimeRegistry {
                     ))
                 }
             })?;
-        // Reuse the producer's endpoint for transports that share state
-        // (grpc, mcp, shared_memory). Other transports get a fresh name.
+        // Reuse the producer's endpoint only for port-based transports
+        // (grpc, mcp), where every consumer connects to the same bound port.
+        // For ros2 / shared_memory, allocate a fresh per-channel endpoint
+        // (the producer's `allocated_endpoint` was assigned to its primary
+        // transport at DeclareInterface time and may not match this transport).
         let endpoint = match transport.as_str() {
-            "grpc" | "mcp" | "shared_memory" => iface.allocated_endpoint.clone(),
+            "grpc" | "mcp" => iface.allocated_endpoint.clone(),
             _ => Self::allocate_endpoint_static(&transport),
         };
         let metadata_json = iface.metadata_json.clone();
@@ -1244,7 +1247,7 @@ mod tests {
     #[tokio::test]
     async fn server_allocates_mcp_port() {
         let reg = MetaRuntimeRegistry::default();
-        reg_node(&reg, "com.test.vla", "ns", "service").await;
+        reg_node(&reg, "com.test.vla", "robonix/skill/manipulation", "service").await;
         let ep = reg
             .declare_interface(
                 "com.test.vla",
@@ -1451,8 +1454,8 @@ mod tests {
         .await
         .unwrap();
         let st = reg.inner.read().await;
-        // Legacy derived contract_id uses slash notation.
-        let derived = "robonix/srv/cognition/reason";
+        // Legacy derived contract_id is just namespace + "/" + name.
+        let derived = "robonix/srv/model/vlm/chat";
         let count = st
             .nodes
             .values()
