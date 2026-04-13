@@ -230,7 +230,28 @@ fn iface_summary(metadata_json: &str, transport: &str) -> String {
     let mut parts = Vec::new();
 
     if let Some(ep) = meta.get("endpoint").and_then(|v| v.as_str()) {
-        parts.push(format!("endpoint={ep}"));
+        let tag = if transport.contains(',') && transport.contains("grpc") {
+            "grpc"
+        } else {
+            "endpoint"
+        };
+        parts.push(format!("{tag}={ep}"));
+    }
+
+    // For multi-transport interfaces (e.g. grpc+ros2), show the ros2 topic/service
+    // from metadata alongside the grpc endpoint. Atlas only allocates one
+    // `allocated_endpoint` per interface (primary transport), so the ros2 side
+    // only appears via metadata.
+    if transport.contains("ros2") {
+        if let Some(t) = meta.get("ros2_topic").and_then(|v| v.as_str())
+            && !t.is_empty()
+        {
+            parts.push(format!("ros2={t}"));
+        } else if let Some(s) = meta.get("ros2_service").and_then(|v| v.as_str())
+            && !s.is_empty()
+        {
+            parts.push(format!("ros2={s}"));
+        }
     }
 
     if transport == "mcp" {
