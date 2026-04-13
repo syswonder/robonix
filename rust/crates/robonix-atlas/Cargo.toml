@@ -26,3 +26,8 @@ protoc-bin-vendored.workspace = true
 tonic-build.workspace = true
 tonic-prost-build.workspace = true
 # NOTE: robonix-codegen build-dependency REMOVED (robonix-codegen RIDL codegen removed from server build)
+
+[dev-dependencies]
+robonix-sdk = { path = "../robonix-sdk" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+serde_json.workspace = true

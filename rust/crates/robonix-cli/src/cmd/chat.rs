@@ -268,7 +268,7 @@ async fn run_intent_with_esc_abort(
     scroll: &mut u16,
 ) -> Result<()> {
     use crate::pb::contracts::srv_pilot_client::SrvPilotClient;
-    use crate::pb::pilot::{Task, PilotEvent};
+    use crate::pb::pilot::{PilotEvent, Task};
     use tonic::Status;
 
     const INTENT_SOURCE_TEXT: u32 = 0;

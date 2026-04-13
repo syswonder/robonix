@@ -26,7 +26,7 @@ use robonix_interfaces::{contracts, pilot};
 use anyhow::Result;
 use contracts::srv_liaison_server::{SrvLiaison, SrvLiaisonServer};
 use contracts::srv_pilot_client::SrvPilotClient;
-use pilot::{Task, PilotEvent};
+use pilot::{PilotEvent, Task};
 use robonix_sdk::RobonixClient;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -101,10 +101,7 @@ struct LiaisonServiceImpl {
 impl SrvLiaison for LiaisonServiceImpl {
     type StreamStream = ReceiverStream<Result<PilotEvent, Status>>;
 
-    async fn stream(
-        &self,
-        request: Request<Task>,
-    ) -> Result<Response<Self::StreamStream>, Status> {
+    async fn stream(&self, request: Request<Task>) -> Result<Response<Self::StreamStream>, Status> {
         let task = request.into_inner();
         let rx = self
             .pipeline
@@ -282,13 +279,8 @@ async fn main() -> Result<()> {
     let mut sdk =
         RobonixClient::connect_with_retry(&atlas_http, 10, std::time::Duration::from_secs(2))
             .await?;
-    sdk.register_node(
-        LIAISON_NODE_ID,
-        "robonix/srv/liaison",
-        "service",
-        "",
-    )
-    .await?;
+    sdk.register_node(LIAISON_NODE_ID, "robonix/srv/liaison", "service", "")
+        .await?;
     sdk.declare_interface_full(
         LIAISON_NODE_ID,
         "liaison",

@@ -1247,7 +1247,13 @@ mod tests {
     #[tokio::test]
     async fn server_allocates_mcp_port() {
         let reg = MetaRuntimeRegistry::default();
-        reg_node(&reg, "com.test.vla", "robonix/skill/manipulation", "service").await;
+        reg_node(
+            &reg,
+            "com.test.vla",
+            "robonix/skill/manipulation",
+            "service",
+        )
+        .await;
         let ep = reg
             .declare_interface(
                 "com.test.vla",
@@ -1361,13 +1367,7 @@ mod tests {
     async fn unregister_node_removes_node_and_channels() {
         let reg = MetaRuntimeRegistry::default();
         reg_node(&reg, "com.test.provider", "robonix/prm/camera", "primitive").await;
-        reg_node(
-            &reg,
-            "com.test.consumer",
-            "robonix/srv/agent",
-            "tool",
-        )
-        .await;
+        reg_node(&reg, "com.test.consumer", "robonix/srv/agent", "tool").await;
         reg.declare_interface(
             "com.test.provider",
             "rgb".into(),

@@ -1,4 +1,4 @@
-# Robonix CI — build + lint checks
+# Robonix CI — fmt, clippy, build, tests (unit + system)
 name: CI
 
 on:
@@ -9,24 +9,39 @@ on:
 
 env:
   RUST_DIR: rust
+  CARGO_TERM_COLOR: always
 
 jobs:
   check:
-    name: Rust (fmt + clippy + build)
+    name: Rust (fmt + clippy + build + tests)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ env.RUST_DIR }}
+
       - name: cargo fmt --check
         run: cd ${{ env.RUST_DIR }} && cargo fmt --all -- --check
 
-      - name: cargo clippy
-        run: cd ${{ env.RUST_DIR }} && cargo clippy --workspace -- -D warnings
+      - name: cargo clippy (lib + bins + tests)
+        run: cd ${{ env.RUST_DIR }} && cargo clippy --workspace --tests -- -D warnings
 
       - name: cargo build
         run: cd ${{ env.RUST_DIR }} && cargo build --workspace
+
+      # Unit tests: per-crate #[cfg(test)] mods (atlas registry, pilot helpers, …).
+      # System tests: robonix-atlas/tests/end_to_end.rs spawns Atlas on an
+      # ephemeral port and drives it through the SDK — exercises RegisterNode /
+      # DeclareInterface / QueryNodes / NegotiateChannel end-to-end.
+      - name: cargo test --workspace --all-targets
+        run: cd ${{ env.RUST_DIR }} && cargo test --workspace --all-targets
