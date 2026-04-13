@@ -2,8 +2,7 @@
 // service.rs — gRPC contract services (SrvExecutor, SrvExecutorListTools)
 
 use crate::contracts::{
-    srv_executor_list_tools_server::SrvExecutorListTools,
-    srv_executor_server::SrvExecutor,
+    srv_executor_list_tools_server::SrvExecutorListTools, srv_executor_server::SrvExecutor,
 };
 use crate::dispatch;
 use crate::exec_wire;

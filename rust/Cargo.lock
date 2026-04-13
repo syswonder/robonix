@@ -2426,6 +2426,7 @@ dependencies = [
  "log",
  "prost",
  "protoc-bin-vendored",
+ "robonix-sdk",
  "serde",
  "serde_json",
  "tokio",

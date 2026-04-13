@@ -18,7 +18,7 @@ use crate::contracts::{
 };
 use crate::executor::ListToolsRequest;
 use crate::pilot::{
-    BatchResult, Task, PilotEvent, SessionStatusEvent, TaskCall, TaskCallResult, TaskGraph,
+    BatchResult, PilotEvent, SessionStatusEvent, Task, TaskCall, TaskCallResult, TaskGraph,
     ToolRouting,
 };
 use crate::pilot_wire::{self, PilotStreamBody};
@@ -628,5 +628,56 @@ async fn try_compact_memory(executor: &mut ExecutorConn) {
             }
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{skip_memory_prefetch, task_is_session_end};
+    use crate::pilot::Task;
+
+    fn task(ctx: &str) -> Task {
+        Task {
+            task_id: "t".into(),
+            session_id: "s".into(),
+            source: 0,
+            text: String::new(),
+            audio_data: Vec::new(),
+            context_json: ctx.into(),
+            timestamp_ms: 0,
+        }
+    }
+
+    #[test]
+    fn session_end_explicit() {
+        assert!(task_is_session_end(&task(r#"{"session_end":true}"#)));
+    }
+
+    #[test]
+    fn session_end_legacy_alias() {
+        assert!(task_is_session_end(&task(
+            r#"{"robonix_session_end":true}"#
+        )));
+    }
+
+    #[test]
+    fn session_end_false_or_absent() {
+        assert!(!task_is_session_end(&task("")));
+        assert!(!task_is_session_end(&task(r#"{"foo":1}"#)));
+        assert!(!task_is_session_end(&task(r#"{"session_end":false}"#)));
+    }
+
+    #[test]
+    fn skip_prefetch_chitchat() {
+        assert!(skip_memory_prefetch("hi"));
+        assert!(skip_memory_prefetch("Hello"));
+        assert!(skip_memory_prefetch("你是谁"));
+        assert!(skip_memory_prefetch("你好"));
+    }
+
+    #[test]
+    fn no_skip_prefetch_real_query() {
+        assert!(!skip_memory_prefetch("open the door"));
+        assert!(!skip_memory_prefetch("帮我找个红色杯子"));
     }
 }

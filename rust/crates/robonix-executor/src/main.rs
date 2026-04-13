@@ -36,13 +36,8 @@ async fn main() -> Result<()> {
         RobonixClient::connect_with_retry(&atlas_endpoint, 10, std::time::Duration::from_secs(2))
             .await?;
 
-    sdk.register_node(
-        EXECUTOR_NODE_ID,
-        "robonix/srv/executor",
-        "service",
-        "",
-    )
-    .await?;
+    sdk.register_node(EXECUTOR_NODE_ID, "robonix/srv/executor", "service", "")
+        .await?;
     info!("registered as '{}'", EXECUTOR_NODE_ID);
 
     let listen_port: u16 = std::env::var("ROBONIX_EXECUTOR_PORT")

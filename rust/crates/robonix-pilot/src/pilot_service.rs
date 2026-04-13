@@ -3,10 +3,9 @@
 
 use crate::contracts::{
     srv_executor_client::SrvExecutorClient,
-    srv_executor_list_tools_client::SrvExecutorListToolsClient,
-    srv_pilot_server::SrvPilot,
+    srv_executor_list_tools_client::SrvExecutorListToolsClient, srv_pilot_server::SrvPilot,
 };
-use crate::pilot::{Task, PilotEvent, SessionStatusEvent};
+use crate::pilot::{PilotEvent, SessionStatusEvent, Task};
 use crate::pilot_wire::{self, PilotStreamBody};
 use crate::planner::{self, ExecutorConn};
 use crate::session::SessionManager;
@@ -60,10 +59,7 @@ fn task_is_abort_turn(task: &Task) -> bool {
 impl SrvPilot for PilotServiceImpl {
     type StreamStream = ReceiverStream<Result<PilotEvent, Status>>;
 
-    async fn stream(
-        &self,
-        request: Request<Task>,
-    ) -> Result<Response<Self::StreamStream>, Status> {
+    async fn stream(&self, request: Request<Task>) -> Result<Response<Self::StreamStream>, Status> {
         let mut task = request.into_inner();
 
         if task_is_abort_turn(&task) {
@@ -157,5 +153,44 @@ impl SrvPilot for PilotServiceImpl {
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::task_is_abort_turn;
+    use crate::pilot::Task;
+
+    fn task(ctx: &str) -> Task {
+        Task {
+            task_id: "t".into(),
+            session_id: "s".into(),
+            source: 0,
+            text: String::new(),
+            audio_data: Vec::new(),
+            context_json: ctx.into(),
+            timestamp_ms: 0,
+        }
+    }
+
+    #[test]
+    fn abort_turn_true() {
+        assert!(task_is_abort_turn(&task(r#"{"abort_turn":true}"#)));
+    }
+
+    #[test]
+    fn abort_turn_false_missing_field() {
+        assert!(!task_is_abort_turn(&task(r#"{"foo":1}"#)));
+    }
+
+    #[test]
+    fn abort_turn_false_explicit() {
+        assert!(!task_is_abort_turn(&task(r#"{"abort_turn":false}"#)));
+    }
+
+    #[test]
+    fn abort_turn_false_empty_or_invalid() {
+        assert!(!task_is_abort_turn(&task("")));
+        assert!(!task_is_abort_turn(&task("not json")));
     }
 }
