@@ -65,7 +65,7 @@ export START_LIAISON="${START_LIAISON:-1}"
 export PYTHONPATH="${PACKAGES}/vlm_service:${PACKAGES}/memsearch_service${PYTHONPATH:+:$PYTHONPATH}"
 
 rbnx() {
-  (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "$@")
+  cargo run --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-cli -- "$@"
 }
 
 rbnx_validate_build() {
@@ -96,7 +96,7 @@ sleep 0.3
 # ── 1. Atlas (control plane) ─────────────────────────────────────────────────
 if [[ "${SMOKE_USE_EXISTING_ATLAS:-0}" != "1" ]]; then
   echo "[clawhub] starting robonix-atlas (control plane, :50051)..."
-  (cd "$RUST_ROOT" && cargo run -p robonix-atlas) &
+  cargo run --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-atlas &
   sleep 2
 fi
 
@@ -106,8 +106,8 @@ RBNX_START_OPTS=(start --endpoint "$ROBONIX_ATLAS")
 if [ "$START_VLM_SERVICE" = "1" ]; then
   rbnx_validate_build "$PACKAGES/vlm_service"
   echo "[clawhub] starting vlm_service..."
-  (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "${RBNX_START_OPTS[@]}" \
-    -p "$PACKAGES/vlm_service" -n com.robonix.services.vlm) &
+  cargo run --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-cli -- "${RBNX_START_OPTS[@]}" \
+    -p "$PACKAGES/vlm_service" -n com.robonix.services.vlm &
   sleep 1
 fi
 
@@ -115,28 +115,28 @@ fi
 rbnx_validate_build "$SCRIPT_DIR"
 
 echo "[clawhub] starting clawhub_skills bridge node..."
-(cd "$RUST_ROOT" && cargo run -p robonix-cli -- "${RBNX_START_OPTS[@]}" \
-  -p "$SCRIPT_DIR" -n com.robonix.skills.clawhub) &
+cargo run --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-cli -- "${RBNX_START_OPTS[@]}" \
+  -p "$SCRIPT_DIR" -n com.robonix.skills.clawhub &
 sleep 2
 
 # ── 4. Executor (tool dispatch runtime) ──────────────────────────────────────
 if [ "$START_EXECUTOR" = "1" ]; then
   echo "[clawhub] starting robonix-executor (:50061)..."
-  (cd "$RUST_ROOT" && cargo run -p robonix-executor) &
+  cargo run --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-executor &
   sleep 1
 fi
 
 # ── 5. Pilot (VLM reasoning service) ─────────────────────────────────────────
 if [ "$START_PILOT" = "1" ]; then
   echo "[clawhub] starting robonix-pilot (:50071)..."
-  (cd "$RUST_ROOT" && cargo run -p robonix-pilot) &
+  cargo run --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-pilot &
   sleep 2
 fi
 
 # ── 6. Liaison (user-facing gRPC server) ─────────────────────────────────────
 if [ "$START_LIAISON" = "1" ]; then
   echo "[clawhub] starting robonix-liaison (:50081)..."
-  (cd "$RUST_ROOT" && cargo run -p robonix-liaison) &
+  cargo run --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-liaison &
   sleep 2
 fi
 

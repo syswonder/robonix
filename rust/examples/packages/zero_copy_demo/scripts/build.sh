@@ -9,8 +9,8 @@ RUST_ROOT="$(rbnx path rust)"
 FLAGS=()
 [[ "${RBNX_BUILD_CLEAN:-}" == "1" ]] && FLAGS+=(--clean)
 
-echo "[build] building librobonix_buffer.so..."
-(cd "$RUST_ROOT" && cargo build -p robonix-buffer --release)
+echo "[build] Building librobonix_buffer.so..."
+cargo build --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-buffer --release
 
 echo "[build] installing Python package (editable)..."
 if command -v uv >/dev/null 2>&1; then

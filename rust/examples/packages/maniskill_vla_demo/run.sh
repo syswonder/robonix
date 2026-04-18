@@ -103,7 +103,7 @@ fi
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 rbnx() {
-  (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "$@")
+  cargo run --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-cli -- "$@"
 }
 
 rbnx_validate_build() {

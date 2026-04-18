@@ -20,7 +20,7 @@ fi
 
 _build_rust() {
     echo "[+] Building robonix-buffer (Rust)..."
-    (cd "$RUST_ROOT" && cargo build -p robonix-buffer --release)
+    cargo build --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-buffer --release
     echo "    librobonix_buffer.so -> $RUST_ROOT/target/release/"
 }
 

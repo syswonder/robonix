@@ -3,7 +3,6 @@
 set -euo pipefail
 
 RUST_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$RUST_ROOT"
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "[smoke] python3 required"
@@ -17,7 +16,7 @@ export ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}"
 ATLAS_PID=""
 if [[ "${SMOKE_USE_EXISTING_ATLAS:-0}" != "1" ]]; then
   echo "[smoke] starting robonix-atlas..."
-  cargo run -p robonix-atlas &
+  cargo run --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-atlas &
   ATLAS_PID=$!
   sleep 2
 fi
@@ -29,7 +28,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-python3 examples/scripts/smoke_control_plane.py
+python3 "$RUST_ROOT/examples/scripts/smoke_control_plane.py"
 EC=$?
 echo "[smoke] exit=$EC"
 exit "$EC"

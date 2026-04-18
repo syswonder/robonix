@@ -46,7 +46,7 @@ export START_MEMSEARCH="${START_MEMSEARCH:-1}"
 export PYTHONPATH="${PACKAGES}/vlm_service:${PACKAGES}/memsearch_service${PYTHONPATH:+:$PYTHONPATH}"
 
 rbnx() {
-  (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "$@")
+  cargo run --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-cli -- "$@"
 }
 
 rbnx_validate_build() {
@@ -136,50 +136,50 @@ fi
 
 # ── 1. Atlas (control plane) ──────────────────────────────────────────────────
 if [[ "${SMOKE_USE_EXISTING_ATLAS:-0}" != "1" ]]; then
-  echo "[example] starting robonix-atlas (control plane)..."
-  (cd "$RUST_ROOT" && cargo run -p robonix-atlas) &
+  echo "[e2e] starting robonix-atlas (control plane)..."
+  cargo run --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-atlas &
   sleep 2
 fi
 
 RBNX_START_OPTS=(start --endpoint "$ROBONIX_ATLAS")
 
 if [ "$START_VLM_SERVICE" = "1" ]; then
-  echo "[example] rbnx start vlm_service (background)..."
-  (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "${RBNX_START_OPTS[@]}" -p "$PACKAGES/vlm_service" -n com.robonix.services.vlm) &
+  echo "[e2e] rbnx start vlm_service (background)..."
+  cargo run --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-cli -- "${RBNX_START_OPTS[@]}" -p "$PACKAGES/vlm_service" -n com.robonix.services.vlm &
   sleep 1
 fi
 
 if [ "$START_MEMSEARCH" = "1" ]; then
   echo "[example] rbnx start memsearch_service (background)..."
   rbnx_validate_build "$PACKAGES/memsearch_service"
-  (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "${RBNX_START_OPTS[@]}" -p "$PACKAGES/memsearch_service" -n com.robonix.services.memsearch) &
+  cargo run --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-cli -- "${RBNX_START_OPTS[@]}" -p "$PACKAGES/memsearch_service" -n com.robonix.services.memsearch &
   sleep 1
 fi
 
 if [ "$START_SIM_STACK" = "1" ]; then
-  echo "[example] rbnx start tiago_sim_stack (background, docker compose)..."
-  (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "${RBNX_START_OPTS[@]}" -p "$PACKAGES/tiago_sim_stack" -n com.robonix.prm.tiago) &
+  echo "[e2e] rbnx start tiago_sim_stack (background, docker compose)..."
+  cargo run --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-cli -- "${RBNX_START_OPTS[@]}" -p "$PACKAGES/tiago_sim_stack" -n com.robonix.prm.tiago &
   sleep 4
 fi
 
 # ── 2. Executor (tool dispatch runtime) ──────────────────────────────────────
 if [ "$START_EXECUTOR" = "1" ]; then
-  echo "[example] starting robonix-executor (background)..."
-  (cd "$RUST_ROOT" && cargo run -p robonix-executor) &
+  echo "[e2e] starting robonix-executor (background)..."
+  cargo run --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-executor &
   sleep 1
 fi
 
 # ── 3. Pilot (VLM reasoning service) ─────────────────────────────────────────
 if [ "$START_PILOT" = "1" ]; then
-  echo "[example] starting robonix-pilot (background)..."
-  (cd "$RUST_ROOT" && cargo run -p robonix-pilot) &
+  echo "[e2e] starting robonix-pilot (background)..."
+  cargo run --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-pilot &
   sleep 2
 fi
 
 # ── 4. Liaison (user-facing gRPC server) ─────────────────────────────────────
 if [ "$START_LIAISON" = "1" ]; then
-  echo "[example] starting robonix-liaison (background, gRPC on :50081)..."
-  (cd "$RUST_ROOT" && cargo run -p robonix-liaison) &
+  echo "[e2e] starting robonix-liaison (background, gRPC on :50081)..."
+  cargo run --manifest-path "$RUST_ROOT/Cargo.toml" -p robonix-liaison &
   sleep 2
 fi
 
