@@ -5,9 +5,12 @@
 //   - robonix_workspace.yaml  (WorkspaceConfig)
 //   - deploy/<target>.yaml    (DeployConfig)
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use crate::output;
 
 // ── robonix_workspace.yaml ──────────────────────────────────────────────────
 
@@ -124,4 +127,99 @@ pub fn parse_package_run(entry: &PackageRunEntry) -> Result<ParsedPackageRun> {
         package_name: pkg_name.to_string(),
         node_selector,
     })
+}
+
+// ── Workspace discovery ─────────────────────────────────────────────────────
+
+/// Find the workspace root by searching upward for `robonix_workspace.yaml`.
+pub fn find_workspace_root(base_dir: &Path) -> Result<PathBuf> {
+    let mut dir = base_dir.to_path_buf();
+    for _ in 0..10 {
+        if dir.join("robonix_workspace.yaml").exists() {
+            return Ok(dir);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    anyhow::bail!(
+        "robonix_workspace.yaml not found (searched from {} upward)",
+        base_dir.display()
+    );
+}
+
+// ── Package resolution (with git clone support) ─────────────────────────────
+
+/// Ensure all workspace-declared packages exist locally.
+/// If a package has a `url` but is not found locally, it will be cloned via git.
+/// Returns a map of package_name → resolved local path.
+pub fn ensure_packages_exist(
+    workspace_root: &Path,
+    packages: &[WorkspacePackageEntry],
+) -> Result<HashMap<String, PathBuf>> {
+    let mut package_paths: HashMap<String, PathBuf> = HashMap::new();
+
+    for pkg in packages {
+        let local_path = if let Some(ref path) = pkg.path {
+            // Explicit path specified — resolve relative to workspace root.
+            let resolved = workspace_root.join(path);
+            if !resolved.exists() {
+                anyhow::bail!(
+                    "package '{}' path '{}' does not exist (resolved to {})",
+                    pkg.name,
+                    path,
+                    resolved.display()
+                );
+            }
+            resolved.canonicalize().unwrap_or(resolved)
+        } else {
+            // No path — check packages/<short_name>, auto-clone if url is set.
+            let pkg_dir_name = pkg.name.rsplit('.').next().unwrap_or(&pkg.name);
+            let candidate = workspace_root.join("packages").join(pkg_dir_name);
+            if !candidate.exists() {
+                if let Some(ref url) = pkg.url {
+                    output::step("Cloning", &format!("{} from {}", pkg.name, url));
+                    // Ensure packages/ directory exists.
+                    let packages_dir = workspace_root.join("packages");
+                    std::fs::create_dir_all(&packages_dir).with_context(|| {
+                        format!("failed to create {}", packages_dir.display())
+                    })?;
+                    clone_package_to_workspace(url, &candidate)?;
+                    output::check(&format!("{} cloned to {}", pkg.name, candidate.display()));
+                } else {
+                    anyhow::bail!(
+                        "package '{}' not found at {} and no url specified",
+                        pkg.name,
+                        candidate.display()
+                    );
+                }
+            }
+            candidate.canonicalize().unwrap_or(candidate)
+        };
+        output::check(&format!("{} → {}", pkg.name, local_path.display()));
+        package_paths.insert(pkg.name.clone(), local_path);
+    }
+    Ok(package_paths)
+}
+
+/// Normalize a git URL: handle short forms like `user/repo`.
+fn normalize_git_url(url: &str) -> String {
+    let s = url.trim().trim_end_matches('/');
+    if s.starts_with("http://") || s.starts_with("https://") || s.starts_with("git@") {
+        return s.to_string();
+    }
+    // Short form: user/repo → https://github.com/user/repo.git
+    if s.contains('/') && !s.contains(' ') {
+        return format!("https://github.com/{}.git", s.trim_end_matches(".git"));
+    }
+    s.to_string()
+}
+
+/// Clone a git repository to the target directory.
+fn clone_package_to_workspace(url: &str, target: &Path) -> Result<()> {
+    let clone_url = normalize_git_url(url);
+    git2::build::RepoBuilder::new()
+        .clone(&clone_url, target)
+        .with_context(|| format!("failed to clone {} to {}", url, target.display()))?;
+    Ok(())
 }

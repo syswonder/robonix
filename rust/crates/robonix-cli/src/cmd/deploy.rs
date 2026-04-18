@@ -14,7 +14,7 @@ use robonix_cli::manifest;
 use robonix_cli::output;
 use robonix_cli::workspace::{
     DeployConfig, MergedConfig, NodeSelector, ParsedPackageRun, WorkspaceConfig,
-    WorkspacePackageEntry, parse_package_run,
+    WorkspacePackageEntry, parse_package_run, find_workspace_root, ensure_packages_exist,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -253,23 +253,6 @@ fn detect_rust_root(base: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Find the workspace root by searching upward for `robonix_workspace.yaml`.
-fn find_workspace_root(base_dir: &Path) -> Result<PathBuf> {
-    let mut dir = base_dir.to_path_buf();
-    for _ in 0..10 {
-        if dir.join("robonix_workspace.yaml").exists() {
-            return Ok(dir);
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    anyhow::bail!(
-        "robonix_workspace.yaml not found (searched from {} upward)",
-        base_dir.display()
-    );
-}
-
 // ── Step 1: Start upstream system ───────────────────────────────────────────
 
 /// Start the fixed system components (atlas, executor, pilot, liaison).
@@ -313,53 +296,6 @@ async fn start_upstream_system(
         }
     }
     Ok(())
-}
-
-// ── Step 2: Ensure packages exist ───────────────────────────────────────────
-
-/// Check that all workspace-declared packages exist locally.
-/// Returns a map of package_name → local path.
-fn ensure_packages_exist(
-    workspace_root: &Path,
-    packages: &[WorkspacePackageEntry],
-) -> Result<HashMap<String, PathBuf>> {
-    let mut package_paths: HashMap<String, PathBuf> = HashMap::new();
-
-    for pkg in packages {
-        let local_path = if let Some(ref path) = pkg.path {
-            let resolved = workspace_root.join(path);
-            if !resolved.exists() {
-                anyhow::bail!(
-                    "package '{}' path '{}' does not exist (resolved to {})",
-                    pkg.name,
-                    path,
-                    resolved.display()
-                );
-            }
-            resolved.canonicalize().unwrap_or(resolved)
-        } else {
-            // No path specified — check packages/<short_name>
-            let pkg_dir_name = pkg.name.rsplit('.').next().unwrap_or(&pkg.name);
-            let candidate = workspace_root.join("packages").join(pkg_dir_name);
-            if !candidate.exists() {
-                // Git clone will be implemented in stage four.
-                anyhow::bail!(
-                    "package '{}' not found at {}{}",
-                    pkg.name,
-                    candidate.display(),
-                    if pkg.url.is_some() {
-                        " (has url, auto-clone will be available in a future update)"
-                    } else {
-                        " and no url specified"
-                    }
-                );
-            }
-            candidate.canonicalize().unwrap_or(candidate)
-        };
-        output::check(&format!("{} → {}", pkg.name, local_path.display()));
-        package_paths.insert(pkg.name.clone(), local_path);
-    }
-    Ok(package_paths)
 }
 
 // ── Step 3: Validate packages_run ───────────────────────────────────────────
@@ -475,16 +411,12 @@ pub async fn execute(config_path: &Path) -> Result<()> {
     let workspace_root = find_workspace_root(&base_dir)?;
     let mut children: Vec<Child> = Vec::new();
 
-    // ── Step 1: Start upstream system (fixed components) ────────────────────
-    output::action("Step 1", "Starting upstream system");
-    start_upstream_system(&workspace_root, &global_env, &mut children).await?;
-
-    // ── Step 2: Check packages existence ────────────────────────────────────
-    output::action("Step 2", "Checking packages existence");
+    // ── Step 1: Check packages existence (fast-fail before heavy system startup) ─
+    output::action("Step 1", "Checking packages existence");
     let package_paths = ensure_packages_exist(&workspace_root, &merged.workspace_packages)?;
 
-    // ── Step 3: Validate packages_run declarations ──────────────────────────
-    output::action("Step 3", "Validating packages_run");
+    // ── Step 2: Validate packages_run declarations ──────────────────────────
+    output::action("Step 2", "Validating packages_run");
     let validated = validate_packages_run(
         &merged.packages_run,
         &merged.workspace_packages,
@@ -493,20 +425,21 @@ pub async fn execute(config_path: &Path) -> Result<()> {
 
     if validated.is_empty() {
         output::warning("no packages_run entries — nothing to deploy");
-        output::info("Press Ctrl+C to shut down system components.");
-        tokio::signal::ctrl_c().await?;
-        shutdown_children(&mut children).await;
         return Ok(());
     }
-
-    // ── Step 4: Start nodes in dependency order ─────────────────────────────
-    output::action("Step 4", "Starting nodes in dependency order");
 
     // Build check (warning only).
     let build_dir = workspace_root.join("build");
     if !build_dir.exists() {
         output::warning("build/ directory not found; packages may not have been built yet");
     }
+
+    // ── Step 3: Start upstream system (fixed components) ────────────────────
+    output::action("Step 3", "Starting upstream system");
+    start_upstream_system(&workspace_root, &global_env, &mut children).await?;
+
+    // ── Step 4: Start nodes in dependency order ─────────────────────────────
+    output::action("Step 4", "Starting nodes in dependency order");
 
     // Topological sort based on manifest.depend.
     let items: Vec<(&str, &[String])> = validated
@@ -611,16 +544,12 @@ pub async fn execute_from_workspace() -> Result<()> {
 
     let mut children: Vec<Child> = Vec::new();
 
-    // Step 1: Start upstream system.
-    output::action("Step 1", "Starting upstream system");
-    start_upstream_system(&workspace_root, &global_env, &mut children).await?;
-
-    // Step 2: Check packages existence.
-    output::action("Step 2", "Checking packages existence");
+    // Step 1: Check packages existence (fast-fail).
+    output::action("Step 1", "Checking packages existence");
     let package_paths = ensure_packages_exist(&workspace_root, &ws.packages)?;
 
-    // Step 3: Build "all nodes" run entries for every package.
-    output::action("Step 3", "Loading manifests");
+    // Step 2: Load manifests for all packages.
+    output::action("Step 2", "Loading manifests");
     let mut validated = Vec::new();
     for pkg_entry in &ws.packages {
         let pkg_path = package_paths.get(&pkg_entry.name).unwrap();
@@ -647,6 +576,10 @@ pub async fn execute_from_workspace() -> Result<()> {
         output::warning("no packages to deploy");
         return Ok(());
     }
+
+    // Step 3: Start upstream system.
+    output::action("Step 3", "Starting upstream system");
+    start_upstream_system(&workspace_root, &global_env, &mut children).await?;
 
     // Step 4: Start nodes in dependency order.
     output::action("Step 4", "Starting nodes in dependency order");

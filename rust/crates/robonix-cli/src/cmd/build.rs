@@ -10,7 +10,9 @@
 use anyhow::{Context, Result};
 use robonix_cli::manifest;
 use robonix_cli::output;
-use robonix_cli::workspace::{DeployConfig, WorkspaceConfig};
+use robonix_cli::workspace::{
+    DeployConfig, WorkspaceConfig, ensure_packages_exist, find_workspace_root,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -52,7 +54,12 @@ fn run_build_script(package_root: &Path, script_rel: &str, clean: bool) -> Resul
     Ok(())
 }
 
-fn build_local(package_root: &Path, manifest: &manifest::Manifest, clean: bool) -> Result<()> {
+fn build_local(
+    package_root: &Path,
+    manifest: &manifest::Manifest,
+    clean: bool,
+    workspace_build_dir: Option<&Path>,
+) -> Result<()> {
     let _summary = manifest.validate_and_summarize()?;
     let script_rel = manifest.build.script.trim();
     let script_path = package_root.join(script_rel);
@@ -75,6 +82,15 @@ fn build_local(package_root: &Path, manifest: &manifest::Manifest, clean: bool) 
             build_stamp_path(package_root).display()
         )
     })?;
+
+    // Write workspace-level build stamp if workspace_build_dir provided.
+    if let Some(build_dir) = workspace_build_dir {
+        if fs::create_dir_all(build_dir).is_ok() {
+            let stamp = build_dir.join(format!("{}.built", manifest.package.name));
+            let _ = fs::write(&stamp, chrono::Utc::now().to_rfc3339());
+        }
+    }
+
     output::success(&format!(
         "Package '{}' build finished",
         manifest.package.name
@@ -87,7 +103,7 @@ pub fn build_local_package(path: &Path, clean: bool) -> Result<()> {
         .canonicalize()
         .with_context(|| format!("Failed to canonicalize package path {}", path.display()))?;
     let detected = manifest::detect_and_load(&package_root)?;
-    build_local(&package_root, &detected.manifest, clean)
+    build_local(&package_root, &detected.manifest, clean, None)
 }
 
 pub async fn execute_local(path: PathBuf, clean: bool) -> Result<()> {
@@ -102,13 +118,95 @@ pub async fn execute_local(path: PathBuf, clean: bool) -> Result<()> {
     Ok(())
 }
 
-// ── Config-file mode (new format: deploy/<target>.yaml) ─────────────────────
+// ── Shared: resolve + topo sort + build ─────────────────────────────────────
+
+struct ResolvedPackage {
+    name: String,
+    root: PathBuf,
+    manifest: manifest::Manifest,
+}
+
+/// Resolve workspace packages, topo-sort by manifest.depend, build each.
+fn resolve_and_build(
+    package_paths: &std::collections::HashMap<String, PathBuf>,
+    packages: &[robonix_cli::workspace::WorkspacePackageEntry],
+    clean: bool,
+    workspace_build_dir: Option<&Path>,
+) -> Result<()> {
+    let mut resolved: Vec<ResolvedPackage> = Vec::new();
+
+    for pkg_entry in packages {
+        let pkg_path = package_paths.get(&pkg_entry.name).unwrap();
+        let manifest_path = pkg_path.join(manifest::MANIFEST_FILE);
+        if !manifest_path.exists() {
+            anyhow::bail!(
+                "package '{}' is missing {} at {}",
+                pkg_entry.name,
+                manifest::MANIFEST_FILE,
+                manifest_path.display()
+            );
+        }
+        let pkg_manifest = manifest::load_from_path(&manifest_path)?;
+        output::check(&format!(
+            "{} — {} v{}",
+            pkg_entry.name, pkg_manifest.package.name, pkg_manifest.package.version
+        ));
+        resolved.push(ResolvedPackage {
+            name: pkg_entry.name.clone(),
+            root: pkg_path.clone(),
+            manifest: pkg_manifest,
+        });
+    }
+
+    if resolved.is_empty() {
+        output::warning("no packages to build");
+        return Ok(());
+    }
+
+    // Topological sort using manifest.depend.
+    let items: Vec<(&str, &[String])> = resolved
+        .iter()
+        .map(|p| (p.name.as_str(), p.manifest.depend.as_slice()))
+        .collect();
+    let build_order = deploy::topo_sort(&items)?;
+    let order_names: Vec<&str> = build_order
+        .iter()
+        .map(|&i| resolved[i].name.as_str())
+        .collect();
+    output::step("Build order", &order_names.join(" → "));
+
+    // Build each package.
+    let mut succeeded = 0usize;
+    for (step_num, &idx) in build_order.iter().enumerate() {
+        let pkg = &resolved[idx];
+        output::action(
+            &format!("[{}/{}] Building", step_num + 1, build_order.len()),
+            &format!("{} ({})", pkg.name, pkg.root.display()),
+        );
+        match build_local(&pkg.root, &pkg.manifest, clean, workspace_build_dir) {
+            Ok(()) => succeeded += 1,
+            Err(e) => {
+                output::error(&format!("package '{}' build failed: {}", pkg.name, e));
+                anyhow::bail!(
+                    "stopping build — package '{}' failed ({} succeeded)",
+                    pkg.name,
+                    succeeded,
+                );
+            }
+        }
+    }
+
+    output::success(&format!(
+        "Build complete — {}/{} package(s) built successfully",
+        succeeded,
+        resolved.len()
+    ));
+    Ok(())
+}
+
+// ── Config-file mode (deploy/<target>.yaml) ─────────────────────────────────
 
 /// Build packages referenced by a deploy config file.
-///
-/// Reads deploy/<target>.yaml + upstream robonix_workspace.yaml using new
-/// format (packages_run / workspace packages). Currently a stub that
-/// validates parsing; full build logic will be implemented in stage three.
 pub async fn execute_from_config(config_path: PathBuf, clean: bool) -> Result<()> {
     let config_path = config_path
         .canonicalize()
@@ -165,134 +263,26 @@ pub async fn execute_from_config(config_path: PathBuf, clean: bool) -> Result<()
         WorkspaceConfig::default()
     };
 
-    // Print summary.
-    output::sub_step(&format!(
-        "workspace: {}, {} workspace package(s), {} packages_run entry(ies)",
-        ws.workspace.as_deref().unwrap_or("unnamed"),
-        ws.packages.len(),
-        cfg.packages_run.len(),
-    ));
-
     if ws.packages.is_empty() {
         output::warning("no packages declared in workspace — nothing to build");
         return Ok(());
     }
 
-    // Resolve packages from workspace and build using manifest.depend for topo sort.
-    struct ResolvedPackage {
-        name: String,
-        root: PathBuf,
-        manifest: manifest::Manifest,
-    }
+    let workspace_root = find_workspace_root(&base_dir)?;
 
-    let mut resolved: Vec<ResolvedPackage> = Vec::new();
+    // Ensure all packages exist (with git clone support).
+    let package_paths = ensure_packages_exist(&workspace_root, &ws.packages)?;
 
-    for pkg_entry in &ws.packages {
-        // Resolve package path.
-        let pkg_path = if let Some(ref path) = pkg_entry.path {
-            let resolved_path = base_dir.parent().unwrap_or(&base_dir).join(path);
-            if !resolved_path.exists() {
-                anyhow::bail!(
-                    "package '{}' path '{}' does not exist (resolved to {})",
-                    pkg_entry.name,
-                    path,
-                    resolved_path.display()
-                );
-            }
-            resolved_path
-                .canonicalize()
-                .unwrap_or(resolved_path)
-        } else {
-            // Try packages/<short_name>
-            let ws_root = base_dir.parent().unwrap_or(&base_dir);
-            let short_name = pkg_entry.name.rsplit('.').next().unwrap_or(&pkg_entry.name);
-            let candidate = ws_root.join("packages").join(short_name);
-            if !candidate.exists() {
-                anyhow::bail!(
-                    "package '{}' not found at {}{}",
-                    pkg_entry.name,
-                    candidate.display(),
-                    if pkg_entry.url.is_some() {
-                        " (has url, auto-clone not yet implemented)"
-                    } else {
-                        " and no url specified"
-                    }
-                );
-            }
-            candidate
-                .canonicalize()
-                .unwrap_or(candidate)
-        };
+    // Workspace-level build directory.
+    let build_dir = workspace_root.join("build");
 
-        // Load manifest.
-        let manifest_path = pkg_path.join(manifest::MANIFEST_FILE);
-        if !manifest_path.exists() {
-            anyhow::bail!(
-                "package '{}' is missing {} at {}",
-                pkg_entry.name,
-                manifest::MANIFEST_FILE,
-                manifest_path.display()
-            );
-        }
-        let pkg_manifest = manifest::load_from_path(&manifest_path)?;
-        output::check(&format!(
-            "{} — {} v{}",
-            pkg_entry.name, pkg_manifest.package.name, pkg_manifest.package.version
-        ));
-
-        resolved.push(ResolvedPackage {
-            name: pkg_entry.name.clone(),
-            root: pkg_path,
-            manifest: pkg_manifest,
-        });
-    }
-
-    // Topological sort using manifest.depend.
-    let items: Vec<(&str, &[String])> = resolved
-        .iter()
-        .map(|p| (p.name.as_str(), p.manifest.depend.as_slice()))
-        .collect();
-    let build_order = deploy::topo_sort(&items)?;
-    let order_names: Vec<&str> = build_order.iter().map(|&i| resolved[i].name.as_str()).collect();
-    output::step("Build order", &order_names.join(" → "));
-
-    // Build each package.
-    let mut succeeded = 0usize;
-
-    for (step_num, &idx) in build_order.iter().enumerate() {
-        let pkg = &resolved[idx];
-        output::action(
-            &format!("[{}/{}] Building", step_num + 1, build_order.len()),
-            &format!("{} ({})", pkg.name, pkg.root.display()),
-        );
-        match build_local(&pkg.root, &pkg.manifest, clean) {
-            Ok(()) => succeeded += 1,
-            Err(e) => {
-                output::error(&format!("package '{}' build failed: {}", pkg.name, e));
-                anyhow::bail!(
-                    "stopping build — package '{}' failed ({} succeeded)",
-                    pkg.name,
-                    succeeded,
-                );
-            }
-        }
-    }
-
-    output::success(&format!(
-        "Build complete — {}/{} package(s) built successfully",
-        succeeded,
-        resolved.len()
-    ));
-
-    Ok(())
+    resolve_and_build(&package_paths, &ws.packages, clean, Some(&build_dir))
 }
 
 // ── Workspace mode (no config file) ─────────────────────────────────────────
 
 /// Build all packages from robonix_workspace.yaml in the current directory.
-///
-/// Stub implementation — will be fully implemented in stage four.
-pub async fn execute_from_workspace(_clean: bool) -> Result<()> {
+pub async fn execute_from_workspace(clean: bool) -> Result<()> {
     let ws_yaml = PathBuf::from("robonix_workspace.yaml");
     if !ws_yaml.exists() {
         anyhow::bail!(
@@ -301,6 +291,7 @@ pub async fn execute_from_workspace(_clean: bool) -> Result<()> {
         );
     }
 
+    let workspace_root = std::env::current_dir()?;
     let content = fs::read_to_string(&ws_yaml)?;
     let ws: WorkspaceConfig = serde_yaml::from_str(&content)
         .with_context(|| "failed to parse robonix_workspace.yaml")?;
@@ -319,6 +310,11 @@ pub async fn execute_from_workspace(_clean: bool) -> Result<()> {
         return Ok(());
     }
 
-    output::warning("workspace-level build not yet fully implemented (stage 4 WIP)");
-    Ok(())
+    // Ensure all packages exist (with git clone support).
+    let package_paths = ensure_packages_exist(&workspace_root, &ws.packages)?;
+
+    // Workspace-level build directory.
+    let build_dir = workspace_root.join("build");
+
+    resolve_and_build(&package_paths, &ws.packages, clean, Some(&build_dir))
 }
