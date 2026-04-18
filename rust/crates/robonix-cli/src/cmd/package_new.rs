@@ -34,6 +34,16 @@ nodes:
     type: python
     start: >
       bash scripts/start.sh
+
+interfaces:
+  provides: []
+    # - id: robonix/prm/camera/rgb
+  consumes: []
+    # - id: robonix/sys/perception/yolo/gpu_tensor
+
+# Package-level dependencies (other package names this package depends on)
+depend: []
+  # - com.robonix.pkg.memory
 "#;
 
 const BUILD_SH_TEMPLATE: &str = r#"#!/usr/bin/env bash
@@ -159,18 +169,22 @@ pub async fn execute(name: &str, path: Option<&Path>) -> Result<()> {
     output::check("src/");
 
     // Summary.
+    let pkg_abs = pkg_root.canonicalize().unwrap_or_else(|_| pkg_root.clone());
     output::success(&format!(
         "Package '{}' created at {}",
         name,
-        pkg_root.display()
+        pkg_abs.display()
     ));
     output::info("");
     output::info("Next steps:");
-    output::info(&format!("  cd {}", pkg_root.display()));
-    output::info("  # Edit robonix_manifest.yaml to describe your package");
-    output::info("  # Edit scripts/build.sh with your build commands");
-    output::info("  # Edit scripts/start.sh with your start commands");
-    output::info("  # Add your package to config.yaml under 'packages:'");
+    output::info("  1. Edit robonix_manifest.yaml to describe your package");
+    output::info("  2. Edit scripts/build.sh with your build commands");
+    output::info("  3. Edit scripts/start.sh with your start commands");
+    output::info("  4. Add your package to robonix_workspace.yaml under 'packages:'");
+    output::info(&format!("     e.g.  - name: com.vendor.{}", name));
+    output::info(&format!("            path: ./packages/{}", name));
+    output::info("  5. Add your package:node to deploy/<target>.yaml under 'packages_run:'");
+    output::info(&format!("     e.g.  - name: com.vendor.{}:all", name));
 
     Ok(())
 }

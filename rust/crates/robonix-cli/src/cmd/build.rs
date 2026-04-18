@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Build command: run the package's build.script
 //
-// Two modes:
-//   1) Single-package mode: `rbnx build -p <path>` or `rbnx build -g <name>`
-//   2) Config-file mode:    `rbnx build --config <config.yaml>`
-//      Reads config.yaml (+ upstream robonix_workspace.yaml), discovers all
-//      packages, topo-sorts by depends_on, validates contracts, and builds each.
+// Modes:
+//   1) Single-package:   `rbnx build -p <path>` or `rbnx build -g <name>`
+//   2) Config-file:      `rbnx build -c <config.yaml>`
+//   3) Target:           `rbnx build <target>`  (finds deploy/<target>.yaml)
+//   4) Workspace:        `rbnx build`           (reads robonix_workspace.yaml)
 
 use anyhow::{Context, Result};
 use robonix_cli::manifest;
 use robonix_cli::output;
-use serde::Deserialize;
+use robonix_cli::workspace::{DeployConfig, WorkspaceConfig};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,42 +19,6 @@ use super::deploy; // Reuse topo_sort from deploy module.
 
 const RBNX_BUILD_DIR: &str = "rbnx-build";
 const RBNX_BUILT_STAMP: &str = "rbnx-build/.rbnx-built";
-
-// ── Config-file schema (subset of deploy config) ────────────────────────────
-
-#[derive(Debug, Deserialize)]
-struct BuildConfig {
-    #[serde(default)]
-    upstream_config: Option<String>,
-    #[serde(default)]
-    packages: Vec<BuildPackageEntry>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct UpstreamWorkspace {
-    #[serde(default)]
-    workspace: Option<String>,
-    /// System services define contract_ids that downstream packages may consume.
-    #[serde(default)]
-    system: Vec<SystemEntry>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
-struct SystemEntry {
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    contract_id: String,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-struct BuildPackageEntry {
-    name: String,
-    path: String,
-    #[serde(default)]
-    depends_on: Vec<String>,
-}
 
 // ── Existing helpers ────────────────────────────────────────────────────────
 
@@ -138,14 +102,13 @@ pub async fn execute_local(path: PathBuf, clean: bool) -> Result<()> {
     Ok(())
 }
 
-// ── Config-file mode ────────────────────────────────────────────────────────
+// ── Config-file mode (new format: deploy/<target>.yaml) ─────────────────────
 
-/// Build all packages defined in a config.yaml file:
-///   1. Parse config.yaml, optionally load upstream robonix_workspace.yaml
-///   2. Resolve each package path, load its robonix_manifest.yaml
-///   3. Validate contracts against upstream (consumed interfaces vs upstream contract_ids)
-///   4. Topological sort by depends_on
-///   5. Build each package in order
+/// Build packages referenced by a deploy config file.
+///
+/// Reads deploy/<target>.yaml + upstream robonix_workspace.yaml using new
+/// format (packages_run / workspace packages). Currently a stub that
+/// validates parsing; full build logic will be implemented in stage three.
 pub async fn execute_from_config(config_path: PathBuf, clean: bool) -> Result<()> {
     let config_path = config_path
         .canonicalize()
@@ -155,7 +118,7 @@ pub async fn execute_from_config(config_path: PathBuf, clean: bool) -> Result<()
 
     let content = fs::read_to_string(&config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
-    let cfg: BuildConfig = serde_yaml::from_str(&content)
+    let cfg: DeployConfig = serde_yaml::from_str(&content)
         .with_context(|| format!("failed to parse {}", config_path.display()))?;
 
     let base_dir = config_path
@@ -172,13 +135,13 @@ pub async fn execute_from_config(config_path: PathBuf, clean: bool) -> Result<()
         .canonicalize()
         .unwrap_or_else(|_| base_dir.to_path_buf());
 
-    // ── Load upstream config for contract validation ────────────────────────
-    let upstream = if let Some(ref upstream_path) = cfg.upstream_config {
+    // Load upstream workspace config.
+    let ws = if let Some(ref upstream_path) = cfg.upstream_config {
         let resolved = base_dir.join(upstream_path);
         if resolved.exists() {
             let upstream_content = fs::read_to_string(&resolved)
                 .with_context(|| format!("failed to read upstream config {}", resolved.display()))?;
-            let up: UpstreamWorkspace = serde_yaml::from_str(&upstream_content).with_context(|| {
+            let ws: WorkspaceConfig = serde_yaml::from_str(&upstream_content).with_context(|| {
                 format!("failed to parse upstream config {}", resolved.display())
             })?;
             output::step(
@@ -186,158 +149,115 @@ pub async fn execute_from_config(config_path: PathBuf, clean: bool) -> Result<()
                 &format!(
                     "upstream config: {} (workspace: {})",
                     resolved.display(),
-                    up.workspace.as_deref().unwrap_or("unnamed")
+                    ws.workspace.as_deref().unwrap_or("unnamed")
                 ),
             );
-            up
+            ws
         } else {
             output::warning(&format!(
                 "upstream_config '{}' not found at {}, skipping",
                 upstream_path,
                 resolved.display()
             ));
-            UpstreamWorkspace::default()
+            WorkspaceConfig::default()
         }
     } else {
-        UpstreamWorkspace::default()
+        WorkspaceConfig::default()
     };
 
-    // Build set of available upstream contract_ids for validation.
-    let upstream_contracts: Vec<&str> = upstream
-        .system
-        .iter()
-        .filter(|s| !s.contract_id.is_empty())
-        .map(|s| s.contract_id.as_str())
-        .collect();
-    if !upstream_contracts.is_empty() {
-        output::step("Upstream", &format!("{} contract(s) available", upstream_contracts.len()));
-        for cid in &upstream_contracts {
-            output::sub_step(&format!("contract: {}", cid));
-        }
-    }
+    // Print summary.
+    output::sub_step(&format!(
+        "workspace: {}, {} workspace package(s), {} packages_run entry(ies)",
+        ws.workspace.as_deref().unwrap_or("unnamed"),
+        ws.packages.len(),
+        cfg.packages_run.len(),
+    ));
 
-    if cfg.packages.is_empty() {
-        output::warning("no packages defined in config — nothing to build");
+    if ws.packages.is_empty() {
+        output::warning("no packages declared in workspace — nothing to build");
         return Ok(());
     }
 
-    // ── Resolve packages and load manifests ─────────────────────────────────
-    output::step("Resolving", &format!("{} package(s)", cfg.packages.len()));
-
+    // Resolve packages from workspace and build using manifest.depend for topo sort.
     struct ResolvedPackage {
         name: String,
         root: PathBuf,
         manifest: manifest::Manifest,
-        depends_on: Vec<String>,
     }
 
     let mut resolved: Vec<ResolvedPackage> = Vec::new();
 
-    for entry in &cfg.packages {
-        let pkg_path = base_dir.join(&entry.path);
-        if !pkg_path.exists() {
-            output::cross(&format!(
-                "package '{}': path {} does not exist",
-                entry.name,
-                pkg_path.display()
-            ));
-            anyhow::bail!(
-                "package '{}' path {} not found",
-                entry.name,
-                pkg_path.display()
-            );
-        }
+    for pkg_entry in &ws.packages {
+        // Resolve package path.
+        let pkg_path = if let Some(ref path) = pkg_entry.path {
+            let resolved_path = base_dir.parent().unwrap_or(&base_dir).join(path);
+            if !resolved_path.exists() {
+                anyhow::bail!(
+                    "package '{}' path '{}' does not exist (resolved to {})",
+                    pkg_entry.name,
+                    path,
+                    resolved_path.display()
+                );
+            }
+            resolved_path
+                .canonicalize()
+                .unwrap_or(resolved_path)
+        } else {
+            // Try packages/<short_name>
+            let ws_root = base_dir.parent().unwrap_or(&base_dir);
+            let short_name = pkg_entry.name.rsplit('.').next().unwrap_or(&pkg_entry.name);
+            let candidate = ws_root.join("packages").join(short_name);
+            if !candidate.exists() {
+                anyhow::bail!(
+                    "package '{}' not found at {}{}",
+                    pkg_entry.name,
+                    candidate.display(),
+                    if pkg_entry.url.is_some() {
+                        " (has url, auto-clone not yet implemented)"
+                    } else {
+                        " and no url specified"
+                    }
+                );
+            }
+            candidate
+                .canonicalize()
+                .unwrap_or(candidate)
+        };
 
-        let pkg_root = pkg_path
-            .canonicalize()
-            .unwrap_or_else(|_| pkg_path.clone());
-
-        // Load robonix_manifest.yaml.
-        let manifest_path = pkg_root.join(manifest::MANIFEST_FILE);
+        // Load manifest.
+        let manifest_path = pkg_path.join(manifest::MANIFEST_FILE);
         if !manifest_path.exists() {
-            output::cross(&format!(
-                "package '{}': {} not found at {}",
-                entry.name,
+            anyhow::bail!(
+                "package '{}' is missing {} at {}",
+                pkg_entry.name,
                 manifest::MANIFEST_FILE,
                 manifest_path.display()
-            ));
-            anyhow::bail!(
-                "package '{}' is missing {}",
-                entry.name,
-                manifest::MANIFEST_FILE
             );
         }
-
-        let pkg_manifest = manifest::load_from_path(&manifest_path).with_context(|| {
-            format!(
-                "failed to load {} for package '{}'",
-                manifest::MANIFEST_FILE,
-                entry.name
-            )
-        })?;
-
+        let pkg_manifest = manifest::load_from_path(&manifest_path)?;
         output::check(&format!(
             "{} — {} v{}",
-            entry.name, pkg_manifest.package.name, pkg_manifest.package.version
+            pkg_entry.name, pkg_manifest.package.name, pkg_manifest.package.version
         ));
 
         resolved.push(ResolvedPackage {
-            name: entry.name.clone(),
-            root: pkg_root,
+            name: pkg_entry.name.clone(),
+            root: pkg_path,
             manifest: pkg_manifest,
-            depends_on: entry.depends_on.clone(),
         });
     }
 
-    // ── Validate contracts against upstream ─────────────────────────────────
-    output::step("Validating", "contracts against upstream");
-
-    let mut contract_warnings = 0usize;
-    for pkg in &resolved {
-        if let Some(ref interfaces) = pkg.manifest.interfaces {
-            for consumed in &interfaces.consumes {
-                // Exact match only — avoid prefix matching which could produce
-                // false positives (e.g. "robonix/sys/model" matching
-                // "robonix/sys/model_evil").
-                let matched = upstream_contracts
-                    .iter()
-                    .any(|cid| *cid == consumed.id);
-                if matched {
-                    output::check(&format!(
-                        "{}: consumed interface '{}' ← upstream OK",
-                        pkg.name, consumed.id
-                    ));
-                } else {
-                    output::warning(&format!(
-                        "{}: consumed interface '{}' not found in upstream contracts",
-                        pkg.name, consumed.id
-                    ));
-                    contract_warnings += 1;
-                }
-            }
-        }
-    }
-    if contract_warnings == 0 {
-        output::check("all contracts validated");
-    } else {
-        output::warning(&format!(
-            "{} contract warning(s) — some consumed interfaces may not be satisfied at runtime",
-            contract_warnings
-        ));
-    }
-
-    // ── Topological sort (reuse shared implementation) ──────────────────────
+    // Topological sort using manifest.depend.
     let items: Vec<(&str, &[String])> = resolved
         .iter()
-        .map(|p| (p.name.as_str(), p.depends_on.as_slice()))
+        .map(|p| (p.name.as_str(), p.manifest.depend.as_slice()))
         .collect();
     let build_order = deploy::topo_sort(&items)?;
     let order_names: Vec<&str> = build_order.iter().map(|&i| resolved[i].name.as_str()).collect();
     output::step("Build order", &order_names.join(" → "));
 
-    // ── Build each package ──────────────────────────────────────────────────
+    // Build each package.
     let mut succeeded = 0usize;
-    let mut failed = 0usize;
 
     for (step_num, &idx) in build_order.iter().enumerate() {
         let pkg = &resolved[idx];
@@ -349,13 +269,10 @@ pub async fn execute_from_config(config_path: PathBuf, clean: bool) -> Result<()
             Ok(()) => succeeded += 1,
             Err(e) => {
                 output::error(&format!("package '{}' build failed: {}", pkg.name, e));
-                failed += 1;
-                // Stop on first failure (downstream packages likely depend on this).
                 anyhow::bail!(
-                    "stopping build — package '{}' failed ({} succeeded, {} failed)",
+                    "stopping build — package '{}' failed ({} succeeded)",
                     pkg.name,
                     succeeded,
-                    failed
                 );
             }
         }
@@ -367,5 +284,41 @@ pub async fn execute_from_config(config_path: PathBuf, clean: bool) -> Result<()
         resolved.len()
     ));
 
+    Ok(())
+}
+
+// ── Workspace mode (no config file) ─────────────────────────────────────────
+
+/// Build all packages from robonix_workspace.yaml in the current directory.
+///
+/// Stub implementation — will be fully implemented in stage four.
+pub async fn execute_from_workspace(_clean: bool) -> Result<()> {
+    let ws_yaml = PathBuf::from("robonix_workspace.yaml");
+    if !ws_yaml.exists() {
+        anyhow::bail!(
+            "no robonix_workspace.yaml found in current directory; \
+             use 'rbnx build <target>' or 'rbnx build -c <config>' instead"
+        );
+    }
+
+    let content = fs::read_to_string(&ws_yaml)?;
+    let ws: WorkspaceConfig = serde_yaml::from_str(&content)
+        .with_context(|| "failed to parse robonix_workspace.yaml")?;
+
+    output::action(
+        "Build",
+        &format!(
+            "from workspace {} ({} package(s))",
+            ws.workspace.as_deref().unwrap_or("unnamed"),
+            ws.packages.len(),
+        ),
+    );
+
+    if ws.packages.is_empty() {
+        output::warning("no packages declared in workspace — nothing to build");
+        return Ok(());
+    }
+
+    output::warning("workspace-level build not yet fully implemented (stage 4 WIP)");
     Ok(())
 }

@@ -4,9 +4,9 @@
 // Usage:  rbnx init <name> [--path <dir>]
 // Creates:
 //   <name>/
-//   ├── robonix_workspace.yaml   (upstream workspace config template)
+//   ├── robonix_workspace.yaml   (workspace config: env + packages list)
 //   ├── deploy/
-//   │   └── config.yaml          (project-level deploy config)
+//   │   └── init.yaml            (deploy profile: target, env overrides, packages_run)
 //   ├── packages/                (empty directory for user packages)
 //   └── .gitignore
 
@@ -19,56 +19,34 @@ const WORKSPACE_YAML_TEMPLATE: &str = r#"workspace: {name}
 
 # Global environment variables (injected into all child processes)
 env:
-  VLM_API_KEY: ""
-  VLM_BASE_URL: ""
-  VLM_MODEL: ""
+  ROBONIX_ATLAS: "127.0.0.1:50051"
+  ROBONIX_META_GRPC_ENDPOINT: "127.0.0.1:50051"
+  ROBONIX_ATLAS_ENDPOINT: "http://127.0.0.1:50051"
+  ROBONIX_EXECUTOR_ENDPOINT: "http://127.0.0.1:50061"
+  ROBONIX_PILOT_ENDPOINT: "http://127.0.0.1:50071"
+  RUST_LOG: "robonix_atlas=info,robonix_pilot=info,robonix_executor=info,robonix_liaison=warn"
 
-# ── Robonix runtime core components (started in dependency order) ──────────
-runtime:
-  - name: robonix-atlas
-    endpoint: "127.0.0.1:50051"
-    description: Service registry and discovery
-
-  - name: robonix-executor
-    endpoint: "127.0.0.1:50061"
-    depends_on:
-      - robonix-atlas
-    description: Task scheduling and execution engine
-
-  - name: robonix-pilot
-    endpoint: "127.0.0.1:50071"
-    depends_on:
-      - robonix-atlas
-      - robonix-executor
-    description: Autonomous decision making and planner
-
-  - name: robonix-liaison
-    endpoint: "127.0.0.1:50081"
-    depends_on:
-      - robonix-atlas
-    description: External communication and bridge gateway
-
-# ── Upstream system services (started after runtime is ready) ──────────────
-system: []
-  # Example:
-  # - name: robonix.sys.model.vlm
-  #   contract_id: robonix/sys/model/vlm/chat
-  #   node_id: com.robonix.services.vlm
-  #   depends_on:
-  #     - robonix-atlas
-  #     - robonix-executor
-  #   description: VLM vision-language model
+# Packages in this workspace (url or path, at least one required per entry)
+packages: []
+  # Examples:
+  # - name: com.robonix.pkg.memory
+  #   url: https://github.com/xxx
+  #
+  # - name: my.local.pkg
+  #   path: ./packages/my_local_pkg
 "#;
 
 const CONFIG_YAML_TEMPLATE: &str = r#"upstream_config: ../robonix_workspace.yaml
-target: default
+target: init
 
-# Downstream packages
-packages: []
-  # Example:
-  # - name: my-package
-  #   path: ./packages/my_package
-  #   depends_on: []
+# Environment variable overrides (merged with workspace env, local wins)
+env: {}
+
+# Packages and nodes to run (format: "package_name:node_id" or "package_name:all")
+packages_run: []
+  # Examples:
+  # - name: com.robonix.pkg.mapping:all
+  # - name: com.robonix.pkg.memory:node_xx
 "#;
 
 const GITIGNORE_TEMPLATE: &str = r#"# Build artifacts
@@ -146,14 +124,14 @@ pub async fn execute(name: &str, path: Option<&Path>) -> Result<()> {
     })?;
     output::check("robonix_workspace.yaml");
 
-    // Create deploy/ directory and write config.yaml.
+    // Create deploy/ directory and write init.yaml.
     fs::create_dir_all(workspace_dir.join("deploy"))
         .with_context(|| format!("failed to create {}/deploy", workspace_dir.display()))?;
-    let config_yaml_path = workspace_dir.join("deploy").join("config.yaml");
+    let config_yaml_path = workspace_dir.join("deploy").join("init.yaml");
     fs::write(&config_yaml_path, CONFIG_YAML_TEMPLATE).with_context(|| {
         format!("failed to write {}", config_yaml_path.display())
     })?;
-    output::check("deploy/config.yaml");
+    output::check("deploy/init.yaml");
 
     // Write .gitignore.
     let gitignore_path = workspace_dir.join(".gitignore");
@@ -162,16 +140,16 @@ pub async fn execute(name: &str, path: Option<&Path>) -> Result<()> {
     output::check(".gitignore");
 
     // Summary.
-    output::success(&format!("Workspace '{}' created at {}", name, workspace_dir.display()));
+    let ws_abs = workspace_dir.canonicalize().unwrap_or_else(|_| workspace_dir.clone());
+    output::success(&format!("Workspace '{}' created at {}", name, ws_abs.display()));
     output::info("");
     output::info("Next steps:");
-    output::info(&format!(
-        "  cd {}",
-        workspace_dir.display()
-    ));
-    output::info("  rbnx package new my_package    # create a new package");
-    output::info("  rbnx build --config deploy/config.yaml # build all packages");
-    output::info("  rbnx deploy deploy/config.yaml         # deploy the full stack");
+    output::info(&format!("  cd {}", ws_abs.display()));
+    output::info("  rbnx package-new my_package        # create a new package");
+    output::info("  rbnx build                          # build all workspace packages");
+    output::info("  rbnx deploy                         # deploy using workspace config");
+    output::info("  rbnx build init                     # build by deploy target 'init'");
+    output::info("  rbnx deploy init                    # deploy by target 'init'");
 
     Ok(())
 }

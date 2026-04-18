@@ -22,6 +22,8 @@ pub struct PackageSummary {
     pub provided_interfaces: Vec<String>,
     pub consumed_interfaces: Vec<String>,
     pub nodes: Vec<String>,
+    /// Package-level dependencies (other package names this package depends on).
+    pub depend: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -37,6 +39,9 @@ pub struct Manifest {
     /// How this package is built: `rbnx build` runs `bash <script>` from the package root.
     #[serde(default)]
     pub build: BuildConfig,
+    /// Package-level dependencies: names of other packages this package depends on.
+    #[serde(default)]
+    pub depend: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -153,6 +158,7 @@ impl Manifest {
             provided_interfaces: interfaces.provides.into_iter().map(|i| i.id).collect(),
             consumed_interfaces: interfaces.consumes.into_iter().map(|i| i.id).collect(),
             nodes: self.nodes.iter().map(|n| n.id.clone()).collect(),
+            depend: self.depend.clone(),
         })
     }
 }

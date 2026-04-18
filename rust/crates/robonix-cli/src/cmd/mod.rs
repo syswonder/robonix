@@ -64,16 +64,19 @@ pub enum Commands {
         #[arg(short = 'p', long)]
         path: Option<PathBuf>,
     },
-    /// Build a package (local path or system-installed) or all packages from a config
+    /// Build packages: single package, by target, by config, or entire workspace
     Build {
-        /// Build by local path (e.g. examples/skill_demo)
-        #[arg(short = 'p', long, conflicts_with = "config")]
+        /// Target name: find matching config in deploy/ directory
+        #[arg(value_name = "TARGET", conflicts_with_all = ["path", "global", "config"])]
+        target: Option<String>,
+        /// Build by local path (e.g. packages/my_pkg)
+        #[arg(short = 'p', long, conflicts_with_all = ["target", "config"])]
         path: Option<PathBuf>,
         /// Build by system-installed package name
-        #[arg(short = 'g', long, conflicts_with = "config")]
+        #[arg(short = 'g', long, conflicts_with_all = ["target", "config"])]
         global: Option<String>,
-        /// Build all packages from a config.yaml file
-        #[arg(short = 'c', long = "config", conflicts_with_all = ["path", "global"])]
+        /// Build from a specific config file
+        #[arg(short = 'c', long = "config", conflicts_with_all = ["target", "path", "global"])]
         config: Option<PathBuf>,
         /// Clean build (remove rbnx-build before building). Default: incremental.
         #[arg(long)]
@@ -216,11 +219,14 @@ pub enum Commands {
         args: GraphArgs,
     },
 
-    /// Deploy a full stack from a config.yaml file (runtime + services + packages)
+    /// Deploy a full stack: by target name, by config file, or from workspace
     Deploy {
-        /// Path to config.yaml
-        #[arg(required = true)]
-        config: PathBuf,
+        /// Target name: find matching config in deploy/ directory
+        #[arg(value_name = "TARGET", conflicts_with = "config")]
+        target: Option<String>,
+        /// Deploy from a specific config file
+        #[arg(short = 'c', long = "config", conflicts_with = "target")]
+        config: Option<PathBuf>,
     },
 }
 
@@ -229,15 +235,28 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         Commands::Init { name, path } => init::execute(&name, path.as_deref()).await,
         Commands::PackageNew { name, path } => package_new::execute(&name, path.as_deref()).await,
         Commands::Build {
+            target,
             path,
             global,
             config: config_file,
             clean,
         } => {
-            if let Some(cfg_path) = config_file {
+            if let Some(p) = path {
+                // -p mode: single-package build (preserved)
+                build::execute_local(p, clean).await
+            } else if let Some(ref g) = global {
+                // -g mode: global package build (preserved)
+                run_package::execute_build(config, None, Some(g.clone()), clean).await
+            } else if let Some(cfg_path) = config_file {
+                // -c mode: build from specified config file
+                build::execute_from_config(cfg_path, clean).await
+            } else if let Some(target_name) = target {
+                // <target> mode: find deploy/<target>.yaml
+                let cfg_path = find_deploy_config_by_target(&target_name)?;
                 build::execute_from_config(cfg_path, clean).await
             } else {
-                run_package::execute_build(config, path, global, clean).await
+                // No args: workspace-level build from robonix_workspace.yaml
+                build::execute_from_workspace(clean).await
             }
         }
         Commands::Start {
@@ -277,11 +296,68 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         Commands::Graph { args } => {
             graph::execute(&args.server, args.output, args.format, args.test_mode).await
         }
-        Commands::Deploy { config } => {
-            let config_path = config
-                .canonicalize()
-                .unwrap_or_else(|_| config.clone());
-            deploy::execute(&config_path).await
+        Commands::Deploy { target, config } => {
+            if let Some(cfg_path) = config {
+                let cfg_path = cfg_path.canonicalize().unwrap_or(cfg_path);
+                deploy::execute(&cfg_path).await
+            } else if let Some(target_name) = target {
+                let cfg_path = find_deploy_config_by_target(&target_name)?;
+                deploy::execute(&cfg_path).await
+            } else {
+                // No args: workspace-level deploy from robonix_workspace.yaml
+                deploy::execute_from_workspace().await
+            }
         }
     }
+}
+
+/// Find a deploy config file by target name.
+/// Searches `deploy/` directory for `<target>.yaml` or a file with `target: <name>`.
+fn find_deploy_config_by_target(target: &str) -> Result<PathBuf> {
+    let deploy_dir = PathBuf::from("deploy");
+    if !deploy_dir.is_dir() {
+        anyhow::bail!(
+            "deploy/ directory not found in current directory; \
+             use '-c <path>' to specify a config file directly"
+        );
+    }
+
+    // Strategy 1: direct filename match deploy/<target>.yaml
+    let direct = deploy_dir.join(format!("{}.yaml", target));
+    if direct.exists() {
+        return Ok(direct.canonicalize()?);
+    }
+
+    // Strategy 2: scan deploy/*.yaml for matching `target` field
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    struct Peek {
+        target: Option<String>,
+    }
+
+    for entry in std::fs::read_dir(&deploy_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path
+            .extension()
+            .map(|e| e == "yaml" || e == "yml")
+            .unwrap_or(false)
+        {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(peek) = serde_yaml::from_str::<Peek>(&content) {
+                    if peek.target.as_deref() == Some(target) {
+                        return Ok(path.canonicalize()?);
+                    }
+                }
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "no deploy config found for target '{}' in deploy/ directory.\n\
+         Expected deploy/{}.yaml or a file with 'target: {}' field.",
+        target,
+        target,
+        target
+    );
 }
