@@ -10,23 +10,21 @@
 //   Step 4 — start nodes in dependency order
 
 use anyhow::{Context, Result};
+use robonix_cli::manifest;
 use robonix_cli::output;
 use robonix_cli::workspace::{
-    DeployConfig, MergedConfig, WorkspaceConfig, parse_package_run,
+    DeployConfig, MergedConfig, NodeSelector, ParsedPackageRun, WorkspaceConfig,
+    WorkspacePackageEntry, parse_package_run,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::{Child, Command};
 use tokio::time::{Duration, sleep};
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Process helpers ─────────────────────────────────────────────────────────
 
-/// Spawn a background process.  Returns the Child handle (caller must store it).
-///
-/// On Unix, the child is placed into its own process group via `pre_exec(setsid)`
-/// so that we can cleanly terminate it later without killing the parent shell.
-#[allow(dead_code)]
+/// Spawn a background process in its own process group.
 async fn spawn_background(
     label: &str,
     cmd: &str,
@@ -42,11 +40,9 @@ async fn spawn_background(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    // Place child in its own process group so we can kill it independently.
     #[cfg(unix)]
     unsafe {
         command.pre_exec(|| {
-            // Create a new session / process group for this child.
             nix::unistd::setsid().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
             Ok(())
         });
@@ -58,8 +54,7 @@ async fn spawn_background(
     Ok(child)
 }
 
-/// Wait for a TCP endpoint to become reachable (connect-only check).
-#[allow(dead_code)]
+/// Wait for a TCP endpoint to become reachable.
 async fn wait_for_endpoint(addr: &str, timeout: Duration) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
     while tokio::time::Instant::now() < deadline {
@@ -71,12 +66,33 @@ async fn wait_for_endpoint(addr: &str, timeout: Duration) -> bool {
     false
 }
 
-/// Generic topological sort using Kahn's algorithm with FIFO (VecDeque)
-/// for correct alphabetical ordering.
-///
-/// `items` is a slice of (name, depends_on) pairs.
-/// Returns indices in dependency-first order.
-/// Reports an error if any `depends_on` reference is unknown.
+/// Gracefully shut down all tracked child processes.
+#[cfg(unix)]
+async fn shutdown_children(children: &mut Vec<Child>) {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+
+    for child in children.iter_mut() {
+        if let Some(pid) = child.id() {
+            let _ = kill(Pid::from_raw(-(pid as i32)), Signal::SIGTERM);
+        }
+    }
+    sleep(Duration::from_secs(2)).await;
+    for child in children.iter_mut() {
+        let _ = child.kill().await;
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_children(children: &mut Vec<Child>) {
+    for child in children.iter_mut() {
+        let _ = child.kill().await;
+    }
+}
+
+// ── Topological sort ────────────────────────────────────────────────────────
+
+/// Generic topological sort using Kahn's algorithm.
 pub(crate) fn topo_sort(items: &[(&str, &[String])]) -> Result<Vec<usize>> {
     let name_to_idx: HashMap<&str, usize> = items
         .iter()
@@ -104,7 +120,6 @@ pub(crate) fn topo_sort(items: &[(&str, &[String])]) -> Result<Vec<usize>> {
         }
     }
 
-    // Kahn's algorithm with a VecDeque (FIFO) for stable alphabetical order.
     let mut ready: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
     ready.sort_by(|a, b| items[*a].0.cmp(items[*b].0));
     let mut queue: VecDeque<usize> = ready.into_iter().collect();
@@ -112,7 +127,6 @@ pub(crate) fn topo_sort(items: &[(&str, &[String])]) -> Result<Vec<usize>> {
     let mut order = Vec::with_capacity(n);
     while let Some(node) = queue.pop_front() {
         order.push(node);
-        // Collect newly-ready neighbors, sort alphabetically, then enqueue.
         let mut newly_ready = Vec::new();
         for &nb in &adj[node] {
             in_degree[nb] -= 1;
@@ -140,16 +154,13 @@ pub(crate) fn topo_sort(items: &[(&str, &[String])]) -> Result<Vec<usize>> {
 
 // ── Config loading & merging ────────────────────────────────────────────────
 
-/// Load and merge configs: read deploy/<target>.yaml, optionally load upstream
-/// robonix_workspace.yaml, merge env (upstream defaults, local overrides),
-/// parse packages_run entries.
+/// Load deploy config + upstream workspace config, merge env, parse packages_run.
 fn load_and_merge(config_path: &Path) -> Result<(MergedConfig, PathBuf)> {
     let content = std::fs::read_to_string(config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
     let cfg: DeployConfig = serde_yaml::from_str(&content)
         .with_context(|| format!("failed to parse {}", config_path.display()))?;
 
-    // Resolve base directory (config file's parent).
     let base_dir = config_path
         .parent()
         .map(|p| {
@@ -164,7 +175,6 @@ fn load_and_merge(config_path: &Path) -> Result<(MergedConfig, PathBuf)> {
         .canonicalize()
         .unwrap_or_else(|_| base_dir.to_path_buf());
 
-    // Load upstream workspace config if specified.
     let upstream = if let Some(ref upstream_path) = cfg.upstream_config {
         let resolved = base_dir.join(upstream_path);
         if resolved.exists() {
@@ -191,13 +201,11 @@ fn load_and_merge(config_path: &Path) -> Result<(MergedConfig, PathBuf)> {
         WorkspaceConfig::default()
     };
 
-    // Merge env: upstream provides defaults, local config overrides.
     let mut merged_env = upstream.env.clone();
     for (k, v) in &cfg.env {
         merged_env.insert(k.clone(), v.clone());
     }
 
-    // Parse packages_run entries.
     let packages_run = cfg
         .packages_run
         .iter()
@@ -216,40 +224,9 @@ fn load_and_merge(config_path: &Path) -> Result<(MergedConfig, PathBuf)> {
     ))
 }
 
-/// Gracefully shut down all tracked child processes by sending SIGTERM
-/// to each child's process group, then waiting for them.
-#[cfg(unix)]
-#[allow(dead_code)]
-async fn shutdown_children(children: &mut Vec<Child>) {
-    use nix::sys::signal::{Signal, kill};
-    use nix::unistd::Pid;
-
-    for child in children.iter_mut() {
-        if let Some(pid) = child.id() {
-            // Send SIGTERM to the child's process group (negative PID).
-            let _ = kill(Pid::from_raw(-(pid as i32)), Signal::SIGTERM);
-        }
-    }
-    // Give children a moment to exit gracefully.
-    sleep(Duration::from_secs(2)).await;
-    for child in children.iter_mut() {
-        // Force kill any remaining.
-        let _ = child.kill().await;
-    }
-}
-
-#[cfg(not(unix))]
-#[allow(dead_code)]
-async fn shutdown_children(children: &mut Vec<Child>) {
-    for child in children.iter_mut() {
-        let _ = child.kill().await;
-    }
-}
-
-// ── Discovery helpers ────────────────────────────────────────────────────────
+// ── Discovery helpers ───────────────────────────────────────────────────────
 
 /// Walk up from `base` looking for a Cargo workspace containing robonix crates.
-#[allow(dead_code)]
 fn detect_rust_root(base: &Path) -> Option<PathBuf> {
     let mut dir = base.to_path_buf();
     for _ in 0..10 {
@@ -276,56 +253,328 @@ fn detect_rust_root(base: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Find the workspace root by searching upward for `robonix_workspace.yaml`.
+fn find_workspace_root(base_dir: &Path) -> Result<PathBuf> {
+    let mut dir = base_dir.to_path_buf();
+    for _ in 0..10 {
+        if dir.join("robonix_workspace.yaml").exists() {
+            return Ok(dir);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    anyhow::bail!(
+        "robonix_workspace.yaml not found (searched from {} upward)",
+        base_dir.display()
+    );
+}
+
+// ── Step 1: Start upstream system ───────────────────────────────────────────
+
+/// Start the fixed system components (atlas, executor, pilot, liaison).
+async fn start_upstream_system(
+    workspace_root: &Path,
+    env: &HashMap<String, String>,
+    children: &mut Vec<Child>,
+) -> Result<()> {
+    let system_components = [
+        ("robonix-atlas", "127.0.0.1:50051"),
+        ("robonix-executor", "127.0.0.1:50061"),
+        ("robonix-pilot", "127.0.0.1:50071"),
+        ("robonix-liaison", "127.0.0.1:50081"),
+    ];
+
+    let rust_root = detect_rust_root(workspace_root);
+    let cwd = rust_root.as_deref().unwrap_or(workspace_root);
+
+    for (name, endpoint) in &system_components {
+        output::step("Starting", &format!("{} (system)", name));
+
+        // Check if already running.
+        if wait_for_endpoint(endpoint, Duration::from_millis(500)).await {
+            output::check(&format!("{} already running at {}", name, endpoint));
+            continue;
+        }
+
+        let child = spawn_background(name, "cargo", &["run", "-p", name], cwd, env).await?;
+        let pid = child.id().unwrap_or(0);
+        output::sub_step(&format!("PID {}", pid));
+        children.push(child);
+
+        output::sub_step(&format!("waiting for {} ...", endpoint));
+        if wait_for_endpoint(endpoint, Duration::from_secs(15)).await {
+            output::check(&format!("{} ready at {}", name, endpoint));
+        } else {
+            output::warning(&format!(
+                "{} started but {} not reachable after 15s — continuing",
+                name, endpoint
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ── Step 2: Ensure packages exist ───────────────────────────────────────────
+
+/// Check that all workspace-declared packages exist locally.
+/// Returns a map of package_name → local path.
+fn ensure_packages_exist(
+    workspace_root: &Path,
+    packages: &[WorkspacePackageEntry],
+) -> Result<HashMap<String, PathBuf>> {
+    let mut package_paths: HashMap<String, PathBuf> = HashMap::new();
+
+    for pkg in packages {
+        let local_path = if let Some(ref path) = pkg.path {
+            let resolved = workspace_root.join(path);
+            if !resolved.exists() {
+                anyhow::bail!(
+                    "package '{}' path '{}' does not exist (resolved to {})",
+                    pkg.name,
+                    path,
+                    resolved.display()
+                );
+            }
+            resolved.canonicalize().unwrap_or(resolved)
+        } else {
+            // No path specified — check packages/<short_name>
+            let pkg_dir_name = pkg.name.rsplit('.').next().unwrap_or(&pkg.name);
+            let candidate = workspace_root.join("packages").join(pkg_dir_name);
+            if !candidate.exists() {
+                // Git clone will be implemented in stage four.
+                anyhow::bail!(
+                    "package '{}' not found at {}{}",
+                    pkg.name,
+                    candidate.display(),
+                    if pkg.url.is_some() {
+                        " (has url, auto-clone will be available in a future update)"
+                    } else {
+                        " and no url specified"
+                    }
+                );
+            }
+            candidate.canonicalize().unwrap_or(candidate)
+        };
+        output::check(&format!("{} → {}", pkg.name, local_path.display()));
+        package_paths.insert(pkg.name.clone(), local_path);
+    }
+    Ok(package_paths)
+}
+
+// ── Step 3: Validate packages_run ───────────────────────────────────────────
+
+/// A validated package run entry with resolved manifest and nodes.
+struct ValidatedPackageRun {
+    package_name: String,
+    pkg_path: PathBuf,
+    manifest: manifest::Manifest,
+    nodes_to_start: Vec<manifest::Node>,
+}
+
+/// Validate packages_run entries against workspace declarations and manifests.
+fn validate_packages_run(
+    packages_run: &[ParsedPackageRun],
+    workspace_packages: &[WorkspacePackageEntry],
+    package_paths: &HashMap<String, PathBuf>,
+) -> Result<Vec<ValidatedPackageRun>> {
+    let ws_pkg_names: HashSet<&str> = workspace_packages.iter().map(|p| p.name.as_str()).collect();
+    let mut validated = Vec::new();
+
+    for run in packages_run {
+        // 1. Check package is declared in workspace.
+        if !ws_pkg_names.contains(run.package_name.as_str()) {
+            anyhow::bail!(
+                "packages_run references '{}' but it is not declared in workspace packages",
+                run.package_name
+            );
+        }
+
+        // 2. Get path and load manifest.
+        let pkg_path = package_paths
+            .get(&run.package_name)
+            .ok_or_else(|| anyhow::anyhow!("package '{}' path not resolved", run.package_name))?;
+        let manifest_path = pkg_path.join(manifest::MANIFEST_FILE);
+        let pkg_manifest = manifest::load_from_path(&manifest_path).with_context(|| {
+            format!(
+                "failed to load {} for package '{}'",
+                manifest::MANIFEST_FILE,
+                run.package_name
+            )
+        })?;
+
+        // 3. Validate node selector.
+        let nodes_to_start: Vec<manifest::Node> = match &run.node_selector {
+            NodeSelector::All => {
+                if pkg_manifest.nodes.is_empty() {
+                    output::warning(&format!(
+                        "package '{}' has no nodes defined",
+                        run.package_name
+                    ));
+                }
+                pkg_manifest.nodes.clone()
+            }
+            NodeSelector::Single(node_id) => {
+                let node = pkg_manifest
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == *node_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "package '{}' has no node '{}'. Available: {:?}",
+                            run.package_name,
+                            node_id,
+                            pkg_manifest
+                                .nodes
+                                .iter()
+                                .map(|n| &n.id)
+                                .collect::<Vec<_>>()
+                        )
+                    })?;
+                vec![node.clone()]
+            }
+        };
+
+        let node_ids: Vec<&str> = nodes_to_start.iter().map(|n| n.id.as_str()).collect();
+        output::check(&format!(
+            "{} — {} v{}, nodes: [{}]",
+            run.package_name,
+            pkg_manifest.package.name,
+            pkg_manifest.package.version,
+            node_ids.join(", ")
+        ));
+
+        validated.push(ValidatedPackageRun {
+            package_name: run.package_name.clone(),
+            pkg_path: pkg_path.clone(),
+            manifest: pkg_manifest,
+            nodes_to_start,
+        });
+    }
+    Ok(validated)
+}
+
 // ── Core deploy logic ────────────────────────────────────────────────────────
 
 /// Deploy from a config file (deploy/<target>.yaml).
-///
-/// Phase 1 (stage one): loads and validates config, prints summary.
-/// Full execution logic (system startup, node launching) will be
-/// implemented in stage three.
 pub async fn execute(config_path: &Path) -> Result<()> {
     output::action("Deploy", &format!("from {}", config_path.display()));
 
-    let (merged, _base_dir) = load_and_merge(config_path)?;
+    let (merged, base_dir) = load_and_merge(config_path)?;
 
-    // Print summary of loaded configuration.
+    // Build global env (current process env + merged config env).
+    let mut global_env: HashMap<String, String> = std::env::vars().collect();
+    for (k, v) in &merged.env {
+        global_env.insert(k.clone(), v.clone());
+    }
+
     if let Some(ref target) = merged.target {
         output::sub_step(&format!("target: {}", target));
     }
-    output::sub_step(&format!(
-        "workspace: {}, {} workspace package(s), {} packages_run entry(ies)",
-        merged.workspace_name.as_deref().unwrap_or("unnamed"),
-        merged.workspace_packages.len(),
-        merged.packages_run.len(),
+
+    let workspace_root = find_workspace_root(&base_dir)?;
+    let mut children: Vec<Child> = Vec::new();
+
+    // ── Step 1: Start upstream system (fixed components) ────────────────────
+    output::action("Step 1", "Starting upstream system");
+    start_upstream_system(&workspace_root, &global_env, &mut children).await?;
+
+    // ── Step 2: Check packages existence ────────────────────────────────────
+    output::action("Step 2", "Checking packages existence");
+    let package_paths = ensure_packages_exist(&workspace_root, &merged.workspace_packages)?;
+
+    // ── Step 3: Validate packages_run declarations ──────────────────────────
+    output::action("Step 3", "Validating packages_run");
+    let validated = validate_packages_run(
+        &merged.packages_run,
+        &merged.workspace_packages,
+        &package_paths,
+    )?;
+
+    if validated.is_empty() {
+        output::warning("no packages_run entries — nothing to deploy");
+        output::info("Press Ctrl+C to shut down system components.");
+        tokio::signal::ctrl_c().await?;
+        shutdown_children(&mut children).await;
+        return Ok(());
+    }
+
+    // ── Step 4: Start nodes in dependency order ─────────────────────────────
+    output::action("Step 4", "Starting nodes in dependency order");
+
+    // Build check (warning only).
+    let build_dir = workspace_root.join("build");
+    if !build_dir.exists() {
+        output::warning("build/ directory not found; packages may not have been built yet");
+    }
+
+    // Topological sort based on manifest.depend.
+    let items: Vec<(&str, &[String])> = validated
+        .iter()
+        .map(|v| (v.package_name.as_str(), v.manifest.depend.as_slice()))
+        .collect();
+    let order = topo_sort(&items)?;
+
+    let order_names: Vec<&str> = order
+        .iter()
+        .map(|&i| validated[i].package_name.as_str())
+        .collect();
+    output::sub_step(&format!("launch order: {}", order_names.join(" → ")));
+
+    // Launch nodes in topo order.
+    for &idx in &order {
+        let vp = &validated[idx];
+        for node in &vp.nodes_to_start {
+            let start_cmd = node.start.trim();
+            if start_cmd.is_empty() {
+                output::warning(&format!(
+                    "{}:{} has empty start command, skipping",
+                    vp.package_name, node.id
+                ));
+                continue;
+            }
+
+            output::step("Starting", &format!("{}:{}", vp.package_name, node.id));
+            output::sub_step(&format!("cmd: {}", start_cmd));
+
+            let child = spawn_background(
+                &format!("{}:{}", vp.package_name, node.id),
+                "bash",
+                &["-c", start_cmd],
+                &vp.pkg_path,
+                &global_env,
+            )
+            .await?;
+            let pid = child.id().unwrap_or(0);
+            output::sub_step(&format!("PID {}", pid));
+            children.push(child);
+
+            sleep(Duration::from_secs(2)).await;
+            output::check(&format!("{}:{} launched", vp.package_name, node.id));
+        }
+    }
+
+    // ── Summary + wait for Ctrl+C ───────────────────────────────────────────
+    let node_count: usize = validated.iter().map(|v| v.nodes_to_start.len()).sum();
+    output::success(&format!(
+        "Deploy complete — {} node(s) from {} package(s) started",
+        node_count,
+        validated.len(),
     ));
+    output::info("Press Ctrl+C to shut down all deployed components.");
 
-    for pkg in &merged.workspace_packages {
-        let source = if let Some(ref url) = pkg.url {
-            format!("url={}", url)
-        } else if let Some(ref path) = pkg.path {
-            format!("path={}", path)
-        } else {
-            "no source".to_string()
-        };
-        output::sub_step(&format!("  package: {} ({})", pkg.name, source));
-    }
+    tokio::signal::ctrl_c()
+        .await
+        .context("failed to listen for Ctrl+C")?;
 
-    for run in &merged.packages_run {
-        let selector = match &run.node_selector {
-            robonix_cli::workspace::NodeSelector::All => "all".to_string(),
-            robonix_cli::workspace::NodeSelector::Single(id) => id.clone(),
-        };
-        output::sub_step(&format!("  run: {}:{}", run.package_name, selector));
-    }
-
-    output::warning("deploy execution logic not yet implemented (stage 3 WIP)");
+    output::action("Shutdown", "stopping deployed components...");
+    shutdown_children(&mut children).await;
 
     Ok(())
 }
 
-/// Deploy from the workspace-level config (no explicit config file).
-///
-/// Stub implementation — will be completed in stage three.
+/// Deploy from workspace-level config (no explicit config file).
+/// Reads robonix_workspace.yaml and starts all packages with all nodes.
 pub async fn execute_from_workspace() -> Result<()> {
     let ws_yaml = PathBuf::from("robonix_workspace.yaml");
     if !ws_yaml.exists() {
@@ -334,6 +583,119 @@ pub async fn execute_from_workspace() -> Result<()> {
              use 'rbnx deploy <target>' or 'rbnx deploy -c <config>' instead"
         );
     }
-    output::warning("workspace-level deploy not yet implemented (stage 3 WIP)");
+
+    let workspace_root = std::env::current_dir()?;
+    let content = std::fs::read_to_string(&ws_yaml)?;
+    let ws: WorkspaceConfig = serde_yaml::from_str(&content)
+        .with_context(|| "failed to parse robonix_workspace.yaml")?;
+
+    output::action(
+        "Deploy",
+        &format!(
+            "from workspace {} ({} package(s))",
+            ws.workspace.as_deref().unwrap_or("unnamed"),
+            ws.packages.len(),
+        ),
+    );
+
+    if ws.packages.is_empty() {
+        output::warning("no packages declared in workspace — nothing to deploy");
+        return Ok(());
+    }
+
+    // Build global env.
+    let mut global_env: HashMap<String, String> = std::env::vars().collect();
+    for (k, v) in &ws.env {
+        global_env.insert(k.clone(), v.clone());
+    }
+
+    let mut children: Vec<Child> = Vec::new();
+
+    // Step 1: Start upstream system.
+    output::action("Step 1", "Starting upstream system");
+    start_upstream_system(&workspace_root, &global_env, &mut children).await?;
+
+    // Step 2: Check packages existence.
+    output::action("Step 2", "Checking packages existence");
+    let package_paths = ensure_packages_exist(&workspace_root, &ws.packages)?;
+
+    // Step 3: Build "all nodes" run entries for every package.
+    output::action("Step 3", "Loading manifests");
+    let mut validated = Vec::new();
+    for pkg_entry in &ws.packages {
+        let pkg_path = package_paths.get(&pkg_entry.name).unwrap();
+        let manifest_path = pkg_path.join(manifest::MANIFEST_FILE);
+        let pkg_manifest = manifest::load_from_path(&manifest_path)?;
+        let nodes = pkg_manifest.nodes.clone();
+        let node_ids: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+        output::check(&format!(
+            "{} — {} v{}, nodes: [{}]",
+            pkg_entry.name,
+            pkg_manifest.package.name,
+            pkg_manifest.package.version,
+            node_ids.join(", ")
+        ));
+        validated.push(ValidatedPackageRun {
+            package_name: pkg_entry.name.clone(),
+            pkg_path: pkg_path.clone(),
+            manifest: pkg_manifest,
+            nodes_to_start: nodes,
+        });
+    }
+
+    if validated.is_empty() {
+        output::warning("no packages to deploy");
+        return Ok(());
+    }
+
+    // Step 4: Start nodes in dependency order.
+    output::action("Step 4", "Starting nodes in dependency order");
+
+    let items: Vec<(&str, &[String])> = validated
+        .iter()
+        .map(|v| (v.package_name.as_str(), v.manifest.depend.as_slice()))
+        .collect();
+    let order = topo_sort(&items)?;
+
+    let order_names: Vec<&str> = order
+        .iter()
+        .map(|&i| validated[i].package_name.as_str())
+        .collect();
+    output::sub_step(&format!("launch order: {}", order_names.join(" → ")));
+
+    for &idx in &order {
+        let vp = &validated[idx];
+        for node in &vp.nodes_to_start {
+            let start_cmd = node.start.trim();
+            if start_cmd.is_empty() {
+                continue;
+            }
+            output::step("Starting", &format!("{}:{}", vp.package_name, node.id));
+            let child = spawn_background(
+                &format!("{}:{}", vp.package_name, node.id),
+                "bash",
+                &["-c", start_cmd],
+                &vp.pkg_path,
+                &global_env,
+            )
+            .await?;
+            children.push(child);
+            sleep(Duration::from_secs(2)).await;
+            output::check(&format!("{}:{} launched", vp.package_name, node.id));
+        }
+    }
+
+    let node_count: usize = validated.iter().map(|v| v.nodes_to_start.len()).sum();
+    output::success(&format!(
+        "Deploy complete — {} node(s) from {} package(s) started",
+        node_count,
+        validated.len(),
+    ));
+    output::info("Press Ctrl+C to shut down all deployed components.");
+
+    tokio::signal::ctrl_c().await?;
+    output::action("Shutdown", "stopping deployed components...");
+    shutdown_children(&mut children).await;
+
     Ok(())
 }
