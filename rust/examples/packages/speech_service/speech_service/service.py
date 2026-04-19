@@ -110,10 +110,7 @@ class WhisperASRBackend:
         import torch
         from transformers import pipeline as hf_pipeline
 
-        model_path = os.environ.get(
-            "ASR_MODEL",
-            "/home/zzb/zzb_HDD/Project/LLM_for_ASR/model/whisper-large-merged",
-        )
+        model_path = os.environ.get("ASR_MODEL", "openai/whisper-large-v3")
         device = os.environ.get("ASR_DEVICE", "cuda")
         chunk_length = float(os.environ.get("ASR_CHUNK_LENGTH", "30.0"))
         batch_size = int(os.environ.get("ASR_BATCH_SIZE", "4"))
