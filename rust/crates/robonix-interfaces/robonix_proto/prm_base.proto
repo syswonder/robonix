@@ -4,6 +4,10 @@ syntax = "proto3";
 
 package robonix.prm_base;
 
+import "geometry_msgs.proto";
+import "sensor_msgs.proto";
+import "std_msgs.proto";
+
 message MoveCommand {
   double linear_x = 1;
   double linear_y = 2;
@@ -11,6 +15,15 @@ message MoveCommand {
   double angular_x = 4;
   double angular_y = 5;
   double angular_z = 6;
+}
+
+message RobotState {
+  robonix.std_msgs.Header header = 1;
+  robonix.geometry_msgs.PoseStamped base_pose = 2;
+  robonix.sensor_msgs.JointState joint_state = 3;
+  robonix.geometry_msgs.PoseStamped tcp_pose = 4;
+  double gripper_width = 5;
+  bool is_grasped = 6;
 }
 
 message CancelNavigation_Request {
@@ -22,6 +35,28 @@ message CancelNavigation_Response {
   string message = 2;
 }
 
+message ExecuteMoveCommand_Request {
+  MoveCommand command = 1;
+}
+
+message ExecuteMoveCommand_Response {
+  robonix.std_msgs.String status = 1;
+}
+
+message GetCameraImage_Request {
+}
+
+message GetCameraImage_Response {
+  robonix.sensor_msgs.Image image = 1;
+}
+
+message GetLaserScan_Request {
+}
+
+message GetLaserScan_Response {
+  robonix.sensor_msgs.LaserScan scan = 1;
+}
+
 message GetNavigationStatus_Request {
   string goal_id = 1;
 }
@@ -30,6 +65,30 @@ message GetNavigationStatus_Response {
   bool known = 1;
   string status = 2;
   bool terminal = 3;
+}
+
+message GetRobotState_Request {
+}
+
+message GetRobotState_Response {
+  RobotState state = 1;
+}
+
+message Navigate_Request {
+  robonix.geometry_msgs.PoseStamped goal = 1;
+}
+
+message Navigate_Response {
+  bool accepted = 1;
+  string status_message = 2;
+}
+
+message PerceptionDetect_Request {
+  robonix.sensor_msgs.Image image = 1;
+}
+
+message PerceptionDetect_Response {
+  robonix.std_msgs.String results = 1;
 }
 
 message StreamMove_Request {
