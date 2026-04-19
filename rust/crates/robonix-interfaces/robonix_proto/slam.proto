@@ -4,6 +4,26 @@ syntax = "proto3";
 
 package robonix.slam;
 
+import "geometry_msgs.proto";
+import "std_msgs.proto";
+
+message SlamStatus {
+  robonix.std_msgs.Header header = 1;
+  string mode = 2;
+  bool odom_alive = 3;
+  float odom_hz = 4;
+  bool cloud_alive = 5;
+  string map_file = 6;
+  uint64 total_odom_frames = 7;
+}
+
+message GetSlamStatus_Request {
+}
+
+message GetSlamStatus_Response {
+  SlamStatus status = 1;
+}
+
 message LoadMap_Request {
   string path = 1;
 }
@@ -21,6 +41,15 @@ message SaveMap_Response {
   bool success = 1;
   string path = 2;
   string message = 3;
+}
+
+message SetInitialPose_Request {
+  robonix.geometry_msgs.PoseStamped pose = 1;
+}
+
+message SetInitialPose_Response {
+  bool success = 1;
+  string message = 2;
 }
 
 message SwitchMode_Request {
