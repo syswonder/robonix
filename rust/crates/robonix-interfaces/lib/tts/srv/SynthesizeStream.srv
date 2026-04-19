@@ -1,13 +1,11 @@
-# TTS streaming synthesis
-# @robonix.grpc stream_server
-# abstract_interface_id: robonix/sys/speech/tts/synthesize_stream
-#
-# Client sends one SynthesizeStreamRequest; server streams back AudioChunk.
-# Use for low-latency playback while text is still being generated.
+# TTS streaming synthesis (server stream).
+# Client sends text request; server streams back SynthesizeAudioChunk.
+# Stream element type is referenced in the contract TOML.
 ---
 string text
 string language
 string voice
 float32 speed
+robonix_msg/AudioConfig audio_config
 ===
-# (empty — streaming RPC, no single response body)
+tts/SynthesizeAudioChunk chunk

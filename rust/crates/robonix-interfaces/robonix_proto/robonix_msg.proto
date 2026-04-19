@@ -4,9 +4,19 @@ syntax = "proto3";
 
 package robonix.robonix_msg;
 
-import "geometry_msgs.proto";
-import "sensor_msgs.proto";
-import "std_msgs.proto";
+message AudioChunk {
+  uint64 timestamp_ns = 1;
+  bytes data = 2;
+  uint32 sequence = 3;
+  float duration_s = 4;
+}
+
+message AudioConfig {
+  string encoding = 1;
+  uint32 sample_rate_hz = 2;
+  uint32 channels = 3;
+  uint32 bits_per_sample = 4;
+}
 
 message BoundingBox {
   double scale_x = 1;
@@ -62,6 +72,27 @@ message CommandResult {
   int32 code = 3;
 }
 
+message DialogEvent {
+  uint64 timestamp_ns = 1;
+  string session_id = 2;
+  uint32 event_type = 3;
+  VadEvent vad_event = 4;
+  string text = 5;
+  float confidence = 6;
+  string language = 7;
+  string response_text = 8;
+  AudioChunk audio_chunk = 9;
+  DialogState dialog_state = 10;
+  string error = 11;
+}
+
+message DialogState {
+  string session_id = 1;
+  uint32 state = 2;
+  string language = 3;
+  string error = 4;
+}
+
 message Dict {
   repeated string keys = 1;
   repeated string values = 2;
@@ -92,16 +123,6 @@ message Object {
   repeated FrameMapping frame_mapping = 6;
 }
 
-message Occupancy3D {
-  robonix.std_msgs.Header header = 1;
-  uint32 width = 2;
-  uint32 height = 3;
-  uint32 depth = 4;
-  float resolution = 5;
-  robonix.geometry_msgs.Point origin = 6;
-  repeated int32 data = 7;
-}
-
 message Point3D {
   double x = 1;
   double y = 2;
@@ -114,11 +135,6 @@ message PrimitiveInstance {
   string input_schema = 3;
   string output_schema = 4;
   string metadata = 5;
-}
-
-message RGBD {
-  robonix.sensor_msgs.Image rgb = 1;
-  robonix.sensor_msgs.Image depth = 2;
 }
 
 message Relation {
@@ -175,29 +191,18 @@ message ToolSpec {
   string input_schema_json = 3;
 }
 
+message VadEvent {
+  uint64 timestamp_ns = 1;
+  uint32 event_type = 2;
+  float confidence = 3;
+  float energy_level = 4;
+}
+
 message Waypoint {
   string name = 1;
   double x = 2;
   double y = 3;
   double z = 4;
   string frame_id = 5;
-}
-
-message ZeroCopyFrame {
-  robonix.std_msgs.Header header = 1;
-  uint64 buffer_handle_id = 2;
-  string shm_name = 3;
-  uint32 width = 4;
-  uint32 height = 5;
-  uint32 channels = 6;
-  uint32 stride = 7;
-  BufferFormat format = 8;
-  MemoryDomain memory_domain = 9;
-  uint64 data_size = 10;
-  uint64 sequence = 11;
-  uint64 hw_timestamp_ns = 12;
-  uint64 sync_token = 13;
-  bool gpu_pinned = 14;
-  uint32 pool_id = 15;
 }
 
