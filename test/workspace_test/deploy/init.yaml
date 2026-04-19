@@ -1,0 +1,14 @@
+upstream_config: ../robonix_workspace.yaml
+target: init
+
+# Environment variable overrides (merged with workspace env, local wins)
+env: {}
+
+# Packages and nodes to run (format: "package_name:node_id" or "package_name:all")
+packages_run: 
+  # Examples:
+  - name: com.vendor.test_pkg_local:all
+  - name: com.vendor.test_pkg_remote:com.vendor.test_pkg_remote.main
+  - name: com.robonix.example.vlm_service:all
+  # - name: nonexistent.pkg:all
+  # - name: com.vendor.test_pkg_local:nonexistent

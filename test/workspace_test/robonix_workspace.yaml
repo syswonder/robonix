@@ -1,0 +1,29 @@
+workspace: workspace_test
+
+# Global environment variables (injected into all child processes)
+env:
+  ROBONIX_ATLAS: "127.0.0.1:50051"
+  ROBONIX_META_GRPC_ENDPOINT: "127.0.0.1:50051"
+  ROBONIX_ATLAS_ENDPOINT: "http://127.0.0.1:50051"
+  ROBONIX_EXECUTOR_ENDPOINT: "http://127.0.0.1:50061"
+  ROBONIX_PILOT_ENDPOINT: "http://127.0.0.1:50071"
+  RUST_LOG: "robonix_atlas=info,robonix_pilot=info,robonix_executor=info,robonix_liaison=warn"
+  VLM_API_KEY: "sk-e5b6865a506746139e04e119202ba2ce"
+  VLM_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  VLM_MODEL: "qwen3-vl-plus"
+  VLM_MESSAGE_FORMAT: "openai"
+
+# Packages in this workspace (url or path, at least one required per entry)
+packages:
+  - name: com.vendor.test_pkg_remote
+    url: https://github.com/lhw2002426/test_pkg_remote.git
+  
+  - name: com.vendor.test_pkg_local
+    path: ./packages/test_pkg_local
+  
+  - name: com.robonix.example.vlm_service
+    path: ./packages/vlm_service
+  
+  # - name: com.bad.pkg
+  #   url: https://github.com/nonexistent/doesnotexist.git
+  # - name: com.missing.pkg

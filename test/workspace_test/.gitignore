@@ -1,0 +1,20 @@
+# Build artifacts
+rbnx-build/
+.rbnx-built
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ROS 2 build artifacts
+build/
+install/
+log/
+
+proto_gen/

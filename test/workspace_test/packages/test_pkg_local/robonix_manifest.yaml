@@ -1,0 +1,28 @@
+manifestVersion: 1
+
+build:
+  script: scripts/build.sh
+
+package:
+  id: com.vendor.test_pkg_local
+  name: test_pkg_local
+  version: 0.0.1
+  vendor: vendor
+  description: TODO — describe your package
+  license: Apache-2.0
+
+nodes:
+  - id: com.vendor.test_pkg_local.main
+    type: python
+    start: >
+      bash scripts/start.sh
+
+interfaces:
+  provides: []
+    # - id: robonix/prm/camera/rgb
+  consumes: []
+    # - id: robonix/sys/perception/yolo/gpu_tensor
+
+# Package-level dependencies (other package names this package depends on)
+depend:
+  - com.vendor.test_pkg_remote
