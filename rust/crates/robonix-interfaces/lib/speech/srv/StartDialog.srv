@@ -1,0 +1,10 @@
+# Start a voice dialog session.
+# Returns initial dialog state; events are streamed via the Dialog contract.
+---
+robonix_msg/msg/AudioConfig audio_config
+string language
+bool   enable_vad
+---
+string session_id
+robonix_msg/msg/DialogState state
+string error

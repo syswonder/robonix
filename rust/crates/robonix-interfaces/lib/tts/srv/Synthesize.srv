@@ -6,7 +6,7 @@ string language       # BCP-47, e.g. "zh-CN", "" = default
 string voice          # voice ID, "" = default
 float32 speed         # 1.0 = normal; < 1.0 = slower; > 1.0 = faster
 ===
-bytes audio_data      # synthesized audio (format specified in encoding)
+uint8[] audio_data      # synthesized audio (format specified in encoding)
 string encoding       # e.g. "pcm_s16le", "mp3"
 uint32 sample_rate_hz
 string error          # non-empty on failure
