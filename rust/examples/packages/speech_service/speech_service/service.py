@@ -454,10 +454,8 @@ class SpeechAsrServicer(spb_grpc.SpeechAsrServicer):
         - asr_backend (WhisperASRBackend) for one-shot Recognize
         - stream_asr_backend (FunASRStreamingBackend) for streaming RecognizeStream
 
-    Audio adaptation:
-        Both RPCs call audio_utils.adapt_audio() to normalize input to
-        16kHz mono pcm_s16le before passing to the backend, regardless
-        of the caller's audio format.
+    If a backend is None (failed to load at startup), the corresponding RPC
+    returns a clear error with actionable instructions instead of crashing.
     """
 
     def __init__(self, asr_backend, stream_asr_backend):
@@ -465,22 +463,18 @@ class SpeechAsrServicer(spb_grpc.SpeechAsrServicer):
         self.stream_asr_backend = stream_asr_backend
 
     def Recognize(self, request, context):
-        """Handle one-shot ASR: receive complete audio, return transcription.
+        """Handle one-shot ASR: receive complete audio, return transcription."""
+        if self.asr_backend is None:
+            context.set_code(grpc.StatusCode.UNAVAILABLE)
+            context.set_details(
+                "ASR backend not available. "
+                "Set ASR_MODEL to a local model path, or ensure network access "
+                "for auto-download from HuggingFace Hub. "
+                "Current ASR_MODEL="
+                + os.environ.get("ASR_MODEL", "openai/whisper-large-v3")
+            )
+            return spb.RecognizeResponse()
 
-        Flow:
-            1. Extract audio params from request (with defaults)
-            2. adapt_audio() → normalize to 16kHz mono pcm_s16le
-            3. WhisperASRBackend.recognize() → {text, confidence}
-            4. Return RecognizeResponse
-
-        Args:
-            request: RecognizeRequest proto with audio_data, encoding,
-                sample_rate_hz, language, channels, bits_per_sample.
-            context: gRPC context.
-
-        Returns:
-            RecognizeResponse with text + confidence, or error string.
-        """
         from speech_service.audio_utils import adapt_audio
 
         encoding = request.encoding or "pcm_s16le"
@@ -509,25 +503,18 @@ class SpeechAsrServicer(spb_grpc.SpeechAsrServicer):
             return spb.RecognizeResponse(text="", confidence=0.0, error=str(e))
 
     def RecognizeStream(self, request_iterator, context):
-        """Handle streaming ASR: receive audio chunks, yield partial/final results.
+        """Handle streaming ASR: receive audio chunks, yield partial/final results."""
+        if self.stream_asr_backend is None:
+            context.set_code(grpc.StatusCode.UNAVAILABLE)
+            context.set_details(
+                "Streaming ASR backend not available. "
+                "Set FUNASR_MODEL to a local model path, or ensure network access "
+                "for auto-download. "
+                "Current FUNASR_MODEL="
+                + os.environ.get("FUNASR_MODEL", "paraformer-zh-streaming")
+            )
+            return
 
-        Flow:
-            1. Read config from first message (AudioConfig + language)
-            2. For each chunk: adapt_audio() → recognize_chunk() with cache
-            3. Yield PARTIAL results (event_type=0) as they arrive
-            4. On stream close: flush with is_final=True → yield FINAL (event_type=1)
-            5. On error: yield ERROR (event_type=2)
-
-        The cache dict maintains Paraformer streaming state across chunks.
-        It is created per-call and discarded when the stream ends.
-
-        Args:
-            request_iterator: Stream of RecognizeStreamRequest messages.
-            context: gRPC context.
-
-        Yields:
-            RecognizeStreamResponse with event_type, text, confidence.
-        """
         from speech_service.audio_utils import adapt_audio, parse_audio_config
 
         cache = {}
@@ -606,16 +593,16 @@ class SpeechTtsServicer(spb_grpc.SpeechTtsServicer):
         self.tts_backend = tts_backend
 
     def Synthesize(self, request, context):
-        """Handle one-shot TTS: receive text, return complete MP3 audio.
+        """Handle one-shot TTS: receive text, return complete MP3 audio."""
+        if self.tts_backend is None:
+            context.set_code(grpc.StatusCode.UNAVAILABLE)
+            context.set_details(
+                "TTS backend not available. "
+                "Edge TTS requires network access to Microsoft Cognitive Services. "
+                "Check your network connection or set SPEECH_CI_MODE=1 for testing."
+            )
+            return spb.SynthesizeResponse()
 
-        Args:
-            request: SynthesizeRequest with text, language, voice, speed.
-            context: gRPC context.
-
-        Returns:
-            SynthesizeResponse with audio_data (MP3), encoding="mp3",
-            sample_rate_hz=24000.
-        """
         text = request.text
         voice = request.voice
         speed = request.speed or 1.0
@@ -633,20 +620,15 @@ class SpeechTtsServicer(spb_grpc.SpeechTtsServicer):
             return spb.SynthesizeResponse(audio_data=b"", error=str(e))
 
     def SynthesizeStream(self, request, context):
-        """Handle streaming TTS: receive text, yield MP3 audio chunks.
+        """Handle streaming TTS: receive text, yield MP3 audio chunks."""
+        if self.tts_backend is None:
+            context.set_code(grpc.StatusCode.UNAVAILABLE)
+            context.set_details(
+                "TTS backend not available. "
+                "Edge TTS requires network access to Microsoft Cognitive Services."
+            )
+            return
 
-        Uses a dedicated asyncio event loop (not the main one) to drive
-        the Edge TTS async generator. Each chunk is yielded as a
-        SynthesizeStreamResponse. The last chunk has is_final=True.
-
-        Args:
-            request: SynthesizeStreamRequest with text, language, voice, speed.
-            context: gRPC context.
-
-        Yields:
-            SynthesizeStreamResponse with audio_data (MP3 chunk),
-            encoding="mp3", sample_rate_hz=24000, is_final on last.
-        """
         text = request.text
         voice = request.voice
         speed = request.speed or 1.0
@@ -786,6 +768,9 @@ def main() -> None:
 
     Startup sequence:
         1. Initialize backends (real or mock based on SPEECH_CI_MODE)
+           - Each backend init is wrapped in try/except
+           - Failed backends are set to None; servicers return UNAVAILABLE
+           - If ALL backends fail, exit with error
         2. Create gRPC server with thread pool (8 workers)
         3. Register all 3 servicers (ASR, TTS, Dialog)
         4. Bind to SPEECH_BIND_ADDR:SPEECH_PORT (default 0.0.0.0:0 = auto)
@@ -794,15 +779,80 @@ def main() -> None:
     """
     log.info("Starting speech service (ci_mode=%s)", CI_MODE)
 
-    # Initialize backends
+    # ── Initialize backends ──────────────────────────────────────────────
+    asr_backend = None
+    asr_stream_backend = None
+    tts_backend = None
+
     if CI_MODE:
         asr_backend = MockASRBackend()
         asr_stream_backend = MockASRStreamingBackend()
         tts_backend = MockTTSBackend()
     else:
-        asr_backend = WhisperASRBackend()
-        asr_stream_backend = FunASRStreamingBackend()
-        tts_backend = EdgeTTSBackend()
+        # Whisper ASR (one-shot)
+        try:
+            asr_backend = WhisperASRBackend()
+        except Exception as e:
+            log.error("╔══════════════════════════════════════════════════════════════╗")
+            log.error("║ Whisper ASR backend FAILED to initialize                  ║")
+            log.error("║ Error: %s", str(e)[:51])
+            log.error("║                                                            ║")
+            log.error("║ To fix, choose ONE of:                                     ║")
+            log.error("║   1. Ensure network access → auto-download from HuggingFace║")
+            log.error("║   2. Set ASR_MODEL=/path/to/local/whisper/model            ║")
+            log.error("║   3. Set SPEECH_CI_MODE=1 for testing (mock backend)       ║")
+            log.error("║                                                            ║")
+            log.error("║ The service will start without ASR (Recognize → UNAVAILABLE║")
+            log.error("╚══════════════════════════════════════════════════════════════╝")
+            asr_backend = None
+
+        # FunASR Paraformer (streaming ASR)
+        try:
+            asr_stream_backend = FunASRStreamingBackend()
+        except Exception as e:
+            log.error("╔══════════════════════════════════════════════════════════════╗")
+            log.error("║ FunASR streaming ASR backend FAILED to initialize          ║")
+            log.error("║ Error: %s", str(e)[:51])
+            log.error("║                                                            ║")
+            log.error("║ To fix, choose ONE of:                                     ║")
+            log.error("║   1. pip install funasr  +  network access                 ║")
+            log.error("║   2. Set FUNASR_MODEL=/path/to/local/paraformer/model      ║")
+            log.error("║   3. Set SPEECH_CI_MODE=1 for testing                      ║")
+            log.error("║                                                            ║")
+            log.error("║ Streaming ASR (RecognizeStream) will be UNAVAILABLE        ║")
+            log.error("╚══════════════════════════════════════════════════════════════╝")
+            asr_stream_backend = None
+
+        # Edge TTS
+        try:
+            tts_backend = EdgeTTSBackend()
+        except Exception as e:
+            log.error("╔══════════════════════════════════════════════════════════════╗")
+            log.error("║ Edge TTS backend FAILED to initialize                      ║")
+            log.error("║ Error: %s", str(e)[:51])
+            log.error("║                                                            ║")
+            log.error("║ To fix: ensure network access to Microsoft TTS endpoint    ║")
+            log.error("║   or set SPEECH_CI_MODE=1 for testing                      ║")
+            log.error("║                                                            ║")
+            log.error("║ TTS (Synthesize/SynthesizeStream) will be UNAVAILABLE      ║")
+            log.error("╚══════════════════════════════════════════════════════════════╝")
+            tts_backend = None
+
+        # Bail out if nothing is available
+        available = [b is not None for b in (asr_backend, asr_stream_backend, tts_backend)]
+        if not any(available):
+            log.error("All backends failed — cannot start service.")
+            log.error("Set SPEECH_CI_MODE=1 for testing, or fix model/network issues above.")
+            sys.exit(1)
+
+    # ── Startup summary ──────────────────────────────────────────────────
+    log.info("Backend status:")
+    log.info("  Whisper ASR (Recognize):       %s",
+             "OK" if asr_backend is not None else "UNAVAILABLE")
+    log.info("  FunASR (RecognizeStream):      %s",
+             "OK" if asr_stream_backend is not None else "UNAVAILABLE")
+    log.info("  Edge TTS (Synthesize):         %s",
+             "OK" if tts_backend is not None else "UNAVAILABLE")
 
     dialog_manager = DialogManager()
 
