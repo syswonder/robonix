@@ -48,7 +48,7 @@ export START_AUDIO_DRIVER="${START_AUDIO_DRIVER:-1}"
 export PYTHONPATH="${PACKAGES}/vlm_service:${PACKAGES}/memsearch_service:${PACKAGES}/speech_service:${PACKAGES}/audio_driver${PYTHONPATH:+:$PYTHONPATH}"
 
 rbnx() {
-  (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "$@")
+  (cargo run --manifest-path $RUST_ROOT/Cargo.toml -p robonix-cli -- "$@")
 }
 
 rbnx_validate_build() {

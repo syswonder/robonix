@@ -9,6 +9,7 @@ pub mod install;
 pub mod manifest;
 pub mod output;
 pub mod process;
+pub mod workspace;
 
 pub use config::{Config, SourcePathKey};
 pub use database::{PackageDatabase, PackageInfo, PackageSource};

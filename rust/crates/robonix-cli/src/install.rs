@@ -94,7 +94,7 @@ impl PackageInstaller {
                 .path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .unwrap_or(manifest::MANIFEST_FILE),
+                .unwrap_or(manifest::PACKAGE_MANIFEST_FILE),
         );
         let package_info = Self::create_package_info(
             &target_path,
@@ -155,7 +155,7 @@ impl PackageInstaller {
                 .path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .unwrap_or(manifest::MANIFEST_FILE),
+                .unwrap_or(manifest::PACKAGE_MANIFEST_FILE),
         );
         let package_info = Self::create_package_info(
             &target_path,

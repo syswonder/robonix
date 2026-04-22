@@ -7,7 +7,8 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-pub const MANIFEST_FILE: &str = "robonix_manifest.yaml";
+/// Package manifest file name.
+pub const PACKAGE_MANIFEST_FILE: &str = "package_manifest.yaml";
 
 #[derive(Debug, Clone)]
 pub struct DetectedManifest {
@@ -22,6 +23,8 @@ pub struct PackageSummary {
     pub provided_interfaces: Vec<String>,
     pub consumed_interfaces: Vec<String>,
     pub nodes: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub depends: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -37,6 +40,15 @@ pub struct Manifest {
     /// How this package is built: `rbnx build` runs `bash <script>` from the package root.
     #[serde(default)]
     pub build: BuildConfig,
+    /// Capabilities exported by this package (like EXPORT_SYMBOL in Linux kernel modules).
+    #[serde(default)]
+    pub capabilities: Vec<Capability>,
+    /// Package-level dependencies (other packages this package depends on).
+    #[serde(default, alias = "depend")]
+    pub depends: Vec<DependEntry>,
+    /// Top-level start shortcut (alternative to per-node start commands).
+    #[serde(default)]
+    pub start: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -48,12 +60,36 @@ pub struct BuildConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Package {
-    pub id: String,
+    /// Package identifier (optional in new format; use `name` as primary key).
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: String,
     pub version: String,
     pub vendor: String,
     pub description: String,
     pub license: String,
+}
+
+/// Capability declaration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Capability {
+    pub name: String,
+    /// Path to a custom capability definition TOML (relative to package root).
+    #[serde(default)]
+    pub definition: Option<String>,
+}
+
+/// Dependency declaration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DependEntry {
+    pub name: String,
+}
+
+impl Package {
+    /// Return the effective identifier: `id` if present, otherwise `name`.
+    pub fn effective_id(&self) -> &str {
+        self.id.as_deref().unwrap_or(&self.name)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -92,12 +128,14 @@ pub struct LaunchNode {
 }
 
 pub fn detect_manifest_path(package_root: &Path) -> Result<PathBuf> {
-    let path = package_root.join(MANIFEST_FILE);
+    let path = package_root.join(PACKAGE_MANIFEST_FILE);
     if path.exists() {
-        Ok(path)
-    } else {
-        anyhow::bail!("Package does not have {}", MANIFEST_FILE)
+        return Ok(path);
     }
+    anyhow::bail!(
+        "Package does not have {}",
+        PACKAGE_MANIFEST_FILE,
+    )
 }
 
 pub fn detect_and_load(package_root: &Path) -> Result<DetectedManifest> {
@@ -119,8 +157,12 @@ impl Manifest {
         if self.manifest_version == 0 {
             anyhow::bail!("Invalid 'manifestVersion': must be >= 1");
         }
-        if self.package.id.trim().is_empty() {
-            anyhow::bail!("Missing 'package.id' in manifest");
+        // package.id is optional in the new format; warn if missing for awareness.
+        if self.package.id.as_ref().map_or(true, |id| id.trim().is_empty()) {
+            log::debug!(
+                "package.id is empty or absent for '{}'; using package.name as identifier",
+                self.package.name
+            );
         }
         if self.package.name.trim().is_empty() {
             anyhow::bail!("Missing 'package.name' in manifest");
@@ -142,9 +184,12 @@ impl Manifest {
         build_config_present(self)?;
 
         let interfaces = self.interfaces.clone().unwrap_or_default();
-        if self.nodes.is_empty() && interfaces.provides.is_empty() && interfaces.consumes.is_empty()
+        if self.nodes.is_empty()
+            && interfaces.provides.is_empty()
+            && interfaces.consumes.is_empty()
+            && self.capabilities.is_empty()
         {
-            anyhow::bail!("Manifest must declare at least one node or interface");
+            anyhow::bail!("Manifest must declare at least one node, interface, or capability");
         }
 
         Ok(PackageSummary {
@@ -153,6 +198,8 @@ impl Manifest {
             provided_interfaces: interfaces.provides.into_iter().map(|i| i.id).collect(),
             consumed_interfaces: interfaces.consumes.into_iter().map(|i| i.id).collect(),
             nodes: self.nodes.iter().map(|n| n.id.clone()).collect(),
+            capabilities: self.capabilities.iter().map(|c| c.name.clone()).collect(),
+            depends: self.depends.iter().map(|d| d.name.clone()).collect(),
         })
     }
 }
