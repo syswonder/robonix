@@ -90,3 +90,13 @@ pub async fn execute_local(path: PathBuf, clean: bool) -> Result<()> {
     build_local_package(&package_root, clean)?;
     Ok(())
 }
+
+/// Build all packages declared in a robonix_manifest.yaml.
+pub async fn execute_all(config_path: PathBuf, _clean: bool) -> Result<()> {
+    output::action(
+        "Build",
+        &format!("all packages from {}", config_path.display()),
+    );
+    output::warning("multi-package build not yet implemented (WIP)");
+    Ok(())
+}

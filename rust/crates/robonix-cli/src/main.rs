@@ -44,6 +44,7 @@ async fn main() -> Result<()> {
             | cmd::Commands::Validate { .. }
             | cmd::Commands::Install { .. }
             | cmd::Commands::Codegen { .. }
+            | cmd::Commands::Deploy { .. }
     );
     if needs_source {
         let _ = config.require_source_path();

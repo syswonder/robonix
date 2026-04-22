@@ -13,11 +13,14 @@ mod build;
 mod chat;
 mod codegen;
 mod config;
+mod deploy;
 mod graph;
 mod info;
+mod init;
 mod install;
 mod launch_helpers;
 mod list;
+mod package_new;
 mod path;
 mod run_package;
 mod runtime;
@@ -44,7 +47,7 @@ pub struct GraphArgs {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Build a package (local path or system-installed)
+    /// Build packages: single package (-p), system-installed (-g), or all from manifest (--all)
     Build {
         /// Local package path (relative to $RBNX_INVOCATION_CWD, else process cwd)
         #[arg(short = 'p', long)]
@@ -52,9 +55,41 @@ pub enum Commands {
         /// Build by system-installed package name
         #[arg(short = 'g', long)]
         global: Option<String>,
+        /// Build all packages declared in robonix_manifest.yaml
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+        /// Path to robonix_manifest.yaml (used with --all; default: ./robonix_manifest.yaml)
+        #[arg(short = 'c', long = "config")]
+        config: Option<PathBuf>,
         /// Clean build (remove rbnx-build before building). Default: incremental.
         #[arg(long)]
         clean: bool,
+    },
+    /// Deploy the full stack from robonix_manifest.yaml (system + primitives + services + skills)
+    Deploy {
+        /// Path to robonix_manifest.yaml (default: ./robonix_manifest.yaml)
+        #[arg(short = 'c', long = "config")]
+        config: Option<PathBuf>,
+    },
+    /// Initialize a new robonix project
+    Init {
+        /// Project name (also used as directory name)
+        name: String,
+        /// Create project at custom path (default: ./<name>)
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    /// Create a new package in the project
+    #[command(name = "package-new")]
+    PackageNew {
+        /// Package name
+        name: String,
+        /// Package type: primitive, service, or skill
+        #[arg(short = 't', long = "type", default_value = "service")]
+        pkg_type: String,
+        /// Create at custom path (default: <type_dir>/<name>)
+        #[arg(long)]
+        path: Option<PathBuf>,
     },
     /// Start one node of a package (package and node required). Blocks until the process exits.
     Start {
@@ -199,8 +234,31 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         Commands::Build {
             path,
             global,
+            all,
+            config: manifest_config,
             clean,
-        } => run_package::execute_build(config, path, global, clean).await,
+        } => {
+            if all {
+                let cfg_path = manifest_config.unwrap_or_else(|| {
+                    PathBuf::from(robonix_cli::workspace::RUNTIME_MANIFEST_FILE)
+                });
+                build::execute_all(cfg_path, clean).await
+            } else {
+                run_package::execute_build(config, path, global, clean).await
+            }
+        }
+        Commands::Deploy { config: cfg } => {
+            let cfg_path = cfg.unwrap_or_else(|| {
+                PathBuf::from(robonix_cli::workspace::RUNTIME_MANIFEST_FILE)
+            });
+            deploy::execute(&cfg_path).await
+        }
+        Commands::Init { name, path } => init::execute(&name, path.as_deref()).await,
+        Commands::PackageNew {
+            name,
+            pkg_type,
+            path,
+        } => package_new::execute(&name, &pkg_type, path.as_deref()).await,
         Commands::Start {
             package,
             node,
