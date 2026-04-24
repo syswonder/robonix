@@ -41,23 +41,35 @@ pub struct RuntimeConfig {
 }
 
 /// System core component configuration.
+/// Each component is optional; if present (even as `{}`), it will be started.
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct SystemConfig {
     #[serde(default)]
-    pub nexus: Option<serde_yaml::Value>,
+    pub nexus: Option<ComponentConfig>,
     #[serde(default)]
-    pub atlas: Option<serde_yaml::Value>,
+    pub atlas: Option<ComponentConfig>,
     #[serde(default)]
-    pub executor: Option<serde_yaml::Value>,
+    pub executor: Option<ComponentConfig>,
     #[serde(default)]
     pub pilot: Option<PilotConfig>,
     #[serde(default)]
-    pub liaison: Option<serde_yaml::Value>,
+    pub liaison: Option<ComponentConfig>,
+}
+
+/// Generic system component configuration (atlas, executor, liaison, nexus).
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct ComponentConfig {
+    /// Listen endpoint (e.g. "127.0.0.1:50051"). Uses built-in default if absent.
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 /// Pilot-specific configuration.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Default, Clone)]
 pub struct PilotConfig {
+    /// Listen endpoint (e.g. "127.0.0.1:50071"). Uses built-in default if absent.
+    #[serde(default)]
+    pub endpoint: Option<String>,
     #[serde(default)]
     pub vlm_base_url: Option<String>,
     #[serde(default)]
@@ -115,4 +127,164 @@ pub fn find_project_root(base_dir: &Path) -> Result<PathBuf> {
         RUNTIME_MANIFEST_FILE,
         base_dir.display()
     )
+}
+
+// ════════════════════════════════════════════════════════════════
+// Topological sort (shared by deploy & build)
+// ════════════════════════════════════════════════════════════════
+
+/// Topological sort over items identified by name with dependency lists.
+///
+/// Input: a slice of `(name, &[dependency_name])` pairs.
+/// Output: a `Vec<usize>` of indices into the input slice, in dependency order
+/// (items with no dependencies first).
+///
+/// Dependencies that reference names **not present** in the input slice are
+/// silently ignored (they may be satisfied by a different layer, e.g. a
+/// primitive depended on by a service).
+///
+/// Returns an error if a cycle is detected among the items in the input.
+///
+/// # Example
+/// ```ignore
+/// let items = vec![
+///     ("B", vec!["A".to_string()]),
+///     ("A", vec![]),
+///     ("C", vec!["B".to_string()]),
+/// ];
+/// let refs: Vec<(&str, &[String])> = items.iter().map(|(n, d)| (*n, d.as_slice())).collect();
+/// let order = topo_sort(&refs)?;
+/// // order == [1, 0, 2]  →  A, B, C
+/// ```
+pub fn topo_sort(items: &[(&str, &[String])]) -> Result<Vec<usize>> {
+    let n = items.len();
+    // Map name → index for items in this set.
+    let idx_of: HashMap<&str, usize> = items
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _))| (*name, i))
+        .collect();
+
+    // Build adjacency list + in-degree (only for edges within this set).
+    let mut in_degree = vec![0u32; n];
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+
+    for (i, (_name, deps)) in items.iter().enumerate() {
+        for dep in *deps {
+            if let Some(&j) = idx_of.get(dep.as_str()) {
+                // j → i  (j must come before i)
+                adj[j].push(i);
+                in_degree[i] += 1;
+            }
+            // deps referencing names outside this set are ignored
+        }
+    }
+
+    // Kahn's algorithm.
+    let mut queue: std::collections::VecDeque<usize> = in_degree
+        .iter()
+        .enumerate()
+        .filter(|&(_, &d)| d == 0)
+        .map(|(i, _)| i)
+        .collect();
+
+    let mut order = Vec::with_capacity(n);
+    while let Some(u) = queue.pop_front() {
+        order.push(u);
+        for &v in &adj[u] {
+            in_degree[v] -= 1;
+            if in_degree[v] == 0 {
+                queue.push_back(v);
+            }
+        }
+    }
+
+    if order.len() != n {
+        // Find cycle members for a useful error message.
+        let cycle_members: Vec<&str> = (0..n)
+            .filter(|i| in_degree[*i] > 0)
+            .map(|i| items[i].0)
+            .collect();
+        anyhow::bail!(
+            "circular dependency detected among: {}",
+            cycle_members.join(", ")
+        );
+    }
+
+    Ok(order)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn topo_sort_linear() {
+        // A → B → C
+        let deps_c = vec!["B".to_string()];
+        let deps_b = vec!["A".to_string()];
+        let items: Vec<(&str, &[String])> = vec![
+            ("C", deps_c.as_slice()),
+            ("A", &[]),
+            ("B", deps_b.as_slice()),
+        ];
+        let order = topo_sort(&items).unwrap();
+        // A(1) must come before B(2), B(2) must come before C(0).
+        let pos: HashMap<usize, usize> = order.iter().enumerate().map(|(pos, &idx)| (idx, pos)).collect();
+        assert!(pos[&1] < pos[&2]); // A before B
+        assert!(pos[&2] < pos[&0]); // B before C
+    }
+
+    #[test]
+    fn topo_sort_no_deps() {
+        let items: Vec<(&str, &[String])> = vec![("X", &[]), ("Y", &[]), ("Z", &[])];
+        let order = topo_sort(&items).unwrap();
+        assert_eq!(order.len(), 3);
+    }
+
+    #[test]
+    fn topo_sort_external_dep_ignored() {
+        // B depends on "external" which is not in the set → ignored.
+        let deps_b = vec!["external".to_string()];
+        let items: Vec<(&str, &[String])> = vec![("A", &[]), ("B", deps_b.as_slice())];
+        let order = topo_sort(&items).unwrap();
+        assert_eq!(order.len(), 2);
+    }
+
+    #[test]
+    fn topo_sort_cycle_detected() {
+        let deps_a = vec!["B".to_string()];
+        let deps_b = vec!["A".to_string()];
+        let items: Vec<(&str, &[String])> = vec![
+            ("A", deps_a.as_slice()),
+            ("B", deps_b.as_slice()),
+        ];
+        let err = topo_sort(&items).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("circular dependency"), "got: {}", msg);
+    }
+
+    #[test]
+    fn topo_sort_diamond() {
+        //   A
+        //  / \
+        // B   C
+        //  \ /
+        //   D
+        let deps_b = vec!["A".to_string()];
+        let deps_c = vec!["A".to_string()];
+        let deps_d = vec!["B".to_string(), "C".to_string()];
+        let items: Vec<(&str, &[String])> = vec![
+            ("D", deps_d.as_slice()),
+            ("B", deps_b.as_slice()),
+            ("A", &[]),
+            ("C", deps_c.as_slice()),
+        ];
+        let order = topo_sort(&items).unwrap();
+        let pos: HashMap<usize, usize> = order.iter().enumerate().map(|(pos, &idx)| (idx, pos)).collect();
+        assert!(pos[&2] < pos[&1]); // A before B
+        assert!(pos[&2] < pos[&3]); // A before C
+        assert!(pos[&1] < pos[&0]); // B before D
+        assert!(pos[&3] < pos[&0]); // C before D
+    }
 }
