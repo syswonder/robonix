@@ -14,28 +14,27 @@ message SynthesizeAudioChunk {
 }
 
 message Synthesize_Request {
-}
-
-message Synthesize_Response {
   string text = 1;
   string language = 2;
   string voice = 3;
   float speed = 4;
-  bytes audio_data = 5;
-  string encoding = 6;
-  uint32 sample_rate_hz = 7;
-  string error = 8;
+}
+
+message Synthesize_Response {
+  bytes audio_data = 1;
+  string encoding = 2;
+  uint32 sample_rate_hz = 3;
+  string error = 4;
 }
 
 message SynthesizeStream_Request {
-}
-
-message SynthesizeStream_Response {
   string text = 1;
   string language = 2;
   string voice = 3;
   float speed = 4;
   robonix.robonix_msg.AudioConfig audio_config = 5;
-  SynthesizeAudioChunk chunk = 6;
 }
 
+message SynthesizeStream_Response {
+  SynthesizeAudioChunk chunk = 1;
+}

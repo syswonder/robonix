@@ -1,14 +1,14 @@
 # Speech Service
 
-语音交互服务 — Robonix srv 层，提供 ASR（语音识别）、TTS（语音合成）、Dialog（语音对话）三类 gRPC 接口。
+Voice interaction service -- Robonix srv layer, providing three types of gRPC interfaces: ASR (Automatic Speech Recognition), TTS (Text-to-Speech), and Dialog (Voice Dialog).
 
-## 架构定位
+## Architecture Position
 
 ```
 ┌─────────────────────────────────────────────┐
 │              Application Layer              │
 ├─────────────────────────────────────────────┤
-│  speech_service  ← 你在这里 (robonix/srv/speech)  │
+│  speech_service  ← you are here (robonix/srv/speech)  │
 ├─────────────────────────────────────────────┤
 │  audio_driver    (robonix/prm/audio)        │
 ├─────────────────────────────────────────────┤
@@ -16,122 +16,122 @@
 └─────────────────────────────────────────────┘
 ```
 
-- **上层**：接收应用层文本请求（TTS）或返回识别结果（ASR）
-- **下层**：从 audio_driver 接收原始 PCM 音频流
-- **自适应性**：自动将任意采样率/声道/编码转为 16kHz mono pcm_s16le，调用方无需预处理
+- **Upper layer**: Receives text requests from applications (TTS) or returns recognition results (ASR)
+- **Lower layer**: Receives raw PCM audio streams from audio_driver
+- **Adaptability**: Automatically converts any sample rate/channel/encoding to 16kHz mono pcm_s16le -- callers do not need to pre-process audio
 
-## gRPC 接口
+## gRPC Interfaces
 
-| 服务 | RPC | 模式 | 后端 | 说明 |
-|------|-----|------|------|------|
-| SpeechAsr | Recognize | Unary | Whisper (GPU FP16) | 一次性识别，适合完整语句 |
-| SpeechAsr | RecognizeStream | Bidi-stream | FunASR Paraformer | 流式识别，600ms 粒度 |
-| SpeechTts | Synthesize | Unary | Edge TTS | 一次性合成，返回完整 MP3 |
-| SpeechTts | SynthesizeStream | Server-stream | Edge TTS | 流式合成，边生成边返回 |
-| SpeechDialog | StartDialog | Server-stream | — | 语音对话会话管理 |
+| Service | RPC | Mode | Backend | Description |
+|---------|-----|------|---------|-------------|
+| SpeechAsr | Recognize | Unary | Whisper (GPU FP16) | One-shot recognition, suitable for complete utterances |
+| SpeechAsr | RecognizeStream | Bidi-stream | FunASR Paraformer | Streaming recognition, 600ms granularity |
+| SpeechTts | Synthesize | Unary | Edge TTS | One-shot synthesis, returns complete MP3 |
+| SpeechTts | SynthesizeStream | Server-stream | Edge TTS | Streaming synthesis, yields chunks as generated |
+| SpeechDialog | StartDialog | Server-stream | — | Voice dialog session management |
 
-## 目录结构
+## Directory Structure
 
 ```
 speech_service/
 ├── proto/
-│   └── speech_service.proto    # 自包含 gRPC 定义（内联 AudioConfig/AudioChunk）
-├── proto_gen/                  # build 时生成的 *_pb2.py（git 忽略）
+│   └── speech_service.proto    # Self-contained gRPC definitions (inline AudioConfig/AudioChunk)
+├── proto_gen/                  # Generated *_pb2.py at build time (git-ignored)
 ├── scripts/
-│   └── build.sh                # proto 代码生成
+│   └── build.sh                # Proto code generation
 ├── speech_service/
-│   ├── __init__.py             # 包入口
-│   ├── service.py              # gRPC servicer + 后端引擎 + main()
-│   └── audio_utils.py          # 音频格式自适应（任意格式 → 16kHz mono s16le）
-├── robonix_manifest.yaml       # Robonix 包描述
+│   ├── __init__.py             # Package entry point
+│   ├── service.py              # gRPC servicer + backend engines + main()
+│   └── audio_utils.py          # Audio format adaptation (any format → 16kHz mono s16le)
+├── robonix_manifest.yaml       # Robonix package descriptor
 ├── requirements.txt
 └── .gitignore
 ```
 
-## 快速启动
+## Quick Start
 
-### 1. 安装依赖
+### 1. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
-# 核心依赖：grpcio, grpcio-tools, transformers, torch, funasr, edge-tts, scipy, numpy
+# Core dependencies: grpcio, grpcio-tools, transformers, torch, funasr, edge-tts, scipy, numpy
 ```
 
-### 2. 生成 proto stubs
+### 2. Generate Proto Stubs
 
 ```bash
 bash scripts/build.sh
 ```
 
-### 3. 启动服务
+### 3. Start the Service
 
 ```bash
-# 正常模式（需要 GPU + 模型权重）
+# Normal mode (requires GPU + model weights)
 export PYTHONPATH=$(pwd)/proto_gen:${PYTHONPATH:-}
 python -m speech_service.service
 
-# CI 模式（不需要 GPU/模型，返回 mock 结果）
+# CI mode (no GPU/model needed, returns mock results)
 SPEECH_CI_MODE=1 python -m speech_service.service
 
-# 指定端口
+# Specify port
 SPEECH_PORT=50060 python -m speech_service.service
 
-# 跳过 Atlas 注册
+# Skip Atlas registration
 SPEECH_STANDALONE=1 python -m speech_service.service
 ```
 
-### 4. 通过 Robonix 启动
+### 4. Launch via Robonix
 
 ```bash
 rbnx run com.robonix.example.speech_service
 ```
 
-## 环境变量
+## Environment Variables
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `ASR_MODEL` | `whisper-large-merged` | Whisper 模型路径 |
-| `ASR_DEVICE` | `cuda` | Torch 设备（cuda/cpu） |
-| `ASR_CHUNK_LENGTH` | `30.0` | Whisper 长音频分片长度（秒） |
-| `ASR_BATCH_SIZE` | `4` | Whisper 批处理大小 |
-| `FUNASR_MODEL` | `paraformer-zh-streaming` | FunASR 流式模型 |
-| `FUNASR_CHUNK_SIZE` | `[0,10,5]` | Paraformer chunk_size 参数 |
-| `TTS_VOICE` | `zh-CN-XiaoxiaoNeural` | Edge TTS 声音名称 |
-| `ROBONIX_ATLAS` | `localhost:50051` | Atlas 控制面地址 |
-| `SPEECH_PORT` | `0`（自动分配） | gRPC 监听端口 |
-| `SPEECH_BIND_ADDR` | `0.0.0.0` | gRPC 绑定地址 |
-| `SPEECH_CI_MODE` | — | 设为 `1` 启用 mock 模式 |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ASR_MODEL` | `whisper-large-merged` | Whisper model path |
+| `ASR_DEVICE` | `cuda` | Torch device (cuda/cpu) |
+| `ASR_CHUNK_LENGTH` | `30.0` | Whisper long-audio chunk length (seconds) |
+| `ASR_BATCH_SIZE` | `4` | Whisper batch size |
+| `FUNASR_MODEL` | `paraformer-zh-streaming` | FunASR streaming model |
+| `FUNASR_CHUNK_SIZE` | `[0,10,5]` | Paraformer chunk_size parameter |
+| `TTS_VOICE` | `zh-CN-XiaoxiaoNeural` | Edge TTS voice name |
+| `ROBONIX_ATLAS` | `localhost:50051` | Atlas control plane address |
+| `SPEECH_PORT` | `0` (auto-assign) | gRPC listen port |
+| `SPEECH_BIND_ADDR` | `0.0.0.0` | gRPC bind address |
+| `SPEECH_CI_MODE` | — | Set to `1` to enable mock mode |
 
-## 音频自适应
+## Audio Adaptation
 
-`audio_utils.py` 处理管线：
+`audio_utils.py` processing pipeline:
 
 ```
-输入音频（任意格式）
+Input audio (any format)
   │
-  ├─ 1. 解码 → float32 numpy [-1, 1]
-  │     支持: pcm_s16le, pcm_f32le, pcm_s32le, pcm_u8, pcm_s24le, wav
+  ├─ 1. Decode → float32 numpy [-1, 1]
+  │     Supported: pcm_s16le, pcm_f32le, pcm_s32le, pcm_u8, pcm_s24le, wav
   │
-  ├─ 2. 多声道混合 → 单声道
+  ├─ 2. Multi-channel downmix → mono
   │     reshape(-1, channels).mean(axis=1)
   │
-  ├─ 3. 重采样 → 16kHz
-  │     scipy.signal.resample_poly（多相 FIR 滤波器）
+  ├─ 3. Resample → 16kHz
+  │     scipy.signal.resample_poly (polyphase FIR filter)
   │
-  └─ 4. 编码 → pcm_s16le
+  └─ 4. Encode → pcm_s16le
 ```
 
-调用方无需关心音频格式，服务端自动处理 8kHz/16kHz/48kHz/stereo 等输入。
+Callers do not need to worry about audio format -- the server automatically handles inputs such as 8kHz/16kHz/48kHz/stereo.
 
-## Atlas 集成
+## Atlas Integration
 
-启动时可选注册到 Atlas 控制面：
+Optionally registers with the Atlas control plane at startup:
 
-- **RegisterNode**: `com.robonix.services.speech`，namespace `robonix/srv/speech`，kind `service`
+- **RegisterNode**: `com.robonix.services.speech`, namespace `robonix/srv/speech`, kind `service`
 - **DeclareInterface × 5**: asr, asr_stream, tts, tts_stream, dialog
 
-Atlas 不可用时自动降级为独立运行模式。
+Automatically degrades to standalone mode when Atlas is unavailable.
 
-## Proto 设计
+## Proto Design
 
-`speech_service.proto` 是**自包含**的 — AudioConfig 和 AudioChunk 类型内联定义，不依赖外部 proto 文件。与 `audio_driver.proto` 中的同名类型解耦，各自独立演进。
+`speech_service.proto` is **self-contained** -- AudioConfig and AudioChunk types are defined inline, with no dependency on external proto files. They are decoupled from the identically-named types in `audio_driver.proto`, allowing each to evolve independently.

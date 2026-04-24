@@ -1,25 +1,21 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MulanPSL-2.0
 set -euo pipefail
 PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-PROTO_SRC="$PKG/proto"
-PROTO_DEPS="$PKG/../../../crates/robonix-interfaces/robonix_proto"
-OUT_DIR="$PKG/proto_gen"
-
 FLAGS=()
 [[ "${RBNX_BUILD_CLEAN:-}" == "1" ]] && FLAGS+=(--clean)
 
-# Step 1: rbnx codegen (generates IDL-based protos: asr.proto, tts.proto, etc.)
-rbnx codegen -p "$PKG" "${FLAGS[@]}" || true
+# Step 1: rbnx codegen (generates proto stubs from ROS IDL + contracts)
+rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
-# Step 2: Generate gRPC service stubs from speech_service.proto
-mkdir -p "$OUT_DIR"
-python -m grpc_tools.protoc \
-    -I"$OUT_DIR" \
-    -I"$PROTO_DEPS" \
-    -I"$PROTO_SRC" \
-    --python_out="$OUT_DIR" \
-    --grpc_python_out="$OUT_DIR" \
-    "$PROTO_SRC/speech_service.proto"
+# Step 2: Download model weights (skip in CI mode or if SKIP_MODEL_DOWNLOAD=1)
+if [[ "${SPEECH_CI_MODE:-}" != "1" && "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
+    echo "[build] Downloading ASR model (openai/whisper-large-v3)..."
+    python3 -c "from transformers import pipeline; pipeline('automatic-speech-recognition', model='openai/whisper-large-v3', model_kwargs={'local_files_only': False})" || echo "[build] WARNING: Whisper model download failed. Service will fail to start ASR backend."
+
+    echo "[build] Downloading FunASR model (paraformer-zh-streaming)..."
+    python3 -c "from funasr import AutoModel; AutoModel(model='paraformer-zh-streaming')" || echo "[build] WARNING: FunASR model download failed. Service will fail to start streaming ASR backend."
+else
+    echo "[build] Skipping model download (CI mode or SKIP_MODEL_DOWNLOAD=1)."
+fi
 
 echo "[build] done."

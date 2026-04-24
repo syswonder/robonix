@@ -1,41 +1,45 @@
 #!/usr/bin/env python3
-"""Speech service — the srv-layer voice interaction service for Robonix.
+"""Speech service -- the srv-layer voice interaction service for Robonix.
 
 Architecture position: robonix/srv/speech
   - Sits ABOVE the prm layer (audio_driver) and BELOW the application layer
   - Receives raw audio from audio_driver via gRPC, returns transcriptions
   - Receives text from applications, returns synthesized audio (MP3)
 
-Provides 3 gRPC services (5 RPCs total):
+Provides 5 RPCs across 5 gRPC service contracts (from robonix_contracts.proto):
 
-  SpeechAsr (Automatic Speech Recognition):
-    - Recognize(req) → resp        — one-shot, full-utterance transcription
-    - RecognizeStream(stream) → stream — real-time chunk-by-chunk transcription
+  SrvSpeechAsr (Automatic Speech Recognition -- one-shot):
+    Call(req) -> resp          -- full-utterance transcription
 
-  SpeechTts (Text-to-Speech):
-    - Synthesize(req) → resp       — one-shot, returns complete MP3 audio
-    - SynthesizeStream(req) → stream — streaming, yields MP3 chunks as generated
+  SrvSpeechAsrStream (Streaming ASR):
+    Stream(stream) -> stream   -- real-time chunk-by-chunk transcription
 
-  SpeechDialog (Voice Dialog Session):
-    - StartDialog(req) → stream    — managed session with state transitions
+  SrvSpeechTts (Text-to-Speech -- one-shot):
+    Call(req) -> resp          -- returns complete MP3 audio
+
+  SrvSpeechTtsStream (Streaming TTS):
+    Stream(req) -> stream      -- yields MP3 chunks as generated
+
+  SrvSpeechDialog (Voice Dialog Session):
+    Stream(req) -> stream      -- managed session with state transitions
 
 Backend engines:
-  - Whisper (transformers pipeline)  — one-shot ASR, GPU FP16, high accuracy
-  - FunASR Paraformer-zh-streaming   — streaming ASR, 600ms granularity
-  - Edge TTS (Microsoft, free)       — TTS synthesis, zh-CN-XiaoxiaoNeural
+  - Whisper (transformers pipeline)  -- one-shot ASR, GPU FP16, high accuracy
+  - FunASR Paraformer-zh-streaming   -- streaming ASR, 600ms granularity
+  - Edge TTS (Microsoft, free)       -- TTS synthesis, zh-CN-XiaoxiaoNeural
 
 Audio adaptation:
   The service auto-adapts any input format (sample_rate, channels, encoding)
   to 16kHz mono pcm_s16le using speech_service.audio_utils.adapt_audio().
-  Callers do NOT need to pre-process audio — the service handles it.
+  Callers do NOT need to pre-process audio -- the service handles it.
 
 Atlas integration:
   On startup, the service optionally registers with the Atlas control plane
-  (RegisterNode + DeclareInterface × 5). If Atlas is unavailable, the service
+  (RegisterNode + DeclareInterface x 5). If Atlas is unavailable, the service
   runs in standalone mode. Set SPEECH_STANDALONE=1 to skip registration.
 
 Environment variables:
-  ASR_MODEL          Whisper model path (default: whisper-large-merged)
+  ASR_MODEL          Whisper model path (default: openai/whisper-large-v3)
   ASR_DEVICE         Torch device: cuda | cpu (default: cuda)
   ASR_CHUNK_LENGTH   Whisper chunk length in seconds (default: 30.0)
   ASR_BATCH_SIZE     Whisper batch size (default: 4)
@@ -63,16 +67,16 @@ from typing import Optional
 logging.basicConfig(level=logging.INFO, format="[speech-service] %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-# ── Proto stub resolution ──────────────────────────────────────────────────
+# -- Proto stub resolution ---------------------------------------------------
 # Walks up from this file's directory looking for proto_gen/ containing the
-# generated *_pb2.py files. Adds it to sys.path so "import speech_service_pb2"
-# works regardless of the working directory.
+# codegen-generated *_pb2.py / *_pb2_grpc.py files. Adds it to sys.path so
+# "import asr_pb2" etc. work regardless of the working directory.
 
 def _ensure_proto_gen() -> None:
     d = Path(__file__).resolve().parent
     while d.parent != d:
         pg = d / "proto_gen"
-        if pg.is_dir() and (pg / "speech_service_pb2.py").exists():
+        if pg.is_dir() and (pg / "robonix_contracts_pb2_grpc.py").exists():
             sys.path.insert(0, str(pg))
             return
         d = d.parent
@@ -80,30 +84,33 @@ def _ensure_proto_gen() -> None:
 _ensure_proto_gen()
 
 import grpc
-import speech_service_pb2 as spb
-import speech_service_pb2_grpc as spb_grpc
+import asr_pb2
+import tts_pb2
+import speech_pb2
+import robonix_msg_pb2
+import robonix_contracts_pb2_grpc as contracts_grpc
 
-# ── CI mock mode ──────────────────────────────────────────────────────────
+# -- CI mock mode ------------------------------------------------------------
 
 CI_MODE = os.environ.get("SPEECH_CI_MODE", "").strip() in ("1", "true", "yes")
 
-# ── ASR Backend (Whisper) ─────────────────────────────────────────────────
+# -- ASR Backend (Whisper) ---------------------------------------------------
 
 class WhisperASRBackend:
     """One-shot ASR backend using HuggingFace Whisper pipeline.
 
-    Loads a Whisper model (default: whisper-large-merged) onto GPU with FP16.
-    Best suited for complete utterances — not real-time streaming.
+    Loads a Whisper model (default: openai/whisper-large-v3) onto GPU with FP16.
+    Best suited for complete utterances -- not real-time streaming.
 
     Pipeline:
-        raw PCM bytes → numpy float32 → transformers pipeline → text
-        + automatic traditional→simplified Chinese conversion (OpenCC t2s)
+        raw PCM bytes -> numpy float32 -> transformers pipeline -> text
+        + automatic traditional-to-simplified Chinese conversion (OpenCC t2s)
 
     Config (environment):
-        ASR_MODEL       — local model path or HuggingFace model ID
-        ASR_DEVICE      — "cuda" or "cpu"
-        ASR_CHUNK_LENGTH — long-form audio chunk length in seconds
-        ASR_BATCH_SIZE  — batch size for pipeline inference
+        ASR_MODEL       -- local model path or HuggingFace model ID
+        ASR_DEVICE      -- "cuda" or "cpu"
+        ASR_CHUNK_LENGTH -- long-form audio chunk length in seconds
+        ASR_BATCH_SIZE  -- batch size for pipeline inference
     """
 
     def __init__(self):
@@ -121,6 +128,7 @@ class WhisperASRBackend:
             model=model_path,
             device=device,
             torch_dtype=torch.float16,
+            model_kwargs={"local_files_only": True},
         )
         self.chunk_length_s = chunk_length
         self.batch_size = batch_size
@@ -183,17 +191,17 @@ class WhisperASRBackend:
 
 
 class MockASRBackend:
-    """CI mock ASR — returns a fixed canned response, no model loaded.
+    """CI mock ASR -- returns a fixed canned response, no model loaded.
 
     Activated when SPEECH_CI_MODE=1. Useful for testing the gRPC layer
     without requiring GPU or model weights.
     """
 
     def recognize(self, audio_bytes: bytes, encoding: str, sample_rate: int, language: str) -> dict:
-        return {"text": "[ci-mock] 你好世界", "confidence": 1.0}
+        return {"text": "[ci-mock] hello world", "confidence": 1.0}
 
 
-# ── ASR Backend (FunASR Paraformer streaming) ─────────────────────────────
+# -- ASR Backend (FunASR Paraformer streaming) --------------------------------
 
 class FunASRStreamingBackend:
     """Streaming ASR backend using FunASR Paraformer-zh-streaming.
@@ -203,17 +211,17 @@ class FunASRStreamingBackend:
 
     Model parameters:
       - Model: paraformer-zh-streaming (or FUNASR_MODEL env override)
-      - chunk_size: [0, 10, 5] — 0 left context, 10 current (600ms), 5 right (300ms)
-      - chunk_stride: 10 × 960 = 9600 samples = 600ms at 16kHz
+      - chunk_size: [0, 10, 5] -- 0 left context, 10 current (600ms), 5 right (300ms)
+      - chunk_stride: 10 x 960 = 9600 samples = 600ms at 16kHz
       - encoder_chunk_look_back: 4 (retain 4 past encoder chunks)
       - decoder_chunk_look_back: 1 (retain 1 past decoder chunk)
 
     The cache dict is passed across recognize_chunk() calls within a single
-    stream session. Each RecognizeStream gRPC call gets its own cache.
+    stream session. Each Stream gRPC call gets its own cache.
 
     Config (environment):
-        FUNASR_MODEL      — model name or local path
-        FUNASR_CHUNK_SIZE — JSON array [left, current, right]
+        FUNASR_MODEL      -- model name or local path
+        FUNASR_CHUNK_SIZE -- JSON array [left, current, right]
     """
 
     def __init__(self):
@@ -230,7 +238,7 @@ class FunASRStreamingBackend:
 
         log.info("Loading FunASR model %s (chunk_size=%s, stride=%d samples)...",
                  model_name, self.chunk_size, self.chunk_stride)
-        self.model = AutoModel(model=model_name)
+        self.model = AutoModel(model=model_name, hub_kwargs={"local_files_only": True})
         log.info("FunASR model loaded.")
 
     def recognize_chunk(
@@ -245,11 +253,11 @@ class FunASRStreamingBackend:
 
         Args:
             audio_chunk: Raw PCM bytes (already adapted to 16kHz mono pcm_s16le).
-                Chunk size should be ~600ms (9600 samples × 2 bytes = 19200 bytes)
+                Chunk size should be ~600ms (9600 samples x 2 bytes = 19200 bytes)
                 for optimal granularity, but any size works.
             cache: Mutable dict maintained across chunks in one session.
                 The model stores encoder/decoder state here. Must be the same
-                dict for all chunks in one RecognizeStream call.
+                dict for all chunks in one Stream call.
             is_final: True on the last call to flush remaining state.
                 Send empty audio_chunk with is_final=True to get the final result.
             encoding: Audio encoding (default pcm_s16le).
@@ -292,17 +300,17 @@ class FunASRStreamingBackend:
 
 
 class MockASRStreamingBackend:
-    """CI mock streaming ASR — returns empty results during streaming,
+    """CI mock streaming ASR -- returns empty results during streaming,
     canned result on is_final. No model loaded.
     """
 
     def recognize_chunk(self, audio_chunk, cache, is_final=False, encoding="pcm_s16le", sample_rate=16000):
         if is_final:
-            return [{"text": "[ci-mock-stream] 你好世界", "confidence": 1.0}]
+            return [{"text": "[ci-mock-stream] hello world", "confidence": 1.0}]
         return [{"text": "", "confidence": 0.0}]
 
 
-# ── TTS Backend (Edge TTS) ───────────────────────────────────────────────
+# -- TTS Backend (Edge TTS) --------------------------------------------------
 
 class EdgeTTSBackend:
     """TTS backend using Microsoft Edge TTS (free, no API key required).
@@ -311,12 +319,12 @@ class EdgeTTSBackend:
     Services TTS endpoint. Outputs MP3 audio at 24kHz.
 
     Config (environment):
-        TTS_VOICE — voice name (default: zh-CN-XiaoxiaoNeural)
+        TTS_VOICE -- voice name (default: zh-CN-XiaoxiaoNeural)
         Other voices: zh-CN-YunxiNeural, en-US-JennyNeural, ja-JP-NanamiNeural
 
     Speed control:
         speed parameter is a multiplier. Internally converted to Edge TTS
-        rate string format: "+N%" or "-N%" where N = |speed-1| × 100.
+        rate string format: "+N%" or "-N%" where N = |speed-1| x 100.
     """
 
     def __init__(self):
@@ -349,7 +357,7 @@ class EdgeTTSBackend:
     async def synthesize_stream(self, text: str, voice: str = "", speed: float = 1.0):
         """Async generator that yields MP3 audio chunks as they're generated.
 
-        Useful for long text — the caller can start playback before the
+        Useful for long text -- the caller can start playback before the
         full audio is ready.
 
         Args:
@@ -358,7 +366,7 @@ class EdgeTTSBackend:
             speed: Speed multiplier.
 
         Yields:
-            bytes — individual MP3 audio chunks from Edge TTS streaming.
+            bytes -- individual MP3 audio chunks from Edge TTS streaming.
         """
         import edge_tts
 
@@ -372,7 +380,7 @@ class EdgeTTSBackend:
 
 
 class MockTTSBackend:
-    """CI mock TTS — returns a minimal valid WAV file (silence).
+    """CI mock TTS -- returns a minimal valid WAV file (silence).
     Activated when SPEECH_CI_MODE=1.
     """
 
@@ -384,17 +392,17 @@ class MockTTSBackend:
         yield data
 
 
-# ── Dialog Session Manager ────────────────────────────────────────────────
+# -- Dialog Session Manager --------------------------------------------------
 # Manages the lifecycle of voice dialog sessions. Each StartDialog call
-# creates a session that tracks state (IDLE → LISTENING → PROCESSING →
+# creates a session that tracks state (IDLE -> LISTENING -> PROCESSING ->
 # SPEAKING) until the client disconnects.
 
 class DialogSession:
     """Tracks state for a single voice dialog session.
 
     State machine:
-        IDLE → LISTENING → PROCESSING → SPEAKING → IDLE (loop)
-        Any state → ERROR (on failure)
+        IDLE -> LISTENING -> PROCESSING -> SPEAKING -> IDLE (loop)
+        Any state -> ERROR (on failure)
 
     Attributes:
         session_id: 8-char UUID prefix, unique per session.
@@ -443,44 +451,50 @@ class DialogManager:
         return False
 
 
-# ── gRPC Servicers ────────────────────────────────────────────────────────
+# -- gRPC Servicers ----------------------------------------------------------
 # These classes implement the gRPC service interfaces defined in
-# speech_service.proto. Each servicer wraps one or more backend engines.
+# robonix_contracts.proto. Each servicer wraps one or more backend engines.
+# Note: the codegen service methods are named Call / Stream (not Recognize
+# or Synthesize) because the contract RPC is always called "Call" or "Stream".
 
-class SpeechAsrServicer(spb_grpc.SpeechAsrServicer):
-    """ASR gRPC servicer — handles Recognize and RecognizeStream RPCs.
+class SpeechAsrServicer(contracts_grpc.SrvSpeechAsrServicer):
+    """ASR gRPC servicer -- handles the Call RPC for one-shot speech recognition.
 
-    Delegates to:
-        - asr_backend (WhisperASRBackend) for one-shot Recognize
-        - stream_asr_backend (FunASRStreamingBackend) for streaming RecognizeStream
+    Delegates to WhisperASRBackend for transcription.
 
-    If a backend is None (failed to load at startup), the corresponding RPC
-    returns a clear error with actionable instructions instead of crashing.
+    If the backend is None (failed to load at startup), the RPC returns
+    UNAVAILABLE with actionable instructions instead of crashing.
     """
 
-    def __init__(self, asr_backend, stream_asr_backend):
+    def __init__(self, asr_backend):
         self.asr_backend = asr_backend
-        self.stream_asr_backend = stream_asr_backend
 
-    def Recognize(self, request, context):
-        """Handle one-shot ASR: receive complete audio, return transcription."""
+    def Call(self, request, context):
+        """Handle one-shot ASR: receive complete audio, return transcription.
+
+        Request fields (from asr.proto Recognize_Request):
+            audio_data     -- raw audio bytes
+            encoding       -- audio encoding string (e.g. "pcm_s16le")
+            sample_rate_hz -- sample rate in Hz
+            language       -- BCP-47 language tag
+
+        Returns asr_pb2.Recognize_Response with text, confidence, error.
+        """
         if self.asr_backend is None:
             context.set_code(grpc.StatusCode.UNAVAILABLE)
             context.set_details(
                 "ASR backend not available. "
-                "Set ASR_MODEL to a local model path, or ensure network access "
-                "for auto-download from HuggingFace Hub. "
+                "Set ASR_MODEL to a local model path with pre-downloaded weights. "
+                "Runtime downloads are disabled (local_files_only=True). "
                 "Current ASR_MODEL="
                 + os.environ.get("ASR_MODEL", "openai/whisper-large-v3")
             )
-            return spb.RecognizeResponse()
+            return asr_pb2.Recognize_Response()
 
         from speech_service.audio_utils import adapt_audio
 
         encoding = request.encoding or "pcm_s16le"
         sample_rate = request.sample_rate_hz or 16000
-        channels = request.channels or 1
-        bits_per_sample = request.bits_per_sample or 16
         language = request.language
 
         try:
@@ -489,59 +503,76 @@ class SpeechAsrServicer(spb_grpc.SpeechAsrServicer):
                 request.audio_data,
                 encoding=encoding,
                 sample_rate=sample_rate,
-                channels=channels,
-                bits_per_sample=bits_per_sample,
             )
             result = self.asr_backend.recognize(audio_data, "pcm_s16le", 16000, language)
-            return spb.RecognizeResponse(
+            return asr_pb2.Recognize_Response(
                 text=result["text"],
                 confidence=result.get("confidence", 0.0),
                 error="",
             )
         except Exception as e:
             log.exception("ASR recognize failed")
-            return spb.RecognizeResponse(text="", confidence=0.0, error=str(e))
+            return asr_pb2.Recognize_Response(text="", confidence=0.0, error=str(e))
 
-    def RecognizeStream(self, request_iterator, context):
-        """Handle streaming ASR: receive audio chunks, yield partial/final results."""
+
+class SpeechAsrStreamServicer(contracts_grpc.SrvSpeechAsrStreamServicer):
+    """Streaming ASR gRPC servicer -- handles the Stream RPC for chunk-by-chunk
+    speech recognition.
+
+    Delegates to FunASRStreamingBackend for real-time recognition.
+
+    This is a bidirectional stream: the client sends AsrAudioChunk messages
+    (each containing an AudioChunk with raw audio data), and the server
+    yields RecognizeStreamEvent messages with partial/final transcriptions.
+
+    Note: the stream carries no AudioConfig or language -- the service uses
+    defaults (16kHz mono pcm_s16le). Each chunk is adapted if needed.
+    """
+
+    def __init__(self, stream_asr_backend):
+        self.stream_asr_backend = stream_asr_backend
+
+    def Stream(self, request_iterator, context):
+        """Handle streaming ASR: receive audio chunks, yield partial/final results.
+
+        Input: asr_pb2.AsrAudioChunk (has .chunk with .data field from robonix_msg.AudioChunk)
+        Output: asr_pb2.RecognizeStreamEvent
+
+        Since the stream has no AudioConfig, we use defaults: 16kHz mono pcm_s16le.
+        """
         if self.stream_asr_backend is None:
             context.set_code(grpc.StatusCode.UNAVAILABLE)
             context.set_details(
                 "Streaming ASR backend not available. "
-                "Set FUNASR_MODEL to a local model path, or ensure network access "
-                "for auto-download. "
+                "Set FUNASR_MODEL to a local model path with pre-downloaded weights. "
+                "Runtime downloads are disabled (local_files_only=True). "
                 "Current FUNASR_MODEL="
                 + os.environ.get("FUNASR_MODEL", "paraformer-zh-streaming")
             )
             return
 
-        from speech_service.audio_utils import adapt_audio, parse_audio_config
+        from speech_service.audio_utils import adapt_audio
 
         cache = {}
-        language = ""
-        config = {"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 1, "bits_per_sample": 16}
         chunk_count = 0
 
         try:
             for req in request_iterator:
-                if req.audio_config and (req.audio_config.encoding or req.audio_config.sample_rate_hz):
-                    config = parse_audio_config(req.audio_config)
-                if req.language:
-                    language = req.language
-
+                # Extract raw audio bytes from AsrAudioChunk.chunk.data
                 chunk_data = bytes(req.chunk.data) if req.chunk and req.chunk.data else None
                 if chunk_data is None:
                     continue
 
                 chunk_count += 1
 
-                # Adapt each chunk to 16kHz mono pcm_s16le
+                # Adapt each chunk to 16kHz mono pcm_s16le using defaults
+                # (stream carries no AudioConfig, so assume pcm_s16le at 16kHz mono)
                 adapted, _ = adapt_audio(
                     chunk_data,
-                    encoding=config["encoding"],
-                    sample_rate=config["sample_rate"],
-                    channels=config["channels"],
-                    bits_per_sample=config["bits_per_sample"],
+                    encoding="pcm_s16le",
+                    sample_rate=16000,
+                    channels=1,
+                    bits_per_sample=16,
                 )
 
                 results = self.stream_asr_backend.recognize_chunk(
@@ -550,10 +581,10 @@ class SpeechAsrServicer(spb_grpc.SpeechAsrServicer):
                 )
                 for r in results:
                     if r.get("text"):
-                        yield spb.RecognizeStreamResponse(
+                        yield asr_pb2.RecognizeStreamEvent(
                             event_type=0, text=r["text"],
                             confidence=r.get("confidence", 0.0),
-                            language=language,
+                            language="",
                         )
 
             # Final flush
@@ -564,36 +595,44 @@ class SpeechAsrServicer(spb_grpc.SpeechAsrServicer):
                 )
                 for r in final_results:
                     if r.get("text"):
-                        yield spb.RecognizeStreamResponse(
+                        yield asr_pb2.RecognizeStreamEvent(
                             event_type=1, text=r["text"],
                             confidence=r.get("confidence", 0.0),
-                            language=language, is_final=True,
+                            language="", is_final=True,
                         )
             else:
-                yield spb.RecognizeStreamResponse(
+                yield asr_pb2.RecognizeStreamEvent(
                     event_type=2, error="No audio data received",
                 )
         except Exception as e:
             log.exception("ASR stream recognize failed")
-            yield spb.RecognizeStreamResponse(event_type=2, error=str(e))
+            yield asr_pb2.RecognizeStreamEvent(event_type=2, error=str(e))
 
 
-class SpeechTtsServicer(spb_grpc.SpeechTtsServicer):
-    """TTS gRPC servicer — handles Synthesize and SynthesizeStream RPCs.
+class SpeechTtsServicer(contracts_grpc.SrvSpeechTtsServicer):
+    """TTS gRPC servicer -- handles the Call RPC for one-shot text-to-speech.
 
     Delegates to EdgeTTSBackend for audio generation.
     Output format: MP3 at 24kHz (fixed by Edge TTS).
 
     Note: Edge TTS uses asyncio internally, but gRPC servicers are sync.
-    Synthesize uses asyncio.run(), SynthesizeStream creates a dedicated
-    event loop to avoid "cannot run from running loop" conflicts.
+    Call uses asyncio.run().
     """
 
     def __init__(self, tts_backend):
         self.tts_backend = tts_backend
 
-    def Synthesize(self, request, context):
-        """Handle one-shot TTS: receive text, return complete MP3 audio."""
+    def Call(self, request, context):
+        """Handle one-shot TTS: receive text, return complete MP3 audio.
+
+        Request fields (from tts.proto Synthesize_Request):
+            text     -- text to synthesize
+            language -- BCP-47 language tag
+            voice    -- voice name override
+            speed    -- speed multiplier (1.0 = normal)
+
+        Returns tts_pb2.Synthesize_Response with audio_data, encoding, sample_rate_hz.
+        """
         if self.tts_backend is None:
             context.set_code(grpc.StatusCode.UNAVAILABLE)
             context.set_details(
@@ -601,7 +640,7 @@ class SpeechTtsServicer(spb_grpc.SpeechTtsServicer):
                 "Edge TTS requires network access to Microsoft Cognitive Services. "
                 "Check your network connection or set SPEECH_CI_MODE=1 for testing."
             )
-            return spb.SynthesizeResponse()
+            return tts_pb2.Synthesize_Response()
 
         text = request.text
         voice = request.voice
@@ -609,7 +648,7 @@ class SpeechTtsServicer(spb_grpc.SpeechTtsServicer):
 
         try:
             audio_data = asyncio.run(self.tts_backend.synthesize(text, voice, speed))
-            return spb.SynthesizeResponse(
+            return tts_pb2.Synthesize_Response(
                 audio_data=audio_data,
                 encoding="mp3",
                 sample_rate_hz=24000,
@@ -617,10 +656,38 @@ class SpeechTtsServicer(spb_grpc.SpeechTtsServicer):
             )
         except Exception as e:
             log.exception("TTS synthesize failed")
-            return spb.SynthesizeResponse(audio_data=b"", error=str(e))
+            return tts_pb2.Synthesize_Response(audio_data=b"", error=str(e))
 
-    def SynthesizeStream(self, request, context):
-        """Handle streaming TTS: receive text, yield MP3 audio chunks."""
+
+class SpeechTtsStreamServicer(contracts_grpc.SrvSpeechTtsStreamServicer):
+    """Streaming TTS gRPC servicer -- handles the Stream RPC for chunk-by-chunk
+    text-to-speech synthesis.
+
+    Delegates to EdgeTTSBackend for audio generation.
+    Output format: MP3 at 24kHz (fixed by Edge TTS).
+
+    This is a server stream: unary request with text/voice/speed,
+    streams back tts_pb2.SynthesizeAudioChunk messages.
+
+    Note: Edge TTS uses asyncio internally. A dedicated event loop is
+    created per call to avoid "cannot run from running loop" conflicts.
+    """
+
+    def __init__(self, tts_backend):
+        self.tts_backend = tts_backend
+
+    def Stream(self, request, context):
+        """Handle streaming TTS: receive text, yield MP3 audio chunks.
+
+        Request fields (from tts.proto SynthesizeStream_Request):
+            text        -- text to synthesize
+            language    -- BCP-47 language tag
+            voice       -- voice name override
+            speed       -- speed multiplier
+            audio_config -- AudioConfig (reserved, not used by Edge TTS)
+
+        Yields tts_pb2.SynthesizeAudioChunk (wrapping robonix_msg.AudioChunk).
+        """
         if self.tts_backend is None:
             context.set_code(grpc.StatusCode.UNAVAILABLE)
             context.set_details(
@@ -636,19 +703,26 @@ class SpeechTtsServicer(spb_grpc.SpeechTtsServicer):
         try:
             loop = asyncio.new_event_loop()
             async_gen = self.tts_backend.synthesize_stream(text, voice, speed)
+            seq = 0
             while True:
                 try:
                     chunk_data = loop.run_until_complete(async_gen.__anext__())
-                    yield spb.SynthesizeStreamResponse(
-                        audio_data=chunk_data,
+                    yield tts_pb2.SynthesizeAudioChunk(
+                        chunk=robonix_msg_pb2.AudioChunk(
+                            data=chunk_data,
+                            sequence=seq,
+                        ),
                         encoding="mp3",
                         sample_rate_hz=24000,
                         is_final=False,
                     )
+                    seq += 1
                 except StopAsyncIteration:
-                    yield spb.SynthesizeStreamResponse(
-                        audio_data=b"", encoding="mp3",
-                        sample_rate_hz=24000, is_final=True,
+                    yield tts_pb2.SynthesizeAudioChunk(
+                        chunk=robonix_msg_pb2.AudioChunk(data=b""),
+                        encoding="mp3",
+                        sample_rate_hz=24000,
+                        is_final=True,
                     )
                     break
             loop.close()
@@ -658,10 +732,10 @@ class SpeechTtsServicer(spb_grpc.SpeechTtsServicer):
             context.set_details(str(e))
 
 
-class SpeechDialogServicer(spb_grpc.SpeechDialogServicer):
-    """Dialog gRPC servicer — handles StartDialog RPC.
+class SpeechDialogServicer(contracts_grpc.SrvSpeechDialogServicer):
+    """Dialog gRPC servicer -- handles the Stream RPC for voice dialog sessions.
 
-    Creates a DialogSession and streams state updates to the client.
+    Creates a DialogSession and streams DialogEvent updates to the client.
     The session stays alive until the client disconnects, then is
     automatically cleaned up.
 
@@ -672,16 +746,31 @@ class SpeechDialogServicer(spb_grpc.SpeechDialogServicer):
     def __init__(self, dialog_manager):
         self.dialog_manager = dialog_manager
 
-    def StartDialog(self, request, context):
+    def Stream(self, request, context):
+        """Handle dialog session: create session, stream state updates.
+
+        Request fields (from speech.proto StartDialog_Request):
+            language    -- BCP-47 language tag
+            enable_vad  -- enable voice activity detection
+            audio_config -- AudioConfig for the session
+
+        Yields speech_pb2.StartDialog_Response wrapping robonix_msg.DialogEvent.
+        """
         language = request.language or "zh-CN"
         enable_vad = request.enable_vad if hasattr(request, "enable_vad") else True
 
         session = self.dialog_manager.create_session(language, enable_vad)
 
-        yield spb.StartDialogResponse(
-            session_id=session.session_id,
-            state=DialogSession.STATE_MAP["IDLE"],
-            error="",
+        yield speech_pb2.StartDialog_Response(
+            event=robonix_msg_pb2.DialogEvent(
+                session_id=session.session_id,
+                event_type=DialogSession.STATE_MAP["IDLE"],
+                text="",
+                confidence=0.0,
+                language=session.language,
+                is_final=False,
+                error="",
+            )
         )
 
         try:
@@ -693,7 +782,7 @@ class SpeechDialogServicer(spb_grpc.SpeechDialogServicer):
             self.dialog_manager.remove_session(session.session_id)
 
 
-# ── Atlas registration (optional) ─────────────────────────────────────────
+# -- Atlas registration (optional) -------------------------------------------
 # Registers the speech service with the Robonix Atlas control plane so that
 # other nodes can discover it. If Atlas is unavailable or the runtime protos
 # are not installed, the service runs in standalone mode.
@@ -704,13 +793,13 @@ def _register_with_atlas(port: int) -> None:
     Registration flow:
         1. RegisterNode: node_id="com.robonix.services.speech",
            namespace="robonix/srv/speech", kind="service"
-        2. DeclareInterface × 5: one per RPC (asr, asr_stream, tts,
+        2. DeclareInterface x 5: one per contract (asr, asr_stream, tts,
            tts_stream, dialog), each with its gRPC mode.
         3. Atlas returns allocated_endpoint for each interface.
 
     If robonix_runtime_pb2 is not importable, or Atlas is unreachable,
     logs a warning and continues. The service is fully functional without
-    Atlas — it just won't be discoverable by other nodes.
+    Atlas -- it just won't be discoverable by other nodes.
 
     Args:
         port: The gRPC port the service is listening on.
@@ -759,7 +848,7 @@ def _register_with_atlas(port: int) -> None:
         log.warning("Atlas not available (%s), running standalone", e.code())
 
 
-# ── Main ──────────────────────────────────────────────────────────────────
+# -- Main --------------------------------------------------------------------
 # Entry point. Called via `python -m speech_service.service` or via the
 # robonix_manifest.yaml start command: `exec python -m speech_service.service`.
 
@@ -772,14 +861,14 @@ def main() -> None:
            - Failed backends are set to None; servicers return UNAVAILABLE
            - If ALL backends fail, exit with error
         2. Create gRPC server with thread pool (8 workers)
-        3. Register all 3 servicers (ASR, TTS, Dialog)
+        3. Register all 5 servicers (ASR, ASR Stream, TTS, TTS Stream, Dialog)
         4. Bind to SPEECH_BIND_ADDR:SPEECH_PORT (default 0.0.0.0:0 = auto)
         5. Optionally register with Atlas control plane
         6. Block until server terminates
     """
     log.info("Starting speech service (ci_mode=%s)", CI_MODE)
 
-    # ── Initialize backends ──────────────────────────────────────────────
+    # -- Initialize backends -------------------------------------------------
     asr_backend = None
     asr_stream_backend = None
     tts_backend = None
@@ -793,65 +882,65 @@ def main() -> None:
         try:
             asr_backend = WhisperASRBackend()
         except Exception as e:
-            log.error("╔══════════════════════════════════════════════════════════════╗")
-            log.error("║ Whisper ASR backend FAILED to initialize                  ║")
-            log.error("║ Error: %s", str(e)[:51])
-            log.error("║                                                            ║")
-            log.error("║ To fix, choose ONE of:                                     ║")
-            log.error("║   1. Ensure network access → auto-download from HuggingFace║")
-            log.error("║   2. Set ASR_MODEL=/path/to/local/whisper/model            ║")
-            log.error("║   3. Set SPEECH_CI_MODE=1 for testing (mock backend)       ║")
-            log.error("║                                                            ║")
-            log.error("║ The service will start without ASR (Recognize → UNAVAILABLE║")
-            log.error("╚══════════════════════════════════════════════════════════════╝")
+            log.error("+============================================================+")
+            log.error("| Whisper ASR backend FAILED to initialize                   |")
+            log.error("| Error: %s", str(e)[:51])
+            log.error("|                                                            |")
+            log.error("| To fix, choose ONE of:                                     |")
+            log.error("|   1. Pre-download model and set ASR_MODEL=/path/to/model   |")
+            log.error("|   2. Set SPEECH_CI_MODE=1 for testing (mock backend)       |")
+            log.error("|                                                            |")
+            log.error("| Note: local_files_only=True -- no runtime downloads        |")
+            log.error("| The service will start without ASR (Call -> UNAVAILABLE)   |")
+            log.error("+============================================================+")
             asr_backend = None
 
         # FunASR Paraformer (streaming ASR)
         try:
             asr_stream_backend = FunASRStreamingBackend()
         except Exception as e:
-            log.error("╔══════════════════════════════════════════════════════════════╗")
-            log.error("║ FunASR streaming ASR backend FAILED to initialize          ║")
-            log.error("║ Error: %s", str(e)[:51])
-            log.error("║                                                            ║")
-            log.error("║ To fix, choose ONE of:                                     ║")
-            log.error("║   1. pip install funasr  +  network access                 ║")
-            log.error("║   2. Set FUNASR_MODEL=/path/to/local/paraformer/model      ║")
-            log.error("║   3. Set SPEECH_CI_MODE=1 for testing                      ║")
-            log.error("║                                                            ║")
-            log.error("║ Streaming ASR (RecognizeStream) will be UNAVAILABLE        ║")
-            log.error("╚══════════════════════════════════════════════════════════════╝")
+            log.error("+============================================================+")
+            log.error("| FunASR streaming ASR backend FAILED to initialize          |")
+            log.error("| Error: %s", str(e)[:51])
+            log.error("|                                                            |")
+            log.error("| To fix, choose ONE of:                                     |")
+            log.error("|   1. Pre-download model and set FUNASR_MODEL=/path/to/model|")
+            log.error("|   2. Set SPEECH_CI_MODE=1 for testing                      |")
+            log.error("|                                                            |")
+            log.error("| Note: local_files_only=True -- no runtime downloads        |")
+            log.error("| Streaming ASR (Stream) will be UNAVAILABLE                 |")
+            log.error("+============================================================+")
             asr_stream_backend = None
 
         # Edge TTS
         try:
             tts_backend = EdgeTTSBackend()
         except Exception as e:
-            log.error("╔══════════════════════════════════════════════════════════════╗")
-            log.error("║ Edge TTS backend FAILED to initialize                      ║")
-            log.error("║ Error: %s", str(e)[:51])
-            log.error("║                                                            ║")
-            log.error("║ To fix: ensure network access to Microsoft TTS endpoint    ║")
-            log.error("║   or set SPEECH_CI_MODE=1 for testing                      ║")
-            log.error("║                                                            ║")
-            log.error("║ TTS (Synthesize/SynthesizeStream) will be UNAVAILABLE      ║")
-            log.error("╚══════════════════════════════════════════════════════════════╝")
+            log.error("+============================================================+")
+            log.error("| Edge TTS backend FAILED to initialize                      |")
+            log.error("| Error: %s", str(e)[:51])
+            log.error("|                                                            |")
+            log.error("| To fix: ensure network access to Microsoft TTS endpoint    |")
+            log.error("|   or set SPEECH_CI_MODE=1 for testing                      |")
+            log.error("|                                                            |")
+            log.error("| TTS (Call/Stream) will be UNAVAILABLE                      |")
+            log.error("+============================================================+")
             tts_backend = None
 
         # Bail out if nothing is available
         available = [b is not None for b in (asr_backend, asr_stream_backend, tts_backend)]
         if not any(available):
-            log.error("All backends failed — cannot start service.")
+            log.error("All backends failed -- cannot start service.")
             log.error("Set SPEECH_CI_MODE=1 for testing, or fix model/network issues above.")
             sys.exit(1)
 
-    # ── Startup summary ──────────────────────────────────────────────────
+    # -- Startup summary -----------------------------------------------------
     log.info("Backend status:")
-    log.info("  Whisper ASR (Recognize):       %s",
+    log.info("  Whisper ASR (Call):            %s",
              "OK" if asr_backend is not None else "UNAVAILABLE")
-    log.info("  FunASR (RecognizeStream):      %s",
+    log.info("  FunASR (Stream):               %s",
              "OK" if asr_stream_backend is not None else "UNAVAILABLE")
-    log.info("  Edge TTS (Synthesize):         %s",
+    log.info("  Edge TTS (Call/Stream):        %s",
              "OK" if tts_backend is not None else "UNAVAILABLE")
 
     dialog_manager = DialogManager()
@@ -859,13 +948,13 @@ def main() -> None:
     # Start gRPC server
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
 
-    # Register servicers
-    spb_grpc.add_SpeechAsrServicer_to_server(
-        SpeechAsrServicer(asr_backend, asr_stream_backend), server)
-    spb_grpc.add_SpeechTtsServicer_to_server(
-        SpeechTtsServicer(tts_backend), server)
-    spb_grpc.add_SpeechDialogServicer_to_server(
-        SpeechDialogServicer(dialog_manager), server)
+    # Register servicers (5 separate contracts from robonix_contracts.proto)
+    spb_grpc = contracts_grpc  # for add_*_to_server calls
+    spb_grpc.add_SrvSpeechAsrServicer_to_server(SpeechAsrServicer(asr_backend), server)
+    spb_grpc.add_SrvSpeechAsrStreamServicer_to_server(SpeechAsrStreamServicer(asr_stream_backend), server)
+    spb_grpc.add_SrvSpeechTtsServicer_to_server(SpeechTtsServicer(tts_backend), server)
+    spb_grpc.add_SrvSpeechTtsStreamServicer_to_server(SpeechTtsStreamServicer(tts_backend), server)
+    spb_grpc.add_SrvSpeechDialogServicer_to_server(SpeechDialogServicer(dialog_manager), server)
 
     # Bind port
     bind_addr = os.environ.get("SPEECH_BIND_ADDR", "0.0.0.0")
