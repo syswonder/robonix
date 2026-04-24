@@ -294,7 +294,7 @@ impl VlmClient {
         };
 
         if nodes.len() > 1 {
-            nodes.sort_by(|a, b| b.namespace.len().cmp(&a.namespace.len()));
+            nodes.sort_by_key(|b| std::cmp::Reverse(b.namespace.len()));
             log::warn!(
                 "multiple VLM candidates ({}); using most specific namespace {:?}",
                 nodes.len(),
