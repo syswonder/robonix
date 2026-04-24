@@ -1,0 +1,22 @@
+# Tiago sim stack — Docker Compose brings up Webots (GUI), Nav2, and
+# tiago_bridge (MCP ↔ atlas). Control plane: registers primitive/service
+# capabilities for the simulated Tiago platform via tiago_bridge.
+# GPU layer (compose.gpu.yaml) auto-merged when nvidia-smi succeeds.
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.tiago_sim_stack
+  version: 0.1.0
+  vendor: robonix
+  description: Tiago sim (Webots + Nav2 + MCP bridge) as a Docker Compose stack.
+  license: MulanPSL-2.0
+
+build: bash scripts/build.sh
+
+start: |
+  CF=(-f compose.yaml)
+  if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+    CF+=(-f compose.gpu.yaml)
+    echo "[tiago_sim_stack] NVIDIA GPU detected — merging compose.gpu.yaml"
+  fi
+  exec docker compose "${CF[@]}" up --build ros2-bridge

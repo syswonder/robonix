@@ -1,0 +1,23 @@
+# Memsearch MCP server — agent long-term memory.
+# Control plane: robonix/system/memory/{save,search,compact}.
+# Exposes MCP tools only; no robonix_contracts gRPC servicer.
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.memsearch_service
+  version: 0.1.0
+  vendor: robonix
+  description: Memsearch MCP server — fact/preference memory for the agent.
+  license: MulanPSL-2.0
+
+build: bash scripts/build.sh
+
+start: |
+  export PYTHONPATH="$(pwd)/proto_gen:${PYTHONPATH:-}"
+  # FastMCP internal logs are verbose — redirect to keep rbnx log clean.
+  exec python -m memsearch_service.service > memsearch.log 2>&1
+
+capabilities:
+  - name: robonix/system/memory/save
+  - name: robonix/system/memory/search
+  - name: robonix/system/memory/compact
