@@ -13,6 +13,7 @@ mod build;
 mod chat;
 mod codegen;
 mod config;
+mod deploy;
 mod graph;
 mod info;
 mod install;
@@ -56,17 +57,33 @@ pub enum Commands {
         #[arg(long)]
         clean: bool,
     },
-    /// Start one node of a package (package and node required). Blocks until the process exits.
+    /// Start the package (runs its single top-level `start` shell block).
+    /// Defaults to the package containing the current directory when `-p`
+    /// is omitted. Blocks until the process exits. The pre-dev-packaging
+    /// `-n / --node` flag is gone — one package = one start body now.
     Start {
-        /// Package path or installed name; relative paths use $RBNX_INVOCATION_CWD, else process cwd
-        #[arg(short = 'p', long, required = true)]
-        package: String,
-        /// Node id to start (e.g. call_ping). Exactly one node per invocation.
-        #[arg(short = 'n', long, required = true)]
-        node: String,
+        /// Package path or installed name; relative paths use $RBNX_INVOCATION_CWD, else process cwd.
+        /// If omitted, rbnx walks up from the current directory to find a package manifest.
+        #[arg(short = 'p', long)]
+        package: Option<String>,
         /// Registry endpoint (default: 127.0.0.1:50051)
         #[arg(long)]
         endpoint: Option<String>,
+    },
+    /// Bring up an entire deployment described by a top-level `robonix_manifest.yaml`
+    /// — system services (atlas/executor/pilot/liaison/memory/vlm) plus every package
+    /// declared under `primitive`/`service`/`skill`. Blocks until Ctrl-C.
+    Deploy {
+        /// Path to the deployment manifest (default: `./robonix_manifest.yaml`).
+        #[arg(short = 'f', long, default_value = "robonix_manifest.yaml")]
+        file: PathBuf,
+        /// Directory for per-component logs (default: `<manifest-dir>/rbnx-deploy/logs`).
+        #[arg(long)]
+        log_dir: Option<PathBuf>,
+        /// Skip starting the `system:` block (atlas/pilot/etc). Useful when
+        /// those are already running externally.
+        #[arg(long)]
+        skip_system: bool,
     },
     /// Install a package from GitHub or local path
     Install {
@@ -84,10 +101,11 @@ pub enum Commands {
         /// Package name
         name: String,
     },
-    /// Validate a package manifest without building
+    /// Validate a package manifest without building. If no path is given,
+    /// rbnx walks up from the current directory to find a package manifest.
     Validate {
         /// Package directory (relative paths use $RBNX_INVOCATION_CWD, else process cwd)
-        path: PathBuf,
+        path: Option<PathBuf>,
     },
     /// Configure robonix-cli
     Config {
@@ -100,11 +118,12 @@ pub enum Commands {
     },
     /// Run codegen for a package (wraps robonix-codegen + grpc_tools.protoc).
     /// Regenerates robonix_proto, <pkg>/proto_gen/, and optional <pkg>/robonix_mcp_types/.
-    /// Replaces the copy-pasted boilerplate in package build.sh scripts.
+    /// Replaces the copy-pasted boilerplate in package build.sh scripts. If `-p`
+    /// is omitted, rbnx walks up from the current directory to find a package manifest.
     Codegen {
         /// Package path (relative to $RBNX_INVOCATION_CWD, else process cwd)
-        #[arg(short = 'p', long, required = true)]
-        package: PathBuf,
+        #[arg(short = 'p', long)]
+        package: Option<PathBuf>,
         /// Also generate robonix_mcp_types/ (for MCP-based packages)
         #[arg(long)]
         mcp: bool,
@@ -203,9 +222,13 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         } => run_package::execute_build(config, path, global, clean).await,
         Commands::Start {
             package,
-            node,
             endpoint,
-        } => run_package::execute_start(&config, &package, &node, endpoint.as_deref()).await,
+        } => run_package::execute_start(&config, package.as_deref(), endpoint.as_deref()).await,
+        Commands::Deploy {
+            file,
+            log_dir,
+            skip_system,
+        } => deploy::execute(config, file, log_dir, skip_system).await,
         Commands::Install { github, path } => install::execute(config, github, path).await,
         Commands::List => list::execute(config).await,
         Commands::Info { name } => info::execute(config, &name).await,

@@ -1,0 +1,14 @@
+# Save current point cloud map to disk.
+[contract]
+id      = "robonix/service/slam/save_map"
+version = "1"
+kind    = "service"
+
+[io.srv]
+srv = "slam/srv/SaveMap"
+
+[mode]
+type = "rpc"
+
+[semantics]
+stateless = false

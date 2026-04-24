@@ -13,17 +13,9 @@ pub struct PackageInfo {
     pub path: PathBuf,
     pub manifest_path: PathBuf,
     #[serde(default)]
-    pub primitives: Vec<String>,
+    pub capabilities: Vec<String>,
     #[serde(default)]
-    pub services: Vec<String>,
-    #[serde(default)]
-    pub skills: Vec<String>,
-    #[serde(default)]
-    pub provided_interfaces: Vec<String>,
-    #[serde(default)]
-    pub consumed_interfaces: Vec<String>,
-    #[serde(default, alias = "components")]
-    pub nodes: Vec<String>,
+    pub depends: Vec<String>,
     pub installed_at: String,
     pub source: PackageSource,
 }

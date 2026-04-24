@@ -1,0 +1,17 @@
+# Single-frame image acquisition (on-demand snapshot).
+# Complements robonix/prm/camera/rgb (continuous stream).
+# ROS IDL: `lib/prm_base/srv/GetCameraImage.srv`.
+[contract]
+id      = "robonix/primitive/camera/snapshot"
+version = "1"
+kind    = "primitive"
+
+
+[io.srv]
+srv = "prm_base/srv/GetCameraImage"
+
+[mode]
+type = "rpc"
+
+[semantics]
+payload = "image"

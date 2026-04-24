@@ -38,14 +38,11 @@ pub async fn execute(config: Config, name: &str) -> Result<()> {
         }
     }
 
-    if !pkg.nodes.is_empty() {
-        output::sub_step(&format!("Nodes: {}", pkg.nodes.join(", ")));
+    if !pkg.capabilities.is_empty() {
+        output::sub_step(&format!("Capabilities: {}", pkg.capabilities.join(", ")));
     }
-    if !pkg.provided_interfaces.is_empty() {
-        output::sub_step(&format!("Provides: {}", pkg.provided_interfaces.join(", ")));
-    }
-    if !pkg.consumed_interfaces.is_empty() {
-        output::sub_step(&format!("Consumes: {}", pkg.consumed_interfaces.join(", ")));
+    if !pkg.depends.is_empty() {
+        output::sub_step(&format!("Depends: {}", pkg.depends.join(", ")));
     }
 
     Ok(())

@@ -1,0 +1,15 @@
+# Provider streams `sensor_msgs/Imu`; gRPC `Stream(Empty) returns (stream Imu)`.
+[contract]
+id      = "robonix/primitive/sensor/imu"
+version = "1"
+kind    = "primitive"
+
+
+[io.msg]
+msg = "sensor_msgs/msg/Imu"
+
+[mode]
+type = "topic_out"
+
+[semantics]
+realtime = true

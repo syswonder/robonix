@@ -15,10 +15,9 @@ pub fn build_stamp_path(package_root: &Path) -> PathBuf {
     package_root.join(RBNX_BUILT_STAMP)
 }
 
-fn run_build_script(package_root: &Path, script_rel: &str, clean: bool) -> Result<()> {
-    let script_path = package_root.join(script_rel);
+fn run_build_shell(package_root: &Path, body: &str, clean: bool) -> Result<()> {
     let mut cmd = Command::new("bash");
-    cmd.arg(&script_path);
+    cmd.arg("-c").arg(body);
     cmd.current_dir(package_root);
     cmd.env("RBNX_PACKAGE_ROOT", package_root.as_os_str());
     if clean {
@@ -26,37 +25,24 @@ fn run_build_script(package_root: &Path, script_rel: &str, clean: bool) -> Resul
     }
     let status = cmd.status().with_context(|| {
         format!(
-            "Failed to run build script {} in {}",
-            script_path.display(),
+            "Failed to run build shell body in {}",
             package_root.display()
         )
     })?;
     if !status.success() {
-        anyhow::bail!(
-            "Build script {} failed with exit code {:?}",
-            script_path.display(),
-            status.code()
-        );
+        anyhow::bail!("Build exited with status {:?}", status.code());
     }
     Ok(())
 }
 
 fn build_local(package_root: &Path, manifest: &manifest::Manifest, clean: bool) -> Result<()> {
     let _summary = manifest.validate_and_summarize()?;
-    let script_rel = manifest.build.script.trim();
-    let script_path = package_root.join(script_rel);
-    if !script_path.is_file() {
-        anyhow::bail!(
-            "build.script not found: {} (manifest.build.script = {:?})",
-            script_path.display(),
-            script_rel
-        );
-    }
+    let build_body = manifest.build.trim();
     output::action(
         "Building",
-        &format!("{} via {}", manifest.package.name, script_rel),
+        &format!("{} via manifest.build", manifest.package.name),
     );
-    run_build_script(package_root, script_rel, clean)?;
+    run_build_shell(package_root, build_body, clean)?;
     fs::create_dir_all(package_root.join(RBNX_BUILD_DIR))?;
     fs::write(build_stamp_path(package_root), "").with_context(|| {
         format!(

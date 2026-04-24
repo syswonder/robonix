@@ -1,0 +1,14 @@
+# Query SLAM system status (mode, health, map info).
+[contract]
+id      = "robonix/service/slam/status"
+version = "1"
+kind    = "service"
+
+[io.srv]
+srv = "slam/srv/GetSlamStatus"
+
+[mode]
+type = "rpc"
+
+[semantics]
+stateless = true

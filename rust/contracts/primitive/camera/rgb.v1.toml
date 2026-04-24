@@ -1,0 +1,16 @@
+# gRPC: `Stream(Empty) returns (stream sensor_msgs/Image)`.
+[contract]
+id      = "robonix/primitive/camera/rgb"
+version = "1"
+kind    = "primitive"
+
+
+[io.msg]
+msg = "sensor_msgs/msg/Image"
+
+[mode]
+type = "topic_out"
+
+[semantics]
+realtime = true
+payload  = "image"
