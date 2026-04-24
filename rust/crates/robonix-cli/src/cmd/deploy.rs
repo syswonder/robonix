@@ -225,6 +225,7 @@ async fn spawn_package(
     rust_root: &Path,
     log_dir: &Path,
     cache_root: &Path,
+    instances_dir: &Path,
     component: &str,
     entry: &PackageEntry,
     manifest_dir: &Path,
@@ -233,7 +234,6 @@ async fn spawn_package(
     let pkg_path = pkg_path
         .canonicalize()
         .with_context(|| format!("package path not found: {}", pkg_path.display()))?;
-    let cfg_json = serde_json::to_string(&entry.config).unwrap_or_else(|_| "{}".to_string());
 
     let name = if entry.name.is_empty() {
         pkg_path
@@ -245,6 +245,17 @@ async fn spawn_package(
         entry.name.clone()
     };
     let log_name = format!("{component}_{name}");
+
+    // Write this instance's config to a per-instance JSON file. Passing a
+    // file path (rather than the JSON itself) in an env var sidesteps
+    // three env-var landmines: bash escaping of quotes/newlines, ARG_MAX
+    // blowing up on large configs, and `printenv`-only debugging. The
+    // package's start body just does `jq ... < "$RBNX_CONFIG_FILE"`.
+    let cfg_json = serde_json::to_value(&entry.config).unwrap_or(serde_json::Value::Null);
+    let cfg_pretty = serde_json::to_string_pretty(&cfg_json).unwrap_or_else(|_| "{}".into());
+    let cfg_file = instances_dir.join(format!("{name}.json"));
+    std::fs::write(&cfg_file, &cfg_pretty)
+        .with_context(|| format!("failed to write {}", cfg_file.display()))?;
 
     let log = std::fs::File::create(log_path(log_dir, &log_name))
         .with_context(|| format!("failed to open log for {log_name}"))?;
@@ -259,7 +270,8 @@ async fn spawn_package(
         .arg("start")
         .arg("-p")
         .arg(pkg_path.as_os_str())
-        .env("RBNX_CAP_CONFIG_JSON", cfg_json)
+        .env("RBNX_CONFIG_FILE", &cfg_file)
+        .env("RBNX_INSTANCE_NAME", &name)
         .env("RBNX_INVOCATION_CWD", manifest_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
@@ -268,8 +280,9 @@ async fn spawn_package(
         .spawn()
         .with_context(|| format!("failed to spawn package {name}"))?;
     output::sub_step(&format!(
-        "[{component}] {name} -> {}",
-        log_path(log_dir, &log_name).display()
+        "[{component}] {name} -> {} (config: {})",
+        log_path(log_dir, &log_name).display(),
+        cfg_file.display(),
     ));
     Ok(Spawned { name: log_name, child })
 }
@@ -312,6 +325,9 @@ pub async fn execute(
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
     let cache_root = manifest_dir.join("rbnx-deploy").join("cache");
+    let instances_dir = manifest_dir.join("rbnx-deploy").join("instances");
+    std::fs::create_dir_all(&instances_dir)
+        .with_context(|| format!("failed to create instances dir {}", instances_dir.display()))?;
 
     // `cargo run -p <bin>` requires we cd into a cargo workspace. We assume
     // the `robonix-cli` binary is itself running out of the robonix source
@@ -365,15 +381,15 @@ pub async fn execute(
     }
 
     for e in &deploy.primitive {
-        let sp = spawn_package(&rust_root, &log_dir, &cache_root, "primitive", e, &manifest_dir).await?;
+        let sp = spawn_package(&rust_root, &log_dir, &cache_root, &instances_dir, "primitive", e, &manifest_dir).await?;
         children.push(sp);
     }
     for e in &deploy.service {
-        let sp = spawn_package(&rust_root, &log_dir, &cache_root, "service", e, &manifest_dir).await?;
+        let sp = spawn_package(&rust_root, &log_dir, &cache_root, &instances_dir, "service", e, &manifest_dir).await?;
         children.push(sp);
     }
     for e in &deploy.skill {
-        let sp = spawn_package(&rust_root, &log_dir, &cache_root, "skill", e, &manifest_dir).await?;
+        let sp = spawn_package(&rust_root, &log_dir, &cache_root, &instances_dir, "skill", e, &manifest_dir).await?;
         children.push(sp);
     }
 
