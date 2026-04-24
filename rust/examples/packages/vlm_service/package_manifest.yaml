@@ -1,0 +1,23 @@
+# VLM chat completions over gRPC, routing to an OpenAI-compatible backend.
+# Control plane: robonix/system/vlm/chat.
+# Data plane: SysModelVlmChat.Stream (robonix_contracts.proto); stubs in
+# package-local proto_gen/.
+# Build: scripts/build.sh runs robonix-codegen --lang proto then
+# grpc_tools.protoc.
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.vlm_service
+  version: 0.1.0
+  vendor: robonix
+  description: VLM system service — chat completions gRPC bridge.
+  license: MulanPSL-2.0
+
+build: bash scripts/build.sh
+
+start: |
+  export PYTHONPATH="$(pwd)/proto_gen:${PYTHONPATH:-}"
+  exec python -m vlm_service.service
+
+capabilities:
+  - name: robonix/system/vlm/chat
