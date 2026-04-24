@@ -1,13 +1,31 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// Manifest parsing and validation for robonix-cli
+// Manifest parsing and validation for robonix-cli.
+//
+// New (dev-packaging) spec: `package_manifest.yaml` with a single top-level
+// `build` + `start` shell string, a list of `capabilities`, optional
+// `depends`. One package = one `start` body — no `nodes: [...]` list, no
+// `-n` flag.
+//
+// Legacy (pre-dev-packaging) spec still accepted for backward compatibility:
+//   - filename `robonix_manifest.yaml`
+//   - `package.id` (used as identity if `name` is missing)
+//   - `build: { script: <path> }` instead of top-level `build: <string>`
+//   - `nodes: [{id, type, start}, ...]` instead of top-level `start: <string>`
+//     → node `start` blocks are concatenated and run as a single background
+//       process group (best-effort; use the new spec for deterministic order).
+//
+// `node` / `runtime` terminology is gone from the spec — "node" is deprecated
+// in favour of "capability"; "runtime" is "system".
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-pub const MANIFEST_FILE: &str = "robonix_manifest.yaml";
+/// Preferred per-package manifest filename. Legacy `robonix_manifest.yaml`
+/// is also accepted by [`detect_manifest_path`].
+pub const MANIFEST_FILE: &str = "package_manifest.yaml";
+pub const LEGACY_MANIFEST_FILE: &str = "robonix_manifest.yaml";
 
 #[derive(Debug, Clone)]
 pub struct DetectedManifest {
@@ -19,85 +37,111 @@ pub struct DetectedManifest {
 pub struct PackageSummary {
     pub name: String,
     pub version: String,
-    pub provided_interfaces: Vec<String>,
-    pub consumed_interfaces: Vec<String>,
-    pub nodes: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub depends: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct Manifest {
-    #[serde(rename = "manifestVersion")]
     pub manifest_version: u32,
     pub package: Package,
-    #[serde(default)]
-    pub nodes: Vec<Node>,
-    pub interfaces: Option<Interfaces>,
-    #[serde(rename = "launchProfiles")]
-    pub launch_profiles: Option<HashMap<String, LaunchProfile>>,
-    /// How this package is built: `rbnx build` runs `bash <script>` from the package root.
-    #[serde(default)]
-    pub build: BuildConfig,
+    pub build: String,
+    pub start: String,
+    pub capabilities: Vec<CapabilityRef>,
+    pub depends: Vec<DependsRef>,
+    /// True iff the manifest was parsed from legacy fields (id/nodes/build.script).
+    /// `rbnx` prints a deprecation warning in this case.
+    pub is_legacy: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct BuildConfig {
-    /// Path relative to package root (e.g. `scripts/build.sh`).
-    #[serde(default)]
-    pub script: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Package {
-    pub id: String,
+    /// New spec: `package.name`. Legacy spec allowed a separate `package.id`
+    /// — if present and `name` is missing, we fall back to `id`.
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
     pub version: String,
+    #[serde(default)]
     pub vendor: String,
+    #[serde(default)]
     pub description: String,
+    #[serde(default)]
     pub license: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct Node {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub node_type: Option<String>,
-    /// Shell command for `rbnx start -n <id>` (run from package root via `bash -c`, after env exports).
-    #[serde(default)]
-    pub start: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct Interfaces {
-    #[serde(default)]
-    pub provides: Vec<InterfaceRef>,
-    #[serde(default)]
-    pub consumes: Vec<InterfaceRef>,
+pub struct CapabilityRef {
+    /// Contract id (matches one of the TOMLs under `rust/contracts/`).
+    pub name: String,
+    /// Optional path to a package-local TOML that overrides / defines
+    /// this capability (for experimental caps not yet in the official
+    /// contracts directory). Relative to the package root.
+    #[serde(default, alias = "definition")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct InterfaceRef {
-    pub id: String,
+pub struct DependsRef {
+    pub name: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct LaunchProfile {
-    #[serde(default, alias = "components")]
-    pub nodes: HashMap<String, LaunchNode>,
-}
+// ── raw shape accepting both old and new ────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Default)]
-pub struct LaunchNode {
+struct RawManifest {
+    #[serde(rename = "manifestVersion", default)]
+    manifest_version: u32,
     #[serde(default)]
-    pub env: HashMap<String, String>,
+    package: Package,
+    /// Accept either a plain shell string (new) or `{ script: <path> }` (legacy).
+    #[serde(default)]
+    build: Option<BuildField>,
+    /// New: top-level shell string.
+    #[serde(default)]
+    start: Option<String>,
+    /// Legacy: list of nodes, each with its own `start` block.
+    #[serde(default)]
+    nodes: Vec<LegacyNode>,
+    #[serde(default)]
+    capabilities: Vec<CapabilityRef>,
+    #[serde(default)]
+    depends: Vec<DependsRef>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum BuildField {
+    Shell(String),
+    Script { script: String },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyNode {
+    #[serde(default)]
+    #[allow(dead_code)]
+    id: String,
+    #[serde(default, rename = "type")]
+    #[allow(dead_code)]
+    node_type: Option<String>,
+    #[serde(default)]
+    start: String,
 }
 
 pub fn detect_manifest_path(package_root: &Path) -> Result<PathBuf> {
-    let path = package_root.join(MANIFEST_FILE);
-    if path.exists() {
-        Ok(path)
-    } else {
-        anyhow::bail!("Package does not have {}", MANIFEST_FILE)
+    let new_path = package_root.join(MANIFEST_FILE);
+    if new_path.exists() {
+        return Ok(new_path);
     }
+    let legacy = package_root.join(LEGACY_MANIFEST_FILE);
+    if legacy.exists() {
+        return Ok(legacy);
+    }
+    anyhow::bail!(
+        "Package does not have {MANIFEST_FILE} (or legacy {LEGACY_MANIFEST_FILE})"
+    )
 }
 
 pub fn detect_and_load(package_root: &Path) -> Result<DetectedManifest> {
@@ -109,9 +153,77 @@ pub fn detect_and_load(package_root: &Path) -> Result<DetectedManifest> {
 pub fn load_from_path(manifest_path: &Path) -> Result<Manifest> {
     let content = std::fs::read_to_string(manifest_path)
         .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
-    let manifest: Manifest = serde_yaml::from_str(&content)
+    let raw: RawManifest = serde_yaml::from_str(&content)
         .with_context(|| format!("Failed to parse manifest: {}", manifest_path.display()))?;
-    Ok(manifest)
+    Ok(normalize(raw, manifest_path))
+}
+
+fn normalize(raw: RawManifest, manifest_path: &Path) -> Manifest {
+    let mut is_legacy = false;
+    let filename_is_legacy = manifest_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s == LEGACY_MANIFEST_FILE)
+        .unwrap_or(false);
+
+    // package.name fallback to package.id (legacy used id as canonical name).
+    let mut package = raw.package;
+    if package.name.trim().is_empty() {
+        if let Some(id) = &package.id {
+            if !id.trim().is_empty() {
+                package.name = id.clone();
+                is_legacy = true;
+            }
+        }
+    }
+
+    // build: string (new) or { script } (legacy).
+    let build = match raw.build {
+        Some(BuildField::Shell(s)) => s,
+        Some(BuildField::Script { script }) => {
+            is_legacy = true;
+            format!("bash {script}")
+        }
+        None => String::new(),
+    };
+
+    // start: top-level string (new) or concatenate nodes (legacy).
+    let start = match (raw.start, raw.nodes.is_empty()) {
+        (Some(s), _) => s,
+        (None, false) => {
+            is_legacy = true;
+            // Concatenate legacy node start blocks. Each block gets wrapped
+            // in a subshell and backgrounded; a `wait` at the end keeps
+            // `rbnx start` alive until all nodes exit. This is a best-effort
+            // port — for deterministic deploys, migrate to the new spec.
+            let parts: Vec<String> = raw
+                .nodes
+                .iter()
+                .filter(|n| !n.start.trim().is_empty())
+                .map(|n| format!("( {} ) &", n.start.trim()))
+                .collect();
+            if parts.is_empty() {
+                String::new()
+            } else {
+                format!("{}\nwait", parts.join("\n"))
+            }
+        }
+        (None, true) => String::new(),
+    };
+
+    if filename_is_legacy {
+        is_legacy = true;
+    }
+
+    Manifest {
+        manifest_version: raw.manifest_version,
+        package,
+        build,
+        start,
+        capabilities: raw.capabilities,
+        depends: raw.depends,
+        is_legacy,
+    }
 }
 
 impl Manifest {
@@ -119,60 +231,46 @@ impl Manifest {
         if self.manifest_version == 0 {
             anyhow::bail!("Invalid 'manifestVersion': must be >= 1");
         }
-        if self.package.id.trim().is_empty() {
-            anyhow::bail!("Missing 'package.id' in manifest");
+        let p = &self.package;
+        for (name, val) in [
+            ("package.name", &p.name),
+            ("package.version", &p.version),
+            ("package.vendor", &p.vendor),
+            ("package.description", &p.description),
+            ("package.license", &p.license),
+        ] {
+            if val.trim().is_empty() {
+                anyhow::bail!("Missing '{name}' in manifest");
+            }
         }
-        if self.package.name.trim().is_empty() {
-            anyhow::bail!("Missing 'package.name' in manifest");
-        }
-        if self.package.version.trim().is_empty() {
-            anyhow::bail!("Missing 'package.version' in manifest");
-        }
-        if self.package.vendor.trim().is_empty() {
-            anyhow::bail!("Missing 'package.vendor' in manifest");
-        }
-        if self.package.description.trim().is_empty() {
-            anyhow::bail!("Missing 'package.description' in manifest");
-        }
-        if self.package.license.trim().is_empty() {
-            anyhow::bail!("Missing 'package.license' in manifest");
+        // `build` remains optional — packages that ship pre-built binaries
+        // can omit it. `start` is required for `rbnx start` to do anything.
+        if self.start.trim().is_empty() {
+            anyhow::bail!(
+                "manifest.start is required (shell string, run at package root). \
+                 If migrating from the legacy spec with `nodes: [...]`, either \
+                 concatenate their start blocks into one top-level `start:` or \
+                 split into multiple packages."
+            );
         }
 
-        validate_node_specs(self)?;
-        build_config_present(self)?;
-
-        let interfaces = self.interfaces.clone().unwrap_or_default();
-        if self.nodes.is_empty() && interfaces.provides.is_empty() && interfaces.consumes.is_empty()
-        {
-            anyhow::bail!("Manifest must declare at least one node or interface");
+        if self.is_legacy {
+            log::warn!(
+                "package '{}' uses legacy manifest fields (package.id / nodes[] / \
+                 build.script / robonix_manifest.yaml). These still work but are \
+                 deprecated — migrate to the new spec (package_manifest.yaml with \
+                 top-level build/start strings + capabilities).",
+                self.package.name
+            );
         }
 
         Ok(PackageSummary {
-            name: self.package.name.clone(),
-            version: self.package.version.clone(),
-            provided_interfaces: interfaces.provides.into_iter().map(|i| i.id).collect(),
-            consumed_interfaces: interfaces.consumes.into_iter().map(|i| i.id).collect(),
-            nodes: self.nodes.iter().map(|n| n.id.clone()).collect(),
+            name: p.name.clone(),
+            version: p.version.clone(),
+            capabilities: self.capabilities.iter().map(|c| c.name.clone()).collect(),
+            depends: self.depends.iter().map(|d| d.name.clone()).collect(),
         })
     }
-}
-
-fn validate_node_specs(manifest: &Manifest) -> Result<()> {
-    for n in &manifest.nodes {
-        if n.start.trim().is_empty() {
-            anyhow::bail!("Node '{}': missing or empty `start`", n.id);
-        }
-    }
-    Ok(())
-}
-
-fn build_config_present(manifest: &Manifest) -> Result<()> {
-    if manifest.build.script.trim().is_empty() {
-        anyhow::bail!(
-            "manifest.build.script is required (path to a build script under the package)"
-        );
-    }
-    Ok(())
 }
 
 // ── Skills scanner (skills/ directory) ───────────────────────
@@ -217,7 +315,6 @@ pub fn scan_skills(package_root: &Path) -> Vec<SkillMeta> {
     out
 }
 
-/// Parse YAML frontmatter (between `---` delimiters) from a SKILL.md file.
 fn parse_skill_frontmatter(path: &Path) -> Result<SkillMeta> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;

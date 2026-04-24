@@ -1,0 +1,13 @@
+# Single-shot robot state query.
+# ROS IDL: `lib/prm_base/srv/GetRobotState.srv` (empty request → prm_base/RobotState).
+[contract]
+id      = "robonix/primitive/robot/state"
+version = "1"
+kind    = "primitive"
+
+
+[io.srv]
+srv = "prm_base/srv/GetRobotState"
+
+[mode]
+type = "rpc"

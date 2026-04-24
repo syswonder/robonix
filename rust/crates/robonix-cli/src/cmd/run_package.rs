@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// Run package commands: build, start (start blocks until process exits)
+// Run package commands: build, start (start blocks until process exits).
+//
+// Dev-packaging contract: one package has ONE top-level `start` shell body
+// (not a list of nodes). `rbnx start` just executes that body at the
+// package root — the body itself is responsible for spawning processes
+// and registering capabilities with atlas. No node-id flag.
 
 use super::build;
 use super::launch_helpers;
@@ -35,7 +40,28 @@ pub(crate) fn resolve_local_path_for_filesystem(p: &Path) -> Result<PathBuf> {
     Ok(path_base_for_dash_p()?.join(p))
 }
 
+/// Walk up from the invocation cwd looking for a directory that contains
+/// a `package_manifest.yaml`. Returns the first match.
+pub(crate) fn find_package_from_cwd() -> Result<PathBuf> {
+    let start = path_base_for_dash_p()?;
+    let mut cur: Option<&Path> = Some(&start);
+    while let Some(d) = cur {
+        if d.join(manifest::MANIFEST_FILE).is_file() {
+            return d
+                .canonicalize()
+                .with_context(|| format!("Failed to canonicalize: {}", d.display()));
+        }
+        cur = d.parent();
+    }
+    anyhow::bail!(
+        "no {} found in {} or any parent; pass -p <path> or `cd` into a package directory",
+        manifest::MANIFEST_FILE,
+        start.display()
+    )
+}
+
 /// Resolve package path from -p (local path) or -g (system-installed name).
+/// When neither is given, walk up from cwd to find a package manifest.
 fn resolve_package_path(
     config: &Config,
     path: Option<PathBuf>,
@@ -68,7 +94,7 @@ fn resolve_package_path(
         );
     }
 
-    anyhow::bail!("Specify -p <path> for local package or -g <name> for system-installed package")
+    find_package_from_cwd()
 }
 
 /// Resolve package path for `start`: same `-p` rules as `build`, then system-installed name fallback.
@@ -106,76 +132,20 @@ pub async fn execute_build(
 
 pub async fn execute_start(
     config: &Config,
-    spec: &str,
-    node_id: &str,
+    spec: Option<&str>,
     registry_endpoint: Option<&str>,
 ) -> Result<()> {
-    let package_root = resolve_package_path_for_start(config, spec)?;
+    let package_root = match spec {
+        Some(s) => resolve_package_path_for_start(config, s)?,
+        None => find_package_from_cwd()?,
+    };
     let detected = manifest::detect_and_load(&package_root)?;
     let manifest = &detected.manifest;
-
-    let node = manifest
-        .nodes
-        .iter()
-        .find(|n| n.id == node_id)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Node '{}' not found in manifest. Available: {}",
-                node_id,
-                manifest
-                    .nodes
-                    .iter()
-                    .map(|n| n.id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?;
+    manifest.validate_and_summarize()?;
 
     let endpoint = registry_endpoint
         .map(String::from)
-        .or_else(|| std::env::var("ROBONIX_META_GRPC_ENDPOINT").ok())
         .unwrap_or_else(|| "127.0.0.1:50051".to_string());
-
-    // Scan skills/ directory and pre-register with robonix-atlas
-    let skills = manifest::scan_skills(&package_root);
-    if !skills.is_empty() {
-        output::sub_step(&format!("Discovered {} skill(s):", skills.len()));
-        for s in &skills {
-            output::sub_step(&format!("  - {} : {}", s.name, s.description));
-        }
-        let grpc_url = if endpoint.contains("://") {
-            endpoint.clone()
-        } else {
-            format!("http://{}", endpoint)
-        };
-        match robonix_sdk::RobonixClient::connect(&grpc_url).await {
-            Ok(mut sdk) => {
-                let skill_items: Vec<robonix_sdk::SkillInfoItem> = skills
-                    .iter()
-                    .map(|s| robonix_sdk::SkillInfoItem {
-                        name: s.name.clone(),
-                        description: s.description.clone(),
-                        path: s.path.display().to_string(),
-                        metadata_json: s.metadata_json.clone(),
-                    })
-                    .collect();
-                match sdk
-                    .register_node_with_skills(&node.id, "", "", "", skill_items, "", "")
-                    .await
-                {
-                    Ok(_) => output::sub_step("Skills registered with robonix-atlas"),
-                    Err(e) => {
-                        output::sub_step(&format!("Warning: failed to register skills: {e:#}"))
-                    }
-                }
-            }
-            Err(e) => {
-                output::sub_step(&format!(
-                    "Warning: could not connect to server for skill registration: {e:#}"
-                ));
-            }
-        }
-    }
 
     let run_root = package_root
         .parent()
@@ -183,28 +153,27 @@ pub async fn execute_start(
     let log_dir = run_root.join("rbnx-deploy").join("logs");
     let process_manager = ProcessManager::new(log_dir)?;
 
-    output::action(
-        "Running",
-        &format!("node {} ({})", node_id, manifest.package.name),
-    );
-    output::sub_step(&format!("Runtime endpoint: {}", endpoint));
-
-    let mut env = std::collections::HashMap::new();
-    env.insert("ROBONIX_META_GRPC_ENDPOINT".to_string(), endpoint.clone());
-    env.insert("ROBONIX_ATLAS".to_string(), endpoint.clone());
-    if let Some(profile) = manifest
-        .launch_profiles
-        .as_ref()
-        .and_then(|p| p.get("default"))
-        && let Some(launch) = profile.nodes.get(&node.id)
-    {
-        for (k, v) in &launch.env {
-            env.insert(k.clone(), v.clone());
-        }
+    output::action("Running", &manifest.package.name);
+    output::sub_step(&format!("Atlas endpoint: {}", endpoint));
+    if !manifest.capabilities.is_empty() {
+        output::sub_step(&format!(
+            "Capabilities: {}",
+            manifest
+                .capabilities
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
-    if !build::build_stamp_path(&package_root).exists() {
-        output::sub_step("No rbnx-build/.rbnx-built — running package build script first");
+    let mut env = std::collections::HashMap::new();
+    env.insert("ROBONIX_ATLAS".to_string(), endpoint.clone());
+
+    if !manifest.build.trim().is_empty()
+        && !build::build_stamp_path(&package_root).exists()
+    {
+        output::sub_step("No rbnx-build/.rbnx-built — running package build first");
         build::build_local_package(&package_root, false)?;
     }
 
@@ -213,18 +182,7 @@ pub async fn execute_start(
         .map(|(k, v)| format!("export {}={}", k, launch_helpers::shell_escape(v)))
         .collect::<Vec<_>>()
         .join("; ");
-    let start_body = node.start.trim();
-    if start_body.is_empty() {
-        anyhow::bail!(
-            "Node '{}' has empty `start` in {}",
-            node.id,
-            manifest::MANIFEST_FILE
-        );
-    }
-    // Auto-source rbnx-build/ws/install/setup.bash if present (generated by
-    // `rbnx codegen`) so PYTHONPATH picks up proto_gen, robonix_mcp_types,
-    // and the shared robonix-py helper without the manifest having to spell
-    // it out.
+    let start_body = manifest.start.trim();
     let setup_bash = package_root
         .join("rbnx-build")
         .join("ws")
@@ -248,18 +206,20 @@ pub async fn execute_start(
         format!("{}; {start_body}", prefix_parts.join("; "))
     };
 
-    let std_name = format!("{}.{}", manifest.package.name, node.id);
     let result = process_manager
         .start_process(
             &manifest.package.name,
-            &std_name,
-            "node",
+            &manifest.package.name,
+            "package",
             &package_root,
             &start_command,
         )
         .await?;
-    output::check(&format!("{} exited (PID {})", std_name, result.pid));
+    output::check(&format!(
+        "{} exited (PID {})",
+        manifest.package.name, result.pid
+    ));
 
-    output::success(&format!("Node {} finished", node_id));
+    output::success(&format!("Package {} finished", manifest.package.name));
     Ok(())
 }

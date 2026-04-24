@@ -58,12 +58,15 @@ fn resolve_pkg_root(package: &Path) -> Result<PathBuf> {
 
 pub async fn execute(
     config: Config,
-    package: PathBuf,
+    package: Option<PathBuf>,
     mcp: bool,
     clean: bool,
     out_dir: Option<PathBuf>,
 ) -> Result<()> {
-    let pkg_root = resolve_pkg_root(&package)?;
+    let pkg_root = match package {
+        Some(p) => resolve_pkg_root(&p)?,
+        None => super::run_package::find_package_from_cwd()?,
+    };
     let rust_root = config.resolve_source_path(SourcePathKey::RustRoot)?;
     let interfaces_lib = config.resolve_source_path(SourcePathKey::InterfacesLib)?;
     let contracts_dir = config.resolve_source_path(SourcePathKey::Contracts)?;

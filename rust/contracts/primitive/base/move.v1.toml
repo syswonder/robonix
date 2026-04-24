@@ -1,0 +1,14 @@
+# ROS: `lib/prm_base/srv/StreamMove.srv`. Client stream element in TOML only.
+[contract]
+id      = "robonix/primitive/base/move"
+version = "1"
+kind    = "primitive"
+
+[io.srv]
+srv = "prm_base/srv/StreamMove"
+
+[mode]
+type = "rpc_client_stream"
+
+[semantics]
+preemptable = true

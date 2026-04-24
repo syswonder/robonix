@@ -1,0 +1,15 @@
+# Stream registered 3D point cloud in world frame.
+# Produced by SLAM engine after scan-to-map registration.
+[contract]
+id      = "robonix/service/map/pointcloud"
+version = "1"
+kind    = "service"
+
+[io.msg]
+msg = "sensor_msgs/msg/PointCloud2"
+
+[mode]
+type = "topic_out"
+
+[semantics]
+realtime = true
