@@ -9,7 +9,6 @@ Robonix targets Linux broadly. The control plane (`robonix-atlas`), runtime serv
 | `packages/vlm_service/` | VLM data plane: implements contract `SysModelVlmChat` from `robonix_contracts.proto` (wire types in `vlm.proto`). `rbnx build` refreshes **package-local** `proto_gen/`. |
 | `packages/tiago_sim_stack/` | Docker Compose: Webots (GUI) + Nav2 + rviz2 + `tiago_bridge` (MCP tools + `PrmCameraRgb` gRPC stream from `robonix_contracts.proto`). |
 | `packages/maniskill_vla_demo/` | ManiSkill3 VLA demo: MCP contracts + **demo-local** `EnvDataService` gRPC (`maniskill_env.proto`, not merged contract services). |
-| `packages/zero_copy_demo/` | Zero-copy shared-memory demo (`RobonixRuntime` control plane only; no contract gRPC servicer). |
 | `packages/memsearch_service/` | Semantic memory over MCP (`RobonixRuntime` registration only). |
 
 Validate:

@@ -14,8 +14,6 @@ cargo run -p robonix-cli -- validate "$RUST_ROOT/examples/packages/tiago_sim_sta
 echo "[test] rbnx validate memsearch_service"
 cargo run -p robonix-cli -- validate "$RUST_ROOT/examples/packages/memsearch_service"
 
-echo "[test] rbnx validate zero_copy_demo"
-cargo run -p robonix-cli -- validate "$RUST_ROOT/examples/packages/zero_copy_demo"
 
 echo "[test] rbnx validate maniskill_vla_demo"
 cargo run -p robonix-cli -- validate "$RUST_ROOT/examples/packages/maniskill_vla_demo"
