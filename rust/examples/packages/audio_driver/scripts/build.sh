@@ -1,16 +1,10 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MulanPSL-2.0
 set -euo pipefail
 PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-PROTO_SRC="$PKG/proto"
-OUT_DIR="$PKG/proto_gen"
+FLAGS=()
+[[ "${RBNX_BUILD_CLEAN:-}" == "1" ]] && FLAGS+=(--clean)
 
-mkdir -p "$OUT_DIR"
-
-python -m grpc_tools.protoc \
-    -I"$PROTO_SRC" \
-    --python_out="$OUT_DIR" \
-    --grpc_python_out="$OUT_DIR" \
-    "$PROTO_SRC/audio_driver.proto"
+# rbnx codegen (generates proto stubs from ROS IDL + contracts)
+rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
 echo "[build] done."

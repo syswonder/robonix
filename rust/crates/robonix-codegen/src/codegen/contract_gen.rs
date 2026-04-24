@@ -47,6 +47,10 @@ struct IoMsgIo {
 #[derive(Debug, Deserialize)]
 struct IoSrvIo {
     srv: String,
+    #[serde(default)]
+    stream_request: Option<String>,
+    #[serde(default)]
+    stream_response: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -158,6 +162,7 @@ pub fn generate(
             "rpc" => format_unary(in_t, out_t),
             "rpc_server_stream" | "topic_out" => format_stream_out(in_t, out_t),
             "rpc_client_stream" | "topic_in" => format_stream_in(in_t, out_t),
+            "rpc_bidirectional_stream" => format_bidi_stream(in_t, out_t),
             other => bail!(
                 "unknown [mode].type '{other}' in contract {} (expected rpc | rpc_server_stream | rpc_client_stream | topic_out | topic_in)",
                 c.contract.id
@@ -202,6 +207,14 @@ fn format_stream_in(input: &ResolvedType, output: &ResolvedType) -> String {
         "rpc Stream(stream {}) returns ({});",
         stream_element(input),
         unary_return(output)
+    )
+}
+
+fn format_bidi_stream(input: &ResolvedType, output: &ResolvedType) -> String {
+    format!(
+        "rpc Stream(stream {}) returns (stream {});",
+        stream_element(input),
+        stream_element(output)
     )
 }
 
@@ -300,6 +313,15 @@ fn resolve_contract_io(
                 )
             })?;
             resolve_srv_client_stream(s, &c.contract.id, resolver, imports, needs_string_wire)
+        }
+        "rpc_bidirectional_stream" => {
+            let s = s.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "contract {}: [mode].type = \"rpc_bidirectional_stream\" requires [io.srv]",
+                    c.contract.id
+                )
+            })?;
+            resolve_srv_bidi_stream(s, &c.contract.id, resolver, imports, needs_string_wire)
         }
         "topic_out" => {
             let m = m.ok_or_else(|| {
@@ -404,6 +426,34 @@ fn resolve_srv_client_stream(
         needs_string_wire,
     )?;
     let out_t = srv_response_to_contract_output(&spec, resolver, imports, needs_string_wire)?;
+    Ok((in_t, out_t))
+}
+
+/// Bidirectional stream: uses `stream_request` and `stream_response` from the
+/// contract TOML as stream element types. Falls back to deriving from the .srv
+/// fields if those hints are absent.
+fn resolve_srv_bidi_stream(
+    io: &IoSrvIo,
+    contract_id: &str,
+    _resolver: &mut MsgResolver,
+    imports: &mut BTreeSet<String>,
+    _needs_string_wire: &mut bool,
+) -> Result<(ResolvedType, ResolvedType)> {
+    let in_ref = io
+        .stream_request
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!(
+            "contract {contract_id}: [mode] rpc_bidirectional_stream requires [io.srv].stream_request"
+        ))?;
+    let out_ref = io
+        .stream_response
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!(
+            "contract {contract_id}: [mode] rpc_bidirectional_stream requires [io.srv].stream_response"
+        ))?;
+
+    let in_t = resolve_io(in_ref, _resolver, imports, _needs_string_wire)?;
+    let out_t = resolve_io(out_ref, _resolver, imports, _needs_string_wire)?;
     Ok((in_t, out_t))
 }
 

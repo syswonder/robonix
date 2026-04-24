@@ -18,6 +18,10 @@ This node follows the **tiago_bridge pattern** for prm driver packages:
      - Speaker gRPC server thread (PrmAudioSpeakerServicer)
   5. Main thread blocks until KeyboardInterrupt
 
+Proto stubs are loaded from codegen-generated files:
+  - robonix_contracts_pb2_grpc  (servicer base classes + registration fns)
+  - robonix_msg_pb2             (AudioChunk message)
+
 This package is designed as a **REFERENCE TEMPLATE** for all future prm
 driver packages. The same pattern should be replicated for camera,
 lidar, IMU, and other hardware drivers.
@@ -52,14 +56,14 @@ log = logging.getLogger(__name__)
 
 # ── Proto stub resolution ──────────────────────────────────────────────────
 # Walks up from this file's directory looking for proto_gen/ containing the
-# generated audio_driver_pb2.py. Adds it to sys.path so the proto imports work
-# regardless of the current working directory.
+# codegen-generated robonix_contracts_pb2.py. Adds it to sys.path so the
+# proto imports work regardless of the current working directory.
 
 def _ensure_proto_gen() -> None:
     d = Path(__file__).resolve().parent
     while d.parent != d:
         pg = d / "proto_gen"
-        if pg.is_dir() and (pg / "audio_driver_pb2.py").exists():
+        if pg.is_dir() and (pg / "robonix_contracts_pb2.py").exists():
             sys.path.insert(0, str(pg))
             return
         d = d.parent
@@ -67,8 +71,8 @@ def _ensure_proto_gen() -> None:
 _ensure_proto_gen()
 
 import grpc
-import audio_driver_pb2 as pb
-import audio_driver_pb2_grpc as pb_grpc
+import robonix_msg_pb2
+import robonix_contracts_pb2_grpc as contracts_grpc
 
 from audio_driver.alsa_utils import scan_alsa_devices, find_default_mic, find_default_speaker
 from audio_driver.mic_driver import MicDriver
@@ -79,7 +83,7 @@ from audio_driver.speaker_driver import SpeakerDriver
 # the corresponding driver. The servicers are registered on separate gRPC
 # servers running in daemon threads.
 
-class PrmAudioMicServicer(pb_grpc.PrmAudioMicServicer):
+class MicServicer(contracts_grpc.PrmAudioMicServicer):
     """Implements contract robonix/prm/audio/mic — server-streaming mic audio.
 
     When a client calls Stream():
@@ -105,7 +109,7 @@ class PrmAudioMicServicer(pb_grpc.PrmAudioMicServicer):
                 chunk = self.mic_driver.read_chunk()
                 if chunk is None:
                     break
-                yield pb.AudioChunk(
+                yield robonix_msg_pb2.AudioChunk(
                     timestamp_ns=chunk["timestamp_ns"],
                     data=chunk["data"],
                     sequence=chunk["sequence"],
@@ -116,13 +120,12 @@ class PrmAudioMicServicer(pb_grpc.PrmAudioMicServicer):
             log.info("Mic stream client disconnected")
 
 
-class PrmAudioSpeakerServicer(pb_grpc.PrmAudioSpeakerServicer):
+class SpeakerServicer(contracts_grpc.PrmAudioSpeakerServicer):
     """Implements contract robonix/prm/audio/speaker — client-streaming playback.
 
-    When a client calls Stream() with a stream of SpeakerChunkRequest:
-      1. Reads audio_config from the first message (if present) and logs it
-      2. For each chunk with data, calls speaker_driver.play_chunk()
-      3. On stream end, returns SpeakerStreamResponse(ok=True)
+    When a client calls Stream() with a stream of AudioChunk messages:
+      1. For each chunk with data, calls speaker_driver.play_chunk()
+      2. On stream end, returns google.protobuf.Empty
 
     The SpeakerDriver handles lazy-starting aplay and auto-restart on errors.
     """
@@ -132,29 +135,20 @@ class PrmAudioSpeakerServicer(pb_grpc.PrmAudioSpeakerServicer):
 
     def Stream(self, request_iterator, context):
         log.info("Speaker stream client connected")
-        config_set = False
         try:
-            for req in request_iterator:
-                if req.audio_config and not config_set:
-                    log.info("Speaker config: rate=%d ch=%d bits=%d enc=%s",
-                             req.audio_config.sample_rate_hz,
-                             req.audio_config.channels,
-                             req.audio_config.bits_per_sample,
-                             req.audio_config.encoding)
-                    config_set = True
-
-                if req.chunk and req.chunk.data:
-                    self.speaker_driver.play_chunk(bytes(req.chunk.data))
+            for chunk in request_iterator:
+                if chunk.data:
+                    self.speaker_driver.play_chunk(bytes(chunk.data))
         finally:
             log.info("Speaker stream client disconnected")
 
-        return pb.SpeakerStreamResponse(ok=True)
+        return robonix_msg_pb2.Empty()
 
 
 # ── Atlas registration (optional) ─────────────────────────────────────────
 # Follows the tiago_bridge pattern exactly:
 #   1. RegisterNode — register as a primitive under robonix/prm/audio
-#   2. DeclareInterface × 2 — declare mic and speaker endpoints
+#   2. DeclareInterface x 2 — declare mic and speaker endpoints
 #   3. Heartbeat thread — send NodeHeartbeat every 15 seconds
 
 def _register_with_atlas(mic_port: int, speaker_port: int) -> None:
@@ -239,48 +233,6 @@ def _register_with_atlas(mic_port: int, speaker_port: int) -> None:
         log.warning("Atlas not available (%s), running standalone", e.code())
 
 
-# ── gRPC server helpers ───────────────────────────────────────────────────
-# Each interface runs in its own daemon thread with a separate gRPC server.
-# This isolates mic and speaker so a problem with one doesn't affect the other.
-
-def _run_mic_server(port: int, mic_driver: MicDriver) -> None:
-    """Start and run the mic gRPC server (blocks until terminated).
-
-    Creates a gRPC server with 4 worker threads, registers the
-    PrmAudioMicServicer, binds to 0.0.0.0:<port>, and blocks.
-
-    Args:
-        port: TCP port to listen on.
-        mic_driver: MicDriver instance to stream audio from.
-    """
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-    pb_grpc.add_PrmAudioMicServicer_to_server(
-        PrmAudioMicServicer(mic_driver), server)
-    server.add_insecure_port(f"0.0.0.0:{port}")
-    server.start()
-    log.info("Mic gRPC server on port %d", port)
-    server.wait_for_termination()
-
-
-def _run_speaker_server(port: int, speaker_driver: SpeakerDriver) -> None:
-    """Start and run the speaker gRPC server (blocks until terminated).
-
-    Creates a gRPC server with 4 worker threads, registers the
-    PrmAudioSpeakerServicer, binds to 0.0.0.0:<port>, and blocks.
-
-    Args:
-        port: TCP port to listen on.
-        speaker_driver: SpeakerDriver instance to play audio through.
-    """
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-    pb_grpc.add_PrmAudioSpeakerServicer_to_server(
-        PrmAudioSpeakerServicer(speaker_driver), server)
-    server.add_insecure_port(f"0.0.0.0:{port}")
-    server.start()
-    log.info("Speaker gRPC server on port %d", port)
-    server.wait_for_termination()
-
-
 # ── Main ──────────────────────────────────────────────────────────────────
 # Entry point. Called via `python -m audio_driver.node` or via the
 # robonix_manifest.yaml start command.
@@ -292,10 +244,10 @@ def main() -> None:
         1. Discover ALSA devices via scan_alsa_devices()
         2. Find mic and speaker devices (auto-detect or env override)
         3. Create MicDriver and SpeakerDriver instances
-        4. Auto-pick free ports for mic and speaker gRPC servers
-        5. Optionally register with Atlas (RegisterNode + DeclareInterface)
-        6. Start mic gRPC server in a daemon thread
-        7. Start speaker gRPC server in a daemon thread
+        4. Create a single gRPC server with both servicers
+        5. Auto-pick free ports for mic and speaker
+        6. Optionally register with Atlas (RegisterNode + DeclareInterface)
+        7. Start the gRPC server
         8. Block main thread until KeyboardInterrupt
     """
     log.info("Starting audio driver")
@@ -357,7 +309,6 @@ def main() -> None:
     speaker_port = int(os.environ.get("AUDIO_SPEAKER_PORT", "0"))
 
     if mic_port == 0:
-        # Auto-pick: bind temporary server to get a free port
         import socket
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.bind(("0.0.0.0", 0))
@@ -376,18 +327,32 @@ def main() -> None:
     if not standalone:
         _register_with_atlas(mic_port, speaker_port)
 
-    # 5. Start gRPC servers
+    # 5. Start gRPC server(s)
+    # Mic and speaker run on separate servers in daemon threads so they are
+    # isolated — a problem with one does not affect the other.
     if mic_driver:
-        threading.Thread(
-            target=_run_mic_server, args=(mic_port, mic_driver),
-            daemon=True, name="mic-grpc",
-        ).start()
+        def _run_mic_server():
+            server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+            contracts_grpc.add_PrmAudioMicServicer_to_server(
+                MicServicer(mic_driver), server)
+            server.add_insecure_port(f"0.0.0.0:{mic_port}")
+            server.start()
+            log.info("Mic gRPC server on port %d", mic_port)
+            server.wait_for_termination()
+
+        threading.Thread(target=_run_mic_server, daemon=True, name="mic-grpc").start()
 
     if speaker_driver:
-        threading.Thread(
-            target=_run_speaker_server, args=(speaker_port, speaker_driver),
-            daemon=True, name="speaker-grpc",
-        ).start()
+        def _run_speaker_server():
+            server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+            contracts_grpc.add_PrmAudioSpeakerServicer_to_server(
+                SpeakerServicer(speaker_driver), server)
+            server.add_insecure_port(f"0.0.0.0:{speaker_port}")
+            server.start()
+            log.info("Speaker gRPC server on port %d", speaker_port)
+            server.wait_for_termination()
+
+        threading.Thread(target=_run_speaker_server, daemon=True, name="speaker-grpc").start()
 
     log.info("Audio driver ready (mic=%s, speaker=%s)",
              f"port {mic_port}" if mic_driver else "none",

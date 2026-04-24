@@ -20,16 +20,16 @@ message RecognizeStreamEvent {
 }
 
 message Recognize_Request {
-}
-
-message Recognize_Response {
   bytes audio_data = 1;
   string encoding = 2;
   uint32 sample_rate_hz = 3;
   string language = 4;
-  string text = 5;
-  float confidence = 6;
-  string error = 7;
+}
+
+message Recognize_Response {
+  string text = 1;
+  float confidence = 2;
+  string error = 3;
 }
 
 message RecognizeStream_Request {
@@ -40,4 +40,3 @@ message RecognizeStream_Request {
 message RecognizeStream_Response {
   RecognizeStreamEvent event = 1;
 }
-
