@@ -201,3 +201,42 @@ message ZeroCopyFrame {
   uint32 pool_id = 15;
 }
 
+message AudioChunk {
+  uint64 timestamp_ns = 1;
+  bytes data = 2;
+  uint32 sequence = 3;
+  float duration_s = 4;
+}
+
+message AudioConfig {
+  string encoding = 1;
+  uint32 sample_rate_hz = 2;
+  uint32 channels = 3;
+  uint32 bits_per_sample = 4;
+}
+
+message DialogEvent {
+  uint64 timestamp_ns = 1;
+  string session_id = 2;
+  uint32 event_type = 3;
+  string text = 4;
+  float confidence = 5;
+  string language = 6;
+  bool is_final = 7;
+  string error = 8;
+}
+
+message DialogState {
+  string session_id = 1;
+  uint32 state = 2;
+  string language = 3;
+  bool vad_enabled = 4;
+  string error = 5;
+}
+
+message VadEvent {
+  uint64 timestamp_ns = 1;
+  bool voice_detected = 2;
+  float energy = 3;
+}
+

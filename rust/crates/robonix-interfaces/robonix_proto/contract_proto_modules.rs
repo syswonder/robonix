@@ -56,3 +56,15 @@ pub mod contracts {
     tonic::include_proto!("robonix.contracts");
 }
 
+pub mod asr {
+    tonic::include_proto!("robonix.asr");
+}
+
+pub mod tts {
+    tonic::include_proto!("robonix.tts");
+}
+
+pub mod speech {
+    tonic::include_proto!("robonix.speech");
+}
+
