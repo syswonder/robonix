@@ -41,54 +41,33 @@ enum Transport {
   TRANSPORT_MCP = 3;
 }
 
-// One capability interface — a single contract_id offered by a capability
-// instance. The full description for ALL interfaces of this instance lives
-// in the package's single CAPABILITY.md (path on RegisterCapabilityRequest);
-// this message carries only the per-interface identity.
-message CapabilityInterface {
-  // Local leaf name. Convention: leaf of `contract_id` (snake_case).
-  // e.g. "move", "odom", "rgb".
-  string name = 1;
-  // Stable full path, e.g. "robonix/primitive/base/move". MUST be a
-  // contract id that exists in the system or package local contract
-  // now we have these contracts in $ROBONIX_SRC/rust/capabilities/
-  // and $SOME_PACKAGE/capabilities/
-  string contract_id = 2;
-  // Package-author extension hatch — flags Atlas doesn't need to
-  // understand. MUST parse as a JSON object (or be empty); Atlas
-  // validates at register time and passes through to consumers.
-  string extra_json = 3;
-}
-
 // Register a capability instance. Instance lives until either Unregister
 // is called or heartbeats lapse past Atlas's eviction threshold.
 //
 // The same `capability_id` may NOT be registered twice — Atlas returns
 // AlreadyExists. Re-registration must be preceded by Unregister.
+//
+// Lazy-declare flow: at register time the cap has not initialised its
+// hardware yet, so it can't enumerate the contracts it will offer. After
+// register the cap MUST DeclareInterface for at least its `driver`
+// contract (used by the rbnx start-up code to invoke hardware init);
+// remaining interfaces are declared on demand once the cap discovers
+// what it can support.
 message RegisterCapabilityRequest {
   // Reverse-DNS instance id, e.g. "com.robonix.primitive.base.ranger_mini".
   // Empty => Atlas assigns "com.robonix.ephemeral.<uuid>".
-  // for example, in `robonix_manifest.yaml` we can have two cameras,
-  // and in `primitive` field, we have two capability instances:
-  // - `front_camera` and `rear_camera`, these are capability id.
-  // each one can have multiple interfaces exported (under some namespace like
-  // ../camera)
+  // For example a `robonix_manifest.yaml` with two cameras would create
+  // two capability instances `front_camera` and `rear_camera`, each able
+  // to declare multiple interfaces under the `camera` namespace.
   string capability_id = 1;
-  // Grouping namespace, e.g. "robonix/primitive/base". Every declared
-  // contract_id MUST live under this prefix; otherwise Atlas rejects
-  // the registration with InvalidArgument.
+  // Grouping namespace, e.g. "robonix/primitive/base". Every later
+  // DeclareInterface MUST carry a contract_id under this prefix;
+  // otherwise Atlas rejects that declare with InvalidArgument.
   string namespace = 2;
   // Absolute path to the package's single CAPABILITY.md. One markdown
-  // per package describes all interfaces below; consumers read it via
+  // per package describes all interfaces; consumers read it via
   // QueryCapabilityMd. Empty path => no markdown for this instance.
   string capability_md_path = 3;
-  // The set of capability interfaces this instance promises to offer.
-  // Each entry's `contract_id` must be addressable via DeclareInterface
-  // before consumers can connect.
-  repeated CapabilityInterface interfaces = 4;
-  // NOTES: when we register cap, we declares the interfaces ahead,
-  //        but we do now specify the actual endpoint for the interfaces,
-  //        this is done in the `DeclareInterface` call.
 }
 message RegisterCapabilityResponse { string capability_id = 1; }
 
@@ -130,7 +109,7 @@ message Ros2Params {
 }
 
 // MCP — one DeclareInterface registers exactly ONE MCP tool (= one
-// contract_id). The tool name is `CapabilityInterface.name`; only the
+// contract_id). The tool name is the leaf of the contract_id; only the
 // MCP-protocol-required extras live here.
 message McpParams {
   // One-line description shown to the LLM in MCP's `tools/list` reply.
@@ -178,6 +157,7 @@ message DeclareInterfaceRequest {
   // like the "front_camera" or "rear_camera" in the example above.
   string capability_id = 1;
   // Must match a contract_id in visible contracts
+  // e.g., "robonix/primitive/camera/depth"
   string contract_id = 2;
   Transport transport = 3;
   // Preferred address string. Format is transport-specific:
@@ -202,12 +182,16 @@ message InterfaceEndpoint {
   TransportParams params = 4;
 }
 
-// Read view of a registered capability instance.
+// Read view of a registered capability instance. The set of contracts
+// the cap currently offers is derivable from `endpoints`
+// (`{e.contract_id for e in endpoints}`); there is no separate
+// pre-announced interface list (driver-flow: contracts are declared
+// lazily as the cap discovers them).
 message CapabilityRecord {
   string capability_id = 1;
   string namespace = 2;
-  uint64 last_heartbeat_ms = 3;
-  repeated CapabilityInterface interfaces = 4;
+  string capability_md_path = 3;
+  uint64 last_heartbeat_ms = 4;
   repeated InterfaceEndpoint endpoints = 5;
 }
 
