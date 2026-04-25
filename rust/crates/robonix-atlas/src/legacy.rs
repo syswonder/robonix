@@ -95,7 +95,9 @@ impl legacy::robonix_runtime_server::RobonixRuntime for LegacyRuntimeService {
             .registry
             .register(&cap_id, &r.namespace, &capability_md_path)
             .await?;
-        Ok(Response::new(legacy::RegisterNodeResponse { node_id: resolved }))
+        Ok(Response::new(legacy::RegisterNodeResponse {
+            node_id: resolved,
+        }))
     }
 
     async fn unregister_node(
@@ -111,7 +113,9 @@ impl legacy::robonix_runtime_server::RobonixRuntime for LegacyRuntimeService {
         if was_present {
             delete_skill_md_for(&r.node_id);
         }
-        Ok(Response::new(legacy::UnregisterNodeResponse { ok: was_present }))
+        Ok(Response::new(legacy::UnregisterNodeResponse {
+            ok: was_present,
+        }))
     }
 
     async fn node_heartbeat(
@@ -160,9 +164,9 @@ impl legacy::robonix_runtime_server::RobonixRuntime for LegacyRuntimeService {
                 .registry
                 .query(&r.node_id, "", Transport::Unspecified)
                 .await;
-            let rec = recs.first().ok_or_else(|| {
-                Status::not_found(format!("unknown node_id: {}", r.node_id))
-            })?;
+            let rec = recs
+                .first()
+                .ok_or_else(|| Status::not_found(format!("unknown node_id: {}", r.node_id)))?;
             format!("{}/{}", rec.namespace, r.name)
         };
 
@@ -217,7 +221,8 @@ impl legacy::robonix_runtime_server::RobonixRuntime for LegacyRuntimeService {
         let mut nodes = Vec::with_capacity(records.len());
         for rec in records {
             // namespace prefix filter (only when contract_id is empty).
-            if r.contract_id.is_empty() && !r.namespace.is_empty()
+            if r.contract_id.is_empty()
+                && !r.namespace.is_empty()
                 && !rec.namespace.starts_with(&r.namespace)
             {
                 continue;
@@ -307,7 +312,11 @@ impl legacy::robonix_runtime_server::RobonixRuntime for LegacyRuntimeService {
             "[atlas-legacy] QuerySkillMd '{}' — DEPRECATED, migrate to Atlas.QueryCapabilityMd",
             r.node_id
         );
-        let skill_md = self.registry.capability_md(&r.node_id).await.unwrap_or_default();
+        let skill_md = self
+            .registry
+            .capability_md(&r.node_id)
+            .await
+            .unwrap_or_default();
         Ok(Response::new(legacy::QuerySkillMdResponse { skill_md }))
     }
 
@@ -315,9 +324,7 @@ impl legacy::robonix_runtime_server::RobonixRuntime for LegacyRuntimeService {
         &self,
         _req: Request<legacy::QueryAllSkillsRequest>,
     ) -> Result<Response<legacy::QueryAllSkillsResponse>, Status> {
-        warn!(
-            "[atlas-legacy] QueryAllSkills — DEPRECATED, agents now read CAPABILITY.md per-cap"
-        );
+        warn!("[atlas-legacy] QueryAllSkills — DEPRECATED, agents now read CAPABILITY.md per-cap");
         let recs = self.registry.snapshot_for_legacy().await;
         let mut skills = Vec::with_capacity(recs.len());
         for rec in recs {
@@ -408,9 +415,7 @@ fn build_legacy_params(transport: Transport, metadata_json: &str) -> pb::Transpo
                 .to_string(),
         }),
         Transport::Mcp => {
-            let schema = v
-                .get("input_schema")
-                .or_else(|| v.get("input_schema_json"));
+            let schema = v.get("input_schema").or_else(|| v.get("input_schema_json"));
             Kind::Mcp(pb::McpParams {
                 description: v
                     .get("description")

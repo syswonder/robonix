@@ -25,9 +25,7 @@ pub async fn load_tools(atlas: &mut AtlasClient) -> anyhow::Result<Vec<ToolEntry
     match load_mcp_tools(atlas).await {
         Ok(mcp) => {
             if mcp.is_empty() {
-                log::debug!(
-                    "no MCP tools from atlas (caps up? all MCP interfaces declared?)"
-                );
+                log::debug!("no MCP tools from atlas (caps up? all MCP interfaces declared?)");
             }
             out.extend(mcp);
         }
@@ -160,7 +158,13 @@ async fn load_mcp_tools(atlas: &mut AtlasClient) -> anyhow::Result<Vec<ToolEntry
                 serde_json::from_str(&input_schema_json)
                     .unwrap_or_else(|_| serde_json::json!({"type":"object","properties":{}}))
             };
-            out.push(tool(&name, &description, schema, RoutingKind::Mcp, &endpoint));
+            out.push(tool(
+                &name,
+                &description,
+                schema,
+                RoutingKind::Mcp,
+                &endpoint,
+            ));
         }
     }
     Ok(out)

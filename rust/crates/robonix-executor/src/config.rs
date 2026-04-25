@@ -20,7 +20,10 @@ pub struct ExecutorConfig {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "robonix-executor", about = "Robonix Executor — tool-call dispatch runtime")]
+#[command(
+    name = "robonix-executor",
+    about = "Robonix Executor — tool-call dispatch runtime"
+)]
 pub struct Args {
     /// Atlas control-plane endpoint.
     #[arg(long, env = "ROBONIX_ATLAS_ENDPOINT")]

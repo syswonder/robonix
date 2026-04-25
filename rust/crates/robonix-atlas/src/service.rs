@@ -90,10 +90,7 @@ struct EndpointRec {
     params: TransportParamsRec,
 }
 
-fn serialize_transport<S: serde::Serializer>(
-    t: &Transport,
-    ser: S,
-) -> Result<S::Ok, S::Error> {
+fn serialize_transport<S: serde::Serializer>(t: &Transport, ser: S) -> Result<S::Ok, S::Error> {
     ser.serialize_str(t.as_str_name())
 }
 
@@ -300,8 +297,7 @@ impl AtlasRegistry {
             if !f_cap_id.is_empty() && rec.capability_id != f_cap_id {
                 continue;
             }
-            if !f_contract.is_empty()
-                && !rec.endpoints.iter().any(|e| e.contract_id == f_contract)
+            if !f_contract.is_empty() && !rec.endpoints.iter().any(|e| e.contract_id == f_contract)
             {
                 continue;
             }
@@ -371,10 +367,7 @@ impl AtlasRegistry {
     /// Same as `unregister` but also returns whether the slot existed —
     /// here for symmetry with the legacy shim, which uses the boolean to
     /// decide whether to clean up its skill_md temp file.
-    pub async fn unregister_with_path(
-        &self,
-        cap_id: &str,
-    ) -> (bool, Option<String>) {
+    pub async fn unregister_with_path(&self, cap_id: &str) -> (bool, Option<String>) {
         let cap_id = cap_id.trim();
         if cap_id.is_empty() {
             return (false, None);
@@ -451,7 +444,9 @@ fn parse_transport(t: i32) -> Result<Transport, Status> {
     let v = Transport::try_from(t)
         .map_err(|_| Status::invalid_argument(format!("transport: unknown enum value {t}")))?;
     if v == Transport::Unspecified {
-        return Err(Status::invalid_argument("transport: must not be UNSPECIFIED"));
+        return Err(Status::invalid_argument(
+            "transport: must not be UNSPECIFIED",
+        ));
     }
     Ok(v)
 }
@@ -557,7 +552,9 @@ impl pb::atlas_server::Atlas for AtlasService {
             .registry
             .register(&r.capability_id, &r.namespace, &r.capability_md_path)
             .await?;
-        Ok(Response::new(pb::RegisterCapabilityResponse { capability_id }))
+        Ok(Response::new(pb::RegisterCapabilityResponse {
+            capability_id,
+        }))
     }
 
     async fn unregister_capability(
@@ -566,7 +563,9 @@ impl pb::atlas_server::Atlas for AtlasService {
     ) -> Result<Response<pb::UnregisterCapabilityResponse>, Status> {
         let r = req.into_inner();
         let was_present = self.registry.unregister(&r.capability_id).await;
-        Ok(Response::new(pb::UnregisterCapabilityResponse { was_present }))
+        Ok(Response::new(pb::UnregisterCapabilityResponse {
+            was_present,
+        }))
     }
 
     async fn heartbeat(
@@ -616,7 +615,9 @@ impl pb::atlas_server::Atlas for AtlasService {
     ) -> Result<Response<pb::QueryCapabilityMdResponse>, Status> {
         let r = req.into_inner();
         let capability_md = self.registry.capability_md(&r.capability_id).await?;
-        Ok(Response::new(pb::QueryCapabilityMdResponse { capability_md }))
+        Ok(Response::new(pb::QueryCapabilityMdResponse {
+            capability_md,
+        }))
     }
 
     async fn inspect_atlas(
@@ -645,9 +646,7 @@ async fn eviction_loop(registry: Arc<AtlasRegistry>, timeout_ms: u64, interval_m
         info!("[atlas] heartbeat eviction disabled (timeout=0)");
         return;
     }
-    info!(
-        "[atlas] heartbeat eviction: timeout={timeout_ms}ms interval={interval_ms}ms"
-    );
+    info!("[atlas] heartbeat eviction: timeout={timeout_ms}ms interval={interval_ms}ms");
     let interval = std::time::Duration::from_millis(interval_ms);
     loop {
         tokio::time::sleep(interval).await;
@@ -673,9 +672,19 @@ async fn eviction_loop(registry: Arc<AtlasRegistry>, timeout_ms: u64, interval_m
 /// `Atlas` service and the deprecated `RobonixRuntime` shim on the same
 /// gRPC port.
 pub async fn serve_atlas(registry: Arc<AtlasRegistry>, listen: SocketAddr) -> Result<()> {
-    let timeout_ms = read_env_u64("ROBONIX_ATLAS_HEARTBEAT_TIMEOUT_MS", DEFAULT_HEARTBEAT_TIMEOUT_MS);
-    let interval_ms = read_env_u64("ROBONIX_ATLAS_EVICTION_INTERVAL_MS", DEFAULT_EVICTION_INTERVAL_MS);
-    let _eviction_task = tokio::spawn(eviction_loop(Arc::clone(&registry), timeout_ms, interval_ms));
+    let timeout_ms = read_env_u64(
+        "ROBONIX_ATLAS_HEARTBEAT_TIMEOUT_MS",
+        DEFAULT_HEARTBEAT_TIMEOUT_MS,
+    );
+    let interval_ms = read_env_u64(
+        "ROBONIX_ATLAS_EVICTION_INTERVAL_MS",
+        DEFAULT_EVICTION_INTERVAL_MS,
+    );
+    let _eviction_task = tokio::spawn(eviction_loop(
+        Arc::clone(&registry),
+        timeout_ms,
+        interval_ms,
+    ));
 
     let svc = AtlasService::new(Arc::clone(&registry));
     let legacy = crate::legacy::LegacyRuntimeService::new(Arc::clone(&registry));
