@@ -3,9 +3,11 @@
 //
 // One running unit = one *capability instance*, registered under a
 // reverse-DNS `capability_id` and a `namespace` (e.g. "robonix/primitive/base").
-// An instance announces a list of `CapabilityInterface` (semantic) and then
-// binds wire endpoints via DeclareInterface (one (contract_id, transport)
-// pair per call). See rust/proto/atlas.proto for the wire schema.
+// Interfaces are declared lazily via DeclareInterface (one (contract_id,
+// transport) pair per call) — typically the cap declares its driver
+// interface first to let `rbnx start` invoke hardware init, then declares
+// the rest after it has discovered what it can support. See
+// rust/proto/atlas.proto for the wire schema.
 
 use anyhow::{Context, Result};
 use log::{info, warn};
@@ -27,35 +29,6 @@ use pb::Transport;
 /// At 8-hex-char UUID suffixes the keyspace is 2^32; collisions are
 /// dominated by bugs in the collide check, not randomness.
 const MINT_ATTEMPTS: usize = 16;
-
-// ── Data model ──────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize)]
-struct CapabilityInterfaceRec {
-    name: String,
-    contract_id: String,
-    extra_json: String,
-}
-
-impl From<pb::CapabilityInterface> for CapabilityInterfaceRec {
-    fn from(c: pb::CapabilityInterface) -> Self {
-        Self {
-            name: c.name,
-            contract_id: c.contract_id,
-            extra_json: c.extra_json,
-        }
-    }
-}
-
-impl From<&CapabilityInterfaceRec> for pb::CapabilityInterface {
-    fn from(c: &CapabilityInterfaceRec) -> Self {
-        Self {
-            name: c.name.clone(),
-            contract_id: c.contract_id.clone(),
-            extra_json: c.extra_json.clone(),
-        }
-    }
-}
 
 // ── Transport-specific params (typed mirror of proto oneof) ────────────────
 
@@ -147,7 +120,6 @@ struct CapRecord {
     namespace: String,
     capability_md_path: String,
     last_heartbeat_ms: u64,
-    interfaces: Vec<CapabilityInterfaceRec>,
     endpoints: Vec<EndpointRec>,
 }
 
@@ -195,23 +167,6 @@ impl AtlasRegistry {
 /// only the caller can produce.
 fn atlas_can_mint(transport: Transport) -> bool {
     matches!(transport, Transport::Ros2)
-}
-
-/// Validate `s` is empty or a parseable JSON object (not bare scalar /
-/// array — the proto fields are spec'd as objects).
-fn validate_extra_json(field: &str, s: &str) -> Result<(), Status> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Ok(());
-    }
-    let v: serde_json::Value = serde_json::from_str(s)
-        .map_err(|e| Status::invalid_argument(format!("{field}: invalid JSON ({e})")))?;
-    if !v.is_object() {
-        return Err(Status::invalid_argument(format!(
-            "{field}: must be a JSON object"
-        )));
-    }
-    Ok(())
 }
 
 /// Convert wire-form `pb::TransportParams` into the typed Rust enum and
@@ -305,29 +260,6 @@ impl pb::atlas_server::Atlas for AtlasService {
         };
         let namespace = AtlasRegistry::require("namespace", &r.namespace)?.to_string();
 
-        // Hard-reject any contract_id that's not under the announced
-        // namespace. Proto says "must"; honour that contract.
-        for c in &r.interfaces {
-            if c.contract_id.trim().is_empty() {
-                return Err(Status::invalid_argument(
-                    "interface contract_id must not be empty",
-                ));
-            }
-            if !c.contract_id.starts_with(&namespace) {
-                return Err(Status::invalid_argument(format!(
-                    "contract_id '{}' is not under namespace '{}'",
-                    c.contract_id, namespace
-                )));
-            }
-            validate_extra_json(
-                &format!("interface '{}' extra_json", c.contract_id),
-                &c.extra_json,
-            )?;
-        }
-
-        let interfaces: Vec<CapabilityInterfaceRec> =
-            r.interfaces.into_iter().map(Into::into).collect();
-
         let mut state = self.registry.inner.write().await;
         if state.caps.contains_key(&cap_id) {
             return Err(Status::already_exists(format!(
@@ -341,7 +273,6 @@ impl pb::atlas_server::Atlas for AtlasService {
                 namespace,
                 capability_md_path: r.capability_md_path.trim().to_string(),
                 last_heartbeat_ms: AtlasRegistry::now_ms(),
-                interfaces,
                 endpoints: Vec::new(),
             },
         );
@@ -394,14 +325,15 @@ impl pb::atlas_server::Atlas for AtlasService {
 
         let mut state = self.registry.inner.write().await;
 
-        // Cap must exist and have announced this contract.
+        // Cap must exist; contract_id must fall under the cap's namespace.
         let rec = state
             .caps
             .get(&cap_id)
             .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
-        if !rec.interfaces.iter().any(|c| c.contract_id == contract_id) {
-            return Err(Status::failed_precondition(format!(
-                "contract_id '{contract_id}' was not announced in RegisterCapability for {cap_id}"
+        if !contract_id.starts_with(&rec.namespace) {
+            return Err(Status::invalid_argument(format!(
+                "contract_id '{contract_id}' is not under namespace '{}' of capability '{cap_id}'",
+                rec.namespace
             )));
         }
         if rec
@@ -451,8 +383,10 @@ impl pb::atlas_server::Atlas for AtlasService {
             if !f_cap_id.is_empty() && rec.capability_id != f_cap_id {
                 continue;
             }
+            // contract_id filter applies to the endpoints list — the set
+            // of contracts a cap currently offers is `{e.contract_id ∈ endpoints}`.
             if !f_contract.is_empty()
-                && !rec.interfaces.iter().any(|c| c.contract_id == f_contract)
+                && !rec.endpoints.iter().any(|e| e.contract_id == f_contract)
             {
                 continue;
             }
@@ -468,8 +402,8 @@ impl pb::atlas_server::Atlas for AtlasService {
             records.push(pb::CapabilityRecord {
                 capability_id: rec.capability_id.clone(),
                 namespace: rec.namespace.clone(),
+                capability_md_path: rec.capability_md_path.clone(),
                 last_heartbeat_ms: rec.last_heartbeat_ms,
-                interfaces: rec.interfaces.iter().map(Into::into).collect(),
                 endpoints,
             });
         }
