@@ -137,10 +137,9 @@ impl PilotConfig {
             bail!("vlm api_format='{api_format}' not supported (only 'openai')");
         }
 
-        let upstream = args
-            .vlm_upstream
-            .or(file_vlm.upstream)
-            .ok_or_else(|| missing_field("vlm.upstream", "ROBONIX_VLM_UPSTREAM", "--vlm-upstream"))?;
+        let upstream = args.vlm_upstream.or(file_vlm.upstream).ok_or_else(|| {
+            missing_field("vlm.upstream", "ROBONIX_VLM_UPSTREAM", "--vlm-upstream")
+        })?;
         let api_key = args
             .vlm_api_key
             .or(file_vlm.api_key)

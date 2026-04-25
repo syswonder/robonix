@@ -231,7 +231,12 @@ pub async fn connect_to_capability(
         })?;
     let normalized = normalize_grpc_endpoint(&endpoint_str);
     let channel = Endpoint::new(normalized.clone())
-        .with_context(|| format!("invalid endpoint '{}' for cap '{}'", normalized, cap.capability_id))?
+        .with_context(|| {
+            format!(
+                "invalid endpoint '{}' for cap '{}'",
+                normalized, cap.capability_id
+            )
+        })?
         .connect()
         .await
         .with_context(|| {

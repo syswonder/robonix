@@ -138,10 +138,7 @@ fn task_is_abort_turn(task: &Task) -> bool {
 impl SystemPilot for PilotServiceImpl {
     type StreamStream = ReceiverStream<Result<PilotEvent, Status>>;
 
-    async fn stream(
-        &self,
-        request: Request<Task>,
-    ) -> Result<Response<Self::StreamStream>, Status> {
+    async fn stream(&self, request: Request<Task>) -> Result<Response<Self::StreamStream>, Status> {
         let mut task = request.into_inner();
 
         if task_is_abort_turn(&task) {
@@ -197,15 +194,8 @@ impl SystemPilot for PilotServiceImpl {
             };
 
             let mut history = history_arc.lock().await;
-            if let Err(e) = planner::run_turn(
-                &task,
-                &mut history,
-                &vlm,
-                &mut executor,
-                &tx,
-                cancel_rx,
-            )
-            .await
+            if let Err(e) =
+                planner::run_turn(&task, &mut history, &vlm, &mut executor, &tx, cancel_rx).await
             {
                 log::error!("[pilot] turn error for session '{session_id}': {e:#}");
                 let _ = tx.send(Err(Status::internal(e.to_string()))).await;
@@ -221,16 +211,13 @@ impl SystemPilot for PilotServiceImpl {
 /// Discover and connect to executor's two contracts. Both lookups go
 /// through atlas so executor can move/restart without reconfiguring pilot.
 async fn build_executor_conn(mut atlas: AtlasClient) -> anyhow::Result<ExecutorConn> {
-    let (_, exec_ch) =
-        atlas_client::connect_to_capability(&mut atlas, "robonix/system/executor")
+    let (_, exec_ch) = atlas_client::connect_to_capability(&mut atlas, "robonix/system/executor")
+        .await
+        .context("connect_to_capability robonix/system/executor")?;
+    let (_, list_ch) =
+        atlas_client::connect_to_capability(&mut atlas, "robonix/system/executor/list_tools")
             .await
-            .context("connect_to_capability robonix/system/executor")?;
-    let (_, list_ch) = atlas_client::connect_to_capability(
-        &mut atlas,
-        "robonix/system/executor/list_tools",
-    )
-    .await
-    .context("connect_to_capability robonix/system/executor/list_tools")?;
+            .context("connect_to_capability robonix/system/executor/list_tools")?;
     Ok(ExecutorConn {
         graph: SystemExecutorClient::new(exec_ch),
         list_tools: SystemExecutorListToolsClient::new(list_ch),
