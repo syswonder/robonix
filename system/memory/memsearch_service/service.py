@@ -111,10 +111,35 @@ async def search_memory(msg: std_msgs_mcp.String) -> std_msgs_mcp.String:
 )
 async def compact_memory(msg: std_msgs_mcp.Empty) -> std_msgs_mcp.String:
     """Compact and summarize recent memories. Call this at the end of a session.
-    Contract: robonix/srv/memory/compact (input std_msgs/Empty, output std_msgs/String)."""
+    Contract: robonix/srv/memory/compact (input std_msgs/Empty, output std_msgs/String).
+
+    Reuses pilot's OpenAI-compatible LLM endpoint so memory doesn't need a
+    separate API key. Reads:
+
+        VLM_BASE_URL  / OPENAI_BASE_URL   — base URL of the OpenAI-compatible API
+        VLM_API_KEY   / OPENAI_API_KEY    — API key
+        VLM_MODEL     / OPENAI_MODEL      — model identifier (default: gpt-4o-mini)
+
+    `VLM_*` are the names used in robonix_manifest.yaml `system.pilot.vlm.*`;
+    `OPENAI_*` are accepted as a fallback so this also works under a stock
+    OpenAI deployment."""
     _ = msg
+    base_url = os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+    api_key = os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    model = os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
+    if not api_key:
+        return std_msgs_mcp.String(
+            data="compact_memory: no LLM credentials available. "
+                 "Set VLM_API_KEY (and VLM_BASE_URL for non-default endpoints) "
+                 "in the deploy manifest's system.memory env block."
+        )
     try:
-        summary_path = await mem.compact(llm_provider="openai")
+        summary_path = await mem.compact(
+            llm_provider="openai",
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+        )
         return std_msgs_mcp.String(
             data=f"Memory compacted successfully to {summary_path}."
         )
