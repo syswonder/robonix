@@ -71,14 +71,6 @@ enum TransportParamsRec {
         is_service: bool,
         qos_profile: String,
     },
-    SharedMemory {
-        size_bytes: u64,
-        ringbuf_capacity: u32,
-    },
-    RawTcp,
-    Websocket {
-        subprotocol: String,
-    },
     Mcp {
         description: String,
         input_schema_json: String,
@@ -90,9 +82,6 @@ impl TransportParamsRec {
         match self {
             Self::Grpc { .. } => Transport::Grpc,
             Self::Ros2 { .. } => Transport::Ros2,
-            Self::SharedMemory { .. } => Transport::SharedMemory,
-            Self::RawTcp => Transport::RawTcp,
-            Self::Websocket { .. } => Transport::Websocket,
             Self::Mcp { .. } => Transport::Mcp,
         }
     }
@@ -117,17 +106,6 @@ impl From<&TransportParamsRec> for pb::TransportParams {
             } => Kind::Ros2(pb::Ros2Params {
                 is_service: *is_service,
                 qos_profile: qos_profile.clone(),
-            }),
-            TransportParamsRec::SharedMemory {
-                size_bytes,
-                ringbuf_capacity,
-            } => Kind::SharedMemory(pb::SharedMemoryParams {
-                size_bytes: *size_bytes,
-                ringbuf_capacity: *ringbuf_capacity,
-            }),
-            TransportParamsRec::RawTcp => Kind::RawTcp(pb::RawTcpParams {}),
-            TransportParamsRec::Websocket { subprotocol } => Kind::Websocket(pb::WebsocketParams {
-                subprotocol: subprotocol.clone(),
             }),
             TransportParamsRec::Mcp {
                 description,
@@ -217,11 +195,11 @@ impl AtlasRegistry {
 }
 
 /// Whether Atlas can mint a fresh endpoint name for this transport without
-/// requiring a prior OS-level bind by the caller. ros2/shared_memory are
-/// pure-name address spaces; grpc/raw_tcp/websocket need a host:port that
+/// requiring a prior OS-level bind by the caller. ros2 is a pure-name
+/// address space; grpc and mcp need a host:port that
 /// only the caller can produce.
 fn atlas_can_mint(transport: Transport) -> bool {
-    matches!(transport, Transport::Ros2 | Transport::SharedMemory)
+    matches!(transport, Transport::Ros2)
 }
 
 /// Validate `s` is empty or a parseable JSON object (not bare scalar /
@@ -262,14 +240,6 @@ fn parse_params(
         Kind::Ros2(r) => TransportParamsRec::Ros2 {
             is_service: r.is_service,
             qos_profile: r.qos_profile,
-        },
-        Kind::SharedMemory(s) => TransportParamsRec::SharedMemory {
-            size_bytes: s.size_bytes,
-            ringbuf_capacity: s.ringbuf_capacity,
-        },
-        Kind::RawTcp(_) => TransportParamsRec::RawTcp,
-        Kind::Websocket(w) => TransportParamsRec::Websocket {
-            subprotocol: w.subprotocol,
         },
         Kind::Mcp(m) => {
             // Validate input_schema_json parses as a JSON object.

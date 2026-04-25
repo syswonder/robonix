@@ -12,7 +12,8 @@ package robonix.atlas;
 //                         An instance offers one or more capability
 //                         interfaces under a single namespace.
 //   capability interface — a single contract-bound endpoint, addressed by
-//                          its `contract_id` (e.g. "robonix/primitive/base/move").
+//                          its `contract_id` (e.g.
+//                          "robonix/primitive/base/move").
 //   transport — a wire protocol used to carry traffic for one interface.
 //               The closed set lives in the `Transport` enum below; new
 //               transports must be added there (no string escape hatch).
@@ -28,7 +29,6 @@ package robonix.atlas;
 //      can come up healthy before all transports are ready.
 // ───────────────────────────────────────────────────────────────────────────
 
-
 // Closed set of wire transports Atlas understands. Adding a transport is
 // a deliberate proto bump — Atlas needs to know per-transport whether it
 // can mint endpoint names (see DeclareInterfaceRequest), so a string
@@ -38,13 +38,7 @@ enum Transport {
   TRANSPORT_UNSPECIFIED = 0;
   TRANSPORT_GRPC = 1;
   TRANSPORT_ROS2 = 2;
-  TRANSPORT_SHARED_MEMORY = 3; // TODO
-  TRANSPORT_RAW_TCP = 4;       // TODO
-  TRANSPORT_WEBSOCKET = 5;     // TODO
-  // MCP — Robonix codegen turns a `contract.toml` into MCP Python types
-  // and @mcp.tool wrappers; the serving package binds an HTTP MCP server
-  // and registers its URL as `endpoint` (caller-supplied, not mintable).
-  TRANSPORT_MCP = 6;
+  TRANSPORT_MCP = 3;
 }
 
 // One capability interface — a single contract_id offered by a capability
@@ -87,25 +81,17 @@ message RegisterCapabilityRequest {
   // before consumers can connect.
   repeated CapabilityInterface interfaces = 4;
 }
-message RegisterCapabilityResponse {
-  string capability_id = 1;
-}
+message RegisterCapabilityResponse { string capability_id = 1; }
 
-message UnregisterCapabilityRequest {
-  string capability_id = 1;
-}
+message UnregisterCapabilityRequest { string capability_id = 1; }
 // `was_present=true` means an existing record was removed; `false` means
 // the id was unknown to Atlas (idempotent caller-side semantics).
-message UnregisterCapabilityResponse {
-  bool was_present = 1;
-}
+message UnregisterCapabilityResponse { bool was_present = 1; }
 
 // Liveness signal. Atlas may evict instances whose heartbeat lapses.
 // Failure cases (unknown capability_id, etc.) come back as gRPC Status,
 // so the response carries no `ok` byte.
-message HeartbeatRequest {
-  string capability_id = 1;
-}
+message HeartbeatRequest { string capability_id = 1; }
 message HeartbeatResponse {}
 
 // ── Transport-specific declare params ──────────────────────────────────────
@@ -119,9 +105,10 @@ message HeartbeatResponse {}
 // message types are derivable from method via proto_file, so they are
 // NOT duplicated here.
 message GrpcParams {
-  string proto_file = 1;       // e.g. "robonix-interfaces/.../robonix_contracts.proto"
-  string service_name = 2;     // e.g. "robonix.contracts.SrvCognitionReason"
-  string method = 3;           // e.g. "/robonix.contracts.SrvCognitionReason/Stream"
+  string proto_file =
+      1; // e.g. "robonix-interfaces/.../robonix_contracts.proto"
+  string service_name = 2; // e.g. "robonix.contracts.SrvCognitionReason"
+  string method = 3; // e.g. "/robonix.contracts.SrvCognitionReason/Stream"
 }
 
 // ROS2 — `endpoint` already carries the topic OR service name. The
@@ -134,20 +121,6 @@ message Ros2Params {
   // Optional QoS override; "" => ROS 2 default profile. Common values:
   // "sensor_data", "reliable", "system_default", "parameters".
   string qos_profile = 2;
-}
-
-// TODO
-message SharedMemoryParams {
-  uint64 size_bytes = 1;
-  uint32 ringbuf_capacity = 2;
-}
-
-// TODO
-message RawTcpParams {}
-
-// TODO
-message WebsocketParams {
-  string subprotocol = 1;      // optional Sec-WebSocket-Protocol value
 }
 
 // MCP — one DeclareInterface registers exactly ONE MCP tool (= one
@@ -168,10 +141,7 @@ message TransportParams {
   oneof kind {
     GrpcParams grpc = 1;
     Ros2Params ros2 = 2;
-    SharedMemoryParams shared_memory = 3; // TODO
-    RawTcpParams raw_tcp = 4; // TODO
-    WebsocketParams websocket = 5; // TODO
-    McpParams mcp = 6;
+    McpParams mcp = 3;
   }
 }
 
@@ -182,9 +152,9 @@ message TransportParams {
 // Caller supplies a *preferred* endpoint string in `endpoint`. Atlas
 // guarantees the returned endpoint is globally unique on (transport,
 // endpoint). Conflict-resolution rules (Atlas-side):
-//   - empty proposal + atlas-mintable transport (ros2 / shared_memory)
+//   - empty proposal + atlas-mintable transport (ros2)
 //                       -> Atlas mints "/rbnx/<dotted-contract>/<uuid8>"
-//   - empty proposal + non-mintable transport (grpc, mcp, raw_tcp, websocket)
+//   - empty proposal + non-mintable transport (grpc, mcp)
 //                       -> InvalidArgument (Atlas cannot allocate; caller
 //                          must bind first and supply host:port / URL etc.)
 //   - non-empty + no collision        -> stored verbatim
@@ -202,12 +172,9 @@ message DeclareInterfaceRequest {
   string contract_id = 2;
   Transport transport = 3;
   // Preferred address string. Format is transport-specific:
-  //   grpc:          "127.0.0.1:50105"   (caller binds first)
-  //   ros2:          "/scanner/cloud"     ("" => Atlas mints)
-  //   shared_memory: "/rbnx_shm_lidar"    ("" => Atlas mints)
-  //   raw_tcp:       "host:port"
-  //   websocket:     "ws://host:port/path"
-  //   mcp:           "http://host:port/mcp"
+  //   grpc:  "127.0.0.1:50105"   (caller binds first)
+  //   ros2:  "/scanner/cloud"     ("" => Atlas mints)
+  //   mcp:   "http://host:port/mcp"
   string endpoint = 4;
   // Transport-specific params; the oneof variant MUST match `transport`.
   TransportParams params = 5;
@@ -245,15 +212,11 @@ message QueryCapabilitiesRequest {
   // not on the instance itself). TRANSPORT_UNSPECIFIED = no filter.
   Transport transport = 3;
 }
-message QueryCapabilitiesResponse {
-  repeated CapabilityRecord records = 1;
-}
+message QueryCapabilitiesResponse { repeated CapabilityRecord records = 1; }
 
 // Get the package's CAPABILITY.md content for an instance. One markdown
 // per package — describes all interfaces in a single document.
-message QueryCapabilityMdRequest {
-  string capability_id = 1;
-}
+message QueryCapabilityMdRequest { string capability_id = 1; }
 message QueryCapabilityMdResponse {
   // Empty when the instance was registered with no `capability_md_path`.
   string capability_md = 1;
@@ -261,9 +224,7 @@ message QueryCapabilityMdResponse {
 
 // Inspect Atlas state. Debug-only, returns implementation-defined JSON.
 message InspectAtlasRequest {}
-message InspectAtlasResponse {
-  string json = 1;
-}
+message InspectAtlasResponse { string json = 1; }
 
 service Atlas {
   rpc RegisterCapability(RegisterCapabilityRequest)
