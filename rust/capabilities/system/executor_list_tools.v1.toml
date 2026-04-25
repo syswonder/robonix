@@ -1,0 +1,12 @@
+# ROS: `lib/executor/srv/ListTools.srv`.
+[contract]
+id      = "robonix/system/executor/list_tools"
+version = "1"
+kind    = "system"
+
+[io.srv]
+srv = "executor/srv/ListTools"
+
+[mode]
+type = "rpc"
+

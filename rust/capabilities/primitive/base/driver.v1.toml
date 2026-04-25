@@ -1,0 +1,16 @@
+# Lifecycle interface for the mobile base (chassis). ONE driver contract
+# per abstract hardware category. `config_json` is an opaque passthrough
+# from the deploy manifest — the driver package parses it however it
+# needs. Robonix does not inspect it. Command discriminator supports
+# INIT / RESET / SHUTDOWN / PROBE (see `lib/robonix_msg/srv/Driver.srv`).
+[contract]
+id      = "robonix/primitive/base/driver"
+version = "1"
+kind    = "primitive"
+
+[io.srv]
+srv = "robonix_msg/srv/Driver"
+
+[mode]
+type = "rpc"
+

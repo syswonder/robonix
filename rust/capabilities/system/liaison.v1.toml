@@ -1,0 +1,12 @@
+# Same as Pilot. ROS: `lib/liaison/srv/SubmitTask.srv`.
+[contract]
+id      = "robonix/system/liaison"
+version = "1"
+kind    = "system"
+
+[io.srv]
+srv = "liaison/srv/SubmitTask"
+
+[mode]
+type = "rpc_server_stream"
+

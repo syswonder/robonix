@@ -2,7 +2,7 @@
 # Robonix Makefile — workspace build commands
 
 .PHONY: help build release install clean pyrightconfig fmt check \
-        build-atlas build-pilot build-executor build-liaison proto-interfaces
+        build-atlas build-pilot build-executor build-liaison
 .DEFAULT_GOAL := help
 
 RUST_DIR := $(shell pwd)
@@ -21,8 +21,7 @@ help:
 	@echo "    make build-liaison   - Build robonix-liaison only"
 	@echo ""
 	@echo "  Install:"
-	@echo "    make install         - Regenerate robonix_proto + install binaries to ~/.cargo/bin"
-	@echo "    make proto-interfaces - Run robonix-codegen (lib + contracts → robonix_proto/)"
+	@echo "    make install         - Install binaries to ~/.cargo/bin (proto codegen runs in each crate's build.rs)"
 	@echo ""
 	@echo "  Format & Lint:"
 	@echo "    make fmt             - Format all Rust code"
@@ -60,13 +59,7 @@ check:
 	cargo fmt --all -- --check
 	cargo clippy --workspace -- -D warnings
 
-proto-interfaces:
-	cd $(RUST_DIR) && cargo run -p robonix-codegen -- --lang proto \
-		-I crates/robonix-interfaces/lib \
-		--contracts contracts \
-		-o crates/robonix-interfaces/robonix_proto
-
-install: install-atlas proto-interfaces
+install: install-atlas
 	cargo install --path crates/robonix-codegen  --bin robonix-codegen  $(CARGO_FLAGS)
 	cargo install --path crates/robonix-cli  --bin rbnx            $(CARGO_FLAGS)
 	cargo install --path crates/robonix-pilot    --bin robonix-pilot    $(CARGO_FLAGS)
