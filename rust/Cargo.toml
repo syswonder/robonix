@@ -10,9 +10,6 @@ edition = "2024"
 license = "MulanPSL-2.0"
 
 [workspace.dependencies]
-# Robonix-internal crates
-robonix-proto = { path = "crates/robonix-proto" }
-
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 

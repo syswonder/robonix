@@ -50,8 +50,9 @@ message CapabilityInterface {
   // e.g. "move", "odom", "rgb".
   string name = 1;
   // Stable full path, e.g. "robonix/primitive/base/move". MUST be a
-  // contract id that exists in the system contract catalog (see
-  // rust/contracts/).
+  // contract id that exists in the system or package local contract
+  // now we have these contracts in $ROBONIX_SRC/rust/capabilities/
+  // and $SOME_PACKAGE/capabilities/
   string contract_id = 2;
   // Package-author extension hatch — flags Atlas doesn't need to
   // understand. MUST parse as a JSON object (or be empty); Atlas
@@ -67,6 +68,11 @@ message CapabilityInterface {
 message RegisterCapabilityRequest {
   // Reverse-DNS instance id, e.g. "com.robonix.primitive.base.ranger_mini".
   // Empty => Atlas assigns "com.robonix.ephemeral.<uuid>".
+  // for example, in `robonix_manifest.yaml` we can have two cameras,
+  // and in `primitive` field, we have two capability instances:
+  // - `front_camera` and `rear_camera`, these are capability id.
+  // each one can have multiple interfaces exported (under some namespace like
+  // ../camera)
   string capability_id = 1;
   // Grouping namespace, e.g. "robonix/primitive/base". Every declared
   // contract_id MUST live under this prefix; otherwise Atlas rejects
@@ -80,6 +86,9 @@ message RegisterCapabilityRequest {
   // Each entry's `contract_id` must be addressable via DeclareInterface
   // before consumers can connect.
   repeated CapabilityInterface interfaces = 4;
+  // NOTES: when we register cap, we declares the interfaces ahead,
+  //        but we do now specify the actual endpoint for the interfaces,
+  //        this is done in the `DeclareInterface` call.
 }
 message RegisterCapabilityResponse { string capability_id = 1; }
 
@@ -111,16 +120,13 @@ message GrpcParams {
   string method = 3; // e.g. "/robonix.contracts.SrvCognitionReason/Stream"
 }
 
-// ROS2 — `endpoint` already carries the topic OR service name. The
-// message type is implied by `contract_id` (contract catalog maps each
-// contract 1:1 to its ROS msg type), so it is NOT duplicated here.
-// `is_service` toggles topic-style pub/sub vs service-style req/resp,
-// which use different ROS 2 APIs on the consumer side.
+// ROS2 — `endpoint` carries the topic or service name; whether it's a
+// topic or service comes from the contract's `[io.srv]` vs `[io.msg]`,
+// not duplicated here.
 message Ros2Params {
-  bool is_service = 1;
   // Optional QoS override; "" => ROS 2 default profile. Common values:
   // "sensor_data", "reliable", "system_default", "parameters".
-  string qos_profile = 2;
+  string qos_profile = 1;
 }
 
 // MCP — one DeclareInterface registers exactly ONE MCP tool (= one
@@ -131,6 +137,7 @@ message McpParams {
   string description = 1;
   // JSON Schema describing the tool's input. MUST parse as a JSON
   // object (or be empty for "no args"); MCP protocol fixes this format.
+  // see spec: https://modelcontextprotocol.io/specification/draft/server/tools
   string input_schema_json = 2;
 }
 
@@ -167,8 +174,10 @@ message TransportParams {
 // CALLER MUST USE the returned endpoint (it may differ from what was
 // proposed when Atlas rewrote to disambiguate).
 message DeclareInterfaceRequest {
+  // this id MUST have been registered in the system before
+  // like the "front_camera" or "rear_camera" in the example above.
   string capability_id = 1;
-  // Must match a contract_id announced in RegisterCapability.
+  // Must match a contract_id in visible contracts
   string contract_id = 2;
   Transport transport = 3;
   // Preferred address string. Format is transport-specific:
@@ -204,10 +213,12 @@ message CapabilityRecord {
 
 // Discover capability instances. Filters AND together when set.
 message QueryCapabilitiesRequest {
-  // Exact match on a CapabilityInterface contract_id offered by the instance.
-  string contract_id = 1;
-  // Prefix match on the instance's `namespace`.
-  string namespace = 2;
+  // Each capability id is unique, so we can directly query by capability id.
+  string capability_id = 1;
+  // Filter by a contract_id
+  // e.g., I want a camera with depth, just set it to
+  // "robonix/primitive/camera/depth"
+  string contract_id = 2;
   // Exact match on InterfaceEndpoint.transport (filter is on endpoints,
   // not on the instance itself). TRANSPORT_UNSPECIFIED = no filter.
   Transport transport = 3;
