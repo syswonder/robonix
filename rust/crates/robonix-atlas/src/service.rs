@@ -19,10 +19,7 @@ use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-pub mod pb {
-    tonic::include_proto!("robonix.atlas");
-}
-
+use crate::pb;
 use pb::Transport;
 
 /// How many times Atlas tries to mint a unique endpoint before giving up.
