@@ -3,4 +3,4 @@
 
 extern crate self as robonix_atlas;
 
-pub mod meta_runtime;
+pub mod service;

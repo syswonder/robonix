@@ -13,7 +13,7 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 pub mod pb {
-    tonic::include_proto!("robonix.runtime");
+    tonic::include_proto!("robonix.atlas");
 }
 
 // ── Data model ──────────────────────────────────────────────────────────────
@@ -125,12 +125,12 @@ const ROBO_SYSTEM_INTERFACE_CATALOG: &[&str] = &[
 ];
 
 #[derive(Debug)]
-pub struct MetaRuntimeRegistry {
+pub struct AtlasRegistry {
     pub(crate) inner: RwLock<State>,
     next_port: AtomicU16,
 }
 
-impl Default for MetaRuntimeRegistry {
+impl Default for AtlasRegistry {
     fn default() -> Self {
         Self {
             inner: RwLock::new(State::default()),
@@ -139,7 +139,7 @@ impl Default for MetaRuntimeRegistry {
     }
 }
 
-impl MetaRuntimeRegistry {
+impl AtlasRegistry {
     fn join_namespace_leaf(namespace: &str, interface_leaf: &str) -> String {
         let ns = namespace.trim().trim_end_matches('/');
         let leaf = interface_leaf.trim().trim_start_matches('/');
@@ -722,28 +722,28 @@ impl MetaRuntimeRegistry {
 // ── gRPC service ────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-pub struct MetaRuntimeService {
-    registry: Arc<MetaRuntimeRegistry>,
+pub struct AtlasService {
+    registry: Arc<AtlasRegistry>,
 }
 
-impl MetaRuntimeService {
-    pub fn new(registry: Arc<MetaRuntimeRegistry>) -> Self {
+impl AtlasService {
+    pub fn new(registry: Arc<AtlasRegistry>) -> Self {
         Self { registry }
     }
 
     fn v(field: &str, value: &str, allow_empty: bool) -> Result<String, Status> {
-        MetaRuntimeRegistry::validate_id(field, value, allow_empty)
+        AtlasRegistry::validate_id(field, value, allow_empty)
     }
 }
 
 #[tonic::async_trait]
-impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
+impl pb::atlas_server::Atlas for AtlasService {
     async fn register_node(
         &self,
         request: Request<pb::RegisterNodeRequest>,
     ) -> Result<Response<pb::RegisterNodeResponse>, Status> {
         let r = request.into_inner();
-        let node_id = MetaRuntimeRegistry::validate_node_identity("node_id", &r.node_id, true)?;
+        let node_id = AtlasRegistry::validate_node_identity("node_id", &r.node_id, true)?;
         let namespace = Self::v("namespace", &r.namespace, true)?;
         let kind = Self::v("kind", &r.kind, true)?;
         let skill_md = if r.skill_md.is_empty() {
@@ -794,7 +794,7 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
         request: Request<pb::UnregisterNodeRequest>,
     ) -> Result<Response<pb::UnregisterNodeResponse>, Status> {
         let r = request.into_inner();
-        let node_id = MetaRuntimeRegistry::validate_node_identity("node_id", &r.node_id, false)?;
+        let node_id = AtlasRegistry::validate_node_identity("node_id", &r.node_id, false)?;
         let ok = self.registry.unregister_node(&node_id).await;
         if ok {
             info!("meta-runtime: unregistered node '{node_id}'");
@@ -807,7 +807,7 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
         request: Request<pb::NodeHeartbeatRequest>,
     ) -> Result<Response<pb::NodeHeartbeatResponse>, Status> {
         let r = request.into_inner();
-        let node_id = MetaRuntimeRegistry::validate_node_identity("node_id", &r.node_id, false)?;
+        let node_id = AtlasRegistry::validate_node_identity("node_id", &r.node_id, false)?;
         let t = self.registry.node_heartbeat(&node_id).await?;
         let server_time_ms = u64::try_from(t).unwrap_or(u64::MAX);
         Ok(Response::new(pb::NodeHeartbeatResponse {
@@ -821,7 +821,7 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
         request: Request<pb::DeclareInterfaceRequest>,
     ) -> Result<Response<pb::DeclareInterfaceResponse>, Status> {
         let r = request.into_inner();
-        let node_id = MetaRuntimeRegistry::validate_node_identity("node_id", &r.node_id, false)?;
+        let node_id = AtlasRegistry::validate_node_identity("node_id", &r.node_id, false)?;
         let name = Self::v("name", &r.name, false)?;
         let endpoint = self
             .registry
@@ -918,8 +918,8 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
     ) -> Result<Response<pb::NegotiateChannelResponse>, Status> {
         let r = request.into_inner();
         let consumer_id =
-            MetaRuntimeRegistry::validate_node_identity("consumer_id", &r.consumer_id, false)?;
-        let provider = MetaRuntimeRegistry::validate_node_identity(
+            AtlasRegistry::validate_node_identity("consumer_id", &r.consumer_id, false)?;
+        let provider = AtlasRegistry::validate_node_identity(
             "provider_node_id",
             &r.provider_node_id,
             false,
@@ -956,7 +956,7 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
         request: Request<pb::QuerySkillMdRequest>,
     ) -> Result<Response<pb::QuerySkillMdResponse>, Status> {
         let r = request.into_inner();
-        let node_id = MetaRuntimeRegistry::validate_node_identity("node_id", &r.node_id, false)?;
+        let node_id = AtlasRegistry::validate_node_identity("node_id", &r.node_id, false)?;
         let skill_md = self.registry.query_skill_md(&node_id).await?;
         Ok(Response::new(pb::QuerySkillMdResponse { skill_md }))
     }
@@ -991,33 +991,33 @@ impl pb::robonix_runtime_server::RobonixRuntime for MetaRuntimeService {
         Ok(Response::new(pb::QueryAllSkillsResponse { skills }))
     }
 
-    async fn inspect_runtime(
+    async fn inspect_atlas(
         &self,
-        _request: Request<pb::InspectRuntimeRequest>,
-    ) -> Result<Response<pb::InspectRuntimeResponse>, Status> {
+        _request: Request<pb::InspectAtlasRequest>,
+    ) -> Result<Response<pb::InspectAtlasResponse>, Status> {
         let json = self
             .registry
             .inspect_json()
             .await
             .map_err(|e| Status::internal(format!("inspect failed: {e:#}")))?;
-        Ok(Response::new(pb::InspectRuntimeResponse { json }))
+        Ok(Response::new(pb::InspectAtlasResponse { json }))
     }
 }
 
 // ── Server entrypoint ───────────────────────────────────────────────────────
 
-pub async fn serve_meta_runtime(
-    registry: Arc<MetaRuntimeRegistry>,
+pub async fn serve_atlas(
+    registry: Arc<AtlasRegistry>,
     listen_addr: SocketAddr,
     runtime_endpoint: String,
 ) -> Result<()> {
-    let svc = MetaRuntimeService::new(registry);
+    let svc = AtlasService::new(registry);
     info!(
         "starting robonix runtime meta API (gRPC) on {}",
         runtime_endpoint
     );
     tonic::transport::Server::builder()
-        .add_service(pb::robonix_runtime_server::RobonixRuntimeServer::new(svc))
+        .add_service(pb::atlas_server::AtlasServer::new(svc))
         .serve(listen_addr)
         .await?;
     Ok(())
@@ -1029,7 +1029,7 @@ pub async fn serve_meta_runtime(
 mod tests {
     use super::*;
 
-    async fn reg_node(reg: &MetaRuntimeRegistry, id: &str, ns: &str, kind: &str) -> String {
+    async fn reg_node(reg: &AtlasRegistry, id: &str, ns: &str, kind: &str) -> String {
         reg.register_node(
             id.into(),
             ns.into(),
@@ -1043,7 +1043,7 @@ mod tests {
     }
 
     async fn reg_node_distro(
-        reg: &MetaRuntimeRegistry,
+        reg: &AtlasRegistry,
         id: &str,
         ns: &str,
         kind: &str,
@@ -1064,21 +1064,21 @@ mod tests {
 
     #[tokio::test]
     async fn register_node_assigns_id_when_empty() {
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         let id = reg_node(&reg, "", "ns", "primitive").await;
         assert!(id.starts_with("com.robonix.ephemeral."));
     }
 
     #[tokio::test]
     async fn register_node_preserves_explicit_id() {
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         let id = reg_node(&reg, "com.test.camera", "ns", "primitive").await;
         assert_eq!(id, "com.test.camera");
     }
 
     #[tokio::test]
     async fn declare_interface_and_negotiate() {
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         reg_node(&reg, "com.test.provider", "robonix/prm/camera", "primitive").await;
         reg.declare_interface(
             "com.test.provider",
@@ -1117,7 +1117,7 @@ mod tests {
 
     #[tokio::test]
     async fn negotiate_rejects_unsupported_transport() {
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         reg_node(&reg, "com.test.provider", "robonix/prm/camera", "primitive").await;
         reg.declare_interface(
             "com.test.provider",
@@ -1143,7 +1143,7 @@ mod tests {
 
     #[tokio::test]
     async fn release_channel_removes_it() {
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         reg_node(&reg, "com.test.provider", "robonix/prm/sensor", "primitive").await;
         reg.declare_interface(
             "com.test.provider",
@@ -1171,7 +1171,7 @@ mod tests {
 
     #[tokio::test]
     async fn skill_md_round_trip() {
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         reg.register_node(
             "com.test.llm".into(),
             "ns".into(),
@@ -1193,7 +1193,7 @@ mod tests {
 
     #[tokio::test]
     async fn declare_interface_uses_listen_port_when_set() {
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         reg_node(&reg, "com.test.p", "robonix/srv/model/vlm", "primitive").await;
         let ep = reg
             .declare_interface(
@@ -1211,7 +1211,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_allocates_grpc_port() {
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         reg_node(&reg, "com.test.sim", "robonix/prm/base", "primitive").await;
 
         let ep = reg
@@ -1246,7 +1246,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_allocates_mcp_port() {
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         reg_node(
             &reg,
             "com.test.vla",
@@ -1284,7 +1284,7 @@ mod tests {
 
     #[tokio::test]
     async fn different_nodes_get_different_ports() {
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         reg_node(&reg, "com.test.node_a", "robonix/prm/base", "primitive").await;
         reg_node(&reg, "com.test.node_b", "robonix/prm/base", "primitive").await;
 
@@ -1315,7 +1315,7 @@ mod tests {
 
     #[tokio::test]
     async fn inspect_returns_valid_json() {
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         reg_node(&reg, "com.test.n1", "ns", "service").await;
         let json_str = reg.inspect_json().await.unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -1325,7 +1325,7 @@ mod tests {
 
     #[tokio::test]
     async fn distro_and_container_stored() {
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         reg_node_distro(
             &reg,
             "com.test.nav2",
@@ -1354,7 +1354,7 @@ mod tests {
 
     #[tokio::test]
     async fn inspect_includes_distro() {
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         reg_node_distro(&reg, "com.test.n1", "ns", "service", "humble", "ctr-1").await;
         let json_str = reg.inspect_json().await.unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -1365,7 +1365,7 @@ mod tests {
 
     #[tokio::test]
     async fn unregister_node_removes_node_and_channels() {
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         reg_node(&reg, "com.test.provider", "robonix/prm/camera", "primitive").await;
         reg_node(&reg, "com.test.consumer", "robonix/srv/agent", "tool").await;
         reg.declare_interface(
@@ -1404,7 +1404,7 @@ mod tests {
 
     #[tokio::test]
     async fn node_heartbeat_updates_timestamp() {
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         reg_node(&reg, "com.test.node", "ns", "primitive").await;
         let t0 = reg.inner.read().await.nodes["com.test.node"].heartbeat_ms;
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -1419,20 +1419,20 @@ mod tests {
     #[test]
     fn validate_node_identity_rejects_non_reverse_dns() {
         assert!(
-            MetaRuntimeRegistry::validate_node_identity("node_id", "tiago-node", false).is_err()
+            AtlasRegistry::validate_node_identity("node_id", "tiago-node", false).is_err()
         );
         assert!(
-            MetaRuntimeRegistry::validate_node_identity("node_id", "com.short", false).is_err()
+            AtlasRegistry::validate_node_identity("node_id", "com.short", false).is_err()
         );
         assert!(
-            MetaRuntimeRegistry::validate_node_identity("node_id", "com.test.ok", false).is_ok()
+            AtlasRegistry::validate_node_identity("node_id", "com.test.ok", false).is_ok()
         );
     }
 
     #[tokio::test]
     async fn contract_id_legacy_derives_from_namespace_and_name() {
         // When contract_id is empty, Atlas derives it from namespace+name (legacy behavior).
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         reg.register_node(
             "com.test.vlm".into(),
             "robonix/srv/model/vlm".into(),
@@ -1470,7 +1470,7 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_contract_id_overrides_derived_path() {
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         reg_node(&reg, "com.test.tiago", "robonix/prm/camera", "primitive").await;
         reg.declare_interface(
             "com.test.tiago",
@@ -1497,7 +1497,7 @@ mod tests {
     #[tokio::test]
     async fn grpc_ros2_warns_for_unknown_contract_but_accepts() {
         // Unknown contract IDs are accepted with a warning, not rejected.
-        let reg = MetaRuntimeRegistry::default();
+        let reg = AtlasRegistry::default();
         reg_node(&reg, "com.test.custom", "robonix/prm/custom", "primitive").await;
         let result = reg
             .declare_interface(
