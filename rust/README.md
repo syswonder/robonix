@@ -1,6 +1,6 @@
 # Robonix (Rust workspace)
 
-Robonix is a robotics EAIOS (Embodied AI Operating System) framework: nodes register capabilities, declare interfaces, negotiate channels over pluggable transports, and expose SKILL.md text so agents and tools can discover how to use them.
+Robonix is a robotics EAIOS (Embodied AI Operating System) framework: capability instances register with Atlas, declare interfaces over pluggable transports, and ship one CAPABILITY.md per package so agents and tools can discover how to use them.
 
 Platform: primary target is Linux; ROS 2 workloads are not assumed on the host — use containers or a sourced distro when needed.
 
@@ -8,8 +8,8 @@ Platform: primary target is Linux; ROS 2 workloads are not assumed on the host �
 
 | Crate | Role |
 |--------|------|
-| robonix-atlas | gRPC control plane: registration, discovery, channel negotiation, skill catalog |
-| robonix-sdk | Thin Rust client for the runtime API |
+| robonix-atlas | gRPC control plane: capability registration, interface discovery, CAPABILITY.md catalog |
+| robonix-sdk | Thin Rust client for the Atlas API (being retired in favour of robonix-proto, task #31) |
 | robonix-pilot | VLM-driven reasoning service: ReAct loop, session management, `TaskGraph` slices (v1 linear; BT/RTDL TODO) |
 | robonix-executor | Tool dispatch runtime: builtin / MCP / gRPC routing |
 | robonix-liaison | User-facing interaction layer: text stdin→Intent→PilotEvent |
@@ -69,10 +69,9 @@ See [`examples/README.md`](examples/README.md).
 
 ## Key concepts
 
-- **Node** — Registered participant (primitive, service, skill) with a namespace and optional SKILL.md.
-- **Interface** — Named capability on a node; lists supported transports and opaque metadata.
-- **Channel** — Allocated connection from `NegotiateChannel` (id, transport, endpoint).
-- **Transport** — Concrete wiring (gRPC, MCP, ROS 2, shared memory); chosen at negotiation time.
-- **SKILL.md** — Human/agent-oriented description of how to invoke the node; served via `QueryAllSkills`.
+- **Capability instance** — Registered execution unit (primitive, service, skill) with a reverse-DNS id under one namespace, optionally with a CAPABILITY.md.
+- **Capability interface** — A single `contract_id` offered by an instance. The instance binds a `(transport, endpoint)` per interface via `DeclareInterface`.
+- **Transport** — Concrete wiring (gRPC, MCP, ROS 2, shared memory, …); closed enum on the wire (`Transport`).
+- **CAPABILITY.md** — One markdown per package describing all of its interfaces; served on demand via `QueryCapabilityMd`. Replaces the legacy per-skill `SKILL.md` convention.
 - **Intent** — Single user turn; Liaison sends it to Pilot and streams back `PilotEvent`.
 - **TaskGraph** — One incremental slice of the task (behavior-tree-shaped contract; v1 = linear `TaskCall[]`); dispatched by Executor (TODO: full BT + RTDL).

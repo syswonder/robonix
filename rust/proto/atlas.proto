@@ -39,8 +39,12 @@ enum Transport {
   TRANSPORT_GRPC = 1;
   TRANSPORT_ROS2 = 2;
   TRANSPORT_SHARED_MEMORY = 3; // TODO
-  TRANSPORT_RAW_TCP = 4; // TODO
-  TRANSPORT_WEBSOCKET = 5; // TODO
+  TRANSPORT_RAW_TCP = 4;       // TODO
+  TRANSPORT_WEBSOCKET = 5;     // TODO
+  // MCP — Robonix codegen turns a `contract.toml` into MCP Python types
+  // and @mcp.tool wrappers; the serving package binds an HTTP MCP server
+  // and registers its URL as `endpoint` (caller-supplied, not mintable).
+  TRANSPORT_MCP = 6;
 }
 
 // One capability interface — a single contract_id offered by a capability
