@@ -1,26 +1,38 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// robonix-executor — tool-call dispatch runtime
+// robonix-executor — tool-call dispatch runtime.
 //
-// Exposes contract gRPC services from `robonix_contracts.proto` (SrvExecutor, …).
+// Bootstrap (every Robonix process):
+//   ROBONIX_ATLAS_ENDPOINT  — atlas control-plane host:port (CLI / env)
+//   ROBONIX_CONFIG_PATH     — optional YAML config slice (rbnx-written)
+//
+// On startup executor:
+//   1. Connects to atlas, registers as `com.robonix.system.executor`.
+//   2. Declares two contract interfaces over gRPC:
+//        - robonix/system/executor              (Stream — TaskGraph dispatch)
+//        - robonix/system/executor/list_tools   (Call   — tool catalogue)
+//   3. Serves both on `listen`. Tool dispatch resolves MCP / gRPC / builtin
+//      backends via atlas at every Stream RPC.
 
+mod config;
 mod dispatch;
 mod exec_wire;
+mod pb;
 mod routing_kind;
 mod service;
 mod tools;
 
-use robonix_interfaces::{contracts, executor, pilot};
-
-use anyhow::Result;
-use contracts::srv_executor_list_tools_server::SrvExecutorListToolsServer;
-use contracts::srv_executor_server::SrvExecutorServer;
+use anyhow::{Context, Result};
+use clap::Parser;
+use config::{Args, EXECUTOR_NAMESPACE, ExecutorConfig};
 use log::info;
-use robonix_sdk::RobonixClient;
+use pb::contracts::{
+    system_executor_list_tools_server::SystemExecutorListToolsServer,
+    system_executor_server::SystemExecutorServer,
+};
+use robonix_atlas::client::{self as atlas_client, AtlasClient};
+use robonix_atlas::pb as atlas_pb;
 use service::ExecutorServiceImpl;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-
-const EXECUTOR_NODE_ID: &str = "com.robonix.runtime.executor";
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -29,68 +41,73 @@ async fn main() -> Result<()> {
     )
     .init();
 
-    let atlas_endpoint = atlas_endpoint();
-    info!("connecting to Atlas at {}", atlas_endpoint);
+    let cfg = ExecutorConfig::resolve(Args::parse())?;
 
-    let mut sdk =
-        RobonixClient::connect_with_retry(&atlas_endpoint, 10, std::time::Duration::from_secs(2))
-            .await?;
+    info!("connecting to atlas at {}", cfg.atlas_endpoint);
+    let mut atlas =
+        AtlasClient::connect_with_retry(&cfg.atlas_endpoint, 10, Duration::from_secs(2))
+            .await
+            .context("connect to atlas")?;
 
-    sdk.register_node(EXECUTOR_NODE_ID, "robonix/srv/executor", "service", "")
+    atlas
+        .register_capability(&cfg.capability_id, EXECUTOR_NAMESPACE, "")
         .await?;
-    info!("registered as '{}'", EXECUTOR_NODE_ID);
+    info!(
+        "registered as '{}' under '{EXECUTOR_NAMESPACE}'",
+        cfg.capability_id
+    );
 
-    let listen_port: u16 = std::env::var("ROBONIX_EXECUTOR_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(50061);
+    let listen_addr: std::net::SocketAddr = cfg
+        .listen
+        .parse()
+        .with_context(|| format!("invalid executor listen address '{}'", cfg.listen))?;
+    let advertised = match listen_addr.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
+            format!("127.0.0.1:{}", listen_addr.port())
+        }
+        _ => listen_addr.to_string(),
+    };
 
-    let listen_addr: std::net::SocketAddr = format!("0.0.0.0:{}", listen_port).parse()?;
-    let advertised = format!("localhost:{}", listen_port);
+    // Executor exposes TWO contracts on the same gRPC server: stream-dispatch
+    // and list_tools. Declare both so consumers (pilot) can connect to each.
+    atlas
+        .declare_interface(
+            &cfg.capability_id,
+            "robonix/system/executor",
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/system/executor.v1.toml",
+                "robonix.contracts.SystemExecutor",
+                "/robonix.contracts.SystemExecutor/Stream",
+            ),
+        )
+        .await?;
+    atlas
+        .declare_interface(
+            &cfg.capability_id,
+            "robonix/system/executor/list_tools",
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/system/executor_list_tools.v1.toml",
+                "robonix.contracts.SystemExecutorListTools",
+                "/robonix.contracts.SystemExecutorListTools/Call",
+            ),
+        )
+        .await?;
+    info!("declared SystemExecutor + SystemExecutorListTools at {advertised}");
 
-    sdk.declare_interface_full(
-        EXECUTOR_NODE_ID,
-        "executor",
-        vec!["grpc".to_string()],
-        serde_json::json!({"endpoint": advertised}).to_string(),
-        listen_port as u32,
-        "robonix/srv/executor",
-    )
-    .await?;
-
-    info!("Executor contract gRPC on :{}", listen_port);
-
-    let sdk = Arc::new(Mutex::new(sdk));
-    let svc = ExecutorServiceImpl::new(sdk);
+    let svc = ExecutorServiceImpl::new(atlas);
+    info!("SystemExecutor gRPC on {listen_addr}");
+    eprintln!("robonix-executor ready on {listen_addr}");
 
     tonic::transport::Server::builder()
-        .add_service(SrvExecutorServer::new(svc.clone()))
-        .add_service(SrvExecutorListToolsServer::new(svc))
+        .add_service(SystemExecutorServer::new(svc.clone()))
+        .add_service(SystemExecutorListToolsServer::new(svc))
         .serve(listen_addr)
-        .await?;
+        .await
+        .context("executor gRPC server failed")?;
 
     Ok(())
-}
-
-fn atlas_endpoint() -> String {
-    let raw = resolve_endpoint(
-        &["ROBONIX_ATLAS_ENDPOINT", "ROBONIX_ATLAS"],
-        "localhost:50051",
-    );
-    if raw.starts_with("http") {
-        raw
-    } else {
-        format!("http://{}", raw)
-    }
-}
-
-fn resolve_endpoint(vars: &[&str], default: &str) -> String {
-    for v in vars {
-        if let Ok(val) = std::env::var(v)
-            && !val.is_empty()
-        {
-            return val;
-        }
-    }
-    default.to_string()
 }

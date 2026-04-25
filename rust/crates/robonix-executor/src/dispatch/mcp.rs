@@ -4,7 +4,7 @@
 // TODO(executor owner): implement full MCP dispatch.
 // Skeleton: connects to the MCP endpoint and calls the named tool.
 
-use crate::pilot::TaskCallResult;
+use crate::pb::pilot::TaskCallResult;
 use rmcp::ServiceExt;
 
 type McpClient = rmcp::service::RunningService<rmcp::RoleClient, ()>;

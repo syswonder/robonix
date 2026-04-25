@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // dispatch/builtin.rs — built-in tool implementations
 
-use crate::pilot::TaskCallResult;
+use crate::pb::pilot::TaskCallResult;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 

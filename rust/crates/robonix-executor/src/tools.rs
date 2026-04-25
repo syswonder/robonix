@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// tools.rs — tool catalogue (builtin + Atlas-discovered MCP)
+// Tool catalogue: builtin tools + Atlas-discovered MCP tools.
 //
-// ExecutorService calls `load_tools` to build the VLM-facing tool list and
-// populate the routing table used by dispatch.
+// `load_tools` is called by ExecutorService at every Stream / list_tools RPC
+// so caps that registered after the last query are picked up next round.
 
-use crate::pilot::ToolRouting;
+use crate::pb::pilot::ToolRouting;
 use crate::routing_kind::RoutingKind;
-use robonix_sdk::RobonixClient;
+use robonix_atlas::client::AtlasClient;
+use robonix_atlas::pb as atlas_pb;
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// Fully-resolved tool spec handed to Pilot via ListTools.
+/// Fully-resolved tool spec returned to consumers via list_tools.
 #[derive(Clone, Debug)]
 pub struct ToolEntry {
     pub name: String,
@@ -19,24 +20,23 @@ pub struct ToolEntry {
     pub routing: ToolRouting,
 }
 
-/// Discover all tools: built-in first, then Atlas MCP nodes.
-pub async fn load_tools(sdk: &mut RobonixClient) -> anyhow::Result<Vec<ToolEntry>> {
+pub async fn load_tools(atlas: &mut AtlasClient) -> anyhow::Result<Vec<ToolEntry>> {
     let mut out: Vec<ToolEntry> = builtin_tools();
-    match load_mcp_tools(sdk).await {
+    match load_mcp_tools(atlas).await {
         Ok(mcp) => {
             if mcp.is_empty() {
                 log::debug!(
-                    "no MCP tools from Atlas (nodes up? try ROBONIX_MCP_NAMESPACE_PREFIX=\"\" to match all namespaces)"
+                    "no MCP tools from atlas (caps up? all MCP interfaces declared?)"
                 );
             }
             out.extend(mcp);
         }
-        Err(e) => log::warn!("Atlas MCP tool discovery failed: {e:#}"),
+        Err(e) => log::warn!("atlas MCP tool discovery failed: {e:#}"),
     }
     Ok(out)
 }
 
-// ── Builtin tools ─────────────────────────────────────────────────────────────
+// ── Builtin tools ─────────────────────────────────────────────────────────
 
 pub fn builtin_tools() -> Vec<ToolEntry> {
     vec![
@@ -117,58 +117,50 @@ fn tool(name: &str, desc: &str, schema: Value, kind: RoutingKind, endpoint: &str
     }
 }
 
-// ── Atlas-discovered MCP tools ────────────────────────────────────────────────
+// ── Atlas-discovered MCP tools ────────────────────────────────────────────
 
-async fn load_mcp_tools(sdk: &mut RobonixClient) -> anyhow::Result<Vec<ToolEntry>> {
-    // Empty prefix = match all registered nodes (QueryNodes treats empty namespace as wildcard).
-    // Default empty so `robonix/srv/...` MCP providers are included alongside `robonix/prm/...`.
-    let ns = std::env::var("ROBONIX_MCP_NAMESPACE_PREFIX").unwrap_or_default();
-    let nodes = sdk.query_nodes(&ns, "", "mcp").await?;
+/// Query atlas for caps offering ANY MCP interface, then unpack each
+/// `(contract_id, endpoint, McpParams)` triple into one `ToolEntry`.
+///
+/// Tool naming policy: contract_id leaf (last `/` segment) is the tool name.
+/// Description + input_schema_json come from the cap's typed `McpParams`
+/// stored at declare time — no opaque metadata_json round-trip.
+async fn load_mcp_tools(atlas: &mut AtlasClient) -> anyhow::Result<Vec<ToolEntry>> {
+    let records = atlas
+        .query_capabilities("", "", atlas_pb::Transport::Mcp)
+        .await?;
     let mut out = Vec::new();
 
-    for n in nodes {
-        for iface in &n.interfaces {
-            if !iface.supported_transports.contains(&"mcp".to_string()) {
+    for rec in records {
+        for ep in rec.endpoints {
+            if ep.transport != atlas_pb::Transport::Mcp as i32 {
                 continue;
             }
-            let meta: Value = match serde_json::from_str(&iface.metadata_json) {
-                Ok(v) => v,
-                Err(e) => {
-                    log::warn!(
-                        "skip MCP iface on node {}: metadata_json not JSON ({e}) snippet={:?}",
-                        n.node_id,
-                        iface.metadata_json.chars().take(120).collect::<String>()
-                    );
-                    continue;
-                }
-            };
-            let endpoint = meta
-                .get("endpoint")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let endpoint = ep.endpoint.replace("localhost", "127.0.0.1");
             if endpoint.is_empty() {
                 continue;
             }
-            // Same IPv4-only listen + localhost→::1 issue as gRPC clients.
-            let endpoint = endpoint.replace("localhost", "127.0.0.1");
-            // One interface = one tool (one capability). Tool name is
-            // metadata.tool_name if present, else falls back to iface.name.
-            let name = meta
-                .get("tool_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or(iface.name.as_str())
-                .to_string();
-            let desc = meta
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let schema = meta
-                .get("input_schema")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({"type":"object","properties":{}}));
-            out.push(tool(&name, &desc, schema, RoutingKind::Mcp, &endpoint));
+            let (description, input_schema_json) = match ep.params.and_then(|p| p.kind) {
+                Some(atlas_pb::transport_params::Kind::Mcp(m)) => {
+                    (m.description, m.input_schema_json)
+                }
+                _ => (String::new(), String::new()),
+            };
+            // Tool name = leaf of contract_id (e.g. "robonix/system/memory/search" → "search").
+            // Memory's MCP server registers tools by their full leaf name though
+            // (`search_memory`, `save_memory`, `compact_memory`); fall back to
+            // metadata-tool-name on legacy callers if/when needed.
+            let name = match ep.contract_id.rsplit_once('/') {
+                Some((_, leaf)) => leaf.to_string(),
+                None => ep.contract_id.clone(),
+            };
+            let schema: Value = if input_schema_json.is_empty() {
+                serde_json::json!({"type":"object","properties":{}})
+            } else {
+                serde_json::from_str(&input_schema_json)
+                    .unwrap_or_else(|_| serde_json::json!({"type":"object","properties":{}}))
+            };
+            out.push(tool(&name, &description, schema, RoutingKind::Mcp, &endpoint));
         }
     }
     Ok(out)

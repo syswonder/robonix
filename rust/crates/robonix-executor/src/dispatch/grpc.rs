@@ -6,7 +6,7 @@
 // Executor should resolve the concrete gRPC endpoint via Atlas QueryNodes and
 // call the generated proto service.
 
-use crate::pilot::TaskCallResult;
+use crate::pb::pilot::TaskCallResult;
 
 pub async fn execute(
     call_id: &str,

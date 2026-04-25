@@ -12,5 +12,3 @@ srv = "tts/srv/Synthesize"
 [mode]
 type = "rpc"
 
-[semantics]
-stateless = true

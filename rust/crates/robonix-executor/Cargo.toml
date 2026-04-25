@@ -16,11 +16,18 @@ tonic.workspace = true
 prost.workspace = true
 tonic-prost.workspace = true
 anyhow.workspace = true
+clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 log.workspace = true
 env_logger.workspace = true
 uuid.workspace = true
-robonix-sdk.workspace = true
-robonix-interfaces.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+robonix-atlas = { path = "../robonix-atlas" }
+
+[build-dependencies]
+robonix-codegen.workspace = true
+tonic-build.workspace = true
+tonic-prost-build.workspace = true
+protoc-bin-vendored.workspace = true
