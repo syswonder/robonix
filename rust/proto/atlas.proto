@@ -50,7 +50,7 @@ enum Transport {
 // One capability interface — a single contract_id offered by a capability
 // instance. The full description for ALL interfaces of this instance lives
 // in the package's single CAPABILITY.md (path on RegisterCapabilityRequest);
-// this message carries only the per-interface identity + planner flags.
+// this message carries only the per-interface identity.
 message CapabilityInterface {
   // Local leaf name. Convention: leaf of `contract_id` (snake_case).
   // e.g. "move", "odom", "rgb".
@@ -59,14 +59,10 @@ message CapabilityInterface {
   // contract id that exists in the system contract catalog (see
   // rust/contracts/).
   string contract_id = 2;
-  // Planner / agent hints (typed flags). Add new fields here when a flag
-  // becomes load-bearing for routing or prompt construction.
-  bool disable_model_invocation = 3;  // hide from VLM tool list
-  bool free_call = 4;                  // does NOT consume an env step
-  // Package-author extension hatch for flags Atlas doesn't need to
+  // Package-author extension hatch — flags Atlas doesn't need to
   // understand. MUST parse as a JSON object (or be empty); Atlas
   // validates at register time and passes through to consumers.
-  string extra_json = 5;
+  string extra_json = 3;
 }
 
 // Register a capability instance. Instance lives until either Unregister
@@ -154,18 +150,15 @@ message WebsocketParams {
   string subprotocol = 1;      // optional Sec-WebSocket-Protocol value
 }
 
-// One MCP tool declared at this interface's MCP server.
-message McpToolDecl {
-  string name = 1;
-  string description = 2;
+// MCP — one DeclareInterface registers exactly ONE MCP tool (= one
+// contract_id). The tool name is `CapabilityInterface.name`; only the
+// MCP-protocol-required extras live here.
+message McpParams {
+  // One-line description shown to the LLM in MCP's `tools/list` reply.
+  string description = 1;
   // JSON Schema describing the tool's input. MUST parse as a JSON
   // object (or be empty for "no args"); MCP protocol fixes this format.
-  string input_schema_json = 3;
-}
-message McpParams {
-  // Tools served at this MCP endpoint. One DeclareInterface call may
-  // bundle several tools that share the same endpoint URL.
-  repeated McpToolDecl tools = 1;
+  string input_schema_json = 2;
 }
 
 // Discriminated transport params. The `kind` set MUST match the

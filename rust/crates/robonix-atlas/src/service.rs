@@ -34,8 +34,6 @@ const MINT_ATTEMPTS: usize = 16;
 struct CapabilityInterfaceRec {
     name: String,
     contract_id: String,
-    disable_model_invocation: bool,
-    free_call: bool,
     extra_json: String,
 }
 
@@ -44,8 +42,6 @@ impl From<pb::CapabilityInterface> for CapabilityInterfaceRec {
         Self {
             name: c.name,
             contract_id: c.contract_id,
-            disable_model_invocation: c.disable_model_invocation,
-            free_call: c.free_call,
             extra_json: c.extra_json,
         }
     }
@@ -56,21 +52,12 @@ impl From<&CapabilityInterfaceRec> for pb::CapabilityInterface {
         Self {
             name: c.name.clone(),
             contract_id: c.contract_id.clone(),
-            disable_model_invocation: c.disable_model_invocation,
-            free_call: c.free_call,
             extra_json: c.extra_json.clone(),
         }
     }
 }
 
 // ── Transport-specific params (typed mirror of proto oneof) ────────────────
-
-#[derive(Debug, Clone, Serialize)]
-struct McpToolRec {
-    name: String,
-    description: String,
-    input_schema_json: String,
-}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "transport", rename_all = "snake_case")]
@@ -93,7 +80,8 @@ enum TransportParamsRec {
         subprotocol: String,
     },
     Mcp {
-        tools: Vec<McpToolRec>,
+        description: String,
+        input_schema_json: String,
     },
 }
 
@@ -141,15 +129,12 @@ impl From<&TransportParamsRec> for pb::TransportParams {
             TransportParamsRec::Websocket { subprotocol } => Kind::Websocket(pb::WebsocketParams {
                 subprotocol: subprotocol.clone(),
             }),
-            TransportParamsRec::Mcp { tools } => Kind::Mcp(pb::McpParams {
-                tools: tools
-                    .iter()
-                    .map(|t| pb::McpToolDecl {
-                        name: t.name.clone(),
-                        description: t.description.clone(),
-                        input_schema_json: t.input_schema_json.clone(),
-                    })
-                    .collect(),
+            TransportParamsRec::Mcp {
+                description,
+                input_schema_json,
+            } => Kind::Mcp(pb::McpParams {
+                description: description.clone(),
+                input_schema_json: input_schema_json.clone(),
             }),
         };
         Self { kind: Some(kind) }
@@ -287,39 +272,23 @@ fn parse_params(
             subprotocol: w.subprotocol,
         },
         Kind::Mcp(m) => {
-            // Validate each tool's input_schema_json parses as a JSON object.
-            for t in &m.tools {
-                if t.name.trim().is_empty() {
+            // Validate input_schema_json parses as a JSON object.
+            if !m.input_schema_json.is_empty() {
+                let v: serde_json::Value = serde_json::from_str(&m.input_schema_json)
+                    .map_err(|e| {
+                        Status::invalid_argument(format!(
+                            "mcp input_schema_json invalid: {e}"
+                        ))
+                    })?;
+                if !v.is_object() {
                     return Err(Status::invalid_argument(
-                        "mcp tool: name must not be empty",
+                        "mcp input_schema_json must be a JSON object",
                     ));
-                }
-                if !t.input_schema_json.is_empty() {
-                    let v: serde_json::Value = serde_json::from_str(&t.input_schema_json)
-                        .map_err(|e| {
-                            Status::invalid_argument(format!(
-                                "mcp tool '{}' input_schema_json invalid: {e}",
-                                t.name
-                            ))
-                        })?;
-                    if !v.is_object() {
-                        return Err(Status::invalid_argument(format!(
-                            "mcp tool '{}' input_schema_json must be a JSON object",
-                            t.name
-                        )));
-                    }
                 }
             }
             TransportParamsRec::Mcp {
-                tools: m
-                    .tools
-                    .into_iter()
-                    .map(|t| McpToolRec {
-                        name: t.name,
-                        description: t.description,
-                        input_schema_json: t.input_schema_json,
-                    })
-                    .collect(),
+                description: m.description,
+                input_schema_json: m.input_schema_json,
             }
         }
     };
