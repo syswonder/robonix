@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// Build command: run the package's build.script
+// Build command: run the package's build command
 
 use anyhow::{Context, Result};
 use robonix_cli::manifest;
@@ -16,48 +16,41 @@ pub fn build_stamp_path(package_root: &Path) -> PathBuf {
     package_root.join(RBNX_BUILT_STAMP)
 }
 
-fn run_build_script(package_root: &Path, script_rel: &str, clean: bool) -> Result<()> {
-    let script_path = package_root.join(script_rel);
+fn build_local(package_root: &Path, manifest: &manifest::Manifest, clean: bool) -> Result<()> {
+    let _summary = manifest.validate_and_summarize()?;
+    let build_cmd = manifest.build.trim();
+
+    if build_cmd.is_empty() {
+        anyhow::bail!(
+            "Package '{}' has no build command",
+            manifest.package.name
+        );
+    }
+
+    output::action(
+        "Building",
+        &format!("{} via `{}`", manifest.package.name, build_cmd),
+    );
+
+    // Run the build command via `bash -c` so it supports any form:
+    //   bash scripts/build.sh, make -j$(nproc), cargo build, ./my_binary, etc.
     let mut cmd = Command::new("bash");
-    cmd.arg(&script_path);
+    cmd.args(["-c", build_cmd]);
     cmd.current_dir(package_root);
     cmd.env("RBNX_PACKAGE_ROOT", package_root.as_os_str());
     if clean {
         cmd.env("RBNX_BUILD_CLEAN", "1");
     }
     let status = cmd.status().with_context(|| {
-        format!(
-            "Failed to run build script {} in {}",
-            script_path.display(),
-            package_root.display()
-        )
+        format!("Failed to run build command '{}' in {}", build_cmd, package_root.display())
     })?;
     if !status.success() {
         anyhow::bail!(
-            "Build script {} failed with exit code {:?}",
-            script_path.display(),
-            status.code()
+            "Build command '{}' failed with exit code {:?}",
+            build_cmd, status.code()
         );
     }
-    Ok(())
-}
 
-fn build_local(package_root: &Path, manifest: &manifest::Manifest, clean: bool) -> Result<()> {
-    let _summary = manifest.validate_and_summarize()?;
-    let script_rel = manifest.build.script.trim();
-    let script_path = package_root.join(script_rel);
-    if !script_path.is_file() {
-        anyhow::bail!(
-            "build.script not found: {} (manifest.build.script = {:?})",
-            script_path.display(),
-            script_rel
-        );
-    }
-    output::action(
-        "Building",
-        &format!("{} via {}", manifest.package.name, script_rel),
-    );
-    run_build_script(package_root, script_rel, clean)?;
     fs::create_dir_all(package_root.join(RBNX_BUILD_DIR))?;
     fs::write(build_stamp_path(package_root), "").with_context(|| {
         format!(

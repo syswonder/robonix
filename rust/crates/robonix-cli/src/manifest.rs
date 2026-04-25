@@ -37,25 +37,23 @@ pub struct Manifest {
     pub interfaces: Option<Interfaces>,
     #[serde(rename = "launchProfiles")]
     pub launch_profiles: Option<HashMap<String, LaunchProfile>>,
-    /// How this package is built: `rbnx build` runs `bash <script>` from the package root.
-    #[serde(default)]
-    pub build: BuildConfig,
+    /// Build command string. Supports any shell command, e.g.:
+    ///   - `bash scripts/build.sh`
+    ///   - `make -j$(nproc)`
+    ///   - `cargo build --release`
+    ///   - `./build.sh`
+    pub build: String,
     /// Capabilities exported by this package (like EXPORT_SYMBOL in Linux kernel modules).
     #[serde(default)]
     pub capabilities: Vec<Capability>,
     /// Package-level dependencies (other packages this package depends on).
     #[serde(default, alias = "depend")]
     pub depends: Vec<DependEntry>,
-    /// Top-level start shortcut (alternative to per-node start commands).
-    #[serde(default)]
-    pub start: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct BuildConfig {
-    /// Path relative to package root (e.g. `scripts/build.sh`).
-    #[serde(default)]
-    pub script: String,
+    /// Start command string. Supports any shell command, e.g.:
+    ///   - `bash run.sh`
+    ///   - `python -m my_service`
+    ///   - `./my_binary --port 8080`
+    pub start: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -181,16 +179,15 @@ impl Manifest {
         }
 
         validate_node_specs(self)?;
-        build_config_present(self)?;
+
+        if self.build.trim().is_empty() {
+            anyhow::bail!("'build' is required in package_manifest.yaml");
+        }
+        if self.start.trim().is_empty() {
+            anyhow::bail!("'start' is required in package_manifest.yaml");
+        }
 
         let interfaces = self.interfaces.clone().unwrap_or_default();
-        if self.nodes.is_empty()
-            && interfaces.provides.is_empty()
-            && interfaces.consumes.is_empty()
-            && self.capabilities.is_empty()
-        {
-            anyhow::bail!("Manifest must declare at least one node, interface, or capability");
-        }
 
         Ok(PackageSummary {
             name: self.package.name.clone(),
@@ -209,15 +206,6 @@ fn validate_node_specs(manifest: &Manifest) -> Result<()> {
         if n.start.trim().is_empty() {
             anyhow::bail!("Node '{}': missing or empty `start`", n.id);
         }
-    }
-    Ok(())
-}
-
-fn build_config_present(manifest: &Manifest) -> Result<()> {
-    if manifest.build.script.trim().is_empty() {
-        anyhow::bail!(
-            "manifest.build.script is required (path to a build script under the package)"
-        );
     }
     Ok(())
 }

@@ -18,17 +18,6 @@ pub async fn execute(path: PathBuf) -> Result<()> {
         &format!("package at {}", package_root.display()),
     );
     let detected = manifest::detect_and_load(&package_root)?;
-    let script_rel = detected.manifest.build.script.trim();
-    if !script_rel.is_empty() {
-        let p = package_root.join(script_rel);
-        if !p.is_file() {
-            anyhow::bail!(
-                "manifest.build.script not found: {} (declared as {:?})",
-                p.display(),
-                script_rel
-            );
-        }
-    }
     let summary = detected.manifest.validate_and_summarize()?;
 
     output::check(&format!("Manifest: {}", detected.path.display()));
