@@ -1,0 +1,18 @@
+# TTS streaming synthesis.
+# Client sends one SynthesizeStreamRequest; server streams back SynthesizeAudioChunk.
+# ROS: `lib/tts/srv/SynthesizeStream.srv`. Stream element type in TOML only.
+[contract]
+id      = "robonix/system/speech/tts_stream"
+version = "1"
+kind    = "service"
+
+[io.srv]
+srv             = "tts/srv/SynthesizeStream"
+stream_response = "tts/msg/SynthesizeAudioChunk"
+
+[mode]
+type = "rpc_server_stream"
+
+[semantics]
+stateless = true
+realtime  = true

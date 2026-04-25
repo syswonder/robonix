@@ -1,0 +1,19 @@
+# ASR streaming recognition.
+# Client streams AudioChunk; server streams RecognizeStreamEvent.
+# ROS: `lib/asr/srv/RecognizeStream.srv`. Stream element types in TOML only.
+[contract]
+id      = "robonix/system/speech/asr_stream"
+version = "1"
+kind    = "service"
+
+[io.srv]
+srv             = "asr/srv/RecognizeStream"
+stream_request  = "asr/msg/AsrAudioChunk"
+stream_response = "asr/msg/RecognizeStreamEvent"
+
+[mode]
+type = "rpc_bidirectional_stream"
+
+[semantics]
+stateless = true
+realtime  = true

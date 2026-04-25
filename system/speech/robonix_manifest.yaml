@@ -1,0 +1,30 @@
+# Robonix Speech Service — ASR (Whisper) + TTS (Edge TTS) + Dialog Manager.
+# Data plane: gRPC servicers for speech/asr, speech/tts, speech/asr_stream,
+# speech/tts_stream, speech/dialog contracts.
+#
+# DEPRECATED file name: this is the old per-package manifest (`robonix_manifest.yaml`).
+# rbnx-cli still supports it for backward compat (warns at run time).
+# New packages should use `package_manifest.yaml` (see system/memory/ for the
+# new schema). speech_service will migrate when its inner code does.
+manifestVersion: 1
+
+build:
+  script: scripts/build.sh
+
+package:
+  id: com.robonix.example.speech_service
+  name: speech_service
+  version: 0.1.0
+  vendor: robonix
+  description: Voice interaction service (ASR + TTS + Dialog) registered under robonix/srv/speech
+  license: MulanPSL-2.0
+
+nodes:
+  - id: com.robonix.services.speech
+    type: python
+    start: |
+      # Activate the per-package uv venv built by scripts/build.sh.
+      export PYTHONPATH="$(pwd)/rbnx-build/codegen/proto_gen:${PYTHONPATH:-}"
+      mkdir -p rbnx-build/data
+      exec rbnx-build/venv/bin/python -m speech_service.service \
+           > rbnx-build/data/speech.log 2>&1

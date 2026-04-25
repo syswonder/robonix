@@ -1,0 +1,6 @@
+# All generated artefacts (uv venv, codegen output, runtime data) under rbnx-build/.
+rbnx-build/
+proto_gen/
+robonix_mcp_types/
+*.log
+__pycache__/
