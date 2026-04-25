@@ -1,5 +1,5 @@
 syntax = "proto3";
-package robonix.runtime;
+package robonix.atlas;
 
 // Structured skill metadata (name + description + path to SKILL.md)
 message SkillInfo {
@@ -165,12 +165,12 @@ message QueryAllSkillsResponse {
 }
 
 // Runtime inspection
-message InspectRuntimeRequest {}
-message InspectRuntimeResponse {
+message InspectAtlasRequest {}
+message InspectAtlasResponse {
   string json = 1;
 }
 
-service RobonixRuntime {
+service Atlas {
   rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
   rpc UnregisterNode(UnregisterNodeRequest) returns (UnregisterNodeResponse);
   rpc NodeHeartbeat(NodeHeartbeatRequest) returns (NodeHeartbeatResponse);
@@ -180,5 +180,5 @@ service RobonixRuntime {
   rpc ReleaseChannel(ReleaseChannelRequest) returns (ReleaseChannelResponse);
   rpc QuerySkillMd(QuerySkillMdRequest) returns (QuerySkillMdResponse);
   rpc QueryAllSkills(QueryAllSkillsRequest) returns (QueryAllSkillsResponse);
-  rpc InspectRuntime(InspectRuntimeRequest) returns (InspectRuntimeResponse);
+  rpc InspectAtlas(InspectAtlasRequest) returns (InspectAtlasResponse);
 }

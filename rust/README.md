@@ -24,7 +24,7 @@ rust/
 ├── crates/                  # Rust packages (atlas, sdk, pilot, executor, liaison, CLI, robonix-codegen, buffer)
 ├── contracts/               # Contract TOML → stable contract_id + shape; input to robonix-codegen --contracts
 ├── examples/                # E2E demo: packages/, scripts/, run.sh
-├── proto/                   # Control plane: robonix_runtime.proto, …
+├── proto/                   # Control plane: atlas.proto, …
 ├── crates/robonix-interfaces/
 │   ├── lib/                 # ROS IDL (.msg/.srv) — canonical payload definitions
 │   └── robonix_proto/       # robonix-codegen-generated `.proto` only (from `lib/` + `contracts/`)

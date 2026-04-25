@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 
 use log::info;
-use robonix_atlas::meta_runtime::{MetaRuntimeRegistry, serve_meta_runtime};
+use robonix_atlas::service::{AtlasRegistry, serve_atlas};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -20,11 +20,11 @@ async fn main() {
         .unwrap_or_else(|_| "0.0.0.0:50051".parse().expect("valid default gRPC address"));
     let grpc_advertised_endpoint =
         std::env::var("ROBONIX_META_GRPC_ENDPOINT").unwrap_or_else(|_| grpc_addr.clone());
-    let registry = Arc::new(MetaRuntimeRegistry::default());
+    let registry = Arc::new(AtlasRegistry::default());
 
     info!("meta runtime gRPC on {}", grpc_addr);
 
-    if let Err(e) = serve_meta_runtime(registry, grpc_listen_addr, grpc_advertised_endpoint).await {
+    if let Err(e) = serve_atlas(registry, grpc_listen_addr, grpc_advertised_endpoint).await {
         eprintln!("robonix-atlas error: {e:?}");
         std::process::exit(1);
     }

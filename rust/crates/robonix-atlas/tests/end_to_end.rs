@@ -1,6 +1,6 @@
 //! End-to-end system tests against a real Atlas process.
 //!
-//! Each test spawns Atlas (`MetaRuntimeService`) on an ephemeral port, then
+//! Each test spawns Atlas (`AtlasService`) on an ephemeral port, then
 //! drives it through the public SDK (`robonix-sdk`) — exactly the path other
 //! crates use. This catches regressions in:
 //!
@@ -12,7 +12,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::time::Duration;
 
-use robonix_atlas::meta_runtime::{MetaRuntimeRegistry, serve_meta_runtime};
+use robonix_atlas::service::{AtlasRegistry, serve_atlas};
 use robonix_sdk::{QueryNodesOpts, RobonixClient};
 
 /// Pick a free TCP port (race-y but fine for tests).
@@ -28,8 +28,8 @@ async fn spawn_atlas() -> String {
     let endpoint = format!("127.0.0.1:{port}");
     let endpoint_clone = endpoint.clone();
     tokio::spawn(async move {
-        let registry = Arc::new(MetaRuntimeRegistry::default());
-        let _ = serve_meta_runtime(registry, addr, endpoint_clone).await;
+        let registry = Arc::new(AtlasRegistry::default());
+        let _ = serve_atlas(registry, addr, endpoint_clone).await;
     });
     // give the server a moment to bind
     tokio::time::sleep(Duration::from_millis(200)).await;

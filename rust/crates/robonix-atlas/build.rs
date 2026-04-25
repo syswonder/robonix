@@ -10,7 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "cargo:rerun-if-changed={}",
-        proto_dir.join("robonix_runtime.proto").display()
+        proto_dir.join("atlas.proto").display()
     );
 
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(true)
         .build_client(true)
         .compile_protos(
-            &[proto_dir.join("robonix_runtime.proto")],
+            &[proto_dir.join("atlas.proto")],
             std::slice::from_ref(&proto_dir),
         )?;
 
