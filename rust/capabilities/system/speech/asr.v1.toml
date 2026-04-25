@@ -2,7 +2,7 @@
 # Caller sends raw audio; returns transcript.
 # ROS: `lib/asr/srv/Recognize.srv`.
 [contract]
-id      = "robonix/system/speech/asr"
+id      = "robonix/srv/speech/asr"
 version = "1"
 kind    = "service"
 
