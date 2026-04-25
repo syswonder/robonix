@@ -531,11 +531,74 @@ fn resolve_endpoint(
     )))
 }
 
+// ── Heartbeat eviction ──────────────────────────────────────────────────────
+//
+// `RegisterCapability` keeps a cap in the registry until either Unregister
+// is called OR its heartbeat lapses past the eviction threshold. The proto
+// promises this; without an eviction task the registry would only shrink
+// on explicit Unregister, leaking entries from crashed/disconnected caps.
+//
+// Tunables (env, read once at serve_atlas startup):
+//   ROBONIX_ATLAS_HEARTBEAT_TIMEOUT_MS  default 60000 (0 disables eviction)
+//   ROBONIX_ATLAS_EVICTION_INTERVAL_MS  default 10000 (sweep cadence)
+//
+// Eviction is non-monotonic: a cap that comes back and re-registers under
+// the same id reuses the slot. Stale entries between crash and re-register
+// remain visible to consumers — they should still tolerate `connect_to_*`
+// failures and retry.
+
+const DEFAULT_HEARTBEAT_TIMEOUT_MS: u64 = 60_000;
+const DEFAULT_EVICTION_INTERVAL_MS: u64 = 10_000;
+
+fn read_env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Run the eviction loop until cancelled. `timeout_ms == 0` skips the loop
+/// entirely — useful for tests and dev where caps may legitimately go silent.
+async fn eviction_loop(registry: Arc<AtlasRegistry>, timeout_ms: u64, interval_ms: u64) {
+    if timeout_ms == 0 {
+        info!("[atlas] heartbeat eviction disabled (timeout=0)");
+        return;
+    }
+    info!(
+        "[atlas] heartbeat eviction: timeout={}ms interval={}ms",
+        timeout_ms, interval_ms
+    );
+    let interval = std::time::Duration::from_millis(interval_ms);
+    loop {
+        tokio::time::sleep(interval).await;
+        let now = AtlasRegistry::now_ms();
+        let mut state = registry.inner.write().await;
+        let evicted: Vec<String> = state
+            .caps
+            .iter()
+            .filter(|(_, rec)| now.saturating_sub(rec.last_heartbeat_ms) > timeout_ms)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &evicted {
+            state.caps.remove(id);
+            warn!(
+                "[atlas] evicted '{id}' (heartbeat lapsed > {}ms)",
+                timeout_ms
+            );
+        }
+    }
+}
+
 // ── Server entrypoint ───────────────────────────────────────────────────────
 
 /// Start the Atlas gRPC server on `listen` using the given registry.
-/// Blocks until the server stops or returns an error.
+/// Spawns a background heartbeat-eviction task; both tasks block until
+/// the gRPC server stops or returns an error.
 pub async fn serve_atlas(registry: Arc<AtlasRegistry>, listen: SocketAddr) -> Result<()> {
+    let timeout_ms = read_env_u64("ROBONIX_ATLAS_HEARTBEAT_TIMEOUT_MS", DEFAULT_HEARTBEAT_TIMEOUT_MS);
+    let interval_ms = read_env_u64("ROBONIX_ATLAS_EVICTION_INTERVAL_MS", DEFAULT_EVICTION_INTERVAL_MS);
+    let _eviction_task = tokio::spawn(eviction_loop(Arc::clone(&registry), timeout_ms, interval_ms));
+
     let svc = AtlasService::new(registry);
     info!("[atlas] gRPC listening on {listen}");
     tonic::transport::Server::builder()
