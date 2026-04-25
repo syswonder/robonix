@@ -191,7 +191,7 @@ pub async fn run_turn(
             .collect();
 
         let mut messages = vec![Message::system(&system_prompt)];
-        messages.extend(history::sanitize_for_vlm(&history));
+        messages.extend(history::sanitize_for_vlm(history));
 
         let (content, raw_tool_calls) = {
             let mut stream = vlm

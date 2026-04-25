@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=build.rs");
 
     // 1. ROS IDL (.msg/.srv) + contract TOML → .proto in OUT_DIR.
-    let mut resolver = msg_parser::MsgResolver::new(&[idl_root.clone()])?;
+    let mut resolver = msg_parser::MsgResolver::new(std::slice::from_ref(&idl_root))?;
     let mut idl_skips = 0usize;
     resolver.resolve_all_in_index(false, &mut idl_skips)?;
     resolver.resolve_all_srv(false, &mut idl_skips)?;
@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile_protos(&proto_files, &[proto_out.clone()])?;
+        .compile_protos(&proto_files, std::slice::from_ref(&proto_out))?;
 
     Ok(())
 }
