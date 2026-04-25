@@ -117,30 +117,39 @@ message HeartbeatResponse {}
 // `TransportParams.kind` MUST hold the variant matching the request's
 // `transport` field; Atlas rejects mismatches with InvalidArgument.
 
+// gRPC — `endpoint` already carries host:port. These three identify
+// WHICH protobuf service+method that endpoint speaks; consumers need
+// them to pick the right tonic-generated client. Request/response
+// message types are derivable from method via proto_file, so they are
+// NOT duplicated here.
 message GrpcParams {
-  // protobuf service identity that this endpoint serves (used by
-  // consumers to pick the right tonic-generated client + RPC method).
   string proto_file = 1;       // e.g. "robonix-interfaces/.../robonix_contracts.proto"
   string service_name = 2;     // e.g. "robonix.contracts.SrvCognitionReason"
   string method = 3;           // e.g. "/robonix.contracts.SrvCognitionReason/Stream"
-  string request_type = 4;     // fully-qualified proto message name
-  string response_type = 5;
 }
 
+// ROS2 — `endpoint` already carries the topic OR service name. The
+// message type is implied by `contract_id` (contract catalog maps each
+// contract 1:1 to its ROS msg type), so it is NOT duplicated here.
+// `is_service` toggles topic-style pub/sub vs service-style req/resp,
+// which use different ROS 2 APIs on the consumer side.
 message Ros2Params {
-  string msg_type = 1;         // e.g. "sensor_msgs/msg/PointCloud2"
-  // QoS profile name; "" => ROS 2 default. Common: "sensor_data",
-  // "reliable", "system_default", "parameters".
+  bool is_service = 1;
+  // Optional QoS override; "" => ROS 2 default profile. Common values:
+  // "sensor_data", "reliable", "system_default", "parameters".
   string qos_profile = 2;
 }
 
+// TODO
 message SharedMemoryParams {
   uint64 size_bytes = 1;
   uint32 ringbuf_capacity = 2;
 }
 
+// TODO
 message RawTcpParams {}
 
+// TODO
 message WebsocketParams {
   string subprotocol = 1;      // optional Sec-WebSocket-Protocol value
 }
@@ -166,9 +175,9 @@ message TransportParams {
   oneof kind {
     GrpcParams grpc = 1;
     Ros2Params ros2 = 2;
-    SharedMemoryParams shared_memory = 3;
-    RawTcpParams raw_tcp = 4;
-    WebsocketParams websocket = 5;
+    SharedMemoryParams shared_memory = 3; // TODO
+    RawTcpParams raw_tcp = 4; // TODO
+    WebsocketParams websocket = 5; // TODO
     McpParams mcp = 6;
   }
 }
