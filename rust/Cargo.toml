@@ -10,6 +10,9 @@ edition = "2024"
 license = "MulanPSL-2.0"
 
 [workspace.dependencies]
+# Robonix-internal crates
+robonix-proto = { path = "crates/robonix-proto" }
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
@@ -60,6 +63,3 @@ crossterm = "0.29.0"
 
 # Internal crates
 robonix-codegen = { path = "crates/robonix-codegen" }
-robonix-sdk = { path = "crates/robonix-sdk" }
-robonix-buffer = { path = "crates/robonix-buffer" }
-robonix-interfaces = { path = "crates/robonix-interfaces" }
