@@ -15,7 +15,7 @@ robonix-pilot is the VLM-driven reasoning service: a ReAct-style loop that recei
 
 1. Connects to robonix-atlas via robonix-sdk; registers as `com.robonix.runtime.pilot`.
 2. Connects to robonix-executor for `ListTools` and `Execute` RPCs.
-3. On each `HandleIntent` RPC: fetches tool list, builds system prompt (SOUL.md + SKILL.md index), then runs the ReAct loop until the VLM produces no tool calls.
+3. On each `HandleIntent` RPC: fetches tool list, builds system prompt (SOUL.md + each registered package's CAPABILITY.md), then runs the ReAct loop until the VLM produces no tool calls.
 
 ```bash
 cargo run -p robonix-pilot
