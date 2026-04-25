@@ -3,7 +3,7 @@
 //
 // One running unit = one *capability instance*, registered under a
 // reverse-DNS `capability_id` and a `namespace` (e.g. "robonix/primitive/base").
-// An instance announces a list of `CapabilityInfo` (semantic) and then
+// An instance announces a list of `CapabilityInterface` (semantic) and then
 // binds wire endpoints via DeclareInterface (one (contract_id, transport)
 // pair per call). See rust/proto/atlas.proto for the wire schema.
 
@@ -13,7 +13,6 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, Ordering};
 use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -25,7 +24,7 @@ pub mod pb {
 // ── Data model ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
-struct CapabilityInfoRec {
+struct CapabilityInterfaceRec {
     name: String,
     contract_id: String,
     description: String,
@@ -33,8 +32,8 @@ struct CapabilityInfoRec {
     metadata_json: String,
 }
 
-impl From<pb::CapabilityInfo> for CapabilityInfoRec {
-    fn from(c: pb::CapabilityInfo) -> Self {
+impl From<pb::CapabilityInterface> for CapabilityInterfaceRec {
+    fn from(c: pb::CapabilityInterface) -> Self {
         Self {
             name: c.name,
             contract_id: c.contract_id,
@@ -45,8 +44,8 @@ impl From<pb::CapabilityInfo> for CapabilityInfoRec {
     }
 }
 
-impl From<&CapabilityInfoRec> for pb::CapabilityInfo {
-    fn from(c: &CapabilityInfoRec) -> Self {
+impl From<&CapabilityInterfaceRec> for pb::CapabilityInterface {
+    fn from(c: &CapabilityInterfaceRec) -> Self {
         Self {
             name: c.name.clone(),
             contract_id: c.contract_id.clone(),
@@ -81,7 +80,7 @@ struct CapRecord {
     capability_id: String,
     namespace: String,
     last_heartbeat_ms: u64,
-    capabilities: Vec<CapabilityInfoRec>,
+    interfaces: Vec<CapabilityInterfaceRec>,
     endpoints: Vec<EndpointRec>,
 }
 
@@ -92,21 +91,9 @@ pub(crate) struct State {
 
 // ── Registry ────────────────────────────────────────────────────────────────
 
-const PORT_RANGE_START: u16 = 50100;
-
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct AtlasRegistry {
     pub(crate) inner: RwLock<State>,
-    next_port: AtomicU16,
-}
-
-impl Default for AtlasRegistry {
-    fn default() -> Self {
-        Self {
-            inner: RwLock::new(State::default()),
-            next_port: AtomicU16::new(PORT_RANGE_START),
-        }
-    }
 }
 
 impl AtlasRegistry {
@@ -119,10 +106,6 @@ impl AtlasRegistry {
 
     fn assign_id() -> String {
         format!("com.robonix.ephemeral.{}", Uuid::new_v4())
-    }
-
-    fn next_port(&self) -> u16 {
-        self.next_port.fetch_add(1, Ordering::Relaxed)
     }
 
     fn require(field: &str, value: &str) -> Result<String, Status> {
@@ -139,20 +122,11 @@ impl AtlasRegistry {
 #[derive(Debug)]
 pub struct AtlasService {
     registry: Arc<AtlasRegistry>,
-    /// Host (without port) used to build grpc data-plane endpoints, e.g.
-    /// "127.0.0.1" or "atlas.lab.local". Atlas appends `:port` per
-    /// DeclareInterface.
-    data_plane_host: String,
 }
 
 impl AtlasService {
-    pub fn new(registry: Arc<AtlasRegistry>, data_plane_host: String) -> Self {
-        // Strip a trailing :port if caller passed a host:port string.
-        let data_plane_host = data_plane_host
-            .rsplit_once(':')
-            .map(|(h, _)| h.to_string())
-            .unwrap_or(data_plane_host);
-        Self { registry, data_plane_host }
+    pub fn new(registry: Arc<AtlasRegistry>) -> Self {
+        Self { registry }
     }
 }
 
@@ -169,12 +143,12 @@ impl pb::atlas_server::Atlas for AtlasService {
             r.capability_id.trim().to_string()
         };
         let namespace = AtlasRegistry::require("namespace", &r.namespace)?;
-        let capabilities: Vec<CapabilityInfoRec> =
-            r.capabilities.into_iter().map(Into::into).collect();
+        let interfaces: Vec<CapabilityInterfaceRec> =
+            r.interfaces.into_iter().map(Into::into).collect();
 
         // Each declared contract_id should sit under the namespace prefix —
         // warn but don't reject (loose policy keeps iteration cheap).
-        for c in &capabilities {
+        for c in &interfaces {
             if !c.contract_id.is_empty() && !c.contract_id.starts_with(&namespace) {
                 warn!(
                     "[atlas] {} contract_id '{}' is not under namespace '{}'",
@@ -190,7 +164,7 @@ impl pb::atlas_server::Atlas for AtlasService {
                 capability_id: cap_id.clone(),
                 namespace,
                 last_heartbeat_ms: AtlasRegistry::now_ms(),
-                capabilities,
+                interfaces,
                 endpoints: Vec::new(),
             },
         );
@@ -240,20 +214,21 @@ impl pb::atlas_server::Atlas for AtlasService {
         let cap_id = AtlasRegistry::require("capability_id", &r.capability_id)?;
         let contract_id = AtlasRegistry::require("contract_id", &r.contract_id)?;
         let transport = AtlasRegistry::require("transport", &r.transport)?;
-
-        let endpoint = self.resolve_endpoint(&transport, r.listen_port, &contract_id, &r.metadata_json);
+        let proposed = r.endpoint.trim().to_string();
 
         let mut state = self.registry.inner.write().await;
+
+        // Cap must exist and have announced this contract.
         let rec = state
             .caps
-            .get_mut(&cap_id)
+            .get(&cap_id)
             .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
-
-        if !rec.capabilities.iter().any(|c| c.contract_id == contract_id) {
+        if !rec.interfaces.iter().any(|c| c.contract_id == contract_id) {
             return Err(Status::failed_precondition(format!(
                 "contract_id '{contract_id}' was not announced in RegisterCapability for {cap_id}"
             )));
         }
+        // Same cap can't declare the same (contract, transport) twice.
         if rec
             .endpoints
             .iter()
@@ -264,6 +239,10 @@ impl pb::atlas_server::Atlas for AtlasService {
             )));
         }
 
+        // Resolve a globally-unique endpoint per the rules in atlas.proto.
+        let endpoint = resolve_endpoint(&state, &transport, &proposed, &contract_id)?;
+
+        let rec = state.caps.get_mut(&cap_id).expect("checked above");
         rec.endpoints.push(EndpointRec {
             contract_id: contract_id.clone(),
             transport: transport.clone(),
@@ -271,7 +250,10 @@ impl pb::atlas_server::Atlas for AtlasService {
             metadata_json: r.metadata_json,
         });
         info!("[atlas] declare {cap_id} {contract_id} via {transport} -> {endpoint}");
-        Ok(Response::new(pb::DeclareInterfaceResponse { ok: true, endpoint }))
+        Ok(Response::new(pb::DeclareInterfaceResponse {
+            ok: true,
+            endpoint,
+        }))
     }
 
     async fn query_capabilities(
@@ -289,7 +271,7 @@ impl pb::atlas_server::Atlas for AtlasService {
                 continue;
             }
             if !f_contract.is_empty()
-                && !rec.capabilities.iter().any(|c| c.contract_id == f_contract)
+                && !rec.interfaces.iter().any(|c| c.contract_id == f_contract)
             {
                 continue;
             }
@@ -306,7 +288,7 @@ impl pb::atlas_server::Atlas for AtlasService {
                 capability_id: rec.capability_id.clone(),
                 namespace: rec.namespace.clone(),
                 last_heartbeat_ms: rec.last_heartbeat_ms,
-                capabilities: rec.capabilities.iter().map(Into::into).collect(),
+                interfaces: rec.interfaces.iter().map(Into::into).collect(),
                 endpoints,
             });
         }
@@ -325,7 +307,7 @@ impl pb::atlas_server::Atlas for AtlasService {
             .get(&cap_id)
             .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
         let mut md = String::new();
-        for c in &rec.capabilities {
+        for c in &rec.interfaces {
             if c.capability_md_path.trim().is_empty() {
                 continue;
             }
@@ -352,42 +334,79 @@ impl pb::atlas_server::Atlas for AtlasService {
     }
 }
 
-impl AtlasService {
-    fn resolve_endpoint(
-        &self,
-        transport: &str,
-        listen_port: u32,
-        contract_id: &str,
-        metadata_json: &str,
-    ) -> String {
-        let meta = serde_json::from_str::<serde_json::Value>(metadata_json).ok();
-        let meta_str = |key: &str| -> Option<String> {
-            meta.as_ref()
-                .and_then(|v| v.get(key))
-                .and_then(|x| x.as_str())
-                .map(|s| s.to_string())
-        };
+/// Pick a globally-unique endpoint for (transport, proposed) per the rules
+/// documented on `DeclareInterfaceRequest` in atlas.proto.
+///
+///   - empty proposal + mintable transport       → mint "/rbnx/<dotted>/<uuid8>"
+///   - empty proposal + non-mintable transport   → InvalidArgument
+///   - non-empty + no collision                  → use as-is
+///   - non-empty + collision + mintable          → "<proposed>~<uuid8>"
+///   - non-empty + collision + non-mintable      → AlreadyExists
+fn resolve_endpoint(
+    state: &State,
+    transport: &str,
+    proposed: &str,
+    contract_id: &str,
+) -> Result<String, Status> {
+    // Atlas can mint names freely for transports whose address space does NOT
+    // require an OS resource bind at registration time.
+    let atlas_can_mint = matches!(transport, "ros2" | "shared_memory");
 
-        match transport {
-            "grpc" => {
-                let port = if listen_port > 0 {
-                    listen_port as u16
-                } else {
-                    self.registry.next_port()
-                };
-                format!("{}:{}", self.data_plane_host, port)
+    let collides = |s: &str| -> bool {
+        state.caps.values().any(|rec| {
+            rec.endpoints
+                .iter()
+                .any(|e| e.transport == transport && e.endpoint == s)
+        })
+    };
+    let short_uuid = || -> String {
+        Uuid::new_v4()
+            .simple()
+            .to_string()
+            .chars()
+            .take(8)
+            .collect()
+    };
+    let dotted = contract_id.replace('/', ".");
+
+    if proposed.is_empty() {
+        if !atlas_can_mint {
+            return Err(Status::invalid_argument(format!(
+                "transport '{transport}' requires caller-supplied endpoint; \
+                 Atlas cannot allocate (e.g. caller must bind a port and pass host:port)"
+            )));
+        }
+        for _ in 0..16 {
+            let candidate = format!("/rbnx/{dotted}/{}", short_uuid());
+            if !collides(&candidate) {
+                return Ok(candidate);
             }
-            "ros2" => meta_str("ros2_topic")
-                .or_else(|| meta_str("ros2_service"))
-                .unwrap_or_else(|| {
-                    format!("/rbnx/{}", contract_id.replace('/', "."))
-                }),
-            "shared_memory" => meta_str("shm_key")
-                .unwrap_or_else(|| format!("/rbnx_shm_{}", Uuid::new_v4().simple())),
-            // Custom transport: caller must supply `endpoint` in metadata_json.
-            _ => meta_str("endpoint").unwrap_or_default(),
+        }
+        return Err(Status::internal(
+            "could not mint unique endpoint after 16 attempts",
+        ));
+    }
+
+    if !collides(proposed) {
+        return Ok(proposed.to_string());
+    }
+
+    if !atlas_can_mint {
+        return Err(Status::already_exists(format!(
+            "endpoint '{proposed}' already registered on transport '{transport}'; \
+             pick a new address (rebind a different port / use a different name) and retry"
+        )));
+    }
+
+    for _ in 0..16 {
+        let candidate = format!("{proposed}~{}", short_uuid());
+        if !collides(&candidate) {
+            return Ok(candidate);
         }
     }
+    Err(Status::internal(
+        "could not mint unique endpoint after 16 attempts",
+    ))
 }
 
 // ── Server entrypoint ───────────────────────────────────────────────────────
@@ -395,9 +414,8 @@ impl AtlasService {
 pub async fn serve_atlas(
     registry: Arc<AtlasRegistry>,
     listen: SocketAddr,
-    data_plane_host: String,
 ) -> Result<()> {
-    let svc = AtlasService::new(registry, data_plane_host);
+    let svc = AtlasService::new(registry);
     info!("[atlas] gRPC listening on {listen}");
     tonic::transport::Server::builder()
         .add_service(pb::atlas_server::AtlasServer::new(svc))

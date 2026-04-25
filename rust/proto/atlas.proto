@@ -26,10 +26,10 @@ package robonix.atlas;
 // ───────────────────────────────────────────────────────────────────────────
 
 
-// One capability interface advertised by a CAPABILITY.md file in a package.
-// Authored by the package; agent reads `capability_md_path` on demand for
-// the full markdown.
-message CapabilityInfo {
+// One capability interface — a single contract_id offered by a capability
+// instance, described by the package's CAPABILITY.md frontmatter.
+// `capability_md_path` is read on demand for the full markdown.
+message CapabilityInterface {
   string name = 1;            // local leaf name (snake_case), e.g. "move", "odom", "rgb"
   string contract_id = 2;     // stable full path, e.g. "robonix/primitive/base/move"
   string description = 3;     // one-liner for VLM prompt
@@ -49,7 +49,7 @@ message RegisterCapabilityRequest {
   // The set of capability interfaces this instance promises to offer.
   // Each entry's `contract_id` must be addressable via DeclareInterface
   // before consumers can connect.
-  repeated CapabilityInfo capabilities = 3;
+  repeated CapabilityInterface interfaces = 3;
 }
 message RegisterCapabilityResponse {
   string capability_id = 1;
@@ -74,26 +74,42 @@ message HeartbeatResponse {
 // Bind ONE transport to ONE capability interface of an already-registered
 // capability. To expose the same `contract_id` over multiple transports,
 // call DeclareInterface once per transport.
+//
+// Caller supplies a *preferred* endpoint string in `endpoint`. Atlas
+// guarantees the returned endpoint is globally unique on (transport,
+// endpoint). Conflict-resolution rules (Atlas-side):
+//   - empty proposal + atlas-mintable transport (ros2 / shared_memory)
+//                       -> Atlas mints "/rbnx/<contract>/<uuid8>"
+//   - empty proposal + non-mintable transport (grpc, raw_tcp, ...)
+//                       -> InvalidArgument (Atlas cannot allocate; caller
+//                          must bind first and supply host:port)
+//   - non-empty + no collision        -> stored verbatim
+//   - non-empty + collision + mintable transport
+//                       -> Atlas rewrites by appending "~<uuid8>"
+//   - non-empty + collision + non-mintable transport
+//                       -> AlreadyExists (caller must rebind / pick a new
+//                          name and retry)
+//
+// CALLER MUST USE the returned endpoint (it may differ from what was
+// proposed when Atlas rewrote to disambiguate).
 message DeclareInterfaceRequest {
   string capability_id = 1;
-  string contract_id = 2;     // must match a CapabilityInfo.contract_id from registration
+  string contract_id = 2;     // must match an interface contract_id announced in RegisterCapability
   string transport = 3;       // exactly one: "ros2" | "grpc" | "shared_memory" | ...
-  // If non-zero, data plane endpoint is ROBONIX_DATA_PLANE_HOST:listen_port
-  // (caller has already bound). If zero, Atlas allocates a port from its
-  // pool. Transports without a port semantic ignore this field.
-  uint32 listen_port = 4;
-  // Transport-specific parameters as JSON. Examples:
-  //   ros2: {"ros2_topic": "/scanner/cloud", "ros2_msg_type": "..."}
-  //   shared_memory: {"shm_key": "...", "size_bytes": 1048576}
-  //   grpc: {} (endpoint is host:port returned in response)
+  // Preferred address string. Format is transport-specific:
+  //   grpc:          "127.0.0.1:50105"   (caller must bind first)
+  //   ros2:          "/scanner/cloud"     (or "" — Atlas mints)
+  //   shared_memory: "/rbnx_shm_lidar"    (or "" — Atlas mints)
+  //   websocket:     "ws://host:port/path"
+  string endpoint = 4;
+  // Optional structured params per transport (e.g. ros2_msg_type, shm size).
+  // Atlas passes this through to consumers untouched.
   string metadata_json = 5;
 }
 message DeclareInterfaceResponse {
   bool ok = 1;
-  // Resolved data-plane endpoint string (semantics depend on transport):
-  //   ros2 → topic/service name
-  //   grpc → host:port
-  //   shared_memory → shm key path
+  // Authoritative endpoint actually registered. Equal to request.endpoint
+  // when there was no collision; otherwise an Atlas-rewritten unique form.
   string endpoint = 2;
 }
 
@@ -110,13 +126,13 @@ message CapabilityRecord {
   string capability_id = 1;
   string namespace = 2;
   uint64 last_heartbeat_ms = 3;
-  repeated CapabilityInfo capabilities = 4;
+  repeated CapabilityInterface interfaces = 4;
   repeated InterfaceEndpoint endpoints = 5;
 }
 
 // Discover capability instances. Filters AND together when set.
 message QueryCapabilitiesRequest {
-  // Exact match on a CapabilityInfo.contract_id offered by the instance.
+  // Exact match on a CapabilityInterface contract_id offered by the instance.
   string contract_id = 1;
   // Prefix match on the instance's `namespace`.
   string namespace = 2;
