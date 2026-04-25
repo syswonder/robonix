@@ -38,8 +38,25 @@ message SkillInfo {
 //
 // Owner: atlas / skill-library team
 
-// Node registration
+// ───────────────────────────────────────────────────────────────────────────
+// MIGRATION NOTE — Node → Cap
+//
+// The "node" terminology dates back to Robonix's earliest design and is
+// being phased out: a registered entity is a *capability instance* (Cap),
+// not a "node". The wire format here still uses Node* names so existing
+// clients keep working, but every Node* message and RPC is marked
+// `deprecated = true` per the dev-packaging spec. New consumers should
+// expect Cap* messages and Cap* RPCs to land in a follow-up commit
+// (kept structurally compatible — same fields, just renamed).
+//
+// Removal will not happen before the May release; partners depending on
+// the current shape can keep using Node* through that release with only a
+// deprecation warning, and migrate to Cap* afterward.
+// ───────────────────────────────────────────────────────────────────────────
+
+// Node registration. DEPRECATED — use Cap-* equivalents (forthcoming).
 message RegisterNodeRequest {
+  option deprecated = true;
   string node_id = 1;        // reverse-DNS, e.g. com.vendor.service (empty => server assigns com.robonix.ephemeral.<uuid>)
   string namespace = 2;      // e.g. "robonix/prm/camera"
   string kind = 3;           // "primitive", "service", "skill"
@@ -49,22 +66,29 @@ message RegisterNodeRequest {
   repeated SkillInfo skills = 7;  // structured skills from package skills/ directory
 }
 message RegisterNodeResponse {
+  option deprecated = true;
   string node_id = 1;
 }
 
-// Remove a node from the registry (channels involving this node are dropped)
+// Remove a node from the registry (channels involving this node are dropped).
+// DEPRECATED — use Cap-* equivalents (forthcoming).
 message UnregisterNodeRequest {
+  option deprecated = true;
   string node_id = 1;
 }
 message UnregisterNodeResponse {
+  option deprecated = true;
   bool ok = 1;
 }
 
-// Refresh node liveness (orchestrator may evict stale nodes later)
+// Refresh node liveness (orchestrator may evict stale nodes later).
+// DEPRECATED — use Cap-* equivalents (forthcoming).
 message NodeHeartbeatRequest {
+  option deprecated = true;
   string node_id = 1;
 }
 message NodeHeartbeatResponse {
+  option deprecated = true;
   bool ok = 1;
   uint64 server_time_ms = 2;
 }
@@ -89,7 +113,9 @@ message DeclareInterfaceResponse {
 }
 
 // Discover nodes by namespace/name/transport, or by contract_id.
+// DEPRECATED — use Cap-* equivalents (forthcoming).
 message QueryNodesRequest {
+  option deprecated = true;
   string namespace = 1;      // filter by namespace (prefix match); ignored if contract_id is set
   string name = 2;           // filter by interface name (optional); ignored if contract_id is set
   string transport = 3;      // filter by supported transport (optional)
@@ -99,7 +125,9 @@ message QueryNodesRequest {
   // When non-empty, namespace and name filters are ignored; transport still applies if set.
   string contract_id = 6;
 }
+// DEPRECATED — use CapInfo (forthcoming).
 message NodeInfo {
+  option deprecated = true;
   string node_id = 1;
   string namespace = 2;
   string kind = 3;
@@ -118,6 +146,7 @@ message InterfaceInfo {
   string contract_id = 4;
 }
 message QueryNodesResponse {
+  option deprecated = true;
   repeated NodeInfo nodes = 1;
 }
 
@@ -171,11 +200,21 @@ message InspectAtlasResponse {
 }
 
 service Atlas {
-  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
-  rpc UnregisterNode(UnregisterNodeRequest) returns (UnregisterNodeResponse);
-  rpc NodeHeartbeat(NodeHeartbeatRequest) returns (NodeHeartbeatResponse);
+  // Node-* RPCs DEPRECATED — Cap-* equivalents will replace them; see
+  // migration note above. Both will coexist through the May release.
+  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse) {
+    option deprecated = true;
+  }
+  rpc UnregisterNode(UnregisterNodeRequest) returns (UnregisterNodeResponse) {
+    option deprecated = true;
+  }
+  rpc NodeHeartbeat(NodeHeartbeatRequest) returns (NodeHeartbeatResponse) {
+    option deprecated = true;
+  }
   rpc DeclareInterface(DeclareInterfaceRequest) returns (DeclareInterfaceResponse);
-  rpc QueryNodes(QueryNodesRequest) returns (QueryNodesResponse);
+  rpc QueryNodes(QueryNodesRequest) returns (QueryNodesResponse) {
+    option deprecated = true;
+  }
   rpc NegotiateChannel(NegotiateChannelRequest) returns (NegotiateChannelResponse);
   rpc ReleaseChannel(ReleaseChannelRequest) returns (ReleaseChannelResponse);
   rpc QuerySkillMd(QuerySkillMdRequest) returns (QuerySkillMdResponse);
