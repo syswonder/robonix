@@ -1,0 +1,6 @@
+# Query current dialog session status.
+---
+string session_id
+---
+robonix_msg/msg/DialogState state
+string error

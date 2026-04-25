@@ -42,8 +42,10 @@ export START_PILOT="${START_PILOT:-1}"
 export START_EXECUTOR="${START_EXECUTOR:-1}"
 export START_LIAISON="${START_LIAISON:-1}"
 export START_MEMSEARCH="${START_MEMSEARCH:-1}"
+export START_SPEECH_SERVICE="${START_SPEECH_SERVICE:-1}"
+export START_AUDIO_DRIVER="${START_AUDIO_DRIVER:-1}"
 
-export PYTHONPATH="${PACKAGES}/vlm_service:${PACKAGES}/memsearch_service${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="${PACKAGES}/vlm_service:${PACKAGES}/memsearch_service:${PACKAGES}/speech_service:${PACKAGES}/audio_driver${PYTHONPATH:+:$PYTHONPATH}"
 
 rbnx() {
   (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "$@")
@@ -103,6 +105,8 @@ pkill -9 -f 'robonix-liaison' 2>/dev/null || true
 pkill -9 -f 'vlm_service.service' 2>/dev/null || true
 pkill -9 -f 'memsearch_service.service' 2>/dev/null || true
 pkill -9 -f 'tiago_bridge.node' 2>/dev/null || true
+pkill -9 -f 'speech_service.service' 2>/dev/null || true
+pkill -9 -f 'audio_driver.node' 2>/dev/null || true
 sleep 0.3
 
 SIM_STACK_DIR="${PACKAGES}/tiago_sim_stack"
@@ -153,6 +157,20 @@ if [ "$START_MEMSEARCH" = "1" ]; then
   echo "[example] rbnx start memsearch_service (background)..."
   rbnx_validate_build "$PACKAGES/memsearch_service"
   (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "${RBNX_START_OPTS[@]}" -p "$PACKAGES/memsearch_service" -n com.robonix.services.memsearch) &
+  sleep 1
+fi
+
+if [ "$START_AUDIO_DRIVER" = "1" ]; then
+  echo "[example] rbnx start audio_driver (background)..."
+  rbnx_validate_build "$PACKAGES/audio_driver"
+  (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "${RBNX_START_OPTS[@]}" -p "$PACKAGES/audio_driver" -n com.robonix.prm.audio) &
+  sleep 1
+fi
+
+if [ "$START_SPEECH_SERVICE" = "1" ]; then
+  echo "[example] rbnx start speech_service (background)..."
+  rbnx_validate_build "$PACKAGES/speech_service"
+  (cd "$RUST_ROOT" && cargo run -p robonix-cli -- "${RBNX_START_OPTS[@]}" -p "$PACKAGES/speech_service" -n com.robonix.services.speech) &
   sleep 1
 fi
 

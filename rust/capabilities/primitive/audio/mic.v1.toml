@@ -1,0 +1,16 @@
+# Microphone audio stream (raw PCM or encoded).
+# ROS: `robonix_msg/msg/AudioChunk` published on a topic.
+[contract]
+id      = "robonix/primitive/audio/mic"
+version = "1"
+kind    = "primitive"
+
+[io.msg]
+msg = "robonix_msg/msg/AudioChunk"
+
+[mode]
+type = "topic_out"
+
+[semantics]
+realtime = true
+payload  = "audio"
