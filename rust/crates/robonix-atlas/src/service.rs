@@ -34,7 +34,9 @@ const MINT_ATTEMPTS: usize = 16;
 struct CapabilityInterfaceRec {
     name: String,
     contract_id: String,
-    metadata_json: String,
+    disable_model_invocation: bool,
+    free_call: bool,
+    extra_json: String,
 }
 
 impl From<pb::CapabilityInterface> for CapabilityInterfaceRec {
@@ -42,7 +44,9 @@ impl From<pb::CapabilityInterface> for CapabilityInterfaceRec {
         Self {
             name: c.name,
             contract_id: c.contract_id,
-            metadata_json: c.metadata_json,
+            disable_model_invocation: c.disable_model_invocation,
+            free_call: c.free_call,
+            extra_json: c.extra_json,
         }
     }
 }
@@ -52,8 +56,109 @@ impl From<&CapabilityInterfaceRec> for pb::CapabilityInterface {
         Self {
             name: c.name.clone(),
             contract_id: c.contract_id.clone(),
-            metadata_json: c.metadata_json.clone(),
+            disable_model_invocation: c.disable_model_invocation,
+            free_call: c.free_call,
+            extra_json: c.extra_json.clone(),
         }
+    }
+}
+
+// ── Transport-specific params (typed mirror of proto oneof) ────────────────
+
+#[derive(Debug, Clone, Serialize)]
+struct McpToolRec {
+    name: String,
+    description: String,
+    input_schema_json: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "transport", rename_all = "snake_case")]
+enum TransportParamsRec {
+    Grpc {
+        proto_file: String,
+        service_name: String,
+        method: String,
+        request_type: String,
+        response_type: String,
+    },
+    Ros2 {
+        msg_type: String,
+        qos_profile: String,
+    },
+    SharedMemory {
+        size_bytes: u64,
+        ringbuf_capacity: u32,
+    },
+    RawTcp,
+    Websocket {
+        subprotocol: String,
+    },
+    Mcp {
+        tools: Vec<McpToolRec>,
+    },
+}
+
+impl TransportParamsRec {
+    fn transport(&self) -> Transport {
+        match self {
+            Self::Grpc { .. } => Transport::Grpc,
+            Self::Ros2 { .. } => Transport::Ros2,
+            Self::SharedMemory { .. } => Transport::SharedMemory,
+            Self::RawTcp => Transport::RawTcp,
+            Self::Websocket { .. } => Transport::Websocket,
+            Self::Mcp { .. } => Transport::Mcp,
+        }
+    }
+}
+
+impl From<&TransportParamsRec> for pb::TransportParams {
+    fn from(r: &TransportParamsRec) -> Self {
+        use pb::transport_params::Kind;
+        let kind = match r {
+            TransportParamsRec::Grpc {
+                proto_file,
+                service_name,
+                method,
+                request_type,
+                response_type,
+            } => Kind::Grpc(pb::GrpcParams {
+                proto_file: proto_file.clone(),
+                service_name: service_name.clone(),
+                method: method.clone(),
+                request_type: request_type.clone(),
+                response_type: response_type.clone(),
+            }),
+            TransportParamsRec::Ros2 {
+                msg_type,
+                qos_profile,
+            } => Kind::Ros2(pb::Ros2Params {
+                msg_type: msg_type.clone(),
+                qos_profile: qos_profile.clone(),
+            }),
+            TransportParamsRec::SharedMemory {
+                size_bytes,
+                ringbuf_capacity,
+            } => Kind::SharedMemory(pb::SharedMemoryParams {
+                size_bytes: *size_bytes,
+                ringbuf_capacity: *ringbuf_capacity,
+            }),
+            TransportParamsRec::RawTcp => Kind::RawTcp(pb::RawTcpParams {}),
+            TransportParamsRec::Websocket { subprotocol } => Kind::Websocket(pb::WebsocketParams {
+                subprotocol: subprotocol.clone(),
+            }),
+            TransportParamsRec::Mcp { tools } => Kind::Mcp(pb::McpParams {
+                tools: tools
+                    .iter()
+                    .map(|t| pb::McpToolDecl {
+                        name: t.name.clone(),
+                        description: t.description.clone(),
+                        input_schema_json: t.input_schema_json.clone(),
+                    })
+                    .collect(),
+            }),
+        };
+        Self { kind: Some(kind) }
     }
 }
 
@@ -63,7 +168,7 @@ struct EndpointRec {
     #[serde(serialize_with = "serialize_transport")]
     transport: Transport,
     endpoint: String,
-    metadata_json: String,
+    params: TransportParamsRec,
 }
 
 fn serialize_transport<S: serde::Serializer>(
@@ -79,7 +184,7 @@ impl From<&EndpointRec> for pb::InterfaceEndpoint {
             contract_id: e.contract_id.clone(),
             transport: e.transport as i32,
             endpoint: e.endpoint.clone(),
-            metadata_json: e.metadata_json.clone(),
+            params: Some((&e.params).into()),
         }
     }
 }
@@ -140,14 +245,100 @@ fn atlas_can_mint(transport: Transport) -> bool {
     matches!(transport, Transport::Ros2 | Transport::SharedMemory)
 }
 
-/// Validate `s` is empty or a parseable JSON value.
-fn validate_metadata_json(field: &str, s: &str) -> Result<(), Status> {
-    if s.trim().is_empty() {
+/// Validate `s` is empty or a parseable JSON object (not bare scalar /
+/// array — the proto fields are spec'd as objects).
+fn validate_extra_json(field: &str, s: &str) -> Result<(), Status> {
+    let s = s.trim();
+    if s.is_empty() {
         return Ok(());
     }
-    serde_json::from_str::<serde_json::Value>(s)
-        .map(|_| ())
-        .map_err(|e| Status::invalid_argument(format!("{field}: invalid JSON ({e})")))
+    let v: serde_json::Value = serde_json::from_str(s)
+        .map_err(|e| Status::invalid_argument(format!("{field}: invalid JSON ({e})")))?;
+    if !v.is_object() {
+        return Err(Status::invalid_argument(format!(
+            "{field}: must be a JSON object"
+        )));
+    }
+    Ok(())
+}
+
+/// Convert wire-form `pb::TransportParams` into the typed Rust enum and
+/// verify that its `oneof` variant matches the requested `transport`.
+fn parse_params(
+    transport: Transport,
+    params: Option<pb::TransportParams>,
+) -> Result<TransportParamsRec, Status> {
+    use pb::transport_params::Kind;
+    let kind = params.and_then(|p| p.kind).ok_or_else(|| {
+        Status::invalid_argument(
+            "params required: set TransportParams.kind to the variant matching `transport`",
+        )
+    })?;
+    let rec = match kind {
+        Kind::Grpc(g) => TransportParamsRec::Grpc {
+            proto_file: g.proto_file,
+            service_name: g.service_name,
+            method: g.method,
+            request_type: g.request_type,
+            response_type: g.response_type,
+        },
+        Kind::Ros2(r) => TransportParamsRec::Ros2 {
+            msg_type: r.msg_type,
+            qos_profile: r.qos_profile,
+        },
+        Kind::SharedMemory(s) => TransportParamsRec::SharedMemory {
+            size_bytes: s.size_bytes,
+            ringbuf_capacity: s.ringbuf_capacity,
+        },
+        Kind::RawTcp(_) => TransportParamsRec::RawTcp,
+        Kind::Websocket(w) => TransportParamsRec::Websocket {
+            subprotocol: w.subprotocol,
+        },
+        Kind::Mcp(m) => {
+            // Validate each tool's input_schema_json parses as a JSON object.
+            for t in &m.tools {
+                if t.name.trim().is_empty() {
+                    return Err(Status::invalid_argument(
+                        "mcp tool: name must not be empty",
+                    ));
+                }
+                if !t.input_schema_json.is_empty() {
+                    let v: serde_json::Value = serde_json::from_str(&t.input_schema_json)
+                        .map_err(|e| {
+                            Status::invalid_argument(format!(
+                                "mcp tool '{}' input_schema_json invalid: {e}",
+                                t.name
+                            ))
+                        })?;
+                    if !v.is_object() {
+                        return Err(Status::invalid_argument(format!(
+                            "mcp tool '{}' input_schema_json must be a JSON object",
+                            t.name
+                        )));
+                    }
+                }
+            }
+            TransportParamsRec::Mcp {
+                tools: m
+                    .tools
+                    .into_iter()
+                    .map(|t| McpToolRec {
+                        name: t.name,
+                        description: t.description,
+                        input_schema_json: t.input_schema_json,
+                    })
+                    .collect(),
+            }
+        }
+    };
+    if rec.transport() != transport {
+        return Err(Status::invalid_argument(format!(
+            "params: oneof variant {:?} does not match transport {:?}",
+            rec.transport(),
+            transport
+        )));
+    }
+    Ok(rec)
 }
 
 fn parse_transport(t: i32) -> Result<Transport, Status> {
@@ -203,7 +394,10 @@ impl pb::atlas_server::Atlas for AtlasService {
                     c.contract_id, namespace
                 )));
             }
-            validate_metadata_json("interface metadata_json", &c.metadata_json)?;
+            validate_extra_json(
+                &format!("interface '{}' extra_json", c.contract_id),
+                &c.extra_json,
+            )?;
         }
 
         let interfaces: Vec<CapabilityInterfaceRec> =
@@ -270,7 +464,7 @@ impl pb::atlas_server::Atlas for AtlasService {
         let cap_id = AtlasRegistry::require("capability_id", &r.capability_id)?.to_string();
         let contract_id = AtlasRegistry::require("contract_id", &r.contract_id)?.to_string();
         let transport = parse_transport(r.transport)?;
-        validate_metadata_json("metadata_json", &r.metadata_json)?;
+        let params = parse_params(transport, r.params)?;
         let proposed = r.endpoint.trim().to_string();
 
         let mut state = self.registry.inner.write().await;
@@ -307,7 +501,7 @@ impl pb::atlas_server::Atlas for AtlasService {
             contract_id: contract_id.clone(),
             transport,
             endpoint: endpoint.clone(),
-            metadata_json: r.metadata_json,
+            params,
         });
         info!(
             "[atlas] declare {cap_id} {contract_id} via {transport:?} -> {endpoint}"

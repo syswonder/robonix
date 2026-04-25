@@ -50,7 +50,7 @@ enum Transport {
 // One capability interface — a single contract_id offered by a capability
 // instance. The full description for ALL interfaces of this instance lives
 // in the package's single CAPABILITY.md (path on RegisterCapabilityRequest);
-// this message carries only the per-interface identity + metadata.
+// this message carries only the per-interface identity + planner flags.
 message CapabilityInterface {
   // Local leaf name. Convention: leaf of `contract_id` (snake_case).
   // e.g. "move", "odom", "rgb".
@@ -59,11 +59,14 @@ message CapabilityInterface {
   // contract id that exists in the system contract catalog (see
   // rust/contracts/).
   string contract_id = 2;
-  // Free-form structured metadata as a JSON object. Atlas validates
-  // that this parses as JSON (or is empty) at register time. Contents
-  // are passed through to consumers untouched.
-  // Common keys: "disable_model_invocation": bool, "free_call": bool.
-  string metadata_json = 3;
+  // Planner / agent hints (typed flags). Add new fields here when a flag
+  // becomes load-bearing for routing or prompt construction.
+  bool disable_model_invocation = 3;  // hide from VLM tool list
+  bool free_call = 4;                  // does NOT consume an env step
+  // Package-author extension hatch for flags Atlas doesn't need to
+  // understand. MUST parse as a JSON object (or be empty); Atlas
+  // validates at register time and passes through to consumers.
+  string extra_json = 5;
 }
 
 // Register a capability instance. Instance lives until either Unregister
@@ -109,6 +112,67 @@ message HeartbeatRequest {
 }
 message HeartbeatResponse {}
 
+// ── Transport-specific declare params ──────────────────────────────────────
+// One Params message per Transport enum variant. The wrapper
+// `TransportParams.kind` MUST hold the variant matching the request's
+// `transport` field; Atlas rejects mismatches with InvalidArgument.
+
+message GrpcParams {
+  // protobuf service identity that this endpoint serves (used by
+  // consumers to pick the right tonic-generated client + RPC method).
+  string proto_file = 1;       // e.g. "robonix-interfaces/.../robonix_contracts.proto"
+  string service_name = 2;     // e.g. "robonix.contracts.SrvCognitionReason"
+  string method = 3;           // e.g. "/robonix.contracts.SrvCognitionReason/Stream"
+  string request_type = 4;     // fully-qualified proto message name
+  string response_type = 5;
+}
+
+message Ros2Params {
+  string msg_type = 1;         // e.g. "sensor_msgs/msg/PointCloud2"
+  // QoS profile name; "" => ROS 2 default. Common: "sensor_data",
+  // "reliable", "system_default", "parameters".
+  string qos_profile = 2;
+}
+
+message SharedMemoryParams {
+  uint64 size_bytes = 1;
+  uint32 ringbuf_capacity = 2;
+}
+
+message RawTcpParams {}
+
+message WebsocketParams {
+  string subprotocol = 1;      // optional Sec-WebSocket-Protocol value
+}
+
+// One MCP tool declared at this interface's MCP server.
+message McpToolDecl {
+  string name = 1;
+  string description = 2;
+  // JSON Schema describing the tool's input. MUST parse as a JSON
+  // object (or be empty for "no args"); MCP protocol fixes this format.
+  string input_schema_json = 3;
+}
+message McpParams {
+  // Tools served at this MCP endpoint. One DeclareInterface call may
+  // bundle several tools that share the same endpoint URL.
+  repeated McpToolDecl tools = 1;
+}
+
+// Discriminated transport params. The `kind` set MUST match the
+// `Transport` value on the enclosing DeclareInterfaceRequest /
+// InterfaceEndpoint.
+message TransportParams {
+  oneof kind {
+    GrpcParams grpc = 1;
+    Ros2Params ros2 = 2;
+    SharedMemoryParams shared_memory = 3;
+    RawTcpParams raw_tcp = 4;
+    WebsocketParams websocket = 5;
+    McpParams mcp = 6;
+  }
+}
+
 // Bind ONE transport to ONE capability interface of an already-registered
 // capability. To expose the same `contract_id` over multiple transports,
 // call DeclareInterface once per transport.
@@ -118,9 +182,9 @@ message HeartbeatResponse {}
 // endpoint). Conflict-resolution rules (Atlas-side):
 //   - empty proposal + atlas-mintable transport (ros2 / shared_memory)
 //                       -> Atlas mints "/rbnx/<dotted-contract>/<uuid8>"
-//   - empty proposal + non-mintable transport (grpc, raw_tcp, websocket)
+//   - empty proposal + non-mintable transport (grpc, mcp, raw_tcp, websocket)
 //                       -> InvalidArgument (Atlas cannot allocate; caller
-//                          must bind first and supply host:port etc.)
+//                          must bind first and supply host:port / URL etc.)
 //   - non-empty + no collision        -> stored verbatim
 //   - non-empty + collision + mintable transport
 //                       -> Atlas rewrites by appending "~<uuid8>"
@@ -135,14 +199,16 @@ message DeclareInterfaceRequest {
   // Must match a contract_id announced in RegisterCapability.
   string contract_id = 2;
   Transport transport = 3;
-  // Preferred address string. Format is transport-specific (see the
-  // Transport enum comments). For mintable transports this MAY be empty
-  // to ask Atlas to mint a unique name.
+  // Preferred address string. Format is transport-specific:
+  //   grpc:          "127.0.0.1:50105"   (caller binds first)
+  //   ros2:          "/scanner/cloud"     ("" => Atlas mints)
+  //   shared_memory: "/rbnx_shm_lidar"    ("" => Atlas mints)
+  //   raw_tcp:       "host:port"
+  //   websocket:     "ws://host:port/path"
+  //   mcp:           "http://host:port/mcp"
   string endpoint = 4;
-  // Optional structured params per transport (e.g. ros2_msg_type, shm
-  // size). MUST parse as JSON; Atlas rejects malformed payloads at
-  // declare time. Passed through to consumers untouched.
-  string metadata_json = 5;
+  // Transport-specific params; the oneof variant MUST match `transport`.
+  TransportParams params = 5;
 }
 message DeclareInterfaceResponse {
   // Authoritative endpoint actually registered. Equal to request.endpoint
@@ -155,7 +221,7 @@ message InterfaceEndpoint {
   string contract_id = 1;
   Transport transport = 2;
   string endpoint = 3;
-  string metadata_json = 4;
+  TransportParams params = 4;
 }
 
 // Read view of a registered capability instance.
