@@ -79,11 +79,9 @@ enum TransportParamsRec {
         proto_file: String,
         service_name: String,
         method: String,
-        request_type: String,
-        response_type: String,
     },
     Ros2 {
-        msg_type: String,
+        is_service: bool,
         qos_profile: String,
     },
     SharedMemory {
@@ -120,20 +118,16 @@ impl From<&TransportParamsRec> for pb::TransportParams {
                 proto_file,
                 service_name,
                 method,
-                request_type,
-                response_type,
             } => Kind::Grpc(pb::GrpcParams {
                 proto_file: proto_file.clone(),
                 service_name: service_name.clone(),
                 method: method.clone(),
-                request_type: request_type.clone(),
-                response_type: response_type.clone(),
             }),
             TransportParamsRec::Ros2 {
-                msg_type,
+                is_service,
                 qos_profile,
             } => Kind::Ros2(pb::Ros2Params {
-                msg_type: msg_type.clone(),
+                is_service: *is_service,
                 qos_profile: qos_profile.clone(),
             }),
             TransportParamsRec::SharedMemory {
@@ -279,11 +273,9 @@ fn parse_params(
             proto_file: g.proto_file,
             service_name: g.service_name,
             method: g.method,
-            request_type: g.request_type,
-            response_type: g.response_type,
         },
         Kind::Ros2(r) => TransportParamsRec::Ros2 {
-            msg_type: r.msg_type,
+            is_service: r.is_service,
             qos_profile: r.qos_profile,
         },
         Kind::SharedMemory(s) => TransportParamsRec::SharedMemory {
