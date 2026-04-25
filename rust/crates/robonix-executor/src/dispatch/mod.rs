@@ -5,7 +5,7 @@ pub mod builtin;
 pub mod grpc;
 pub mod mcp;
 
-use crate::pilot::{TaskCall, TaskCallResult};
+use crate::pb::pilot::{TaskCall, TaskCallResult};
 use crate::routing_kind::RoutingKind;
 use crate::tools::ToolEntry;
 use std::collections::HashMap;

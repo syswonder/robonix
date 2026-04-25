@@ -12,5 +12,3 @@ srv = "asr/srv/Recognize"
 [mode]
 type = "rpc"
 
-[semantics]
-stateless = true

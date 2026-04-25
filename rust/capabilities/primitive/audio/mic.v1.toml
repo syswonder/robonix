@@ -11,6 +11,3 @@ msg = "robonix_msg/msg/AudioChunk"
 [mode]
 type = "topic_out"
 
-[semantics]
-realtime = true
-payload  = "audio"

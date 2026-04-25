@@ -13,6 +13,3 @@ stream_response = "tts/msg/SynthesizeAudioChunk"
 [mode]
 type = "rpc_server_stream"
 
-[semantics]
-stateless = true
-realtime  = true

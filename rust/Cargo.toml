@@ -1,7 +1,15 @@
 [workspace]
 members = ["crates/*"]
 # robonix-py is a Python-only library (no Cargo.toml) — exclude from the Rust workspace.
-exclude = ["crates/robonix-py"]
+# pilot/executor/cli/liaison still reference the deleted robonix-sdk; temporarily
+# excluded until the migration to atlas.proto stubs lands (see task #31).
+exclude = [
+    "crates/robonix-py",
+    "crates/robonix-cli",
+    
+    "crates/robonix-liaison",
+    "crates/robonix-interfaces",
+]
 resolver = "2"
 
 [workspace.package]

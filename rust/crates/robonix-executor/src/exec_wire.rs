@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Flat `TaskCallEvent` (`lib/executor/msg/TaskCallEvent.msg`).
 
-use crate::executor::{BatchComplete, TaskCallEvent, TaskCallStarted};
-use crate::pilot::TaskCallResult;
+use crate::pb::executor::{BatchComplete, TaskCallEvent, TaskCallStarted};
+use crate::pb::pilot::TaskCallResult;
 
 pub const EVT_STARTED: u32 = 0;
 pub const EVT_RESULT: u32 = 1;

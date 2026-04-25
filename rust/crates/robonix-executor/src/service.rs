@@ -1,33 +1,34 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// service.rs — gRPC contract services (SrvExecutor, SrvExecutorListTools)
+// gRPC contract handlers (SystemExecutor — Stream; SystemExecutorListTools — Call).
 
-use crate::contracts::{
-    srv_executor_list_tools_server::SrvExecutorListTools, srv_executor_server::SrvExecutor,
-};
 use crate::dispatch;
 use crate::exec_wire;
-use crate::executor::{ListToolsRequest, ListToolsResponse, TaskCallEvent, ToolSpec};
-use crate::pilot::TaskGraph;
+use crate::pb::contracts::{
+    system_executor_list_tools_server::SystemExecutorListTools,
+    system_executor_server::SystemExecutor,
+};
+use crate::pb::executor::{ListToolsRequest, ListToolsResponse, TaskCallEvent, ToolSpec};
+use crate::pb::pilot::TaskGraph;
 use crate::tools;
-use robonix_sdk::RobonixClient;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use robonix_atlas::client::AtlasClient;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
+/// `AtlasClient` is cheap to clone — each Stream RPC clones it so per-turn
+/// tool discovery runs without serialising on a single mutex.
 #[derive(Clone)]
 pub struct ExecutorServiceImpl {
-    sdk: Arc<Mutex<RobonixClient>>,
+    atlas: AtlasClient,
 }
 
 impl ExecutorServiceImpl {
-    pub fn new(sdk: Arc<Mutex<RobonixClient>>) -> Self {
-        Self { sdk }
+    pub fn new(atlas: AtlasClient) -> Self {
+        Self { atlas }
     }
 }
 
 #[tonic::async_trait]
-impl SrvExecutor for ExecutorServiceImpl {
+impl SystemExecutor for ExecutorServiceImpl {
     type StreamStream = ReceiverStream<Result<TaskCallEvent, Status>>;
 
     async fn stream(
@@ -36,17 +37,16 @@ impl SrvExecutor for ExecutorServiceImpl {
     ) -> Result<Response<Self::StreamStream>, Status> {
         let graph = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(64);
-        let sdk = Arc::clone(&self.sdk);
+        let mut atlas = self.atlas.clone();
 
         tokio::spawn(async move {
-            let routing_map = {
-                let mut sdk = sdk.lock().await;
-                match tools::load_tools(&mut sdk).await {
-                    Ok(list) => tools::routing_map(&list),
-                    Err(e) => {
-                        log::warn!("failed to load tools: {e:#}");
-                        Default::default()
-                    }
+            // Re-discover tools at the top of every Stream RPC so caps that
+            // registered after pilot's last list_tools call are visible.
+            let routing_map = match tools::load_tools(&mut atlas).await {
+                Ok(list) => tools::routing_map(&list),
+                Err(e) => {
+                    log::warn!("failed to load tools: {e:#}");
+                    Default::default()
                 }
             };
 
@@ -93,14 +93,14 @@ impl SrvExecutor for ExecutorServiceImpl {
 }
 
 #[tonic::async_trait]
-impl SrvExecutorListTools for ExecutorServiceImpl {
+impl SystemExecutorListTools for ExecutorServiceImpl {
     async fn call(
         &self,
         request: Request<ListToolsRequest>,
     ) -> Result<Response<ListToolsResponse>, Status> {
         let _refresh = request.into_inner().refresh;
-        let mut sdk = self.sdk.lock().await;
-        let tool_list = tools::load_tools(&mut sdk)
+        let mut atlas = self.atlas.clone();
+        let tool_list = tools::load_tools(&mut atlas)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 

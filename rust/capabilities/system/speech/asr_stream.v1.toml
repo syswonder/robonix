@@ -14,6 +14,3 @@ stream_response = "asr/msg/RecognizeStreamEvent"
 [mode]
 type = "rpc_bidirectional_stream"
 
-[semantics]
-stateless = true
-realtime  = true
