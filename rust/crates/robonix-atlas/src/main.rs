@@ -13,18 +13,18 @@ async fn main() {
 
     info!("robonix-atlas starting (control plane)");
 
+    // ROBONIX_ATLAS_LISTEN — what host:port Atlas binds its gRPC service on.
+    // Default 0.0.0.0:50051. Caps register here; consumers query here.
     let grpc_addr =
-        std::env::var("ROBONIX_META_GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:50051".to_string());
+        std::env::var("ROBONIX_ATLAS_LISTEN").unwrap_or_else(|_| "0.0.0.0:50051".to_string());
     let grpc_listen_addr: std::net::SocketAddr = grpc_addr
         .parse()
         .unwrap_or_else(|_| "0.0.0.0:50051".parse().expect("valid default gRPC address"));
-    let grpc_advertised_endpoint =
-        std::env::var("ROBONIX_META_GRPC_ENDPOINT").unwrap_or_else(|_| grpc_addr.clone());
     let registry = Arc::new(AtlasRegistry::default());
 
     info!("atlas gRPC on {}", grpc_addr);
 
-    if let Err(e) = serve_atlas(registry, grpc_listen_addr, grpc_advertised_endpoint).await {
+    if let Err(e) = serve_atlas(registry, grpc_listen_addr).await {
         eprintln!("robonix-atlas error: {e:?}");
         std::process::exit(1);
     }
