@@ -11,6 +11,7 @@ description = "Robonix Speech Service — ASR (Whisper / FunASR) + TTS (Edge TTS
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.0",
+    "torchaudio>=2.0",
     "transformers>=4.30",
     "funasr>=1.0",
     "edge-tts>=6.1",
