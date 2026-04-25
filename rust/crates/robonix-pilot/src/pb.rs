@@ -6,10 +6,22 @@
 // package, ordered so that prost `super::sibling` references resolve.
 //
 // All cross-call proto types pilot uses live under here:
-//   pb::contracts        — SystemPilot / SystemExecutor / SystemVlmChat / …
+//   pb::contracts        — SystemPilot / SystemExecutor / SystemExecutorListTools / …
 //   pb::pilot            — Task / TaskGraph / TaskCall / PilotEvent / …
 //   pb::executor         — TaskCallEvent / ListTools_Request / ToolSpec / …
-//   pb::vlm              — ChatStream_Request / ChatStreamEvent
 //   pb::robonix_msg      — ChatMessage / ChatPart / ToolCall / ToolSpec
-//   pb::std_msgs         — String, Empty, …
+//   pb::std_msgs         — String / Empty / …
+//
+// The codegen output triggers a lot of dead_code / unused warnings on
+// types pilot itself never references; silence them here so `cargo build`
+// stays readable.
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    clippy::all,
+    rustdoc::broken_intra_doc_links,
+    rustdoc::invalid_html_tags
+)]
+
 include!(concat!(env!("OUT_DIR"), "/contract_proto_modules.rs"));

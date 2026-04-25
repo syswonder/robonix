@@ -18,6 +18,8 @@
 //      through atlas at every Stream RPC, not configured statically.
 
 mod config;
+mod history;
+mod memory;
 mod pb;
 mod planner;
 mod service;
@@ -31,9 +33,7 @@ use pb::contracts::system_pilot_server::SystemPilotServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
 use service::PilotServiceImpl;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -91,7 +91,6 @@ async fn main() -> Result<()> {
         cfg.vlm.upstream, cfg.vlm.model
     );
 
-    let atlas = Arc::new(Mutex::new(atlas));
     let svc = PilotServiceImpl::new(atlas, vlm);
 
     info!("SystemPilot gRPC on {listen_addr}");

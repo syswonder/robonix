@@ -37,6 +37,9 @@ pub struct VlmConfig {
     pub upstream: String,
     pub api_key: String,
     pub model: String,
+    /// Wire dialect. Currently only "openai" is implemented; checked at
+    /// `resolve` time, kept on the struct for diagnostics / future routing.
+    #[allow(dead_code)]
     pub api_format: String,
 }
 

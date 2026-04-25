@@ -161,7 +161,10 @@ impl Message {
 pub enum VlmStreamItem {
     TextDelta(String),
     ToolCall(ToolCall),
-    Finish(String),
+    /// Stream complete. Finish reason ("stop" / "tool_calls" / "error") is
+    /// not surfaced to consumers yet — add a field here when the planner or
+    /// downstream PilotEvent grows a use for it.
+    Finish,
 }
 
 /// Direct HTTP client for an OpenAI-compatible chat-completions endpoint.
@@ -188,7 +191,7 @@ impl VlmClient {
     ///   - `TextDelta` for every assistant content chunk
     ///   - `ToolCall` once per accumulated function call (after the upstream
     ///     finishes streaming all argument deltas)
-    ///   - one final `Finish(reason)` (e.g. "stop", "tool_calls", "error")
+    ///   - one final `Finish`
     pub async fn chat_stream(
         &self,
         messages: &[Message],
@@ -285,7 +288,8 @@ impl VlmClient {
                     return;
                 }
             }
-            let _ = tx.send(Ok(VlmStreamItem::Finish(finish))).await;
+            let _ = finish; // surface to PilotEvent later if needed
+            let _ = tx.send(Ok(VlmStreamItem::Finish)).await;
         });
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))

@@ -94,7 +94,10 @@ pub fn pack(session_id: &str, body: PilotStreamBody) -> PilotEvent {
 type Histories = Arc<Mutex<HashMap<String, Arc<Mutex<Vec<Message>>>>>>;
 
 pub struct PilotServiceImpl {
-    atlas: Arc<Mutex<AtlasClient>>,
+    /// `AtlasClient` is cheap to clone (its inner channel is just a handle);
+    /// each Stream RPC clones it to discover executor concurrently without
+    /// serialising on a single mutex.
+    atlas: AtlasClient,
     vlm: VlmClient,
     histories: Histories,
     /// Per-session cancellation senders. `abort_turn` Task signals this
@@ -103,7 +106,7 @@ pub struct PilotServiceImpl {
 }
 
 impl PilotServiceImpl {
-    pub fn new(atlas: Arc<Mutex<AtlasClient>>, vlm: VlmClient) -> Self {
+    pub fn new(atlas: AtlasClient, vlm: VlmClient) -> Self {
         Self {
             atlas,
             vlm,
@@ -160,7 +163,7 @@ impl SystemPilot for PilotServiceImpl {
 
         let history_arc = self.get_or_create_history(&task.session_id).await;
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(64);
-        let atlas = Arc::clone(&self.atlas);
+        let atlas = self.atlas.clone();
         let vlm = self.vlm.clone();
         let session_id = task.session_id.clone();
         let cancels = Arc::clone(&self.cancels);
@@ -180,7 +183,7 @@ impl SystemPilot for PilotServiceImpl {
                 )))
                 .await;
 
-            let mut executor = match build_executor_conn(&atlas).await {
+            let mut executor = match build_executor_conn(atlas).await {
                 Ok(e) => e,
                 Err(e) => {
                     let _ = tx
@@ -217,8 +220,7 @@ impl SystemPilot for PilotServiceImpl {
 
 /// Discover and connect to executor's two contracts. Both lookups go
 /// through atlas so executor can move/restart without reconfiguring pilot.
-async fn build_executor_conn(atlas: &Arc<Mutex<AtlasClient>>) -> anyhow::Result<ExecutorConn> {
-    let mut atlas = atlas.lock().await;
+async fn build_executor_conn(mut atlas: AtlasClient) -> anyhow::Result<ExecutorConn> {
     let (_, exec_ch) =
         atlas_client::connect_to_capability(&mut atlas, "robonix/system/executor")
             .await
