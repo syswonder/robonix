@@ -194,10 +194,7 @@ impl pb::atlas_server::Atlas for AtlasService {
         match state.caps.get_mut(&cap_id) {
             Some(rec) => {
                 rec.last_heartbeat_ms = now;
-                Ok(Response::new(pb::HeartbeatResponse {
-                    ok: true,
-                    server_time_ms: now,
-                }))
+                Ok(Response::new(pb::HeartbeatResponse { ok: true }))
             }
             None => Err(Status::not_found(format!("unknown capability_id: {cap_id}"))),
         }
