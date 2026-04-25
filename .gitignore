@@ -6,6 +6,7 @@ build/
 install/
 temp/
 .vscode/
+.codex
 log.txt
 .DS_Store
 .cursor/
@@ -50,3 +51,7 @@ target
 
 .cursor/
 .claude/
+
+_build
+
+deploy_example/

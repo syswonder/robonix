@@ -1,0 +1,34 @@
+name: workspace-test
+
+env:
+  LOG: "INFO"
+
+system:
+  nexus: {}
+  atlas:
+    endpoint: "127.0.0.1:50051"
+  executor:
+    endpoint: "127.0.0.1:50061"
+  pilot:
+    endpoint: "127.0.0.1:50071"
+    vlm_base_url: "https://example.com/v1"
+    vlm_api_key: "test-key"
+    vlm_api_format: openai
+  liaison:
+    endpoint: "127.0.0.1:50081"
+
+primitives:
+  - package: com.vendor.test_pkg_remote
+    url: https://github.com/lhw2002426/test_pkg_remote.git
+    name: test_driver
+
+services:
+  - package: com.robonix.example.vlm_service
+    path: ./services/vlm_service
+    name: vlm
+
+  - package: com.vendor.test_pkg_local
+    path: ./services/test_pkg_local
+    name: test_local
+
+skills: []

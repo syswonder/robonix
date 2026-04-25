@@ -1,0 +1,17 @@
+manifestVersion: 1
+
+build: bash scripts/build.sh
+
+start: echo "Starting test_pkg_local ..."
+
+package:
+  name: com.vendor.test_pkg_local
+  version: 0.0.1
+  vendor: vendor
+  description: Test local service for workspace integration testing
+  license: Apache-2.0
+
+capabilities: []
+
+depends:
+  - name: com.robonix.example.vlm_service

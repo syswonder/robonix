@@ -1,0 +1,19 @@
+manifestVersion: 1
+
+build: bash scripts/build.sh
+
+start: |
+  export PYTHONPATH="$(pwd)/proto_gen:${PYTHONPATH:-}"
+  exec python -m vlm_service.service
+
+package:
+  name: com.robonix.example.vlm_service
+  version: 0.1.0
+  vendor: robonix
+  description: VLM chat completions over gRPC (OpenAI-compatible backend)
+  license: MulanPSL-2.0
+
+capabilities:
+  - name: robonix/srv/cognition/vlm
+
+depends: []

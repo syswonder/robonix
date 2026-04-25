@@ -1,0 +1,21 @@
+manifestVersion: 1
+
+build: bash scripts/build.sh
+
+start: |
+  export PYTHONPATH="$(pwd)/src:${PYTHONPATH:-}"
+  exec python -m clawhub_bridge
+
+package:
+  name: com.robonix.example.clawhub_skills
+  version: 0.1.0
+  vendor: robonix
+  description: >-
+    Bridge package that imports community skills from OpenClaw ClawHub
+    into Robonix. Demonstrates native compatibility with the Agent Skills
+    open standard (agentskills.io).
+  license: MulanPSL-2.0
+
+capabilities: []
+
+depends: []

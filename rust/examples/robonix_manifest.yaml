@@ -1,0 +1,51 @@
+name: robonix-examples
+
+env:
+  LOG: "INFO"
+  RUST_LOG: "robonix_atlas=info,robonix_pilot=info,robonix_executor=info,robonix_liaison=warn"
+  VLM_API_KEY: "sk-e5b6865a506746139e04e119202ba2ce"
+  VLM_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  VLM_MODEL: "qwen3-vl-plus"
+  VLM_API_FORMAT: "openai"
+  # ROBONIX_VLM_CONTRACT_ID: "robonix/srv/cognition/reason"
+
+system:
+  nexus: {}
+  atlas:
+    endpoint: "127.0.0.1:50051"
+  executor:
+    endpoint: "127.0.0.1:50061"
+  pilot:
+    endpoint: "127.0.0.1:50071"
+    vlm_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    vlm_api_key: "sk-e5b6865a506746139e04e119202ba2ce"
+    vlm_api_format: openai
+  liaison:
+    endpoint: "127.0.0.1:50081"
+
+primitives:
+  - package: com.robonix.example.tiago_sim_stack
+    path: ./primitives/tiago_sim_stack
+    name: tiago_sim
+
+  # - package: com.robonix.example.zero_copy_demo
+  #   path: ./primitives/zero_copy_demo
+  #   name: zero_copy
+
+services:
+  - package: com.robonix.example.vlm_service
+    path: ./services/vlm_service
+    name: vlm
+
+  - package: com.robonix.example.memsearch_service
+    path: ./services/memsearch_service
+    name: memsearch
+
+  # - package: com.robonix.example.maniskill_graspnet_demo
+  #   path: ./services/maniskill_vla_demo
+  #   name: maniskill_demo
+
+skills:
+  # - package: com.robonix.example.clawhub_skills
+  #   path: ./skills/clawhub_skills
+  #   name: clawhub
