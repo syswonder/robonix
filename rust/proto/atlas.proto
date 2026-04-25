@@ -71,7 +71,6 @@ message HeartbeatRequest {
 }
 message HeartbeatResponse {
   bool ok = 1;
-  uint64 server_time_ms = 2;
 }
 
 // Bind ONE transport to ONE capability interface of an already-registered
