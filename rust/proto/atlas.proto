@@ -13,11 +13,12 @@ package robonix.atlas;
 //                         interfaces under a single namespace.
 //   capability interface — a single contract-bound endpoint, addressed by
 //                          its `contract_id` (e.g. "robonix/primitive/base/move").
-//   transport — a wire protocol used to carry traffic for one interface
-//               (e.g. "ros2", "grpc", "shared_memory"). Each
-//               (capability_id, contract_id, transport) tuple is unique:
-//               to expose the same interface over multiple transports,
-//               call DeclareInterface once per transport.
+//   transport — a wire protocol used to carry traffic for one interface.
+//               The closed set lives in the `Transport` enum below; new
+//               transports must be added there (no string escape hatch).
+//               Each (capability_id, contract_id, transport) tuple is
+//               unique: to expose the same interface over multiple
+//               transports, call DeclareInterface once per transport.
 //
 // Two-step registration on purpose:
 //   1) RegisterCapability — semantic announcement: "I am cap X, here are
@@ -28,31 +29,60 @@ package robonix.atlas;
 // ───────────────────────────────────────────────────────────────────────────
 
 
+// Closed set of wire transports Atlas understands. Adding a transport is
+// a deliberate proto bump — Atlas needs to know per-transport whether it
+// can mint endpoint names (see DeclareInterfaceRequest), so a string
+// escape hatch would silently route unknown transports through a wrong
+// branch.
+enum Transport {
+  TRANSPORT_UNSPECIFIED = 0;
+  TRANSPORT_GRPC = 1;
+  TRANSPORT_ROS2 = 2;
+  TRANSPORT_SHARED_MEMORY = 3; // TODO
+  TRANSPORT_RAW_TCP = 4; // TODO
+  TRANSPORT_WEBSOCKET = 5; // TODO
+}
+
 // One capability interface — a single contract_id offered by a capability
-// instance. The full description lives in the package's CAPABILITY.md;
-// this message just gives Atlas the path to read it on demand. NO
-// duplicated description text: CAPABILITY.md is the single source of
-// truth, callers (e.g. VLM prompt builders) read it directly.
+// instance. The full description for ALL interfaces of this instance lives
+// in the package's single CAPABILITY.md (path on RegisterCapabilityRequest);
+// this message carries only the per-interface identity + metadata.
 message CapabilityInterface {
-  string name = 1;            // good to use the leaf name of contract but we can use any name (snake_case), e.g. "move", "odom", "rgb"
-  string contract_id = 2;     // stable full path, e.g. "robonix/primitive/base/move", this MUST be the actually existing contract_id in system
-  string capability_md_path = 3;  // absolute path to CAPABILITY.md (read on demand)
-  string metadata_json = 4;   // free-form, e.g. {"disable_model_invocation": true}
+  // Local leaf name. Convention: leaf of `contract_id` (snake_case).
+  // e.g. "move", "odom", "rgb".
+  string name = 1;
+  // Stable full path, e.g. "robonix/primitive/base/move". MUST be a
+  // contract id that exists in the system contract catalog (see
+  // rust/contracts/).
+  string contract_id = 2;
+  // Free-form structured metadata as a JSON object. Atlas validates
+  // that this parses as JSON (or is empty) at register time. Contents
+  // are passed through to consumers untouched.
+  // Common keys: "disable_model_invocation": bool, "free_call": bool.
+  string metadata_json = 3;
 }
 
 // Register a capability instance. Instance lives until either Unregister
 // is called or heartbeats lapse past Atlas's eviction threshold.
+//
+// The same `capability_id` may NOT be registered twice — Atlas returns
+// AlreadyExists. Re-registration must be preceded by Unregister.
 message RegisterCapabilityRequest {
   // Reverse-DNS instance id, e.g. "com.robonix.primitive.base.ranger_mini".
   // Empty => Atlas assigns "com.robonix.ephemeral.<uuid>".
   string capability_id = 1;
-  // Grouping namespace, e.g. "robonix/primitive/base". All contract_ids
-  // declared by this instance must live under this prefix.
+  // Grouping namespace, e.g. "robonix/primitive/base". Every declared
+  // contract_id MUST live under this prefix; otherwise Atlas rejects
+  // the registration with InvalidArgument.
   string namespace = 2;
+  // Absolute path to the package's single CAPABILITY.md. One markdown
+  // per package describes all interfaces below; consumers read it via
+  // QueryCapabilityMd. Empty path => no markdown for this instance.
+  string capability_md_path = 3;
   // The set of capability interfaces this instance promises to offer.
   // Each entry's `contract_id` must be addressable via DeclareInterface
   // before consumers can connect.
-  repeated CapabilityInterface interfaces = 3;
+  repeated CapabilityInterface interfaces = 4;
 }
 message RegisterCapabilityResponse {
   string capability_id = 1;
@@ -61,17 +91,19 @@ message RegisterCapabilityResponse {
 message UnregisterCapabilityRequest {
   string capability_id = 1;
 }
+// `was_present=true` means an existing record was removed; `false` means
+// the id was unknown to Atlas (idempotent caller-side semantics).
 message UnregisterCapabilityResponse {
-  bool ok = 1;
+  bool was_present = 1;
 }
 
 // Liveness signal. Atlas may evict instances whose heartbeat lapses.
+// Failure cases (unknown capability_id, etc.) come back as gRPC Status,
+// so the response carries no `ok` byte.
 message HeartbeatRequest {
   string capability_id = 1;
 }
-message HeartbeatResponse {
-  bool ok = 1;
-}
+message HeartbeatResponse {}
 
 // Bind ONE transport to ONE capability interface of an already-registered
 // capability. To expose the same `contract_id` over multiple transports,
@@ -81,10 +113,10 @@ message HeartbeatResponse {
 // guarantees the returned endpoint is globally unique on (transport,
 // endpoint). Conflict-resolution rules (Atlas-side):
 //   - empty proposal + atlas-mintable transport (ros2 / shared_memory)
-//                       -> Atlas mints "/rbnx/<contract>/<uuid8>"
-//   - empty proposal + non-mintable transport (grpc, raw_tcp, ...)
+//                       -> Atlas mints "/rbnx/<dotted-contract>/<uuid8>"
+//   - empty proposal + non-mintable transport (grpc, raw_tcp, websocket)
 //                       -> InvalidArgument (Atlas cannot allocate; caller
-//                          must bind first and supply host:port)
+//                          must bind first and supply host:port etc.)
 //   - non-empty + no collision        -> stored verbatim
 //   - non-empty + collision + mintable transport
 //                       -> Atlas rewrites by appending "~<uuid8>"
@@ -96,29 +128,28 @@ message HeartbeatResponse {
 // proposed when Atlas rewrote to disambiguate).
 message DeclareInterfaceRequest {
   string capability_id = 1;
-  string contract_id = 2;     // must match an interface contract_id announced in RegisterCapability
-  string transport = 3;       // exactly one: "ros2" | "grpc" | "shared_memory" | ...
-  // Preferred address string. Format is transport-specific:
-  //   grpc:          "127.0.0.1:50105"   (caller must bind first)
-  //   ros2:          "/scanner/cloud"     (or "" — Atlas mints)
-  //   shared_memory: "/rbnx_shm_lidar"    (or "" — Atlas mints)
-  //   websocket:     "ws://host:port/path"
+  // Must match a contract_id announced in RegisterCapability.
+  string contract_id = 2;
+  Transport transport = 3;
+  // Preferred address string. Format is transport-specific (see the
+  // Transport enum comments). For mintable transports this MAY be empty
+  // to ask Atlas to mint a unique name.
   string endpoint = 4;
-  // Optional structured params per transport (e.g. ros2_msg_type, shm size).
-  // Atlas passes this through to consumers untouched.
+  // Optional structured params per transport (e.g. ros2_msg_type, shm
+  // size). MUST parse as JSON; Atlas rejects malformed payloads at
+  // declare time. Passed through to consumers untouched.
   string metadata_json = 5;
 }
 message DeclareInterfaceResponse {
-  bool ok = 1;
   // Authoritative endpoint actually registered. Equal to request.endpoint
   // when there was no collision; otherwise an Atlas-rewritten unique form.
-  string endpoint = 2;
+  string endpoint = 1;
 }
 
 // One declared (transport, endpoint) binding for one capability interface.
 message InterfaceEndpoint {
   string contract_id = 1;
-  string transport = 2;
+  Transport transport = 2;
   string endpoint = 3;
   string metadata_json = 4;
 }
@@ -139,20 +170,20 @@ message QueryCapabilitiesRequest {
   // Prefix match on the instance's `namespace`.
   string namespace = 2;
   // Exact match on InterfaceEndpoint.transport (filter is on endpoints,
-  // not on the instance itself).
-  string transport = 3;
+  // not on the instance itself). TRANSPORT_UNSPECIFIED = no filter.
+  Transport transport = 3;
 }
 message QueryCapabilitiesResponse {
   repeated CapabilityRecord records = 1;
 }
 
-// Get the full CAPABILITY.md content for an instance (concatenation of
-// all CAPABILITY.md files this instance owns), for VLM system prompt
-// construction.
+// Get the package's CAPABILITY.md content for an instance. One markdown
+// per package — describes all interfaces in a single document.
 message QueryCapabilityMdRequest {
   string capability_id = 1;
 }
 message QueryCapabilityMdResponse {
+  // Empty when the instance was registered with no `capability_md_path`.
   string capability_md = 1;
 }
 

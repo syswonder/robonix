@@ -21,13 +21,19 @@ pub mod pb {
     tonic::include_proto!("robonix.atlas");
 }
 
+use pb::Transport;
+
+/// How many times Atlas tries to mint a unique endpoint before giving up.
+/// At 8-hex-char UUID suffixes the keyspace is 2^32; collisions are
+/// dominated by bugs in the collide check, not randomness.
+const MINT_ATTEMPTS: usize = 16;
+
 // ── Data model ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
 struct CapabilityInterfaceRec {
     name: String,
     contract_id: String,
-    capability_md_path: String,
     metadata_json: String,
 }
 
@@ -36,7 +42,6 @@ impl From<pb::CapabilityInterface> for CapabilityInterfaceRec {
         Self {
             name: c.name,
             contract_id: c.contract_id,
-            capability_md_path: c.capability_md_path,
             metadata_json: c.metadata_json,
         }
     }
@@ -47,7 +52,6 @@ impl From<&CapabilityInterfaceRec> for pb::CapabilityInterface {
         Self {
             name: c.name.clone(),
             contract_id: c.contract_id.clone(),
-            capability_md_path: c.capability_md_path.clone(),
             metadata_json: c.metadata_json.clone(),
         }
     }
@@ -56,16 +60,24 @@ impl From<&CapabilityInterfaceRec> for pb::CapabilityInterface {
 #[derive(Debug, Clone, Serialize)]
 struct EndpointRec {
     contract_id: String,
-    transport: String,
+    #[serde(serialize_with = "serialize_transport")]
+    transport: Transport,
     endpoint: String,
     metadata_json: String,
+}
+
+fn serialize_transport<S: serde::Serializer>(
+    t: &Transport,
+    ser: S,
+) -> Result<S::Ok, S::Error> {
+    ser.serialize_str(t.as_str_name())
 }
 
 impl From<&EndpointRec> for pb::InterfaceEndpoint {
     fn from(e: &EndpointRec) -> Self {
         Self {
             contract_id: e.contract_id.clone(),
-            transport: e.transport.clone(),
+            transport: e.transport as i32,
             endpoint: e.endpoint.clone(),
             metadata_json: e.metadata_json.clone(),
         }
@@ -76,6 +88,7 @@ impl From<&EndpointRec> for pb::InterfaceEndpoint {
 struct CapRecord {
     capability_id: String,
     namespace: String,
+    capability_md_path: String,
     last_heartbeat_ms: u64,
     interfaces: Vec<CapabilityInterfaceRec>,
     endpoints: Vec<EndpointRec>,
@@ -88,6 +101,11 @@ pub(crate) struct State {
 
 // ── Registry ────────────────────────────────────────────────────────────────
 
+/// In-memory state shared by all gRPC handlers.
+///
+/// Hold the `Arc<AtlasRegistry>` once at process startup; clone the `Arc`
+/// (not the struct) when sharing across tasks. The interior `RwLock`
+/// serialises access to the cap table.
 #[derive(Debug, Default)]
 pub struct AtlasRegistry {
     pub(crate) inner: RwLock<State>,
@@ -105,17 +123,47 @@ impl AtlasRegistry {
         format!("com.robonix.ephemeral.{}", Uuid::new_v4())
     }
 
-    fn require(field: &str, value: &str) -> Result<String, Status> {
+    fn require<'a>(field: &str, value: &'a str) -> Result<&'a str, Status> {
         let v = value.trim();
         if v.is_empty() {
             return Err(Status::invalid_argument(format!("{field} required")));
         }
-        Ok(v.to_string())
+        Ok(v)
     }
+}
+
+/// Whether Atlas can mint a fresh endpoint name for this transport without
+/// requiring a prior OS-level bind by the caller. ros2/shared_memory are
+/// pure-name address spaces; grpc/raw_tcp/websocket need a host:port that
+/// only the caller can produce.
+fn atlas_can_mint(transport: Transport) -> bool {
+    matches!(transport, Transport::Ros2 | Transport::SharedMemory)
+}
+
+/// Validate `s` is empty or a parseable JSON value.
+fn validate_metadata_json(field: &str, s: &str) -> Result<(), Status> {
+    if s.trim().is_empty() {
+        return Ok(());
+    }
+    serde_json::from_str::<serde_json::Value>(s)
+        .map(|_| ())
+        .map_err(|e| Status::invalid_argument(format!("{field}: invalid JSON ({e})")))
+}
+
+fn parse_transport(t: i32) -> Result<Transport, Status> {
+    let v = Transport::try_from(t).map_err(|_| {
+        Status::invalid_argument(format!("transport: unknown enum value {t}"))
+    })?;
+    if v == Transport::Unspecified {
+        return Err(Status::invalid_argument("transport: must not be UNSPECIFIED"));
+    }
+    Ok(v)
 }
 
 // ── gRPC service ────────────────────────────────────────────────────────────
 
+/// gRPC service implementing the Atlas control plane (see
+/// `rust/proto/atlas.proto`). Stateless wrapper around an `AtlasRegistry`.
 #[derive(Debug)]
 pub struct AtlasService {
     registry: Arc<AtlasRegistry>,
@@ -139,27 +187,40 @@ impl pb::atlas_server::Atlas for AtlasService {
         } else {
             r.capability_id.trim().to_string()
         };
-        let namespace = AtlasRegistry::require("namespace", &r.namespace)?;
+        let namespace = AtlasRegistry::require("namespace", &r.namespace)?.to_string();
+
+        // Hard-reject any contract_id that's not under the announced
+        // namespace. Proto says "must"; honour that contract.
+        for c in &r.interfaces {
+            if c.contract_id.trim().is_empty() {
+                return Err(Status::invalid_argument(
+                    "interface contract_id must not be empty",
+                ));
+            }
+            if !c.contract_id.starts_with(&namespace) {
+                return Err(Status::invalid_argument(format!(
+                    "contract_id '{}' is not under namespace '{}'",
+                    c.contract_id, namespace
+                )));
+            }
+            validate_metadata_json("interface metadata_json", &c.metadata_json)?;
+        }
+
         let interfaces: Vec<CapabilityInterfaceRec> =
             r.interfaces.into_iter().map(Into::into).collect();
 
-        // Each declared contract_id should sit under the namespace prefix —
-        // warn but don't reject (loose policy keeps iteration cheap).
-        for c in &interfaces {
-            if !c.contract_id.is_empty() && !c.contract_id.starts_with(&namespace) {
-                warn!(
-                    "[atlas] {} contract_id '{}' is not under namespace '{}'",
-                    cap_id, c.contract_id, namespace
-                );
-            }
-        }
-
         let mut state = self.registry.inner.write().await;
+        if state.caps.contains_key(&cap_id) {
+            return Err(Status::already_exists(format!(
+                "capability_id '{cap_id}' already registered; Unregister first"
+            )));
+        }
         state.caps.insert(
             cap_id.clone(),
             CapRecord {
                 capability_id: cap_id.clone(),
                 namespace,
+                capability_md_path: r.capability_md_path.trim().to_string(),
                 last_heartbeat_ms: AtlasRegistry::now_ms(),
                 interfaces,
                 endpoints: Vec::new(),
@@ -176,11 +237,13 @@ impl pb::atlas_server::Atlas for AtlasService {
         req: Request<pb::UnregisterCapabilityRequest>,
     ) -> Result<Response<pb::UnregisterCapabilityResponse>, Status> {
         let r = req.into_inner();
-        let cap_id = AtlasRegistry::require("capability_id", &r.capability_id)?;
+        let cap_id = AtlasRegistry::require("capability_id", &r.capability_id)?.to_string();
         let mut state = self.registry.inner.write().await;
-        let removed = state.caps.remove(&cap_id).is_some();
-        info!("[atlas] unregister {cap_id} (was_present={removed})");
-        Ok(Response::new(pb::UnregisterCapabilityResponse { ok: removed }))
+        let was_present = state.caps.remove(&cap_id).is_some();
+        info!("[atlas] unregister {cap_id} (was_present={was_present})");
+        Ok(Response::new(pb::UnregisterCapabilityResponse {
+            was_present,
+        }))
     }
 
     async fn heartbeat(
@@ -188,16 +251,15 @@ impl pb::atlas_server::Atlas for AtlasService {
         req: Request<pb::HeartbeatRequest>,
     ) -> Result<Response<pb::HeartbeatResponse>, Status> {
         let r = req.into_inner();
-        let cap_id = AtlasRegistry::require("capability_id", &r.capability_id)?;
+        let cap_id = AtlasRegistry::require("capability_id", &r.capability_id)?.to_string();
         let now = AtlasRegistry::now_ms();
         let mut state = self.registry.inner.write().await;
-        match state.caps.get_mut(&cap_id) {
-            Some(rec) => {
-                rec.last_heartbeat_ms = now;
-                Ok(Response::new(pb::HeartbeatResponse { ok: true }))
-            }
-            None => Err(Status::not_found(format!("unknown capability_id: {cap_id}"))),
-        }
+        let rec = state
+            .caps
+            .get_mut(&cap_id)
+            .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
+        rec.last_heartbeat_ms = now;
+        Ok(Response::new(pb::HeartbeatResponse {}))
     }
 
     async fn declare_interface(
@@ -205,9 +267,10 @@ impl pb::atlas_server::Atlas for AtlasService {
         req: Request<pb::DeclareInterfaceRequest>,
     ) -> Result<Response<pb::DeclareInterfaceResponse>, Status> {
         let r = req.into_inner();
-        let cap_id = AtlasRegistry::require("capability_id", &r.capability_id)?;
-        let contract_id = AtlasRegistry::require("contract_id", &r.contract_id)?;
-        let transport = AtlasRegistry::require("transport", &r.transport)?;
+        let cap_id = AtlasRegistry::require("capability_id", &r.capability_id)?.to_string();
+        let contract_id = AtlasRegistry::require("contract_id", &r.contract_id)?.to_string();
+        let transport = parse_transport(r.transport)?;
+        validate_metadata_json("metadata_json", &r.metadata_json)?;
         let proposed = r.endpoint.trim().to_string();
 
         let mut state = self.registry.inner.write().await;
@@ -222,32 +285,34 @@ impl pb::atlas_server::Atlas for AtlasService {
                 "contract_id '{contract_id}' was not announced in RegisterCapability for {cap_id}"
             )));
         }
-        // Same cap can't declare the same (contract, transport) twice.
         if rec
             .endpoints
             .iter()
             .any(|e| e.contract_id == contract_id && e.transport == transport)
         {
             return Err(Status::already_exists(format!(
-                "({contract_id}, {transport}) already declared by {cap_id}"
+                "({contract_id}, {transport:?}) already declared by {cap_id}"
             )));
         }
 
-        // Resolve a globally-unique endpoint per the rules in atlas.proto.
-        let endpoint = resolve_endpoint(&state, &transport, &proposed, &contract_id)?;
+        let endpoint = resolve_endpoint(&state, transport, &proposed, &contract_id)?;
 
-        let rec = state.caps.get_mut(&cap_id).expect("checked above");
+        // Lock guard hasn't been dropped since the read above; ok_or_else
+        // here is defensive against future refactors that split the lock.
+        let rec = state
+            .caps
+            .get_mut(&cap_id)
+            .ok_or_else(|| Status::internal("capability vanished mid-declare"))?;
         rec.endpoints.push(EndpointRec {
             contract_id: contract_id.clone(),
-            transport: transport.clone(),
+            transport,
             endpoint: endpoint.clone(),
             metadata_json: r.metadata_json,
         });
-        info!("[atlas] declare {cap_id} {contract_id} via {transport} -> {endpoint}");
-        Ok(Response::new(pb::DeclareInterfaceResponse {
-            ok: true,
-            endpoint,
-        }))
+        info!(
+            "[atlas] declare {cap_id} {contract_id} via {transport:?} -> {endpoint}"
+        );
+        Ok(Response::new(pb::DeclareInterfaceResponse { endpoint }))
     }
 
     async fn query_capabilities(
@@ -257,7 +322,10 @@ impl pb::atlas_server::Atlas for AtlasService {
         let r = req.into_inner();
         let f_contract = r.contract_id.trim();
         let f_namespace = r.namespace.trim();
-        let f_transport = r.transport.trim();
+        let f_transport = Transport::try_from(r.transport)
+            .ok()
+            .filter(|&t| t != Transport::Unspecified);
+
         let state = self.registry.inner.read().await;
         let mut records = Vec::new();
         for rec in state.caps.values() {
@@ -274,7 +342,7 @@ impl pb::atlas_server::Atlas for AtlasService {
                 .iter()
                 .filter(|e| {
                     (f_contract.is_empty() || e.contract_id == f_contract)
-                        && (f_transport.is_empty() || e.transport == f_transport)
+                        && f_transport.is_none_or(|t| e.transport == t)
                 })
                 .map(Into::into)
                 .collect();
@@ -294,27 +362,35 @@ impl pb::atlas_server::Atlas for AtlasService {
         req: Request<pb::QueryCapabilityMdRequest>,
     ) -> Result<Response<pb::QueryCapabilityMdResponse>, Status> {
         let r = req.into_inner();
-        let cap_id = AtlasRegistry::require("capability_id", &r.capability_id)?;
-        let state = self.registry.inner.read().await;
-        let rec = state
-            .caps
-            .get(&cap_id)
-            .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
-        let mut md = String::new();
-        for c in &rec.interfaces {
-            if c.capability_md_path.trim().is_empty() {
-                continue;
-            }
-            if let Ok(content) = std::fs::read_to_string(&c.capability_md_path) {
-                if !md.is_empty() {
-                    md.push_str("\n\n---\n\n");
-                }
-                md.push_str(&content);
+        let cap_id = AtlasRegistry::require("capability_id", &r.capability_id)?.to_string();
+
+        // Snapshot path under the read lock, then drop it before doing
+        // (potentially blocking) filesystem I/O.
+        let path = {
+            let state = self.registry.inner.read().await;
+            let rec = state
+                .caps
+                .get(&cap_id)
+                .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
+            rec.capability_md_path.clone()
+        };
+
+        if path.is_empty() {
+            return Ok(Response::new(pb::QueryCapabilityMdResponse {
+                capability_md: String::new(),
+            }));
+        }
+        match tokio::fs::read_to_string(&path).await {
+            Ok(capability_md) => Ok(Response::new(pb::QueryCapabilityMdResponse {
+                capability_md,
+            })),
+            Err(e) => {
+                warn!("[atlas] {cap_id}: read CAPABILITY.md '{path}' failed: {e}");
+                Err(Status::internal(format!(
+                    "failed to read CAPABILITY.md for {cap_id}: {e}"
+                )))
             }
         }
-        Ok(Response::new(pb::QueryCapabilityMdResponse {
-            capability_md: md,
-        }))
     }
 
     async fn inspect_atlas(
@@ -322,8 +398,8 @@ impl pb::atlas_server::Atlas for AtlasService {
         _req: Request<pb::InspectAtlasRequest>,
     ) -> Result<Response<pb::InspectAtlasResponse>, Status> {
         let state = self.registry.inner.read().await;
-        let json =
-            serde_json::to_string_pretty(&*state).unwrap_or_else(|_| "{}".to_string());
+        let json = serde_json::to_string_pretty(&*state)
+            .map_err(|e| Status::internal(format!("inspect serialise failed: {e}")))?;
         Ok(Response::new(pb::InspectAtlasResponse { json }))
     }
 }
@@ -338,13 +414,11 @@ impl pb::atlas_server::Atlas for AtlasService {
 ///   - non-empty + collision + non-mintable      → AlreadyExists
 fn resolve_endpoint(
     state: &State,
-    transport: &str,
+    transport: Transport,
     proposed: &str,
     contract_id: &str,
 ) -> Result<String, Status> {
-    // Atlas can mint names freely for transports whose address space does NOT
-    // require an OS resource bind at registration time.
-    let atlas_can_mint = matches!(transport, "ros2" | "shared_memory");
+    let mintable = atlas_can_mint(transport);
 
     let collides = |s: &str| -> bool {
         state.caps.values().any(|rec| {
@@ -364,51 +438,54 @@ fn resolve_endpoint(
     let dotted = contract_id.replace('/', ".");
 
     if proposed.is_empty() {
-        if !atlas_can_mint {
+        if !mintable {
             return Err(Status::invalid_argument(format!(
-                "transport '{transport}' requires caller-supplied endpoint; \
+                "transport '{transport:?}' requires caller-supplied endpoint; \
                  Atlas cannot allocate (e.g. caller must bind a port and pass host:port)"
             )));
         }
-        for _ in 0..16 {
+        for _ in 0..MINT_ATTEMPTS {
             let candidate = format!("/rbnx/{dotted}/{}", short_uuid());
             if !collides(&candidate) {
                 return Ok(candidate);
             }
         }
-        return Err(Status::internal(
-            "could not mint unique endpoint after 16 attempts",
-        ));
+        return Err(Status::internal(format!(
+            "could not mint unique endpoint for ({transport:?}, {contract_id}) \
+             after {MINT_ATTEMPTS} attempts (existing caps: {})",
+            state.caps.len()
+        )));
     }
 
     if !collides(proposed) {
         return Ok(proposed.to_string());
     }
 
-    if !atlas_can_mint {
+    if !mintable {
         return Err(Status::already_exists(format!(
-            "endpoint '{proposed}' already registered on transport '{transport}'; \
+            "endpoint '{proposed}' already registered on transport '{transport:?}'; \
              pick a new address (rebind a different port / use a different name) and retry"
         )));
     }
 
-    for _ in 0..16 {
+    for _ in 0..MINT_ATTEMPTS {
         let candidate = format!("{proposed}~{}", short_uuid());
         if !collides(&candidate) {
             return Ok(candidate);
         }
     }
-    Err(Status::internal(
-        "could not mint unique endpoint after 16 attempts",
-    ))
+    Err(Status::internal(format!(
+        "could not disambiguate '{proposed}' on transport '{transport:?}' \
+         after {MINT_ATTEMPTS} attempts (existing caps: {})",
+        state.caps.len()
+    )))
 }
 
 // ── Server entrypoint ───────────────────────────────────────────────────────
 
-pub async fn serve_atlas(
-    registry: Arc<AtlasRegistry>,
-    listen: SocketAddr,
-) -> Result<()> {
+/// Start the Atlas gRPC server on `listen` using the given registry.
+/// Blocks until the server stops or returns an error.
+pub async fn serve_atlas(registry: Arc<AtlasRegistry>, listen: SocketAddr) -> Result<()> {
     let svc = AtlasService::new(registry);
     info!("[atlas] gRPC listening on {listen}");
     tonic::transport::Server::builder()
