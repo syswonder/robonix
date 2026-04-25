@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Atlas — Robonix capability registry (gRPC service).
 //
-// One running unit = one *capability instance*, registered under a
-// reverse-DNS `capability_id` and a `namespace` (e.g. "robonix/primitive/base").
-// Interfaces are declared lazily via DeclareInterface (one (contract_id,
-// transport) pair per call) — typically the cap declares its driver
-// interface first to let `rbnx start` invoke hardware init, then declares
-// the rest after it has discovered what it can support. See
-// rust/proto/atlas.proto for the wire schema.
+// `AtlasRegistry` owns the in-memory state and exposes typed async methods
+// for each operation. `AtlasService` is a thin facade that parses wire
+// types out of `pb::*` requests and calls the registry. The legacy
+// `RobonixRuntime` shim (see crate::legacy) calls the same registry
+// methods after translating old fields, which is how backward compat is
+// implemented without a parallel state.
 
 use anyhow::{Context, Result};
 use log::{info, warn};
@@ -20,14 +19,12 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 use crate::pb;
-use pb::Transport;
+pub use pb::Transport;
 
 /// How many times Atlas tries to mint a unique endpoint before giving up.
-/// At 8-hex-char UUID suffixes the keyspace is 2^32; collisions are
-/// dominated by bugs in the collide check, not randomness.
 const MINT_ATTEMPTS: usize = 16;
 
-// ── Transport-specific params (typed mirror of proto oneof) ────────────────
+// ── Internal record types (state.caps values) ──────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "transport", rename_all = "snake_case")]
@@ -120,6 +117,18 @@ struct CapRecord {
     endpoints: Vec<EndpointRec>,
 }
 
+impl From<&CapRecord> for pb::CapabilityRecord {
+    fn from(rec: &CapRecord) -> Self {
+        Self {
+            capability_id: rec.capability_id.clone(),
+            namespace: rec.namespace.clone(),
+            capability_md_path: rec.capability_md_path.clone(),
+            last_heartbeat_ms: rec.last_heartbeat_ms,
+            endpoints: rec.endpoints.iter().map(Into::into).collect(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct State {
     caps: HashMap<String, CapRecord>,
@@ -127,18 +136,16 @@ pub(crate) struct State {
 
 // ── Registry ────────────────────────────────────────────────────────────────
 
-/// In-memory state shared by all gRPC handlers.
-///
-/// Hold the `Arc<AtlasRegistry>` once at process startup; clone the `Arc`
-/// (not the struct) when sharing across tasks. The interior `RwLock`
-/// serialises access to the cap table.
+/// In-memory state shared by all gRPC handlers (new + legacy). All ops go
+/// through one of the typed async methods below. `Arc<AtlasRegistry>` is
+/// cheap to clone; the interior `RwLock` serialises mutations.
 #[derive(Debug, Default)]
 pub struct AtlasRegistry {
     pub(crate) inner: RwLock<State>,
 }
 
 impl AtlasRegistry {
-    fn now_ms() -> u64 {
+    pub fn now_ms() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -156,18 +163,243 @@ impl AtlasRegistry {
         }
         Ok(v)
     }
+
+    /// Register a new capability instance. Empty `cap_id` triggers Atlas-
+    /// assigned ephemeral id. Returns the resolved id.
+    pub async fn register(
+        &self,
+        cap_id: &str,
+        namespace: &str,
+        capability_md_path: &str,
+    ) -> Result<String, Status> {
+        let cap_id = if cap_id.trim().is_empty() {
+            Self::assign_id()
+        } else {
+            cap_id.trim().to_string()
+        };
+        let namespace = Self::require("namespace", namespace)?.to_string();
+        let mut state = self.inner.write().await;
+        if state.caps.contains_key(&cap_id) {
+            return Err(Status::already_exists(format!(
+                "capability_id '{cap_id}' already registered; Unregister first"
+            )));
+        }
+        state.caps.insert(
+            cap_id.clone(),
+            CapRecord {
+                capability_id: cap_id.clone(),
+                namespace,
+                capability_md_path: capability_md_path.trim().to_string(),
+                last_heartbeat_ms: Self::now_ms(),
+                endpoints: Vec::new(),
+            },
+        );
+        info!("[atlas] register {cap_id}");
+        Ok(cap_id)
+    }
+
+    /// Idempotent: returns `true` if a record was removed, `false` if the id
+    /// was unknown.
+    pub async fn unregister(&self, cap_id: &str) -> bool {
+        let cap_id = cap_id.trim();
+        if cap_id.is_empty() {
+            return false;
+        }
+        let mut state = self.inner.write().await;
+        let was_present = state.caps.remove(cap_id).is_some();
+        info!("[atlas] unregister {cap_id} (was_present={was_present})");
+        was_present
+    }
+
+    /// Updates `last_heartbeat_ms` to now. Returns the timestamp it set.
+    pub async fn heartbeat(&self, cap_id: &str) -> Result<u64, Status> {
+        let cap_id = Self::require("capability_id", cap_id)?;
+        let now = Self::now_ms();
+        let mut state = self.inner.write().await;
+        let rec = state
+            .caps
+            .get_mut(cap_id)
+            .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
+        rec.last_heartbeat_ms = now;
+        Ok(now)
+    }
+
+    /// Declare ONE transport for ONE contract on a registered cap. Returns
+    /// the authoritative endpoint string (may differ from `proposed` when
+    /// Atlas rewrote it to disambiguate on a mintable transport).
+    pub async fn declare(
+        &self,
+        cap_id: &str,
+        contract_id: &str,
+        transport: Transport,
+        proposed: &str,
+        params: pb::TransportParams,
+    ) -> Result<String, Status> {
+        let cap_id = Self::require("capability_id", cap_id)?;
+        let contract_id = Self::require("contract_id", contract_id)?.to_string();
+        let params = parse_params(transport, Some(params))?;
+        let proposed = proposed.trim().to_string();
+
+        let mut state = self.inner.write().await;
+        let rec = state
+            .caps
+            .get(cap_id)
+            .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
+        if !contract_id.starts_with(&rec.namespace) {
+            return Err(Status::invalid_argument(format!(
+                "contract_id '{contract_id}' is not under namespace '{}' of capability '{cap_id}'",
+                rec.namespace
+            )));
+        }
+        if rec
+            .endpoints
+            .iter()
+            .any(|e| e.contract_id == contract_id && e.transport == transport)
+        {
+            return Err(Status::already_exists(format!(
+                "({contract_id}, {transport:?}) already declared by {cap_id}"
+            )));
+        }
+
+        let endpoint = resolve_endpoint(&state, transport, &proposed, &contract_id, cap_id)?;
+        let rec = state
+            .caps
+            .get_mut(cap_id)
+            .ok_or_else(|| Status::internal("capability vanished mid-declare"))?;
+        rec.endpoints.push(EndpointRec {
+            contract_id: contract_id.clone(),
+            transport,
+            endpoint: endpoint.clone(),
+            params,
+        });
+        info!("[atlas] declare {cap_id} {contract_id} via {transport:?} -> {endpoint}");
+        Ok(endpoint)
+    }
+
+    /// Snapshot of registered caps matching the given filters. Empty
+    /// `cap_id` / empty `contract` / `Transport::Unspecified` mean "no
+    /// filter on that field". Records carry only endpoints that satisfy
+    /// `contract` + `transport` filters.
+    pub async fn query(
+        &self,
+        cap_id: &str,
+        contract: &str,
+        transport: Transport,
+    ) -> Vec<pb::CapabilityRecord> {
+        let f_cap_id = cap_id.trim();
+        let f_contract = contract.trim();
+        let f_transport = if transport == Transport::Unspecified {
+            None
+        } else {
+            Some(transport)
+        };
+
+        let state = self.inner.read().await;
+        let mut out = Vec::new();
+        for rec in state.caps.values() {
+            if !f_cap_id.is_empty() && rec.capability_id != f_cap_id {
+                continue;
+            }
+            if !f_contract.is_empty()
+                && !rec.endpoints.iter().any(|e| e.contract_id == f_contract)
+            {
+                continue;
+            }
+            let endpoints: Vec<pb::InterfaceEndpoint> = rec
+                .endpoints
+                .iter()
+                .filter(|e| {
+                    (f_contract.is_empty() || e.contract_id == f_contract)
+                        && f_transport.is_none_or(|t| e.transport == t)
+                })
+                .map(Into::into)
+                .collect();
+            out.push(pb::CapabilityRecord {
+                capability_id: rec.capability_id.clone(),
+                namespace: rec.namespace.clone(),
+                capability_md_path: rec.capability_md_path.clone(),
+                last_heartbeat_ms: rec.last_heartbeat_ms,
+                endpoints,
+            });
+        }
+        out
+    }
+
+    /// Read the cap's CAPABILITY.md content. Returns "" when the cap
+    /// registered without a path.
+    pub async fn capability_md(&self, cap_id: &str) -> Result<String, Status> {
+        let cap_id = Self::require("capability_id", cap_id)?;
+        let path = {
+            let state = self.inner.read().await;
+            let rec = state
+                .caps
+                .get(cap_id)
+                .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
+            rec.capability_md_path.clone()
+        };
+        if path.is_empty() {
+            return Ok(String::new());
+        }
+        match tokio::fs::read_to_string(&path).await {
+            Ok(s) => Ok(s),
+            Err(e) => {
+                warn!("[atlas] {cap_id}: read CAPABILITY.md '{path}' failed: {e}");
+                Err(Status::internal(format!(
+                    "failed to read CAPABILITY.md for {cap_id}: {e}"
+                )))
+            }
+        }
+    }
+
+    /// Debug-only JSON dump of the entire registry. Schema is unstable.
+    pub async fn inspect_json(&self) -> Result<String, Status> {
+        let state = self.inner.read().await;
+        serde_json::to_string_pretty(&*state)
+            .map_err(|e| Status::internal(format!("inspect serialise failed: {e}")))
+    }
+
+    // ── Legacy-shim helpers (keep parallel state out of legacy.rs) ─────────
+
+    /// Snapshot all `(cap_id, namespace, capability_md_path, endpoints-as-pb)`
+    /// for the legacy `RobonixRuntime` shim's QueryNodes / QueryAllSkills /
+    /// NegotiateChannel translations. Uses the shared registry state; no copy
+    /// of state lives in legacy.rs.
+    pub async fn snapshot_for_legacy(&self) -> Vec<pb::CapabilityRecord> {
+        self.query("", "", Transport::Unspecified).await
+    }
+
+    /// Same as `unregister` but also returns whether the slot existed —
+    /// here for symmetry with the legacy shim, which uses the boolean to
+    /// decide whether to clean up its skill_md temp file.
+    pub async fn unregister_with_path(
+        &self,
+        cap_id: &str,
+    ) -> (bool, Option<String>) {
+        let cap_id = cap_id.trim();
+        if cap_id.is_empty() {
+            return (false, None);
+        }
+        let mut state = self.inner.write().await;
+        let prior = state.caps.remove(cap_id);
+        let path = prior.as_ref().map(|r| r.capability_md_path.clone());
+        info!(
+            "[atlas] unregister {cap_id} (was_present={})",
+            prior.is_some()
+        );
+        (prior.is_some(), path)
+    }
 }
 
 /// Whether Atlas can mint a fresh endpoint name for this transport without
 /// requiring a prior OS-level bind by the caller. ros2 is a pure-name
-/// address space; grpc and mcp need a host:port that
-/// only the caller can produce.
+/// address space; grpc and mcp need a host:port that only the caller can
+/// produce.
 fn atlas_can_mint(transport: Transport) -> bool {
     matches!(transport, Transport::Ros2)
 }
 
-/// Convert wire-form `pb::TransportParams` into the typed Rust enum and
-/// verify that its `oneof` variant matches the requested `transport`.
+/// Convert wire `pb::TransportParams` into the typed Rust enum and verify
+/// the `oneof` variant matches `transport`.
 fn parse_params(
     transport: Transport,
     params: Option<pb::TransportParams>,
@@ -188,13 +420,10 @@ fn parse_params(
             qos_profile: r.qos_profile,
         },
         Kind::Mcp(m) => {
-            // Validate input_schema_json parses as a JSON object.
             if !m.input_schema_json.is_empty() {
-                let v: serde_json::Value = serde_json::from_str(&m.input_schema_json)
-                    .map_err(|e| {
-                        Status::invalid_argument(format!(
-                            "mcp input_schema_json invalid: {e}"
-                        ))
+                let v: serde_json::Value =
+                    serde_json::from_str(&m.input_schema_json).map_err(|e| {
+                        Status::invalid_argument(format!("mcp input_schema_json invalid: {e}"))
                     })?;
                 if !v.is_object() {
                     return Err(Status::invalid_argument(
@@ -219,262 +448,37 @@ fn parse_params(
 }
 
 fn parse_transport(t: i32) -> Result<Transport, Status> {
-    let v = Transport::try_from(t).map_err(|_| {
-        Status::invalid_argument(format!("transport: unknown enum value {t}"))
-    })?;
+    let v = Transport::try_from(t)
+        .map_err(|_| Status::invalid_argument(format!("transport: unknown enum value {t}")))?;
     if v == Transport::Unspecified {
         return Err(Status::invalid_argument("transport: must not be UNSPECIFIED"));
     }
     Ok(v)
 }
 
-// ── gRPC service ────────────────────────────────────────────────────────────
-
-/// gRPC service implementing the Atlas control plane (see
-/// `rust/proto/atlas.proto`). Stateless wrapper around an `AtlasRegistry`.
-#[derive(Debug)]
-pub struct AtlasService {
-    registry: Arc<AtlasRegistry>,
-}
-
-impl AtlasService {
-    pub fn new(registry: Arc<AtlasRegistry>) -> Self {
-        Self { registry }
-    }
-}
-
-#[tonic::async_trait]
-impl pb::atlas_server::Atlas for AtlasService {
-    async fn register_capability(
-        &self,
-        req: Request<pb::RegisterCapabilityRequest>,
-    ) -> Result<Response<pb::RegisterCapabilityResponse>, Status> {
-        let r = req.into_inner();
-        let cap_id = if r.capability_id.trim().is_empty() {
-            AtlasRegistry::assign_id()
-        } else {
-            r.capability_id.trim().to_string()
-        };
-        let namespace = AtlasRegistry::require("namespace", &r.namespace)?.to_string();
-
-        let mut state = self.registry.inner.write().await;
-        if state.caps.contains_key(&cap_id) {
-            return Err(Status::already_exists(format!(
-                "capability_id '{cap_id}' already registered; Unregister first"
-            )));
-        }
-        state.caps.insert(
-            cap_id.clone(),
-            CapRecord {
-                capability_id: cap_id.clone(),
-                namespace,
-                capability_md_path: r.capability_md_path.trim().to_string(),
-                last_heartbeat_ms: AtlasRegistry::now_ms(),
-                endpoints: Vec::new(),
-            },
-        );
-        info!("[atlas] register {cap_id}");
-        Ok(Response::new(pb::RegisterCapabilityResponse {
-            capability_id: cap_id,
-        }))
-    }
-
-    async fn unregister_capability(
-        &self,
-        req: Request<pb::UnregisterCapabilityRequest>,
-    ) -> Result<Response<pb::UnregisterCapabilityResponse>, Status> {
-        let r = req.into_inner();
-        let cap_id = AtlasRegistry::require("capability_id", &r.capability_id)?.to_string();
-        let mut state = self.registry.inner.write().await;
-        let was_present = state.caps.remove(&cap_id).is_some();
-        info!("[atlas] unregister {cap_id} (was_present={was_present})");
-        Ok(Response::new(pb::UnregisterCapabilityResponse {
-            was_present,
-        }))
-    }
-
-    async fn heartbeat(
-        &self,
-        req: Request<pb::HeartbeatRequest>,
-    ) -> Result<Response<pb::HeartbeatResponse>, Status> {
-        let r = req.into_inner();
-        let cap_id = AtlasRegistry::require("capability_id", &r.capability_id)?.to_string();
-        let now = AtlasRegistry::now_ms();
-        let mut state = self.registry.inner.write().await;
-        let rec = state
-            .caps
-            .get_mut(&cap_id)
-            .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
-        rec.last_heartbeat_ms = now;
-        Ok(Response::new(pb::HeartbeatResponse {}))
-    }
-
-    async fn declare_interface(
-        &self,
-        req: Request<pb::DeclareInterfaceRequest>,
-    ) -> Result<Response<pb::DeclareInterfaceResponse>, Status> {
-        let r = req.into_inner();
-        let cap_id = AtlasRegistry::require("capability_id", &r.capability_id)?.to_string();
-        let contract_id = AtlasRegistry::require("contract_id", &r.contract_id)?.to_string();
-        let transport = parse_transport(r.transport)?;
-        let params = parse_params(transport, r.params)?;
-        let proposed = r.endpoint.trim().to_string();
-
-        let mut state = self.registry.inner.write().await;
-
-        // Cap must exist; contract_id must fall under the cap's namespace.
-        let rec = state
-            .caps
-            .get(&cap_id)
-            .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
-        if !contract_id.starts_with(&rec.namespace) {
-            return Err(Status::invalid_argument(format!(
-                "contract_id '{contract_id}' is not under namespace '{}' of capability '{cap_id}'",
-                rec.namespace
-            )));
-        }
-        if rec
-            .endpoints
-            .iter()
-            .any(|e| e.contract_id == contract_id && e.transport == transport)
-        {
-            return Err(Status::already_exists(format!(
-                "({contract_id}, {transport:?}) already declared by {cap_id}"
-            )));
-        }
-
-        let endpoint = resolve_endpoint(&state, transport, &proposed, &contract_id)?;
-
-        // Lock guard hasn't been dropped since the read above; ok_or_else
-        // here is defensive against future refactors that split the lock.
-        let rec = state
-            .caps
-            .get_mut(&cap_id)
-            .ok_or_else(|| Status::internal("capability vanished mid-declare"))?;
-        rec.endpoints.push(EndpointRec {
-            contract_id: contract_id.clone(),
-            transport,
-            endpoint: endpoint.clone(),
-            params,
-        });
-        info!(
-            "[atlas] declare {cap_id} {contract_id} via {transport:?} -> {endpoint}"
-        );
-        Ok(Response::new(pb::DeclareInterfaceResponse { endpoint }))
-    }
-
-    async fn query_capabilities(
-        &self,
-        req: Request<pb::QueryCapabilitiesRequest>,
-    ) -> Result<Response<pb::QueryCapabilitiesResponse>, Status> {
-        let r = req.into_inner();
-        let f_cap_id = r.capability_id.trim();
-        let f_contract = r.contract_id.trim();
-        let f_transport = Transport::try_from(r.transport)
-            .ok()
-            .filter(|&t| t != Transport::Unspecified);
-
-        let state = self.registry.inner.read().await;
-        let mut records = Vec::new();
-        for rec in state.caps.values() {
-            if !f_cap_id.is_empty() && rec.capability_id != f_cap_id {
-                continue;
-            }
-            // contract_id filter applies to the endpoints list — the set
-            // of contracts a cap currently offers is `{e.contract_id ∈ endpoints}`.
-            if !f_contract.is_empty()
-                && !rec.endpoints.iter().any(|e| e.contract_id == f_contract)
-            {
-                continue;
-            }
-            let endpoints: Vec<pb::InterfaceEndpoint> = rec
-                .endpoints
-                .iter()
-                .filter(|e| {
-                    (f_contract.is_empty() || e.contract_id == f_contract)
-                        && f_transport.is_none_or(|t| e.transport == t)
-                })
-                .map(Into::into)
-                .collect();
-            records.push(pb::CapabilityRecord {
-                capability_id: rec.capability_id.clone(),
-                namespace: rec.namespace.clone(),
-                capability_md_path: rec.capability_md_path.clone(),
-                last_heartbeat_ms: rec.last_heartbeat_ms,
-                endpoints,
-            });
-        }
-        Ok(Response::new(pb::QueryCapabilitiesResponse { records }))
-    }
-
-    async fn query_capability_md(
-        &self,
-        req: Request<pb::QueryCapabilityMdRequest>,
-    ) -> Result<Response<pb::QueryCapabilityMdResponse>, Status> {
-        let r = req.into_inner();
-        let cap_id = AtlasRegistry::require("capability_id", &r.capability_id)?.to_string();
-
-        // Snapshot path under the read lock, then drop it before doing
-        // (potentially blocking) filesystem I/O.
-        let path = {
-            let state = self.registry.inner.read().await;
-            let rec = state
-                .caps
-                .get(&cap_id)
-                .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
-            rec.capability_md_path.clone()
-        };
-
-        if path.is_empty() {
-            return Ok(Response::new(pb::QueryCapabilityMdResponse {
-                capability_md: String::new(),
-            }));
-        }
-        match tokio::fs::read_to_string(&path).await {
-            Ok(capability_md) => Ok(Response::new(pb::QueryCapabilityMdResponse {
-                capability_md,
-            })),
-            Err(e) => {
-                warn!("[atlas] {cap_id}: read CAPABILITY.md '{path}' failed: {e}");
-                Err(Status::internal(format!(
-                    "failed to read CAPABILITY.md for {cap_id}: {e}"
-                )))
-            }
-        }
-    }
-
-    async fn inspect_atlas(
-        &self,
-        _req: Request<pb::InspectAtlasRequest>,
-    ) -> Result<Response<pb::InspectAtlasResponse>, Status> {
-        let state = self.registry.inner.read().await;
-        let json = serde_json::to_string_pretty(&*state)
-            .map_err(|e| Status::internal(format!("inspect serialise failed: {e}")))?;
-        Ok(Response::new(pb::InspectAtlasResponse { json }))
-    }
-}
-
-/// Pick a globally-unique endpoint for (transport, proposed) per the rules
-/// documented on `DeclareInterfaceRequest` in atlas.proto.
+/// Pick a globally-unique endpoint per the rules on `DeclareInterfaceRequest`.
 ///
-///   - empty proposal + mintable transport       → mint "/rbnx/<dotted>/<uuid8>"
-///   - empty proposal + non-mintable transport   → InvalidArgument
-///   - non-empty + no collision                  → use as-is
-///   - non-empty + collision + mintable          → "<proposed>~<uuid8>"
-///   - non-empty + collision + non-mintable      → AlreadyExists
+/// "Globally unique" here means: no *other* cap may already own this
+/// `(transport, endpoint)` pair. The cap itself is allowed to expose multiple
+/// contracts on the same endpoint — that's the dominant pattern for MCP
+/// (one MCP server URL hosts many tools) and a legitimate one for gRPC
+/// (one tonic Server with multiple services). The per-cap
+/// `(contract_id, transport)` uniqueness check happens earlier in `declare`.
 fn resolve_endpoint(
     state: &State,
     transport: Transport,
     proposed: &str,
     contract_id: &str,
+    own_cap_id: &str,
 ) -> Result<String, Status> {
     let mintable = atlas_can_mint(transport);
-
     let collides = |s: &str| -> bool {
-        state.caps.values().any(|rec| {
-            rec.endpoints
-                .iter()
-                .any(|e| e.transport == transport && e.endpoint == s)
+        state.caps.iter().any(|(other_id, rec)| {
+            other_id != own_cap_id
+                && rec
+                    .endpoints
+                    .iter()
+                    .any(|e| e.transport == transport && e.endpoint == s)
         })
     };
     let short_uuid = || -> String {
@@ -510,14 +514,12 @@ fn resolve_endpoint(
     if !collides(proposed) {
         return Ok(proposed.to_string());
     }
-
     if !mintable {
         return Err(Status::already_exists(format!(
             "endpoint '{proposed}' already registered on transport '{transport:?}'; \
              pick a new address (rebind a different port / use a different name) and retry"
         )));
     }
-
     for _ in 0..MINT_ATTEMPTS {
         let candidate = format!("{proposed}~{}", short_uuid());
         if !collides(&candidate) {
@@ -531,21 +533,102 @@ fn resolve_endpoint(
     )))
 }
 
+// ── gRPC service (thin facade over AtlasRegistry) ──────────────────────────
+
+#[derive(Debug)]
+pub struct AtlasService {
+    registry: Arc<AtlasRegistry>,
+}
+
+impl AtlasService {
+    pub fn new(registry: Arc<AtlasRegistry>) -> Self {
+        Self { registry }
+    }
+}
+
+#[tonic::async_trait]
+impl pb::atlas_server::Atlas for AtlasService {
+    async fn register_capability(
+        &self,
+        req: Request<pb::RegisterCapabilityRequest>,
+    ) -> Result<Response<pb::RegisterCapabilityResponse>, Status> {
+        let r = req.into_inner();
+        let capability_id = self
+            .registry
+            .register(&r.capability_id, &r.namespace, &r.capability_md_path)
+            .await?;
+        Ok(Response::new(pb::RegisterCapabilityResponse { capability_id }))
+    }
+
+    async fn unregister_capability(
+        &self,
+        req: Request<pb::UnregisterCapabilityRequest>,
+    ) -> Result<Response<pb::UnregisterCapabilityResponse>, Status> {
+        let r = req.into_inner();
+        let was_present = self.registry.unregister(&r.capability_id).await;
+        Ok(Response::new(pb::UnregisterCapabilityResponse { was_present }))
+    }
+
+    async fn heartbeat(
+        &self,
+        req: Request<pb::HeartbeatRequest>,
+    ) -> Result<Response<pb::HeartbeatResponse>, Status> {
+        let r = req.into_inner();
+        self.registry.heartbeat(&r.capability_id).await?;
+        Ok(Response::new(pb::HeartbeatResponse {}))
+    }
+
+    async fn declare_interface(
+        &self,
+        req: Request<pb::DeclareInterfaceRequest>,
+    ) -> Result<Response<pb::DeclareInterfaceResponse>, Status> {
+        let r = req.into_inner();
+        let transport = parse_transport(r.transport)?;
+        let endpoint = self
+            .registry
+            .declare(
+                &r.capability_id,
+                &r.contract_id,
+                transport,
+                &r.endpoint,
+                r.params.unwrap_or_default(),
+            )
+            .await?;
+        Ok(Response::new(pb::DeclareInterfaceResponse { endpoint }))
+    }
+
+    async fn query_capabilities(
+        &self,
+        req: Request<pb::QueryCapabilitiesRequest>,
+    ) -> Result<Response<pb::QueryCapabilitiesResponse>, Status> {
+        let r = req.into_inner();
+        let transport = Transport::try_from(r.transport).unwrap_or(Transport::Unspecified);
+        let records = self
+            .registry
+            .query(&r.capability_id, &r.contract_id, transport)
+            .await;
+        Ok(Response::new(pb::QueryCapabilitiesResponse { records }))
+    }
+
+    async fn query_capability_md(
+        &self,
+        req: Request<pb::QueryCapabilityMdRequest>,
+    ) -> Result<Response<pb::QueryCapabilityMdResponse>, Status> {
+        let r = req.into_inner();
+        let capability_md = self.registry.capability_md(&r.capability_id).await?;
+        Ok(Response::new(pb::QueryCapabilityMdResponse { capability_md }))
+    }
+
+    async fn inspect_atlas(
+        &self,
+        _req: Request<pb::InspectAtlasRequest>,
+    ) -> Result<Response<pb::InspectAtlasResponse>, Status> {
+        let json = self.registry.inspect_json().await?;
+        Ok(Response::new(pb::InspectAtlasResponse { json }))
+    }
+}
+
 // ── Heartbeat eviction ──────────────────────────────────────────────────────
-//
-// `RegisterCapability` keeps a cap in the registry until either Unregister
-// is called OR its heartbeat lapses past the eviction threshold. The proto
-// promises this; without an eviction task the registry would only shrink
-// on explicit Unregister, leaking entries from crashed/disconnected caps.
-//
-// Tunables (env, read once at serve_atlas startup):
-//   ROBONIX_ATLAS_HEARTBEAT_TIMEOUT_MS  default 60000 (0 disables eviction)
-//   ROBONIX_ATLAS_EVICTION_INTERVAL_MS  default 10000 (sweep cadence)
-//
-// Eviction is non-monotonic: a cap that comes back and re-registers under
-// the same id reuses the slot. Stale entries between crash and re-register
-// remain visible to consumers — they should still tolerate `connect_to_*`
-// failures and retry.
 
 const DEFAULT_HEARTBEAT_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_EVICTION_INTERVAL_MS: u64 = 10_000;
@@ -557,16 +640,13 @@ fn read_env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// Run the eviction loop until cancelled. `timeout_ms == 0` skips the loop
-/// entirely — useful for tests and dev where caps may legitimately go silent.
 async fn eviction_loop(registry: Arc<AtlasRegistry>, timeout_ms: u64, interval_ms: u64) {
     if timeout_ms == 0 {
         info!("[atlas] heartbeat eviction disabled (timeout=0)");
         return;
     }
     info!(
-        "[atlas] heartbeat eviction: timeout={}ms interval={}ms",
-        timeout_ms, interval_ms
+        "[atlas] heartbeat eviction: timeout={timeout_ms}ms interval={interval_ms}ms"
     );
     let interval = std::time::Duration::from_millis(interval_ms);
     loop {
@@ -581,10 +661,7 @@ async fn eviction_loop(registry: Arc<AtlasRegistry>, timeout_ms: u64, interval_m
             .collect();
         for id in &evicted {
             state.caps.remove(id);
-            warn!(
-                "[atlas] evicted '{id}' (heartbeat lapsed > {}ms)",
-                timeout_ms
-            );
+            warn!("[atlas] evicted '{id}' (heartbeat lapsed > {timeout_ms}ms)");
         }
     }
 }
@@ -592,17 +669,21 @@ async fn eviction_loop(registry: Arc<AtlasRegistry>, timeout_ms: u64, interval_m
 // ── Server entrypoint ───────────────────────────────────────────────────────
 
 /// Start the Atlas gRPC server on `listen` using the given registry.
-/// Spawns a background heartbeat-eviction task; both tasks block until
-/// the gRPC server stops or returns an error.
+/// Spawns a background heartbeat-eviction task and exposes BOTH the new
+/// `Atlas` service and the deprecated `RobonixRuntime` shim on the same
+/// gRPC port.
 pub async fn serve_atlas(registry: Arc<AtlasRegistry>, listen: SocketAddr) -> Result<()> {
     let timeout_ms = read_env_u64("ROBONIX_ATLAS_HEARTBEAT_TIMEOUT_MS", DEFAULT_HEARTBEAT_TIMEOUT_MS);
     let interval_ms = read_env_u64("ROBONIX_ATLAS_EVICTION_INTERVAL_MS", DEFAULT_EVICTION_INTERVAL_MS);
     let _eviction_task = tokio::spawn(eviction_loop(Arc::clone(&registry), timeout_ms, interval_ms));
 
-    let svc = AtlasService::new(registry);
-    info!("[atlas] gRPC listening on {listen}");
+    let svc = AtlasService::new(Arc::clone(&registry));
+    let legacy = crate::legacy::LegacyRuntimeService::new(Arc::clone(&registry));
+
+    info!("[atlas] gRPC listening on {listen} (Atlas + legacy RobonixRuntime)");
     tonic::transport::Server::builder()
         .add_service(pb::atlas_server::AtlasServer::new(svc))
+        .add_service(crate::legacy_pb::robonix_runtime_server::RobonixRuntimeServer::new(legacy))
         .serve(listen)
         .await
         .context("Atlas server failed")?;
