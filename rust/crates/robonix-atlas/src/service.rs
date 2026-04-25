@@ -68,7 +68,6 @@ enum TransportParamsRec {
         method: String,
     },
     Ros2 {
-        is_service: bool,
         qos_profile: String,
     },
     Mcp {
@@ -100,11 +99,7 @@ impl From<&TransportParamsRec> for pb::TransportParams {
                 service_name: service_name.clone(),
                 method: method.clone(),
             }),
-            TransportParamsRec::Ros2 {
-                is_service,
-                qos_profile,
-            } => Kind::Ros2(pb::Ros2Params {
-                is_service: *is_service,
+            TransportParamsRec::Ros2 { qos_profile } => Kind::Ros2(pb::Ros2Params {
                 qos_profile: qos_profile.clone(),
             }),
             TransportParamsRec::Mcp {
@@ -238,7 +233,6 @@ fn parse_params(
             method: g.method,
         },
         Kind::Ros2(r) => TransportParamsRec::Ros2 {
-            is_service: r.is_service,
             qos_profile: r.qos_profile,
         },
         Kind::Mcp(m) => {
@@ -445,8 +439,8 @@ impl pb::atlas_server::Atlas for AtlasService {
         req: Request<pb::QueryCapabilitiesRequest>,
     ) -> Result<Response<pb::QueryCapabilitiesResponse>, Status> {
         let r = req.into_inner();
+        let f_cap_id = r.capability_id.trim();
         let f_contract = r.contract_id.trim();
-        let f_namespace = r.namespace.trim();
         let f_transport = Transport::try_from(r.transport)
             .ok()
             .filter(|&t| t != Transport::Unspecified);
@@ -454,7 +448,7 @@ impl pb::atlas_server::Atlas for AtlasService {
         let state = self.registry.inner.read().await;
         let mut records = Vec::new();
         for rec in state.caps.values() {
-            if !f_namespace.is_empty() && !rec.namespace.starts_with(f_namespace) {
+            if !f_cap_id.is_empty() && rec.capability_id != f_cap_id {
                 continue;
             }
             if !f_contract.is_empty()
