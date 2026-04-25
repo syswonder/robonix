@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+# Robonix system service: long-term memory MCP provider.
+#
+# uv-managed: `uv sync` (called from scripts/build.sh) materialises a
+# local .build/venv/ from this file + uv.lock. No requirements.txt.
+
+[project]
+name = "robonix-system-memory"
+version = "0.1.0"
+description = "Memsearch MCP server — fact/preference memory for the agent."
+requires-python = ">=3.10"
+dependencies = [
+    # Pin NumPy 1.x: pandas via pymilvus needs >=1.26; some downstream
+    # consumers haven't migrated off NumPy 1.x.
+    "numpy>=1.26,<2",
+    "mcp",
+    "fastmcp",
+    "memsearch[onnx]",
+    "grpcio",
+    "grpcio-tools",
+    "protobuf",
+    "uvicorn",
+    "robonix-py",
+]
+
+# This package is the service itself; `uv sync` only needs to install
+# dependencies into a venv, not build/install memsearch_service as a
+# wheel. `package = false` skips the build-backend dance.
+[tool.uv]
+package = false
+
+# Resolved through the workspace at the repo root (see /pyproject.toml).
+# No `path = "../../pylib/..."` here — that would break if pylib/ moves.
+[tool.uv.sources]
+robonix-py = { workspace = true }
