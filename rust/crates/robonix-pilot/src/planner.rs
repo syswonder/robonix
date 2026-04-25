@@ -1,43 +1,37 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// planner.rs — VLM-driven ReAct loop (core Pilot logic)
+// VLM-driven ReAct loop (core Pilot logic).
 //
 // One call to `run_turn` handles a single user turn:
-//   1. Build system prompt (SOUL.md + skill index).
+//   1. Build system prompt (optional SOUL.md + operating principles).
 //   1b. Proactively call search_memory via Executor; inject results into system prompt.
 //   2. Add user message to history.
 //   3. Loop: fetch tools → VLM call → tool calls → TaskGraph → Executor → feed results back.
 //   4. Stream PilotEvents to the Liaison caller via `tx`.
-//
-// The task graph is incremental: each VLM round produces one `TaskGraph` wire message (v1: linear
-// `TaskCall[]`; TODO: behavior tree + RTDL, see `TaskGraph.msg`).
-// Pilot does NOT pre-plan a full graph — it reasons step by step.
 
-use crate::contracts::{
-    srv_executor_client::SrvExecutorClient,
-    srv_executor_list_tools_client::SrvExecutorListToolsClient,
+use crate::pb::contracts::{
+    system_executor_client::SystemExecutorClient,
+    system_executor_list_tools_client::SystemExecutorListToolsClient,
 };
-use crate::executor::ListToolsRequest;
-use crate::pilot::{
+use crate::pb::executor::ListToolsRequest;
+use crate::pb::pilot::{
     BatchResult, PilotEvent, SessionStatusEvent, Task, TaskCall, TaskCallResult, TaskGraph,
     ToolRouting,
 };
-use crate::pilot_wire::{self, PilotStreamBody};
-use crate::session::Session;
-use crate::session_state::SessionState;
-use crate::skills;
+use crate::service::{self, PilotStreamBody, SessionState};
 use crate::vlm::{Message, ToolDef, VlmClient, VlmStreamItem};
 use anyhow::Result;
-use robonix_sdk::RobonixClient;
-use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc::Sender, watch};
+use futures_util::StreamExt;
+use std::path::PathBuf;
+use tokio::sync::{mpsc::Sender, watch};
 use tonic::Request;
 use tonic::transport::Channel;
 use uuid::Uuid;
 
-/// gRPC clients for Executor contract services (`SrvExecutor`, `SrvExecutorListTools`).
+/// gRPC clients for Executor contract services (`SystemExecutor`,
+/// `SystemExecutorListTools`).
 pub struct ExecutorConn {
-    pub graph: SrvExecutorClient<Channel>,
-    pub list_tools: SrvExecutorListToolsClient<Channel>,
+    pub graph: SystemExecutorClient<Channel>,
+    pub list_tools: SystemExecutorListToolsClient<Channel>,
 }
 
 // ── Hard limits ───────────────────────────────────────────────────────────────
@@ -76,13 +70,15 @@ fn skip_memory_prefetch(user_text: &str) -> bool {
 
 // ── Public entry-point ────────────────────────────────────────────────────────
 
-/// Run one user turn. Streams PilotEvents into `tx`; completes when the VLM
-/// decides it is done or the round limit is reached.
+/// Drive one user turn: build prompt, run the ReAct loop, stream events.
+///
+/// `history` is the running LLM conversation (one Vec per logical chat
+/// thread, keyed by `task.session_id` at the call site). It's mutated in
+/// place across rounds so subsequent turns see prior tool calls/results.
 pub async fn run_turn(
     task: &Task,
-    session: &mut Session,
-    sdk: &Arc<Mutex<RobonixClient>>,
-    vlm: &Arc<Mutex<VlmClient>>,
+    history: &mut Vec<Message>,
+    vlm: &VlmClient,
     executor: &mut ExecutorConn,
     tx: &Sender<Result<PilotEvent, tonic::Status>>,
     mut cancel_rx: watch::Receiver<bool>,
@@ -93,7 +89,7 @@ pub async fn run_turn(
     macro_rules! return_interrupted {
         () => {{
             let _ = tx
-                .send(Ok(pilot_wire::pack(
+                .send(Ok(service::pack(
                     &session_id,
                     PilotStreamBody::Status(SessionStatusEvent {
                         session_id: session_id.clone(),
@@ -110,7 +106,7 @@ pub async fn run_turn(
         log::info!("[pilot] session_end: invoking compact_memory if available");
         try_compact_memory(executor).await;
         let _ = tx
-            .send(Ok(pilot_wire::pack(
+            .send(Ok(service::pack(
                 &session_id,
                 PilotStreamBody::Status(SessionStatusEvent {
                     session_id: session_id.clone(),
@@ -122,15 +118,8 @@ pub async fn run_turn(
         return Ok(());
     }
 
-    // ── 1. Build system prompt (once per turn — skills don't change mid-turn) ─
-    let soul = skills::load_agent_soul();
-    let merged_skills = {
-        let mut sdk = sdk.lock().await;
-        skills::load_merged_skills(&mut sdk)
-            .await
-            .unwrap_or_default()
-    };
-    let base_prompt = skills::build_system_prompt(soul.as_deref(), &merged_skills);
+    // ── 1. Build system prompt (once per turn) ────────────────────────────────
+    let base_prompt = build_system_prompt(load_agent_soul().as_deref());
 
     // Tool catalogue (needed before prefetch so MCP tools get correct routing — never dispatch as
     // unknown builtins when `TaskCall.routing` is missing).
@@ -161,8 +150,8 @@ pub async fn run_turn(
     };
 
     // ── 2. Add user message to history ────────────────────────────────────────
-    session.history.push(Message::user(&task.text));
-    trim_history(&mut session.history, MAX_HISTORY);
+    history.push(Message::user(&task.text));
+    trim_history(history, MAX_HISTORY);
 
     let max_rounds = max_tool_rounds();
     let mut round: u32 = 0;
@@ -200,9 +189,8 @@ pub async fn run_turn(
             .collect();
 
         let mut messages = vec![Message::system(&system_prompt)];
-        messages.extend(sanitize_history_for_vlm(&session.history));
+        messages.extend(sanitize_history_for_vlm(&history));
 
-        let mut vlm = vlm.lock().await;
         let (content, raw_tool_calls) = {
             let mut stream = vlm
                 .chat_stream(&messages, &tool_defs)
@@ -218,17 +206,17 @@ pub async fn run_turn(
                     // Cancel takes priority — checked before every new VLM token.
                     _ = cancel_rx.changed() => {
                         drop(stream);
-                        drop(vlm);
                         return_interrupted!();
                     }
-                    msg = stream.message() => {
-                        let event = match msg.map_err(|e| anyhow::anyhow!("VLM stream recv: {e}"))? {
-                            Some(e) => e,
+                    item = stream.next() => {
+                        let item = match item {
+                            Some(Ok(it)) => it,
+                            Some(Err(e)) => return Err(anyhow::anyhow!("VLM stream recv: {e:#}")),
                             None => break,
                         };
-                        match VlmClient::parse_stream_event(event) {
+                        match item {
                             VlmStreamItem::TextDelta(delta) => {
-                                let _ = tx.send(Ok(pilot_wire::pack(
+                                let _ = tx.send(Ok(service::pack(
                                     &session_id,
                                     PilotStreamBody::TextChunk(delta.clone()),
                                 ))).await;
@@ -250,16 +238,15 @@ pub async fn run_turn(
             };
             (content, tool_calls)
         };
-        drop(vlm); // release lock before async Executor call
 
         // No tool calls → VLM is done.
         if raw_tool_calls.is_empty() {
             let final_text = content.unwrap_or_default();
             if !final_text.is_empty() {
-                session.history.push(Message::assistant(&final_text));
+                history.push(Message::assistant(&final_text));
             }
             let _ = tx
-                .send(Ok(pilot_wire::pack(
+                .send(Ok(service::pack(
                     &session_id,
                     PilotStreamBody::FinalText(final_text),
                 )))
@@ -268,9 +255,7 @@ pub async fn run_turn(
         }
 
         // Push assistant message with tool calls into history.
-        session
-            .history
-            .push(Message::assistant_tool_calls(raw_tool_calls.clone()));
+        history.push(Message::assistant_tool_calls(raw_tool_calls.clone()));
 
         // ── 5. Build TaskGraph (v1: linear list of calls) ─────────────────────
         let graph_id = Uuid::new_v4().to_string();
@@ -293,7 +278,7 @@ pub async fn run_turn(
 
         // Notify Liaison about the outgoing task graph slice.
         let _ = tx
-            .send(Ok(pilot_wire::pack(
+            .send(Ok(service::pack(
                 &session_id,
                 PilotStreamBody::TaskGraph(graph.clone()),
             )))
@@ -351,17 +336,17 @@ pub async fn run_turn(
         for r in &results {
             if r.success {
                 let mapped = tool_result_to_messages(&r.call_id, &r.output);
-                session.history.extend(mapped.tool_messages);
+                history.extend(mapped.tool_messages);
                 deferred_followups.extend(mapped.followup_messages);
             } else {
-                session.history.push(Message::tool_result(
+                history.push(Message::tool_result(
                     &r.call_id,
                     &format!("error: {}", r.error),
                 ));
             }
         }
-        session.history.extend(deferred_followups);
-        trim_history(&mut session.history, MAX_HISTORY);
+        history.extend(deferred_followups);
+        trim_history(history, MAX_HISTORY);
 
         // Emit BatchResult to Liaison.
         let any_failed = results.iter().any(|r| !r.success);
@@ -373,7 +358,7 @@ pub async fn run_turn(
             any_failed,
         };
         let _ = tx
-            .send(Ok(pilot_wire::pack(
+            .send(Ok(service::pack(
                 &session_id,
                 PilotStreamBody::BatchResult(batch_result),
             )))
@@ -390,9 +375,8 @@ pub async fn run_turn(
     }
 
     // ── 8. Mark turn complete ─────────────────────────────────────────────────
-    session.turn_count += 1;
     let _ = tx
-        .send(Ok(pilot_wire::pack(
+        .send(Ok(service::pack(
             &session_id,
             PilotStreamBody::Status(SessionStatusEvent {
                 session_id: session_id.clone(),
@@ -631,10 +615,62 @@ async fn try_compact_memory(executor: &mut ExecutorConn) {
     }
 }
 
+// ── System prompt + SOUL ──────────────────────────────────────────────────────
+// Optional `SOUL.md` (agent personality) is read from `$ROBONIX_PILOT_SOUL`,
+// then `~/.robonix/SOUL.md`. There is no skill index — skill caps surface as
+// regular tools through `executor.list_tools`, with descriptions sourced from
+// each cap's CAPABILITY.md.
+
+fn load_agent_soul() -> Option<String> {
+    if let Ok(p) = std::env::var("ROBONIX_PILOT_SOUL") {
+        let p = p.trim();
+        if !p.is_empty() {
+            return std::fs::read_to_string(p).ok();
+        }
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let soul = home.join(".robonix").join("SOUL.md");
+    if soul.is_file() {
+        return std::fs::read_to_string(soul).ok();
+    }
+    None
+}
+
+fn build_system_prompt(soul: Option<&str>) -> String {
+    let mut p = String::new();
+    if let Some(s) = soul {
+        let t = s.trim();
+        if !t.is_empty() {
+            p.push_str("## Agent SOUL\n\n");
+            p.push_str(t);
+            p.push_str("\n\n---\n\n");
+        }
+    }
+    p.push_str(
+        "\
+You are the Robonix Pilot — the reasoning and planning component of a robot system.
+You receive requests from a user or higher-level system and translate them into actions
+by calling the tools available to you.
+
+## Operating principles
+- ACT immediately using your tools. Do not ask the user to run things themselves.
+- Execute all necessary steps before replying.
+- Each tool call you make is dispatched to the Executor runtime, which handles the
+  actual robot hardware or service call.
+- Do NOT claim missing capabilities unless verified from current tools/results.
+  - If `search_memory` / `save_memory` / `compact_memory` tools are available, treat
+    long-term memory as available via those tools.
+- Prefer structured output; report tool results concisely.
+- If a tool returns an error, diagnose and retry, or report to the user.
+",
+    );
+    p
+}
+
 #[cfg(test)]
 mod tests {
     use super::{skip_memory_prefetch, task_is_session_end};
-    use crate::pilot::Task;
+    use crate::pb::pilot::Task;
 
     fn task(ctx: &str) -> Task {
         Task {
