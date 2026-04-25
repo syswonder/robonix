@@ -1,0 +1,32 @@
+# ROS2 camera bridge node — relays env_node gRPC camera frames to ROS2 topics.
+# Includes zenoh-bridge-ros2dds for cross-machine transport.
+FROM ros:humble-ros-base
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3-pip \
+      python3-rclpy \
+      ros-humble-sensor-msgs \
+      ros-humble-cv-bridge \
+      ros-humble-rmw-cyclonedx-cpp \
+      curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python gRPC + protobuf
+RUN pip3 install --no-cache-dir grpcio grpcio-tools protobuf
+
+# zenoh-bridge-ros2dds (Eclipse Zenoh)
+RUN curl -sSL https://raw.githubusercontent.com/eclipse-zenoh/zenoh-bridge-ros2dds/main/zenoh-bridge-ros2dds-install.sh \
+      | bash -s -- --version 1.3.3 2>/dev/null \
+    || (echo "[bridge] zenoh install script unavailable, will try apt/cargo at runtime" && true)
+
+COPY entrypoint_ros2bridge.sh /entrypoint.sh
+COPY ros2_camera_bridge.py    /ros2_camera_bridge.py
+
+# proto stubs are bind-mounted at runtime
+ENV PYTHONPATH=/proto_gen
+
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

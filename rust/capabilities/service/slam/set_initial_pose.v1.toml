@@ -1,0 +1,12 @@
+# Set initial pose hint for SLAM relocalization.
+[contract]
+id      = "robonix/service/slam/set_initial_pose"
+version = "1"
+kind    = "service"
+
+[io.srv]
+srv = "slam/srv/SetInitialPose"
+
+[mode]
+type = "rpc"
+
