@@ -27,7 +27,6 @@ pub mod pb {
 struct CapabilityInterfaceRec {
     name: String,
     contract_id: String,
-    description: String,
     capability_md_path: String,
     metadata_json: String,
 }
@@ -37,7 +36,6 @@ impl From<pb::CapabilityInterface> for CapabilityInterfaceRec {
         Self {
             name: c.name,
             contract_id: c.contract_id,
-            description: c.description,
             capability_md_path: c.capability_md_path,
             metadata_json: c.metadata_json,
         }
@@ -49,7 +47,6 @@ impl From<&CapabilityInterfaceRec> for pb::CapabilityInterface {
         Self {
             name: c.name.clone(),
             contract_id: c.contract_id.clone(),
-            description: c.description.clone(),
             capability_md_path: c.capability_md_path.clone(),
             metadata_json: c.metadata_json.clone(),
         }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Author: wheatfox <wheatfox17@icloud.com>
 syntax = "proto3";
 package robonix.atlas;
 
@@ -27,14 +29,15 @@ package robonix.atlas;
 
 
 // One capability interface — a single contract_id offered by a capability
-// instance, described by the package's CAPABILITY.md frontmatter.
-// `capability_md_path` is read on demand for the full markdown.
+// instance. The full description lives in the package's CAPABILITY.md;
+// this message just gives Atlas the path to read it on demand. NO
+// duplicated description text: CAPABILITY.md is the single source of
+// truth, callers (e.g. VLM prompt builders) read it directly.
 message CapabilityInterface {
-  string name = 1;            // local leaf name (snake_case), e.g. "move", "odom", "rgb"
-  string contract_id = 2;     // stable full path, e.g. "robonix/primitive/base/move"
-  string description = 3;     // one-liner for VLM prompt
-  string capability_md_path = 4;  // absolute path to CAPABILITY.md (read on demand)
-  string metadata_json = 5;   // free-form, e.g. {"disable_model_invocation": true}
+  string name = 1;            // good to use the leaf name of contract but we can use any name (snake_case), e.g. "move", "odom", "rgb"
+  string contract_id = 2;     // stable full path, e.g. "robonix/primitive/base/move", this MUST be the actually existing contract_id in system
+  string capability_md_path = 3;  // absolute path to CAPABILITY.md (read on demand)
+  string metadata_json = 4;   // free-form, e.g. {"disable_model_invocation": true}
 }
 
 // Register a capability instance. Instance lives until either Unregister
