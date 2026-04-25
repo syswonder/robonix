@@ -83,8 +83,12 @@ pub struct PilotConfig {
 pub struct RuntimePackageEntry {
     /// Fully-qualified package name (e.g. "com.realsense.rs_driver").
     pub package: String,
-    /// Local path (relative to project root) or git URL.
-    pub path: String,
+    /// Local path relative to project root (e.g. "./primitives/my_driver"). Optional.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Git URL for auto-clone when the package is not found locally. Optional.
+    #[serde(default)]
+    pub url: Option<String>,
     /// Instance name (e.g. "external_cam", "slam").
     pub name: String,
     /// Runtime parameters passed to the package.
@@ -104,6 +108,89 @@ pub fn load_runtime_config(path: &Path) -> Result<RuntimeConfig> {
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(cfg)
 }
+
+// ════════════════════════════════════════════════════════════════
+// Package path resolution (shared by deploy & build)
+// ════════════════════════════════════════════════════════════════
+
+/// Resolve the local filesystem path of a package declared in the runtime config.
+///
+/// Resolution order:
+/// 1. If `entry.path` is set and starts with `./` or `../` — resolve relative to `project_root`.
+/// 2. Look in `<project_root>/<role_dir>/<short_name>`.
+/// 3. If not found and `entry.url` is set — git clone into `<project_root>/<role_dir>/<short_name>`.
+/// 4. Otherwise — error.
+pub fn resolve_package_path(
+    project_root: &Path,
+    role_dir: &str,
+    entry: &RuntimePackageEntry,
+) -> Result<PathBuf> {
+    // 1. Explicit local path.
+    if let Some(ref path_str) = entry.path {
+        if path_str.starts_with("./") || path_str.starts_with("../") {
+            let resolved = project_root.join(path_str);
+            if resolved.exists() {
+                return Ok(resolved.canonicalize().unwrap_or(resolved));
+            }
+            anyhow::bail!(
+                "package '{}' local path '{}' not found (resolved to {})",
+                entry.name,
+                path_str,
+                resolved.display()
+            );
+        }
+    }
+
+    // 2. Convention: <project_root>/<role_dir>/<short_name>
+    let short_name = entry.package.rsplit('.').next().unwrap_or(&entry.package);
+    let candidate = project_root.join(role_dir).join(short_name);
+    if candidate.exists() {
+        return Ok(candidate.canonicalize().unwrap_or(candidate));
+    }
+
+    // 3. Auto git-clone if url is provided.
+    if let Some(ref url) = entry.url {
+        crate::output::step("Cloning", &format!("{} from {}", entry.name, url));
+        let clone_url = normalize_git_url(url);
+        git2::build::RepoBuilder::new()
+            .clone(&clone_url, &candidate)
+            .with_context(|| {
+                format!(
+                    "failed to clone '{}' to {}",
+                    url,
+                    candidate.display()
+                )
+            })?;
+        crate::output::check(&format!(
+            "{} cloned to {}",
+            entry.name,
+            candidate.display()
+        ));
+        return Ok(candidate);
+    }
+
+    // 4. Nothing found.
+    anyhow::bail!(
+        "package '{}' not found at {} and no url specified for auto-clone",
+        entry.name,
+        candidate.display(),
+    )
+}
+
+/// Normalize a git URL: bare `user/repo` → `https://github.com/user/repo.git`.
+fn normalize_git_url(url: &str) -> String {
+    let s = url.trim().trim_end_matches('/');
+    if s.starts_with("http://") || s.starts_with("https://") || s.starts_with("git@") {
+        return s.to_string();
+    }
+    if s.contains('/') && !s.contains(' ') {
+        return format!("https://github.com/{}.git", s.trim_end_matches(".git"));
+    }
+    s.to_string()
+}
+
+/// Build stamp file name within a project's `_build/` directory.
+pub const BUILD_STAMP_DIR: &str = "_build";
 
 /// Walk up from `base_dir` looking for `robonix_manifest.yaml` (the project root).
 pub fn find_project_root(base_dir: &Path) -> Result<PathBuf> {

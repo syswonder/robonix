@@ -44,6 +44,15 @@ pub async fn execute(config_path: &Path) -> Result<()> {
 
     let mut children: Vec<(String, Child)> = Vec::new();
 
+    // ── Pre-check: has the project been built? ─────────────────────
+    let stamp_file = project_root.join(workspace::BUILD_STAMP_DIR).join(".built");
+    if !stamp_file.exists() {
+        output::warning(
+            "no build stamp found — packages may not have been built yet. \
+             Consider running 'rbnx build --all' first.",
+        );
+    }
+
     // ── Step 1: Start system core components ───────────────────────
     output::action("Step 1/4", "Starting system components");
     start_system(&config.system, &global_env, &mut children).await?;
@@ -65,7 +74,7 @@ pub async fn execute(config_path: &Path) -> Result<()> {
     // ── Step 4: Register skills (on-demand, not started) ───────────
     output::action("Step 4/4", &format!("Registering {} skill(s)", config.skills.len()));
     for entry in &config.skills {
-        match resolve_package_path(&project_root, "skills", entry) {
+        match workspace::resolve_package_path(&project_root, "skills", entry) {
             Ok(pkg_path) => {
                 output::sub_step(&format!(
                     "skill '{}' available at {}",
@@ -254,44 +263,6 @@ fn detect_rust_root(env: &HashMap<String, String>) -> Result<PathBuf> {
 // Package resolution & startup
 // ════════════════════════════════════════════════════════════════════
 
-/// Resolve the local filesystem path of a package declared in the runtime config.
-fn resolve_package_path(
-    project_root: &Path,
-    role_dir: &str, // "primitives", "services", "skills"
-    entry: &RuntimePackageEntry,
-) -> Result<PathBuf> {
-    let path_str = &entry.path;
-
-    // Local relative path (starts with ./ or ../).
-    if path_str.starts_with("./") || path_str.starts_with("../") {
-        let resolved = project_root.join(path_str);
-        if resolved.exists() {
-            return Ok(resolved.canonicalize().unwrap_or(resolved));
-        }
-        anyhow::bail!(
-            "package '{}' local path '{}' not found (resolved to {})",
-            entry.name,
-            path_str,
-            resolved.display()
-        );
-    }
-
-    // Git URL or bare name — look in the role directory.
-    let short_name = entry.package.rsplit('.').next().unwrap_or(&entry.package);
-    let candidate = project_root.join(role_dir).join(short_name);
-    if candidate.exists() {
-        return Ok(candidate.canonicalize().unwrap_or(candidate));
-    }
-
-    // TODO (stage 4): auto git-clone when path is a URL.
-    anyhow::bail!(
-        "package '{}' not found at {} (path: {})",
-        entry.name,
-        candidate.display(),
-        path_str
-    )
-}
-
 /// Resolve paths and topologically sort entries within one layer (primitives/services/skills)
 /// based on the `depends` field in each package's `package_manifest.yaml`.
 fn resolve_and_sort_entries<'a>(
@@ -311,7 +282,7 @@ fn resolve_and_sort_entries<'a>(
     }
     let mut resolved: Vec<Resolved<'a>> = Vec::with_capacity(entries.len());
     for entry in entries {
-        let pkg_path = resolve_package_path(project_root, role_dir, entry)?;
+        let pkg_path = workspace::resolve_package_path(project_root, role_dir, entry)?;
         let detected = manifest::detect_and_load(&pkg_path)?;
         let depends: Vec<String> = detected
             .manifest

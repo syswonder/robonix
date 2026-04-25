@@ -4,6 +4,7 @@
 use anyhow::{Context, Result};
 use robonix_cli::manifest;
 use robonix_cli::output;
+use robonix_cli::workspace;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -91,12 +92,104 @@ pub async fn execute_local(path: PathBuf, clean: bool) -> Result<()> {
     Ok(())
 }
 
-/// Build all packages declared in a robonix_manifest.yaml.
-pub async fn execute_all(config_path: PathBuf, _clean: bool) -> Result<()> {
+/// Build all packages declared in a robonix_manifest.yaml, in dependency order.
+pub async fn execute_all(config_path: PathBuf, clean: bool) -> Result<()> {
+    let config_path = if config_path.is_absolute() {
+        config_path
+    } else {
+        std::env::current_dir()?.join(&config_path)
+    };
+    if !config_path.exists() {
+        anyhow::bail!("{} not found", config_path.display());
+    }
+
+    let config = workspace::load_runtime_config(&config_path)?;
+    let project_root = config_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+
     output::action(
         "Build",
-        &format!("all packages from {}", config_path.display()),
+        &format!("all packages from '{}' ({})", config.name, config_path.display()),
     );
-    output::warning("multi-package build not yet implemented (WIP)");
+
+    // Collect all packages across layers.
+    let all_entries: Vec<(&str, &workspace::RuntimePackageEntry)> = config
+        .primitives
+        .iter()
+        .map(|e| ("primitives", e))
+        .chain(config.services.iter().map(|e| ("services", e)))
+        .chain(config.skills.iter().map(|e| ("skills", e)))
+        .collect();
+
+    if all_entries.is_empty() {
+        output::warning("no packages declared in manifest");
+        return Ok(());
+    }
+
+    // Resolve paths and load manifests.
+    struct Resolved<'a> {
+        pkg_path: PathBuf,
+        entry: &'a workspace::RuntimePackageEntry,
+        manifest: manifest::Manifest,
+        depends: Vec<String>,
+    }
+    let mut resolved: Vec<Resolved> = Vec::with_capacity(all_entries.len());
+    for (role_dir, entry) in &all_entries {
+        let pkg_path = workspace::resolve_package_path(&project_root, role_dir, entry)?;
+        let detected = manifest::detect_and_load(&pkg_path)?;
+        let depends: Vec<String> = detected
+            .manifest
+            .depends
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
+        resolved.push(Resolved {
+            pkg_path,
+            entry,
+            manifest: detected.manifest,
+            depends,
+        });
+    }
+
+    // Topological sort using package name as key.
+    let topo_input: Vec<(&str, &[String])> = resolved
+        .iter()
+        .map(|r| (r.entry.package.as_str(), r.depends.as_slice()))
+        .collect();
+    let order = workspace::topo_sort(&topo_input)?;
+
+    let order_names: Vec<&str> = order
+        .iter()
+        .map(|&i| resolved[i].entry.name.as_str())
+        .collect();
+    output::step("Build order", &order_names.join(" → "));
+
+    // Build each package in order.
+    let total = order.len();
+    let mut succeeded = 0usize;
+    for (step_num, &idx) in order.iter().enumerate() {
+        let r = &resolved[idx];
+        output::action(
+            &format!("[{}/{}]", step_num + 1, total),
+            &format!("Building {}", r.entry.name),
+        );
+        build_local(&r.pkg_path, &r.manifest, clean)?;
+        succeeded += 1;
+    }
+
+    output::success(&format!(
+        "Build complete — {}/{} package(s) built",
+        succeeded, total
+    ));
+
+    // Write project-level build stamp so `rbnx deploy` can check.
+    let stamp_dir = project_root.join(workspace::BUILD_STAMP_DIR);
+    fs::create_dir_all(&stamp_dir)?;
+    let stamp_file = stamp_dir.join(".built");
+    fs::write(&stamp_file, format!("{} packages built\n", succeeded))?;
+    output::sub_step(&format!("build stamp written to {}", stamp_file.display()));
+
     Ok(())
 }

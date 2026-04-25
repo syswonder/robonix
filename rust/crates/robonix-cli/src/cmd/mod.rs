@@ -238,12 +238,14 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             config: manifest_config,
             clean,
         } => {
-            if all {
+            if all || manifest_config.is_some() {
+                // --all or -c: multi-package build from robonix_manifest.yaml
                 let cfg_path = manifest_config.unwrap_or_else(|| {
                     PathBuf::from(robonix_cli::workspace::RUNTIME_MANIFEST_FILE)
                 });
                 build::execute_all(cfg_path, clean).await
             } else {
+                // -p or -g: single-package build
                 run_package::execute_build(config, path, global, clean).await
             }
         }
