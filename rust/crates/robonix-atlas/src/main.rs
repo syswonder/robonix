@@ -22,7 +22,7 @@ async fn main() {
         std::env::var("ROBONIX_META_GRPC_ENDPOINT").unwrap_or_else(|_| grpc_addr.clone());
     let registry = Arc::new(AtlasRegistry::default());
 
-    info!("meta runtime gRPC on {}", grpc_addr);
+    info!("atlas gRPC on {}", grpc_addr);
 
     if let Err(e) = serve_atlas(registry, grpc_listen_addr, grpc_advertised_endpoint).await {
         eprintln!("robonix-atlas error: {e:?}");
