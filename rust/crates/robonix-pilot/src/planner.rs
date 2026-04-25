@@ -8,6 +8,8 @@
 //   3. Loop: fetch tools → VLM call → tool calls → TaskGraph → Executor → feed results back.
 //   4. Stream PilotEvents to the Liaison caller via `tx`.
 
+use crate::history;
+use crate::memory;
 use crate::pb::contracts::{
     system_executor_client::SystemExecutorClient,
     system_executor_list_tools_client::SystemExecutorListToolsClient,
@@ -104,7 +106,7 @@ pub async fn run_turn(
 
     if task_is_session_end(task) {
         log::info!("[pilot] session_end: invoking compact_memory if available");
-        try_compact_memory(executor).await;
+        memory::try_compact(executor).await;
         let _ = tx
             .send(Ok(service::pack(
                 &session_id,
@@ -141,7 +143,7 @@ pub async fn run_turn(
     let system_prompt = if skip_memory_prefetch(&task.text) {
         base_prompt
     } else {
-        match prefetch_memory(&task.text, executor, search_memory_routing).await {
+        match memory::prefetch(&task.text, executor, search_memory_routing).await {
             Some(mem) => format!(
                 "{base_prompt}\n\n## Relevant past memories (System Context)\n\n{mem}\n\n---\n\n"
             ),
@@ -151,7 +153,7 @@ pub async fn run_turn(
 
     // ── 2. Add user message to history ────────────────────────────────────────
     history.push(Message::user(&task.text));
-    trim_history(history, MAX_HISTORY);
+    history::trim(history, MAX_HISTORY);
 
     let max_rounds = max_tool_rounds();
     let mut round: u32 = 0;
@@ -189,7 +191,7 @@ pub async fn run_turn(
             .collect();
 
         let mut messages = vec![Message::system(&system_prompt)];
-        messages.extend(sanitize_history_for_vlm(&history));
+        messages.extend(history::sanitize_for_vlm(&history));
 
         let (content, raw_tool_calls) = {
             let mut stream = vlm
@@ -225,7 +227,7 @@ pub async fn run_turn(
                             VlmStreamItem::ToolCall(tc) => {
                                 tool_calls.push(tc);
                             }
-                            VlmStreamItem::Finish(_) => {}
+                            VlmStreamItem::Finish => {}
                         }
                     }
                 }
@@ -335,7 +337,7 @@ pub async fn run_turn(
         let mut deferred_followups: Vec<Message> = Vec::new();
         for r in &results {
             if r.success {
-                let mapped = tool_result_to_messages(&r.call_id, &r.output);
+                let mapped = history::tool_result_to_messages(&r.call_id, &r.output);
                 history.extend(mapped.tool_messages);
                 deferred_followups.extend(mapped.followup_messages);
             } else {
@@ -346,7 +348,7 @@ pub async fn run_turn(
             }
         }
         history.extend(deferred_followups);
-        trim_history(history, MAX_HISTORY);
+        history::trim(history, MAX_HISTORY);
 
         // Emit BatchResult to Liaison.
         let any_failed = results.iter().any(|r| !r.success);
@@ -387,232 +389,6 @@ pub async fn run_turn(
         .await;
 
     Ok(())
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Map executor tool output to VLM history messages.
-///
-/// OpenAI-compatible VLM endpoints reject `image_url` content on `tool` role
-/// messages. When a tool returns an image, keep the tool result textual and
-/// append a synthetic `user` vision message that carries the image.
-struct ToolResultHistory {
-    tool_messages: Vec<Message>,
-    followup_messages: Vec<Message>,
-}
-
-fn tool_result_to_messages(call_id: &str, output: &str) -> ToolResultHistory {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(output) else {
-        return ToolResultHistory {
-            tool_messages: vec![Message::tool_result(call_id, output)],
-            followup_messages: vec![],
-        };
-    };
-
-    if let Some(b64) = v.get("image_base64").and_then(|x| x.as_str()) {
-        let fmt = v.get("format").and_then(|x| x.as_str()).unwrap_or("jpeg");
-        return ToolResultHistory {
-            tool_messages: vec![Message::tool_result(
-                call_id,
-                &format!("[{fmt} image attached]"),
-            )],
-            followup_messages: vec![Message::user_with_image(
-                "Tool returned an image. Analyze this image together with the tool result above.",
-                b64.to_string(),
-            )],
-        };
-    }
-
-    // sensor_msgs/msg/Image — matches e.g. camera_snapshot / camera_depth_snapshot MCP tools.
-    // Skip images with encoding="error" — these are error placeholders, not real images.
-    let img_encoding = v.get("encoding").and_then(|e| e.as_str());
-    if v.get("width").is_some()
-        && v.get("height").is_some()
-        && img_encoding.is_some()
-        && img_encoding != Some("error")
-        && v.get("data")
-            .and_then(|d| d.as_str())
-            .is_some_and(|s| !s.is_empty())
-    {
-        let enc = img_encoding.unwrap_or("jpeg");
-        let b64 = v.get("data").and_then(|d| d.as_str()).unwrap_or("");
-        return ToolResultHistory {
-            tool_messages: vec![Message::tool_result(
-                call_id,
-                &format!("[sensor_msgs/Image encoding={enc}]"),
-            )],
-            followup_messages: vec![Message::user_with_image(
-                "Tool returned an image. Analyze this image together with the tool result above.",
-                b64.to_string(),
-            )],
-        };
-    }
-
-    ToolResultHistory {
-        tool_messages: vec![Message::tool_result(call_id, output)],
-        followup_messages: vec![],
-    }
-}
-
-fn trim_history(history: &mut Vec<Message>, max: usize) {
-    if history.len() > max {
-        let remove = history.len() - max;
-        history.drain(0..remove);
-    }
-}
-
-fn sanitize_history_for_vlm(history: &[Message]) -> Vec<Message> {
-    let mut out: Vec<Message> = Vec::with_capacity(history.len());
-    let mut open_tool_call_ids: std::collections::HashSet<String> = Default::default();
-
-    for msg in history {
-        match msg.role.as_str() {
-            "assistant" => {
-                if let Some(calls) = &msg.tool_calls {
-                    open_tool_call_ids.clear();
-                    for tc in calls {
-                        open_tool_call_ids.insert(tc.id.clone());
-                    }
-                } else {
-                    open_tool_call_ids.clear();
-                }
-                out.push(msg.clone());
-            }
-            "tool" => {
-                let Some(call_id) = msg.tool_call_id.as_ref() else {
-                    continue;
-                };
-                if open_tool_call_ids.remove(call_id) {
-                    out.push(msg.clone());
-                }
-            }
-            _ => {
-                open_tool_call_ids.clear();
-                out.push(msg.clone());
-            }
-        }
-    }
-
-    out
-}
-
-/// Extract `std_msgs/String.data` from tool output.
-/// Accepts either raw text or JSON object payload: {"data": "..."}.
-fn decode_string_output(output: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(output)
-        .ok()
-        .and_then(|v| {
-            v.get("data")
-                .and_then(|x| x.as_str())
-                .map(ToString::to_string)
-        })
-        .unwrap_or_else(|| output.to_string())
-}
-
-/// Dispatch a single `search_memory` call to the Executor and return the
-/// result text.  Returns `None` if the tool is not registered, the index is
-/// empty, or any error occurs — the caller should never fail because of
-/// missing memory context.
-async fn prefetch_memory(
-    query: &str,
-    executor: &mut ExecutorConn,
-    routing: Option<ToolRouting>,
-) -> Option<String> {
-    let routing = routing?;
-
-    const EX_RESULT: u32 = 1;
-
-    let graph = TaskGraph {
-        graph_id: Uuid::new_v4().to_string(),
-        session_id: "memory-prefetch".to_string(),
-        round: 0,
-        calls: vec![TaskCall {
-            call_id: Uuid::new_v4().to_string(),
-            tool_name: "search_memory".to_string(),
-            // Contract-aligned MCP input uses std_msgs/String.data.
-            args_json: serde_json::json!({ "data": query }).to_string(),
-            routing: Some(routing),
-        }],
-    };
-
-    let mut stream = executor
-        .graph
-        .stream(Request::new(graph))
-        .await
-        .ok()?
-        .into_inner();
-    while let Ok(Some(event)) = stream.message().await {
-        if event.event_kind == EX_RESULT
-            && let Some(r) = event.result
-        {
-            let out = decode_string_output(&r.output);
-            if r.success && !out.contains("No relevant memories") && !out.is_empty() {
-                log::debug!("[pilot] memory prefetch: {}", out);
-                return Some(out);
-            }
-            return None;
-        }
-    }
-    None
-}
-
-/// Best-effort MCP `compact_memory` (session teardown). Ignores failures (tool may be absent).
-async fn try_compact_memory(executor: &mut ExecutorConn) {
-    let tools = match executor
-        .list_tools
-        .call(Request::new(ListToolsRequest { refresh: false }))
-        .await
-    {
-        Ok(r) => r.into_inner().tools,
-        Err(e) => {
-            log::debug!("[pilot] compact_memory: list_tools failed: {e}");
-            return;
-        }
-    };
-    let Some(routing) = tools
-        .iter()
-        .find(|t| t.tool_name == "compact_memory")
-        .and_then(|t| t.routing.clone())
-    else {
-        return;
-    };
-
-    const EX_RESULT: u32 = 1;
-
-    let graph = TaskGraph {
-        graph_id: Uuid::new_v4().to_string(),
-        session_id: "memory-compact".to_string(),
-        round: 0,
-        calls: vec![TaskCall {
-            call_id: Uuid::new_v4().to_string(),
-            tool_name: "compact_memory".to_string(),
-            // Contract-aligned MCP input uses std_msgs/Empty (empty object payload).
-            args_json: "{}".to_string(),
-            routing: Some(routing),
-        }],
-    };
-
-    let Ok(mut stream) = executor
-        .graph
-        .stream(Request::new(graph))
-        .await
-        .map(|r| r.into_inner())
-    else {
-        return;
-    };
-    while let Ok(Some(event)) = stream.message().await {
-        if event.event_kind == EX_RESULT {
-            if let Some(r) = event.result {
-                let out = decode_string_output(&r.output);
-                if r.success {
-                    log::debug!("[pilot] compact_memory: {}", out);
-                } else {
-                    log::debug!("[pilot] compact_memory failed: {}", out);
-                }
-            }
-            return;
-        }
-    }
 }
 
 // ── System prompt + SOUL ──────────────────────────────────────────────────────

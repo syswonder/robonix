@@ -189,18 +189,17 @@ impl AtlasClient {
 
 /// "Find a cap offering this contract over gRPC, then connect to it."
 ///
-/// The bread-and-butter discovery primitive — every consumer that wants to
-/// call a Robonix gRPC interface goes through this. Returns the matched
-/// `capability_id` and a connected `Channel` ready for stub construction.
-///
-/// Selection policy when multiple caps match: longest-namespace-wins (most
-/// specific provider). Override by passing `capability_id` filter through
-/// `AtlasClient::query_capabilities` directly when you need exact targeting.
+/// Returns the matched `capability_id` and a connected `Channel` ready for
+/// stub construction. Picks the first record Atlas returns and logs a
+/// warning if multiple caps offer the same contract — Atlas does not
+/// guarantee an order, so callers that need deterministic selection must
+/// call `query_capabilities` directly and apply their own policy
+/// (`capability_id` filter, load-aware tiebreak, etc.).
 pub async fn connect_to_capability(
     atlas: &mut AtlasClient,
     contract_id: &str,
 ) -> Result<(String, Channel)> {
-    let mut records = atlas
+    let records = atlas
         .query_capabilities("", contract_id, pb::Transport::Grpc)
         .await?;
     if records.is_empty() {
@@ -209,15 +208,13 @@ pub async fn connect_to_capability(
              registered caps may not have declared this interface yet"
         );
     }
-    // Most specific provider wins (longest namespace).
-    records.sort_by(|a, b| b.namespace.len().cmp(&a.namespace.len()));
     if records.len() > 1 {
         log::warn!(
             "[atlas-client] {} caps offer '{contract_id}' over gRPC; \
-             picking '{}' (namespace='{}')",
+             picking first ('{}'). Use query_capabilities + cap_id filter for \
+             deterministic selection.",
             records.len(),
             records[0].capability_id,
-            records[0].namespace
         );
     }
     let cap = records.into_iter().next().expect("non-empty checked above");
