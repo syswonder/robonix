@@ -309,7 +309,9 @@ impl legacy::robonix_runtime_server::RobonixRuntime for LegacyRuntimeService {
     ) -> Result<Response<legacy::ReleaseChannelResponse>, Status> {
         let r = req.into_inner();
         let was_open = self.registry.disconnect(&r.channel_id).await;
-        Ok(Response::new(legacy::ReleaseChannelResponse { ok: was_open }))
+        Ok(Response::new(legacy::ReleaseChannelResponse {
+            ok: was_open,
+        }))
     }
 
     // ── Skill markdown ──────────────────────────────────────────────────────

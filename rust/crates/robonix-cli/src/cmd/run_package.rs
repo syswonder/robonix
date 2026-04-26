@@ -170,9 +170,7 @@ pub async fn execute_start(
     let mut env = std::collections::HashMap::new();
     env.insert("ROBONIX_ATLAS".to_string(), endpoint.clone());
 
-    if !manifest.build.trim().is_empty()
-        && !build::build_stamp_path(&package_root).exists()
-    {
+    if !manifest.build.trim().is_empty() && !build::build_stamp_path(&package_root).exists() {
         output::sub_step("No rbnx-build/.rbnx-built — running package build first");
         build::build_local_package(&package_root, false)?;
     }

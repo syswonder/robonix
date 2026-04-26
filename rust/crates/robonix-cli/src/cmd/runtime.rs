@@ -10,7 +10,7 @@
 //   channels   → InspectAtlas (channels live in the JSON dump now)
 //   inspect    → InspectAtlas (raw JSON)
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 const MIGRATION_NOTE: &str = "this command is temporarily disabled during the \
                               sdk → atlas-client migration. Use `atlas` gRPC \

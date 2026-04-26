@@ -221,10 +221,9 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             global,
             clean,
         } => run_package::execute_build(config, path, global, clean).await,
-        Commands::Start {
-            package,
-            endpoint,
-        } => run_package::execute_start(&config, package.as_deref(), endpoint.as_deref()).await,
+        Commands::Start { package, endpoint } => {
+            run_package::execute_start(&config, package.as_deref(), endpoint.as_deref()).await
+        }
         Commands::Deploy {
             file,
             log_dir,

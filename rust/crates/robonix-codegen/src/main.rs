@@ -66,9 +66,9 @@ fn main() -> Result<()> {
 
     match args.lang.as_str() {
         "proto" | "mcp" => {}
-        other => bail!(
-            "[robonix-codegen] unsupported --lang '{other}'. Supported: 'proto', 'mcp'."
-        ),
+        other => {
+            bail!("[robonix-codegen] unsupported --lang '{other}'. Supported: 'proto', 'mcp'.")
+        }
     }
 
     if verbose {

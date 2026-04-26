@@ -139,9 +139,7 @@ pub fn detect_manifest_path(package_root: &Path) -> Result<PathBuf> {
     if legacy.exists() {
         return Ok(legacy);
     }
-    anyhow::bail!(
-        "Package does not have {MANIFEST_FILE} (or legacy {LEGACY_MANIFEST_FILE})"
-    )
+    anyhow::bail!("Package does not have {MANIFEST_FILE} (or legacy {LEGACY_MANIFEST_FILE})")
 }
 
 pub fn detect_and_load(package_root: &Path) -> Result<DetectedManifest> {

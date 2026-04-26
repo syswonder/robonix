@@ -182,8 +182,7 @@ impl State {
     /// channel records. Returns the number of channels dropped.
     fn drop_channels_of(&mut self, cap_id: &str) -> usize {
         let before = self.channels.len();
-        self.channels
-            .retain(|_, ch| ch.provider_cap_id != cap_id);
+        self.channels.retain(|_, ch| ch.provider_cap_id != cap_id);
         before - self.channels.len()
     }
 }

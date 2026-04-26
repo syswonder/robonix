@@ -28,7 +28,10 @@ pub async fn execute(path: Option<PathBuf>) -> Result<()> {
     output::check(&format!("Package: {} {}", summary.name, summary.version));
 
     if !summary.capabilities.is_empty() {
-        output::sub_step(&format!("Capabilities: {}", summary.capabilities.join(", ")));
+        output::sub_step(&format!(
+            "Capabilities: {}",
+            summary.capabilities.join(", ")
+        ));
     }
     if !summary.depends.is_empty() {
         output::sub_step(&format!("Depends: {}", summary.depends.join(", ")));
