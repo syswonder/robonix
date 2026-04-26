@@ -19,11 +19,14 @@ use tonic::{Request, Response, Status};
 #[derive(Clone)]
 pub struct ExecutorServiceImpl {
     atlas: AtlasClient,
+    /// Executor's own cap_id; passed to atlas as `consumer_id` whenever
+    /// load_tools opens channels to MCP-providing caps.
+    cap_id: String,
 }
 
 impl ExecutorServiceImpl {
-    pub fn new(atlas: AtlasClient) -> Self {
-        Self { atlas }
+    pub fn new(atlas: AtlasClient, cap_id: String) -> Self {
+        Self { atlas, cap_id }
     }
 }
 
@@ -38,11 +41,12 @@ impl SystemExecutor for ExecutorServiceImpl {
         let graph = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let mut atlas = self.atlas.clone();
+        let cap_id = self.cap_id.clone();
 
         tokio::spawn(async move {
             // Re-discover tools at the top of every Stream RPC so caps that
             // registered after pilot's last list_tools call are visible.
-            let routing_map = match tools::load_tools(&mut atlas).await {
+            let routing_map = match tools::load_tools(&mut atlas, &cap_id).await {
                 Ok(list) => tools::routing_map(&list),
                 Err(e) => {
                     log::warn!("failed to load tools: {e:#}");
@@ -100,7 +104,7 @@ impl SystemExecutorListTools for ExecutorServiceImpl {
     ) -> Result<Response<ListToolsResponse>, Status> {
         let _refresh = request.into_inner().refresh;
         let mut atlas = self.atlas.clone();
-        let tool_list = tools::load_tools(&mut atlas)
+        let tool_list = tools::load_tools(&mut atlas, &self.cap_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 

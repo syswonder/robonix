@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: MulanPSL-2.0
+// Author: wheatfox <wheatfox17@icloud.com>
+// 
 // Atlas client-side helpers shared by every Robonix component that talks to
 // Atlas (pilot, executor, cli, system services, …).
 //
 // Two layers:
 //   * `AtlasClient` — thin wrapper over the generated stub with retry-able
 //     connect and one helper per Atlas RPC. Use this for register / declare /
-//     query / heartbeat / unregister.
-//   * `connect_to_capability` — opinionated "find one cap by contract +
-//     transport, open a tonic Channel to its endpoint" combo. The bread-and-
-//     butter call site for every consumer.
+//     query / heartbeat / connect / disconnect / unregister.
+//   * `connect_to_capability` — gRPC-only convenience: pick the first cap
+//     offering the contract, call `ConnectCapability` to record the edge,
+//     dial the returned host:port, and hand back a tonic Channel + the
+//     channel_id (so the caller can DisconnectCapability on shutdown).
+//     For ROS 2 / MCP consumers, call `ConnectCapability` directly and
+//     dial yourself — atlas can't dial generically across transports.
 //
 // All helpers return `anyhow::Error` wrapping the underlying `tonic::Status`
 // so callers can attach context with `.with_context(...)`.
@@ -173,6 +178,51 @@ impl AtlasClient {
         Ok(())
     }
 
+    /// Open a channel to one cap's interface. Atlas records the
+    /// consumer→provider edge and returns the binding. Caller dials the
+    /// returned `endpoint` themselves using whatever transport-appropriate
+    /// mechanism (tonic for grpc, rclrs for ros2, fastmcp for mcp, …).
+    /// Returns `(channel_id, endpoint, params)`.
+    pub async fn connect_capability(
+        &mut self,
+        consumer_id: &str,
+        capability_id: &str,
+        contract_id: &str,
+        transport: pb::Transport,
+    ) -> Result<(String, String, pb::TransportParams)> {
+        let resp = self
+            .inner
+            .connect_capability(pb::ConnectCapabilityRequest {
+                consumer_id: consumer_id.to_string(),
+                capability_id: capability_id.to_string(),
+                contract_id: contract_id.to_string(),
+                transport: transport as i32,
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "ConnectCapability consumer='{consumer_id}' provider='{capability_id}' \
+                     contract='{contract_id}' transport={transport:?}"
+                )
+            })?;
+        let r = resp.into_inner();
+        Ok((r.channel_id, r.endpoint, r.params.unwrap_or_default()))
+    }
+
+    /// Release a previously-opened channel. Idempotent: returns `false` when
+    /// the channel_id was unknown (already released, or auto-dropped because
+    /// the provider unregistered / was evicted).
+    pub async fn disconnect_capability(&mut self, channel_id: &str) -> Result<bool> {
+        let resp = self
+            .inner
+            .disconnect_capability(pb::DisconnectCapabilityRequest {
+                channel_id: channel_id.to_string(),
+            })
+            .await
+            .with_context(|| format!("DisconnectCapability '{channel_id}'"))?;
+        Ok(resp.into_inner().was_open)
+    }
+
     /// Unregister. Returns `true` if a record was removed, `false` if the
     /// id was unknown (idempotent caller-side semantics).
     pub async fn unregister_capability(&mut self, capability_id: &str) -> Result<bool> {
@@ -187,18 +237,24 @@ impl AtlasClient {
     }
 }
 
-/// "Find a cap offering this contract over gRPC, then connect to it."
+/// gRPC-only convenience: pick the first cap offering `contract_id` over
+/// gRPC, call `ConnectCapability` to register the edge, dial the returned
+/// host:port, and hand back the bookkeeping handle + tonic Channel.
 ///
-/// Returns the matched `capability_id` and a connected `Channel` ready for
-/// stub construction. Picks the first record Atlas returns and logs a
-/// warning if multiple caps offer the same contract — Atlas does not
-/// guarantee an order, so callers that need deterministic selection must
-/// call `query_capabilities` directly and apply their own policy
-/// (`capability_id` filter, load-aware tiebreak, etc.).
+/// Returns `(channel_id, capability_id, Channel)`. The caller MUST call
+/// `disconnect_capability(channel_id)` when it's done so atlas can drop
+/// the bookkeeping. If multiple caps offer the contract atlas's order is
+/// unspecified — callers needing deterministic selection should call
+/// `query_capabilities` + `connect_capability` themselves.
+///
+/// Not for ROS 2 / MCP consumers — those transports have their own
+/// connect protocols. Use `AtlasClient::connect_capability` directly and
+/// dial yourself with rclrs / fastmcp / etc.
 pub async fn connect_to_capability(
     atlas: &mut AtlasClient,
+    consumer_id: &str,
     contract_id: &str,
-) -> Result<(String, Channel)> {
+) -> Result<(String, String, Channel)> {
     let records = atlas
         .query_capabilities("", contract_id, pb::Transport::Grpc)
         .await?;
@@ -211,41 +267,29 @@ pub async fn connect_to_capability(
     if records.len() > 1 {
         log::warn!(
             "[atlas-client] {} caps offer '{contract_id}' over gRPC; \
-             picking first ('{}'). Use query_capabilities + cap_id filter for \
-             deterministic selection.",
+             picking first ('{}'). Use query_capabilities + connect_capability \
+             for deterministic selection.",
             records.len(),
             records[0].capability_id,
         );
     }
-    let cap = records.into_iter().next().expect("non-empty checked above");
-    let endpoint_str = cap
-        .endpoints
-        .iter()
-        .find(|e| e.contract_id == contract_id && e.transport == pb::Transport::Grpc as i32)
-        .map(|e| e.endpoint.clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "cap '{}' returned by query has no matching gRPC endpoint for '{contract_id}'",
-                cap.capability_id
-            )
-        })?;
+    let cap_id = records
+        .into_iter()
+        .next()
+        .expect("non-empty checked above")
+        .capability_id;
+    let (channel_id, endpoint_str, _params) = atlas
+        .connect_capability(consumer_id, &cap_id, contract_id, pb::Transport::Grpc)
+        .await?;
     let normalized = normalize_grpc_endpoint(&endpoint_str);
     let channel = Endpoint::new(normalized.clone())
-        .with_context(|| {
-            format!(
-                "invalid endpoint '{}' for cap '{}'",
-                normalized, cap.capability_id
-            )
-        })?
+        .with_context(|| format!("invalid endpoint '{}' for cap '{}'", normalized, cap_id))?
         .connect()
         .await
         .with_context(|| {
-            format!(
-                "connect to cap '{}' at '{}' for contract '{contract_id}'",
-                cap.capability_id, normalized
-            )
+            format!("connect to cap '{cap_id}' at '{normalized}' for contract '{contract_id}'")
         })?;
-    Ok((cap.capability_id, channel))
+    Ok((channel_id, cap_id, channel))
 }
 
 // ── TransportParams constructors ────────────────────────────────────────────

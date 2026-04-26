@@ -229,8 +229,8 @@ impl legacy::robonix_runtime_server::RobonixRuntime for LegacyRuntimeService {
             }
             // name filter (only when contract_id is empty).
             if r.contract_id.is_empty() && !r.name.is_empty() {
-                let matches = rec.endpoints.iter().any(|e| {
-                    e.contract_id
+                let matches = rec.interfaces.iter().any(|m| {
+                    m.contract_id
                         .rsplit_once('/')
                         .map(|(_, leaf)| leaf == r.name)
                         .unwrap_or(false)
@@ -244,19 +244,18 @@ impl legacy::robonix_runtime_server::RobonixRuntime for LegacyRuntimeService {
         Ok(Response::new(legacy::QueryNodesResponse { nodes }))
     }
 
-    // ── Channel negotiation (synthetic; new clients connect directly) ───────
+    // ── Channel negotiation ────────────────────────────────────────────────
+    // Translates to the new `ConnectCapability` / `DisconnectCapability`
+    // calls so legacy callers get the same atlas-side bookkeeping the new
+    // API does (channel record, provider-eviction cleanup).
 
     async fn negotiate_channel(
         &self,
         req: Request<legacy::NegotiateChannelRequest>,
     ) -> Result<Response<legacy::NegotiateChannelResponse>, Status> {
         let r = req.into_inner();
-        warn!(
-            "[atlas-legacy] NegotiateChannel consumer='{}' provider='{}' iface='{}' transport='{}' \
-             — DEPRECATED, new clients connect directly to QueryCapabilities endpoints",
-            r.consumer_id, r.provider_node_id, r.interface_name, r.transport
-        );
-
+        // Legacy interface_name is just the contract_id leaf; resolve it to
+        // the full contract_id by looking at what the provider declared.
         let recs = self
             .registry
             .query(&r.provider_node_id, "", Transport::Unspecified)
@@ -264,28 +263,42 @@ impl legacy::robonix_runtime_server::RobonixRuntime for LegacyRuntimeService {
         let rec = recs.first().ok_or_else(|| {
             Status::not_found(format!("unknown provider_node_id: {}", r.provider_node_id))
         })?;
-
-        let endpoint = rec
-            .endpoints
+        let transport = match r.transport.as_str() {
+            "grpc" => Transport::Grpc,
+            "ros2" => Transport::Ros2,
+            "mcp" => Transport::Mcp,
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "unknown legacy transport '{other}' (expected grpc | ros2 | mcp)"
+                )));
+            }
+        };
+        let contract_id = rec
+            .interfaces
             .iter()
-            .find(|e| {
-                transport_int_to_str(e.transport) == r.transport
-                    && e.contract_id
+            .find(|m| {
+                m.transport == transport as i32
+                    && m.contract_id
                         .rsplit_once('/')
                         .map(|(_, leaf)| leaf == r.interface_name)
                         .unwrap_or(false)
             })
+            .map(|m| m.contract_id.clone())
             .ok_or_else(|| {
                 Status::not_found(format!(
-                    "no endpoint for interface '{}' over '{}' on '{}'",
+                    "no interface '{}' over '{}' on '{}'",
                     r.interface_name, r.transport, r.provider_node_id
                 ))
             })?;
 
+        let (channel_id, endpoint, _params) = self
+            .registry
+            .connect(&r.consumer_id, &r.provider_node_id, &contract_id, transport)
+            .await?;
         Ok(Response::new(legacy::NegotiateChannelResponse {
-            channel_id: Uuid::new_v4().to_string(),
+            channel_id,
             transport: r.transport,
-            endpoint: endpoint.endpoint.clone(),
+            endpoint,
             metadata_json: String::new(),
         }))
     }
@@ -294,11 +307,9 @@ impl legacy::robonix_runtime_server::RobonixRuntime for LegacyRuntimeService {
         &self,
         req: Request<legacy::ReleaseChannelRequest>,
     ) -> Result<Response<legacy::ReleaseChannelResponse>, Status> {
-        warn!(
-            "[atlas-legacy] ReleaseChannel '{}' — DEPRECATED, no-op (Atlas no longer tracks channels)",
-            req.into_inner().channel_id
-        );
-        Ok(Response::new(legacy::ReleaseChannelResponse { ok: true }))
+        let r = req.into_inner();
+        let was_open = self.registry.disconnect(&r.channel_id).await;
+        Ok(Response::new(legacy::ReleaseChannelResponse { ok: was_open }))
     }
 
     // ── Skill markdown ──────────────────────────────────────────────────────
@@ -435,19 +446,19 @@ fn build_legacy_params(transport: Transport, metadata_json: &str) -> pb::Transpo
 }
 
 /// Project a `pb::CapabilityRecord` back into the legacy `NodeInfo` shape.
-/// Endpoints are grouped by `contract_id`; one `InterfaceInfo` per group.
+/// Interfaces are grouped by `contract_id`; one `InterfaceInfo` per group.
 fn record_to_node_info(rec: pb::CapabilityRecord, transport_filter: &str) -> legacy::NodeInfo {
     use std::collections::BTreeMap;
 
     let mut by_contract: BTreeMap<String, Vec<i32>> = BTreeMap::new();
-    for e in &rec.endpoints {
-        if !transport_filter.is_empty() && transport_int_to_str(e.transport) != transport_filter {
+    for m in &rec.interfaces {
+        if !transport_filter.is_empty() && transport_int_to_str(m.transport) != transport_filter {
             continue;
         }
         by_contract
-            .entry(e.contract_id.clone())
+            .entry(m.contract_id.clone())
             .or_default()
-            .push(e.transport);
+            .push(m.transport);
     }
 
     let interfaces: Vec<legacy::InterfaceInfo> = by_contract

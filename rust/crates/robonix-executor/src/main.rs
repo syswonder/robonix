@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
         .await?;
     info!("declared SystemExecutor + SystemExecutorListTools at {advertised}");
 
-    let svc = ExecutorServiceImpl::new(atlas);
+    let svc = ExecutorServiceImpl::new(atlas, cfg.capability_id.clone());
     info!("SystemExecutor gRPC on {listen_addr}");
     eprintln!("robonix-executor ready on {listen_addr}");
 

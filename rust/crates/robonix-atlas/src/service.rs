@@ -94,13 +94,11 @@ fn serialize_transport<S: serde::Serializer>(t: &Transport, ser: S) -> Result<S:
     ser.serialize_str(t.as_str_name())
 }
 
-impl From<&EndpointRec> for pb::InterfaceEndpoint {
+impl From<&EndpointRec> for pb::InterfaceMetadata {
     fn from(e: &EndpointRec) -> Self {
         Self {
             contract_id: e.contract_id.clone(),
             transport: e.transport as i32,
-            endpoint: e.endpoint.clone(),
-            params: Some((&e.params).into()),
         }
     }
 }
@@ -121,7 +119,7 @@ impl From<&CapRecord> for pb::CapabilityRecord {
             namespace: rec.namespace.clone(),
             capability_md_path: rec.capability_md_path.clone(),
             last_heartbeat_ms: rec.last_heartbeat_ms,
-            endpoints: rec.endpoints.iter().map(Into::into).collect(),
+            interfaces: rec.endpoints.iter().map(Into::into).collect(),
             state: rec.state() as i32,
         }
     }
@@ -157,12 +155,38 @@ fn is_driver_contract(contract_id: &str) -> bool {
     contract_id.ends_with("/driver")
 }
 
+/// One open consumer→provider edge. Allocated by `ConnectCapability`,
+/// dropped by `DisconnectCapability` or when the provider unregisters /
+/// is evicted by heartbeat lapse.
+#[derive(Debug, Clone, Serialize)]
+struct ChannelRec {
+    channel_id: String,
+    consumer_id: String,
+    provider_cap_id: String,
+    contract_id: String,
+    #[serde(serialize_with = "serialize_transport")]
+    transport: Transport,
+    endpoint: String,
+    opened_at_ms: u64,
+}
+
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct State {
     caps: HashMap<String, CapRecord>,
+    channels: HashMap<String, ChannelRec>,
 }
 
-// ── Registry ────────────────────────────────────────────────────────────────
+impl State {
+    /// Drop every channel whose provider is `cap_id`. Called from
+    /// unregister / heartbeat eviction so dead providers don't leak
+    /// channel records. Returns the number of channels dropped.
+    fn drop_channels_of(&mut self, cap_id: &str) -> usize {
+        let before = self.channels.len();
+        self.channels
+            .retain(|_, ch| ch.provider_cap_id != cap_id);
+        before - self.channels.len()
+    }
+}
 
 /// In-memory state shared by all gRPC handlers (new + legacy). All ops go
 /// through one of the typed async methods below. `Arc<AtlasRegistry>` is
@@ -227,7 +251,8 @@ impl AtlasRegistry {
     }
 
     /// Idempotent: returns `true` if a record was removed, `false` if the id
-    /// was unknown.
+    /// was unknown. Also drops any channels where this cap was the provider —
+    /// consumers will get NOT_FOUND on their next call and can re-discover.
     pub async fn unregister(&self, cap_id: &str) -> bool {
         let cap_id = cap_id.trim();
         if cap_id.is_empty() {
@@ -235,7 +260,10 @@ impl AtlasRegistry {
         }
         let mut state = self.inner.write().await;
         let was_present = state.caps.remove(cap_id).is_some();
-        info!("[atlas] unregister {cap_id} (was_present={was_present})");
+        let dropped = state.drop_channels_of(cap_id);
+        info!(
+            "[atlas] unregister {cap_id} (was_present={was_present}, channels_dropped={dropped})"
+        );
         was_present
     }
 
@@ -332,7 +360,7 @@ impl AtlasRegistry {
             {
                 continue;
             }
-            let endpoints: Vec<pb::InterfaceEndpoint> = rec
+            let interfaces: Vec<pb::InterfaceMetadata> = rec
                 .endpoints
                 .iter()
                 .filter(|e| {
@@ -347,10 +375,81 @@ impl AtlasRegistry {
                 capability_md_path: rec.capability_md_path.clone(),
                 last_heartbeat_ms: rec.last_heartbeat_ms,
                 state: rec.state() as i32,
-                endpoints,
+                interfaces,
             });
         }
         out
+    }
+
+    /// Open a channel to one (provider cap, contract, transport). Atlas
+    /// only records the edge — the consumer dials the returned endpoint
+    /// itself (each transport has its own connect protocol; atlas can't
+    /// dial generically). Returns the allocated channel handle and the
+    /// full binding the consumer needs.
+    pub async fn connect(
+        &self,
+        consumer_id: &str,
+        provider_cap_id: &str,
+        contract_id: &str,
+        transport: Transport,
+    ) -> Result<(String, String, pb::TransportParams), Status> {
+        let consumer_id = Self::require("consumer_id", consumer_id)?.to_string();
+        let provider_cap_id = Self::require("capability_id", provider_cap_id)?.to_string();
+        let contract_id = Self::require("contract_id", contract_id)?.to_string();
+        if transport == Transport::Unspecified {
+            return Err(Status::invalid_argument(
+                "transport: must not be UNSPECIFIED",
+            ));
+        }
+
+        let mut state = self.inner.write().await;
+        let rec = state.caps.get(&provider_cap_id).ok_or_else(|| {
+            Status::not_found(format!("unknown capability_id: {provider_cap_id}"))
+        })?;
+        let ep = rec
+            .endpoints
+            .iter()
+            .find(|e| e.contract_id == contract_id && e.transport == transport)
+            .ok_or_else(|| {
+                Status::not_found(format!(
+                    "cap '{provider_cap_id}' has not declared ({contract_id}, {transport:?})"
+                ))
+            })?;
+        let endpoint = ep.endpoint.clone();
+        let params: pb::TransportParams = (&ep.params).into();
+
+        let channel_id = format!("ch-{}", Uuid::new_v4().simple());
+        state.channels.insert(
+            channel_id.clone(),
+            ChannelRec {
+                channel_id: channel_id.clone(),
+                consumer_id: consumer_id.clone(),
+                provider_cap_id: provider_cap_id.clone(),
+                contract_id: contract_id.clone(),
+                transport,
+                endpoint: endpoint.clone(),
+                opened_at_ms: Self::now_ms(),
+            },
+        );
+        info!(
+            "[atlas] connect '{consumer_id}' -> '{provider_cap_id}' \
+             {contract_id} via {transport:?} -> {endpoint} ({channel_id})"
+        );
+        Ok((channel_id, endpoint, params))
+    }
+
+    /// Idempotent: returns `true` if a channel was removed, `false` if
+    /// the id was unknown (already released, or auto-dropped when its
+    /// provider went away).
+    pub async fn disconnect(&self, channel_id: &str) -> bool {
+        let channel_id = channel_id.trim();
+        if channel_id.is_empty() {
+            return false;
+        }
+        let mut state = self.inner.write().await;
+        let was_open = state.channels.remove(channel_id).is_some();
+        info!("[atlas] disconnect {channel_id} (was_open={was_open})");
+        was_open
     }
 
     /// Read the cap's CAPABILITY.md content. Returns "" when the cap
@@ -407,8 +506,9 @@ impl AtlasRegistry {
         let mut state = self.inner.write().await;
         let prior = state.caps.remove(cap_id);
         let path = prior.as_ref().map(|r| r.capability_md_path.clone());
+        let dropped = state.drop_channels_of(cap_id);
         info!(
-            "[atlas] unregister {cap_id} (was_present={})",
+            "[atlas] unregister {cap_id} (was_present={}, channels_dropped={dropped})",
             prior.is_some()
         );
         (prior.is_some(), path)
@@ -560,8 +660,6 @@ fn resolve_endpoint(
     )))
 }
 
-// ── gRPC service (thin facade over AtlasRegistry) ──────────────────────────
-
 #[derive(Debug)]
 pub struct AtlasService {
     registry: Arc<AtlasRegistry>,
@@ -652,6 +750,32 @@ impl pb::atlas_server::Atlas for AtlasService {
         }))
     }
 
+    async fn connect_capability(
+        &self,
+        req: Request<pb::ConnectCapabilityRequest>,
+    ) -> Result<Response<pb::ConnectCapabilityResponse>, Status> {
+        let r = req.into_inner();
+        let transport = parse_transport(r.transport)?;
+        let (channel_id, endpoint, params) = self
+            .registry
+            .connect(&r.consumer_id, &r.capability_id, &r.contract_id, transport)
+            .await?;
+        Ok(Response::new(pb::ConnectCapabilityResponse {
+            channel_id,
+            endpoint,
+            params: Some(params),
+        }))
+    }
+
+    async fn disconnect_capability(
+        &self,
+        req: Request<pb::DisconnectCapabilityRequest>,
+    ) -> Result<Response<pb::DisconnectCapabilityResponse>, Status> {
+        let r = req.into_inner();
+        let was_open = self.registry.disconnect(&r.channel_id).await;
+        Ok(Response::new(pb::DisconnectCapabilityResponse { was_open }))
+    }
+
     async fn inspect_atlas(
         &self,
         _req: Request<pb::InspectAtlasRequest>,
@@ -661,10 +785,8 @@ impl pb::atlas_server::Atlas for AtlasService {
     }
 }
 
-// ── Heartbeat eviction ──────────────────────────────────────────────────────
-
-const DEFAULT_HEARTBEAT_TIMEOUT_MS: u64 = 60_000;
-const DEFAULT_EVICTION_INTERVAL_MS: u64 = 10_000;
+const DEFAULT_EVICTION_INTERVAL_MS: u64 = 10_000; // check every 10s
+const DEFAULT_HEARTBEAT_TIMEOUT_MS: u64 = 60_000; // while checking we found some cap dead for 60s then we evict it :(
 
 fn read_env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
@@ -692,12 +814,14 @@ async fn eviction_loop(registry: Arc<AtlasRegistry>, timeout_ms: u64, interval_m
             .collect();
         for id in &evicted {
             state.caps.remove(id);
-            warn!("[atlas] evicted '{id}' (heartbeat lapsed > {timeout_ms}ms)");
+            let dropped = state.drop_channels_of(id);
+            warn!(
+                "[atlas] evicted '{id}' (heartbeat lapsed > {timeout_ms}ms, \
+                 channels_dropped={dropped})"
+            );
         }
     }
 }
-
-// ── Server entrypoint ───────────────────────────────────────────────────────
 
 /// Start the Atlas gRPC server on `listen` using the given registry.
 /// Spawns a background heartbeat-eviction task and exposes BOTH the new
@@ -721,7 +845,7 @@ pub async fn serve_atlas(registry: Arc<AtlasRegistry>, listen: SocketAddr) -> Re
     let svc = AtlasService::new(Arc::clone(&registry));
     let legacy = crate::legacy::LegacyRuntimeService::new(Arc::clone(&registry));
 
-    info!("[atlas] gRPC listening on {listen} (Atlas + legacy RobonixRuntime)");
+    info!("[atlas] gRPC listening on {listen} (Atlas + legacy)");
     tonic::transport::Server::builder()
         .add_service(pb::atlas_server::AtlasServer::new(svc))
         .add_service(crate::legacy_pb::robonix_runtime_server::RobonixRuntimeServer::new(legacy))
