@@ -1,26 +1,23 @@
+manifestVersion: 1
 name: robonix-webots-example-deploy
-
-env:
 
 system:
   atlas:
     listen: 127.0.0.1:50051
+    log:    info
   executor:
     listen: 127.0.0.1:50061
+    atlas:  127.0.0.1:50051
+    log:    info
   pilot:
     listen: 127.0.0.1:50071
-    vlm_service: 127.0.0.1:50091
-  liaison:
-    listen: 127.0.0.1:50081
-  vlm:
-    listen: 127.0.0.1:50091
-    upstream: ${VLM_BASE_URL}
-    api_key:  ${VLM_API_KEY}
-    model:    ${VLM_MODEL}
-    api_format: openai
-  memory:
-    backend: sqlite
-    path: ${HOME}/.robonix/memory.db
+    atlas:  127.0.0.1:50051
+    log:    info
+    vlm:
+      upstream:   ${VLM_BASE_URL}
+      api_key:    ${VLM_API_KEY}
+      model:      ${VLM_MODEL}
+      api_format: openai
 
 primitive: []
 

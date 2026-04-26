@@ -1,23 +1,20 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // `rbnx deploy` — bring up a whole robonix deployment from a top-level
-// `robonix_manifest.yaml`. No shell scripts required: every tunable lives
-// in the manifest, each package declares its own `start` body, and the
-// config block per entry flows through as `RBNX_CAP_CONFIG_JSON`.
+// `robonix_manifest.yaml`.
 //
-// What this does, in order:
-//   1. Parse the deployment manifest (env expansion on scalar strings).
-//   2. Launch `system:` components (atlas, executor, pilot, liaison, vlm,
-//      memory) via `cargo run -p <binary>` from the robonix source tree.
-//      Skipped when `--skip-system` is passed or the section is empty.
-//   3. For each entry in `primitive`/`service`/`skill`, spawn `rbnx start
-//      -p <path>` in a subprocess with the entry's `config:` block in
-//      `RBNX_CAP_CONFIG_JSON`.
-//   4. Redirect every child's stdout/stderr to `<log_dir>/<component>.log`.
-//   5. Block on SIGINT/SIGTERM; propagate to all children and wait.
+// Conventions:
+//   - `system:` Rust binaries (atlas / pilot / executor) are launched with
+//     CLI arguments translated from the manifest block (`--listen`,
+//     `--log`, `--vlm-*`, …). No env-var translation, no YAML config files.
+//   - Package entries (`primitive` / `service`) are launched via
+//     `rbnx start -p <path>`. Their `config:` block is JSON-encoded and
+//     handed to the package's `start` body via `RBNX_CONFIG_FILE`.
+//   - `skill:` entries are NOT started at deploy time — the executor
+//     invokes them on demand. We just log them so the user can see they
+//     were registered with the manifest.
 //
-// Deliberately simple — no crash-restart, no health checks, no dependency
-// ordering beyond `sleep 1.5` between boots. A proper supervisor is P3
-// work; this is the "rbnx deploy == one-shot bring-up" foundation.
+// Out of scope: crash-restart, health checks, dependency ordering beyond
+// `sleep 1.5` between boots.
 
 use anyhow::{Context, Result};
 use robonix_cli::output;
@@ -190,8 +187,7 @@ async fn spawn_system_binary(
     log_dir: &Path,
     name: &str,
     bin: &str,
-    args: &[&str],
-    extra_env: &HashMap<String, String>,
+    args: &[String],
 ) -> Result<Spawned> {
     let log = std::fs::File::create(log_path(log_dir, name))
         .with_context(|| format!("failed to open log file for {name}"))?;
@@ -205,20 +201,25 @@ async fn spawn_system_binary(
     for a in args {
         cmd.arg(a);
     }
-    for (k, v) in extra_env {
-        cmd.env(k, v);
-    }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(err));
     let child = cmd
         .spawn()
         .with_context(|| format!("failed to spawn system binary {bin}"))?;
+    let arg_preview = if args.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", args.join(" "))
+    };
     output::sub_step(&format!(
-        "[system] {name} -> {}",
+        "[system] {name}{arg_preview} -> {}",
         log_path(log_dir, name).display()
     ));
-    Ok(Spawned { name: name.to_string(), child })
+    Ok(Spawned {
+        name: name.to_string(),
+        child,
+    })
 }
 
 async fn spawn_package(
@@ -356,41 +357,76 @@ pub async fn execute(
     let mut children: Vec<Spawned> = Vec::new();
 
     if !skip_system {
-        // Minimal system bring-up. Each component's config block is passed
-        // as env vars whose exact keys are determined by the component's
-        // own code (TODO #25: make them accept the manifest-derived config
-        // uniformly). For now we just launch binaries with no extra args —
-        // they use their default ports.
+        // System Rust binaries: launched in atlas → executor → pilot order.
+        // Each is fed CLI flags translated from `system.<name>:` block.
         let bin_map: &[(&str, &str)] = &[
             ("atlas", "robonix-atlas"),
             ("executor", "robonix-executor"),
             ("pilot", "robonix-pilot"),
-            ("liaison", "robonix-liaison"),
         ];
         for (name, bin) in bin_map {
             if !deploy.system.contains_key(*name) {
                 continue;
             }
-            let extra = system_env(*name, deploy.system.get(*name));
-            let sp = spawn_system_binary(&rust_root, &log_dir, name, bin, &[], &extra).await?;
+            let args = system_cli_args(name, deploy.system.get(*name));
+            let sp = spawn_system_binary(&rust_root, &log_dir, name, bin, &args).await?;
             children.push(sp);
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        }
+        // Warn (don't fail) on system entries we don't know how to bring up
+        // yet (e.g. liaison while it's still being ported off robonix-sdk).
+        for key in deploy.system.keys() {
+            if !bin_map.iter().any(|(n, _)| *n == key) {
+                output::sub_step(&format!(
+                    "[system] {key}: no built-in launcher; ignored (declare it as a service package if needed)"
+                ));
+            }
         }
     } else {
         output::sub_step("Skipping system bring-up (--skip-system)");
     }
 
     for e in &deploy.primitive {
-        let sp = spawn_package(&rust_root, &log_dir, &cache_root, &instances_dir, "primitive", e, &manifest_dir).await?;
+        let sp = spawn_package(
+            &rust_root,
+            &log_dir,
+            &cache_root,
+            &instances_dir,
+            "primitive",
+            e,
+            &manifest_dir,
+        )
+        .await?;
         children.push(sp);
     }
     for e in &deploy.service {
-        let sp = spawn_package(&rust_root, &log_dir, &cache_root, &instances_dir, "service", e, &manifest_dir).await?;
+        let sp = spawn_package(
+            &rust_root,
+            &log_dir,
+            &cache_root,
+            &instances_dir,
+            "service",
+            e,
+            &manifest_dir,
+        )
+        .await?;
         children.push(sp);
     }
+    // Skills are NOT spawned at deploy — the executor invokes them on demand.
+    // Just report what was registered so the user has visibility.
     for e in &deploy.skill {
-        let sp = spawn_package(&rust_root, &log_dir, &cache_root, &instances_dir, "skill", e, &manifest_dir).await?;
-        children.push(sp);
+        let label = if e.name.is_empty() {
+            e.path
+                .as_deref()
+                .or(e.url.as_deref())
+                .unwrap_or("(unnamed)")
+                .to_string()
+        } else {
+            e.name.clone()
+        };
+        output::sub_step(&format!(
+            "[skill] {label}: registered (invoked on demand by executor — not spawned at deploy)"
+        ));
     }
 
     output::success(&format!(
@@ -440,43 +476,51 @@ fn find_rust_root() -> Result<PathBuf> {
     std::env::current_dir().context("could not locate rust workspace root")
 }
 
-/// Convert a system component's config block into the env-var set its
-/// binary expects. Intentionally narrow — keeps the mapping close to the
-/// call site so a missing key is obvious. Extend as components grow.
-fn system_env(name: &str, cfg: Option<&serde_yaml::Value>) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    let cfg = match cfg.and_then(|v| v.as_mapping()) {
-        Some(m) => m,
-        None => return out,
-    };
+/// Translate a `system.<name>:` block into CLI args for the corresponding
+/// Rust binary. Per-binary mapping kept narrow — adding a new flag means
+/// touching exactly this function plus the binary's clap struct.
+fn system_cli_args(name: &str, cfg: Option<&serde_yaml::Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    let map = cfg.and_then(|v| v.as_mapping());
     let s = |k: &str| -> Option<String> {
-        cfg.get(serde_yaml::Value::String(k.into()))
+        map.and_then(|m| {
+            m.get(serde_yaml::Value::String(k.into()))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+    };
+    let nested_str = |outer: &str, inner: &str| -> Option<String> {
+        map.and_then(|m| m.get(serde_yaml::Value::String(outer.into())))
+            .and_then(|v| v.as_mapping())
+            .and_then(|m| m.get(serde_yaml::Value::String(inner.into())))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
     };
+    let push_pair = |out: &mut Vec<String>, flag: &str, val: Option<String>| {
+        if let Some(v) = val {
+            out.push(flag.into());
+            out.push(v);
+        }
+    };
     match name {
         "atlas" => {
-            if let Some(l) = s("listen") {
-                out.insert("ROBONIX_ATLAS".into(), l);
-            }
+            push_pair(&mut out, "--listen", s("listen"));
+            push_pair(&mut out, "--log", s("log"));
         }
         "executor" => {
-            if let Some(l) = s("listen") {
-                out.insert("ROBONIX_EXECUTOR_LISTEN".into(), l);
-            }
+            push_pair(&mut out, "--listen", s("listen"));
+            push_pair(&mut out, "--atlas", s("atlas"));
+            push_pair(&mut out, "--log", s("log"));
         }
         "pilot" => {
-            if let Some(l) = s("listen") {
-                out.insert("ROBONIX_PILOT_LISTEN".into(), l);
-            }
-            if let Some(v) = s("vlm_service") {
-                out.insert("ROBONIX_VLM_SERVICE".into(), v);
-            }
-        }
-        "liaison" => {
-            if let Some(l) = s("listen") {
-                out.insert("ROBONIX_LIAISON_LISTEN".into(), l);
-            }
+            push_pair(&mut out, "--listen", s("listen"));
+            push_pair(&mut out, "--atlas", s("atlas"));
+            push_pair(&mut out, "--log", s("log"));
+            // Embedded VLM block.
+            push_pair(&mut out, "--vlm-upstream", nested_str("vlm", "upstream"));
+            push_pair(&mut out, "--vlm-api-key", nested_str("vlm", "api_key"));
+            push_pair(&mut out, "--vlm-model", nested_str("vlm", "model"));
+            push_pair(&mut out, "--vlm-format", nested_str("vlm", "api_format"));
         }
         _ => {}
     }

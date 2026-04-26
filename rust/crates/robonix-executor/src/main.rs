@@ -36,12 +36,15 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("robonix_executor=info"),
-    )
-    .init();
+    let parsed = Args::parse();
+    let log_filter = parsed
+        .log
+        .clone()
+        .or_else(|| std::env::var("RUST_LOG").ok())
+        .unwrap_or_else(|| "robonix_executor=info".to_string());
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_filter)).init();
 
-    let cfg = ExecutorConfig::resolve(Args::parse())?;
+    let cfg = ExecutorConfig::resolve(parsed)?;
 
     info!("connecting to atlas at {}", cfg.atlas_endpoint);
     let mut atlas =

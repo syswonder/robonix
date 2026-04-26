@@ -2791,6 +2791,7 @@ name = "robonix-atlas"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "env_logger",
  "log",
  "prost",
