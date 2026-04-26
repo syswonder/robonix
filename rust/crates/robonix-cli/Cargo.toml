@@ -31,6 +31,13 @@ hostname = "0.4"
 colored = "3.0"
 git2 = "0.20.4"
 resvg = "0.47.0"
+robonix-atlas = { path = "../robonix-atlas" }
+
+[build-dependencies]
+robonix-codegen.workspace = true
+tonic-build.workspace = true
+tonic-prost-build.workspace = true
+protoc-bin-vendored.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["signal", "process"] }
