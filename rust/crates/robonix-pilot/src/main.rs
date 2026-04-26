@@ -97,6 +97,23 @@ async fn main() -> Result<()> {
         cfg.vlm.upstream, cfg.vlm.model
     );
 
+    // Atlas evicts caps after ~60s without a heartbeat. Send one every
+    // 20s so we stay registered for the lifetime of the process.
+    {
+        let mut hb = atlas.clone();
+        let cap_id = cfg.capability_id.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(20));
+            tick.tick().await; // first tick fires immediately; skip
+            loop {
+                tick.tick().await;
+                if let Err(e) = hb.heartbeat(&cap_id).await {
+                    log::warn!("heartbeat failed: {e:#}");
+                }
+            }
+        });
+    }
+
     let svc = PilotServiceImpl::new(atlas, cfg.capability_id.clone(), vlm);
 
     info!("SystemPilot gRPC on {listen_addr}");
