@@ -131,12 +131,24 @@ async def save(data: str) -> dict:
     return {"data": "Memory saved and indexed."}
 
 
-def _single_tool_meta(tool_name: str, description: str, input_schema: dict) -> str:
+def _meta(
+    name: str,
+    description: str,
+    properties: dict | None = None,
+    required: list[str] | None = None,
+) -> str:
+    """JSON-Schema for the @mcp.tool() function actually registered on
+    this server. Kept lockstep with the Python signature so pydantic
+    validation matches the schema the LLM sees."""
     return json.dumps({
         "tools": [{
-            "name": tool_name,
+            "name": name,
             "description": description,
-            "input_schema": input_schema,
+            "input_schema": {
+                "type": "object",
+                "properties": properties or {},
+                "required": list(required or []),
+            },
         }]
     })
 
@@ -167,10 +179,11 @@ def main():
                 node_id=node_id,
                 name="search",
                 supported_transports=["mcp"],
-                metadata_json=_single_tool_meta(
+                metadata_json=_meta(
                     "search",
-                    "Search agent long-term memory. data: the search query string.",
-                    std_msgs_mcp.String.json_schema(),
+                    "Search the agent's long-term memory for relevant past context, decisions, or user preferences.",
+                    properties={"data": {"type": "string", "description": "the search query string"}},
+                    required=["data"],
                 ),
                 listen_port=port,
                 contract_id="robonix/system/memory/search",
@@ -183,26 +196,26 @@ def main():
                 node_id=node_id,
                 name="save",
                 supported_transports=["mcp"],
-                metadata_json=_single_tool_meta(
+                metadata_json=_meta(
                     "save",
-                    "Save fact or preference to long-term memory. data: content to save.",
-                    std_msgs_mcp.String.json_schema(),
+                    "Save an important fact, user preference, or decision to long-term memory.",
+                    properties={"data": {"type": "string", "description": "the content to save"}},
+                    required=["data"],
                 ),
                 listen_port=port,
                 contract_id="robonix/system/memory/save",
             )
         )
 
-        # robonix/system/memory/compact  (input: Empty → no parameters)
+        # robonix/system/memory/compact (no parameters)
         stub.DeclareInterface(
             pb.DeclareInterfaceRequest(
                 node_id=node_id,
                 name="compact",
                 supported_transports=["mcp"],
-                metadata_json=_single_tool_meta(
+                metadata_json=_meta(
                     "compact",
-                    "Compact and summarize recent memories. No input required.",
-                    std_msgs_mcp.Empty.json_schema(),
+                    "Compact and summarize recent memories. Call at the end of a session.",
                 ),
                 listen_port=port,
                 contract_id="robonix/system/memory/compact",

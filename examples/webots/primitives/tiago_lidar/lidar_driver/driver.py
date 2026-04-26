@@ -172,9 +172,14 @@ def _heartbeat_loop(stub, node_id: str) -> None:
             print(f"[tiago_lidar] heartbeat failed: {e}")
 
 
-def _single_tool_meta(tool_name: str, description: str, input_schema: dict) -> str:
+def _meta(name: str, description: str) -> str:
+    """Zero-arg MCP tool schema for the lidar snapshot."""
     return json.dumps({
-        "tools": [{"name": tool_name, "description": description, "input_schema": input_schema}]
+        "tools": [{
+            "name": name,
+            "description": description,
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        }]
     })
 
 
@@ -196,10 +201,9 @@ def main() -> None:
         stub.DeclareInterface(pb.DeclareInterfaceRequest(
             node_id=node_id, name="snapshot",
             supported_transports=["mcp"],
-            metadata_json=_single_tool_meta(
+            metadata_json=_meta(
                 "snapshot",
-                "Get the latest 2D lidar scan. Returns sensor_msgs/LaserScan.",
-                Empty.json_schema(),
+                "Get the latest 2D planar lidar scan. Returns sensor_msgs/LaserScan.",
             ),
             listen_port=port,
             contract_id="robonix/primitive/lidar/snapshot",

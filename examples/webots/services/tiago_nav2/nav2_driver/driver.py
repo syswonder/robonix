@@ -284,9 +284,27 @@ def _heartbeat_loop(stub, node_id: str) -> None:
             print(f"[tiago_nav2] heartbeat failed: {e}")
 
 
-def _single_tool_meta(tool_name: str, description: str, input_schema: dict) -> str:
+def _meta(
+    name: str,
+    description: str,
+    properties: dict | None = None,
+    required: list[str] | None = None,
+) -> str:
+    """Build the metadata_json blob atlas hands to pilot, which pilot
+    reformats into an OpenAI tool spec for the LLM. The `properties` /
+    `required` here MUST match the actual `@mcp.tool()` function
+    signature on this driver — FastMCP / pydantic enforce that on every
+    call, and the LLM picks `required` from this exact JSON-Schema."""
     return json.dumps({
-        "tools": [{"name": tool_name, "description": description, "input_schema": input_schema}]
+        "tools": [{
+            "name": name,
+            "description": description,
+            "input_schema": {
+                "type": "object",
+                "properties": properties or {},
+                "required": list(required or []),
+            },
+        }]
     })
 
 
@@ -308,11 +326,17 @@ def main() -> None:
         stub.DeclareInterface(pb.DeclareInterfaceRequest(
             node_id=node_id, name="navigate",
             supported_transports=["mcp"],
-            metadata_json=_single_tool_meta(
+            metadata_json=_meta(
                 "navigate",
-                "Send a navigation goal. Arguments: geometry_msgs/PoseStamped JSON. "
-                "Returns std_msgs/String; data is JSON {goal_id, status}.",
-                PoseStamped.json_schema(),
+                "Send the robot to a target (x, y, yaw) pose via Nav2. "
+                "Returns JSON {goal_id, status, nav_action}; track via status() / cancel().",
+                properties={
+                    "x":        {"type": "number", "description": "target x position (meters, in frame_id)"},
+                    "y":        {"type": "number", "description": "target y position (meters, in frame_id)"},
+                    "yaw":      {"type": "number", "description": "target heading (radians); default 0"},
+                    "frame_id": {"type": "string", "description": "TF frame id; default 'map'"},
+                },
+                required=["x", "y"],
             ),
             listen_port=port,
             contract_id="robonix/service/navigation/navigate",
@@ -320,10 +344,13 @@ def main() -> None:
         stub.DeclareInterface(pb.DeclareInterfaceRequest(
             node_id=node_id, name="status",
             supported_transports=["mcp"],
-            metadata_json=_single_tool_meta(
+            metadata_json=_meta(
                 "status",
-                "Get navigation status. std_msgs/String; data is goal_id from nav_navigate.",
-                std_msgs_mcp.String.json_schema(),
+                "Get the navigation status for a previously-issued goal_id (returned by navigate()).",
+                properties={
+                    "goal_id": {"type": "string", "description": "goal_id returned by navigate()"},
+                },
+                required=["goal_id"],
             ),
             listen_port=port,
             contract_id="robonix/service/navigation/status",
@@ -331,10 +358,13 @@ def main() -> None:
         stub.DeclareInterface(pb.DeclareInterfaceRequest(
             node_id=node_id, name="cancel",
             supported_transports=["mcp"],
-            metadata_json=_single_tool_meta(
+            metadata_json=_meta(
                 "cancel",
-                "Cancel a navigation goal. std_msgs/String; data is goal_id from nav_navigate.",
-                std_msgs_mcp.String.json_schema(),
+                "Cancel an in-flight navigation goal by goal_id (returned by navigate()).",
+                properties={
+                    "goal_id": {"type": "string", "description": "goal_id returned by navigate()"},
+                },
+                required=["goal_id"],
             ),
             listen_port=port,
             contract_id="robonix/service/navigation/cancel",

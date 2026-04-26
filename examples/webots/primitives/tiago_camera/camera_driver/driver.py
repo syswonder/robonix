@@ -250,9 +250,14 @@ def _heartbeat_loop(stub, node_id: str) -> None:
             print(f"[tiago_camera] heartbeat failed: {e}")
 
 
-def _single_tool_meta(tool_name: str, description: str, input_schema: dict) -> str:
+def _meta(name: str, description: str) -> str:
+    """Zero-arg MCP tool schema. Both camera tools take no arguments."""
     return json.dumps({
-        "tools": [{"name": tool_name, "description": description, "input_schema": input_schema}]
+        "tools": [{
+            "name": name,
+            "description": description,
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        }]
     })
 
 
@@ -274,10 +279,9 @@ def main() -> None:
         stub.DeclareInterface(pb.DeclareInterfaceRequest(
             node_id=node_id, name="snapshot",
             supported_transports=["mcp"],
-            metadata_json=_single_tool_meta(
+            metadata_json=_meta(
                 "snapshot",
-                "Get current RGB head-camera frame as sensor_msgs/Image (JPEG in data).",
-                Empty.json_schema(),
+                "Get the current RGB head-camera frame. Returns sensor_msgs/Image (JPEG in `data`, base64-encoded).",
             ),
             listen_port=port,
             contract_id="robonix/primitive/camera/snapshot",
@@ -285,10 +289,9 @@ def main() -> None:
         stub.DeclareInterface(pb.DeclareInterfaceRequest(
             node_id=node_id, name="depth_snapshot",
             supported_transports=["mcp"],
-            metadata_json=_single_tool_meta(
+            metadata_json=_meta(
                 "depth_snapshot",
-                "Get current depth head-camera frame as grayscale-JPEG sensor_msgs/Image.",
-                Empty.json_schema(),
+                "Get the current depth head-camera frame as grayscale-JPEG sensor_msgs/Image (depth normalized).",
             ),
             listen_port=port,
             contract_id="robonix/primitive/camera/depth_snapshot",
