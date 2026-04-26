@@ -130,10 +130,7 @@ pub fn detect_manifest_path(package_root: &Path) -> Result<PathBuf> {
     if path.exists() {
         return Ok(path);
     }
-    anyhow::bail!(
-        "Package does not have {}",
-        PACKAGE_MANIFEST_FILE,
-    )
+    anyhow::bail!("Package does not have {}", PACKAGE_MANIFEST_FILE,)
 }
 
 pub fn detect_and_load(package_root: &Path) -> Result<DetectedManifest> {
@@ -156,7 +153,12 @@ impl Manifest {
             anyhow::bail!("Invalid 'manifestVersion': must be >= 1");
         }
         // package.id is optional in the new format; warn if missing for awareness.
-        if self.package.id.as_ref().map_or(true, |id| id.trim().is_empty()) {
+        if self
+            .package
+            .id
+            .as_ref()
+            .is_none_or(|id| id.trim().is_empty())
+        {
             log::debug!(
                 "package.id is empty or absent for '{}'; using package.name as identifier",
                 self.package.name

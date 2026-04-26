@@ -94,10 +94,7 @@ pub async fn execute(name: &str, pkg_type: &str, path: Option<&Path>) -> Result<
         .unwrap_or_else(|| std::path::PathBuf::from(role_dir).join(name));
 
     if target.exists() {
-        anyhow::bail!(
-            "directory '{}' already exists",
-            target.display()
-        );
+        anyhow::bail!("directory '{}' already exists", target.display());
     }
 
     output::action(
@@ -141,11 +138,24 @@ pub async fn execute(name: &str, pkg_type: &str, path: Option<&Path>) -> Result<
     output::check("src/");
     output::check("capabilities/");
 
-    output::success(&format!("Package '{}' created at {}", name, target.display()));
+    output::success(&format!(
+        "Package '{}' created at {}",
+        name,
+        target.display()
+    ));
     output::info("Next steps:");
-    output::info(&format!("  Edit {}/package_manifest.yaml to set package name, capabilities, and depends", target.display()));
-    output::info(&format!("  Edit {}/scripts/build.sh to add build steps", target.display()));
-    output::info(&format!("  Edit {}/scripts/start.sh to add start command", target.display()));
+    output::info(&format!(
+        "  Edit {}/package_manifest.yaml to set package name, capabilities, and depends",
+        target.display()
+    ));
+    output::info(&format!(
+        "  Edit {}/scripts/build.sh to add build steps",
+        target.display()
+    ));
+    output::info(&format!(
+        "  Edit {}/scripts/start.sh to add start command",
+        target.display()
+    ));
 
     Ok(())
 }

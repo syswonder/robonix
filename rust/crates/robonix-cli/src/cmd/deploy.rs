@@ -29,12 +29,12 @@ pub async fn execute(config_path: &Path) -> Result<()> {
     }
 
     let config = workspace::load_runtime_config(&config_path)?;
-    let project_root = config_path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
+    let project_root = config_path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
-    output::action("Deploy", &format!("'{}' from {}", config.name, config_path.display()));
+    output::action(
+        "Deploy",
+        &format!("'{}' from {}", config.name, config_path.display()),
+    );
 
     // Build global env: inherit process env + overlay config env.
     let mut global_env: HashMap<String, String> = std::env::vars().collect();
@@ -58,21 +58,30 @@ pub async fn execute(config_path: &Path) -> Result<()> {
     start_system(&config.system, &global_env, &mut children).await?;
 
     // ── Step 2: Resolve & start primitives ─────────────────────────
-    output::action("Step 2/4", &format!("Starting {} primitive(s)", config.primitives.len()));
+    output::action(
+        "Step 2/4",
+        &format!("Starting {} primitive(s)", config.primitives.len()),
+    );
     let sorted = resolve_and_sort_entries(&project_root, "primitives", &config.primitives)?;
     for (pkg_path, entry) in &sorted {
         start_package(pkg_path, entry, &global_env, &mut children).await?;
     }
 
     // ── Step 3: Resolve & start services ───────────────────────────
-    output::action("Step 3/4", &format!("Starting {} service(s)", config.services.len()));
+    output::action(
+        "Step 3/4",
+        &format!("Starting {} service(s)", config.services.len()),
+    );
     let sorted = resolve_and_sort_entries(&project_root, "services", &config.services)?;
     for (pkg_path, entry) in &sorted {
         start_package(pkg_path, entry, &global_env, &mut children).await?;
     }
 
     // ── Step 4: Register skills (on-demand, not started) ───────────
-    output::action("Step 4/4", &format!("Registering {} skill(s)", config.skills.len()));
+    output::action(
+        "Step 4/4",
+        &format!("Registering {} skill(s)", config.skills.len()),
+    );
     for entry in &config.skills {
         match workspace::resolve_package_path(&project_root, "skills", entry) {
             Ok(pkg_path) => {
@@ -187,7 +196,10 @@ async fn start_system(
         output::step("Starting", &format!("{} (system)", comp.name));
 
         if check_port_reachable(comp.endpoint).await {
-            output::check(&format!("{} already running at {}", comp.name, comp.endpoint));
+            output::check(&format!(
+                "{} already running at {}",
+                comp.name, comp.endpoint
+            ));
             continue;
         }
 
@@ -200,7 +212,10 @@ async fn start_system(
         // Atlas uses ROBONIX_ATLAS as host:port (no http://).
         if comp.name == "atlas" {
             cmd_env.insert("ROBONIX_ATLAS".to_string(), comp.endpoint.to_string());
-            cmd_env.insert("ROBONIX_META_GRPC_ENDPOINT".to_string(), comp.endpoint.to_string());
+            cmd_env.insert(
+                "ROBONIX_META_GRPC_ENDPOINT".to_string(),
+                comp.endpoint.to_string(),
+            );
         }
 
         output::sub_step(&format!(
@@ -236,10 +251,10 @@ async fn start_system(
 /// Detect the `rust/` workspace root from `robonix_source_path` config or env.
 fn detect_rust_root(env: &HashMap<String, String>) -> Result<PathBuf> {
     // Try the CLI config's source path first.
-    if let Ok(cfg) = robonix_cli::Config::load() {
-        if let Ok(p) = cfg.resolve_source_path(robonix_cli::SourcePathKey::RustRoot) {
-            return Ok(p);
-        }
+    if let Ok(cfg) = robonix_cli::Config::load()
+        && let Ok(p) = cfg.resolve_source_path(robonix_cli::SourcePathKey::RustRoot)
+    {
+        return Ok(p);
     }
     // Fallback: RUST_ROOT env or walk up from cwd.
     if let Some(v) = env.get("RUST_ROOT") {
@@ -311,7 +326,10 @@ fn resolve_and_sort_entries<'a>(
     let order = workspace::topo_sort(&topo_input)?;
 
     if order.len() > 1 {
-        let names: Vec<&str> = order.iter().map(|&i| resolved[i].entry.name.as_str()).collect();
+        let names: Vec<&str> = order
+            .iter()
+            .map(|&i| resolved[i].entry.name.as_str())
+            .collect();
         output::sub_step(&format!("launch order: {}", names.join(" → ")));
     }
 
@@ -341,7 +359,10 @@ async fn start_package(
         let env_key = format!("RBNX_CFG_{}", k.to_uppercase());
         let env_val = match v {
             serde_yaml::Value::String(s) => s.clone(),
-            other => serde_yaml::to_string(other).unwrap_or_default().trim().to_string(),
+            other => serde_yaml::to_string(other)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
         };
         pkg_env.insert(env_key, env_val);
     }
@@ -356,7 +377,7 @@ async fn start_package(
         return Ok(());
     }
 
-    output::step("Starting", &format!("{}", entry.name));
+    output::step("Starting", &entry.name);
 
     // Source setup.bash if present (generated by `rbnx codegen`).
     let setup_bash = pkg_path
@@ -379,7 +400,11 @@ async fn start_package(
         .spawn()
         .with_context(|| format!("failed to spawn {}", entry.name))?;
 
-    output::sub_step(&format!("  {} (PID {})", entry.name, child.id().unwrap_or(0)));
+    output::sub_step(&format!(
+        "  {} (PID {})",
+        entry.name,
+        child.id().unwrap_or(0)
+    ));
     children.push((entry.name.clone(), child));
 
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -393,9 +418,7 @@ async fn start_package(
 
 /// Try to connect to `addr` (host:port) once. Returns true if successful.
 async fn check_port_reachable(addr: &str) -> bool {
-    tokio::net::TcpStream::connect(addr)
-        .await
-        .is_ok()
+    tokio::net::TcpStream::connect(addr).await.is_ok()
 }
 
 /// Poll `addr` until it becomes reachable or `timeout` elapses.
@@ -418,7 +441,7 @@ async fn wait_for_endpoint(addr: &str, timeout: Duration) -> bool {
 // ════════════════════════════════════════════════════════════════════
 
 /// Send SIGTERM (unix) / kill (windows) to all children, then wait.
-async fn shutdown_children(children: &mut Vec<(String, Child)>) {
+async fn shutdown_children(children: &mut [(String, Child)]) {
     for (label, child) in children.iter_mut().rev() {
         let pid = child.id().unwrap_or(0);
         output::sub_step(&format!("stopping {} (PID {})...", label, pid));

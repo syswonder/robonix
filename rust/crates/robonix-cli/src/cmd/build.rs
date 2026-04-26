@@ -21,10 +21,7 @@ fn build_local(package_root: &Path, manifest: &manifest::Manifest, clean: bool) 
     let build_cmd = manifest.build.trim();
 
     if build_cmd.is_empty() {
-        anyhow::bail!(
-            "Package '{}' has no build command",
-            manifest.package.name
-        );
+        anyhow::bail!("Package '{}' has no build command", manifest.package.name);
     }
 
     output::action(
@@ -42,12 +39,17 @@ fn build_local(package_root: &Path, manifest: &manifest::Manifest, clean: bool) 
         cmd.env("RBNX_BUILD_CLEAN", "1");
     }
     let status = cmd.status().with_context(|| {
-        format!("Failed to run build command '{}' in {}", build_cmd, package_root.display())
+        format!(
+            "Failed to run build command '{}' in {}",
+            build_cmd,
+            package_root.display()
+        )
     })?;
     if !status.success() {
         anyhow::bail!(
             "Build command '{}' failed with exit code {:?}",
-            build_cmd, status.code()
+            build_cmd,
+            status.code()
         );
     }
 
@@ -97,14 +99,15 @@ pub async fn execute_all(config_path: PathBuf, clean: bool) -> Result<()> {
     }
 
     let config = workspace::load_runtime_config(&config_path)?;
-    let project_root = config_path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
+    let project_root = config_path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
     output::action(
         "Build",
-        &format!("all packages from '{}' ({})", config.name, config_path.display()),
+        &format!(
+            "all packages from '{}' ({})",
+            config.name,
+            config_path.display()
+        ),
     );
 
     // Collect all packages across layers.

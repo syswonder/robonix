@@ -77,13 +77,13 @@ pub async fn execute(name: &str, path: Option<&Path>) -> Result<()> {
         .unwrap_or_else(|| std::path::PathBuf::from(name));
 
     if target.exists() {
-        anyhow::bail!(
-            "directory '{}' already exists",
-            target.display()
-        );
+        anyhow::bail!("directory '{}' already exists", target.display());
     }
 
-    output::action("Init", &format!("creating project '{}' at {}", name, target.display()));
+    output::action(
+        "Init",
+        &format!("creating project '{}' at {}", name, target.display()),
+    );
 
     // Create directory structure.
     fs::create_dir_all(target.join("primitives"))
@@ -93,10 +93,7 @@ pub async fn execute(name: &str, path: Option<&Path>) -> Result<()> {
 
     // Write robonix_manifest.yaml.
     let manifest_content = MANIFEST_TEMPLATE.replace("{name}", name);
-    fs::write(
-        target.join("robonix_manifest.yaml"),
-        manifest_content,
-    )?;
+    fs::write(target.join("robonix_manifest.yaml"), manifest_content)?;
     output::check("robonix_manifest.yaml");
 
     // Write .gitignore.

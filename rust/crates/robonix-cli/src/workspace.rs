@@ -126,19 +126,19 @@ pub fn resolve_package_path(
     entry: &RuntimePackageEntry,
 ) -> Result<PathBuf> {
     // 1. Explicit local path.
-    if let Some(ref path_str) = entry.path {
-        if path_str.starts_with("./") || path_str.starts_with("../") {
-            let resolved = project_root.join(path_str);
-            if resolved.exists() {
-                return Ok(resolved.canonicalize().unwrap_or(resolved));
-            }
-            anyhow::bail!(
-                "package '{}' local path '{}' not found (resolved to {})",
-                entry.name,
-                path_str,
-                resolved.display()
-            );
+    if let Some(ref path_str) = entry.path
+        && (path_str.starts_with("./") || path_str.starts_with("../"))
+    {
+        let resolved = project_root.join(path_str);
+        if resolved.exists() {
+            return Ok(resolved.canonicalize().unwrap_or(resolved));
         }
+        anyhow::bail!(
+            "package '{}' local path '{}' not found (resolved to {})",
+            entry.name,
+            path_str,
+            resolved.display()
+        );
     }
 
     // 2. Convention: <project_root>/<role_dir>/<short_name>
@@ -154,18 +154,8 @@ pub fn resolve_package_path(
         let clone_url = normalize_git_url(url);
         git2::build::RepoBuilder::new()
             .clone(&clone_url, &candidate)
-            .with_context(|| {
-                format!(
-                    "failed to clone '{}' to {}",
-                    url,
-                    candidate.display()
-                )
-            })?;
-        crate::output::check(&format!(
-            "{} cloned to {}",
-            entry.name,
-            candidate.display()
-        ));
+            .with_context(|| format!("failed to clone '{}' to {}", url, candidate.display()))?;
+        crate::output::check(&format!("{} cloned to {}", entry.name, candidate.display()));
         return Ok(candidate);
     }
 
@@ -317,7 +307,11 @@ mod tests {
         ];
         let order = topo_sort(&items).unwrap();
         // A(1) must come before B(2), B(2) must come before C(0).
-        let pos: HashMap<usize, usize> = order.iter().enumerate().map(|(pos, &idx)| (idx, pos)).collect();
+        let pos: HashMap<usize, usize> = order
+            .iter()
+            .enumerate()
+            .map(|(pos, &idx)| (idx, pos))
+            .collect();
         assert!(pos[&1] < pos[&2]); // A before B
         assert!(pos[&2] < pos[&0]); // B before C
     }
@@ -342,10 +336,8 @@ mod tests {
     fn topo_sort_cycle_detected() {
         let deps_a = vec!["B".to_string()];
         let deps_b = vec!["A".to_string()];
-        let items: Vec<(&str, &[String])> = vec![
-            ("A", deps_a.as_slice()),
-            ("B", deps_b.as_slice()),
-        ];
+        let items: Vec<(&str, &[String])> =
+            vec![("A", deps_a.as_slice()), ("B", deps_b.as_slice())];
         let err = topo_sort(&items).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("circular dependency"), "got: {}", msg);
@@ -368,7 +360,11 @@ mod tests {
             ("C", deps_c.as_slice()),
         ];
         let order = topo_sort(&items).unwrap();
-        let pos: HashMap<usize, usize> = order.iter().enumerate().map(|(pos, &idx)| (idx, pos)).collect();
+        let pos: HashMap<usize, usize> = order
+            .iter()
+            .enumerate()
+            .map(|(pos, &idx)| (idx, pos))
+            .collect();
         assert!(pos[&2] < pos[&1]); // A before B
         assert!(pos[&2] < pos[&3]); // A before C
         assert!(pos[&1] < pos[&0]); // B before D

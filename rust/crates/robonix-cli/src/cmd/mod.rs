@@ -250,9 +250,8 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             }
         }
         Commands::Deploy { config: cfg } => {
-            let cfg_path = cfg.unwrap_or_else(|| {
-                PathBuf::from(robonix_cli::workspace::RUNTIME_MANIFEST_FILE)
-            });
+            let cfg_path =
+                cfg.unwrap_or_else(|| PathBuf::from(robonix_cli::workspace::RUNTIME_MANIFEST_FILE));
             deploy::execute(&cfg_path).await
         }
         Commands::Init { name, path } => init::execute(&name, path.as_deref()).await,
