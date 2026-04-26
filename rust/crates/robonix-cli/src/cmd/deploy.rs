@@ -203,6 +203,12 @@ async fn start_system(
             cmd_env.insert("ROBONIX_META_GRPC_ENDPOINT".to_string(), comp.endpoint.to_string());
         }
 
+        output::sub_step(&format!(
+            "exec: cargo run --manifest-path {} -p {}",
+            cargo_toml.display(),
+            comp.crate_name
+        ));
+
         let child = Command::new("cargo")
             .args(["run", "--manifest-path"])
             .arg(&cargo_toml)
@@ -235,8 +241,8 @@ fn detect_rust_root(env: &HashMap<String, String>) -> Result<PathBuf> {
             return Ok(p);
         }
     }
-    // Fallback: ROBONIX_RUST_ROOT env or walk up from cwd.
-    if let Some(v) = env.get("ROBONIX_RUST_ROOT") {
+    // Fallback: RUST_ROOT env or walk up from cwd.
+    if let Some(v) = env.get("RUST_ROOT") {
         let p = PathBuf::from(v);
         if p.join("Cargo.toml").exists() {
             return Ok(p);

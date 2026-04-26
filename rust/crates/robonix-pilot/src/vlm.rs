@@ -272,11 +272,52 @@ pub struct VlmClient {
 
 impl VlmClient {
     /// Discover a VLM/LLM service via robonix-atlas and negotiate a gRPC channel.
+    ///
+    /// The entire flow (query → negotiate → connect) is retried up to 30 times
+    /// (2s interval, ~60s total) to tolerate services that haven't registered yet
+    /// or stale registrations from a previous run.
     pub async fn discover(
         sdk: &mut robonix_sdk::RobonixClient,
         agent_node_id: &str,
     ) -> Result<Self> {
+        const MAX_RETRIES: u32 = 30;
+        const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
         let contract_id = vlm_contract_id_for_query();
+        let mut last_err: Option<anyhow::Error> = None;
+
+        for attempt in 1..=MAX_RETRIES {
+            match Self::try_discover(sdk, agent_node_id, &contract_id).await {
+                Ok(client) => return Ok(client),
+                Err(e) => {
+                    if attempt < MAX_RETRIES {
+                        log::info!(
+                            "VLM discovery attempt {}/{} failed: {}. Retrying in {}s...",
+                            attempt,
+                            MAX_RETRIES,
+                            e,
+                            RETRY_INTERVAL.as_secs()
+                        );
+                        last_err = Some(e);
+                        tokio::time::sleep(RETRY_INTERVAL).await;
+                    } else {
+                        last_err = Some(e);
+                    }
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            anyhow::anyhow!("VLM discovery failed after {} attempts", MAX_RETRIES)
+        }))
+    }
+
+    /// Single attempt: query nodes → negotiate channel → connect.
+    async fn try_discover(
+        sdk: &mut robonix_sdk::RobonixClient,
+        agent_node_id: &str,
+        contract_id: &str,
+    ) -> Result<Self> {
         let mut nodes = if contract_id.is_empty() {
             let ns_prefix = vlm_query_namespace_prefix();
             let iface_leaf = vlm_interface_leaf();
@@ -285,13 +326,24 @@ impl VlmClient {
                 .with_context(|| "failed to query nodes (legacy split namespace + name)")?
         } else {
             sdk.query_nodes_opts(QueryNodesOpts {
-                contract_id: contract_id.clone(),
+                contract_id: contract_id.to_string(),
                 transport: "grpc".into(),
                 ..Default::default()
             })
             .await
             .with_context(|| format!("failed to query nodes for contract_id={contract_id}"))?
         };
+
+        if nodes.is_empty() {
+            anyhow::bail!(
+                "no VLM node for contract {} (grpc)",
+                if contract_id.is_empty() {
+                    format!("{}+{}", vlm_query_namespace_prefix(), vlm_interface_leaf())
+                } else {
+                    contract_id.to_string()
+                }
+            );
+        }
 
         if nodes.len() > 1 {
             nodes.sort_by_key(|b| std::cmp::Reverse(b.namespace.len()));
@@ -302,17 +354,7 @@ impl VlmClient {
             );
         }
 
-        let vlm_node = nodes.first().ok_or_else(|| {
-            anyhow::anyhow!(
-                "no VLM node for contract {} (grpc). See rust/docs/NAMESPACE.md; \
-                 set ROBONIX_VLM_CONTRACT_ID or use legacy empty contract + ROBONIX_VLM_NAMESPACE_PREFIX.",
-                if contract_id.is_empty() {
-                    format!("{}+{}", vlm_query_namespace_prefix(), vlm_interface_leaf())
-                } else {
-                    contract_id.clone()
-                }
-            )
-        })?;
+        let vlm_node = &nodes[0];
 
         log::info!(
             "discovered VLM service: node_id='{}' namespace='{}'",
