@@ -7,7 +7,7 @@
 // and then dial that channel. The previous TUI lives in git history (last
 // working at commit 7f3f63f's parent on dev-packaging).
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 pub async fn execute(_server: &str) -> Result<()> {
     bail!(

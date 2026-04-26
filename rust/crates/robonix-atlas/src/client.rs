@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Author: wheatfox <wheatfox17@icloud.com>
-// 
+//
 // Atlas client-side helpers shared by every Robonix component that talks to
 // Atlas (pilot, executor, cli, system services, …).
 //

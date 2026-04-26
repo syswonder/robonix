@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::ValueEnum;
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]

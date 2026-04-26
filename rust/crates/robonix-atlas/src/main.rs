@@ -33,9 +33,7 @@ async fn main() {
 
     info!("robonix-atlas starting (control plane)");
 
-    let listen = args
-        .listen
-        .unwrap_or_else(|| DEFAULT_LISTEN.to_string());
+    let listen = args.listen.unwrap_or_else(|| DEFAULT_LISTEN.to_string());
     let listen_addr: std::net::SocketAddr = match listen.parse() {
         Ok(a) => a,
         Err(e) => {
