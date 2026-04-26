@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// robonix-executor — capability-call dispatch runtime.
+// Author: wheatfox <wheatfox17@icloud.com>
 //
+// robonix-executor — capability-call dispatch runtime.
 // On startup executor:
 //   1. Connects to atlas, registers as `com.robonix.system.executor`.
 //   2. Declares its gRPC Execute interface (Plan → CapabilityCallEvent stream).

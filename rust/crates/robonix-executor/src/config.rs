@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MulanPSL-2.0
+// Author: wheatfox <wheatfox17@icloud.com>
+//
 // Executor config — same three-source resolution as pilot:
 //   compiled defaults < YAML at $ROBONIX_CONFIG_PATH < CLI flags / env.
 

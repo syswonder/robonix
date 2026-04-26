@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MulanPSL-2.0
+// Author: wheatfox <wheatfox17@icloud.com>
+//
 // robonix-pilot — reasoning, planning, and session management.
 //
 // Run standalone (manual smoke testing):
 //   robonix-pilot --vlm-upstream https://api.openai.com/v1 \
 //                 --vlm-api-key sk-... \
-//                 --vlm-model gpt-4o-mini
+//                 --vlm-model gpt-5.5
 //   # atlas defaults to 127.0.0.1:50051; everything else has sane defaults.
 //
 // Run under rbnx:

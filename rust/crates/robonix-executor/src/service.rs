@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MulanPSL-2.0
+// Author: wheatfox <wheatfox17@icloud.com>
+//
 // gRPC contract handler: SystemExecutor.Execute(Plan) → stream CapabilityCallEvent.
 
 use crate::dispatch;

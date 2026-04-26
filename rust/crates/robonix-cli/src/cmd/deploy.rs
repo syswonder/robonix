@@ -206,7 +206,6 @@ fn log_path(log_dir: &Path, name: &str) -> PathBuf {
 }
 
 async fn spawn_system_binary(
-    rust_root: &Path,
     log_dir: &Path,
     name: &str,
     bin: &str,
@@ -215,21 +214,22 @@ async fn spawn_system_binary(
     let log = std::fs::File::create(log_path(log_dir, name))
         .with_context(|| format!("failed to open log file for {name}"))?;
     let err = log.try_clone()?;
-    let mut cmd = Command::new("cargo");
-    cmd.current_dir(rust_root)
-        .arg("run")
-        .arg("-p")
-        .arg(bin)
-        .arg("--");
+    // Run the installed binary directly. `cargo install` puts atlas /
+    // executor / pilot in $CARGO_HOME/bin (via `make install`); the user
+    // is expected to have run that. No `cargo run` here — that requires
+    // the source tree on disk and needlessly slows down deploy.
+    let mut cmd = Command::new(bin);
     for a in args {
         cmd.arg(a);
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(err));
-    let child = cmd
-        .spawn()
-        .with_context(|| format!("failed to spawn system binary {bin}"))?;
+    let child = cmd.spawn().with_context(|| {
+        format!(
+            "failed to spawn system binary `{bin}` — is it installed (try `make install` from the rust/ workspace)?"
+        )
+    })?;
     let arg_preview = if args.is_empty() {
         String::new()
     } else {
@@ -246,7 +246,6 @@ async fn spawn_system_binary(
 }
 
 async fn spawn_package(
-    rust_root: &Path,
     log_dir: &Path,
     cache_root: &Path,
     instances_dir: &Path,
@@ -285,13 +284,13 @@ async fn spawn_package(
         .with_context(|| format!("failed to open log for {log_name}"))?;
     let err = log.try_clone()?;
 
-    let mut cmd = Command::new("cargo");
-    cmd.current_dir(rust_root)
-        .arg("run")
-        .arg("-p")
-        .arg("robonix-cli")
-        .arg("--")
-        .arg("start")
+    // Spawn `rbnx start -p <pkg>` via the currently-running rbnx binary
+    // itself — i.e. argv[0] of the deploy process. This way deploy doesn't
+    // need a cargo workspace on disk and version-skew is impossible.
+    let rbnx_bin = std::env::current_exe()
+        .context("could not resolve current rbnx binary path for `start` re-exec")?;
+    let mut cmd = Command::new(&rbnx_bin);
+    cmd.arg("start")
         .arg("-p")
         .arg(pkg_path.as_os_str())
         .env("RBNX_CONFIG_FILE", &cfg_file)
@@ -300,9 +299,12 @@ async fn spawn_package(
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(err));
-    let child = cmd
-        .spawn()
-        .with_context(|| format!("failed to spawn package {name}"))?;
+    let child = cmd.spawn().with_context(|| {
+        format!(
+            "failed to spawn package {name} via `{} start`",
+            rbnx_bin.display()
+        )
+    })?;
     output::sub_step(&format!(
         "[{component}] {name} -> {} (config: {})",
         log_path(log_dir, &log_name).display(),
@@ -356,11 +358,6 @@ pub async fn execute(
     std::fs::create_dir_all(&instances_dir)
         .with_context(|| format!("failed to create instances dir {}", instances_dir.display()))?;
 
-    // `cargo run -p <bin>` requires we cd into a cargo workspace. We assume
-    // the `robonix-cli` binary is itself running out of the robonix source
-    // tree — walk up from the current exe to find the workspace root.
-    let rust_root = find_rust_root()?;
-
     // Propagate the manifest's `env:` block into our own env so child
     // processes (which inherit) see it.
     // set_var is unsafe on edition 2024 (other threads may race). We call
@@ -408,7 +405,7 @@ pub async fn execute(
                 continue;
             }
             let args = system_cli_args(name, deploy.system.get(*name), atlas_listen.as_deref());
-            let sp = spawn_system_binary(&rust_root, &log_dir, name, bin, &args).await?;
+            let sp = spawn_system_binary(&log_dir, name, bin, &args).await?;
             children.push(sp);
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         }
@@ -445,7 +442,6 @@ pub async fn execute(
         let sp = spawn_and_init(
             "primitive",
             e,
-            &rust_root,
             &log_dir,
             &cache_root,
             &instances_dir,
@@ -459,7 +455,6 @@ pub async fn execute(
         let sp = spawn_and_init(
             "service",
             e,
-            &rust_root,
             &log_dir,
             &cache_root,
             &instances_dir,
@@ -509,28 +504,6 @@ pub async fn execute(
         output::sub_step(&format!("{} stopped", sp.name));
     }
     Ok(())
-}
-
-/// Walk up from the running executable's directory until a `Cargo.toml`
-/// containing `[workspace]` is found (the robonix rust/ root). This is
-/// how we locate the cargo workspace when called as an installed binary
-/// or from `cargo run` alike.
-fn find_rust_root() -> Result<PathBuf> {
-    let exe = std::env::current_exe()?;
-    let mut cur: Option<&Path> = exe.parent();
-    while let Some(d) = cur {
-        let cargo = d.join("Cargo.toml");
-        if cargo.is_file() {
-            if let Ok(text) = std::fs::read_to_string(&cargo) {
-                if text.contains("[workspace]") {
-                    return Ok(d.to_path_buf());
-                }
-            }
-        }
-        cur = d.parent();
-    }
-    // Fallback: current working dir (useful in dev).
-    std::env::current_dir().context("could not locate rust workspace root")
 }
 
 /// Translate a `system.<name>:` block into CLI args for the corresponding
@@ -618,7 +591,6 @@ fn system_cli_args(
 async fn spawn_and_init(
     component: &str,
     entry: &PackageEntry,
-    rust_root: &Path,
     log_dir: &Path,
     cache_root: &Path,
     instances_dir: &Path,
@@ -634,7 +606,6 @@ async fn spawn_and_init(
         .collect();
 
     let sp = spawn_package(
-        rust_root,
         log_dir,
         cache_root,
         instances_dir,

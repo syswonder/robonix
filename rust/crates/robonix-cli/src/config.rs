@@ -16,12 +16,6 @@ pub struct Config {
     /// (e.g. mapping_rbnx on a robot) can find capabilities/ and rust/crates/robonix-interfaces/lib.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub robonix_source_path: Option<PathBuf>,
-    /// Node identifier (e.g. hostname) for capabilities registered by this CLI; shown in core web UI.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<String>,
-    /// Core web HTTP base URL (e.g. http://core-host:8080) for pushing capability logs when core has a viewer open.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub core_http_url: Option<String>,
 }
 
 impl Config {
@@ -117,8 +111,6 @@ impl Config {
         Self {
             package_storage_path: default_path,
             robonix_source_path: None,
-            node_id: None,
-            core_http_url: None,
         }
     }
 
@@ -200,15 +192,6 @@ impl std::str::FromStr for SourcePathKey {
 }
 
 impl Config {
-    /// Resolve node_id: config value or hostname.
-    pub fn effective_node_id(&self) -> String {
-        self.node_id.clone().unwrap_or_else(|| {
-            hostname::get()
-                .map(|h| h.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| String::new())
-        })
-    }
-
     pub fn ensure_storage_dir(&self) -> Result<()> {
         // Check if path exists and is a directory (following symlinks)
         if let Ok(metadata) = std::fs::metadata(&self.package_storage_path) {
