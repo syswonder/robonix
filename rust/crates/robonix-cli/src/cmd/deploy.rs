@@ -574,20 +574,13 @@ fn system_cli_args(
     out
 }
 
-/// Spawn one primitive / service package, then drive it through Driver(CMD_INIT).
-///
-/// Flow:
-///   1. Snapshot atlas's known cap_id set
-///   2. Spawn `rbnx start -p <path>` (the package boots and `register_capability`
-///      itself, then declares its driver interface)
-///   3. Poll atlas until a NEW cap_id appears that has at least one
-///      `*/driver` interface declared over gRPC
-///   4. ConnectCapability → tonic Channel → LifecycleDriver.Driver(CMD_INIT, config_json)
-///   5. Verify response.ok; on failure return Err and let the caller abort
-///   6. DisconnectCapability and continue
-///
-/// The package's process handle is returned so the deploy loop can teardown
-/// it on Ctrl-C.
+/// Spawn one primitive / service package and wait for it to register
+/// at least one capability with atlas. If the new cap has a `*/driver`
+/// gRPC interface, also drive Driver(CMD_INIT) and pass the entry's
+/// `config:` as `config_json`. Packages that don't declare a driver
+/// (legacy RegisterNode + DeclareInterface, or new packages that just
+/// don't need init-time wiring) are deployed as-is once their first cap
+/// appears in atlas.
 async fn spawn_and_init(
     component: &str,
     entry: &PackageEntry,
@@ -616,10 +609,17 @@ async fn spawn_and_init(
     .await?;
     let pkg_label = sp.name.clone();
 
-    // 1. Wait for the new cap to register + declare its driver interface.
-    let (cap_id, driver_contract) = wait_for_driver(atlas, &before, &pkg_label, component).await?;
+    let (cap_id, driver_contract) =
+        wait_for_registration(atlas, &before, &pkg_label, component).await?;
 
-    // 2. ConnectCapability to get the driver endpoint.
+    let Some(driver_contract) = driver_contract else {
+        // Legacy / no-lifecycle package: registration alone is enough.
+        output::sub_step(&format!(
+            "[{component}/{pkg_label}] cap '{cap_id}' registered (no `*/driver` interface — skipping Driver(INIT))"
+        ));
+        return Ok(sp);
+    };
+
     let (channel_id, endpoint, _params) = atlas
         .connect_capability(
             DEPLOY_CONSUMER_ID,
@@ -632,7 +632,6 @@ async fn spawn_and_init(
             format!("[{component}/{pkg_label}] ConnectCapability for {driver_contract}")
         })?;
 
-    // 3. Driver(CMD_INIT, config_json).
     let config_json = serde_json::to_string(&entry.config).unwrap_or_else(|_| "{}".into());
     let normalized = if endpoint.starts_with("http") {
         endpoint.clone()
@@ -683,40 +682,44 @@ async fn spawn_and_init(
     Ok(sp)
 }
 
-/// Poll atlas every DRIVER_POLL_INTERVAL until a cap NOT in `before` appears
-/// with a `*/driver` gRPC interface. Returns (cap_id, driver_contract_id).
-async fn wait_for_driver(
+/// Poll atlas until a cap NOT in `before` appears. Returns the new
+/// `cap_id` plus an optional `driver_contract_id` if the new cap
+/// declared a `*/driver` gRPC interface (signal to the caller that
+/// Driver(CMD_INIT) lifecycle should run).
+async fn wait_for_registration(
     atlas: &mut AtlasClient,
     before: &HashSet<String>,
     pkg_label: &str,
     component: &str,
-) -> Result<(String, String)> {
+) -> Result<(String, Option<String>)> {
     output::sub_step(&format!(
-        "[{component}/{pkg_label}] waiting for driver registration..."
+        "[{component}/{pkg_label}] waiting for cap registration..."
     ));
     let deadline = Instant::now() + DRIVER_REGISTER_TIMEOUT;
     loop {
         let records = atlas
             .query_capabilities("", "", atlas_pb::Transport::Unspecified)
             .await
-            .with_context(|| format!("[{component}/{pkg_label}] poll atlas for driver"))?;
+            .with_context(|| format!("[{component}/{pkg_label}] poll atlas"))?;
         for rec in records {
             if before.contains(&rec.capability_id) {
                 continue;
             }
-            // New cap! Check if it's declared a driver interface yet.
-            for iface in &rec.interfaces {
-                if iface.transport != atlas_pb::Transport::Grpc as i32 {
-                    continue;
-                }
-                if iface.contract_id.ends_with("/driver") {
-                    return Ok((rec.capability_id.clone(), iface.contract_id.clone()));
-                }
-            }
+            // Found a new cap. If it has a `*/driver` gRPC interface,
+            // the caller should run Driver(CMD_INIT); otherwise it's a
+            // legacy / no-lifecycle package and we just record the cap.
+            let driver = rec.interfaces.iter().find(|iface| {
+                iface.transport == atlas_pb::Transport::Grpc as i32
+                    && iface.contract_id.ends_with("/driver")
+            });
+            return Ok((
+                rec.capability_id.clone(),
+                driver.map(|i| i.contract_id.clone()),
+            ));
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
-                "[{component}/{pkg_label}] timed out after {:?} waiting for the package to register a `*/driver` gRPC interface — check the package's stdout/stderr log",
+                "[{component}/{pkg_label}] timed out after {:?} — package never registered a cap with atlas. Check its log.",
                 DRIVER_REGISTER_TIMEOUT
             );
         }
