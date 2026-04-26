@@ -6,23 +6,23 @@
 // Executor should resolve the concrete gRPC endpoint via Atlas QueryNodes and
 // call the generated proto service.
 
-use crate::pb::pilot::TaskCallResult;
+use crate::pb::pilot::CapabilityCallResult;
 
 pub async fn execute(
     call_id: &str,
     name: &str,
     _args_json: &str,
     endpoint: &str,
-) -> TaskCallResult {
+) -> CapabilityCallResult {
     // Stub: gRPC dispatch not yet implemented.
     log::warn!(
         "[grpc] tool '{}' (interface '{}') — gRPC dispatch not yet implemented",
         name,
         endpoint
     );
-    TaskCallResult {
+    CapabilityCallResult {
         call_id: call_id.to_string(),
-        tool_name: name.to_string(),
+        capability_name: name.to_string(),
         success: false,
         output: String::new(),
         error: format!("gRPC dispatch not yet implemented for '{}'", name),

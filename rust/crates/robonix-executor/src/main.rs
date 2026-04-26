@@ -8,7 +8,7 @@
 // On startup executor:
 //   1. Connects to atlas, registers as `com.robonix.system.executor`.
 //   2. Declares two contract interfaces over gRPC:
-//        - robonix/system/executor              (Stream — TaskGraph dispatch)
+//        - robonix/system/executor              (Stream — Plan dispatch)
 //        - robonix/system/executor/list_tools   (Call   — tool catalogue)
 //   3. Serves both on `listen`. Tool dispatch resolves MCP / gRPC / builtin
 //      backends via atlas at every Stream RPC.
@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
             atlas_client::grpc_params(
                 "capabilities/system/executor.v1.toml",
                 "robonix.contracts.SystemExecutor",
-                "/robonix.contracts.SystemExecutor/Stream",
+                "/robonix.contracts.SystemExecutor/Execute",
             ),
         )
         .await?;
@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
             atlas_client::grpc_params(
                 "capabilities/system/executor_list_tools.v1.toml",
                 "robonix.contracts.SystemExecutorListTools",
-                "/robonix.contracts.SystemExecutorListTools/Call",
+                "/robonix.contracts.SystemExecutorListTools/ListTools",
             ),
         )
         .await?;

@@ -1,3 +1,3 @@
-# Correlates with TaskGraph.graph_id.
-string graph_id
+# Correlates with Plan.plan_id.
+string plan_id
 bool any_failed

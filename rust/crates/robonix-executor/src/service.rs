@@ -7,8 +7,10 @@ use crate::pb::contracts::{
     system_executor_list_tools_server::SystemExecutorListTools,
     system_executor_server::SystemExecutor,
 };
-use crate::pb::executor::{ListToolsRequest, ListToolsResponse, TaskCallEvent, ToolSpec};
-use crate::pb::pilot::TaskGraph;
+use crate::pb::executor::{
+    CapabilityCallEvent, CapabilitySpec, ListToolsRequest, ListToolsResponse,
+};
+use crate::pb::pilot::Plan;
 use crate::tools;
 use robonix_atlas::client::AtlasClient;
 use tokio_stream::wrappers::ReceiverStream;
@@ -32,12 +34,12 @@ impl ExecutorServiceImpl {
 
 #[tonic::async_trait]
 impl SystemExecutor for ExecutorServiceImpl {
-    type StreamStream = ReceiverStream<Result<TaskCallEvent, Status>>;
+    type ExecuteStream = ReceiverStream<Result<CapabilityCallEvent, Status>>;
 
-    async fn stream(
+    async fn execute(
         &self,
-        request: Request<TaskGraph>,
-    ) -> Result<Response<Self::StreamStream>, Status> {
+        request: Request<Plan>,
+    ) -> Result<Response<Self::ExecuteStream>, Status> {
         let graph = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let mut atlas = self.atlas.clone();
@@ -54,20 +56,20 @@ impl SystemExecutor for ExecutorServiceImpl {
                 }
             };
 
-            let graph_id = graph.graph_id.clone();
+            let plan_id = graph.plan_id.clone();
             let mut any_failed = false;
 
             for call in &graph.calls {
                 let _ = tx
                     .send(Ok(exec_wire::started(
                         call.call_id.clone(),
-                        call.tool_name.clone(),
+                        call.capability_name.clone(),
                     )))
                     .await;
 
                 log::info!(
                     "[executor] dispatching '{}' (call_id={})",
-                    call.tool_name,
+                    call.capability_name,
                     call.call_id
                 );
                 let result = dispatch::dispatch(call, &routing_map).await;
@@ -77,19 +79,23 @@ impl SystemExecutor for ExecutorServiceImpl {
                     let ellipsis = if result.output.len() > 120 { "…" } else { "" };
                     log::info!(
                         "[executor] '{}' ok: {}{}",
-                        call.tool_name,
+                        call.capability_name,
                         preview,
                         ellipsis
                     );
                 } else {
                     any_failed = true;
-                    log::warn!("[executor] '{}' failed: {}", call.tool_name, result.error);
+                    log::warn!(
+                        "[executor] '{}' failed: {}",
+                        call.capability_name,
+                        result.error
+                    );
                 }
 
                 let _ = tx.send(Ok(exec_wire::result(result))).await;
             }
 
-            let _ = tx.send(Ok(exec_wire::complete(graph_id, any_failed))).await;
+            let _ = tx.send(Ok(exec_wire::complete(plan_id, any_failed))).await;
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
@@ -98,7 +104,7 @@ impl SystemExecutor for ExecutorServiceImpl {
 
 #[tonic::async_trait]
 impl SystemExecutorListTools for ExecutorServiceImpl {
-    async fn call(
+    async fn list_tools(
         &self,
         request: Request<ListToolsRequest>,
     ) -> Result<Response<ListToolsResponse>, Status> {
@@ -110,14 +116,16 @@ impl SystemExecutorListTools for ExecutorServiceImpl {
 
         let specs = tool_list
             .into_iter()
-            .map(|t| ToolSpec {
-                tool_name: t.name,
+            .map(|t| CapabilitySpec {
+                capability_name: t.name,
                 description: t.description,
                 input_schema_json: t.input_schema.to_string(),
                 routing: Some(t.routing),
             })
             .collect();
 
-        Ok(Response::new(ListToolsResponse { tools: specs }))
+        Ok(Response::new(ListToolsResponse {
+            capabilities: specs,
+        }))
     }
 }

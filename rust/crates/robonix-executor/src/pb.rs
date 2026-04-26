@@ -6,8 +6,8 @@
 // Used here:
 //   pb::contracts::system_executor_server          — Stream RPC handler
 //   pb::contracts::system_executor_list_tools_server — Call RPC handler
-//   pb::executor                                   — TaskCallEvent / ListTools_*
-//   pb::pilot                                      — TaskGraph / TaskCall / TaskCallResult / ToolRouting
+//   pb::executor                                   — CapabilityCallEvent / ListTools_*
+//   pb::pilot                                      — Plan / CapabilityCall / CapabilityCallResult / ToolRouting
 #![allow(
     dead_code,
     unused_imports,

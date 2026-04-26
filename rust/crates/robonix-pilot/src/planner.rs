@@ -5,7 +5,7 @@
 //   1. Build system prompt (optional SOUL.md + operating principles).
 //   1b. Proactively call search_memory via Executor; inject results into system prompt.
 //   2. Add user message to history.
-//   3. Loop: fetch tools → VLM call → tool calls → TaskGraph → Executor → feed results back.
+//   3. Loop: fetch tools → VLM call → tool calls → Plan → Executor → feed results back.
 //   4. Stream PilotEvents to the Liaison caller via `tx`.
 
 use crate::history;
@@ -16,7 +16,7 @@ use crate::pb::contracts::{
 };
 use crate::pb::executor::ListToolsRequest;
 use crate::pb::pilot::{
-    BatchResult, PilotEvent, SessionStatusEvent, Task, TaskCall, TaskCallResult, TaskGraph,
+    BatchResult, CapabilityCall, CapabilityCallResult, PilotEvent, Plan, SessionStatusEvent, Task,
     ToolRouting,
 };
 use crate::service::{self, PilotStreamBody, SessionState};
@@ -124,17 +124,17 @@ pub async fn run_turn(
     let base_prompt = build_system_prompt(load_agent_soul().as_deref());
 
     // Tool catalogue (needed before prefetch so MCP tools get correct routing — never dispatch as
-    // unknown builtins when `TaskCall.routing` is missing).
+    // unknown builtins when `CapabilityCall.routing` is missing).
     let initial_tools = executor
         .list_tools
-        .call(Request::new(ListToolsRequest { refresh: true }))
+        .list_tools(Request::new(ListToolsRequest { refresh: true }))
         .await
         .map_err(|e| anyhow::anyhow!("ListTools RPC failed: {e}"))?
         .into_inner()
-        .tools;
+        .capabilities;
     let search_memory_routing = initial_tools
         .iter()
-        .find(|t| t.tool_name == "search_memory")
+        .find(|t| t.capability_name == "search_memory")
         .and_then(|t| t.routing.clone());
 
     // ── 1b. Pre-fetch long-term memory ────────────────────────────────────────
@@ -170,24 +170,24 @@ pub async fn run_turn(
         // are visible to the VLM immediately in the next round.
         let tool_list = executor
             .list_tools
-            .call(Request::new(ListToolsRequest { refresh: true }))
+            .list_tools(Request::new(ListToolsRequest { refresh: true }))
             .await
             .map_err(|e| anyhow::anyhow!("ListTools RPC failed: {e}"))?
             .into_inner()
-            .tools;
+            .capabilities;
 
         let tool_defs: Vec<ToolDef> = tool_list
             .iter()
             .map(|t| {
                 let schema: serde_json::Value =
                     serde_json::from_str(&t.input_schema_json).unwrap_or_default();
-                ToolDef::new(&t.tool_name, &t.description, schema)
+                ToolDef::new(&t.capability_name, &t.description, schema)
             })
             .collect();
 
         let routing_map: std::collections::HashMap<String, ToolRouting> = tool_list
             .iter()
-            .filter_map(|t| t.routing.clone().map(|r| (t.tool_name.clone(), r)))
+            .filter_map(|t| t.routing.clone().map(|r| (t.capability_name.clone(), r)))
             .collect();
 
         let mut messages = vec![Message::system(&system_prompt)];
@@ -259,20 +259,20 @@ pub async fn run_turn(
         // Push assistant message with tool calls into history.
         history.push(Message::assistant_tool_calls(raw_tool_calls.clone()));
 
-        // ── 5. Build TaskGraph (v1: linear list of calls) ─────────────────────
-        let graph_id = Uuid::new_v4().to_string();
-        let calls: Vec<TaskCall> = raw_tool_calls
+        // ── 5. Build Plan (v1: linear list of calls) ─────────────────────
+        let plan_id = Uuid::new_v4().to_string();
+        let calls: Vec<CapabilityCall> = raw_tool_calls
             .iter()
-            .map(|tc| TaskCall {
+            .map(|tc| CapabilityCall {
                 call_id: tc.id.clone(),
-                tool_name: tc.function.name.clone(),
+                capability_name: tc.function.name.clone(),
                 args_json: tc.function.arguments.clone(),
                 routing: routing_map.get(&tc.function.name).cloned(),
             })
             .collect();
 
-        let graph = TaskGraph {
-            graph_id: graph_id.clone(),
+        let graph = Plan {
+            plan_id: plan_id.clone(),
             session_id: session_id.clone(),
             round,
             calls: calls.clone(),
@@ -282,19 +282,19 @@ pub async fn run_turn(
         let _ = tx
             .send(Ok(service::pack(
                 &session_id,
-                PilotStreamBody::TaskGraph(graph.clone()),
+                PilotStreamBody::Plan(graph.clone()),
             )))
             .await;
 
         // ── 6. Dispatch to Executor ───────────────────────────────────────────
         let mut exec_stream = executor
             .graph
-            .stream(Request::new(graph))
+            .execute(Request::new(graph))
             .await
             .map_err(|e| anyhow::anyhow!("Executor Stream RPC failed: {e}"))?
             .into_inner();
 
-        let mut results: Vec<TaskCallResult> = Vec::new();
+        let mut results: Vec<CapabilityCallResult> = Vec::new();
 
         const EX_STARTED: u32 = 0;
         const EX_RESULT: u32 = 1;
@@ -309,7 +309,7 @@ pub async fn run_turn(
             match event.event_kind {
                 EX_STARTED => {
                     if let Some(ref s) = event.started {
-                        log::debug!("[pilot] executor started '{}'", s.tool_name);
+                        log::debug!("[pilot] executor started '{}'", s.capability_name);
                     }
                 }
                 EX_RESULT => {
@@ -353,7 +353,7 @@ pub async fn run_turn(
         // Emit BatchResult to Liaison.
         let any_failed = results.iter().any(|r| !r.success);
         let batch_result = BatchResult {
-            graph_id: graph_id.clone(),
+            plan_id: plan_id.clone(),
             session_id: session_id.clone(),
             round,
             results,

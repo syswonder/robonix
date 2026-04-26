@@ -1,19 +1,14 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// `SystemPilot` gRPC handler (contract `robonix/system/pilot`).
+// Author: wheatfox <wheatfox17@icloud.com>
 //
-// One Stream RPC per Task. The handler:
-//   * fast-paths abort_turn requests by signaling the in-flight session
-//     without holding the session lock,
-//   * spawns the planner in a tokio task, streaming `PilotEvent`s back to
-//     the caller (Liaison) over the gRPC server-streaming response,
-//   * connects to executor on demand via atlas (no static endpoint config).
+// `SystemPilot` gRPC handler (contract `robonix/system/pilot`).
 
 use crate::pb::contracts::{
     system_executor_client::SystemExecutorClient,
     system_executor_list_tools_client::SystemExecutorListToolsClient,
     system_pilot_server::SystemPilot,
 };
-use crate::pb::pilot::{BatchResult, PilotEvent, SessionStatusEvent, Task, TaskGraph};
+use crate::pb::pilot::{BatchResult, PilotEvent, Plan, SessionStatusEvent, Task};
 use crate::planner::{self, ExecutorConn};
 use crate::vlm::{Message, VlmClient};
 use anyhow::Context;
@@ -25,26 +20,20 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-/// Conversation state values that go on the wire in
-/// `pb::pilot::SessionStatusEvent.state`. Defined here (not in the proto)
-/// because pilot is the only writer.
 #[derive(Clone, Copy)]
 #[repr(u32)]
 #[allow(dead_code)]
 pub enum SessionState {
-    Active = 0,
-    Completed = 1,
-    Failed = 2,
-    WaitingInput = 3,
+    Active = 0,    // when pilot recieved a task
+    Completed = 1, // the task is completed
+    Failed = 2,    // the task failed
 }
 
-// ── PilotEvent wire helpers ────────────────────────────────────────────────
 // `PilotEvent` carries one of N payloads tagged by `event_kind`. proto3 lacks
 // a oneof here so we keep the discriminator explicit; planner + service both
 // build events through `pack`.
-
 pub const EVT_TEXT_CHUNK: u32 = 0;
-pub const EVT_TASK_GRAPH: u32 = 1;
+pub const EVT_PLAN: u32 = 1;
 pub const EVT_BATCH_RESULT: u32 = 2;
 pub const EVT_STATUS: u32 = 3;
 pub const EVT_FINAL_TEXT: u32 = 4;
@@ -52,7 +41,7 @@ pub const EVT_FINAL_TEXT: u32 = 4;
 pub enum PilotStreamBody {
     TextChunk(String),
     FinalText(String),
-    TaskGraph(TaskGraph),
+    Plan(Plan),
     BatchResult(BatchResult),
     Status(SessionStatusEvent),
 }
@@ -67,9 +56,9 @@ pub fn pack(session_id: &str, body: PilotStreamBody) -> PilotEvent {
             e.event_kind = EVT_TEXT_CHUNK;
             e.text_chunk = s;
         }
-        PilotStreamBody::TaskGraph(g) => {
-            e.event_kind = EVT_TASK_GRAPH;
-            e.task_graph = Some(g);
+        PilotStreamBody::Plan(g) => {
+            e.event_kind = EVT_PLAN;
+            e.plan = Some(g);
         }
         PilotStreamBody::BatchResult(b) => {
             e.event_kind = EVT_BATCH_RESULT;
@@ -86,8 +75,6 @@ pub fn pack(session_id: &str, body: PilotStreamBody) -> PilotEvent {
     }
     e
 }
-
-// ── Service ────────────────────────────────────────────────────────────────
 
 /// LLM conversation history per `session_id`. Grows across turns; never
 /// expired (turns trim themselves at MAX_HISTORY in planner).
@@ -141,9 +128,12 @@ fn task_is_abort_turn(task: &Task) -> bool {
 
 #[tonic::async_trait]
 impl SystemPilot for PilotServiceImpl {
-    type StreamStream = ReceiverStream<Result<PilotEvent, Status>>;
+    type SubmitTaskStream = ReceiverStream<Result<PilotEvent, Status>>;
 
-    async fn stream(&self, request: Request<Task>) -> Result<Response<Self::StreamStream>, Status> {
+    async fn submit_task(
+        &self,
+        request: Request<Task>,
+    ) -> Result<Response<Self::SubmitTaskStream>, Status> {
         let mut task = request.into_inner();
 
         if task_is_abort_turn(&task) {
@@ -164,6 +154,10 @@ impl SystemPilot for PilotServiceImpl {
         }
 
         let history_arc = self.get_or_create_history(&task.session_id).await;
+        // what is tokio's tx and rx:
+        // https://docs.rs/tokio/latest/tokio/sync/mpsc/struct.Sender.html
+        // https://tokio.rs/tokio/tutorial/channels
+        // MPSC: Multiple Producer Single Consumer
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(64);
         let atlas = self.atlas.clone();
         let cap_id = self.cap_id.clone();
