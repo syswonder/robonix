@@ -4,7 +4,7 @@
 // package's build.sh.
 //
 // For a given package root:
-//   1. Stage the system-wide .proto files (IDL + contracts) into
+//   1. Stage the system-wide .proto files (IDL + capabilities) into
 //      `<pkg>/rbnx-build/proto-staging/`. This dir is package-local and
 //      transient — no committed artefacts elsewhere in the tree.
 //   2. If --mcp: regenerate `<pkg>/robonix_mcp_types/`
@@ -14,9 +14,10 @@
 //   4. Write `<pkg>/rbnx-build/ws/install/setup.bash` so `rbnx start`
 //      injects the right PYTHONPATH.
 //
-// TODO: union package-local contracts (`<pkg>/contracts/`) and package-local
-// IDL (`<pkg>/interfaces/lib/`) into a staging dir before running codegen —
-// currently those are a copy-pasted snippet in a few build.sh scripts.
+// TODO: union package-local capabilities (`<pkg>/capabilities/`) and
+// package-local IDL (`<pkg>/interfaces/lib/`) into a staging dir before
+// running codegen — currently those are a copy-pasted snippet in a few
+// build.sh scripts.
 
 use anyhow::{Context, Result};
 use colored::*;
@@ -70,7 +71,7 @@ pub async fn execute(
     };
     let rust_root = config.resolve_source_path(SourcePathKey::RustRoot)?;
     let interfaces_lib = config.resolve_source_path(SourcePathKey::InterfacesLib)?;
-    let contracts_dir = config.resolve_source_path(SourcePathKey::Contracts)?;
+    let capabilities_dir = config.resolve_source_path(SourcePathKey::Capabilities)?;
     let runtime_proto = config.resolve_source_path(SourcePathKey::RuntimeProto)?;
     let robonix_py = config.resolve_source_path(SourcePathKey::RobonixPy).ok();
 
@@ -112,7 +113,7 @@ pub async fn execute(
 
     // 1. Stage system .proto into rbnx-build/proto-staging/.
     println!("{} robonix-codegen --lang proto ...", "[codegen]".bold());
-    // TODO: support <pkg>/contracts and <pkg>/interfaces/lib union.
+    // TODO: support <pkg>/capabilities and <pkg>/interfaces/lib union.
     run_cmd(
         "robonix-codegen proto",
         Command::new(&cargo_bin)
@@ -121,7 +122,7 @@ pub async fn execute(
             .args(["--", "--lang", "proto", "-I"])
             .arg(&interfaces_lib)
             .arg("--contracts")
-            .arg(&contracts_dir)
+            .arg(&capabilities_dir)
             .arg("-o")
             .arg(&proto_staging),
     )?;

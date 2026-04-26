@@ -68,7 +68,7 @@ install: install-atlas
 	@# uncomment once it migrates to robonix-atlas::client.
 	@# cargo install --path crates/robonix-liaison  --bin robonix-liaison   $(CARGO_FLAGS)
 	@# Register this clone as the robonix source tree so packages anywhere
-	@# on disk can resolve contracts/IDL via `rbnx path`. This updates
+	@# on disk can resolve capabilities/IDL via `rbnx path`. This updates
 	@# ~/.robonix/config.yaml robonix_source_path = <repo-root> (the parent of rust/).
 	@REPO_ROOT="$$(cd "$(RUST_ABS)/.." && pwd)"; \
 	echo ""; \

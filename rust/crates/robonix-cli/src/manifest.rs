@@ -77,7 +77,7 @@ pub struct CapabilityRef {
     pub name: String,
     /// Optional path to a package-local TOML that overrides / defines
     /// this capability (for experimental caps not yet in the official
-    /// contracts directory). Relative to the package root.
+    /// capabilities directory). Relative to the package root.
     #[serde(default, alias = "definition")]
     pub path: Option<String>,
 }

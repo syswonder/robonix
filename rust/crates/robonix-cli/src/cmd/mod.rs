@@ -120,14 +120,14 @@ pub enum Commands {
         out_dir: Option<PathBuf>,
     },
     /// Register this directory as the robonix source tree (persists to ~/.robonix/config.yaml).
-    /// Call once from a cloned robonix repo so packages anywhere on disk can find contracts/IDL.
+    /// Call once from a cloned robonix repo so packages anywhere on disk can find capabilities/IDL.
     Setup {
         /// Path to the robonix repo root (default: $RBNX_INVOCATION_CWD or process cwd).
         /// If the given path is a sub-directory, walks up to find the root.
         path: Option<PathBuf>,
     },
     /// Print an absolute path rooted in the configured robonix source tree (for build scripts).
-    /// Keys: root, rust, contracts, interfaces-lib, runtime-proto, robonix-py
+    /// Keys: root, rust, capabilities, interfaces-lib, runtime-proto, robonix-py
     Path {
         /// Path key to resolve (see above).
         key: String,

@@ -19,7 +19,7 @@ struct Args {
     #[arg(short = 'I', long = "include", number_of_values = 1)]
     include: Vec<PathBuf>,
 
-    /// Directory of contract `.toml` files (e.g. rust/contracts). Emits `robonix_contracts.proto` (proto only).
+    /// Directory of contract `.toml` files (e.g. <root>/capabilities). Emits `robonix_contracts.proto` (proto only).
     #[arg(long = "contracts")]
     contracts: Option<PathBuf>,
 
