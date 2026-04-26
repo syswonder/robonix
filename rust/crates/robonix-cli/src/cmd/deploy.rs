@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::{Child, Command};
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 
 // ── Deploy manifest schema (subset used by this orchestrator) ───────────
 
@@ -71,7 +71,11 @@ struct PackageEntry {
 
 /// Resolve a `PackageEntry` to a filesystem path, cloning from `url` into
 /// `<cache_root>/<name>/` if necessary.
-fn resolve_entry_path(entry: &PackageEntry, cache_root: &Path, manifest_dir: &Path) -> Result<PathBuf> {
+fn resolve_entry_path(
+    entry: &PackageEntry,
+    cache_root: &Path,
+    manifest_dir: &Path,
+) -> Result<PathBuf> {
     match (&entry.path, &entry.url) {
         (Some(p), None) => Ok(manifest_dir.join(p)),
         (None, Some(url)) => {
@@ -101,11 +105,7 @@ fn resolve_entry_path(entry: &PackageEntry, cache_root: &Path, manifest_dir: &Pa
                     anyhow::bail!("git clone {url} exited with {:?}", status.code());
                 }
             } else {
-                output::sub_step(&format!(
-                    "[cache hit] {} -> {}",
-                    name,
-                    dest.display()
-                ));
+                output::sub_step(&format!("[cache hit] {} -> {}", name, dest.display()));
             }
             Ok(dest)
         }
@@ -285,7 +285,10 @@ async fn spawn_package(
         log_path(log_dir, &log_name).display(),
         cfg_file.display(),
     ));
-    Ok(Spawned { name: log_name, child })
+    Ok(Spawned {
+        name: log_name,
+        child,
+    })
 }
 
 // ── entry point ─────────────────────────────────────────────────────────
@@ -349,7 +352,11 @@ pub async fn execute(
         "Deploying",
         &format!(
             "{} (manifest: {})",
-            if deploy.name.is_empty() { "robonix" } else { &deploy.name },
+            if deploy.name.is_empty() {
+                "robonix"
+            } else {
+                &deploy.name
+            },
             manifest_path.display()
         ),
     );
@@ -359,6 +366,15 @@ pub async fn execute(
     if !skip_system {
         // System Rust binaries: launched in atlas → executor → pilot order.
         // Each is fed CLI flags translated from `system.<name>:` block.
+        // executor + pilot inherit `--atlas` from `system.atlas.listen`
+        // unless they declare their own `atlas:` (rare).
+        let atlas_listen = deploy
+            .system
+            .get("atlas")
+            .and_then(|v| v.as_mapping())
+            .and_then(|m| m.get(serde_yaml::Value::String("listen".into())))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         let bin_map: &[(&str, &str)] = &[
             ("atlas", "robonix-atlas"),
             ("executor", "robonix-executor"),
@@ -368,7 +384,7 @@ pub async fn execute(
             if !deploy.system.contains_key(*name) {
                 continue;
             }
-            let args = system_cli_args(name, deploy.system.get(*name));
+            let args = system_cli_args(name, deploy.system.get(*name), atlas_listen.as_deref());
             let sp = spawn_system_binary(&rust_root, &log_dir, name, bin, &args).await?;
             children.push(sp);
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
@@ -479,7 +495,16 @@ fn find_rust_root() -> Result<PathBuf> {
 /// Translate a `system.<name>:` block into CLI args for the corresponding
 /// Rust binary. Per-binary mapping kept narrow — adding a new flag means
 /// touching exactly this function plus the binary's clap struct.
-fn system_cli_args(name: &str, cfg: Option<&serde_yaml::Value>) -> Vec<String> {
+///
+/// `atlas_listen` is the value of `system.atlas.listen` (already resolved
+/// elsewhere). Consumers that don't carry their own `atlas:` field inherit
+/// from this so the manifest doesn't have to repeat the address. An
+/// explicit per-block `atlas:` still wins.
+fn system_cli_args(
+    name: &str,
+    cfg: Option<&serde_yaml::Value>,
+    atlas_listen: Option<&str>,
+) -> Vec<String> {
     let mut out = Vec::new();
     let map = cfg.and_then(|v| v.as_mapping());
     let s = |k: &str| -> Option<String> {
@@ -509,12 +534,20 @@ fn system_cli_args(name: &str, cfg: Option<&serde_yaml::Value>) -> Vec<String> {
         }
         "executor" => {
             push_pair(&mut out, "--listen", s("listen"));
-            push_pair(&mut out, "--atlas", s("atlas"));
+            push_pair(
+                &mut out,
+                "--atlas",
+                s("atlas").or_else(|| atlas_listen.map(str::to_string)),
+            );
             push_pair(&mut out, "--log", s("log"));
         }
         "pilot" => {
             push_pair(&mut out, "--listen", s("listen"));
-            push_pair(&mut out, "--atlas", s("atlas"));
+            push_pair(
+                &mut out,
+                "--atlas",
+                s("atlas").or_else(|| atlas_listen.map(str::to_string)),
+            );
             push_pair(&mut out, "--log", s("log"));
             // Embedded VLM block.
             push_pair(&mut out, "--vlm-upstream", nested_str("vlm", "upstream"));
