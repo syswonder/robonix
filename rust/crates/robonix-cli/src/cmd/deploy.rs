@@ -93,7 +93,9 @@ struct PackageEntry {
 }
 
 /// Resolve a `PackageEntry` to a filesystem path, cloning from `url` into
-/// `<cache_root>/<name>/` if necessary.
+/// `<cache_root>/<name>/` if necessary. Uses libgit2 (via the `git2` crate)
+/// instead of shelling out to `git`, so TLS works regardless of the system
+/// LibreSSL/OpenSSL version.
 fn resolve_entry_path(
     entry: &PackageEntry,
     cache_root: &Path,
@@ -115,18 +117,8 @@ fn resolve_entry_path(
             if !dest.exists() {
                 std::fs::create_dir_all(cache_root)?;
                 output::sub_step(&format!("cloning {url} -> {}", dest.display()));
-                let mut clone = std::process::Command::new("git");
-                clone.arg("clone").arg("--depth").arg("1");
-                if let Some(b) = &entry.branch {
-                    clone.arg("--branch").arg(b);
-                }
-                clone.arg(url).arg(&dest);
-                let status = clone.status().with_context(|| {
-                    format!("git clone {url} failed to spawn (is git installed?)")
-                })?;
-                if !status.success() {
-                    anyhow::bail!("git clone {url} exited with {:?}", status.code());
-                }
+                git_clone(url, &dest, entry.branch.as_deref())
+                    .with_context(|| format!("git clone {url} failed"))?;
             } else {
                 output::sub_step(&format!("[cache hit] {} -> {}", name, dest.display()));
             }
@@ -139,6 +131,61 @@ fn resolve_entry_path(
             anyhow::bail!("package entry has neither `path` nor `url`")
         }
     }
+}
+
+/// Clone a git repository using libgit2. Falls back to `git` CLI if libgit2
+/// fails (e.g. SSH auth that only the CLI agent handles).
+fn git_clone(url: &str, dest: &Path, branch: Option<&str>) -> Result<()> {
+    // Try libgit2 first (bundled TLS, no system LibreSSL dependency).
+    match git_clone_libgit2(url, dest, branch) {
+        Ok(()) => return Ok(()),
+        Err(e) => {
+            log::warn!("libgit2 clone failed ({e:#}), falling back to git CLI");
+            // Clean up partial clone if any.
+            let _ = std::fs::remove_dir_all(dest);
+        }
+    }
+
+    // Fallback: shell out to git (handles SSH agent, credential helpers, etc.).
+    // Inherit the full parent environment so proxy / SSL settings are preserved.
+    output::sub_step(&format!(
+        "git CLI: git clone --depth 1 {} {}{}",
+        url,
+        dest.display(),
+        branch.map(|b| format!(" --branch {b}")).unwrap_or_default()
+    ));
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("clone").arg("--depth").arg("1");
+    if let Some(b) = branch {
+        cmd.arg("--branch").arg(b);
+    }
+    cmd.arg(url).arg(dest);
+    // Let stdout/stderr go directly to terminal for real-time feedback.
+    cmd.stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    let status = cmd
+        .status()
+        .with_context(|| "git clone failed to spawn (is git installed?)")?;
+    if !status.success() {
+        anyhow::bail!("git clone exited with {:?}", status.code());
+    }
+    Ok(())
+}
+
+/// Clone using the git2 crate (libgit2).
+fn git_clone_libgit2(url: &str, dest: &Path, branch: Option<&str>) -> Result<()> {
+    let mut fo = git2::FetchOptions::new();
+    fo.depth(1);
+
+    let mut builder = git2::build::RepoBuilder::new();
+    builder.fetch_options(fo);
+    if let Some(b) = branch {
+        builder.branch(b);
+    }
+    builder
+        .clone(url, dest)
+        .with_context(|| format!("libgit2: failed to clone {url}"))?;
+    Ok(())
 }
 
 // ── env expansion — replace ${VAR} / $VAR in scalar strings ─────────────
