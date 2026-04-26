@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-# ROS 2 Humble + Webots (GUI) + Nav2 + tiago_bridge. Build context = repository root.
+# ROS 2 Humble + Webots (GUI) + Nav2 deps + Python deps for robonix
+# drivers that get `docker exec`'d into this container by `rbnx deploy`.
+# This image is the SIM container; it does NOT contain robonix driver
+# code. Driver code lives in each primitive/service package directory
+# on the host and is bind-mounted in by compose.yaml under /robonix_pkgs.
+# Build context = the directory containing this Dockerfile (sim/bridge/).
 FROM osrf/ros:humble-desktop-full
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -33,29 +38,28 @@ RUN wget -q -O /tmp/webots.deb "${WEBOTS_DEB_URL}" \
 # Pre-populate Webots asset cache. Without this, Webots fetches ~100 files from
 # raw.githubusercontent.com at first run — often blocked or painfully slow.
 # The seed tarball is exported from a successful run; see scripts/update-webots-seed.sh.
-COPY rust/examples/packages/tiago_sim_stack/bridge/webots_assets_seed.tar.gz /tmp/webots_seed.tar.gz
+COPY bridge/webots_assets_seed.tar.gz /tmp/webots_seed.tar.gz
 RUN mkdir -p /root/.cache/Cyberbotics/Webots \
     && tar -xzf /tmp/webots_seed.tar.gz -C /root/.cache/Cyberbotics/Webots \
     && rm -f /tmp/webots_seed.tar.gz \
     && echo "[dockerfile] webots asset cache: $(ls /root/.cache/Cyberbotics/Webots/assets | wc -l) files pre-populated"
 
+# Python deps used by the robonix driver processes that will be `docker
+# exec`'d into this container. (Drivers themselves live on host; their
+# Python imports resolve against this image's site-packages + the
+# bind-mounted package dirs under /robonix_pkgs.)
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN python3 -m pip install --no-cache-dir \
     "grpcio>=1.78.0" "protobuf>=6.30,<7" mcp "fastmcp>=3" numpy Pillow uvicorn httpx
 
+# Build context is sim/bridge/ — ros_ws lives one level up at sim/ros_ws/.
+# Compose passes context: ../ so we COPY from there.
 WORKDIR /colcon_ws
-COPY rust/examples/packages/tiago_sim_stack/ros_ws/src/eaios_webots src/eaios_webots
+COPY ros_ws/src/eaios_webots src/eaios_webots
 RUN bash -lc "source /opt/ros/humble/setup.bash && colcon build --symlink-install --packages-select eaios_webots"
 
-COPY rust/examples/packages/tiago_sim_stack/nav2_bringup /opt/robonix_nav2
-COPY rust/examples/packages/tiago_sim_stack/tiago_bridge /app/tiago_bridge
-# Shared Python helper (moved from examples/packages/robonix_mcp_contract to crates/robonix-py).
-COPY rust/crates/robonix-py /app/robonix_py_pkg
-COPY rust/examples/packages/tiago_sim_stack/bridge/entrypoint.sh /entrypoint.sh
+COPY bridge/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-
-WORKDIR /app
-ENV PYTHONPATH=/app:/app/tiago_bridge:/app/tiago_bridge/proto_gen:/app/tiago_bridge/robonix_mcp_types:/app/robonix_py_pkg
-
+WORKDIR /
 ENTRYPOINT ["/entrypoint.sh"]

@@ -5,7 +5,7 @@
 # If you do not use NVIDIA, skip this file; Intel/AMD may still use /dev/dri from compose.yaml.
 
 services:
-  ros2-bridge:
+  sim:
     deploy:
       resources:
         reservations:

@@ -1,70 +1,54 @@
-# `tiago_sim_stack` (RFC002 + Docker Compose)
+# Tiago Webots sim container
 
-Single Compose service **`ros2-bridge`**: **Webots (GUI)** + `eaios_webots` launch + **Nav2** bringup + **`tiago_bridge`** registering MCP with `robonix-atlas`.
+The simulation **environment** for the webots example. Brings up
+**Webots (GUI) + the `eaios_webots` Tiago controller** in one container.
+That's all — Nav2 lives in the [`tiago_nav2`](../services/tiago_nav2/)
+service package, and per-device drivers live in
+[`../primitives/`](../primitives/). Robonix `docker exec`s those into
+this container at deploy time.
+
+## Run
+
+Start the sim **first**, then `rbnx deploy` from `examples/webots/`:
+
+```bash
+# Terminal 1 — sim (GUI; Ctrl-C to stop):
+bash examples/webots/sim/start.sh
+
+# Terminal 2 — robonix:
+cd examples/webots
+rbnx deploy
+```
+
+`start.sh` auto-detects `nvidia-smi` and merges `compose.gpu.yaml` when
+present. Force CPU-only with `ROBONIX_FORCE_CPU=1`. The container's name
+is `robonix_tiago_sim` (referenced by every driver package's
+`docker exec`).
 
 ## Requirements
 
-- Docker, host **X11** (this stack is **not** headless).
-- Before `docker compose up`, allow local clients to use your display, e.g. `xhost +local:docker` (revert when done).
-- Set **`DISPLAY`** (e.g. `export DISPLAY=:0`) in the shell that runs Compose so the container inherits it.
-- **`robonix-atlas`** listening on the address in **`ROBONIX_ATLAS`** (default `127.0.0.1:50051`). With `network_mode: host`, the container shares the host network namespace.
-
-## `rbnx` (from repository `rust/`)
-
-```bash
-cargo run -p robonix-cli -- validate examples/packages/tiago_sim_stack
-cargo run -p robonix-cli -- build -p examples/packages/tiago_sim_stack
-# with robonix-atlas already running:
-cargo run -p robonix-cli -- start -p examples/packages/tiago_sim_stack -n com.robonix.prm.tiago
-```
-
-`start` runs `docker compose up --build ros2-bridge` in the foreground (Ctrl+C stops the stack).
-
-## End-to-end script
-
-From `rust/`:
-
-```bash
-./examples/run.sh
-```
-
-This uses **`rbnx` validate/build/start** for `vlm_service` and `tiago_sim_stack` by default (and starts `robonix-atlas` + `robonix-pilot` unless disabled — see `run.sh` header). Use **`START_SIM_STACK=0`** to skip the sim container.
-
-## Agent skills (`skills/`)
-
-`rbnx start` registers **`skills/* /SKILL.md`** with `robonix-atlas` for `robonix-pilot`. Notable:
-
-- **`object_search_wander`** — find a target (e.g. door) with **`robot_state` + `camera_snapshot` + short `base_cmd`**; explicitly **no** `base_navigate` / nav goals.
-- **`navigation`** — Nav2 map goals when allowed.
-- **`visual_inspection`** — camera-first perception.
+- Docker + Docker Compose v2.
+- Host X11 — `DISPLAY` set in the launching shell, plus
+  `xhost +local:docker` once per session (`start.sh` does this for you
+  when xhost is available).
+- For NVIDIA GPU: `nvidia-container-toolkit` installed on the host.
 
 ## Layout
 
 | Path | Role |
 |------|------|
-| `tiago_bridge/` | Python module: ROS2 ↔ MCP bridge; PRM RGB stream implements `robonix.contracts.PrmCameraRgb` (`robonix_contracts_pb2_grpc`). |
-| `ros_ws/src/eaios_webots` | ROS 2 Python package: Webots world + `robot_launch.py`. |
-| `nav2_bringup/config` | Nav2 + AMCL YAML, map, and rviz config. |
-| `bridge/Dockerfile` | Humble + Webots `.deb` + colcon build of `eaios_webots` + `tiago_bridge`. |
-| `bridge/entrypoint.sh` | Start Webots stack → Nav2 → rviz2 → `tiago_bridge.node`. |
+| `start.sh` | User-facing launcher. `bash start.sh`. |
+| `compose.yaml` | Single `sim` service: Webots + eaios_webots + bind-mounts of `../primitives` and `../services` into the container at `/robonix_pkgs`. |
+| `compose.gpu.yaml` | Optional NVIDIA GPU passthrough (auto-merged by `start.sh`). |
+| `bridge/Dockerfile` | Humble + Webots `.deb` + Python deps used by docker-exec'd robonix drivers. |
+| `bridge/entrypoint.sh` | Launch Webots, then `wait` so the container stays alive. |
+| `bridge/webots_assets_seed.tar.gz` | Pre-baked Webots proto/texture cache (offline-fast first run). |
+| `ros_ws/src/eaios_webots` | ROS 2 launch + Webots world for the simulated Tiago. |
 
-## Webots GUI feels slow?
+## Why is the container kept alive after Webots launches?
 
-Compared to the older **`docker/run.sh`** dev image, this Compose file used to start Webots with **only** the X11 socket mounted. Two things hurt a lot:
-
-1. **Default `/dev/shm` (64MB)** — Qt and Webots use shared memory; it is easy to end up swapping or stalling. `compose.yaml` now sets **`shm_size: '2gb'`** (same idea as giving GL apps enough IPC).
-2. **No GPU in the container** — `docker/run.sh` adds **`--gpus all`** when `nvidia-smi` exists and mounts **`/dev/dri`**. Without that, Webots often falls back to **software OpenGL** over X11, which feels “stuck” or single-digit FPS.
-
-**What to do**
-
-- **NVIDIA:** install [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html), then run:
-  ```bash
-  docker compose -f compose.yaml -f compose.gpu.yaml up --build
-  ```
-  (or the same merge from repo root with `-f` paths adjusted).
-- **Intel / AMD:** keep the default `compose.yaml`; **`/dev/dri`** is already mounted for Mesa.
-- Still bad? Try **`ipc: host`** on the service (stronger than large shm; dev-only).
-
-## Topic notes
-
-`tiago_bridge` defaults (camera, scan, `/amcl_pose`) may not match this Webots world without extra sensors or remaps. Override with **`TIAGO_*_TOPIC`** env vars in `compose.yaml` if needed.
+Robonix drivers (e.g. `tiago_chassis`, `tiago_camera`, `tiago_lidar`,
+`tiago_nav2`) run in **this** container via `docker exec` so they share
+the same DDS graph as Webots. The entrypoint ends with `wait` (instead
+of the previous `exec python3 -m tiago_bridge.node`) so Compose treats
+the container as live for as long as the Webots launch is alive.
