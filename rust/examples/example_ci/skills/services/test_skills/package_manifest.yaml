@@ -1,0 +1,17 @@
+manifestVersion: 1
+
+build: bash scripts/build.sh
+
+start: bash scripts/start.sh
+
+package:
+  name: com.vendor.test_skills
+  version: 0.0.1
+  vendor: vendor
+  description: TODO
+  license: Apache-2.0
+
+capabilities:
+  - name: robonix/srv/test_skills
+
+depends: []
