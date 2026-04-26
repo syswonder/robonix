@@ -6,7 +6,7 @@
 // memory cap is looked up via atlas the same way every other capability
 // is. Missing caps are silently tolerated — memory is never load-bearing.
 
-use crate::discovery::{self, llm_name};
+use crate::discovery;
 use crate::history::decode_string_output;
 use crate::pb::pilot::{CapabilityCall, Plan};
 use crate::planner::ExecutorConn;
@@ -71,7 +71,7 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
     };
     let Some((cap_id, iface)) = caps
         .iter()
-        .find(|(_, iface)| llm_name(&iface.contract_id) == "compact_memory")
+        .find(|(_, iface)| iface.contract_id == "robonix/system/memory/compact")
     else {
         return;
     };

@@ -81,19 +81,19 @@ mem = MemSearch(
 )
 
 
-# ── Contract: robonix/srv/memory/search ──────────────────────────────────────
+# ── Contract: robonix/system/memory/search ──────────────────────────────────────
 
 @mcp_contract(
     mcp,
-    contract_id="robonix/srv/memory/search",
+    contract_id="robonix/system/memory/search",
 )
-async def search_memory(msg: std_msgs_mcp.String) -> std_msgs_mcp.String:
+async def search(msg: std_msgs_mcp.String) -> std_msgs_mcp.String:
     """Search the agent's long-term memory for relevant past context, decisions, or user preferences.
-    Contract: robonix/srv/memory/search (input/output std_msgs/String)."""
+    Contract: robonix/system/memory/search (input/output std_msgs/String)."""
     try:
         results = await mem.search(msg.data, top_k=2)
     except Exception as e:
-        logging.warning("[memsearch] search_memory failed (returning empty): %s", e)
+        logging.warning("[memsearch] search failed (returning empty): %s", e)
         return std_msgs_mcp.String(
             data="No relevant memories found (search unavailable)."
         )
@@ -103,15 +103,15 @@ async def search_memory(msg: std_msgs_mcp.String) -> std_msgs_mcp.String:
     return std_msgs_mcp.String(data=f"Relevant memories:\n{context}")
 
 
-# ── Contract: robonix/srv/memory/compact ─────────────────────────────────────
+# ── Contract: robonix/system/memory/compact ─────────────────────────────────────
 
 @mcp_contract(
     mcp,
-    contract_id="robonix/srv/memory/compact",
+    contract_id="robonix/system/memory/compact",
 )
-async def compact_memory(msg: std_msgs_mcp.Empty) -> std_msgs_mcp.String:
+async def compact(msg: std_msgs_mcp.Empty) -> std_msgs_mcp.String:
     """Compact and summarize recent memories. Call this at the end of a session.
-    Contract: robonix/srv/memory/compact (input std_msgs/Empty, output std_msgs/String).
+    Contract: robonix/system/memory/compact (input std_msgs/Empty, output std_msgs/String).
 
     Reuses pilot's OpenAI-compatible LLM endpoint so memory doesn't need a
     separate API key. Reads:
@@ -129,7 +129,7 @@ async def compact_memory(msg: std_msgs_mcp.Empty) -> std_msgs_mcp.String:
     model = os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
     if not api_key:
         return std_msgs_mcp.String(
-            data="compact_memory: no LLM credentials available. "
+            data="compact: no LLM credentials available. "
                  "Set VLM_API_KEY (and VLM_BASE_URL for non-default endpoints) "
                  "in the deploy manifest's system.memory env block."
         )
@@ -147,15 +147,15 @@ async def compact_memory(msg: std_msgs_mcp.Empty) -> std_msgs_mcp.String:
         return std_msgs_mcp.String(data=f"Failed to compact memory: {e}")
 
 
-# ── Contract: robonix/srv/memory/save ────────────────────────────────────────
+# ── Contract: robonix/system/memory/save ────────────────────────────────────────
 
 @mcp_contract(
     mcp,
-    contract_id="robonix/srv/memory/save",
+    contract_id="robonix/system/memory/save",
 )
-async def save_memory(msg: std_msgs_mcp.String) -> std_msgs_mcp.String:
+async def save(msg: std_msgs_mcp.String) -> std_msgs_mcp.String:
     """Save an important fact, user preference, or decision to long-term memory.
-    Contract: robonix/srv/memory/save (input/output std_msgs/String)."""
+    Contract: robonix/system/memory/save (input/output std_msgs/String)."""
     from datetime import date
     p = Path(MEMORY_DIR) / f"{date.today()}_notes.md"
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -190,7 +190,7 @@ def main():
         stub.RegisterNode(
             pb.RegisterNodeRequest(
                 node_id=node_id,
-                namespace="robonix/srv/memory",
+                namespace="robonix/system/memory",
                 kind="service",
                 skill_md="# Memsearch MCP\nProvides memory search, save, and compact operations.",
             )
@@ -198,51 +198,51 @@ def main():
 
         # One DeclareInterface per contract —————————————————————————————————
 
-        # robonix/srv/memory/search
+        # robonix/system/memory/search
         stub.DeclareInterface(
             pb.DeclareInterfaceRequest(
                 node_id=node_id,
                 name="search",
                 supported_transports=["mcp"],
                 metadata_json=_single_tool_meta(
-                    "search_memory",
+                    "search",
                     "Search agent long-term memory. data: the search query string.",
                     std_msgs_mcp.String.json_schema(),
                 ),
                 listen_port=port,
-                contract_id="robonix/srv/memory/search",
+                contract_id="robonix/system/memory/search",
             )
         )
 
-        # robonix/srv/memory/save
+        # robonix/system/memory/save
         stub.DeclareInterface(
             pb.DeclareInterfaceRequest(
                 node_id=node_id,
                 name="save",
                 supported_transports=["mcp"],
                 metadata_json=_single_tool_meta(
-                    "save_memory",
+                    "save",
                     "Save fact or preference to long-term memory. data: content to save.",
                     std_msgs_mcp.String.json_schema(),
                 ),
                 listen_port=port,
-                contract_id="robonix/srv/memory/save",
+                contract_id="robonix/system/memory/save",
             )
         )
 
-        # robonix/srv/memory/compact  (input: Empty → no parameters)
+        # robonix/system/memory/compact  (input: Empty → no parameters)
         stub.DeclareInterface(
             pb.DeclareInterfaceRequest(
                 node_id=node_id,
                 name="compact",
                 supported_transports=["mcp"],
                 metadata_json=_single_tool_meta(
-                    "compact_memory",
+                    "compact",
                     "Compact and summarize recent memories. No input required.",
                     std_msgs_mcp.Empty.json_schema(),
                 ),
                 listen_port=port,
-                contract_id="robonix/srv/memory/compact",
+                contract_id="robonix/system/memory/compact",
             )
         )
 
