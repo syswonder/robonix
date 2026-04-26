@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
             atlas_client::grpc_params(
                 "capabilities/system/pilot.v1.toml",
                 "robonix.contracts.SystemPilot",
-                "/robonix.contracts.SystemPilot/Stream",
+                "/robonix.contracts.SystemPilot/SubmitTask",
             ),
         )
         .await?;

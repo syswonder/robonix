@@ -9,12 +9,12 @@
 
 use crate::history::decode_string_output;
 use crate::pb::executor::ListToolsRequest;
-use crate::pb::pilot::{TaskCall, TaskGraph, ToolRouting};
+use crate::pb::pilot::{CapabilityCall, Plan, ToolRouting};
 use crate::planner::ExecutorConn;
 use tonic::Request;
 use uuid::Uuid;
 
-/// Executor `TaskCallEvent.event_kind` for "tool result". Mirrors the proto
+/// Executor `CapabilityCallEvent.event_kind` for "tool result". Mirrors the proto
 /// constant used everywhere else; not re-exported because the planner's
 /// other dispatch path defines its own copy locally.
 const EX_RESULT: u32 = 1;
@@ -28,13 +28,13 @@ pub async fn prefetch(
     routing: Option<ToolRouting>,
 ) -> Option<String> {
     let routing = routing?;
-    let graph = TaskGraph {
-        graph_id: Uuid::new_v4().to_string(),
+    let graph = Plan {
+        plan_id: Uuid::new_v4().to_string(),
         session_id: "memory-prefetch".to_string(),
         round: 0,
-        calls: vec![TaskCall {
+        calls: vec![CapabilityCall {
             call_id: Uuid::new_v4().to_string(),
-            tool_name: "search_memory".to_string(),
+            capability_name: "search_memory".to_string(),
             args_json: serde_json::json!({ "data": query }).to_string(),
             routing: Some(routing),
         }],
@@ -42,7 +42,7 @@ pub async fn prefetch(
 
     let mut stream = executor
         .graph
-        .stream(Request::new(graph))
+        .execute(Request::new(graph))
         .await
         .ok()?
         .into_inner();
@@ -66,10 +66,10 @@ pub async fn prefetch(
 pub async fn try_compact(executor: &mut ExecutorConn) {
     let tools = match executor
         .list_tools
-        .call(Request::new(ListToolsRequest { refresh: false }))
+        .list_tools(Request::new(ListToolsRequest { refresh: false }))
         .await
     {
-        Ok(r) => r.into_inner().tools,
+        Ok(r) => r.into_inner().capabilities,
         Err(e) => {
             log::debug!("[pilot] compact_memory: list_tools failed: {e}");
             return;
@@ -77,19 +77,19 @@ pub async fn try_compact(executor: &mut ExecutorConn) {
     };
     let Some(routing) = tools
         .iter()
-        .find(|t| t.tool_name == "compact_memory")
+        .find(|t| t.capability_name == "compact_memory")
         .and_then(|t| t.routing.clone())
     else {
         return;
     };
 
-    let graph = TaskGraph {
-        graph_id: Uuid::new_v4().to_string(),
+    let graph = Plan {
+        plan_id: Uuid::new_v4().to_string(),
         session_id: "memory-compact".to_string(),
         round: 0,
-        calls: vec![TaskCall {
+        calls: vec![CapabilityCall {
             call_id: Uuid::new_v4().to_string(),
-            tool_name: "compact_memory".to_string(),
+            capability_name: "compact_memory".to_string(),
             args_json: "{}".to_string(),
             routing: Some(routing),
         }],
@@ -97,7 +97,7 @@ pub async fn try_compact(executor: &mut ExecutorConn) {
 
     let Ok(mut stream) = executor
         .graph
-        .stream(Request::new(graph))
+        .execute(Request::new(graph))
         .await
         .map(|r| r.into_inner())
     else {

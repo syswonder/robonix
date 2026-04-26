@@ -4,23 +4,28 @@
 // TODO(executor owner): implement full MCP dispatch.
 // Skeleton: connects to the MCP endpoint and calls the named tool.
 
-use crate::pb::pilot::TaskCallResult;
+use crate::pb::pilot::CapabilityCallResult;
 use rmcp::ServiceExt;
 
 type McpClient = rmcp::service::RunningService<rmcp::RoleClient, ()>;
 
-pub async fn execute(call_id: &str, name: &str, args_json: &str, endpoint: &str) -> TaskCallResult {
+pub async fn execute(
+    call_id: &str,
+    name: &str,
+    args_json: &str,
+    endpoint: &str,
+) -> CapabilityCallResult {
     match call_mcp(name, args_json, endpoint).await {
-        Ok(output) => TaskCallResult {
+        Ok(output) => CapabilityCallResult {
             call_id: call_id.to_string(),
-            tool_name: name.to_string(),
+            capability_name: name.to_string(),
             success: true,
             output,
             error: String::new(),
         },
-        Err(e) => TaskCallResult {
+        Err(e) => CapabilityCallResult {
             call_id: call_id.to_string(),
-            tool_name: name.to_string(),
+            capability_name: name.to_string(),
             success: false,
             output: String::new(),
             error: e.to_string(),

@@ -1,7 +1,7 @@
-# Correlates with TaskGraph.graph_id for this execution round.
-string graph_id
+# Correlates with Plan.plan_id for this execution round.
+string plan_id
 string session_id
 
 uint32 round
-TaskCallResult[] results
+CapabilityCallResult[] results
 bool any_failed

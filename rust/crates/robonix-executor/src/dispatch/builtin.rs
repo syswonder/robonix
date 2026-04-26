@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // dispatch/builtin.rs — built-in tool implementations
 
-use crate::pb::pilot::TaskCallResult;
+use crate::pb::pilot::CapabilityCallResult;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -52,19 +52,19 @@ fn safe_resolve(user_path: &str) -> anyhow::Result<PathBuf> {
     Ok(resolved)
 }
 
-pub async fn execute(call_id: &str, name: &str, args_json: &str) -> TaskCallResult {
+pub async fn execute(call_id: &str, name: &str, args_json: &str) -> CapabilityCallResult {
     let output = run(name, args_json).await;
     match output {
-        Ok(out) => TaskCallResult {
+        Ok(out) => CapabilityCallResult {
             call_id: call_id.to_string(),
-            tool_name: name.to_string(),
+            capability_name: name.to_string(),
             success: true,
             output: out,
             error: String::new(),
         },
-        Err(e) => TaskCallResult {
+        Err(e) => CapabilityCallResult {
             call_id: call_id.to_string(),
-            tool_name: name.to_string(),
+            capability_name: name.to_string(),
             success: false,
             output: String::new(),
             error: e.to_string(),

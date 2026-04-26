@@ -164,6 +164,27 @@ pub fn generate(
         }
         let mode = c.mode.mode_type.trim();
         let svc = contract_id_to_service_name(&c.contract.id);
+        // RPC method name = the .srv leaf the contract points at.
+        // `[io.srv].srv = "pilot/srv/SubmitTask"` → method `SubmitTask`.
+        // For the (rare) topic_out / topic_in / msg-only contracts the
+        // method name falls back to the contract id leaf.
+        let method_raw =
+            c.io.srv
+                .as_ref()
+                .and_then(|io| parse_ros_path(io.srv.trim()))
+                .map(|(_, _, name)| name.to_string())
+                .unwrap_or_else(|| {
+                    c.contract
+                        .id
+                        .rsplit_once('/')
+                        .map(|(_, leaf)| leaf.to_string())
+                        .unwrap_or_else(|| c.contract.id.clone())
+                });
+        // RPC method names must be UpperCamelCase. `.srv` filenames are
+        // already CamelCase by ROS convention so this is identity for
+        // them; the fallback (contract id leaf, e.g. `scan_2d` for
+        // topic-style contracts) gets normalised here.
+        let method = upper_camel(&method_raw);
         writeln!(
             &mut out,
             "// contract: {} (v{})",
@@ -172,10 +193,10 @@ pub fn generate(
         writeln!(&mut out, "service {svc} {{")?;
 
         let rpc = match mode {
-            "rpc" => format_unary(in_t, out_t),
-            "rpc_server_stream" | "topic_out" => format_stream_out(in_t, out_t),
-            "rpc_client_stream" | "topic_in" => format_stream_in(in_t, out_t),
-            "rpc_bidirectional_stream" => format_bidi_stream(in_t, out_t),
+            "rpc" => format_unary(&method, in_t, out_t),
+            "rpc_server_stream" | "topic_out" => format_stream_out(&method, in_t, out_t),
+            "rpc_client_stream" | "topic_in" => format_stream_in(&method, in_t, out_t),
+            "rpc_bidirectional_stream" => format_bidi_stream(&method, in_t, out_t),
             other => bail!(
                 "unknown [mode].type '{other}' in contract {} (expected rpc | rpc_server_stream | rpc_client_stream | topic_out | topic_in)",
                 c.contract.id
@@ -207,33 +228,33 @@ enum ResolvedType {
     StringWire,
 }
 
-fn format_stream_out(input: &ResolvedType, output: &ResolvedType) -> String {
+fn format_stream_out(method: &str, input: &ResolvedType, output: &ResolvedType) -> String {
     format!(
-        "rpc Stream({}) returns (stream {});",
+        "rpc {method}({}) returns (stream {});",
         empty_or_type(input),
         stream_element(output)
     )
 }
 
-fn format_stream_in(input: &ResolvedType, output: &ResolvedType) -> String {
+fn format_stream_in(method: &str, input: &ResolvedType, output: &ResolvedType) -> String {
     format!(
-        "rpc Stream(stream {}) returns ({});",
+        "rpc {method}(stream {}) returns ({});",
         stream_element(input),
         unary_return(output)
     )
 }
 
-fn format_bidi_stream(input: &ResolvedType, output: &ResolvedType) -> String {
+fn format_bidi_stream(method: &str, input: &ResolvedType, output: &ResolvedType) -> String {
     format!(
-        "rpc Stream(stream {}) returns (stream {});",
+        "rpc {method}(stream {}) returns (stream {});",
         stream_element(input),
         stream_element(output)
     )
 }
 
-fn format_unary(input: &ResolvedType, output: &ResolvedType) -> String {
+fn format_unary(method: &str, input: &ResolvedType, output: &ResolvedType) -> String {
     format!(
-        "rpc Call({}) returns ({});",
+        "rpc {method}({}) returns ({});",
         unary_arg(input),
         unary_return(output)
     )
@@ -632,6 +653,27 @@ fn proto_file_for_dot_package(pkg: &str) -> String {
 /// template TOML — one schema shared across many per-area contracts.
 fn is_template_id(id: &str) -> bool {
     id.contains('{')
+}
+
+/// Convert an arbitrary identifier to UpperCamelCase. Splits on `_`/`-`/
+/// digit-letter boundaries and capitalises each segment.
+/// `submit_task` → `SubmitTask`; `scan_2d` → `Scan2d`; `SubmitTask` → `SubmitTask`.
+fn upper_camel(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut capitalize_next = true;
+    for ch in s.chars() {
+        if ch == '_' || ch == '-' {
+            capitalize_next = true;
+            continue;
+        }
+        if capitalize_next {
+            out.extend(ch.to_uppercase());
+            capitalize_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn contract_id_to_service_name(id: &str) -> String {
