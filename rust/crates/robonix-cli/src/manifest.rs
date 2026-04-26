@@ -74,7 +74,7 @@ pub struct Package {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CapabilityRef {
-    /// Contract id (matches one of the TOMLs under `rust/contracts/`).
+    /// Contract id (matches one of the TOMLs under `capabilities/`).
     pub name: String,
     /// Optional path to a package-local TOML that overrides / defines
     /// this capability (for experimental caps not yet in the official
