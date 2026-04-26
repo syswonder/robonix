@@ -27,8 +27,6 @@ pub struct ExecutorConn {
     pub graph: SystemExecutorClient<Channel>,
 }
 
-// ── Hard limits ───────────────────────────────────────────────────────────────
-
 fn max_tool_rounds() -> usize {
     std::env::var("ROBONIX_PILOT_MAX_TOOL_ROUNDS")
         .ok()
@@ -58,16 +56,9 @@ fn task_is_session_end(task: &Task) -> bool {
 fn skip_memory_prefetch(user_text: &str) -> bool {
     let t = user_text.trim();
     let lower = t.to_lowercase();
-    lower == "hi" || lower == "hello" || t == "你是谁" || t == "你好"
+    lower == "hi" || lower == "hello"
 }
 
-// ── Public entry-point ────────────────────────────────────────────────────────
-
-/// Drive one user turn: build prompt, run the ReAct loop, stream events.
-///
-/// `history` is the running LLM conversation (one Vec per logical chat
-/// thread, keyed by `task.session_id` at the call site). It's mutated in
-/// place across rounds so subsequent turns see prior tool calls/results.
 pub async fn run_turn(
     task: &Task,
     history: &mut Vec<Message>,
@@ -80,7 +71,6 @@ pub async fn run_turn(
 ) -> Result<()> {
     let session_id = task.session_id.clone();
 
-    /// Emit an "interrupted" status event and return Ok to end the turn cleanly.
     macro_rules! return_interrupted {
         () => {{
             let _ = tx
@@ -113,7 +103,7 @@ pub async fn run_turn(
         return Ok(());
     }
 
-    // ── 1. Build system prompt (once per turn) ────────────────────────────────
+    // 1. Build system prompt (once per turn)
     let base_prompt = build_system_prompt(load_agent_soul().as_deref());
 
     // Pilot's capability catalog comes straight from atlas (filtered to
@@ -123,12 +113,15 @@ pub async fn run_turn(
     let initial_caps = discovery::discover(atlas)
         .await
         .map_err(|e| anyhow::anyhow!("atlas capability discovery failed: {e}"))?;
+    // Pilot binds to the canonical contract_id, not the LLM-facing tool
+    // name: the latter is just the contract_id leaf and a provider could
+    // rename it freely. contract_id is the stable identity.
     let search_memory_target = initial_caps
         .iter()
-        .find(|(_, iface)| llm_name(&iface.contract_id) == "search_memory")
+        .find(|(_, iface)| iface.contract_id == "robonix/system/memory/search")
         .map(|(cap_id, iface)| (cap_id.clone(), iface.contract_id.clone()));
 
-    // ── 1b. Pre-fetch long-term memory ────────────────────────────────────────
+    // 1b. Pre-fetch long-term memory
     // Silently dispatches search_memory before the first VLM call so that
     // relevant past context is available from the start of the turn.
     let system_prompt = if skip_memory_prefetch(&task.text) {
@@ -142,14 +135,14 @@ pub async fn run_turn(
         }
     };
 
-    // ── 2. Add user message to history ────────────────────────────────────────
+    // 2. Add user message to history
     history.push(Message::user(&task.text));
     history::trim(history, MAX_HISTORY);
 
     let max_rounds = max_tool_rounds();
     let mut round: u32 = 0;
 
-    // ── 3. ReAct loop ─────────────────────────────────────────────────────────
+    // 3. Capbility call loop
     loop {
         // Check for interrupt at the top of every round.
         if *cancel_rx.borrow() {
@@ -157,8 +150,7 @@ pub async fn run_turn(
         }
 
         // Re-discover capabilities from atlas every round so caps that
-        // registered mid-turn (e.g. tiago bridge warming up) are visible in
-        // the next VLM call.
+        // registered mid-turn are visible in the next call.
         let cap_list = discovery::discover(atlas)
             .await
             .map_err(|e| anyhow::anyhow!("atlas capability discovery failed: {e}"))?;
@@ -181,8 +173,6 @@ pub async fn run_turn(
             .collect();
 
         // LLM-tool-name → (cap_id, contract_id) so we can build CapabilityCall
-        // when the model picks a tool. Names are MCP-side tool names = leaf
-        // of contract_id; collisions across caps would be a user-config bug.
         let target_map: HashMap<String, (String, String)> = cap_list
             .iter()
             .map(|(cap_id, iface)| {
@@ -504,8 +494,6 @@ mod tests {
     fn skip_prefetch_chitchat() {
         assert!(skip_memory_prefetch("hi"));
         assert!(skip_memory_prefetch("Hello"));
-        assert!(skip_memory_prefetch("你是谁"));
-        assert!(skip_memory_prefetch("你好"));
     }
 
     #[test]

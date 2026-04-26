@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// Atlas-driven capability catalog for the LLM.
-//
-// Pilot needs to tell the LLM what it can ask for, but doesn't dial
-// anything itself — dispatch is executor's job. So before each turn we
-// just call `QueryCapabilities(transport=Mcp)` against atlas and read
-// `McpParams.{description, input_schema_json}` straight from each
-// returned `InterfaceMetadata`. No Connect, no channel bookkeeping —
-// description + schema are public docs (atlas serves them in metadata).
+// Author: wheatfox <wheatfox17@icloud.com>
 
 use anyhow::Result;
 use robonix_atlas::client::AtlasClient;
