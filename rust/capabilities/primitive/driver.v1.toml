@@ -1,0 +1,21 @@
+# Lifecycle interface every primitive capability MUST declare. ONE contract
+# for ALL primitives (chassis, camera, lidar, imu, audio, …). Each cap
+# binds its own endpoint at DeclareInterface time; rbnx start drives
+# `Driver(CMD_INIT, config_json=…)` against each cap before the cap
+# lazy-declares its real interfaces. See `lib/lifecycle/srv/Driver.srv`
+# for command discriminator (INIT / RESET / SHUTDOWN / PROBE) and the
+# (ok, state, error) response shape.
+#
+# `config_json` is an opaque passthrough — the deploy manifest's
+# primitive entry's `config:` block, JSON-encoded. Robonix does not
+# inspect it; the driver package parses it however it needs.
+[contract]
+id      = "robonix/primitive/driver"
+version = "1"
+kind    = "primitive"
+
+[io.srv]
+srv = "lifecycle/srv/Driver"
+
+[mode]
+type = "rpc"
