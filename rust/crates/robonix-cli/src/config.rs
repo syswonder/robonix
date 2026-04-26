@@ -13,7 +13,7 @@ pub struct Config {
     pub package_storage_path: PathBuf,
     /// Absolute path to the cloned robonix repo root (the directory containing `rust/`).
     /// Set by `rbnx setup` from inside a working copy. Required so out-of-tree packages
-    /// (e.g. mapping_rbnx on a robot) can find rust/contracts and rust/crates/robonix-interfaces/lib.
+    /// (e.g. mapping_rbnx on a robot) can find capabilities/ and rust/crates/robonix-interfaces/lib.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub robonix_source_path: Option<PathBuf>,
     /// Node identifier (e.g. hostname) for capabilities registered by this CLI; shown in core web UI.
@@ -134,7 +134,7 @@ impl Config {
         let abs = match key {
             SourcePathKey::Root => root.clone(),
             SourcePathKey::RustRoot => root.join("rust"),
-            SourcePathKey::Contracts => root.join("rust").join("contracts"),
+            SourcePathKey::Contracts => root.join("capabilities"),
             SourcePathKey::InterfacesLib => root
                 .join("rust")
                 .join("crates")
@@ -177,7 +177,7 @@ pub enum SourcePathKey {
     Root,
     /// `<root>/rust` (cargo workspace).
     RustRoot,
-    /// `<root>/rust/contracts` (contract TOMLs).
+    /// `<root>/capabilities` (contract TOMLs).
     Contracts,
     /// `<root>/rust/crates/robonix-interfaces/lib` (ROS IDL source).
     InterfacesLib,
