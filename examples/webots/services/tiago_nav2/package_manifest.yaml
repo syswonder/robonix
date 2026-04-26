@@ -1,0 +1,24 @@
+# Tiago Nav2 service package — wraps Nav2 NavigateToPose ActionClient.
+# Service package (not primitive): provides navigation as a service on
+# top of the chassis primitive. start.sh launches Nav2 + the wrapper.
+#
+# Capabilities (all over MCP, std_msgs/String JSON envelopes):
+#   robonix/service/navigation/navigate  → nav_navigate(PoseStamped) → String (goal_id JSON)
+#   robonix/service/navigation/status    → nav_status(String goal_id) → String (status JSON)
+#   robonix/service/navigation/cancel    → nav_cancel(String goal_id) → String (status JSON)
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.tiago_nav2
+  version: 0.1.0
+  vendor: robonix
+  description: Tiago Nav2 wrapper — exposes navigate_to_pose action as MCP tools.
+  license: MulanPSL-2.0
+
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+
+capabilities:
+  - name: robonix/service/navigation/navigate
+  - name: robonix/service/navigation/status
+  - name: robonix/service/navigation/cancel

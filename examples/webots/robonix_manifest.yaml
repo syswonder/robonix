@@ -21,14 +21,30 @@ system:
       model:      ${VLM_MODEL}
       api_format: openai
 
+# Primitive driver packages — each is one device, one process. Every
+# entry below docker-exec's into the pre-running sim container (from
+# `bash sim/start.sh`) and registers its caps to atlas. Make sure sim
+# is up FIRST: `bash examples/webots/sim/start.sh`.
+#
+# These drivers still use the legacy RegisterNode + DeclareInterface
+# atlas API (no `*/driver` interface). Until that migration lands,
+# `rbnx deploy` would block waiting for Driver(CMD_INIT). Run them
+# manually for now (one terminal each):
+#   rbnx start -p ./primitives/tiago_chassis
+#   rbnx start -p ./primitives/tiago_camera
+#   rbnx start -p ./primitives/tiago_lidar
+#   rbnx start -p ./services/tiago_nav2
 primitive: []
-# TODO: add tiago_sim_stack here once it grows a `*/driver` lifecycle
-# interface (Phase B of task #37). Deploy waits for `*/driver` over gRPC
-# and calls Driver(CMD_INIT) before moving on; tiago_sim_stack currently
-# registers via the legacy RegisterNode/DeclareInterface API and would
-# deadlock the deploy loop. Until then, start it manually:
-#   rbnx start -p ./primitives/tiago_sim_stack
+# TODO: when each driver gains a `*/driver` lifecycle interface,
+# uncomment:
+# primitive:
+#   - { name: tiago_chassis, path: ./primitives/tiago_chassis }
+#   - { name: tiago_camera,  path: ./primitives/tiago_camera  }
+#   - { name: tiago_lidar,   path: ./primitives/tiago_lidar   }
 
 service: []
+# TODO: same migration; planned:
+# service:
+#   - { name: tiago_nav2, path: ./services/tiago_nav2 }
 
 skill: []
