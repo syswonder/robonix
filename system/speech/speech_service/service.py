@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """Speech service -- the srv-layer voice interaction service for Robonix.
 
-Architecture position: robonix/srv/speech
+Architecture position: robonix/system/speech
   - Sits ABOVE the prm layer (audio_driver) and BELOW the application layer
   - Receives raw audio from audio_driver via gRPC, returns transcriptions
   - Receives text from applications, returns synthesized audio (MP3)
 
 Provides 5 RPCs across 5 gRPC service contracts (from robonix_contracts.proto):
 
-  SrvSpeechAsr (Automatic Speech Recognition -- one-shot):
+  SystemSpeechAsr (Automatic Speech Recognition -- one-shot):
     Call(req) -> resp          -- full-utterance transcription
 
-  SrvSpeechAsrStream (Streaming ASR):
+  SystemSpeechAsrStream (Streaming ASR):
     Stream(stream) -> stream   -- real-time chunk-by-chunk transcription
 
-  SrvSpeechTts (Text-to-Speech -- one-shot):
+  SystemSpeechTts (Text-to-Speech -- one-shot):
     Call(req) -> resp          -- returns complete MP3 audio
 
-  SrvSpeechTtsStream (Streaming TTS):
+  SystemSpeechTtsStream (Streaming TTS):
     Stream(req) -> stream      -- yields MP3 chunks as generated
 
-  SrvSpeechDialog (Voice Dialog Session):
+  SystemSpeechDialog (Voice Dialog Session):
     Stream(req) -> stream      -- managed session with state transitions
 
 Backend engines:
@@ -457,7 +457,7 @@ class DialogManager:
 # Note: the codegen service methods are named Call / Stream (not Recognize
 # or Synthesize) because the contract RPC is always called "Call" or "Stream".
 
-class SpeechAsrServicer(contracts_grpc.SrvSpeechAsrServicer):
+class SpeechAsrServicer(contracts_grpc.SystemSpeechAsrServicer):
     """ASR gRPC servicer -- handles the Call RPC for one-shot speech recognition.
 
     Delegates to WhisperASRBackend for transcription.
@@ -515,7 +515,7 @@ class SpeechAsrServicer(contracts_grpc.SrvSpeechAsrServicer):
             return asr_pb2.Recognize_Response(text="", confidence=0.0, error=str(e))
 
 
-class SpeechAsrStreamServicer(contracts_grpc.SrvSpeechAsrStreamServicer):
+class SpeechAsrStreamServicer(contracts_grpc.SystemSpeechAsrStreamServicer):
     """Streaming ASR gRPC servicer -- handles the Stream RPC for chunk-by-chunk
     speech recognition.
 
@@ -609,7 +609,7 @@ class SpeechAsrStreamServicer(contracts_grpc.SrvSpeechAsrStreamServicer):
             yield asr_pb2.RecognizeStreamEvent(event_type=2, error=str(e))
 
 
-class SpeechTtsServicer(contracts_grpc.SrvSpeechTtsServicer):
+class SpeechTtsServicer(contracts_grpc.SystemSpeechTtsServicer):
     """TTS gRPC servicer -- handles the Call RPC for one-shot text-to-speech.
 
     Delegates to EdgeTTSBackend for audio generation.
@@ -659,7 +659,7 @@ class SpeechTtsServicer(contracts_grpc.SrvSpeechTtsServicer):
             return tts_pb2.Synthesize_Response(audio_data=b"", error=str(e))
 
 
-class SpeechTtsStreamServicer(contracts_grpc.SrvSpeechTtsStreamServicer):
+class SpeechTtsStreamServicer(contracts_grpc.SystemSpeechTtsStreamServicer):
     """Streaming TTS gRPC servicer -- handles the Stream RPC for chunk-by-chunk
     text-to-speech synthesis.
 
@@ -732,7 +732,7 @@ class SpeechTtsStreamServicer(contracts_grpc.SrvSpeechTtsStreamServicer):
             context.set_details(str(e))
 
 
-class SpeechDialogServicer(contracts_grpc.SrvSpeechDialogServicer):
+class SpeechDialogServicer(contracts_grpc.SystemSpeechDialogServicer):
     """Dialog gRPC servicer -- handles the Stream RPC for voice dialog sessions.
 
     Creates a DialogSession and streams DialogEvent updates to the client.
@@ -792,7 +792,7 @@ def _register_with_atlas(port: int) -> None:
 
     Registration flow:
         1. RegisterNode: node_id="com.robonix.services.speech",
-           namespace="robonix/srv/speech", kind="service"
+           namespace="robonix/system/speech", kind="service"
         2. DeclareInterface x 5: one per contract (asr, asr_stream, tts,
            tts_stream, dialog), each with its gRPC mode.
         3. Atlas returns allocated_endpoint for each interface.
@@ -821,17 +821,17 @@ def _register_with_atlas(port: int) -> None:
         node_id = "com.robonix.services.speech"
         stub.RegisterNode(pb.RegisterNodeRequest(
             node_id=node_id,
-            namespace="robonix/srv/speech",
+            namespace="robonix/system/speech",
             kind="service",
         ))
         log.info("Registered node %s with Atlas", node_id)
 
         contracts = [
-            ("robonix/srv/speech/asr",        "asr",        "rpc"),
-            ("robonix/srv/speech/asr_stream",  "asr_stream", "rpc_bidirectional_stream"),
-            ("robonix/srv/speech/tts",         "tts",         "rpc"),
-            ("robonix/srv/speech/tts_stream",  "tts_stream",  "rpc_server_stream"),
-            ("robonix/srv/speech/dialog",      "dialog",      "rpc_server_stream"),
+            ("robonix/system/speech/asr",        "asr",        "rpc"),
+            ("robonix/system/speech/asr_stream",  "asr_stream", "rpc_bidirectional_stream"),
+            ("robonix/system/speech/tts",         "tts",         "rpc"),
+            ("robonix/system/speech/tts_stream",  "tts_stream",  "rpc_server_stream"),
+            ("robonix/system/speech/dialog",      "dialog",      "rpc_server_stream"),
         ]
         for contract_id, name, mode in contracts:
             meta = json.dumps({"transport": "grpc", "contract": {"idl_type": "protobuf", "mode": mode}})
@@ -950,11 +950,11 @@ def main() -> None:
 
     # Register servicers (5 separate contracts from robonix_contracts.proto)
     spb_grpc = contracts_grpc  # for add_*_to_server calls
-    spb_grpc.add_SrvSpeechAsrServicer_to_server(SpeechAsrServicer(asr_backend), server)
-    spb_grpc.add_SrvSpeechAsrStreamServicer_to_server(SpeechAsrStreamServicer(asr_stream_backend), server)
-    spb_grpc.add_SrvSpeechTtsServicer_to_server(SpeechTtsServicer(tts_backend), server)
-    spb_grpc.add_SrvSpeechTtsStreamServicer_to_server(SpeechTtsStreamServicer(tts_backend), server)
-    spb_grpc.add_SrvSpeechDialogServicer_to_server(SpeechDialogServicer(dialog_manager), server)
+    spb_grpc.add_SystemSpeechAsrServicer_to_server(SpeechAsrServicer(asr_backend), server)
+    spb_grpc.add_SystemSpeechAsrStreamServicer_to_server(SpeechAsrStreamServicer(asr_stream_backend), server)
+    spb_grpc.add_SystemSpeechTtsServicer_to_server(SpeechTtsServicer(tts_backend), server)
+    spb_grpc.add_SystemSpeechTtsStreamServicer_to_server(SpeechTtsStreamServicer(tts_backend), server)
+    spb_grpc.add_SystemSpeechDialogServicer_to_server(SpeechDialogServicer(dialog_manager), server)
 
     # Bind port
     bind_addr = os.environ.get("SPEECH_BIND_ADDR", "0.0.0.0")
