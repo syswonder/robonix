@@ -224,7 +224,7 @@ def _dispatch_nav_goal(node, gid, x, y, yaw, frame_id):
 # ── MCP tools ────────────────────────────────────────────────────────────────
 
 @mcp_contract(mcp, contract_id="robonix/service/navigation/navigate")
-def nav_navigate(msg: PoseStamped) -> String:
+def navigate(msg: PoseStamped) -> String:
     """Send the robot to a target pose via Nav2's navigate_to_pose action.
     Returns std_msgs/String whose `data` is JSON `{goal_id, status}`.
     Use the goal_id with nav_status / nav_cancel to track the goal.
@@ -247,7 +247,7 @@ def nav_navigate(msg: PoseStamped) -> String:
 
 
 @mcp_contract(mcp, contract_id="robonix/service/navigation/status")
-def nav_status(msg: String) -> String:
+def status(msg: String) -> String:
     """Return navigation status for a goal_id obtained from nav_navigate.
     msg.data is the goal_id. Returns std_msgs/String JSON.
     Contract: robonix/service/navigation/status."""
@@ -260,7 +260,7 @@ def nav_status(msg: String) -> String:
 
 
 @mcp_contract(mcp, contract_id="robonix/service/navigation/cancel")
-def nav_cancel(msg: String) -> String:
+def cancel(msg: String) -> String:
     """Cancel an in-flight navigation goal (Nav2 action only — /goal_pose
     fallback goals can't be cancelled).
     msg.data is the goal_id. Returns std_msgs/String JSON.
@@ -339,10 +339,10 @@ def main() -> None:
             skill_md="# tiago_nav2\nNav2 navigate_to_pose wrapper.",
         ))
         stub.DeclareInterface(pb.DeclareInterfaceRequest(
-            node_id=node_id, name="nav_navigate",
+            node_id=node_id, name="navigate",
             supported_transports=["mcp"],
             metadata_json=_single_tool_meta(
-                "nav_navigate",
+                "navigate",
                 "Send a navigation goal. Arguments: geometry_msgs/PoseStamped JSON. "
                 "Returns std_msgs/String; data is JSON {goal_id, status}.",
                 PoseStamped.json_schema(),
@@ -351,10 +351,10 @@ def main() -> None:
             contract_id="robonix/service/navigation/navigate",
         ))
         stub.DeclareInterface(pb.DeclareInterfaceRequest(
-            node_id=node_id, name="nav_status",
+            node_id=node_id, name="status",
             supported_transports=["mcp"],
             metadata_json=_single_tool_meta(
-                "nav_status",
+                "status",
                 "Get navigation status. std_msgs/String; data is goal_id from nav_navigate.",
                 std_msgs_mcp.String.json_schema(),
             ),
@@ -362,10 +362,10 @@ def main() -> None:
             contract_id="robonix/service/navigation/status",
         ))
         stub.DeclareInterface(pb.DeclareInterfaceRequest(
-            node_id=node_id, name="nav_cancel",
+            node_id=node_id, name="cancel",
             supported_transports=["mcp"],
             metadata_json=_single_tool_meta(
-                "nav_cancel",
+                "cancel",
                 "Cancel a navigation goal. std_msgs/String; data is goal_id from nav_navigate.",
                 std_msgs_mcp.String.json_schema(),
             ),

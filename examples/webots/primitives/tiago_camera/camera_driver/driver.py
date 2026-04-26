@@ -217,7 +217,7 @@ def _on_depth(msg):
 # ── MCP tools ────────────────────────────────────────────────────────────────
 
 @mcp_contract(mcp, contract_id="robonix/primitive/camera/snapshot")
-def camera_snapshot(msg: Empty) -> Image:
+def snapshot(msg: Empty) -> Image:
     """Get the current RGB head-camera frame as a JPEG-encoded sensor_msgs/Image.
     Contract: robonix/primitive/camera/snapshot."""
     _ = msg
@@ -231,7 +231,7 @@ def camera_snapshot(msg: Empty) -> Image:
 
 
 @mcp_contract(mcp, contract_id="robonix/primitive/camera/depth_snapshot")
-def camera_depth_snapshot(msg: Empty) -> Image:
+def depth_snapshot(msg: Empty) -> Image:
     """Get the current depth head-camera frame as a JPEG-encoded sensor_msgs/Image
     (depth normalized to grayscale).
     Contract: robonix/primitive/camera/depth_snapshot."""
@@ -298,10 +298,10 @@ def main() -> None:
             skill_md="# tiago_camera\nHead camera RGB + depth snapshots.",
         ))
         stub.DeclareInterface(pb.DeclareInterfaceRequest(
-            node_id=node_id, name="camera_snapshot",
+            node_id=node_id, name="snapshot",
             supported_transports=["mcp"],
             metadata_json=_single_tool_meta(
-                "camera_snapshot",
+                "snapshot",
                 "Get current RGB head-camera frame as sensor_msgs/Image (JPEG in data).",
                 Empty.json_schema(),
             ),
@@ -309,10 +309,10 @@ def main() -> None:
             contract_id="robonix/primitive/camera/snapshot",
         ))
         stub.DeclareInterface(pb.DeclareInterfaceRequest(
-            node_id=node_id, name="camera_depth_snapshot",
+            node_id=node_id, name="depth_snapshot",
             supported_transports=["mcp"],
             metadata_json=_single_tool_meta(
-                "camera_depth_snapshot",
+                "depth_snapshot",
                 "Get current depth head-camera frame as grayscale-JPEG sensor_msgs/Image.",
                 Empty.json_schema(),
             ),
