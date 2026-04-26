@@ -48,7 +48,7 @@ A unified control plane (Atlas) handles registration, discovery, and channel neg
 Dive deeper:
 - [**Overview**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/overview.md) — control/data plane, one full request end-to-end
 - [**Crates**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/crates.md) — each binary's role and port
-- [**Namespaces & contracts**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/namespace-and-interfaces.md) — how `robonix/prm/*` and `robonix/srv/*` work
+- [**Namespaces & contracts**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/namespace-and-interfaces.md) — how `robonix/primitive/*` and `robonix/service/*` work
 - [**Interface catalog**](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md) — every primitive + service contract
 
 ## Status

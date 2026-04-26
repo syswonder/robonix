@@ -1,7 +1,7 @@
 """Audio format adaptation utilities for the speech service.
 
 This module is the upper-layer adaptation layer between the audio_driver
-(prm, hardware) and the ASR backends (Whisper, FunASR). Its job is to
+(primitive, hardware) and the ASR backends (Whisper, FunASR). Its job is to
 normalize ANY audio format the lower layer sends into the exact format
 the ASR backends expect: **16 kHz mono pcm_s16le**.
 

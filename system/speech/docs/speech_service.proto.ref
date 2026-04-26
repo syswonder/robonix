@@ -1,8 +1,8 @@
 // ──────────────────────────────────────────────────────────────────────────
 // Speech Service — gRPC service definitions for ASR / TTS / Dialog
 //
-// Architecture position: robonix/srv/speech (service layer)
-//   - Receives audio from lower-layer prm drivers (e.g. audio_driver)
+// Architecture position: robonix/service/speech (service layer)
+//   - Receives audio from lower-layer primitive drivers (e.g. audio_driver)
 //   - Auto-adapts any input sample_rate / channels / encoding to 16kHz mono s16le
 //   - Outputs synthesized audio (MP3) for downstream playback
 //

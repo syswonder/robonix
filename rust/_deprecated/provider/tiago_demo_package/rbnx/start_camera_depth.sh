@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 # Start Depth Camera Primitive Script
 #
-# Start script for prm::camera.depth (depth camera)
+# Start script for primitive::camera.depth (depth camera)
 # Note: The depth camera is provided by webots_ros2_driver when webots is running.
 # This script verifies the topic is available or waits for it.
 

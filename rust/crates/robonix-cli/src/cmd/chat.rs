@@ -247,12 +247,29 @@ async fn send_message(
                             .rsplit_once('/')
                             .map(|(_, leaf)| leaf.to_string())
                             .unwrap_or_else(|| r.contract_id.clone());
+                        // Compact one-liner: collapse newlines, cap at ~80 chars,
+                        // hide payload bulk. The full payload is always visible
+                        // in the deploy-side log; the TUI is for reading flow,
+                        // not auditing tool I/O.
+                        let one_line = |s: &str, n: usize| -> String {
+                            let flat: String = s
+                                .chars()
+                                .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+                                .collect();
+                            let mut out: String = flat.chars().take(n).collect();
+                            if flat.chars().count() > n {
+                                out.push('…');
+                            }
+                            out
+                        };
                         let text = if r.success {
-                            let preview: String = r.output.chars().take(200).collect();
-                            let suffix = if r.output.chars().count() > 200 { "..." } else { "" };
-                            format!("{head} -> {preview}{suffix}")
+                            if r.output.is_empty() {
+                                format!("{head} → ok")
+                            } else {
+                                format!("{head} → {}", one_line(&r.output, 80))
+                            }
                         } else {
-                            format!("{head} ERROR: {}", r.error)
+                            format!("{head} ✗ {}", one_line(&r.error, 80))
                         };
                         messages.push(ChatMessage {
                             role: Role::ToolResult,

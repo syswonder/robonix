@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 # Start RGB Camera Primitive Script
 #
-# Start script for prm::camera.rgb (RGB camera)
+# Start script for primitive::camera.rgb (RGB camera)
 # Note: The camera is provided by webots_ros2_driver when webots is running.
 # This script verifies the topic is available or waits for it.
 

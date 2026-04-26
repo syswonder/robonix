@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Audio driver node — the prm-layer audio primitive for Robonix.
+"""Audio driver node — the primitive-layer audio primitive for Robonix.
 
-Architecture position: robonix/prm/audio (primitive / hardware layer)
+Architecture position: robonix/primitive/audio (primitive / hardware layer)
   - Sits BELOW the srv layer (speech_service) and ABOVE the hardware
   - Auto-discovers ALSA audio devices (microphones and speakers)
   - Provides two gRPC interfaces for audio I/O:
       1. PrmAudioMic.Stream    — server-streaming, outputs mic audio
       2. PrmAudioSpeaker.Stream — client-streaming, plays received audio
 
-This node follows the **tiago_bridge pattern** for prm driver packages:
+This node follows the **tiago_bridge pattern** for primitive driver packages:
   1. Auto-scan ALSA devices (arecord -l / aplay -l)
   2. RegisterNode with Atlas control plane
   3. DeclareInterface for mic + speaker (2 contracts)
@@ -22,13 +22,13 @@ Proto stubs are loaded from codegen-generated files:
   - robonix_contracts_pb2_grpc  (servicer base classes + registration fns)
   - robonix_msg_pb2             (AudioChunk message)
 
-This package is designed as a **REFERENCE TEMPLATE** for all future prm
+This package is designed as a **REFERENCE TEMPLATE** for all future primitive
 driver packages. The same pattern should be replicated for camera,
 lidar, IMU, and other hardware drivers.
 
 Environment variables (all optional — sensible defaults provided):
   ROBONIX_ATLAS              Atlas control-plane address (default: localhost:50051)
-  ROBONIX_NODE_ID            Node ID for Atlas registration (default: com.robonix.prm.audio)
+  ROBONIX_NODE_ID            Node ID for Atlas registration (default: com.robonix.primitive.audio)
   AUDIO_MIC_DEVICE           Override mic ALSA device (default: auto-detect via arecord -l)
   AUDIO_MIC_SAMPLE_RATE      Mic capture sample rate in Hz (default: 16000)
   AUDIO_MIC_CHANNELS         Mic capture channels (default: 1 = mono)
@@ -84,7 +84,7 @@ from audio_driver.speaker_driver import SpeakerDriver
 # servers running in daemon threads.
 
 class MicServicer(contracts_grpc.PrmAudioMicServicer):
-    """Implements contract robonix/prm/audio/mic — server-streaming mic audio.
+    """Implements contract robonix/primitive/audio/mic — server-streaming mic audio.
 
     When a client calls Stream():
       1. Starts the MicDriver (arecord subprocess)
@@ -121,7 +121,7 @@ class MicServicer(contracts_grpc.PrmAudioMicServicer):
 
 
 class SpeakerServicer(contracts_grpc.PrmAudioSpeakerServicer):
-    """Implements contract robonix/prm/audio/speaker — client-streaming playback.
+    """Implements contract robonix/primitive/audio/speaker — client-streaming playback.
 
     When a client calls Stream() with a stream of AudioChunk messages:
       1. For each chunk with data, calls speaker_driver.play_chunk()
@@ -147,7 +147,7 @@ class SpeakerServicer(contracts_grpc.PrmAudioSpeakerServicer):
 
 # ── Atlas registration (optional) ─────────────────────────────────────────
 # Follows the tiago_bridge pattern exactly:
-#   1. RegisterNode — register as a primitive under robonix/prm/audio
+#   1. RegisterNode — register as a primitive under robonix/primitive/audio
 #   2. DeclareInterface x 2 — declare mic and speaker endpoints
 #   3. Heartbeat thread — send NodeHeartbeat every 15 seconds
 
@@ -159,11 +159,11 @@ def _register_with_atlas(mic_port: int, speaker_port: int) -> None:
     fully functional without Atlas — it just won't be discoverable.
 
     Registration details:
-      - Node ID: com.robonix.prm.audio (configurable via ROBONIX_NODE_ID)
-      - Namespace: robonix/prm/audio
+      - Node ID: com.robonix.primitive.audio (configurable via ROBONIX_NODE_ID)
+      - Namespace: robonix/primitive/audio
       - Kind: primitive (hardware driver)
-      - Interface 1: "mic" — contract robonix/prm/audio/mic, server-stream
-      - Interface 2: "speaker" — contract robonix/prm/audio/speaker, client-stream
+      - Interface 1: "mic" — contract robonix/primitive/audio/mic, server-stream
+      - Interface 2: "speaker" — contract robonix/primitive/audio/speaker, client-stream
 
     Args:
         mic_port: gRPC port the mic server is listening on.
@@ -182,11 +182,11 @@ def _register_with_atlas(mic_port: int, speaker_port: int) -> None:
     try:
         channel = grpc.insecure_channel(atlas_addr)
         stub = rpb_grpc.RobonixRuntimeStub(channel)
-        node_id = os.environ.get("ROBONIX_NODE_ID", "com.robonix.prm.audio")
+        node_id = os.environ.get("ROBONIX_NODE_ID", "com.robonix.primitive.audio")
 
         stub.RegisterNode(rpb.RegisterNodeRequest(
             node_id=node_id,
-            namespace="robonix/prm/audio",
+            namespace="robonix/primitive/audio",
             kind="primitive",
         ))
         log.info("Registered node %s with Atlas", node_id)
@@ -200,9 +200,9 @@ def _register_with_atlas(mic_port: int, speaker_port: int) -> None:
                 "contract": {"idl_type": "protobuf", "mode": "server_stream"},
             }),
             listen_port=mic_port,
-            contract_id="robonix/prm/audio/mic",
+            contract_id="robonix/primitive/audio/mic",
         ))
-        log.info("Declared robonix/prm/audio/mic on port %d", mic_port)
+        log.info("Declared robonix/primitive/audio/mic on port %d", mic_port)
 
         # Speaker interface
         stub.DeclareInterface(rpb.DeclareInterfaceRequest(
@@ -213,9 +213,9 @@ def _register_with_atlas(mic_port: int, speaker_port: int) -> None:
                 "contract": {"idl_type": "protobuf", "mode": "client_stream"},
             }),
             listen_port=speaker_port,
-            contract_id="robonix/prm/audio/speaker",
+            contract_id="robonix/primitive/audio/speaker",
         ))
-        log.info("Declared robonix/prm/audio/speaker on port %d", speaker_port)
+        log.info("Declared robonix/primitive/audio/speaker on port %d", speaker_port)
 
         # Heartbeat
         def _heartbeat():

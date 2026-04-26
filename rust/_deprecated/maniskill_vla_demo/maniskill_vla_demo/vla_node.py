@@ -739,7 +739,7 @@ def main() -> None:
     node_id = "com.robonix.demo.vla"
     stub.RegisterNode(pb.RegisterNodeRequest(
         node_id=node_id,
-        namespace="robonix/prm/manipulation",
+        namespace="robonix/primitive/manipulation",
         kind="primitive",
     ))
 
@@ -750,7 +750,7 @@ def main() -> None:
         supported_transports=["mcp"],
         metadata_json=_iface_meta_mcp(),
         listen_port=mcp_port,
-        contract_id="robonix/prm/manipulation/tools",
+        contract_id="robonix/primitive/manipulation/tools",
     ))
 
     # Start MCP HTTP + heartbeat BEFORE env discovery (so agent can connect)

@@ -1,5 +1,5 @@
 # On-demand lidar scan snapshot (single scan).
-# Complements robonix/prm/sensor/lidar (continuous stream).
+# Complements robonix/primitive/sensor/lidar (continuous stream).
 # ROS IDL: `lib/primitive/sensor/srv/GetLaserScan.srv`.
 [contract]
 id      = "robonix/primitive/sensor/lidar_snapshot"

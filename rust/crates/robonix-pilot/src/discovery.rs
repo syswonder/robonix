@@ -14,6 +14,39 @@ pub fn llm_name(contract_id: &str) -> &str {
         .unwrap_or(contract_id)
 }
 
+/// One row per registered capability, summarised for the LLM-facing
+/// "## Capability docs (lazy-load via read_file)" block in pilot's
+/// system prompt. Includes only caps that registered with a non-empty
+/// `capability_md_path`. The path is what we hand the LLM verbatim;
+/// the executor's `read_file` builtin resolves it (it must be readable
+/// from the executor's host workspace).
+pub struct CapDoc {
+    pub cap_id: String,
+    pub namespace: String,
+    pub md_path: String,
+}
+
+/// Returns a `CapDoc` per capability that has a non-empty
+/// `capability_md_path`. Pilot lists these in the system prompt and
+/// the LLM read_files them lazily.
+pub async fn cap_md_index(atlas: &mut AtlasClient) -> Result<Vec<CapDoc>> {
+    let records = atlas
+        .query_capabilities("", "", atlas_pb::Transport::Unspecified)
+        .await?;
+    let mut out = Vec::new();
+    for rec in records {
+        if rec.capability_md_path.is_empty() {
+            continue;
+        }
+        out.push(CapDoc {
+            cap_id: rec.capability_id,
+            namespace: rec.namespace,
+            md_path: rec.capability_md_path,
+        });
+    }
+    Ok(out)
+}
+
 /// Query atlas for every MCP-transport interface. Returns one
 /// `(cap_id, InterfaceMetadata)` pair per LLM-callable contract; callers
 /// pull description + input_schema_json out of `params.kind` themselves.

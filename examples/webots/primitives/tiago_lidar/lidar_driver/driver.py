@@ -21,29 +21,59 @@ from pathlib import Path
 
 
 def _ensure_proto_gen() -> None:
+    """Locate rbnx-build/codegen/proto_gen produced by `rbnx codegen
+    --out-dir rbnx-build/codegen`. All build artefacts live under
+    `<pkg>/rbnx-build/`; nothing should land at package root."""
     d = Path(__file__).resolve().parent
     while d.parent != d:
-        for pg in (d / "rbnx-build" / "codegen" / "proto_gen", d / "proto_gen"):
-            if pg.is_dir() and (pg / "atlas_legacy_pb2.py").exists():
-                if str(pg) not in sys.path:
-                    sys.path.insert(0, str(pg))
-                return
+        pg = d / "rbnx-build" / "codegen" / "proto_gen"
+        if pg.is_dir() and (pg / "atlas_pb2.py").exists():
+            if str(pg) not in sys.path:
+                sys.path.insert(0, str(pg))
+            return
         d = d.parent
 
 
 def _ensure_mcp_types() -> None:
+    """Locate rbnx-build/codegen/robonix_mcp_types from
+    `rbnx codegen --mcp --out-dir rbnx-build/codegen`."""
     d = Path(__file__).resolve().parent
     while d.parent != d:
-        for mt in (d / "rbnx-build" / "codegen" / "robonix_mcp_types", d / "robonix_mcp_types"):
-            if mt.is_dir() and (mt / "__init__.py").exists():
-                if str(mt) not in sys.path:
-                    sys.path.insert(0, str(mt))
+        mt = d / "rbnx-build" / "codegen" / "robonix_mcp_types"
+        if mt.is_dir() and (mt / "__init__.py").exists():
+            if str(mt) not in sys.path:
+                sys.path.insert(0, str(mt))
+            return
+        d = d.parent
+
+
+def _ensure_robonix_py() -> None:
+    """Find pylib/robonix-py — host walk-up or `rbnx path` fallback."""
+    d = Path(__file__).resolve().parent
+    while d.parent != d:
+        for cand in (d / "pylib" / "robonix-py", d / "robonix-py"):
+            if cand.is_dir() and (cand / "robonix_py" / "__init__.py").exists():
+                if str(cand) not in sys.path:
+                    sys.path.insert(0, str(cand))
                 return
         d = d.parent
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["rbnx", "path", "robonix-py"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if out.returncode == 0:
+            lib = Path(out.stdout.strip())
+            if lib.is_dir() and str(lib) not in sys.path:
+                sys.path.insert(0, str(lib))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
 
 
 _ensure_proto_gen()
 _ensure_mcp_types()
+_ensure_robonix_py()
 
 for _logger_name in (
     "mcp", "mcp.server", "mcp.server.streamable_http",
@@ -53,8 +83,8 @@ for _logger_name in (
     logging.getLogger(_logger_name).setLevel(logging.WARNING)
 
 import grpc
-import atlas_legacy_pb2 as pb
-import atlas_legacy_pb2_grpc as pb_grpc
+import atlas_pb2 as pb
+import atlas_pb2_grpc as pb_grpc
 
 import builtin_interfaces_mcp
 import std_msgs_mcp
@@ -62,6 +92,7 @@ from sensor_msgs_mcp import LaserScan
 from std_msgs_mcp import Empty
 
 from mcp.server.fastmcp import FastMCP
+from robonix_py import mcp_contract
 
 # ── ROS2 lazy imports ────────────────────────────────────────────────────────
 
@@ -132,15 +163,18 @@ def _on_scan(msg):
 
 # ── MCP tool ─────────────────────────────────────────────────────────────────
 
-@mcp.tool(name="snapshot")
-def snapshot() -> dict:
-    """Get the latest planar lidar scan as sensor_msgs/LaserScan.
+@mcp_contract(mcp, contract_id="robonix/primitive/lidar/snapshot")
+def snapshot(msg: Empty) -> LaserScan:
+    """Get the latest planar lidar scan. Returns sensor_msgs/LaserScan;
+    `ranges[i]` is the distance (m) at angle `angle_min + i*angle_increment`.
+    Useful for "obstacle in front?" / "where's the nearest open space?"
     Contract: robonix/primitive/lidar/snapshot."""
+    _ = msg
     with _lock:
         ros_scan = _latest_scan_msg
     if ros_scan is None:
-        return _laserscan_error("no lidar scan received yet").to_dict()
-    return _ros_laserscan_to_mcp(ros_scan).to_dict()
+        return _laserscan_error("no lidar scan received yet")
+    return _ros_laserscan_to_mcp(ros_scan)
 
 
 # ── runtime wiring ───────────────────────────────────────────────────────────
@@ -167,52 +201,54 @@ def _heartbeat_loop(stub, node_id: str) -> None:
     while True:
         time.sleep(15.0)
         try:
-            stub.NodeHeartbeat(pb.NodeHeartbeatRequest(node_id=node_id))
+            stub.Heartbeat(pb.HeartbeatRequest(capability_id=node_id))
         except Exception as e:
             print(f"[tiago_lidar] heartbeat failed: {e}")
 
 
-def _meta(name: str, description: str) -> str:
-    """Zero-arg MCP tool schema for the lidar snapshot."""
-    return json.dumps({
-        "tools": [{
-            "name": name,
-            "description": description,
-            "input_schema": {"type": "object", "properties": {}, "required": []},
-        }]
-    })
+def _decl_mcp(stub, cap_id: str, contract_id: str, port: int, fn) -> None:
+    """Atlas registration derived from the @mcp_contract handler:
+    docstring → description, codegen input class → input_schema_json."""
+    description = (fn.__doc__ or "").strip()
+    input_cls = getattr(fn, "_robonix_input_cls", None)
+    schema_json = json.dumps(
+        input_cls.json_schema() if input_cls is not None
+        else {"type": "object", "properties": {}, "required": []}
+    )
+    stub.DeclareInterface(pb.DeclareInterfaceRequest(
+        capability_id=cap_id,
+        contract_id=contract_id,
+        transport=pb.TRANSPORT_MCP,
+        endpoint=f"http://127.0.0.1:{port}/mcp/",
+        params=pb.TransportParams(mcp=pb.McpParams(
+            description=description,
+            input_schema_json=schema_json,
+        )),
+    ))
 
 
 def main() -> None:
     atlas_addr = os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
     port = int(os.environ.get("TIAGO_LIDAR_MCP_PORT", "50113"))
-    node_id = os.environ.get("ROBONIX_NODE_ID", "com.robonix.primitive.tiago_lidar")
+    cap_id = os.environ.get("ROBONIX_CAPABILITY_ID", "com.robonix.primitive.tiago_lidar")
 
     channel = grpc.insecure_channel(atlas_addr)
-    stub = pb_grpc.RobonixRuntimeStub(channel)
+    stub = pb_grpc.AtlasStub(channel)
 
     try:
-        stub.RegisterNode(pb.RegisterNodeRequest(
-            node_id=node_id,
+        pkg_dir = os.environ.get("ROBONIX_PKG_HOST_DIR", "")
+        md_path = f"{pkg_dir}/CAPABILITY.md" if pkg_dir else ""
+        stub.RegisterCapability(pb.RegisterCapabilityRequest(
+            capability_id=cap_id,
             namespace="robonix/primitive/lidar",
-            kind="primitive",
-            skill_md="# tiago_lidar\nPlanar lidar snapshot.",
+            capability_md_path=md_path,
         ))
-        stub.DeclareInterface(pb.DeclareInterfaceRequest(
-            node_id=node_id, name="snapshot",
-            supported_transports=["mcp"],
-            metadata_json=_meta(
-                "snapshot",
-                "Get the latest 2D planar lidar scan. Returns sensor_msgs/LaserScan.",
-            ),
-            listen_port=port,
-            contract_id="robonix/primitive/lidar/snapshot",
-        ))
-        print(f"[tiago_lidar] registered node {node_id} → 1 cap on port {port}")
+        _decl_mcp(stub, cap_id, "robonix/primitive/lidar/snapshot", port, snapshot)
+        print(f"[tiago_lidar] registered cap {cap_id} → 1 interface on port {port}")
     except Exception as e:
         print(f"[tiago_lidar] WARN: atlas registration failed: {e}")
 
-    threading.Thread(target=_heartbeat_loop, args=(stub, node_id), daemon=True).start()
+    threading.Thread(target=_heartbeat_loop, args=(stub, cap_id), daemon=True).start()
     threading.Thread(target=_start_ros2, daemon=True).start()
 
     print(f"[tiago_lidar] MCP HTTP serving on 0.0.0.0:{port}")

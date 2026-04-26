@@ -51,7 +51,7 @@ class MoveToObjectSkill(Node):
         service_qos.liveliness_lease_duration = Duration(seconds=0)
 
         self.query_primitive_client = self.create_client(
-            QueryPrimitive, "/rbnx/prm/query", qos_profile=service_qos
+            QueryPrimitive, "/rbnx/primitive/query", qos_profile=service_qos
         )
         self.get_logger().info("QueryPrimitive service client created")
 
@@ -93,7 +93,7 @@ class MoveToObjectSkill(Node):
                 PoseWithCovarianceStamped, self.pose_topic, self.pose_cov_callback, 10
             )
             self.get_logger().info(
-                f"Subscribing to pose topic (PoseWithCovarianceStamped from prm::base.pose.cov): {self.pose_topic}"
+                f"Subscribing to pose topic (PoseWithCovarianceStamped from primitive::base.pose.cov): {self.pose_topic}"
             )
         else:
             self.pose_subscriber = None
@@ -217,7 +217,7 @@ class MoveToObjectSkill(Node):
                 else:
                     break
 
-        self.get_logger().info("Querying prm::base.pose.cov...")
+        self.get_logger().info("Querying primitive::base.pose.cov...")
         for attempt in range(max_retries):
             try:
                 wait_timeout = 10.0 if attempt < 2 else 5.0
@@ -231,7 +231,7 @@ class MoveToObjectSkill(Node):
                         break
 
                 request = QueryPrimitive.Request()
-                request.name = "prm::base.pose.cov"
+                request.name = "primitive::base.pose.cov"
                 request.filter = "{}"
 
                 future = self.query_primitive_client.call_async(request)
@@ -258,18 +258,18 @@ class MoveToObjectSkill(Node):
                     if "pose" in output_schema:
                         self.pose_topic = output_schema["pose"]
                         self.get_logger().info(
-                            f"  Found pose topic: {self.pose_topic} (from prm::base.pose.cov)"
+                            f"  Found pose topic: {self.pose_topic} (from primitive::base.pose.cov)"
                         )
                         break
             except Exception as e:
                 self.get_logger().error(
-                    f"Error querying prm::base.pose.cov: {e}")
+                    f"Error querying primitive::base.pose.cov: {e}")
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                 else:
                     break
 
-        self.get_logger().info("Querying prm::base.navigate...")
+        self.get_logger().info("Querying primitive::base.navigate...")
         for attempt in range(max_retries):
             try:
                 wait_timeout = 10.0 if attempt < 2 else 5.0
@@ -283,7 +283,7 @@ class MoveToObjectSkill(Node):
                         break
 
                 request = QueryPrimitive.Request()
-                request.name = "prm::base.navigate"
+                request.name = "primitive::base.navigate"
                 request.filter = "{}"
 
                 future = self.query_primitive_client.call_async(request)
@@ -325,7 +325,7 @@ class MoveToObjectSkill(Node):
                     break
             except Exception as e:
                 self.get_logger().error(
-                    f"Error querying prm::base.navigate: {e}")
+                    f"Error querying primitive::base.navigate: {e}")
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                 else:

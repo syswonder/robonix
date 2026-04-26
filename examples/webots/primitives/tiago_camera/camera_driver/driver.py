@@ -28,29 +28,60 @@ import numpy as np
 
 
 def _ensure_proto_gen() -> None:
+    """Locate rbnx-build/codegen/proto_gen produced by `rbnx codegen
+    --out-dir rbnx-build/codegen`. All build artefacts live under
+    `<pkg>/rbnx-build/`; nothing should land at package root."""
     d = Path(__file__).resolve().parent
     while d.parent != d:
-        for pg in (d / "rbnx-build" / "codegen" / "proto_gen", d / "proto_gen"):
-            if pg.is_dir() and (pg / "atlas_legacy_pb2.py").exists():
-                if str(pg) not in sys.path:
-                    sys.path.insert(0, str(pg))
-                return
+        pg = d / "rbnx-build" / "codegen" / "proto_gen"
+        if pg.is_dir() and (pg / "atlas_pb2.py").exists():
+            if str(pg) not in sys.path:
+                sys.path.insert(0, str(pg))
+            return
         d = d.parent
 
 
 def _ensure_mcp_types() -> None:
+    """Locate rbnx-build/codegen/robonix_mcp_types from
+    `rbnx codegen --mcp --out-dir rbnx-build/codegen`."""
     d = Path(__file__).resolve().parent
     while d.parent != d:
-        for mt in (d / "rbnx-build" / "codegen" / "robonix_mcp_types", d / "robonix_mcp_types"):
-            if mt.is_dir() and (mt / "__init__.py").exists():
-                if str(mt) not in sys.path:
-                    sys.path.insert(0, str(mt))
+        mt = d / "rbnx-build" / "codegen" / "robonix_mcp_types"
+        if mt.is_dir() and (mt / "__init__.py").exists():
+            if str(mt) not in sys.path:
+                sys.path.insert(0, str(mt))
+            return
+        d = d.parent
+
+
+def _ensure_robonix_py() -> None:
+    """Find pylib/robonix-py — host-side via `rbnx path`, in-container via
+    walk-up from this file. Provides @mcp_contract."""
+    d = Path(__file__).resolve().parent
+    while d.parent != d:
+        for cand in (d / "pylib" / "robonix-py", d / "robonix-py"):
+            if cand.is_dir() and (cand / "robonix_py" / "__init__.py").exists():
+                if str(cand) not in sys.path:
+                    sys.path.insert(0, str(cand))
                 return
         d = d.parent
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["rbnx", "path", "robonix-py"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if out.returncode == 0:
+            lib = Path(out.stdout.strip())
+            if lib.is_dir() and str(lib) not in sys.path:
+                sys.path.insert(0, str(lib))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
 
 
 _ensure_proto_gen()
 _ensure_mcp_types()
+_ensure_robonix_py()
 
 for _logger_name in (
     "mcp", "mcp.server", "mcp.server.streamable_http",
@@ -60,8 +91,8 @@ for _logger_name in (
     logging.getLogger(_logger_name).setLevel(logging.WARNING)
 
 import grpc
-import atlas_legacy_pb2 as pb
-import atlas_legacy_pb2_grpc as pb_grpc
+import atlas_pb2 as pb
+import atlas_pb2_grpc as pb_grpc
 
 import builtin_interfaces_mcp
 import std_msgs_mcp
@@ -69,6 +100,7 @@ from sensor_msgs_mcp import Image
 from std_msgs_mcp import Empty
 
 from mcp.server.fastmcp import FastMCP
+from robonix_py import mcp_contract
 
 # ── ROS2 lazy imports ────────────────────────────────────────────────────────
 
@@ -191,32 +223,37 @@ def _on_depth(msg):
 
 # ── MCP tools ────────────────────────────────────────────────────────────────
 
-@mcp.tool(name="snapshot")
-def snapshot() -> dict:
-    """Get the current RGB head-camera frame as a JPEG-encoded sensor_msgs/Image
-    (binary `data` field is base64-encoded by .to_dict()).
+@mcp_contract(mcp, contract_id="robonix/primitive/camera/snapshot")
+def snapshot(msg: Empty) -> Image:
+    """PRIMARY perception tool. Use freely — between every chassis/cmd
+    burst — to see what's in front of the robot and decide what to do
+    next. Returns the current RGB head-camera frame as a JPEG-encoded
+    sensor_msgs/Image (`data` is base64).
     Contract: robonix/primitive/camera/snapshot."""
+    _ = msg
     with _lock:
         data = _latest_rgb
     if data is None:
-        return _image_error("no RGB image received yet").to_dict()
+        return _image_error("no RGB image received yet")
     return _jpeg_to_image_mcp(
         data, os.environ.get("TIAGO_RGB_FRAME_ID", "head_front_camera_rgb_optical_frame")
-    ).to_dict()
+    )
 
 
-@mcp.tool(name="depth_snapshot")
-def depth_snapshot() -> dict:
-    """Get the current depth head-camera frame as a JPEG-encoded sensor_msgs/Image
-    (depth normalized to grayscale; binary `data` is base64).
+@mcp_contract(mcp, contract_id="robonix/primitive/camera/depth_snapshot")
+def depth_snapshot(msg: Empty) -> Image:
+    """Get the current depth head-camera frame as a JPEG-encoded
+    sensor_msgs/Image (depth normalized to grayscale; binary `data` is
+    base64). Use to gauge stand-off distance / find open space.
     Contract: robonix/primitive/camera/depth_snapshot."""
+    _ = msg
     with _lock:
         data = _latest_depth
     if data is None:
-        return _image_error("no depth image received yet").to_dict()
+        return _image_error("no depth image received yet")
     return _jpeg_to_image_mcp(
         data, os.environ.get("TIAGO_DEPTH_FRAME_ID", "head_front_camera_depth_optical_frame")
-    ).to_dict()
+    )
 
 
 # ── runtime wiring ───────────────────────────────────────────────────────────
@@ -245,62 +282,65 @@ def _heartbeat_loop(stub, node_id: str) -> None:
     while True:
         time.sleep(15.0)
         try:
-            stub.NodeHeartbeat(pb.NodeHeartbeatRequest(node_id=node_id))
+            stub.Heartbeat(pb.HeartbeatRequest(capability_id=node_id))
         except Exception as e:
             print(f"[tiago_camera] heartbeat failed: {e}")
 
 
-def _meta(name: str, description: str) -> str:
-    """Zero-arg MCP tool schema. Both camera tools take no arguments."""
-    return json.dumps({
-        "tools": [{
-            "name": name,
-            "description": description,
-            "input_schema": {"type": "object", "properties": {}, "required": []},
-        }]
-    })
+def _decl_mcp(stub, cap_id: str, contract_id: str, port: int, fn) -> None:
+    """Atlas registration derived from the @mcp_contract-decorated handler:
+    docstring → description, codegen input class → input_schema_json."""
+    description = (fn.__doc__ or "").strip()
+    input_cls = getattr(fn, "_robonix_input_cls", None)
+    if input_cls is None:
+        schema_json = json.dumps({"type": "object", "properties": {}, "required": []})
+    else:
+        schema_json = json.dumps(input_cls.json_schema())
+    stub.DeclareInterface(pb.DeclareInterfaceRequest(
+        capability_id=cap_id,
+        contract_id=contract_id,
+        transport=pb.TRANSPORT_MCP,
+        endpoint=f"http://127.0.0.1:{port}/mcp/",
+        params=pb.TransportParams(mcp=pb.McpParams(
+            description=description,
+            input_schema_json=schema_json,
+        )),
+    ))
 
 
 def main() -> None:
     atlas_addr = os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
     port = int(os.environ.get("TIAGO_CAMERA_MCP_PORT", "50112"))
-    node_id = os.environ.get("ROBONIX_NODE_ID", "com.robonix.primitive.tiago_camera")
+    cap_id = os.environ.get("ROBONIX_CAPABILITY_ID", "com.robonix.primitive.tiago_camera")
 
     channel = grpc.insecure_channel(atlas_addr)
-    stub = pb_grpc.RobonixRuntimeStub(channel)
+    stub = pb_grpc.AtlasStub(channel)
 
     try:
-        stub.RegisterNode(pb.RegisterNodeRequest(
-            node_id=node_id,
+        pkg_dir = os.environ.get("ROBONIX_PKG_HOST_DIR", "")
+        md_path = f"{pkg_dir}/CAPABILITY.md" if pkg_dir else ""
+        stub.RegisterCapability(pb.RegisterCapabilityRequest(
+            capability_id=cap_id,
             namespace="robonix/primitive/camera",
-            kind="primitive",
-            skill_md="# tiago_camera\nHead camera RGB + depth snapshots.",
+            capability_md_path=md_path,
         ))
-        stub.DeclareInterface(pb.DeclareInterfaceRequest(
-            node_id=node_id, name="snapshot",
-            supported_transports=["mcp"],
-            metadata_json=_meta(
-                "snapshot",
-                "Get the current RGB head-camera frame. Returns sensor_msgs/Image (JPEG in `data`, base64-encoded).",
-            ),
-            listen_port=port,
-            contract_id="robonix/primitive/camera/snapshot",
-        ))
-        stub.DeclareInterface(pb.DeclareInterfaceRequest(
-            node_id=node_id, name="depth_snapshot",
-            supported_transports=["mcp"],
-            metadata_json=_meta(
-                "depth_snapshot",
-                "Get the current depth head-camera frame as grayscale-JPEG sensor_msgs/Image (depth normalized).",
-            ),
-            listen_port=port,
-            contract_id="robonix/primitive/camera/depth_snapshot",
-        ))
-        print(f"[tiago_camera] registered node {node_id} → 2 caps on port {port}")
+        _decl_mcp(
+            stub, cap_id, "robonix/primitive/camera/snapshot", port,
+            "PRIMARY perception tool. Use freely — between every chassis/cmd burst — "
+            "to see what's in front of the robot and decide what to do next. Returns "
+            "the current RGB head-camera frame as a JPEG-encoded sensor_msgs/Image "
+            "(`data` is base64). For visual search tasks: snapshot → reason about it → "
+            "small chassis/cmd nudge → snapshot again.",
+        )
+        _decl_mcp(
+            stub, cap_id, "robonix/primitive/camera/depth_snapshot", port,
+            "Get the current depth head-camera frame as grayscale-JPEG sensor_msgs/Image (depth normalized).",
+        )
+        print(f"[tiago_camera] registered cap {cap_id} → 2 interfaces on port {port}")
     except Exception as e:
         print(f"[tiago_camera] WARN: atlas registration failed: {e}")
 
-    threading.Thread(target=_heartbeat_loop, args=(stub, node_id), daemon=True).start()
+    threading.Thread(target=_heartbeat_loop, args=(stub, cap_id), daemon=True).start()
     threading.Thread(target=_start_ros2, daemon=True).start()
 
     print(f"[tiago_camera] MCP HTTP serving on 0.0.0.0:{port}")

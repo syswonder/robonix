@@ -228,7 +228,7 @@ RTDL Format:
 - Each instruction is a JSON object with:
   - "object_id": string (REQUIRED) - ID of the object that executes this instruction (usually robot, e.g., "robot_001")
   - "type": "skill" or "primitive"
-  - "name": skill/primitive name (e.g., "skl::pick", "skl::place", "skl::navigate", "prm::arm.move.ee") # remember to prefix with "skl::" or "prm::"
+  - "name": skill/primitive name (e.g., "skl::pick", "skl::place", "skl::navigate", "primitive::arm.move.ee") # remember to prefix with "skl::" or "primitive::"
   - "params": JSON object with skill/primitive parameters
 
 Example:
