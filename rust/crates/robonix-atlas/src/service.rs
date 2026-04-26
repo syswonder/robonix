@@ -99,6 +99,7 @@ impl From<&EndpointRec> for pb::InterfaceMetadata {
         Self {
             contract_id: e.contract_id.clone(),
             transport: e.transport as i32,
+            params: Some((&e.params).into()),
         }
     }
 }
