@@ -16,9 +16,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|p| p.parent())
         .ok_or("could not locate workspace rust dir from CARGO_MANIFEST_DIR")?
         .to_path_buf();
+    let repo_root = workspace_rust
+        .parent()
+        .ok_or("could not locate repo root from CARGO_MANIFEST_DIR")?
+        .to_path_buf();
 
     let idl_root = workspace_rust.join("crates/robonix-interfaces/lib");
-    let contracts_root = workspace_rust.join("capabilities");
+    let contracts_root = repo_root.join("capabilities");
     let proto_out = PathBuf::from(std::env::var("OUT_DIR")?);
 
     println!("cargo:rerun-if-changed={}", idl_root.display());
