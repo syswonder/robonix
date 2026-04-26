@@ -1,31 +1,7 @@
-# Robonix examples — end-to-end deployment manifest.
-#
-# `rbnx deploy -f robonix_manifest.yaml` brings up:
-#   1. System services: atlas, executor, pilot, liaison (cargo binaries
-#      from the workspace, logs under rbnx-deploy/logs/).
-#   2. The vlm_service + memsearch_service packages (feed pilot).
-#   3. Optional scene stack: tiago_sim_stack (Docker Compose; set
-#      SKIP_TIAGO=1 to disable).
-#   4. Optional skills: clawhub_skills (pulls community Agent Skills).
-#
-# Compared to the previous `examples/run.sh`, there are NO shell scripts
-# in this flow — every tunable lives in this file or in each package's
-# `package_manifest.yaml`. One command brings up the full stack.
-#
-# Pre-reqs:
-#   - `.env` in this dir (or parent) exports VLM_BASE_URL / VLM_API_KEY /
-#     VLM_MODEL for the vlm block below.
-#   - `pip install -r requirements.txt` for the Python packages.
-
-name: robonix-examples
+name: robonix-webots-example-deploy
 
 env:
-  RUST_LOG: "robonix_atlas=info,robonix_pilot=info,robonix_executor=info,robonix_liaison=warn"
-  # Legacy env kept until all callers migrate to the new system config
-  # mechanism. Safe to remove once task #24 lands (drop META_GRPC).
-  ROBONIX_META_GRPC_ENDPOINT: "127.0.0.1:50051"
 
-# ── Infrastructure. `rbnx deploy` launches these first. ──────────────────
 system:
   atlas:
     listen: 127.0.0.1:50051
@@ -36,9 +12,6 @@ system:
     vlm_service: 127.0.0.1:50091
   liaison:
     listen: 127.0.0.1:50081
-  # vlm runs as a package below (packages/vlm_service) so it benefits
-  # from the normal build/start plumbing and its own proto_gen/.
-  # `system.vlm` here only carries the config that the package reads.
   vlm:
     listen: 127.0.0.1:50091
     upstream: ${VLM_BASE_URL}
@@ -49,40 +22,8 @@ system:
     backend: sqlite
     path: ${HOME}/.robonix/memory.db
 
-# ── No hardware primitives in this stack (sim-only). ─────────────────────
 primitive: []
 
-# ── Scene / domain services. ─────────────────────────────────────────────
-service:
-  - package: com.robonix.example.vlm_service
-    path: ./packages/vlm_service
-    name: vlm_service
-    config:
-      listen: 127.0.0.1:50091
-      upstream: ${VLM_BASE_URL}
-      api_key:  ${VLM_API_KEY}
-      model:    ${VLM_MODEL}
-      api_format: openai
+service: []
 
-  - package: com.robonix.example.memsearch_service
-    path: ./packages/memsearch_service
-    name: memsearch
-    config:
-      db_path: ${HOME}/.robonix/memory.db
-
-  - package: com.robonix.example.tiago_sim_stack
-    path: ./packages/tiago_sim_stack
-    name: tiago_sim
-    config:
-      # compose.gpu.yaml auto-merged at runtime if nvidia-smi succeeds.
-      headless: false
-
-# ── Agent skills. ────────────────────────────────────────────────────────
-skill:
-  - package: com.robonix.example.clawhub_skills
-    path: ./packages/clawhub_skills
-    name: clawhub
-    config:
-      # Pull list — each entry is a `owner/repo/skills/<name>` path in
-      # OpenClaw ClawHub. Add your own skills here.
-      skills: []
+skill: []
