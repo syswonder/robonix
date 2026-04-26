@@ -133,6 +133,11 @@ def _ros2_image_to_jpeg(msg) -> bytes:
         arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(h, w, 3)
     elif encoding == "bgr8":
         arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(h, w, 3)[:, :, ::-1]
+    elif encoding == "rgba8":
+        arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(h, w, 4)[:, :, :3]
+    elif encoding == "bgra8":
+        # Webots head camera publishes BGRA8 — drop alpha + swap to RGB.
+        arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(h, w, 4)[:, :, :3][:, :, ::-1]
     elif encoding == "mono8":
         arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(h, w)
         arr = np.stack([arr, arr, arr], axis=-1)
