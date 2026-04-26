@@ -22,7 +22,7 @@ pub mod pb {
 
 pub mod legacy_pb {
     #![allow(dead_code, clippy::all)]
-    tonic::include_proto!("robonix.runtime");
+    tonic::include_proto!("robonix.runtime"); // DEPRECATED
 }
 
 pub mod client;

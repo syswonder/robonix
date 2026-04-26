@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MulanPSL-2.0
+// Author: wheatfox <wheatfox17@icloud.com>
+//
 // Atlas — Robonix capability registry (gRPC service).
 //
 // `AtlasRegistry` owns the in-memory state and exposes typed async methods
@@ -23,8 +25,6 @@ pub use pb::Transport;
 
 /// How many times Atlas tries to mint a unique endpoint before giving up.
 const MINT_ATTEMPTS: usize = 16;
-
-// ── Internal record types (state.caps values) ──────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "transport", rename_all = "snake_case")]

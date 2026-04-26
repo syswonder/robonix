@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
+// Author: wheatfox <wheatfox17@icloud.com>
 
 use log::info;
 use robonix_atlas::service::{AtlasRegistry, serve_atlas};
