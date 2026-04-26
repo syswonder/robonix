@@ -326,6 +326,18 @@ mod tests {
     }
 
     // ── execute() integration tests for path traversal ───────────────────
+    //
+    // CapabilityCall builder — tests dispatch by contract_id leaf, so each
+    // call's contract_id is `<anything>/<op>` and the leaf names the op.
+
+    fn call(call_id: &str, op: &str, args_json: &str) -> CapabilityCall {
+        CapabilityCall {
+            call_id: call_id.to_string(),
+            cap_id: "com.robonix.system.executor".to_string(),
+            contract_id: format!("robonix/system/executor/builtin/{op}"),
+            args_json: args_json.to_string(),
+        }
+    }
 
     #[tokio::test]
     async fn read_file_rejects_path_traversal() {
@@ -333,7 +345,12 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
 
-        let result = execute("test-1", "read_file", r#"{"path": "../../../etc/passwd"}"#).await;
+        let result = execute(&call(
+            "test-1",
+            "read_file",
+            r#"{"path": "../../../etc/passwd"}"#,
+        ))
+        .await;
         assert!(!result.success, "read_file should fail for path traversal");
         assert!(
             result.error.contains("traversal") || result.error.contains("does not exist"),
@@ -348,11 +365,11 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
 
-        let result = execute(
+        let result = execute(&call(
             "test-2",
             "write_file",
             r#"{"path": "/tmp/outside_workspace_evil.txt", "content": "pwned"}"#,
-        )
+        ))
         .await;
         assert!(
             !result.success,
@@ -372,7 +389,7 @@ mod tests {
     async fn run_command_rejects_oversized_command() {
         let long_cmd = "a".repeat(MAX_COMMAND_LEN + 1);
         let args = format!(r#"{{"command": "{}"}}"#, long_cmd);
-        let result = execute("test-3", "run_command", &args).await;
+        let result = execute(&call("test-3", "run_command", &args)).await;
         assert!(!result.success, "oversized command should be rejected");
         assert!(
             result.error.contains("command too long"),
@@ -383,7 +400,12 @@ mod tests {
 
     #[tokio::test]
     async fn run_command_accepts_normal_command() {
-        let result = execute("test-4", "run_command", r#"{"command": "echo hello"}"#).await;
+        let result = execute(&call(
+            "test-4",
+            "run_command",
+            r#"{"command": "echo hello"}"#,
+        ))
+        .await;
         assert!(
             result.success,
             "normal command should succeed: {}",
@@ -449,7 +471,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_builtin_returns_error() {
-        let result = execute("test-5", "evil_tool", "{}").await;
+        let result = execute(&call("test-5", "evil_tool", "{}")).await;
         assert!(!result.success);
         assert!(result.error.contains("unknown builtin"));
     }
