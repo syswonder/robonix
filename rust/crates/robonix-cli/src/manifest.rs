@@ -165,13 +165,12 @@ fn normalize(raw: RawManifest, manifest_path: &Path) -> Manifest {
 
     // package.name fallback to package.id (legacy used id as canonical name).
     let mut package = raw.package;
-    if package.name.trim().is_empty() {
-        if let Some(id) = &package.id {
-            if !id.trim().is_empty() {
-                package.name = id.clone();
-                is_legacy = true;
-            }
-        }
+    if package.name.trim().is_empty()
+        && let Some(id) = &package.id
+        && !id.trim().is_empty()
+    {
+        package.name = id.clone();
+        is_legacy = true;
     }
 
     // build: string (new) or { script } (legacy).

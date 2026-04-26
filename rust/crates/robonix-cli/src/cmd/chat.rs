@@ -116,64 +116,73 @@ async fn run_tui(
     loop {
         draw(terminal, &messages, &input, scroll, busy)?;
 
-        if event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    break;
-                }
-                if busy {
-                    match key.code {
-                        KeyCode::PageUp => scroll = scroll.saturating_add(5),
-                        KeyCode::PageDown => scroll = scroll.saturating_sub(5),
-                        _ => {}
-                    }
-                    continue;
-                }
+        if event::poll(std::time::Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                break;
+            }
+            if busy {
                 match key.code {
-                    KeyCode::Enter => {
-                        let msg = input.trim().to_string();
-                        input.clear();
-                        scroll = 0;
-                        if msg.is_empty() {
-                            continue;
-                        }
-                        if msg == "quit" || msg == "exit" {
-                            break;
-                        }
-                        if msg == "/reset" {
-                            session_id = Uuid::new_v4().to_string();
-                            messages.push(ChatMessage {
-                                role: Role::Status,
-                                text: format!("New session: {session_id}"),
-                            });
-                            continue;
-                        }
-                        messages.push(ChatMessage {
-                            role: Role::User,
-                            text: msg.clone(),
-                        });
-                        busy = true;
-                        draw(terminal, &messages, &input, scroll, busy)?;
-
-                        match send_message(&mut client, &session_id, &msg, &mut messages, terminal, &input).await {
-                            Ok(()) => {}
-                            Err(e) => {
-                                messages.push(ChatMessage {
-                                    role: Role::Status,
-                                    text: format!("Error: {e:#}"),
-                                });
-                            }
-                        }
-                        busy = false;
-                    }
-                    KeyCode::Char(c) => input.push(c),
-                    KeyCode::Backspace => {
-                        input.pop();
-                    }
                     KeyCode::PageUp => scroll = scroll.saturating_add(5),
                     KeyCode::PageDown => scroll = scroll.saturating_sub(5),
                     _ => {}
                 }
+                continue;
+            }
+            match key.code {
+                KeyCode::Enter => {
+                    let msg = input.trim().to_string();
+                    input.clear();
+                    scroll = 0;
+                    if msg.is_empty() {
+                        continue;
+                    }
+                    if msg == "quit" || msg == "exit" {
+                        break;
+                    }
+                    if msg == "/reset" {
+                        session_id = Uuid::new_v4().to_string();
+                        messages.push(ChatMessage {
+                            role: Role::Status,
+                            text: format!("New session: {session_id}"),
+                        });
+                        continue;
+                    }
+                    messages.push(ChatMessage {
+                        role: Role::User,
+                        text: msg.clone(),
+                    });
+                    busy = true;
+                    draw(terminal, &messages, &input, scroll, busy)?;
+
+                    match send_message(
+                        &mut client,
+                        &session_id,
+                        &msg,
+                        &mut messages,
+                        terminal,
+                        &input,
+                    )
+                    .await
+                    {
+                        Ok(()) => {}
+                        Err(e) => {
+                            messages.push(ChatMessage {
+                                role: Role::Status,
+                                text: format!("Error: {e:#}"),
+                            });
+                        }
+                    }
+                    busy = false;
+                }
+                KeyCode::Char(c) => input.push(c),
+                KeyCode::Backspace => {
+                    input.pop();
+                }
+                KeyCode::PageUp => scroll = scroll.saturating_add(5),
+                KeyCode::PageDown => scroll = scroll.saturating_sub(5),
+                _ => {}
             }
         }
     }
@@ -209,12 +218,12 @@ async fn send_message(
                 if chunk.is_empty() {
                     continue;
                 }
-                if let Some(last) = messages.last_mut() {
-                    if matches!(last.role, Role::Agent) {
-                        last.text.push_str(&chunk);
-                        draw(terminal, messages, input, 0, true)?;
-                        continue;
-                    }
+                if let Some(last) = messages.last_mut()
+                    && matches!(last.role, Role::Agent)
+                {
+                    last.text.push_str(&chunk);
+                    draw(terminal, messages, input, 0, true)?;
+                    continue;
                 }
                 messages.push(ChatMessage {
                     role: Role::Agent,

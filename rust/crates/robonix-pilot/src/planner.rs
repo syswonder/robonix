@@ -59,6 +59,7 @@ fn skip_memory_prefetch(user_text: &str) -> bool {
     lower == "hi" || lower == "hello"
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_turn(
     task: &Task,
     history: &mut Vec<Message>,
@@ -142,23 +143,23 @@ pub async fn run_turn(
     // system prompt tiny while still giving the LLM full per-cap context
     // when relevant. Errors here are non-fatal — caps that didn't register
     // a path simply don't appear in the block.
-    if let Ok(docs) = discovery::cap_md_index(atlas).await {
-        if !docs.is_empty() {
-            let mut block = String::from(
-                "\n\n## Capability docs (lazy-load via `read_file`)\n\
-                 Each capability below ships a CAPABILITY.md describing its tools \
-                 and the recommended usage pattern. Read the relevant one with the \
-                 `read_file` builtin BEFORE you start using the capability — the \
-                 short tool descriptions in your tool list are intentionally terse.\n\n",
-            );
-            for d in &docs {
-                block.push_str(&format!(
-                    "- `{}` ({}): `{}`\n",
-                    d.cap_id, d.namespace, d.md_path
-                ));
-            }
-            system_prompt.push_str(&block);
+    if let Ok(docs) = discovery::cap_md_index(atlas).await
+        && !docs.is_empty()
+    {
+        let mut block = String::from(
+            "\n\n## Capability docs (lazy-load via `read_file`)\n\
+             Each capability below ships a CAPABILITY.md describing its tools \
+             and the recommended usage pattern. Read the relevant one with the \
+             `read_file` builtin BEFORE you start using the capability — the \
+             short tool descriptions in your tool list are intentionally terse.\n\n",
+        );
+        for d in &docs {
+            block.push_str(&format!(
+                "- `{}` ({}): `{}`\n",
+                d.cap_id, d.namespace, d.md_path
+            ));
         }
+        system_prompt.push_str(&block);
     }
     let system_prompt = system_prompt;
 
