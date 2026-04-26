@@ -117,9 +117,10 @@ pub enum Commands {
         show: bool,
     },
     /// Run codegen for a package (wraps robonix-codegen + grpc_tools.protoc).
-    /// Regenerates robonix_proto, <pkg>/proto_gen/, and optional <pkg>/robonix_mcp_types/.
-    /// Replaces the copy-pasted boilerplate in package build.sh scripts. If `-p`
-    /// is omitted, rbnx walks up from the current directory to find a package manifest.
+    /// Stages system protos under `<pkg>/rbnx-build/proto-staging/`, then emits
+    /// `<pkg>/proto_gen/` (and optional `<pkg>/robonix_mcp_types/`). Replaces the
+    /// copy-pasted boilerplate in package build.sh scripts. If `-p` is omitted,
+    /// rbnx walks up from the current directory to find a package manifest.
     Codegen {
         /// Package path (relative to $RBNX_INVOCATION_CWD, else process cwd)
         #[arg(short = 'p', long)]
@@ -144,7 +145,7 @@ pub enum Commands {
         path: Option<PathBuf>,
     },
     /// Print an absolute path rooted in the configured robonix source tree (for build scripts).
-    /// Keys: root, rust, contracts, interfaces-lib, interfaces-proto, runtime-proto, robonix-py
+    /// Keys: root, rust, contracts, interfaces-lib, runtime-proto, robonix-py
     Path {
         /// Path key to resolve (see above).
         key: String,

@@ -140,11 +140,6 @@ impl Config {
                 .join("crates")
                 .join("robonix-interfaces")
                 .join("lib"),
-            SourcePathKey::InterfacesProto => root
-                .join("rust")
-                .join("crates")
-                .join("robonix-interfaces")
-                .join("robonix_proto"),
             SourcePathKey::RuntimeProto => root.join("rust").join("proto"),
             SourcePathKey::RobonixPy => {
                 let new_loc = root.join("rust").join("crates").join("robonix-py");
@@ -181,8 +176,6 @@ pub enum SourcePathKey {
     Contracts,
     /// `<root>/rust/crates/robonix-interfaces/lib` (ROS IDL source).
     InterfacesLib,
-    /// `<root>/rust/crates/robonix-interfaces/robonix_proto` (generated protos).
-    InterfacesProto,
     /// `<root>/rust/proto` (runtime / atlas protos).
     RuntimeProto,
     /// Shared Python helper library (robonix-py; fallback: examples/packages/robonix_mcp_contract).
@@ -197,11 +190,10 @@ impl std::str::FromStr for SourcePathKey {
             "rust" | "rust-root" => Ok(Self::RustRoot),
             "contracts" => Ok(Self::Contracts),
             "interfaces-lib" | "idl" => Ok(Self::InterfacesLib),
-            "interfaces-proto" => Ok(Self::InterfacesProto),
             "runtime-proto" => Ok(Self::RuntimeProto),
             "robonix-py" | "mcp-contract" => Ok(Self::RobonixPy),
             other => Err(format!(
-                "unknown path key: {other}. Valid: root, rust, contracts, interfaces-lib, interfaces-proto, runtime-proto, robonix-py"
+                "unknown path key: {other}. Valid: root, rust, contracts, interfaces-lib, runtime-proto, robonix-py"
             )),
         }
     }
