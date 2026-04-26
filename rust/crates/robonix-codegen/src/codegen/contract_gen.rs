@@ -149,6 +149,19 @@ pub fn generate(
     }
 
     for ((_, c), (_, in_t, out_t)) in contracts.iter().zip(proto_types.iter()) {
+        // Templates: `{CAP_CLASS}` etc. in the id mark the TOML as a schema
+        // shared across many per-area contracts (drivers). Runtime calls go
+        // through the IDL-level stub (`robonix.lifecycle.Driver` etc.), so
+        // a per-contract service stub here would only be a malformed name.
+        if is_template_id(&c.contract.id) {
+            writeln!(
+                &mut out,
+                "// template contract (id `{}`): per-area instances are concretised at runtime; no per-contract service emitted.",
+                c.contract.id
+            )?;
+            writeln!(&mut out)?;
+            continue;
+        }
         let mode = c.mode.mode_type.trim();
         let svc = contract_id_to_service_name(&c.contract.id);
         writeln!(
@@ -613,6 +626,12 @@ fn proto_file_for_dot_package(pkg: &str) -> String {
         return format!("{}_{}.proto", segs[0], segs[1]);
     }
     format!("{}.proto", pkg.replace('.', "_"))
+}
+
+/// A `{CAP_CLASS}`-style placeholder anywhere in the id makes this a
+/// template TOML — one schema shared across many per-area contracts.
+fn is_template_id(id: &str) -> bool {
+    id.contains('{')
 }
 
 fn contract_id_to_service_name(id: &str) -> String {

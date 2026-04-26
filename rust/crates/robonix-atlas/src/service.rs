@@ -150,12 +150,11 @@ impl CapRecord {
 }
 
 fn is_driver_contract(contract_id: &str) -> bool {
-    // `robonix/primitive/driver` and `robonix/service/driver` (the canonical
-    // lifecycle contracts), plus historical `<area>/driver` ids that
-    // pre-9c22145 packages may still declare.
-    contract_id == "robonix/primitive/driver"
-        || contract_id == "robonix/service/driver"
-        || contract_id.ends_with("/driver")
+    // Per-area lifecycle drivers: `robonix/primitive/<area>/driver`,
+    // `robonix/service/<area>/driver`. The `{CAP_CLASS}/driver` template in
+    // `capabilities/{primitive,service}/driver.v1.toml` is concretised by
+    // the cap to its area at DeclareInterface time.
+    contract_id.ends_with("/driver")
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -274,11 +273,7 @@ impl AtlasRegistry {
             .caps
             .get(cap_id)
             .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
-        // Drivers live above per-area namespaces by design — every primitive
-        // (regardless of area) shares `robonix/primitive/driver`, every scene
-        // service shares `robonix/service/driver`. The namespace check covers
-        // only the cap's real interfaces.
-        if !is_driver_contract(&contract_id) && !contract_id.starts_with(&rec.namespace) {
+        if !contract_id.starts_with(&rec.namespace) {
             return Err(Status::invalid_argument(format!(
                 "contract_id '{contract_id}' is not under namespace '{}' of capability '{cap_id}'",
                 rec.namespace
