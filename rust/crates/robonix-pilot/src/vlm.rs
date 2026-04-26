@@ -1,17 +1,8 @@
 // SPDX-License-Identifier: MulanPSL-2.0
+// Author: wheatfox <wheatfox17@icloud.com>
+//
 // Embedded OpenAI-compatible chat-completions client.
-//
-// VLM is no longer a separate Robonix capability — pilot owns the LLM
-// connection directly using `async-openai`. Connection params come from the
-// `vlm:` block of pilot's config (see `config.rs::VlmConfig`).
-//
-// Public surface (consumed by `planner.rs`):
-//   * `Message` / `ToolCall` / `FnCall` / `ToolDef`  — internal data types
-//     used by `planner.rs` to keep history / dispatch tool calls.
-//   * `VlmClient::new(&VlmConfig)`                    — constructs the client.
-//   * `VlmClient::chat_stream(messages, tools)`       — returns a Stream of
-//     `VlmStreamItem` (text deltas → tool call accumulations → finish).
-
+// TODO: maybe we will support Google/Anthropic/etc. in the future :D
 use crate::config::VlmConfig;
 use anyhow::{Context, Result};
 use async_openai::Client;
@@ -32,20 +23,62 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::pin::Pin;
 
-// ── Pilot-internal message / tool data types ───────────────────────────────
-
+/// One message in an OpenAI Chat Completions conversation.
+/// Spec: https://platform.openai.com/docs/api-reference/chat/create#chat/create-messages
+///
+/// One struct, four roles (`system` / `user` / `assistant` / `tool`); each
+/// role uses a different subset of the optional fields. `skip_serializing_if`
+/// on every Option prunes irrelevant fields at serialization, so the wire
+/// JSON for each role only carries what OpenAI expects:
+///
+///   system    → role + content
+///   user      → role + content (+ optional `name` for multi-user)
+///   assistant → role + content (may be null when only tool_calls are emitted)
+///                              + optional tool_calls[]
+///   tool      → role + content + tool_call_id (must match an id in the
+///                                              preceding assistant.tool_calls)
+///
+/// We use a flat struct with optional fields rather than a tagged enum because
+/// the planner does a lot of generic Vec<Message> manipulation (trim, sanitize,
+/// sliding-window slicing) that's awkward to express through `match` on every
+/// access. Type-safety for "tool messages must have tool_call_id" is delegated
+/// to runtime checks (`history::sanitize_for_vlm`) and the OpenAI server's
+/// own validation.
+///
+/// `image_base64` is a robonix-side simplification, NOT part of the OpenAI
+/// wire format. Callers set it on a `user` message; `build_openai_messages`
+/// in this file repackages content + image into OpenAI's multimodal `content`
+/// array (`[{type:"text",...}, {type:"image_url",...}]`) at request time.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Message {
+    /// "system" / "user" / "assistant" / "tool". Determines which other
+    /// fields are meaningful; OpenAI rejects mismatched combinations.
     pub role: String,
+
+    /// Optional sender name. Used by `user`/`assistant` for multi-user
+    /// disambiguation; rare in practice. Robonix doesn't set it today.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+
+    /// Message text. Always present except on `assistant` messages whose
+    /// only output is tool calls (then None / null on the wire).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+
+    /// Tool calls the LLM decided to make. Present only on `assistant`
+    /// messages. Each entry carries id + function.{name, arguments};
+    /// the corresponding `tool` message links back via `tool_call_id`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+
+    /// Correlates a `tool` result back to the `assistant.tool_calls[].id`
+    /// that produced it. Required on `tool` messages; absent on others.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
-    /// Optional inline image (base64-encoded JPEG bytes).
+
+    /// Inline image attached to a `user` message (base64-encoded JPEG
+    /// bytes). Robonix-only field; rewritten into OpenAI's multimodal
+    /// content array at serialize time by `build_openai_messages`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_base64: Option<String>,
 }
@@ -153,8 +186,6 @@ impl Message {
         }
     }
 }
-
-// ── VLM client ─────────────────────────────────────────────────────────────
 
 /// Item yielded by the chat completion stream. `planner.rs` matches on this
 /// enum to drive token streaming, tool dispatch, and finish handling.
@@ -302,8 +333,6 @@ struct AccumulatedToolCall {
     name: String,
     arguments: String,
 }
-
-// ── Message + tool conversion ──────────────────────────────────────────────
 
 fn build_openai_messages(messages: &[Message]) -> Result<Vec<ChatCompletionRequestMessage>> {
     let mut out = Vec::with_capacity(messages.len());

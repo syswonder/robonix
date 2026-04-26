@@ -4,7 +4,7 @@
 // Command definitions and execution for robonix-cli
 
 use anyhow::Result;
-use clap::{Args, Subcommand};
+use clap::Subcommand;
 use std::path::PathBuf;
 
 use robonix_cli::Config;
@@ -14,10 +14,8 @@ mod chat;
 mod codegen;
 mod config;
 mod deploy;
-mod graph;
 mod info;
 mod install;
-mod launch_helpers;
 mod list;
 mod path;
 mod run_package;
@@ -26,22 +24,6 @@ mod setup;
 mod validate;
 
 const DEFAULT_ENDPOINT: &str = "localhost:50051";
-
-#[derive(Args)]
-pub struct GraphArgs {
-    /// robonix-atlas endpoint (ignored with `--test`)
-    #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
-    pub server: String,
-    /// Output file path (extension hints format when `--format` omitted: `.png` / `.svg`)
-    #[arg(short, long, default_value = "topology.png")]
-    pub output: PathBuf,
-    /// Output format (`png` default when extension is absent or unrecognized)
-    #[arg(long, value_enum)]
-    pub format: Option<graph::GraphOutputFormat>,
-    /// Random mock nodes and channels only (no server)
-    #[arg(long = "test")]
-    pub test_mode: bool,
-}
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -206,12 +188,6 @@ pub enum Commands {
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
     },
-
-    /// Generate a topology graph of the running system
-    Graph {
-        #[command(flatten)]
-        args: GraphArgs,
-    },
 }
 
 pub async fn execute(command: Commands, config: Config) -> Result<()> {
@@ -258,8 +234,5 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         Commands::Channels { server } => runtime::channels(&server).await,
         Commands::Inspect { server } => runtime::inspect(&server).await,
         Commands::Chat { server } => chat::execute(&server).await,
-        Commands::Graph { args } => {
-            graph::execute(&args.server, args.output, args.format, args.test_mode).await
-        }
     }
 }

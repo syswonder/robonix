@@ -200,7 +200,7 @@ pub async fn tools(endpoint: &str, json: bool) -> Result<()> {
 }
 
 pub async fn channels(endpoint: &str) -> Result<()> {
-    let mut atlas = connect(endpoint).await?;
+    let atlas = connect(endpoint).await?;
     let raw = atlas
         .inner()
         .inspect_atlas(atlas_pb::InspectAtlasRequest {})
@@ -245,7 +245,7 @@ pub async fn channels(endpoint: &str) -> Result<()> {
 }
 
 pub async fn inspect(endpoint: &str) -> Result<()> {
-    let mut atlas = connect(endpoint).await?;
+    let atlas = connect(endpoint).await?;
     let raw = atlas
         .inner()
         .inspect_atlas(atlas_pb::InspectAtlasRequest {})

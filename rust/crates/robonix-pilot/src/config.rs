@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MulanPSL-2.0
+// Author: wheatfox <wheatfox17@icloud.com>
+//
 // Pilot config: how a launched pilot process figures out where atlas is,
 // what address to bind, and how to reach the LLM upstream.
 //

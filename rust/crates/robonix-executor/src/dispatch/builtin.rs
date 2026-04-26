@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MulanPSL-2.0
+// Author: wheatfox <wheatfox17@icloud.com>
+//
 // dispatch/builtin.rs — built-in tool implementations
 
 use crate::pb::pilot::CapabilityCallResult;
@@ -7,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 /// Workspace root for file operations. All file paths are resolved relative to
 /// this directory, and path traversal beyond it is rejected.
+/// > `wheatfox's note: the definition of this "workspace" is where all the built-in tools
+/// > like read_file, write_file, exec command will be ran, as the linux CWD`
 fn workspace_root() -> PathBuf {
     std::env::var("ROBONIX_WORKSPACE")
         .map(PathBuf::from)
@@ -190,6 +194,7 @@ fn write_file(args: &str) -> anyhow::Result<String> {
 }
 
 fn patch_file(args: &str) -> anyhow::Result<String> {
+    // TODO: use standard tools like sed, awk, etc.
     let a: PatchArgs = serde_json::from_str(args)?;
     let path = safe_resolve(&a.path)?;
     let content = std::fs::read_to_string(&path)?;
@@ -263,8 +268,6 @@ async fn run_command(args: &str) -> anyhow::Result<String> {
 mod tests {
     use super::*;
 
-    // ── Path traversal tests ─────────────────────────────────────────────
-
     #[test]
     fn path_traversal_dotdot_is_rejected() {
         // Set workspace to a temp dir so we have a known root
@@ -325,11 +328,8 @@ mod tests {
         let _ = std::fs::remove_dir(&tmp);
     }
 
-    // ── execute() integration tests for path traversal ───────────────────
-    //
     // CapabilityCall builder — tests dispatch by contract_id leaf, so each
     // call's contract_id is `<anything>/<op>` and the leaf names the op.
-
     fn call(call_id: &str, op: &str, args_json: &str) -> CapabilityCall {
         CapabilityCall {
             call_id: call_id.to_string(),
@@ -383,8 +383,6 @@ mod tests {
         );
     }
 
-    // ── Command length limit test ────────────────────────────────────────
-
     #[tokio::test]
     async fn run_command_rejects_oversized_command() {
         let long_cmd = "a".repeat(MAX_COMMAND_LEN + 1);
@@ -417,8 +415,6 @@ mod tests {
             result.output
         );
     }
-
-    // ── UTF-8 truncation safety test ─────────────────────────────────────
 
     #[test]
     fn truncate_ascii_works() {
@@ -466,8 +462,6 @@ mod tests {
             "should start with 'A', got: {result}"
         );
     }
-
-    // ── Unknown builtin test ─────────────────────────────────────────────
 
     #[tokio::test]
     async fn unknown_builtin_returns_error() {

@@ -7,7 +7,6 @@
 // and registering capabilities with atlas. No node-id flag.
 
 use super::build;
-use super::launch_helpers;
 use anyhow::{Context, Result};
 use robonix_cli::Config;
 use robonix_cli::manifest;
@@ -19,6 +18,12 @@ use std::path::{Path, PathBuf};
 /// When `cargo run` runs from `robonix/rust`, the process cwd is not the user's shell cwd — wrappers
 /// should `export RBNX_INVOCATION_CWD="$(pwd)"` before `cd`+`cargo run`. If unset, `std::env::current_dir()` is used.
 pub(crate) const RBNX_INVOCATION_CWD: &str = "RBNX_INVOCATION_CWD";
+
+/// POSIX-shell single-quoted escape, used when we synthesise `export FOO=...`
+/// fragments to inject into a package's `start` body.
+fn shell_escape(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
 
 fn path_base_for_dash_p() -> Result<PathBuf> {
     if let Ok(s) = std::env::var(RBNX_INVOCATION_CWD) {
@@ -177,7 +182,7 @@ pub async fn execute_start(
 
     let exports = env
         .iter()
-        .map(|(k, v)| format!("export {}={}", k, launch_helpers::shell_escape(v)))
+        .map(|(k, v)| format!("export {}={}", k, shell_escape(v)))
         .collect::<Vec<_>>()
         .join("; ");
     let start_body = manifest.start.trim();
@@ -187,10 +192,7 @@ pub async fn execute_start(
         .join("install")
         .join("setup.bash");
     let setup_source = if setup_bash.exists() {
-        format!(
-            "source {}",
-            launch_helpers::shell_escape(&setup_bash.display().to_string())
-        )
+        format!("source {}", shell_escape(&setup_bash.display().to_string()))
     } else {
         String::new()
     };

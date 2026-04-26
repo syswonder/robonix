@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// Conversation-history transforms.
+// Author: wheatfox <wheatfox17@icloud.com>
 //
 // Two concerns live here:
 //   1. Mapping an executor tool result (JSON string) back into one or more
