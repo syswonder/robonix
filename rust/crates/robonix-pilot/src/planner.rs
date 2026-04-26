@@ -1,14 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// VLM-driven ReAct loop (core Pilot logic).
+// Author: wheatfox <wheatfox17@icloud.com>
 //
-// One call to `run_turn` handles a single user turn:
-//   1. Build system prompt (optional SOUL.md + operating principles).
-//   1b. Proactively call search_memory via Executor; inject results into system prompt.
-//   2. Add user message to history.
-//   3. Loop: fetch tools → VLM call → tool calls → Plan → Executor → feed results back.
-//   4. Stream PilotEvents to the Liaison caller via `tx`.
-
-use crate::discovery::{self, CapEntry};
+use crate::discovery::{self, llm_name};
 use crate::history;
 use crate::memory;
 use crate::pb::contracts::system_executor_client::SystemExecutorClient;
@@ -20,6 +13,7 @@ use crate::vlm::{Message, ToolDef, VlmClient, VlmStreamItem};
 use anyhow::Result;
 use futures_util::StreamExt;
 use robonix_atlas::client::AtlasClient;
+use robonix_atlas::pb as atlas_pb;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::{mpsc::Sender, watch};
@@ -122,17 +116,17 @@ pub async fn run_turn(
     // ── 1. Build system prompt (once per turn) ────────────────────────────────
     let base_prompt = build_system_prompt(load_agent_soul().as_deref());
 
-    // Pilot's capability catalog comes straight from atlas (filtered to MCP
-    // transport — only those are LLM-callable). Per-cap description +
-    // input_schema_json come from McpParams, peeked via brief Connect in
-    // `discovery::discover`.
-    let initial_caps = discovery::discover(atlas, consumer_id)
+    // Pilot's capability catalog comes straight from atlas (filtered to
+    // MCP transport — only those are LLM-callable). McpParams ride along
+    // in InterfaceMetadata.params, no Connect needed.
+    let _ = consumer_id; // currently unused; kept on the signature for future channel-tracked discovery
+    let initial_caps = discovery::discover(atlas)
         .await
         .map_err(|e| anyhow::anyhow!("atlas capability discovery failed: {e}"))?;
     let search_memory_target = initial_caps
         .iter()
-        .find(|c| c.name == "search_memory")
-        .map(|c| (c.cap_id.clone(), c.contract_id.clone()));
+        .find(|(_, iface)| llm_name(&iface.contract_id) == "search_memory")
+        .map(|(cap_id, iface)| (cap_id.clone(), iface.contract_id.clone()));
 
     // ── 1b. Pre-fetch long-term memory ────────────────────────────────────────
     // Silently dispatches search_memory before the first VLM call so that
@@ -165,16 +159,24 @@ pub async fn run_turn(
         // Re-discover capabilities from atlas every round so caps that
         // registered mid-turn (e.g. tiago bridge warming up) are visible in
         // the next VLM call.
-        let cap_list: Vec<CapEntry> = discovery::discover(atlas, consumer_id)
+        let cap_list = discovery::discover(atlas)
             .await
             .map_err(|e| anyhow::anyhow!("atlas capability discovery failed: {e}"))?;
 
         let tool_defs: Vec<ToolDef> = cap_list
             .iter()
-            .map(|c| {
+            .filter_map(|(_, iface)| {
+                let mcp = match iface.params.as_ref()?.kind.as_ref()? {
+                    atlas_pb::transport_params::Kind::Mcp(m) => m,
+                    _ => return None,
+                };
                 let schema: serde_json::Value =
-                    serde_json::from_str(&c.input_schema_json).unwrap_or_default();
-                ToolDef::new(&c.name, &c.description, schema)
+                    serde_json::from_str(&mcp.input_schema_json).unwrap_or_default();
+                Some(ToolDef::new(
+                    llm_name(&iface.contract_id),
+                    &mcp.description,
+                    schema,
+                ))
             })
             .collect();
 
@@ -183,7 +185,12 @@ pub async fn run_turn(
         // of contract_id; collisions across caps would be a user-config bug.
         let target_map: HashMap<String, (String, String)> = cap_list
             .iter()
-            .map(|c| (c.name.clone(), (c.cap_id.clone(), c.contract_id.clone())))
+            .map(|(cap_id, iface)| {
+                (
+                    llm_name(&iface.contract_id).to_string(),
+                    (cap_id.clone(), iface.contract_id.clone()),
+                )
+            })
             .collect();
 
         let mut messages = vec![Message::system(&system_prompt)];
