@@ -8,6 +8,7 @@ use clap::Parser;
 use robonix_cli::Config;
 
 mod cmd;
+mod pb;
 
 #[derive(Parser)]
 #[command(name = "rbnx")]
