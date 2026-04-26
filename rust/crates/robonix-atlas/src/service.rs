@@ -122,8 +122,40 @@ impl From<&CapRecord> for pb::CapabilityRecord {
             capability_md_path: rec.capability_md_path.clone(),
             last_heartbeat_ms: rec.last_heartbeat_ms,
             endpoints: rec.endpoints.iter().map(Into::into).collect(),
+            state: rec.state() as i32,
         }
     }
+}
+
+impl CapRecord {
+    /// Observed lifecycle state. INITIALIZED iff the cap has declared at
+    /// least one interface whose contract_id is NOT a `*/driver` (the
+    /// lifecycle hook). By convention, primitives + scene services declare
+    /// only `<kind>/driver` until rbnx calls `Driver(CMD_INIT)` succeeds,
+    /// after which they lazy-declare their real interfaces. System caps
+    /// (atlas/pilot/executor/memory/...) skip the driver step and declare
+    /// their real interfaces directly, transitioning to INITIALIZED on
+    /// first declare.
+    fn state(&self) -> pb::CapabilityState {
+        let any_non_driver = self
+            .endpoints
+            .iter()
+            .any(|e| !is_driver_contract(&e.contract_id));
+        if any_non_driver {
+            pb::CapabilityState::StateInitialized
+        } else {
+            pb::CapabilityState::StateRegistered
+        }
+    }
+}
+
+fn is_driver_contract(contract_id: &str) -> bool {
+    // `robonix/primitive/driver` and `robonix/service/driver` (the canonical
+    // lifecycle contracts), plus historical `<area>/driver` ids that
+    // pre-9c22145 packages may still declare.
+    contract_id == "robonix/primitive/driver"
+        || contract_id == "robonix/service/driver"
+        || contract_id.ends_with("/driver")
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -242,7 +274,11 @@ impl AtlasRegistry {
             .caps
             .get(cap_id)
             .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
-        if !contract_id.starts_with(&rec.namespace) {
+        // Drivers live above per-area namespaces by design — every primitive
+        // (regardless of area) shares `robonix/primitive/driver`, every scene
+        // service shares `robonix/service/driver`. The namespace check covers
+        // only the cap's real interfaces.
+        if !is_driver_contract(&contract_id) && !contract_id.starts_with(&rec.namespace) {
             return Err(Status::invalid_argument(format!(
                 "contract_id '{contract_id}' is not under namespace '{}' of capability '{cap_id}'",
                 rec.namespace
@@ -315,6 +351,7 @@ impl AtlasRegistry {
                 namespace: rec.namespace.clone(),
                 capability_md_path: rec.capability_md_path.clone(),
                 last_heartbeat_ms: rec.last_heartbeat_ms,
+                state: rec.state() as i32,
                 endpoints,
             });
         }

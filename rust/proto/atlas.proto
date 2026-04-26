@@ -187,12 +187,30 @@ message InterfaceEndpoint {
 // (`{e.contract_id for e in endpoints}`); there is no separate
 // pre-announced interface list (driver-flow: contracts are declared
 // lazily as the cap discovers them).
+// Lifecycle state of a capability instance, observed (not driven) by Atlas.
+//   STATE_REGISTERED  — the cap exists in atlas but only its `driver`
+//                       interface has been declared (or no interface yet).
+//                       It hasn't been initialised; rbnx start hasn't yet
+//                       called Driver(CMD_INIT) — or the call is in flight,
+//                       or it failed.
+//   STATE_INITIALIZED — the cap has declared at least one non-driver
+//                       interface, which by convention only happens after
+//                       a successful Driver(CMD_INIT). The cap is serving.
+// System caps (atlas/pilot/executor/memory/…) skip the driver step and
+// transition straight to INITIALIZED on their first interface declare.
+enum CapabilityState {
+  STATE_UNSPECIFIED = 0;
+  STATE_REGISTERED  = 1;
+  STATE_INITIALIZED = 2;
+}
+
 message CapabilityRecord {
   string capability_id = 1;
   string namespace = 2;
   string capability_md_path = 3;
   uint64 last_heartbeat_ms = 4;
   repeated InterfaceEndpoint endpoints = 5;
+  CapabilityState state = 6;
 }
 
 // Discover capability instances. Filters AND together when set.
