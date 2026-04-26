@@ -127,7 +127,7 @@ pub enum Commands {
         path: Option<PathBuf>,
     },
     /// Print an absolute path rooted in the configured robonix source tree (for build scripts).
-    /// Keys: root, rust, capabilities, interfaces-lib, runtime-proto, robonix-py
+    /// Keys: root, rust, capabilities, interfaces-lib, runtime-proto
     Path {
         /// Path key to resolve (see above).
         key: String,

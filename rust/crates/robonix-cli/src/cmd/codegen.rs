@@ -73,7 +73,6 @@ pub async fn execute(
     let interfaces_lib = config.resolve_source_path(SourcePathKey::InterfacesLib)?;
     let capabilities_dir = config.resolve_source_path(SourcePathKey::Capabilities)?;
     let runtime_proto = config.resolve_source_path(SourcePathKey::RuntimeProto)?;
-    let robonix_py = config.resolve_source_path(SourcePathKey::RobonixPy).ok();
 
     // Where to place proto_gen/ and robonix_mcp_types/. Defaults to package root;
     // override for packages that want them inside a sub-dir (e.g. tiago_bridge/).
@@ -179,9 +178,6 @@ pub async fn execute(
     ];
     if mcp {
         py_parts.push(mcp_types.display().to_string());
-    }
-    if let Some(pp) = robonix_py {
-        py_parts.push(pp.display().to_string());
     }
     let joined = py_parts.join(":");
     let setup_bash = ws_install.join("setup.bash");
