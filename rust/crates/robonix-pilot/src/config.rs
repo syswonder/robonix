@@ -79,6 +79,11 @@ pub struct Args {
     /// YAML config file (rbnx writes this; CLI/env still override individual fields).
     #[arg(long, env = "ROBONIX_CONFIG_PATH")]
     pub config: Option<PathBuf>,
+
+    /// Log filter (env_logger syntax; e.g. `info`, `robonix_pilot=debug`).
+    /// Default: `robonix_pilot=info`. Falls back to `RUST_LOG` if neither set.
+    #[arg(long)]
+    pub log: Option<String>,
 }
 
 /// Optional YAML schema. Field names match `PilotConfig` (flat) so a
