@@ -4,9 +4,7 @@
 // `SystemPilot` gRPC handler (contract `robonix/system/pilot`).
 
 use crate::pb::contracts::{
-    system_executor_client::SystemExecutorClient,
-    system_executor_list_tools_client::SystemExecutorListToolsClient,
-    system_pilot_server::SystemPilot,
+    system_executor_client::SystemExecutorClient, system_pilot_server::SystemPilot,
 };
 use crate::pb::pilot::{BatchResult, PilotEvent, Plan, SessionStatusEvent, Task};
 use crate::planner::{self, ExecutorConn};
@@ -180,6 +178,7 @@ impl SystemPilot for PilotServiceImpl {
                 )))
                 .await;
 
+            let mut atlas_for_turn = atlas.clone();
             let mut executor = match build_executor_conn(atlas, &cap_id).await {
                 Ok(e) => e,
                 Err(e) => {
@@ -194,8 +193,17 @@ impl SystemPilot for PilotServiceImpl {
             };
 
             let mut history = history_arc.lock().await;
-            if let Err(e) =
-                planner::run_turn(&task, &mut history, &vlm, &mut executor, &tx, cancel_rx).await
+            if let Err(e) = planner::run_turn(
+                &task,
+                &mut history,
+                &vlm,
+                &mut executor,
+                &mut atlas_for_turn,
+                &cap_id,
+                &tx,
+                cancel_rx,
+            )
+            .await
             {
                 log::error!("[pilot] turn error for session '{session_id}': {e:#}");
                 let _ = tx.send(Err(Status::internal(e.to_string()))).await;
@@ -208,13 +216,8 @@ impl SystemPilot for PilotServiceImpl {
     }
 }
 
-/// Discover and connect to executor's two contracts. Both lookups go
-/// through atlas so executor can move/restart without reconfiguring
-/// pilot. Each connect call records a channel record on atlas
-/// (consumer=pilot, provider=executor) for the duration of this turn.
-/// TODO(channel-release): keep the channel_ids and call
-/// `disconnect_capability` when the turn ends — currently the channels
-/// stay bookkept until atlas evicts executor.
+/// Connect to executor's Execute RPC. Capability discovery (what's available
+/// for the LLM to call) is done directly against atlas, not through executor.
 async fn build_executor_conn(
     mut atlas: AtlasClient,
     consumer_id: &str,
@@ -223,16 +226,8 @@ async fn build_executor_conn(
         atlas_client::connect_to_capability(&mut atlas, consumer_id, "robonix/system/executor")
             .await
             .context("connect_to_capability robonix/system/executor")?;
-    let (_, _, list_ch) = atlas_client::connect_to_capability(
-        &mut atlas,
-        consumer_id,
-        "robonix/system/executor/list_tools",
-    )
-    .await
-    .context("connect_to_capability robonix/system/executor/list_tools")?;
     Ok(ExecutorConn {
         graph: SystemExecutorClient::new(exec_ch),
-        list_tools: SystemExecutorListToolsClient::new(list_ch),
     })
 }
 

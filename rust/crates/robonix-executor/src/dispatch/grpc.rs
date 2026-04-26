@@ -1,30 +1,29 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// dispatch/grpc.rs — gRPC primitive / service dispatch
+// dispatch/grpc.rs — gRPC dispatch (placeholder).
 //
-// TODO(executor owner): implement gRPC dispatch via Atlas endpoint resolution.
-// `endpoint` here is an abstract_interface_id (e.g. "robonix/srv/navigation/navigate").
-// Executor should resolve the concrete gRPC endpoint via Atlas QueryNodes and
-// call the generated proto service.
+// Currently unused: the LLM-callable contract path is MCP-only. This module
+// exists for future Robonix-internal contracts that consumers may invoke via
+// gRPC after `ConnectCapability` returns endpoint + GrpcParams.
 
-use crate::pb::pilot::CapabilityCallResult;
+use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
 
-pub async fn execute(
-    call_id: &str,
-    name: &str,
-    _args_json: &str,
-    endpoint: &str,
-) -> CapabilityCallResult {
-    // Stub: gRPC dispatch not yet implemented.
+#[allow(dead_code)]
+pub async fn execute(call: &CapabilityCall, endpoint: &str) -> CapabilityCallResult {
     log::warn!(
-        "[grpc] tool '{}' (interface '{}') — gRPC dispatch not yet implemented",
-        name,
+        "[grpc] cap='{}' contract='{}' (endpoint='{}') — gRPC dispatch not yet implemented",
+        call.cap_id,
+        call.contract_id,
         endpoint
     );
     CapabilityCallResult {
-        call_id: call_id.to_string(),
-        capability_name: name.to_string(),
+        call_id: call.call_id.clone(),
+        cap_id: call.cap_id.clone(),
+        contract_id: call.contract_id.clone(),
         success: false,
         output: String::new(),
-        error: format!("gRPC dispatch not yet implemented for '{}'", name),
+        error: format!(
+            "gRPC dispatch not yet implemented for '{}'",
+            call.contract_id
+        ),
     }
 }

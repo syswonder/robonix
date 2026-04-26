@@ -1,2 +1,3 @@
 string call_id
-string capability_name
+string cap_id
+string contract_id

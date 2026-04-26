@@ -8,12 +8,13 @@ pub const EVT_STARTED: u32 = 0;
 pub const EVT_RESULT: u32 = 1;
 pub const EVT_COMPLETE: u32 = 2;
 
-pub fn started(call_id: String, capability_name: String) -> CapabilityCallEvent {
+pub fn started(call_id: String, cap_id: String, contract_id: String) -> CapabilityCallEvent {
     CapabilityCallEvent {
         event_kind: EVT_STARTED,
         started: Some(CapabilityCallStarted {
             call_id,
-            capability_name,
+            cap_id,
+            contract_id,
         }),
         ..Default::default()
     }
