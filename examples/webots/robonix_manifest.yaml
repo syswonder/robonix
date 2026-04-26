@@ -1,17 +1,19 @@
 manifestVersion: 1
 name: robonix-webots-example-deploy
 
+env:
+  # ${VAR} in the blocks below resolves from the launching shell. This
+  # `env:` block is the place to inject extras / overrides for children.
+
 system:
   atlas:
     listen: 127.0.0.1:50051
     log:    info
   executor:
     listen: 127.0.0.1:50061
-    atlas:  127.0.0.1:50051
     log:    info
   pilot:
     listen: 127.0.0.1:50071
-    atlas:  127.0.0.1:50051
     log:    info
     vlm:
       upstream:   ${VLM_BASE_URL}
