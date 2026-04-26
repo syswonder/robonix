@@ -175,13 +175,21 @@ message DeclareInterfaceResponse {
 }
 
 // Public metadata of one declared interface. Returned by
-// QueryCapabilities so consumers can SEE what's on offer, but NOT how
-// to dial — the endpoint string and full TransportParams are hidden
-// at this stage. To actually dial, the consumer commits via
-// ConnectCapability, which returns the binding details.
+// QueryCapabilities — carries everything needed to render the cap to a
+// catalog (LLM tool docs, gRPC service/method names for codegen lookup,
+// ROS 2 QoS hints) EXCEPT the endpoint string. Endpoint disclosure is
+// gated behind ConnectCapability so atlas can record the consumer→
+// provider channel before any traffic flows.
 message InterfaceMetadata {
   string contract_id = 1;
   Transport transport = 2;
+  // Transport-specific public docs:
+  //   * grpc — proto_file / service_name / method (codegen lookup; not secret)
+  //   * ros2 — qos_profile
+  //   * mcp  — description + input_schema_json (LLM tool docs)
+  // Same shape as the `params` declared at DeclareInterface time, just
+  // without the endpoint.
+  TransportParams params = 3;
 }
 
 // Lifecycle state of a capability instance, observed (not driven) by Atlas.

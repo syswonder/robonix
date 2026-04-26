@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Atlas-driven capability catalog for the LLM.
 //
-// Pilot doesn't dispatch — but it needs to tell the LLM *what* it can ask
-// for. So before each turn we query atlas for MCP-providing caps, peek at
-// each cap's McpParams (description + input_schema_json) via a brief
-// Connect/Disconnect, and assemble the catalog.
-//
-// The Connect here is purely for read access: bookkeeping is opened and
-// closed inline; pilot never holds these channels for the actual call (the
-// executor does, when it dispatches).
+// Pilot needs to tell the LLM what it can ask for, but doesn't need to
+// dial anything itself — dispatch is executor's job. So before each turn
+// we just call `QueryCapabilities(transport=Mcp)` against atlas and read
+// `McpParams.{description, input_schema_json}` straight from each
+// returned `InterfaceMetadata`. No Connect, no channel bookkeeping —
+// description + schema are public docs (atlas serves them in metadata).
 
 use anyhow::Result;
 use robonix_atlas::client::AtlasClient;
@@ -25,29 +23,17 @@ pub struct CapEntry {
     pub input_schema_json: String,
 }
 
-impl CapEntry {
-    /// LLM-facing tool name = contract_id leaf (last `/` segment). All MCP
-    /// servers expose tools by short name; the cap+contract grouping is
-    /// internal to Robonix.
-    fn from_metadata(cap_id: String, contract_id: String) -> Self {
-        let name = contract_id
-            .rsplit_once('/')
-            .map(|(_, leaf)| leaf.to_string())
-            .unwrap_or_else(|| contract_id.clone());
-        Self {
-            cap_id,
-            contract_id,
-            name,
-            description: String::new(),
-            input_schema_json: String::new(),
-        }
-    }
+fn leaf_of(contract_id: &str) -> String {
+    contract_id
+        .rsplit_once('/')
+        .map(|(_, leaf)| leaf.to_string())
+        .unwrap_or_else(|| contract_id.to_string())
 }
 
 /// Query atlas for every MCP-transport capability and return the LLM-facing
-/// catalog. Each entry's description + input_schema is fetched via a brief
-/// `ConnectCapability` (released immediately).
-pub async fn discover(atlas: &mut AtlasClient, consumer_id: &str) -> Result<Vec<CapEntry>> {
+/// catalog. Description + schema come straight from `InterfaceMetadata.params`
+/// (MCP variant); no Connect/Disconnect roundtrip per cap.
+pub async fn discover(atlas: &mut AtlasClient, _consumer_id: &str) -> Result<Vec<CapEntry>> {
     let records = atlas
         .query_capabilities("", "", atlas_pb::Transport::Mcp)
         .await?;
@@ -58,38 +44,26 @@ pub async fn discover(atlas: &mut AtlasClient, consumer_id: &str) -> Result<Vec<
             if iface.transport != atlas_pb::Transport::Mcp as i32 {
                 continue;
             }
-            let mut entry =
-                CapEntry::from_metadata(rec.capability_id.clone(), iface.contract_id.clone());
-
-            // Brief Connect/Disconnect to read MCP params (description +
-            // schema). Errors are warnings, not fatal — a cap that's gone
-            // away between Query and Connect just gets skipped.
-            match atlas
-                .connect_capability(
-                    consumer_id,
-                    &rec.capability_id,
-                    &iface.contract_id,
-                    atlas_pb::Transport::Mcp,
-                )
-                .await
-            {
-                Ok((channel_id, _endpoint, params)) => {
-                    if let Some(atlas_pb::transport_params::Kind::Mcp(m)) = params.kind {
-                        entry.description = m.description;
-                        entry.input_schema_json = m.input_schema_json;
-                    }
-                    let _ = atlas.disconnect_capability(&channel_id).await;
+            let (description, input_schema_json) = match iface.params.and_then(|p| p.kind) {
+                Some(atlas_pb::transport_params::Kind::Mcp(m)) => {
+                    (m.description, m.input_schema_json)
                 }
-                Err(e) => {
+                _ => {
                     log::warn!(
-                        "[pilot/discovery] connect to '{}/{}' failed: {e:#}; skipping",
+                        "[pilot/discovery] cap='{}' contract='{}' has no MCP params; skipping",
                         rec.capability_id,
                         iface.contract_id
                     );
                     continue;
                 }
             };
-            out.push(entry);
+            out.push(CapEntry {
+                name: leaf_of(&iface.contract_id),
+                cap_id: rec.capability_id.clone(),
+                contract_id: iface.contract_id,
+                description,
+                input_schema_json,
+            });
         }
     }
     Ok(out)
