@@ -1,0 +1,23 @@
+# Lifecycle interface every scene service MUST declare. ONE contract for
+# ALL services (mapping, navigation, perception, slam, …). rbnx start
+# drives `Driver(CMD_INIT, config_json=…)` against each service AFTER all
+# primitives have finished init — services can depend on primitive data
+# streams, so initialising a service means "verify the primitives my
+# config_json says I need are already up + ready, then wire myself to
+# them, then declare my real interfaces". See `lib/lifecycle/srv/Driver.srv`
+# for the request/response shape.
+#
+# Example: a mapping service whose `config_json` is `{"backend":"slam_imu"}`
+# checks atlas for an IMU primitive and a SLAM-capable lidar primitive,
+# but does NOT require a camera primitive. Same Driver.srv contract; the
+# init body is service-specific.
+[contract]
+id      = "robonix/service/driver"
+version = "1"
+kind    = "service"
+
+[io.srv]
+srv = "lifecycle/srv/Driver"
+
+[mode]
+type = "rpc"
