@@ -506,6 +506,27 @@ pub async fn execute(
     Ok(())
 }
 
+/// Walk up from the running executable's directory until a `Cargo.toml`
+/// containing `[workspace]` is found (the robonix rust/ root). This is
+/// how we locate the cargo workspace when called as an installed binary
+/// or from `cargo run` alike.
+fn find_rust_root() -> Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    let mut cur: Option<&Path> = exe.parent();
+    while let Some(d) = cur {
+        let cargo = d.join("Cargo.toml");
+        if cargo.is_file()
+            && let Ok(text) = std::fs::read_to_string(&cargo)
+            && text.contains("[workspace]")
+        {
+            return Ok(d.to_path_buf());
+        }
+        cur = d.parent();
+    }
+    // Fallback: current working dir (useful in dev).
+    std::env::current_dir().context("could not locate rust workspace root")
+}
+
 /// Translate a `system.<name>:` block into CLI args for the corresponding
 /// Rust binary. Per-binary mapping kept narrow — adding a new flag means
 /// touching exactly this function plus the binary's clap struct.
