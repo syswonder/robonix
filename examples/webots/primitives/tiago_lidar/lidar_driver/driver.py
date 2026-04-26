@@ -163,7 +163,7 @@ def _on_scan(msg):
 # ── MCP tool ─────────────────────────────────────────────────────────────────
 
 @mcp_contract(mcp, contract_id="robonix/primitive/lidar/snapshot")
-def lidar_snapshot(msg: Empty) -> LaserScan:
+def snapshot(msg: Empty) -> LaserScan:
     """Get the latest planar lidar scan as sensor_msgs/LaserScan.
     Contract: robonix/primitive/lidar/snapshot."""
     _ = msg
@@ -225,10 +225,10 @@ def main() -> None:
             skill_md="# tiago_lidar\nPlanar lidar snapshot.",
         ))
         stub.DeclareInterface(pb.DeclareInterfaceRequest(
-            node_id=node_id, name="lidar_snapshot",
+            node_id=node_id, name="snapshot",
             supported_transports=["mcp"],
             metadata_json=_single_tool_meta(
-                "lidar_snapshot",
+                "snapshot",
                 "Get the latest 2D lidar scan. Returns sensor_msgs/LaserScan.",
                 Empty.json_schema(),
             ),

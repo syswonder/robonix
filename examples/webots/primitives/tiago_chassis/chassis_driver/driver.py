@@ -144,7 +144,7 @@ def _on_pose(msg):
 # ── MCP tools ────────────────────────────────────────────────────────────────
 
 @mcp_contract(mcp, contract_id="robonix/primitive/chassis/state")
-def chassis_state(msg: Empty) -> RobotState:
+def state(msg: Empty) -> RobotState:
     """Get the chassis pose (latest /amcl_pose). Returns codegen base/RobotState
     with `base_pose` populated from AMCL when available; empty otherwise.
     Contract: robonix/primitive/chassis/state."""
@@ -169,7 +169,7 @@ def chassis_state(msg: Empty) -> RobotState:
 
 
 @mcp_contract(mcp, contract_id="robonix/primitive/chassis/cmd")
-def chassis_cmd(msg: MoveCommand) -> String:
+def cmd(msg: MoveCommand) -> String:
     """Send a velocity command to the chassis (publishes Twist on /cmd_vel
     for `TIAGO_CHASSIS_CMD_DURATION_SEC` seconds, default 1.0).
     Contract: robonix/primitive/chassis/cmd."""
@@ -255,10 +255,10 @@ def main() -> None:
         ))
 
         stub.DeclareInterface(pb.DeclareInterfaceRequest(
-            node_id=node_id, name="chassis_state",
+            node_id=node_id, name="state",
             supported_transports=["mcp"],
             metadata_json=_single_tool_meta(
-                "chassis_state",
+                "state",
                 "Get the chassis pose. Returns base/RobotState; base_pose is the latest /amcl_pose.",
                 Empty.json_schema(),
             ),
@@ -266,10 +266,10 @@ def main() -> None:
             contract_id="robonix/primitive/chassis/state",
         ))
         stub.DeclareInterface(pb.DeclareInterfaceRequest(
-            node_id=node_id, name="chassis_cmd",
+            node_id=node_id, name="cmd",
             supported_transports=["mcp"],
             metadata_json=_single_tool_meta(
-                "chassis_cmd",
+                "cmd",
                 "Send a velocity command. base/MoveCommand wire JSON. "
                 "Publish duration: env TIAGO_CHASSIS_CMD_DURATION_SEC (default 1.0).",
                 MoveCommand.json_schema(),
