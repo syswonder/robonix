@@ -202,12 +202,24 @@ def _heartbeat_loop(stub, node_id: str) -> None:
             print(f"[tiago_chassis] heartbeat failed: {e}")
 
 
-def _single_tool_meta(tool_name: str, description: str, input_schema: dict) -> str:
+def _meta(
+    name: str,
+    description: str,
+    properties: dict | None = None,
+    required: list[str] | None = None,
+) -> str:
+    """JSON-Schema for the registered MCP tool. Properties / required must
+    match the @mcp.tool() function signature so the LLM gets honest
+    field info."""
     return json.dumps({
         "tools": [{
-            "name": tool_name,
+            "name": name,
             "description": description,
-            "input_schema": input_schema,
+            "input_schema": {
+                "type": "object",
+                "properties": properties or {},
+                "required": list(required or []),
+            },
         }]
     })
 
@@ -233,10 +245,9 @@ def main() -> None:
         stub.DeclareInterface(pb.DeclareInterfaceRequest(
             node_id=node_id, name="state",
             supported_transports=["mcp"],
-            metadata_json=_single_tool_meta(
+            metadata_json=_meta(
                 "state",
                 "Get the chassis pose. Returns base/RobotState; base_pose is the latest /amcl_pose.",
-                Empty.json_schema(),
             ),
             listen_port=port,
             contract_id="robonix/primitive/chassis/state",
@@ -244,11 +255,19 @@ def main() -> None:
         stub.DeclareInterface(pb.DeclareInterfaceRequest(
             node_id=node_id, name="cmd",
             supported_transports=["mcp"],
-            metadata_json=_single_tool_meta(
+            metadata_json=_meta(
                 "cmd",
-                "Send a velocity command. base/MoveCommand fields as parameters. "
-                "Publish duration: env TIAGO_CHASSIS_CMD_DURATION_SEC (default 1.0).",
-                MoveCommand.json_schema(),
+                "Drive the chassis: publishes Twist on /cmd_vel for "
+                "TIAGO_CHASSIS_CMD_DURATION_SEC seconds (default 1.0). All linear/angular "
+                "components default to 0; pass only the axes you want to actuate.",
+                properties={
+                    "linear_x":  {"type": "number", "description": "forward velocity (m/s)"},
+                    "linear_y":  {"type": "number", "description": "lateral velocity (m/s)"},
+                    "linear_z":  {"type": "number", "description": "vertical velocity (m/s)"},
+                    "angular_x": {"type": "number", "description": "roll  rate (rad/s)"},
+                    "angular_y": {"type": "number", "description": "pitch rate (rad/s)"},
+                    "angular_z": {"type": "number", "description": "yaw   rate (rad/s)"},
+                },
             ),
             listen_port=port,
             contract_id="robonix/primitive/chassis/cmd",
