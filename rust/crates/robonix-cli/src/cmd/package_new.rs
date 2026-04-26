@@ -1,48 +1,55 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// `rbnx package-new <name> --type <primitive|service|skill>` — scaffold a new package.
+// `rbnx package-new <name>` — scaffold a new package.
+//
+// Two modes:
+//   1. `rbnx package-new my_cam --path ./primitives/my_cam`
+//       → creates directly at the given path (--type is ignored).
+//   2. `rbnx package-new my_cam -t primitive`
+//       → creates at `<cwd>/<role_dir>/my_cam` where role_dir is
+//         derived from --type (primitives/ services/ skills/).
 
 use anyhow::{Context, Result};
 use robonix_cli::output;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub async fn execute(name: &str, pkg_type: &str, path: Option<&Path>) -> Result<()> {
-    let role_dir = match pkg_type {
-        "primitive" => "primitives",
-        "service" => "services",
-        "skill" => "skills",
-        other => anyhow::bail!(
-            "unknown package type '{other}'; expected: primitive, service, skill"
-        ),
+    let pkg_dir: PathBuf = if let Some(p) = path {
+        // --path given: use it directly, no type inference needed.
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(p)
+        }
+    } else {
+        // No --path: derive from --type.
+        let role_dir = match pkg_type {
+            "primitive" => "primitives",
+            "service" => "services",
+            "skill" => "skills",
+            other => anyhow::bail!(
+                "unknown package type '{other}'; expected: primitive, service, skill"
+            ),
+        };
+        std::env::current_dir()?.join(role_dir).join(name)
     };
-
-    let base = match path {
-        Some(p) => p.to_path_buf(),
-        None => std::env::current_dir()?,
-    };
-    let pkg_dir = base.join(role_dir).join(name);
 
     if pkg_dir.exists() {
         anyhow::bail!("directory '{}' already exists", pkg_dir.display());
     }
 
-    output::action(
-        "PackageNew",
-        &format!("creating {pkg_type} package '{name}'"),
-    );
+    output::action("PackageNew", &format!("creating package '{name}'"));
 
-    // Create directory structure.
+    // Create directory structure; put .gitkeep in empty dirs.
     for sub in ["scripts", "capabilities"] {
-        std::fs::create_dir_all(pkg_dir.join(sub))
+        let dir = pkg_dir.join(sub);
+        std::fs::create_dir_all(&dir)
             .with_context(|| format!("failed to create {sub}/ directory"))?;
+        // .gitkeep so git tracks the empty directory.
+        std::fs::write(dir.join(".gitkeep"), "")
+            .with_context(|| format!("failed to write {sub}/.gitkeep"))?;
     }
 
-    // package_manifest.yaml
-    let cap_name = match pkg_type {
-        "primitive" => format!("robonix/primitive/{name}/driver"),
-        "service" => format!("robonix/srv/{name}"),
-        "skill" => format!("robonix/skill/{name}"),
-        _ => unreachable!(),
-    };
+    // package_manifest.yaml — capabilities default to empty.
     let manifest = format!(
         r#"manifestVersion: 1
 
@@ -57,8 +64,7 @@ package:
   description: TODO
   license: Apache-2.0
 
-capabilities:
-  - name: {cap_name}
+capabilities: []
 
 depends: []
 "#
@@ -106,6 +112,9 @@ sleep infinity
         )?;
     }
 
+    // Remove .gitkeep from scripts/ since it now has real files.
+    let _ = std::fs::remove_file(pkg_dir.join("scripts/.gitkeep"));
+
     // .gitignore
     std::fs::write(
         pkg_dir.join(".gitignore"),
@@ -114,13 +123,13 @@ sleep infinity
     .context("failed to write .gitignore")?;
 
     output::success(&format!(
-        "Package '{name}' ({pkg_type}) created at {}",
+        "Package '{name}' created at {}",
         pkg_dir.display()
     ));
     output::sub_step("package_manifest.yaml");
     output::sub_step("scripts/build.sh");
     output::sub_step("scripts/start.sh");
-    output::sub_step("capabilities/");
+    output::sub_step("capabilities/  (.gitkeep)");
     output::sub_step(".gitignore");
 
     Ok(())
