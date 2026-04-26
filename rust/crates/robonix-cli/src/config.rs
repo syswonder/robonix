@@ -134,16 +134,25 @@ impl Config {
                 .join("lib"),
             SourcePathKey::RuntimeProto => root.join("rust").join("proto"),
             SourcePathKey::RobonixPy => {
-                let new_loc = root.join("rust").join("crates").join("robonix-py");
-                if new_loc.exists() {
-                    new_loc
-                } else {
-                    // Fallback to old location for backward-compat.
+                // Try the standard locations in order. Python `from robonix_py
+                // import …` needs the *parent* dir of the `robonix_py/`
+                // package on sys.path, so the resolved path here is the
+                // package-root (the dir containing `robonix_py/`), not
+                // `robonix_py/` itself.
+                let candidates = [
+                    root.join("pylib").join("robonix-py"),
+                    root.join("rust").join("crates").join("robonix-py"),
+                    // Pre-dev-packaging fallback.
                     root.join("rust")
                         .join("examples")
                         .join("packages")
-                        .join("robonix_mcp_contract")
-                }
+                        .join("robonix_mcp_contract"),
+                ];
+                candidates
+                    .iter()
+                    .find(|p| p.exists())
+                    .cloned()
+                    .unwrap_or_else(|| candidates[0].clone())
             }
         };
         if !abs.exists() {
