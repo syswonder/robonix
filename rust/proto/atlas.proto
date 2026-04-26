@@ -174,19 +174,16 @@ message DeclareInterfaceResponse {
   string endpoint = 1;
 }
 
-// One declared (transport, endpoint) binding for one capability interface.
-message InterfaceEndpoint {
+// Public metadata of one declared interface. Returned by
+// QueryCapabilities so consumers can SEE what's on offer, but NOT how
+// to dial — the endpoint string and full TransportParams are hidden
+// at this stage. To actually dial, the consumer commits via
+// ConnectCapability, which returns the binding details.
+message InterfaceMetadata {
   string contract_id = 1;
   Transport transport = 2;
-  string endpoint = 3;
-  TransportParams params = 4;
 }
 
-// Read view of a registered capability instance. The set of contracts
-// the cap currently offers is derivable from `endpoints`
-// (`{e.contract_id for e in endpoints}`); there is no separate
-// pre-announced interface list (driver-flow: contracts are declared
-// lazily as the cap discovers them).
 // Lifecycle state of a capability instance, observed (not driven) by Atlas.
 //   STATE_REGISTERED  — the cap exists in atlas but only its `driver`
 //                       interface has been declared (or no interface yet).
@@ -204,12 +201,19 @@ enum CapabilityState {
   STATE_INITIALIZED = 2;
 }
 
+// Read view of a registered capability instance. `interfaces` lists
+// what the cap currently offers as METADATA only (contract id +
+// transport) — endpoint strings + TransportParams are revealed only
+// via ConnectCapability. The set of contracts is derivable from
+// `interfaces` (`{m.contract_id for m in interfaces}`); there is no
+// separate pre-announced interface list (driver-flow: contracts are
+// declared lazily as the cap discovers them).
 message CapabilityRecord {
   string capability_id = 1;
   string namespace = 2;
   string capability_md_path = 3;
   uint64 last_heartbeat_ms = 4;
-  repeated InterfaceEndpoint endpoints = 5;
+  repeated InterfaceMetadata interfaces = 5;
   CapabilityState state = 6;
 }
 
@@ -221,8 +225,9 @@ message QueryCapabilitiesRequest {
   // e.g., I want a camera with depth, just set it to
   // "robonix/primitive/camera/depth"
   string contract_id = 2;
-  // Exact match on InterfaceEndpoint.transport (filter is on endpoints,
-  // not on the instance itself). TRANSPORT_UNSPECIFIED = no filter.
+  // Exact match on InterfaceMetadata.transport (filter is on the cap's
+  // interfaces, not on the instance itself). TRANSPORT_UNSPECIFIED =
+  // no filter.
   Transport transport = 3;
 }
 message QueryCapabilitiesResponse { repeated CapabilityRecord records = 1; }
@@ -234,6 +239,47 @@ message QueryCapabilityMdResponse {
   // Empty when the instance was registered with no `capability_md_path`.
   string capability_md = 1;
 }
+
+// ── Channels ───────────────────────────────────────────────────────────────
+// Discovery (QueryCapabilities) and consumption (ConnectCapability) are
+// distinct on purpose: consumers may browse without committing. Once a
+// consumer commits — "I'm going to use cap X's interface Y over Z" —
+// it calls ConnectCapability so atlas records the consumer→provider
+// edge, hands back the binding the consumer needs to dial themselves
+// (atlas can't dial for callers because each transport has its own
+// connect protocol), and the consumer is expected to call
+// DisconnectCapability when it's done. Provider eviction (unregister
+// or heartbeat lapse) auto-drops the provider's channels.
+
+message ConnectCapabilityRequest {
+  // Free-form id of the caller (a cap_id if the consumer is itself a
+  // registered cap, or any stable identifier otherwise — e.g.
+  // "rbnx-cli/<pid>"). Used by atlas only for bookkeeping / inspection.
+  string consumer_id = 1;
+  // Target provider cap. Must already be registered.
+  string capability_id = 2;
+  // Which interface of that cap. Must match an InterfaceMetadata the
+  // cap has declared, with a transport equal to `transport` below.
+  string contract_id = 3;
+  Transport transport = 4;
+}
+message ConnectCapabilityResponse {
+  // Unique handle for this channel. Pass to DisconnectCapability when
+  // the consumer is done.
+  string channel_id = 1;
+  // Authoritative endpoint string (host:port / topic / URL — same form
+  // the cap registered at DeclareInterface time).
+  string endpoint = 2;
+  // Full transport-specific binding (proto_file/service/method for gRPC,
+  // qos for ROS 2, schema for MCP). Saves the consumer a follow-up
+  // QueryCapabilities to resolve these fields.
+  TransportParams params = 3;
+}
+
+message DisconnectCapabilityRequest { string channel_id = 1; }
+// `was_open=true` means atlas removed an existing record; `false` means
+// the channel_id was unknown (already released, or expired with provider).
+message DisconnectCapabilityResponse { bool was_open = 1; }
 
 // Inspect Atlas state. Debug-only, returns implementation-defined JSON.
 message InspectAtlasRequest {}
@@ -251,5 +297,9 @@ service Atlas {
       returns (QueryCapabilitiesResponse);
   rpc QueryCapabilityMd(QueryCapabilityMdRequest)
       returns (QueryCapabilityMdResponse);
+  rpc ConnectCapability(ConnectCapabilityRequest)
+      returns (ConnectCapabilityResponse);
+  rpc DisconnectCapability(DisconnectCapabilityRequest)
+      returns (DisconnectCapabilityResponse);
   rpc InspectAtlas(InspectAtlasRequest) returns (InspectAtlasResponse);
 }

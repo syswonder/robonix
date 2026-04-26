@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
         cfg.vlm.upstream, cfg.vlm.model
     );
 
-    let svc = PilotServiceImpl::new(atlas, vlm);
+    let svc = PilotServiceImpl::new(atlas, cfg.capability_id.clone(), vlm);
 
     info!("SystemPilot gRPC on {listen_addr}");
     eprintln!("robonix-pilot ready on {listen_addr}");

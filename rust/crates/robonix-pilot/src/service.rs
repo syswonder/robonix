@@ -98,6 +98,10 @@ pub struct PilotServiceImpl {
     /// each Stream RPC clones it to discover executor concurrently without
     /// serialising on a single mutex.
     atlas: AtlasClient,
+    /// Pilot's own cap_id; passed to atlas as `consumer_id` on every
+    /// `ConnectCapability` so the channel record reflects who is using
+    /// the executor.
+    cap_id: String,
     vlm: VlmClient,
     histories: Histories,
     /// Per-session cancellation senders. `abort_turn` Task signals this
@@ -106,9 +110,10 @@ pub struct PilotServiceImpl {
 }
 
 impl PilotServiceImpl {
-    pub fn new(atlas: AtlasClient, vlm: VlmClient) -> Self {
+    pub fn new(atlas: AtlasClient, cap_id: String, vlm: VlmClient) -> Self {
         Self {
             atlas,
+            cap_id,
             vlm,
             histories: Arc::new(Mutex::new(HashMap::new())),
             cancels: Arc::new(Mutex::new(HashMap::new())),
@@ -161,6 +166,7 @@ impl SystemPilot for PilotServiceImpl {
         let history_arc = self.get_or_create_history(&task.session_id).await;
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(64);
         let atlas = self.atlas.clone();
+        let cap_id = self.cap_id.clone();
         let vlm = self.vlm.clone();
         let session_id = task.session_id.clone();
         let cancels = Arc::clone(&self.cancels);
@@ -180,7 +186,7 @@ impl SystemPilot for PilotServiceImpl {
                 )))
                 .await;
 
-            let mut executor = match build_executor_conn(atlas).await {
+            let mut executor = match build_executor_conn(atlas, &cap_id).await {
                 Ok(e) => e,
                 Err(e) => {
                     let _ = tx
@@ -209,15 +215,27 @@ impl SystemPilot for PilotServiceImpl {
 }
 
 /// Discover and connect to executor's two contracts. Both lookups go
-/// through atlas so executor can move/restart without reconfiguring pilot.
-async fn build_executor_conn(mut atlas: AtlasClient) -> anyhow::Result<ExecutorConn> {
-    let (_, exec_ch) = atlas_client::connect_to_capability(&mut atlas, "robonix/system/executor")
-        .await
-        .context("connect_to_capability robonix/system/executor")?;
-    let (_, list_ch) =
-        atlas_client::connect_to_capability(&mut atlas, "robonix/system/executor/list_tools")
+/// through atlas so executor can move/restart without reconfiguring
+/// pilot. Each connect call records a channel record on atlas
+/// (consumer=pilot, provider=executor) for the duration of this turn.
+/// TODO(channel-release): keep the channel_ids and call
+/// `disconnect_capability` when the turn ends — currently the channels
+/// stay bookkept until atlas evicts executor.
+async fn build_executor_conn(
+    mut atlas: AtlasClient,
+    consumer_id: &str,
+) -> anyhow::Result<ExecutorConn> {
+    let (_, _, exec_ch) =
+        atlas_client::connect_to_capability(&mut atlas, consumer_id, "robonix/system/executor")
             .await
-            .context("connect_to_capability robonix/system/executor/list_tools")?;
+            .context("connect_to_capability robonix/system/executor")?;
+    let (_, _, list_ch) = atlas_client::connect_to_capability(
+        &mut atlas,
+        consumer_id,
+        "robonix/system/executor/list_tools",
+    )
+    .await
+    .context("connect_to_capability robonix/system/executor/list_tools")?;
     Ok(ExecutorConn {
         graph: SystemExecutorClient::new(exec_ch),
         list_tools: SystemExecutorListToolsClient::new(list_ch),

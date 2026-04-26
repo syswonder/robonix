@@ -20,9 +20,12 @@ pub struct ToolEntry {
     pub routing: ToolRouting,
 }
 
-pub async fn load_tools(atlas: &mut AtlasClient) -> anyhow::Result<Vec<ToolEntry>> {
+pub async fn load_tools(
+    atlas: &mut AtlasClient,
+    consumer_id: &str,
+) -> anyhow::Result<Vec<ToolEntry>> {
     let mut out: Vec<ToolEntry> = builtin_tools();
-    match load_mcp_tools(atlas).await {
+    match load_mcp_tools(atlas, consumer_id).await {
         Ok(mcp) => {
             if mcp.is_empty() {
                 log::debug!("no MCP tools from atlas (caps up? all MCP interfaces declared?)");
@@ -117,28 +120,56 @@ fn tool(name: &str, desc: &str, schema: Value, kind: RoutingKind, endpoint: &str
 
 // ── Atlas-discovered MCP tools ────────────────────────────────────────────
 
-/// Query atlas for caps offering ANY MCP interface, then unpack each
-/// `(contract_id, endpoint, McpParams)` triple into one `ToolEntry`.
+/// Query atlas for caps offering ANY MCP interface, then `ConnectCapability`
+/// each one to fetch the endpoint + `McpParams` (atlas hides those at
+/// query time — see proto comments).
 ///
 /// Tool naming policy: contract_id leaf (last `/` segment) is the tool name.
 /// Description + input_schema_json come from the cap's typed `McpParams`
 /// stored at declare time — no opaque metadata_json round-trip.
-async fn load_mcp_tools(atlas: &mut AtlasClient) -> anyhow::Result<Vec<ToolEntry>> {
+///
+/// TODO(channel-release): the channels we open here stay bookkept on
+/// atlas until the provider is evicted. When list_tools is reissued
+/// frequently we leak channel records on each refresh; release them
+/// once the executor's tool catalogue is rebuilt.
+async fn load_mcp_tools(
+    atlas: &mut AtlasClient,
+    consumer_id: &str,
+) -> anyhow::Result<Vec<ToolEntry>> {
     let records = atlas
         .query_capabilities("", "", atlas_pb::Transport::Mcp)
         .await?;
     let mut out = Vec::new();
 
     for rec in records {
-        for ep in rec.endpoints {
-            if ep.transport != atlas_pb::Transport::Mcp as i32 {
+        for iface in rec.interfaces {
+            if iface.transport != atlas_pb::Transport::Mcp as i32 {
                 continue;
             }
-            let endpoint = ep.endpoint.replace("localhost", "127.0.0.1");
+            let (_channel_id, endpoint, params) = match atlas
+                .connect_capability(
+                    consumer_id,
+                    &rec.capability_id,
+                    &iface.contract_id,
+                    atlas_pb::Transport::Mcp,
+                )
+                .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    log::warn!(
+                        "connect_capability failed for cap='{}' contract='{}': {e:#}",
+                        rec.capability_id,
+                        iface.contract_id
+                    );
+                    continue;
+                }
+            };
+            let endpoint = endpoint.replace("localhost", "127.0.0.1");
             if endpoint.is_empty() {
                 continue;
             }
-            let (description, input_schema_json) = match ep.params.and_then(|p| p.kind) {
+            let (description, input_schema_json) = match params.kind {
                 Some(atlas_pb::transport_params::Kind::Mcp(m)) => {
                     (m.description, m.input_schema_json)
                 }
@@ -148,9 +179,9 @@ async fn load_mcp_tools(atlas: &mut AtlasClient) -> anyhow::Result<Vec<ToolEntry
             // Memory's MCP server registers tools by their full leaf name though
             // (`search_memory`, `save_memory`, `compact_memory`); fall back to
             // metadata-tool-name on legacy callers if/when needed.
-            let name = match ep.contract_id.rsplit_once('/') {
+            let name = match iface.contract_id.rsplit_once('/') {
                 Some((_, leaf)) => leaf.to_string(),
-                None => ep.contract_id.clone(),
+                None => iface.contract_id.clone(),
             };
             let schema: Value = if input_schema_json.is_empty() {
                 serde_json::json!({"type":"object","properties":{}})
