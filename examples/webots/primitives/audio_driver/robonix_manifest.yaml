@@ -8,11 +8,11 @@ package:
   name: audio_driver
   version: 0.1.0
   vendor: robonix
-  description: Audio driver (mic capture + speaker playback) for robonix/prm/audio contracts
+  description: Audio driver (mic capture + speaker playback) for robonix/primitive/audio contracts
   license: MulanPSL-2.0
 
 nodes:
-  - id: com.robonix.prm.audio
+  - id: com.robonix.primitive.audio
     type: python
     start: |
       export PYTHONPATH="$(pwd)/proto_gen:${PYTHONPATH:-}"

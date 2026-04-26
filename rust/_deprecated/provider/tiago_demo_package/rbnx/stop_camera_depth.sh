@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 # Stop Depth Camera Primitive Script
 #
-# Stop script for prm::camera.depth (depth camera)
+# Stop script for primitive::camera.depth (depth camera)
 # Note: The depth camera is provided by webots_ros2_driver, so this is a no-op.
 # The topic will stop when webots is stopped.
 

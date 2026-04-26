@@ -1,4 +1,4 @@
-# Snapshot of full robot state, returned by robonix/prm/robot/state (RPC).
+# Snapshot of full robot state, returned by robonix/primitive/robot/state (RPC).
 # Designed for single-shot queries (MCP tools, VLA state input, teleop feedback).
 # For continuous streaming use nav_msgs/Odometry + sensor_msgs/JointState separately.
 

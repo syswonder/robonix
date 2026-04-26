@@ -16,6 +16,7 @@ fi
 # wrapper exits and bash's EXIT trap kills the nav2 launch tree.
 exec docker exec -i \
   -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
+  -e ROBONIX_PKG_HOST_DIR="$(cd "$(dirname "$0")/.." && pwd)" \
   -e TIAGO_NAV2_MCP_PORT="${TIAGO_NAV2_MCP_PORT:-50121}" \
   -e TIAGO_NAV2_WAIT_SEC="${TIAGO_NAV2_WAIT_SEC:-30}" \
   -e NAV2_WARMUP_SEC="${NAV2_WARMUP_SEC:-15}" \

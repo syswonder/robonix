@@ -341,14 +341,14 @@ def _reset_env():
 
 # ── MCP tools (one per contract) ─────────────────────────────────────────────
 
-# Contract: robonix/prm/camera/snapshot
+# Contract: robonix/primitive/camera/snapshot
 @mcp_contract(
     mcp,
-    contract_id="robonix/prm/camera/snapshot",
+    contract_id="robonix/primitive/camera/snapshot",
 )
 def camera_snapshot(msg: std_msgs_mcp.Empty) -> sensor_msgs_mcp.Image:
     """Get current RGB camera image from the ManiSkill3 environment.
-    Contract: robonix/prm/camera/snapshot.
+    Contract: robonix/primitive/camera/snapshot.
     Returns sensor_msgs/Image (JPEG in `data`)."""
     _ = msg
     with _lock:
@@ -366,14 +366,14 @@ def camera_snapshot(msg: std_msgs_mcp.Empty) -> sensor_msgs_mcp.Image:
     )
 
 
-# Contract: robonix/prm/robot/state
+# Contract: robonix/primitive/robot/state
 @mcp_contract(
     mcp,
-    contract_id="robonix/prm/robot/state",
+    contract_id="robonix/primitive/robot/state",
 )
 def robot_state(msg: std_msgs_mcp.Empty) -> prm_base_mcp.RobotState:
     """Get robot state: joints, end-effector pose, gripper state.
-    Contract: robonix/prm/robot/state.
+    Contract: robonix/primitive/robot/state.
     Fields: joint_state.position (proprio), tcp_pose (end-effector), is_grasped."""
     _ = msg
     with _lock:
@@ -400,16 +400,16 @@ def robot_state(msg: std_msgs_mcp.Empty) -> prm_base_mcp.RobotState:
     return state
 
 
-# Contract: robonix/prm/manipulation/exec
+# Contract: robonix/primitive/manipulation/exec
 # input: std_msgs/msg/String  output: std_msgs/msg/String
 # ``data`` is either a JSON array of floats, or ``{"action": [...], "hold_steps": 8}``.
 @mcp_contract(
     mcp,
-    contract_id="robonix/prm/manipulation/exec",
+    contract_id="robonix/primitive/manipulation/exec",
 )
 def manipulation_exec(msg: std_msgs_mcp.String) -> std_msgs_mcp.String:
     """Apply a manipulation action to the ManiSkill3 environment.
-    Contract: robonix/prm/manipulation/exec.
+    Contract: robonix/primitive/manipulation/exec.
     ``data``: JSON list of action floats (Fetch 12-DoF), or object with ``action`` and optional ``hold_steps``."""
     hold_steps = 8
     try:
@@ -621,7 +621,7 @@ def main() -> None:
     node_id = "com.robonix.demo.maniskill"
     stub.RegisterNode(pb.RegisterNodeRequest(
         node_id=node_id,
-        namespace="robonix/prm/sim/maniskill",
+        namespace="robonix/primitive/sim/maniskill",
         kind="primitive",
     ))
 
@@ -629,7 +629,7 @@ def main() -> None:
 
     # ── One DeclareInterface per contract ──────────────────────────────────────
 
-    # robonix/prm/camera/snapshot — Empty → Image
+    # robonix/primitive/camera/snapshot — Empty → Image
     stub.DeclareInterface(pb.DeclareInterfaceRequest(
         node_id=node_id,
         name="camera_snapshot",
@@ -640,10 +640,10 @@ def main() -> None:
             std_msgs_mcp.Empty.json_schema(),
         ),
         listen_port=mcp_port,
-        contract_id="robonix/prm/camera/snapshot",
+        contract_id="robonix/primitive/camera/snapshot",
     ))
 
-    # robonix/prm/robot/state — Empty → RobotState
+    # robonix/primitive/robot/state — Empty → RobotState
     stub.DeclareInterface(pb.DeclareInterfaceRequest(
         node_id=node_id,
         name="robot_state",
@@ -654,10 +654,10 @@ def main() -> None:
             std_msgs_mcp.Empty.json_schema(),
         ),
         listen_port=mcp_port,
-        contract_id="robonix/prm/robot/state",
+        contract_id="robonix/primitive/robot/state",
     ))
 
-    # robonix/prm/manipulation/exec — String → String
+    # robonix/primitive/manipulation/exec — String → String
     stub.DeclareInterface(pb.DeclareInterfaceRequest(
         node_id=node_id,
         name="manipulation_exec",
@@ -668,7 +668,7 @@ def main() -> None:
             std_msgs_mcp.String.json_schema(),
         ),
         listen_port=mcp_port,
-        contract_id="robonix/prm/manipulation/exec",
+        contract_id="robonix/primitive/manipulation/exec",
     ))
 
     grpc_port = _pick_port()

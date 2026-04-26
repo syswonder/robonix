@@ -25,29 +25,59 @@ from pathlib import Path
 
 
 def _ensure_proto_gen() -> None:
+    """Locate rbnx-build/codegen/proto_gen produced by `rbnx codegen
+    --out-dir rbnx-build/codegen`. All build artefacts live under
+    `<pkg>/rbnx-build/`; nothing should land at package root."""
     d = Path(__file__).resolve().parent
     while d.parent != d:
-        for pg in (d / "rbnx-build" / "codegen" / "proto_gen", d / "proto_gen"):
-            if pg.is_dir() and (pg / "atlas_legacy_pb2.py").exists():
-                if str(pg) not in sys.path:
-                    sys.path.insert(0, str(pg))
-                return
+        pg = d / "rbnx-build" / "codegen" / "proto_gen"
+        if pg.is_dir() and (pg / "atlas_pb2.py").exists():
+            if str(pg) not in sys.path:
+                sys.path.insert(0, str(pg))
+            return
         d = d.parent
 
 
 def _ensure_mcp_types() -> None:
+    """Locate rbnx-build/codegen/robonix_mcp_types from
+    `rbnx codegen --mcp --out-dir rbnx-build/codegen`."""
     d = Path(__file__).resolve().parent
     while d.parent != d:
-        for mt in (d / "rbnx-build" / "codegen" / "robonix_mcp_types", d / "robonix_mcp_types"):
-            if mt.is_dir() and (mt / "__init__.py").exists():
-                if str(mt) not in sys.path:
-                    sys.path.insert(0, str(mt))
+        mt = d / "rbnx-build" / "codegen" / "robonix_mcp_types"
+        if mt.is_dir() and (mt / "__init__.py").exists():
+            if str(mt) not in sys.path:
+                sys.path.insert(0, str(mt))
+            return
+        d = d.parent
+
+
+def _ensure_robonix_py() -> None:
+    """Find pylib/robonix-py — host walk-up or `rbnx path` fallback."""
+    d = Path(__file__).resolve().parent
+    while d.parent != d:
+        for cand in (d / "pylib" / "robonix-py", d / "robonix-py"):
+            if cand.is_dir() and (cand / "robonix_py" / "__init__.py").exists():
+                if str(cand) not in sys.path:
+                    sys.path.insert(0, str(cand))
                 return
         d = d.parent
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["rbnx", "path", "robonix-py"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if out.returncode == 0:
+            lib = Path(out.stdout.strip())
+            if lib.is_dir() and str(lib) not in sys.path:
+                sys.path.insert(0, str(lib))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
 
 
 _ensure_proto_gen()
 _ensure_mcp_types()
+_ensure_robonix_py()
 
 for _logger_name in (
     "mcp", "mcp.server", "mcp.server.streamable_http",
@@ -57,14 +87,15 @@ for _logger_name in (
     logging.getLogger(_logger_name).setLevel(logging.WARNING)
 
 import grpc
-import atlas_legacy_pb2 as pb
-import atlas_legacy_pb2_grpc as pb_grpc
+import atlas_pb2 as pb
+import atlas_pb2_grpc as pb_grpc
 
 import std_msgs_mcp
 from std_msgs_mcp import String
 from geometry_msgs_mcp import PoseStamped
 
 from mcp.server.fastmcp import FastMCP
+from robonix_py import mcp_contract
 
 # ── ROS2 lazy imports ────────────────────────────────────────────────────────
 
@@ -193,52 +224,59 @@ def _dispatch_nav_goal(node, gid, x, y, yaw, frame_id):
 
 # ── MCP tools ────────────────────────────────────────────────────────────────
 
-@mcp.tool(name="navigate")
-def navigate(
-    x: float,
-    y: float,
-    yaw: float = 0.0,
-    frame_id: str = "map",
-) -> dict:
-    """Send the robot to a target pose via Nav2's navigate_to_pose action.
-    Args mirror flattened geometry_msgs/PoseStamped (only x/y/yaw — quaternion
-    is computed from yaw, position.z=0). Returns std_msgs/String whose `data`
-    is JSON `{goal_id, status, nav_action}`. Track the goal_id via status() / cancel().
+@mcp_contract(mcp, contract_id="robonix/service/navigation/navigate")
+def navigate(msg: PoseStamped) -> String:
+    """AVOID for interactive / exploration tasks — map coordinates an LLM
+    guesses are almost always wrong. Drive the robot visually instead:
+    camera/snapshot → reason → chassis/move. ONLY call this when an
+    external planner has handed you valid (x, y, yaw) in the map frame.
+    Returns std_msgs/String whose `data` is JSON `{goal_id, status,
+    nav_action}`. Track via status() / cancel().
     Contract: robonix/service/navigation/navigate."""
     if _ros_node is None:
-        return {"data": json.dumps({"error": "ROS2 not initialized"})}
+        return String(data=json.dumps({"error": "ROS2 not initialized"}))
+    frame_id = msg.header.frame_id or "map"
+    qz = msg.pose.orientation.z
+    qw = msg.pose.orientation.w
+    yaw = 2.0 * math.atan2(qz, qw)
     gid = str(uuid.uuid4())
-    _nav_queue.put((gid, float(x), float(y), float(yaw), frame_id or "map"))
+    _nav_queue.put(
+        (gid, float(msg.pose.position.x), float(msg.pose.position.y), float(yaw), frame_id)
+    )
     with _lock:
         _goal_states[gid] = {"status": "QUEUED", "accepted": False}
-    return {"data": json.dumps({
+    return String(data=json.dumps({
         "goal_id": gid, "status": "queued", "nav_action": _nav_action_ready,
-    })}
+    }))
 
 
-@mcp.tool(name="status")
-def status(goal_id: str) -> dict:
-    """Return navigation status for a goal_id obtained from navigate().
-    Returns std_msgs/String whose `data` is JSON.
+@mcp_contract(mcp, contract_id="robonix/service/navigation/status")
+def status(msg: String) -> String:
+    """Return navigation status for a goal_id previously returned by
+    navigate(). msg.data is the goal_id. Only useful if you actually
+    issued a navigate() goal first.
     Contract: robonix/service/navigation/status."""
+    gid = msg.data
     with _lock:
-        st = _goal_states.get(goal_id)
+        st = _goal_states.get(gid)
     if st is None:
-        return {"data": json.dumps({"error": "unknown goal_id", "goal_id": goal_id})}
-    return {"data": json.dumps({"goal_id": goal_id, **st})}
+        return String(data=json.dumps({"error": "unknown goal_id", "goal_id": gid}))
+    return String(data=json.dumps({"goal_id": gid, **st}))
 
 
-@mcp.tool(name="cancel")
-def cancel(goal_id: str) -> dict:
-    """Cancel an in-flight navigation goal (Nav2 action only — /goal_pose
-    fallback goals can't be cancelled). Returns std_msgs/String JSON.
+@mcp_contract(mcp, contract_id="robonix/service/navigation/cancel")
+def cancel(msg: String) -> String:
+    """Cancel an in-flight navigation goal. msg.data is the goal_id.
+    (Only Nav2 action goals can be cancelled — the `/goal_pose` fallback
+    can't.)
     Contract: robonix/service/navigation/cancel."""
+    gid = msg.data
     with _lock:
-        gh = _goal_handles.get(goal_id)
+        gh = _goal_handles.get(gid)
     if gh is None:
-        return {"data": json.dumps({"error": "no active goal handle", "goal_id": goal_id})}
+        return String(data=json.dumps({"error": "no active goal handle", "goal_id": gid}))
     gh.cancel_goal_async()  # type: ignore[union-attr]
-    return {"data": json.dumps({"goal_id": goal_id, "status": "cancel_requested"})}
+    return String(data=json.dumps({"goal_id": gid, "status": "cancel_requested"}))
 
 
 # ── runtime wiring ───────────────────────────────────────────────────────────
@@ -279,101 +317,56 @@ def _heartbeat_loop(stub, node_id: str) -> None:
     while True:
         time.sleep(15.0)
         try:
-            stub.NodeHeartbeat(pb.NodeHeartbeatRequest(node_id=node_id))
+            stub.Heartbeat(pb.HeartbeatRequest(capability_id=node_id))
         except Exception as e:
             print(f"[tiago_nav2] heartbeat failed: {e}")
 
 
-def _meta(
-    name: str,
-    description: str,
-    properties: dict | None = None,
-    required: list[str] | None = None,
-) -> str:
-    """Build the metadata_json blob atlas hands to pilot, which pilot
-    reformats into an OpenAI tool spec for the LLM. The `properties` /
-    `required` here MUST match the actual `@mcp.tool()` function
-    signature on this driver — FastMCP / pydantic enforce that on every
-    call, and the LLM picks `required` from this exact JSON-Schema."""
-    return json.dumps({
-        "tools": [{
-            "name": name,
-            "description": description,
-            "input_schema": {
-                "type": "object",
-                "properties": properties or {},
-                "required": list(required or []),
-            },
-        }]
-    })
+def _decl_mcp(stub, cap_id: str, contract_id: str, port: int, fn) -> None:
+    """Atlas registration derived from the @mcp_contract handler:
+    docstring → description, codegen input class → input_schema_json."""
+    description = (fn.__doc__ or "").strip()
+    input_cls = getattr(fn, "_robonix_input_cls", None)
+    schema_json = json.dumps(
+        input_cls.json_schema() if input_cls is not None
+        else {"type": "object", "properties": {}, "required": []}
+    )
+    stub.DeclareInterface(pb.DeclareInterfaceRequest(
+        capability_id=cap_id,
+        contract_id=contract_id,
+        transport=pb.TRANSPORT_MCP,
+        endpoint=f"http://127.0.0.1:{port}/mcp/",
+        params=pb.TransportParams(mcp=pb.McpParams(
+            description=description,
+            input_schema_json=schema_json,
+        )),
+    ))
 
 
 def main() -> None:
     atlas_addr = os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
     port = int(os.environ.get("TIAGO_NAV2_MCP_PORT", "50121"))
-    node_id = os.environ.get("ROBONIX_NODE_ID", "com.robonix.service.tiago_nav2")
+    cap_id = os.environ.get("ROBONIX_CAPABILITY_ID", "com.robonix.service.tiago_nav2")
 
     channel = grpc.insecure_channel(atlas_addr)
-    stub = pb_grpc.RobonixRuntimeStub(channel)
+    stub = pb_grpc.AtlasStub(channel)
 
     try:
-        stub.RegisterNode(pb.RegisterNodeRequest(
-            node_id=node_id,
+        pkg_dir = os.environ.get("ROBONIX_PKG_HOST_DIR", "")
+        md_path = f"{pkg_dir}/CAPABILITY.md" if pkg_dir else ""
+        stub.RegisterCapability(pb.RegisterCapabilityRequest(
+            capability_id=cap_id,
             namespace="robonix/service/navigation",
-            kind="service",
-            skill_md="# tiago_nav2\nNav2 navigate_to_pose wrapper.",
+            capability_md_path=md_path,
         ))
-        stub.DeclareInterface(pb.DeclareInterfaceRequest(
-            node_id=node_id, name="navigate",
-            supported_transports=["mcp"],
-            metadata_json=_meta(
-                "navigate",
-                "Send the robot to a target (x, y, yaw) pose via Nav2. "
-                "Returns JSON {goal_id, status, nav_action}; track via status() / cancel().",
-                properties={
-                    "x":        {"type": "number", "description": "target x position (meters, in frame_id)"},
-                    "y":        {"type": "number", "description": "target y position (meters, in frame_id)"},
-                    "yaw":      {"type": "number", "description": "target heading (radians); default 0"},
-                    "frame_id": {"type": "string", "description": "TF frame id; default 'map'"},
-                },
-                required=["x", "y"],
-            ),
-            listen_port=port,
-            contract_id="robonix/service/navigation/navigate",
-        ))
-        stub.DeclareInterface(pb.DeclareInterfaceRequest(
-            node_id=node_id, name="status",
-            supported_transports=["mcp"],
-            metadata_json=_meta(
-                "status",
-                "Get the navigation status for a previously-issued goal_id (returned by navigate()).",
-                properties={
-                    "goal_id": {"type": "string", "description": "goal_id returned by navigate()"},
-                },
-                required=["goal_id"],
-            ),
-            listen_port=port,
-            contract_id="robonix/service/navigation/status",
-        ))
-        stub.DeclareInterface(pb.DeclareInterfaceRequest(
-            node_id=node_id, name="cancel",
-            supported_transports=["mcp"],
-            metadata_json=_meta(
-                "cancel",
-                "Cancel an in-flight navigation goal by goal_id (returned by navigate()).",
-                properties={
-                    "goal_id": {"type": "string", "description": "goal_id returned by navigate()"},
-                },
-                required=["goal_id"],
-            ),
-            listen_port=port,
-            contract_id="robonix/service/navigation/cancel",
-        ))
-        print(f"[tiago_nav2] registered node {node_id} → 3 caps on port {port}")
+        _decl_mcp(stub, cap_id, "robonix/service/navigation/navigate", port, navigate)
+        _decl_mcp(stub, cap_id, "robonix/service/navigation/status",   port, status)
+        _decl_mcp(stub, cap_id, "robonix/service/navigation/cancel",   port, cancel)
+        print(f"[tiago_nav2] registered cap {cap_id} → 3 interfaces on port {port}")
     except Exception as e:
         print(f"[tiago_nav2] WARN: atlas registration failed: {e}")
 
-    threading.Thread(target=_heartbeat_loop, args=(stub, node_id), daemon=True).start()
+    threading.Thread(target=_heartbeat_loop, args=(stub, cap_id), daemon=True).start()
     threading.Thread(target=_start_ros2, daemon=True).start()
 
     print(f"[tiago_nav2] MCP HTTP serving on 0.0.0.0:{port}")

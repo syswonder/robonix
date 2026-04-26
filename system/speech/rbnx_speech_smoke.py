@@ -73,17 +73,17 @@ def test_register_speech():
 
     node_id = "com.robonix.services.speech"
     contracts = [
-        ("robonix/srv/speech/asr",        "asr",        "rpc"),
-        ("robonix/srv/speech/asr_stream",  "asr_stream", "rpc_bidirectional_stream"),
-        ("robonix/srv/speech/tts",         "tts",         "rpc"),
-        ("robonix/srv/speech/tts_stream",  "tts_stream",  "rpc_server_stream"),
-        ("robonix/srv/speech/dialog",      "dialog",      "rpc_server_stream"),
+        ("robonix/service/speech/asr",        "asr",        "rpc"),
+        ("robonix/service/speech/asr_stream",  "asr_stream", "rpc_bidirectional_stream"),
+        ("robonix/service/speech/tts",         "tts",         "rpc"),
+        ("robonix/service/speech/tts_stream",  "tts_stream",  "rpc_server_stream"),
+        ("robonix/service/speech/dialog",      "dialog",      "rpc_server_stream"),
     ]
 
     try:
         stub.RegisterNode(rpb.RegisterNodeRequest(
             node_id=node_id,
-            namespace="robonix/srv/speech",
+            namespace="robonix/service/speech",
             kind="service",
         ))
         log.info("  RegisterNode OK: %s", node_id)
@@ -113,19 +113,19 @@ def test_register_audio():
     log.info("Test 3: Register audio_driver with Atlas")
     stub, ch = atlas_stub()
 
-    node_id = "com.robonix.prm.audio"
+    node_id = "com.robonix.primitive.audio"
 
     try:
         stub.RegisterNode(rpb.RegisterNodeRequest(
             node_id=node_id,
-            namespace="robonix/prm/audio",
+            namespace="robonix/primitive/audio",
             kind="primitive",
         ))
         log.info("  RegisterNode OK: %s", node_id)
 
         for cid, name, mode, port in [
-            ("robonix/prm/audio/mic",     "mic",     "server_stream", 50070),
-            ("robonix/prm/audio/speaker", "speaker", "client_stream", 50071),
+            ("robonix/primitive/audio/mic",     "mic",     "server_stream", 50070),
+            ("robonix/primitive/audio/speaker", "speaker", "client_stream", 50071),
         ]:
             import json
             meta = json.dumps({"transport": "grpc", "contract": {"idl_type": "protobuf", "mode": mode}})
@@ -153,11 +153,11 @@ def test_discover_speech():
 
     results = {}
     for cid in [
-        "robonix/srv/speech/asr",
-        "robonix/srv/speech/tts",
-        "robonix/srv/speech/dialog",
-        "robonix/prm/audio/mic",
-        "robonix/prm/audio/speaker",
+        "robonix/service/speech/asr",
+        "robonix/service/speech/tts",
+        "robonix/service/speech/dialog",
+        "robonix/primitive/audio/mic",
+        "robonix/primitive/audio/speaker",
     ]:
         try:
             resp = stub.QueryNodes(rpb.QueryNodesRequest(contract_id=cid))

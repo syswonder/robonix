@@ -1,5 +1,5 @@
 # Single-frame image acquisition (on-demand snapshot).
-# Complements robonix/prm/camera/rgb (continuous stream).
+# Complements robonix/primitive/camera/rgb (continuous stream).
 # ROS IDL: `lib/primitive/camera/srv/GetCameraImage.srv`.
 [contract]
 id      = "robonix/primitive/camera/snapshot"

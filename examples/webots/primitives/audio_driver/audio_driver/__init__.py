@@ -1,10 +1,10 @@
-# Robonix Audio Driver (robonix/prm/audio)
+# Robonix Audio Driver (robonix/primitive/audio)
 #
 # Primitive-layer audio driver for microphone capture and speaker playback.
 # Auto-discovers ALSA devices and provides gRPC streaming interfaces for
 # both input (mic) and output (speaker).
 #
-# This package is the REFERENCE TEMPLATE for all future prm driver packages.
+# This package is the REFERENCE TEMPLATE for all future primitive driver packages.
 #
 # Key modules:
 #   node.py          — Main entry point (Atlas registration + gRPC servers)

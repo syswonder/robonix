@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 # Stop Base Navigate Primitive Script
 #
-# Stop script for prm::base.navigate (navigate to target pose)
+# Stop script for primitive::base.navigate (navigate to target pose)
 # Note: Nav2 is typically managed by launch files, so this is a no-op.
 
 set -e

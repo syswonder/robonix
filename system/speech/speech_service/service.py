@@ -2,7 +2,7 @@
 """Speech service -- the srv-layer voice interaction service for Robonix.
 
 Architecture position: robonix/system/speech
-  - Sits ABOVE the prm layer (audio_driver) and BELOW the application layer
+  - Sits ABOVE the primitive layer (audio_driver) and BELOW the application layer
   - Receives raw audio from audio_driver via gRPC, returns transcriptions
   - Receives text from applications, returns synthesized audio (MP3)
 

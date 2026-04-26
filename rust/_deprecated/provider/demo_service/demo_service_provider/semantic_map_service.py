@@ -207,7 +207,7 @@ class SemanticMapService(Node):
                 pose_qos,
             )
             self.get_logger().info(
-                f"Subscribed to robot pose (PoseWithCovarianceStamped from prm::base.pose.cov): {self.pose_topic} with RELIABLE QoS"
+                f"Subscribed to robot pose (PoseWithCovarianceStamped from primitive::base.pose.cov): {self.pose_topic} with RELIABLE QoS"
             )
 
             import time
@@ -252,7 +252,7 @@ class SemanticMapService(Node):
     def _query_camera_primitives(self):
         """Query front camera primitives from OS with retry logic. Exits if failed."""
         self.rgb_image_topic = self.robonix.query_primitive_and_extract_field(
-            "prm::camera.rgb",
+            "primitive::camera.rgb",
             field_name="image",
             filter_dict={"camera": "front"},
             max_retries=5,
@@ -267,7 +267,7 @@ class SemanticMapService(Node):
     def _query_pose_primitive(self):
         """Query robot pose primitive from OS with retry logic."""
         self.pose_topic = self.robonix.query_primitive_and_extract_field(
-            "prm::base.pose.cov",
+            "primitive::base.pose.cov",
             field_name="pose",
             filter_dict=None,
             max_retries=5,

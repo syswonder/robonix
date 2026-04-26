@@ -1,8 +1,8 @@
-# Robonix Speech Service (robonix/srv/speech)
+# Robonix Speech Service (robonix/service/speech)
 #
 # Provides ASR (speech-to-text), TTS (text-to-speech), and Dialog (voice
 # session) services over gRPC. Part of the srv (service) layer in the
-# Robonix architecture, sitting above the prm (primitive) audio driver.
+# Robonix architecture, sitting above the primitive (primitive) audio driver.
 #
 # Key modules:
 #   service.py   — gRPC servicers and main entry point

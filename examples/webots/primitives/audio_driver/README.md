@@ -1,17 +1,17 @@
 # Audio Driver
 
-Audio driver -- Robonix prm layer, automatically scans ALSA devices, provides gRPC streaming interfaces for microphone capture and speaker playback.
+Audio driver -- Robonix primitive layer, automatically scans ALSA devices, provides gRPC streaming interfaces for microphone capture and speaker playback.
 
-**This package also serves as a reference template for all future prm driver packages.**
+**This package also serves as a reference template for all future primitive driver packages.**
 
 ## Architecture Position
 
 ```
 ┌─────────────────────────────────────────────┐
-│  speech_service  (robonix/srv/speech)       │
+│  speech_service  (robonix/service/speech)       │
 │    ↕ gRPC: AudioChunk                       │
 ├─────────────────────────────────────────────┤
-│  audio_driver    ← you are here (robonix/prm/audio)  │
+│  audio_driver    ← you are here (robonix/primitive/audio)  │
 │    ↕ ALSA: arecord / aplay                  │
 ├─────────────────────────────────────────────┤
 │         Hardware (USB Mic / Speaker)        │
@@ -26,8 +26,8 @@ Audio driver -- Robonix prm layer, automatically scans ALSA devices, provides gR
 
 | Service | RPC | Mode | Contract ID | Data Flow |
 |---------|-----|------|-------------|-----------|
-| PrmAudioMic | Stream | Server-stream | `robonix/prm/audio/mic` | Microphone -> Caller |
-| PrmAudioSpeaker | Stream | Client-stream | `robonix/prm/audio/speaker` | Caller -> Speaker |
+| PrmAudioMic | Stream | Server-stream | `robonix/primitive/audio/mic` | Microphone -> Caller |
+| PrmAudioSpeaker | Stream | Client-stream | `robonix/primitive/audio/speaker` | Caller -> Speaker |
 
 ## Directory Structure
 
@@ -102,7 +102,7 @@ rbnx run com.robonix.example.audio_driver
 | `AUDIO_SPEAKER_PORT` | `0` (auto-assign) | Speaker gRPC port |
 | `AUDIO_DRIVER_STANDALONE` | — | Set to `1` to skip Atlas registration |
 | `ROBONIX_ATLAS` | `localhost:50051` | Atlas control plane address |
-| `ROBONIX_NODE_ID` | `com.robonix.prm.audio` | Atlas node ID |
+| `ROBONIX_NODE_ID` | `com.robonix.primitive.audio` | Atlas node ID |
 
 ## Automatic Device Discovery
 
@@ -178,17 +178,17 @@ Startup sequence (following the tiago_bridge pattern):
 
 ## As a Reference Template
 
-When creating a new prm driver, copy this package and modify:
+When creating a new primitive driver, copy this package and modify:
 
 | Replace | This Package | Your Package |
 |---------|-------------|-------------|
 | Proto message types | AudioConfig, AudioChunk | Your hardware data types |
 | gRPC services | PrmAudioMic, PrmAudioSpeaker | Your device interfaces |
-| Contract IDs | robonix/prm/audio/* | robonix/prm/your_device/* |
+| Contract IDs | robonix/primitive/audio/* | robonix/primitive/your_device/* |
 | Scanning tools | arecord -l / aplay -l | Your device discovery method |
 | Driver classes | MicDriver, SpeakerDriver | Your device drivers |
 | Environment variable prefix | AUDIO_ | Your device prefix |
-| Manifest node ID | com.robonix.prm.audio | com.robonix.prm.your_device |
+| Manifest node ID | com.robonix.primitive.audio | com.robonix.primitive.your_device |
 
 Keep unchanged:
 - `_ensure_proto_gen()` -- Proto stub lookup logic
@@ -199,7 +199,7 @@ Keep unchanged:
 
 ## Atlas Integration
 
-- **RegisterNode**: `com.robonix.prm.audio`, namespace `robonix/prm/audio`, kind `primitive`
+- **RegisterNode**: `com.robonix.primitive.audio`, namespace `robonix/primitive/audio`, kind `primitive`
 - **DeclareInterface**: mic (server-stream) + speaker (client-stream)
 - **Heartbeat**: Sends NodeHeartbeat every 15 seconds
 - **Degradation**: Automatically runs standalone when Atlas is unavailable

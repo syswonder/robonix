@@ -4,7 +4,7 @@
 # the `{CAP_CLASS}` placeholder below is filled from the cap's
 # namespace leaf at DeclareInterface time:
 #   camera primitive  → robonix/primitive/camera/driver
-#   base   primitive  → robonix/primitive/base/driver
+#   base   primitive  → robonix/primitive/chassis/driver
 #   sensor primitive  → robonix/primitive/sensor/driver
 # Each cap binds its own endpoint at DeclareInterface time; rbnx start
 # drives `Driver(CMD_INIT, config_json=…)` against each cap before the

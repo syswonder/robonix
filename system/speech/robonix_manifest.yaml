@@ -16,7 +16,7 @@ package:
   name: speech_service
   version: 0.1.0
   vendor: robonix
-  description: Voice interaction service (ASR + TTS + Dialog) registered under robonix/srv/speech
+  description: Voice interaction service (ASR + TTS + Dialog) registered under robonix/service/speech
   license: MulanPSL-2.0
 
 nodes:

@@ -124,7 +124,7 @@ pub async fn run_turn(
     // 1b. Pre-fetch long-term memory
     // Silently dispatches search_memory before the first VLM call so that
     // relevant past context is available from the start of the turn.
-    let system_prompt = if skip_memory_prefetch(&task.text) {
+    let mut system_prompt = if skip_memory_prefetch(&task.text) {
         base_prompt
     } else {
         match memory::prefetch(&task.text, executor, search_memory_target).await {
@@ -134,6 +134,33 @@ pub async fn run_turn(
             None => base_prompt,
         }
     };
+
+    // 1c. Append the per-capability docs index. Each cap that registered
+    // a `capability_md_path` shows up here as a one-liner pointing at its
+    // CAPABILITY.md; the LLM is instructed to lazy-load those via the
+    // `read_file` builtin when it actually needs that cap. This keeps the
+    // system prompt tiny while still giving the LLM full per-cap context
+    // when relevant. Errors here are non-fatal — caps that didn't register
+    // a path simply don't appear in the block.
+    if let Ok(docs) = discovery::cap_md_index(atlas).await {
+        if !docs.is_empty() {
+            let mut block = String::from(
+                "\n\n## Capability docs (lazy-load via `read_file`)\n\
+                 Each capability below ships a CAPABILITY.md describing its tools \
+                 and the recommended usage pattern. Read the relevant one with the \
+                 `read_file` builtin BEFORE you start using the capability — the \
+                 short tool descriptions in your tool list are intentionally terse.\n\n",
+            );
+            for d in &docs {
+                block.push_str(&format!(
+                    "- `{}` ({}): `{}`\n",
+                    d.cap_id, d.namespace, d.md_path
+                ));
+            }
+            system_prompt.push_str(&block);
+        }
+    }
+    let system_prompt = system_prompt;
 
     // 2. Add user message to history
     history.push(Message::user(&task.text));

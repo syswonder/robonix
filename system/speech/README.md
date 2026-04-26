@@ -8,9 +8,9 @@ Voice interaction service -- Robonix srv layer, providing three types of gRPC in
 ┌─────────────────────────────────────────────┐
 │              Application Layer              │
 ├─────────────────────────────────────────────┤
-│  speech_service  ← you are here (robonix/srv/speech)  │
+│  speech_service  ← you are here (robonix/service/speech)  │
 ├─────────────────────────────────────────────┤
-│  audio_driver    (robonix/prm/audio)        │
+│  audio_driver    (robonix/primitive/audio)        │
 ├─────────────────────────────────────────────┤
 │         Hardware (ALSA / USB Mic/Speaker)   │
 └─────────────────────────────────────────────┘
@@ -127,7 +127,7 @@ Callers do not need to worry about audio format -- the server automatically hand
 
 Optionally registers with the Atlas control plane at startup:
 
-- **RegisterNode**: `com.robonix.services.speech`, namespace `robonix/srv/speech`, kind `service`
+- **RegisterNode**: `com.robonix.services.speech`, namespace `robonix/service/speech`, kind `service`
 - **DeclareInterface × 5**: asr, asr_stream, tts, tts_stream, dialog
 
 Automatically degrades to standalone mode when Atlas is unavailable.
