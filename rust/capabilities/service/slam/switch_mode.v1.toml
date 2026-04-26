@@ -9,4 +9,3 @@ srv = "slam/srv/SwitchMode"
 
 [mode]
 type = "rpc"
-

@@ -9,4 +9,3 @@ srv = "executor/srv/ListTools"
 
 [mode]
 type = "rpc"
-

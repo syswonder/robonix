@@ -1,5 +1,5 @@
 # Send a navigation goal to the robot base.
-# ROS IDL: `lib/prm_base/srv/Navigate.srv` (geometry_msgs/PoseStamped goal → accepted + status_message).
+# ROS IDL: `lib/service/navigation/srv/Navigate.srv` (geometry_msgs/PoseStamped goal → accepted + status_message).
 [contract]
 id      = "robonix/service/navigation/navigate"
 version = "1"
@@ -7,7 +7,7 @@ kind    = "service"
 
 
 [io.srv]
-srv = "prm_base/srv/Navigate"
+srv = "navigation/srv/Navigate"
 
 [mode]
 type = "rpc"

@@ -1,14 +1,14 @@
 # Lifecycle interface for an IMU device. ONE driver contract per abstract
 # hardware category. `config_json` is an opaque passthrough from the
 # deploy manifest. Command discriminator supports INIT / RESET / SHUTDOWN
-# / PROBE (see `lib/robonix_msg/srv/Driver.srv`).
+# / PROBE (see `lib/primitive/lifecycle/srv/Driver.srv`).
 [contract]
 id      = "robonix/primitive/sensor/imu/driver"
 version = "1"
 kind    = "primitive"
 
 [io.srv]
-srv = "robonix_msg/srv/Driver"
+srv = "lifecycle/srv/Driver"
 
 [mode]
 type = "rpc"

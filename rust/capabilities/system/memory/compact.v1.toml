@@ -11,4 +11,3 @@ srv = "memory/srv/Compact"
 
 [mode]
 type = "rpc"
-

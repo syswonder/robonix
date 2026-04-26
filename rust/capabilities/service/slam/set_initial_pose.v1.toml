@@ -9,4 +9,3 @@ srv = "slam/srv/SetInitialPose"
 
 [mode]
 type = "rpc"
-

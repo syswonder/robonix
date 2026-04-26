@@ -1,5 +1,5 @@
 # Query the status of a previously issued navigation goal.
-# ROS IDL: `lib/prm_base/srv/GetNavigationStatus.srv` (goal_id → known + status + terminal).
+# ROS IDL: `lib/service/navigation/srv/GetNavigationStatus.srv` (goal_id → known + status + terminal).
 [contract]
 id      = "robonix/service/navigation/status"
 version = "1"
@@ -7,7 +7,7 @@ kind    = "service"
 
 
 [io.srv]
-srv = "prm_base/srv/GetNavigationStatus"
+srv = "navigation/srv/GetNavigationStatus"
 
 [mode]
 type = "rpc"
