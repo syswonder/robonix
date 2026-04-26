@@ -1,0 +1,26 @@
+# Concrete (non-template) lifecycle Driver contract — exists solely to
+# generate the `LifecycleDriver` gRPC client stub used by `rbnx deploy`
+# when calling `Driver(CMD_INIT, config_json)` against a primitive/service
+# package.
+#
+# At runtime each primitive/service registers its driver under a per-area
+# id (`robonix/primitive/<area>/driver` or `robonix/service/<area>/driver`)
+# via the `{CAP_CLASS}/driver` template. They all share this same gRPC
+# service+method on the wire (the IDL is `lifecycle/srv/Driver` which
+# generates one `Driver` service stub regardless of which contract id
+# the cap declared with). So `rbnx deploy` uses `LifecycleDriverClient`
+# from this contract and points it at whatever endpoint atlas returned.
+#
+# `kind = system` because this contract is part of the runtime control
+# plane — never declared by user packages, only used by rbnx-cli's
+# deploy orchestrator.
+[contract]
+id      = "robonix/lifecycle/driver"
+version = "1"
+kind    = "system"
+
+[io.srv]
+srv = "lifecycle/srv/Driver"
+
+[mode]
+type = "rpc"

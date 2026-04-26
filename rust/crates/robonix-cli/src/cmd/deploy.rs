@@ -6,24 +6,47 @@
 //   - `system:` Rust binaries (atlas / pilot / executor) are launched with
 //     CLI arguments translated from the manifest block (`--listen`,
 //     `--log`, `--vlm-*`, …). No env-var translation, no YAML config files.
-//   - Package entries (`primitive` / `service`) are launched via
-//     `rbnx start -p <path>`. Their `config:` block is JSON-encoded and
-//     handed to the package's `start` body via `RBNX_CONFIG_FILE`.
+//   - Package entries (`primitive` / `service`) are launched serially:
+//     spawn → wait for the package to register a cap with a `*/driver`
+//     interface on atlas → call Driver(CMD_INIT, config_json) → wait for
+//     `ok=true`. Only after every primitive's driver returns ok do we move
+//     on to `service:` (which can depend on primitive data being ready).
+//     The package's `config:` block is JSON-encoded and ALSO handed to
+//     the start body via `RBNX_CONFIG_FILE`; whether the init logic reads
+//     it from the env file or from the Driver call's `config_json` arg
+//     is the package's choice.
 //   - `skill:` entries are NOT started at deploy time — the executor
 //     invokes them on demand. We just log them so the user can see they
 //     were registered with the manifest.
 //
-// Out of scope: crash-restart, health checks, dependency ordering beyond
-// `sleep 1.5` between boots.
+// Out of scope: crash-restart, health checks beyond Driver(INIT).
 
 use anyhow::{Context, Result};
+use robonix_atlas::client::AtlasClient;
+use robonix_atlas::pb as atlas_pb;
 use robonix_cli::output;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
 use tokio::signal::unix::{SignalKind, signal};
+use tonic::Request;
+use tonic::transport::Endpoint;
+
+use crate::pb::contracts::lifecycle_driver_client::LifecycleDriverClient;
+use crate::pb::lifecycle::DriverRequest;
+
+// Driver.srv command discriminator.
+const CMD_INIT: u32 = 0;
+// How long to wait for a freshly spawned package to register its driver
+// interface with atlas before giving up.
+const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
+const DRIVER_POLL_INTERVAL: Duration = Duration::from_millis(500);
+// How long Driver(CMD_INIT) is given to return.
+const DRIVER_INIT_TIMEOUT: Duration = Duration::from_secs(60);
+const DEPLOY_CONSUMER_ID: &str = "rbnx-cli/deploy";
 
 // ── Deploy manifest schema (subset used by this orchestrator) ───────────
 
@@ -402,28 +425,46 @@ pub async fn execute(
         output::sub_step("Skipping system bring-up (--skip-system)");
     }
 
+    // Connect to atlas once; reuse for every primitive/service init dance.
+    let atlas_endpoint = deploy
+        .system
+        .get("atlas")
+        .and_then(|v| v.as_mapping())
+        .and_then(|m| m.get(serde_yaml::Value::String("listen".into())))
+        .and_then(|v| v.as_str())
+        .unwrap_or("127.0.0.1:50051")
+        .to_string();
+    let mut atlas =
+        AtlasClient::connect_with_retry(&atlas_endpoint, 20, Duration::from_millis(500))
+            .await
+            .with_context(|| {
+                format!("connect to atlas at '{atlas_endpoint}' for lifecycle init")
+            })?;
+
     for e in &deploy.primitive {
-        let sp = spawn_package(
+        let sp = spawn_and_init(
+            "primitive",
+            e,
             &rust_root,
             &log_dir,
             &cache_root,
             &instances_dir,
-            "primitive",
-            e,
             &manifest_dir,
+            &mut atlas,
         )
         .await?;
         children.push(sp);
     }
     for e in &deploy.service {
-        let sp = spawn_package(
+        let sp = spawn_and_init(
+            "service",
+            e,
             &rust_root,
             &log_dir,
             &cache_root,
             &instances_dir,
-            "service",
-            e,
             &manifest_dir,
+            &mut atlas,
         )
         .await?;
         children.push(sp);
@@ -558,4 +599,156 @@ fn system_cli_args(
         _ => {}
     }
     out
+}
+
+/// Spawn one primitive / service package, then drive it through Driver(CMD_INIT).
+///
+/// Flow:
+///   1. Snapshot atlas's known cap_id set
+///   2. Spawn `rbnx start -p <path>` (the package boots and `register_capability`
+///      itself, then declares its driver interface)
+///   3. Poll atlas until a NEW cap_id appears that has at least one
+///      `*/driver` interface declared over gRPC
+///   4. ConnectCapability → tonic Channel → LifecycleDriver.Driver(CMD_INIT, config_json)
+///   5. Verify response.ok; on failure return Err and let the caller abort
+///   6. DisconnectCapability and continue
+///
+/// The package's process handle is returned so the deploy loop can teardown
+/// it on Ctrl-C.
+async fn spawn_and_init(
+    component: &str,
+    entry: &PackageEntry,
+    rust_root: &Path,
+    log_dir: &Path,
+    cache_root: &Path,
+    instances_dir: &Path,
+    manifest_dir: &Path,
+    atlas: &mut AtlasClient,
+) -> Result<Spawned> {
+    let before: HashSet<String> = atlas
+        .query_capabilities("", "", atlas_pb::Transport::Unspecified)
+        .await
+        .with_context(|| format!("[{component}] pre-spawn atlas snapshot"))?
+        .into_iter()
+        .map(|r| r.capability_id)
+        .collect();
+
+    let sp = spawn_package(
+        rust_root,
+        log_dir,
+        cache_root,
+        instances_dir,
+        component,
+        entry,
+        manifest_dir,
+    )
+    .await?;
+    let pkg_label = sp.name.clone();
+
+    // 1. Wait for the new cap to register + declare its driver interface.
+    let (cap_id, driver_contract) = wait_for_driver(atlas, &before, &pkg_label, component).await?;
+
+    // 2. ConnectCapability to get the driver endpoint.
+    let (channel_id, endpoint, _params) = atlas
+        .connect_capability(
+            DEPLOY_CONSUMER_ID,
+            &cap_id,
+            &driver_contract,
+            atlas_pb::Transport::Grpc,
+        )
+        .await
+        .with_context(|| {
+            format!("[{component}/{pkg_label}] ConnectCapability for {driver_contract}")
+        })?;
+
+    // 3. Driver(CMD_INIT, config_json).
+    let config_json = serde_json::to_string(&entry.config).unwrap_or_else(|_| "{}".into());
+    let normalized = if endpoint.starts_with("http") {
+        endpoint.clone()
+    } else {
+        format!("http://{}", endpoint)
+    };
+    let init_result = async {
+        let channel = Endpoint::new(normalized.clone())
+            .with_context(|| format!("invalid driver endpoint '{normalized}'"))?
+            .connect()
+            .await
+            .with_context(|| format!("dial driver at '{normalized}'"))?;
+        let mut client = LifecycleDriverClient::new(channel);
+        let resp = tokio::time::timeout(
+            DRIVER_INIT_TIMEOUT,
+            client.driver(Request::new(DriverRequest {
+                command: CMD_INIT,
+                config_json,
+            })),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Driver(CMD_INIT) timed out after {:?}", DRIVER_INIT_TIMEOUT))?
+        .with_context(|| "Driver(CMD_INIT) RPC failed")?;
+        Ok::<_, anyhow::Error>(resp.into_inner())
+    }
+    .await;
+    let _ = atlas.disconnect_capability(&channel_id).await;
+
+    match init_result {
+        Ok(r) if r.ok => {
+            output::sub_step(&format!(
+                "[{component}/{pkg_label}] Driver(INIT) ok (state={})",
+                r.state
+            ));
+        }
+        Ok(r) => {
+            anyhow::bail!(
+                "[{component}/{pkg_label}] Driver(INIT) returned ok=false (state={}, error={})",
+                r.state,
+                r.error
+            );
+        }
+        Err(e) => {
+            anyhow::bail!("[{component}/{pkg_label}] Driver(INIT) failed: {e:#}");
+        }
+    }
+
+    Ok(sp)
+}
+
+/// Poll atlas every DRIVER_POLL_INTERVAL until a cap NOT in `before` appears
+/// with a `*/driver` gRPC interface. Returns (cap_id, driver_contract_id).
+async fn wait_for_driver(
+    atlas: &mut AtlasClient,
+    before: &HashSet<String>,
+    pkg_label: &str,
+    component: &str,
+) -> Result<(String, String)> {
+    output::sub_step(&format!(
+        "[{component}/{pkg_label}] waiting for driver registration..."
+    ));
+    let deadline = Instant::now() + DRIVER_REGISTER_TIMEOUT;
+    loop {
+        let records = atlas
+            .query_capabilities("", "", atlas_pb::Transport::Unspecified)
+            .await
+            .with_context(|| format!("[{component}/{pkg_label}] poll atlas for driver"))?;
+        for rec in records {
+            if before.contains(&rec.capability_id) {
+                continue;
+            }
+            // New cap! Check if it's declared a driver interface yet.
+            for iface in &rec.interfaces {
+                if iface.transport != atlas_pb::Transport::Grpc as i32 {
+                    continue;
+                }
+                if iface.contract_id.ends_with("/driver") {
+                    return Ok((rec.capability_id.clone(), iface.contract_id.clone()));
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "[{component}/{pkg_label}] timed out after {:?} waiting for the package to register a `*/driver` gRPC interface — check the package's stdout/stderr log",
+                DRIVER_REGISTER_TIMEOUT
+            );
+        }
+        tokio::time::sleep(DRIVER_POLL_INTERVAL).await;
+    }
 }
