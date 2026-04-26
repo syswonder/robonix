@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// Generate `robonix_contracts.proto` from `rust/contracts/**/*.toml`.
+// Generate `robonix_contracts.proto` from `<root>/capabilities/**/*.toml`.
 //
-// `[mode].type` → `robonix_contracts.proto` (see `rust/contracts/README.md`).
+// `[mode].type` → `robonix_contracts.proto` (see `<root>/capabilities/README.md`).
 // Streaming: `rpc_server_stream` uses the .srv response (exactly one field) as stream element; `rpc_client_stream` uses the request (exactly one field).
 
 use anyhow::{Context, Result, bail};

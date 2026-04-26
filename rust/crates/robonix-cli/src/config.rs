@@ -66,7 +66,7 @@ impl Config {
                     "[rbnx] config is missing robonix_source_path (legacy config from before the `rbnx setup` migration)."
                 );
                 eprintln!(
-                    "This is required so packages anywhere on disk can resolve contracts/IDL paths."
+                    "This is required so packages anywhere on disk can resolve capabilities/IDL paths."
                 );
                 eprintln!();
                 eprintln!("Fix:  cd /path/to/robonix   # the repo root (containing `rust/`)");
@@ -126,7 +126,7 @@ impl Config {
         let abs = match key {
             SourcePathKey::Root => root.clone(),
             SourcePathKey::RustRoot => root.join("rust"),
-            SourcePathKey::Contracts => root.join("capabilities"),
+            SourcePathKey::Capabilities => root.join("capabilities"),
             SourcePathKey::InterfacesLib => root
                 .join("rust")
                 .join("crates")
@@ -165,7 +165,7 @@ pub enum SourcePathKey {
     /// `<root>/rust` (cargo workspace).
     RustRoot,
     /// `<root>/capabilities` (contract TOMLs).
-    Contracts,
+    Capabilities,
     /// `<root>/rust/crates/robonix-interfaces/lib` (ROS IDL source).
     InterfacesLib,
     /// `<root>/rust/proto` (runtime / atlas protos).
@@ -180,12 +180,12 @@ impl std::str::FromStr for SourcePathKey {
         match s {
             "root" | "source" => Ok(Self::Root),
             "rust" | "rust-root" => Ok(Self::RustRoot),
-            "contracts" => Ok(Self::Contracts),
+            "capabilities" => Ok(Self::Capabilities),
             "interfaces-lib" | "idl" => Ok(Self::InterfacesLib),
             "runtime-proto" => Ok(Self::RuntimeProto),
             "robonix-py" | "mcp-contract" => Ok(Self::RobonixPy),
             other => Err(format!(
-                "unknown path key: {other}. Valid: root, rust, contracts, interfaces-lib, runtime-proto, robonix-py"
+                "unknown path key: {other}. Valid: root, rust, capabilities, interfaces-lib, runtime-proto, robonix-py"
             )),
         }
     }

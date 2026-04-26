@@ -92,7 +92,7 @@ message DeclareInterfaceRequest {
   // If non-zero, data-plane endpoint is ROBONIX_DATA_PLANE_HOST:listen_port (client already bound).
   // If zero, server picks the next port from its allocator (may collide with host services).
   uint32 listen_port = 5;
-  // Stable capability path — same string as in contract TOML `[contract] id` (see rust/contracts/).
+  // Stable capability path — same string as in contract TOML `[contract] id` (see <root>/capabilities/).
   // Example: "robonix/prm/camera/rgb". Version is not appended here; it is in the TOML only.
   // Empty = Atlas derives from RegisterNode.namespace + "/" + name.
   string contract_id = 6;
