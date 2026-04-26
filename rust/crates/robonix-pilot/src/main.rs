@@ -18,6 +18,7 @@
 //      through atlas at every Stream RPC, not configured statically.
 
 mod config;
+mod discovery;
 mod history;
 mod memory;
 mod pb;

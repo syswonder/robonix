@@ -8,32 +8,29 @@
 //   3. Loop: fetch tools → VLM call → tool calls → Plan → Executor → feed results back.
 //   4. Stream PilotEvents to the Liaison caller via `tx`.
 
+use crate::discovery::{self, CapEntry};
 use crate::history;
 use crate::memory;
-use crate::pb::contracts::{
-    system_executor_client::SystemExecutorClient,
-    system_executor_list_tools_client::SystemExecutorListToolsClient,
-};
-use crate::pb::executor::ListToolsRequest;
+use crate::pb::contracts::system_executor_client::SystemExecutorClient;
 use crate::pb::pilot::{
     BatchResult, CapabilityCall, CapabilityCallResult, PilotEvent, Plan, SessionStatusEvent, Task,
-    ToolRouting,
 };
 use crate::service::{self, PilotStreamBody, SessionState};
 use crate::vlm::{Message, ToolDef, VlmClient, VlmStreamItem};
 use anyhow::Result;
 use futures_util::StreamExt;
+use robonix_atlas::client::AtlasClient;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::{mpsc::Sender, watch};
 use tonic::Request;
 use tonic::transport::Channel;
 use uuid::Uuid;
 
-/// gRPC clients for Executor contract services (`SystemExecutor`,
-/// `SystemExecutorListTools`).
+/// gRPC client for executor's plan-dispatch contract. Pilot only ever calls
+/// `Execute(Plan)` — discovery happens directly against atlas now.
 pub struct ExecutorConn {
     pub graph: SystemExecutorClient<Channel>,
-    pub list_tools: SystemExecutorListToolsClient<Channel>,
 }
 
 // ── Hard limits ───────────────────────────────────────────────────────────────
@@ -82,6 +79,8 @@ pub async fn run_turn(
     history: &mut Vec<Message>,
     vlm: &VlmClient,
     executor: &mut ExecutorConn,
+    atlas: &mut AtlasClient,
+    consumer_id: &str,
     tx: &Sender<Result<PilotEvent, tonic::Status>>,
     mut cancel_rx: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -106,7 +105,7 @@ pub async fn run_turn(
 
     if task_is_session_end(task) {
         log::info!("[pilot] session_end: invoking compact_memory if available");
-        memory::try_compact(executor).await;
+        memory::try_compact(executor, atlas, consumer_id).await;
         let _ = tx
             .send(Ok(service::pack(
                 &session_id,
@@ -123,19 +122,17 @@ pub async fn run_turn(
     // ── 1. Build system prompt (once per turn) ────────────────────────────────
     let base_prompt = build_system_prompt(load_agent_soul().as_deref());
 
-    // Tool catalogue (needed before prefetch so MCP tools get correct routing — never dispatch as
-    // unknown builtins when `CapabilityCall.routing` is missing).
-    let initial_tools = executor
-        .list_tools
-        .list_tools(Request::new(ListToolsRequest { refresh: true }))
+    // Pilot's capability catalog comes straight from atlas (filtered to MCP
+    // transport — only those are LLM-callable). Per-cap description +
+    // input_schema_json come from McpParams, peeked via brief Connect in
+    // `discovery::discover`.
+    let initial_caps = discovery::discover(atlas, consumer_id)
         .await
-        .map_err(|e| anyhow::anyhow!("ListTools RPC failed: {e}"))?
-        .into_inner()
-        .capabilities;
-    let search_memory_routing = initial_tools
+        .map_err(|e| anyhow::anyhow!("atlas capability discovery failed: {e}"))?;
+    let search_memory_target = initial_caps
         .iter()
-        .find(|t| t.capability_name == "search_memory")
-        .and_then(|t| t.routing.clone());
+        .find(|c| c.name == "search_memory")
+        .map(|c| (c.cap_id.clone(), c.contract_id.clone()));
 
     // ── 1b. Pre-fetch long-term memory ────────────────────────────────────────
     // Silently dispatches search_memory before the first VLM call so that
@@ -143,7 +140,7 @@ pub async fn run_turn(
     let system_prompt = if skip_memory_prefetch(&task.text) {
         base_prompt
     } else {
-        match memory::prefetch(&task.text, executor, search_memory_routing).await {
+        match memory::prefetch(&task.text, executor, search_memory_target).await {
             Some(mem) => format!(
                 "{base_prompt}\n\n## Relevant past memories (System Context)\n\n{mem}\n\n---\n\n"
             ),
@@ -165,29 +162,28 @@ pub async fn run_turn(
             return_interrupted!();
         }
 
-        // Re-fetch tool list from Executor on every round so that MCP providers
-        // that registered after the turn started (e.g. Tiago bridge warming up)
-        // are visible to the VLM immediately in the next round.
-        let tool_list = executor
-            .list_tools
-            .list_tools(Request::new(ListToolsRequest { refresh: true }))
+        // Re-discover capabilities from atlas every round so caps that
+        // registered mid-turn (e.g. tiago bridge warming up) are visible in
+        // the next VLM call.
+        let cap_list: Vec<CapEntry> = discovery::discover(atlas, consumer_id)
             .await
-            .map_err(|e| anyhow::anyhow!("ListTools RPC failed: {e}"))?
-            .into_inner()
-            .capabilities;
+            .map_err(|e| anyhow::anyhow!("atlas capability discovery failed: {e}"))?;
 
-        let tool_defs: Vec<ToolDef> = tool_list
+        let tool_defs: Vec<ToolDef> = cap_list
             .iter()
-            .map(|t| {
+            .map(|c| {
                 let schema: serde_json::Value =
-                    serde_json::from_str(&t.input_schema_json).unwrap_or_default();
-                ToolDef::new(&t.capability_name, &t.description, schema)
+                    serde_json::from_str(&c.input_schema_json).unwrap_or_default();
+                ToolDef::new(&c.name, &c.description, schema)
             })
             .collect();
 
-        let routing_map: std::collections::HashMap<String, ToolRouting> = tool_list
+        // LLM-tool-name → (cap_id, contract_id) so we can build CapabilityCall
+        // when the model picks a tool. Names are MCP-side tool names = leaf
+        // of contract_id; collisions across caps would be a user-config bug.
+        let target_map: HashMap<String, (String, String)> = cap_list
             .iter()
-            .filter_map(|t| t.routing.clone().map(|r| (t.capability_name.clone(), r)))
+            .map(|c| (c.name.clone(), (c.cap_id.clone(), c.contract_id.clone())))
             .collect();
 
         let mut messages = vec![Message::system(&system_prompt)];
@@ -263,11 +259,25 @@ pub async fn run_turn(
         let plan_id = Uuid::new_v4().to_string();
         let calls: Vec<CapabilityCall> = raw_tool_calls
             .iter()
-            .map(|tc| CapabilityCall {
-                call_id: tc.id.clone(),
-                capability_name: tc.function.name.clone(),
-                args_json: tc.function.arguments.clone(),
-                routing: routing_map.get(&tc.function.name).cloned(),
+            .map(|tc| {
+                let (cap_id, contract_id) = target_map
+                    .get(&tc.function.name)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        // Unknown tool name (LLM hallucinated). Build a call
+                        // anyway so the executor surfaces a clear error.
+                        log::warn!(
+                            "[pilot] LLM picked unknown tool '{}' — no matching capability in catalog",
+                            tc.function.name
+                        );
+                        (String::new(), tc.function.name.clone())
+                    });
+                CapabilityCall {
+                    call_id: tc.id.clone(),
+                    cap_id,
+                    contract_id,
+                    args_json: tc.function.arguments.clone(),
+                }
             })
             .collect();
 
@@ -309,7 +319,11 @@ pub async fn run_turn(
             match event.event_kind {
                 EX_STARTED => {
                     if let Some(ref s) = event.started {
-                        log::debug!("[pilot] executor started '{}'", s.capability_name);
+                        log::debug!(
+                            "[pilot] executor started cap='{}' contract='{}'",
+                            s.cap_id,
+                            s.contract_id
+                        );
                     }
                 }
                 EX_RESULT => {

@@ -1,48 +1,46 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// Long-term-memory RPC dispatch (best-effort, fire-and-forget on errors).
+// Long-term-memory dispatch (best-effort, fire-and-forget on errors).
 //
-// Pilot calls these around a turn — `prefetch` before the first VLM call
-// to inject relevant past context, `compact` on session_end to roll
-// hot history into the persistent store. Both go through executor (MCP
-// dispatch), not directly to a memory cap, so missing tools are silently
-// tolerated.
+// `prefetch` runs before the first VLM call, `compact` on session_end.
+// Both build a one-call Plan and hand it to executor; the corresponding
+// memory cap is looked up via atlas the same way every other capability
+// is. Missing caps are silently tolerated — memory is never load-bearing.
 
+use crate::discovery;
 use crate::history::decode_string_output;
-use crate::pb::executor::ListToolsRequest;
-use crate::pb::pilot::{CapabilityCall, Plan, ToolRouting};
+use crate::pb::pilot::{CapabilityCall, Plan};
 use crate::planner::ExecutorConn;
+use robonix_atlas::client::AtlasClient;
 use tonic::Request;
 use uuid::Uuid;
 
-/// Executor `CapabilityCallEvent.event_kind` for "tool result". Mirrors the proto
-/// constant used everywhere else; not re-exported because the planner's
-/// other dispatch path defines its own copy locally.
+/// Executor `CapabilityCallEvent.event_kind` for "tool result".
 const EX_RESULT: u32 = 1;
 
 /// Dispatch one `search_memory` call and return the result text. Returns
-/// `None` if the tool is not registered, the index is empty, or any error
-/// occurs — memory context is never load-bearing for correctness.
+/// `None` if the cap is not registered, the index is empty, or any error
+/// occurs.
 pub async fn prefetch(
     query: &str,
     executor: &mut ExecutorConn,
-    routing: Option<ToolRouting>,
+    target: Option<(String, String)>,
 ) -> Option<String> {
-    let routing = routing?;
-    let graph = Plan {
+    let (cap_id, contract_id) = target?;
+    let plan = Plan {
         plan_id: Uuid::new_v4().to_string(),
         session_id: "memory-prefetch".to_string(),
         round: 0,
         calls: vec![CapabilityCall {
             call_id: Uuid::new_v4().to_string(),
-            capability_name: "search_memory".to_string(),
+            cap_id,
+            contract_id,
             args_json: serde_json::json!({ "data": query }).to_string(),
-            routing: Some(routing),
         }],
     };
 
     let mut stream = executor
         .graph
-        .execute(Request::new(graph))
+        .execute(Request::new(plan))
         .await
         .ok()?
         .into_inner();
@@ -61,43 +59,35 @@ pub async fn prefetch(
     None
 }
 
-/// Best-effort `compact_memory` on session teardown. Logs failures and
-/// returns; never propagates errors (the tool may be absent entirely).
-pub async fn try_compact(executor: &mut ExecutorConn) {
-    let tools = match executor
-        .list_tools
-        .list_tools(Request::new(ListToolsRequest { refresh: false }))
-        .await
-    {
-        Ok(r) => r.into_inner().capabilities,
+/// Best-effort `compact_memory` on session teardown. Logs failures, never
+/// propagates errors (the cap may be absent entirely).
+pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, consumer_id: &str) {
+    let caps = match discovery::discover(atlas, consumer_id).await {
+        Ok(c) => c,
         Err(e) => {
-            log::debug!("[pilot] compact_memory: list_tools failed: {e}");
+            log::debug!("[pilot] compact_memory: discovery failed: {e}");
             return;
         }
     };
-    let Some(routing) = tools
-        .iter()
-        .find(|t| t.capability_name == "compact_memory")
-        .and_then(|t| t.routing.clone())
-    else {
+    let Some(target) = caps.iter().find(|c| c.name == "compact_memory") else {
         return;
     };
 
-    let graph = Plan {
+    let plan = Plan {
         plan_id: Uuid::new_v4().to_string(),
         session_id: "memory-compact".to_string(),
         round: 0,
         calls: vec![CapabilityCall {
             call_id: Uuid::new_v4().to_string(),
-            capability_name: "compact_memory".to_string(),
+            cap_id: target.cap_id.clone(),
+            contract_id: target.contract_id.clone(),
             args_json: "{}".to_string(),
-            routing: Some(routing),
         }],
     };
 
     let Ok(mut stream) = executor
         .graph
-        .execute(Request::new(graph))
+        .execute(Request::new(plan))
         .await
         .map(|r| r.into_inner())
     else {

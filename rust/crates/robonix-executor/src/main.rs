@@ -1,34 +1,28 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// robonix-executor — tool-call dispatch runtime.
-//
-// Bootstrap (every Robonix process):
-//   ROBONIX_ATLAS_ENDPOINT  — atlas control-plane host:port (CLI / env)
-//   ROBONIX_CONFIG_PATH     — optional YAML config slice (rbnx-written)
+// robonix-executor — capability-call dispatch runtime.
 //
 // On startup executor:
 //   1. Connects to atlas, registers as `com.robonix.system.executor`.
-//   2. Declares two contract interfaces over gRPC:
-//        - robonix/system/executor              (Stream — Plan dispatch)
-//        - robonix/system/executor/list_tools   (Call   — tool catalogue)
-//   3. Serves both on `listen`. Tool dispatch resolves MCP / gRPC / builtin
-//      backends via atlas at every Stream RPC.
+//   2. Declares its gRPC Execute interface (Plan → CapabilityCallEvent stream).
+//   3. Declares 5 built-in capabilities under `robonix/system/executor/builtin/<op>`
+//      so pilot's atlas-driven discovery surfaces them to the LLM as plain
+//      capabilities. Calls hitting these contracts short-circuit to in-process
+//      handlers in `dispatch::builtin` — no MCP loopback.
+//   4. Serves Execute on `listen`. Per-call dispatch resolves provider via
+//      `ConnectCapability(cap_id, contract_id, MCP)` on atlas.
 
 mod config;
 mod dispatch;
 mod exec_wire;
 mod pb;
-mod routing_kind;
 mod service;
-mod tools;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use config::{Args, EXECUTOR_NAMESPACE, ExecutorConfig};
+use dispatch::builtin::BUILTINS;
 use log::info;
-use pb::contracts::{
-    system_executor_list_tools_server::SystemExecutorListToolsServer,
-    system_executor_server::SystemExecutorServer,
-};
+use pb::contracts::system_executor_server::SystemExecutorServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
 use service::ExecutorServiceImpl;
@@ -71,8 +65,7 @@ async fn main() -> Result<()> {
         _ => listen_addr.to_string(),
     };
 
-    // Executor exposes TWO contracts on the same gRPC server: stream-dispatch
-    // and list_tools. Declare both so consumers (pilot) can connect to each.
+    // Execute RPC: pilot → executor for plan dispatch.
     atlas
         .declare_interface(
             &cfg.capability_id,
@@ -86,28 +79,36 @@ async fn main() -> Result<()> {
             ),
         )
         .await?;
-    atlas
-        .declare_interface(
-            &cfg.capability_id,
-            "robonix/system/executor/list_tools",
-            atlas_pb::Transport::Grpc,
-            &advertised,
-            atlas_client::grpc_params(
-                "capabilities/system/executor_list_tools.v1.toml",
-                "robonix.contracts.SystemExecutorListTools",
-                "/robonix.contracts.SystemExecutorListTools/ListTools",
-            ),
-        )
-        .await?;
-    info!("declared SystemExecutor + SystemExecutorListTools at {advertised}");
+
+    // Built-in capabilities: declared as MCP-transport interfaces so pilot's
+    // catalog discovery sees them like any user MCP cap. The endpoint is a
+    // sentinel — dispatch never dials it; calls hitting these contracts hit
+    // the cap_id == self short-circuit in `dispatch::dispatch`.
+    let builtin_endpoint = format!("internal://{}/builtin", cfg.capability_id);
+    for spec in BUILTINS {
+        let contract_id = format!("{EXECUTOR_NAMESPACE}/builtin/{}", spec.op);
+        atlas
+            .declare_interface(
+                &cfg.capability_id,
+                &contract_id,
+                atlas_pb::Transport::Mcp,
+                &builtin_endpoint,
+                atlas_client::mcp_params(spec.description, spec.input_schema_json),
+            )
+            .await
+            .with_context(|| format!("declare builtin '{}'", contract_id))?;
+    }
+    info!(
+        "declared SystemExecutor + {} builtin capabilities at {advertised}",
+        BUILTINS.len()
+    );
 
     let svc = ExecutorServiceImpl::new(atlas, cfg.capability_id.clone());
     info!("SystemExecutor gRPC on {listen_addr}");
     eprintln!("robonix-executor ready on {listen_addr}");
 
     tonic::transport::Server::builder()
-        .add_service(SystemExecutorServer::new(svc.clone()))
-        .add_service(SystemExecutorListToolsServer::new(svc))
+        .add_service(SystemExecutorServer::new(svc))
         .serve(listen_addr)
         .await
         .context("executor gRPC server failed")?;
