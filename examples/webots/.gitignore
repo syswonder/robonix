@@ -1,6 +1,7 @@
-# Auto-generated protobuf Python stubs.
+# Auto-generated protobuf Python stubs + MCP dataclasses.
 # Each package regenerates these at build time via scripts/build.sh.
 proto_gen/
+robonix_mcp_types/
 */proto_compat/
 # Per-package build artifacts
 */rbnx-build/

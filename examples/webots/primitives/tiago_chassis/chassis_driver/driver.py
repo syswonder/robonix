@@ -28,7 +28,7 @@ def _ensure_proto_gen() -> None:
     d = Path(__file__).resolve().parent
     while d.parent != d:
         for pg in (d / "rbnx-build" / "codegen" / "proto_gen", d / "proto_gen"):
-            if pg.is_dir() and (pg / "robonix_runtime_pb2.py").exists():
+            if pg.is_dir() and (pg / "atlas_legacy_pb2.py").exists():
                 if str(pg) not in sys.path:
                     sys.path.insert(0, str(pg))
                 return
@@ -47,7 +47,19 @@ def _ensure_mcp_types() -> None:
 
 
 def _ensure_robonix_py() -> None:
-    """Pull in robonix-py (mcp_contract decorator)."""
+    """Find the robonix_py helper lib (sibling pylib/robonix-py/ on host
+    or /robonix_pkgs/pylib/robonix-py/ inside the sim container) by
+    walking up from this driver. Falls back to `rbnx path` only if a
+    walk-up doesn't turn it up — that fallback never fires inside the
+    container because rbnx isn't installed there."""
+    d = Path(__file__).resolve().parent
+    while d.parent != d:
+        for cand in (d / "pylib" / "robonix-py", d / "robonix-py"):
+            if cand.is_dir() and (cand / "robonix_py" / "__init__.py").exists():
+                if str(cand) not in sys.path:
+                    sys.path.insert(0, str(cand))
+                return
+        d = d.parent
     import subprocess
     try:
         out = subprocess.run(
@@ -75,12 +87,12 @@ for _logger_name in (
     logging.getLogger(_logger_name).setLevel(logging.WARNING)
 
 import grpc
-import robonix_runtime_pb2 as pb
-import robonix_runtime_pb2_grpc as pb_grpc
+import atlas_legacy_pb2 as pb
+import atlas_legacy_pb2_grpc as pb_grpc
 
 import builtin_interfaces_mcp
 import std_msgs_mcp
-from prm_base_mcp import MoveCommand, RobotState
+from base_mcp import MoveCommand, RobotState
 from geometry_msgs_mcp import PoseStamped
 from std_msgs_mcp import Empty, String
 
@@ -133,7 +145,7 @@ def _on_pose(msg):
 
 @mcp_contract(mcp, contract_id="robonix/primitive/chassis/state")
 def chassis_state(msg: Empty) -> RobotState:
-    """Get the chassis pose (latest /amcl_pose). Returns codegen prm_base/RobotState
+    """Get the chassis pose (latest /amcl_pose). Returns codegen base/RobotState
     with `base_pose` populated from AMCL when available; empty otherwise.
     Contract: robonix/primitive/chassis/state."""
     _ = msg
@@ -247,7 +259,7 @@ def main() -> None:
             supported_transports=["mcp"],
             metadata_json=_single_tool_meta(
                 "chassis_state",
-                "Get the chassis pose. Returns prm_base/RobotState; base_pose is the latest /amcl_pose.",
+                "Get the chassis pose. Returns base/RobotState; base_pose is the latest /amcl_pose.",
                 Empty.json_schema(),
             ),
             listen_port=port,
@@ -258,7 +270,7 @@ def main() -> None:
             supported_transports=["mcp"],
             metadata_json=_single_tool_meta(
                 "chassis_cmd",
-                "Send a velocity command. prm_base/MoveCommand wire JSON. "
+                "Send a velocity command. base/MoveCommand wire JSON. "
                 "Publish duration: env TIAGO_CHASSIS_CMD_DURATION_SEC (default 1.0).",
                 MoveCommand.json_schema(),
             ),

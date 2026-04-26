@@ -31,7 +31,7 @@ def _ensure_proto_gen() -> None:
     d = Path(__file__).resolve().parent
     while d.parent != d:
         for pg in (d / "rbnx-build" / "codegen" / "proto_gen", d / "proto_gen"):
-            if pg.is_dir() and (pg / "robonix_runtime_pb2.py").exists():
+            if pg.is_dir() and (pg / "atlas_legacy_pb2.py").exists():
                 if str(pg) not in sys.path:
                     sys.path.insert(0, str(pg))
                 return
@@ -50,6 +50,19 @@ def _ensure_mcp_types() -> None:
 
 
 def _ensure_robonix_py() -> None:
+    """Find the robonix_py helper lib (sibling pylib/robonix-py/ on host
+    or /robonix_pkgs/pylib/robonix-py/ inside the sim container) by
+    walking up from this driver. Falls back to `rbnx path` only if a
+    walk-up doesn't turn it up — that fallback never fires inside the
+    container because rbnx isn't installed there."""
+    d = Path(__file__).resolve().parent
+    while d.parent != d:
+        for cand in (d / "pylib" / "robonix-py", d / "robonix-py"):
+            if cand.is_dir() and (cand / "robonix_py" / "__init__.py").exists():
+                if str(cand) not in sys.path:
+                    sys.path.insert(0, str(cand))
+                return
+        d = d.parent
     import subprocess
     try:
         out = subprocess.run(
@@ -76,8 +89,8 @@ for _logger_name in (
     logging.getLogger(_logger_name).setLevel(logging.WARNING)
 
 import grpc
-import robonix_runtime_pb2 as pb
-import robonix_runtime_pb2_grpc as pb_grpc
+import atlas_legacy_pb2 as pb
+import atlas_legacy_pb2_grpc as pb_grpc
 
 import builtin_interfaces_mcp
 import std_msgs_mcp

@@ -59,8 +59,11 @@ services:
       # Bind-mount sibling robonix package dirs so `docker exec` can
       # find driver code without rebuilding the image. Each driver
       # package is reachable at `/robonix_pkgs/<class>/<pkg_name>/`.
+      # `pylib` is the shared Python helper lib (robonix_py); driver
+      # code walks up sys.path looking for it under any parent.
       - ../primitives:/robonix_pkgs/primitives:rw
       - ../services:/robonix_pkgs/services:rw
+      - ../../../pylib:/robonix_pkgs/pylib:ro
 
 volumes:
   webots_cache:

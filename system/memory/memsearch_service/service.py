@@ -17,7 +17,7 @@ def _ensure_proto_gen() -> None:
     d = Path(__file__).resolve().parent
     while d.parent != d:
         for pg in (d / "rbnx-build" / "codegen" / "proto_gen", d / "proto_gen"):
-            if pg.is_dir() and (pg / "robonix_runtime_pb2.py").exists():
+            if pg.is_dir() and (pg / "atlas_legacy_pb2.py").exists():
                 if str(pg) not in sys.path:
                     sys.path.insert(0, str(pg))
                 return
@@ -60,8 +60,8 @@ def _ensure_robonix_py() -> None:
 _ensure_robonix_py()
 
 import grpc
-import robonix_runtime_pb2 as pb
-import robonix_runtime_pb2_grpc as pb_grpc
+import atlas_legacy_pb2 as pb
+import atlas_legacy_pb2_grpc as pb_grpc
 import std_msgs_mcp
 
 from mcp.server.fastmcp import FastMCP

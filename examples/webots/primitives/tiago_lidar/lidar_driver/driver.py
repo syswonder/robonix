@@ -3,13 +3,13 @@
 # pyright: reportArgumentType=false
 """Tiago lidar driver — primitive cap.
 
-Subscribes to the planar lidar topic (default /scanner/scan), exposes:
+Subscribes to the planar lidar topic (default /scanner), exposes:
   robonix/primitive/lidar/snapshot  → lidar_snapshot(Empty) → LaserScan
 
 Env vars:
   ROBONIX_ATLAS          atlas endpoint (default 127.0.0.1:50051)
   TIAGO_LIDAR_MCP_PORT   MCP HTTP port (default 50113)
-  TIAGO_SCAN_TOPIC       lidar topic (default /scanner/scan)
+  TIAGO_SCAN_TOPIC       lidar topic (default /scanner)
 """
 import json
 import logging
@@ -24,7 +24,7 @@ def _ensure_proto_gen() -> None:
     d = Path(__file__).resolve().parent
     while d.parent != d:
         for pg in (d / "rbnx-build" / "codegen" / "proto_gen", d / "proto_gen"):
-            if pg.is_dir() and (pg / "robonix_runtime_pb2.py").exists():
+            if pg.is_dir() and (pg / "atlas_legacy_pb2.py").exists():
                 if str(pg) not in sys.path:
                     sys.path.insert(0, str(pg))
                 return
@@ -43,6 +43,19 @@ def _ensure_mcp_types() -> None:
 
 
 def _ensure_robonix_py() -> None:
+    """Find the robonix_py helper lib (sibling pylib/robonix-py/ on host
+    or /robonix_pkgs/pylib/robonix-py/ inside the sim container) by
+    walking up from this driver. Falls back to `rbnx path` only if a
+    walk-up doesn't turn it up — that fallback never fires inside the
+    container because rbnx isn't installed there."""
+    d = Path(__file__).resolve().parent
+    while d.parent != d:
+        for cand in (d / "pylib" / "robonix-py", d / "robonix-py"):
+            if cand.is_dir() and (cand / "robonix_py" / "__init__.py").exists():
+                if str(cand) not in sys.path:
+                    sys.path.insert(0, str(cand))
+                return
+        d = d.parent
     import subprocess
     try:
         out = subprocess.run(
@@ -69,8 +82,8 @@ for _logger_name in (
     logging.getLogger(_logger_name).setLevel(logging.WARNING)
 
 import grpc
-import robonix_runtime_pb2 as pb
-import robonix_runtime_pb2_grpc as pb_grpc
+import atlas_legacy_pb2 as pb
+import atlas_legacy_pb2_grpc as pb_grpc
 
 import builtin_interfaces_mcp
 import std_msgs_mcp
@@ -171,7 +184,7 @@ def _start_ros2():
 
     node = _rclpy.create_node("tiago_lidar_driver")
     _ros_node = node
-    scan_topic = os.environ.get("TIAGO_SCAN_TOPIC", "/scanner/scan")
+    scan_topic = os.environ.get("TIAGO_SCAN_TOPIC", "/scanner")
     node.create_subscription(_LaserScan, scan_topic, _on_scan, 1)
 
     executor = SingleThreadedExecutor()
