@@ -1,0 +1,29 @@
+# Tiago chassis driver — primitive package.
+# One device = one package. This driver exposes the robot base/chassis:
+#   robonix/primitive/chassis/state  → MCP tool chassis_state(Empty) → RobotState
+#   robonix/primitive/chassis/cmd    → MCP tool chassis_cmd(MoveCommand) → String
+#
+# Runs inside the sim container (started by examples/webots/sim/start.sh)
+# so it shares the same DDS graph as Webots; subscribes to /amcl_pose,
+# publishes to /cmd_vel.
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.tiago_chassis
+  version: 0.1.0
+  vendor: robonix
+  description: Tiago chassis driver — pose readout + velocity control over Webots ROS2.
+  license: MulanPSL-2.0
+
+# Codegen the proto stubs + MCP dataclasses into rbnx-build/codegen/.
+# scripts/build.sh just wraps `rbnx codegen --mcp`; the venv pattern from
+# system/memory is unnecessary here because the driver runs inside the
+# sim container which already has rclpy + numpy + Pillow + fastmcp.
+build: bash scripts/build.sh
+
+# Start: docker-exec into the pre-running sim container. See scripts/start.sh.
+start: bash scripts/start.sh
+
+capabilities:
+  - name: robonix/primitive/chassis/state
+  - name: robonix/primitive/chassis/cmd
