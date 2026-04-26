@@ -2,7 +2,7 @@
 # Client streams AudioChunk; server streams RecognizeStreamEvent.
 # ROS: `lib/asr/srv/RecognizeStream.srv`. Stream element types in TOML only.
 [contract]
-id      = "robonix/srv/speech/asr_stream"
+id      = "robonix/system/speech/asr_stream"
 version = "1"
 kind    = "service"
 

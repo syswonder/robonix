@@ -9,4 +9,3 @@ srv = "slam/srv/GetSlamStatus"
 
 [mode]
 type = "rpc"
-

@@ -9,4 +9,3 @@ srv = "slam/srv/SaveMap"
 
 [mode]
 type = "rpc"
-

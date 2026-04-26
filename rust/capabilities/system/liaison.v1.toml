@@ -9,4 +9,3 @@ srv = "liaison/srv/SubmitTask"
 
 [mode]
 type = "rpc_server_stream"
-

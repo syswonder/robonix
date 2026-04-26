@@ -1,5 +1,5 @@
 # Cancel an active navigation goal.
-# ROS IDL: `lib/prm_base/srv/CancelNavigation.srv` (goal_id → accepted + message).
+# ROS IDL: `lib/service/navigation/srv/CancelNavigation.srv` (goal_id → accepted + message).
 [contract]
 id      = "robonix/service/navigation/cancel"
 version = "1"
@@ -7,7 +7,7 @@ kind    = "service"
 
 
 [io.srv]
-srv = "prm_base/srv/CancelNavigation"
+srv = "navigation/srv/CancelNavigation"
 
 [mode]
 type = "rpc"

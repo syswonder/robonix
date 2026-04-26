@@ -9,4 +9,3 @@ srv = "pilot/srv/SubmitTask"
 
 [mode]
 type = "rpc_server_stream"
-

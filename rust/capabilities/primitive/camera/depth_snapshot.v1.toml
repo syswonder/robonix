@@ -1,6 +1,6 @@
 # On-demand depth image snapshot (single frame).
 # Complements robonix/prm/camera/depth (continuous stream).
-# ROS IDL: `lib/prm_base/srv/GetCameraImage.srv` (same wire as RGB snapshot; encoding differs).
+# ROS IDL: `lib/primitive/camera/srv/GetCameraImage.srv` (same wire as RGB snapshot; encoding differs).
 [contract]
 id      = "robonix/primitive/camera/depth_snapshot"
 version = "1"
@@ -8,7 +8,7 @@ kind    = "primitive"
 
 
 [io.srv]
-srv = "prm_base/srv/GetCameraImage"
+srv = "camera/srv/GetCameraImage"
 
 [mode]
 type = "rpc"
