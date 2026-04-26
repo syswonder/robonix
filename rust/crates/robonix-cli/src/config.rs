@@ -133,27 +133,6 @@ impl Config {
                 .join("robonix-interfaces")
                 .join("lib"),
             SourcePathKey::RuntimeProto => root.join("rust").join("proto"),
-            SourcePathKey::RobonixPy => {
-                // Try the standard locations in order. Python `from robonix_py
-                // import …` needs the *parent* dir of the `robonix_py/`
-                // package on sys.path, so the resolved path here is the
-                // package-root (the dir containing `robonix_py/`), not
-                // `robonix_py/` itself.
-                let candidates = [
-                    root.join("pylib").join("robonix-py"),
-                    root.join("rust").join("crates").join("robonix-py"),
-                    // Pre-dev-packaging fallback.
-                    root.join("rust")
-                        .join("examples")
-                        .join("packages")
-                        .join("robonix_mcp_contract"),
-                ];
-                candidates
-                    .iter()
-                    .find(|p| p.exists())
-                    .cloned()
-                    .unwrap_or_else(|| candidates[0].clone())
-            }
         };
         if !abs.exists() {
             anyhow::bail!(
@@ -179,8 +158,6 @@ pub enum SourcePathKey {
     InterfacesLib,
     /// `<root>/rust/proto` (runtime / atlas protos).
     RuntimeProto,
-    /// Shared Python helper library (robonix-py; fallback: examples/packages/robonix_mcp_contract).
-    RobonixPy,
 }
 
 impl std::str::FromStr for SourcePathKey {
@@ -192,9 +169,8 @@ impl std::str::FromStr for SourcePathKey {
             "capabilities" => Ok(Self::Capabilities),
             "interfaces-lib" | "idl" => Ok(Self::InterfacesLib),
             "runtime-proto" => Ok(Self::RuntimeProto),
-            "robonix-py" | "mcp-contract" => Ok(Self::RobonixPy),
             other => Err(format!(
-                "unknown path key: {other}. Valid: root, rust, capabilities, interfaces-lib, runtime-proto, robonix-py"
+                "unknown path key: {other}. Valid: root, rust, capabilities, interfaces-lib, runtime-proto"
             )),
         }
     }

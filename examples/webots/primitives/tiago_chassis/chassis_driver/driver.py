@@ -4,8 +4,8 @@
 """Tiago chassis driver — primitive cap.
 
 Subscribes to /amcl_pose, publishes to /cmd_vel, exposes two MCP tools:
-  robonix/primitive/chassis/state  → chassis_state(Empty) → RobotState
-  robonix/primitive/chassis/cmd    → chassis_cmd(MoveCommand) → String
+  robonix/primitive/chassis/state  → state()  → RobotState (as dict)
+  robonix/primitive/chassis/cmd    → cmd(...) → ack JSON string
 
 Runs inside the sim docker container (sim/start.sh brings it up, then
 the package's `start:` block does `docker exec robonix_tiago_sim ...`).
@@ -46,37 +46,8 @@ def _ensure_mcp_types() -> None:
         d = d.parent
 
 
-def _ensure_robonix_py() -> None:
-    """Find the robonix_py helper lib (sibling pylib/robonix-py/ on host
-    or /robonix_pkgs/pylib/robonix-py/ inside the sim container) by
-    walking up from this driver. Falls back to `rbnx path` only if a
-    walk-up doesn't turn it up — that fallback never fires inside the
-    container because rbnx isn't installed there."""
-    d = Path(__file__).resolve().parent
-    while d.parent != d:
-        for cand in (d / "pylib" / "robonix-py", d / "robonix-py"):
-            if cand.is_dir() and (cand / "robonix_py" / "__init__.py").exists():
-                if str(cand) not in sys.path:
-                    sys.path.insert(0, str(cand))
-                return
-        d = d.parent
-    import subprocess
-    try:
-        out = subprocess.run(
-            ["rbnx", "path", "robonix-py"],
-            capture_output=True, text=True, timeout=5, check=False,
-        )
-        if out.returncode == 0:
-            lib = Path(out.stdout.strip())
-            if lib.is_dir() and str(lib) not in sys.path:
-                sys.path.insert(0, str(lib))
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-
-
 _ensure_proto_gen()
 _ensure_mcp_types()
-_ensure_robonix_py()
 
 # Quiet down noisy upstreams.
 for _logger_name in (
@@ -90,13 +61,10 @@ import grpc
 import atlas_legacy_pb2 as pb
 import atlas_legacy_pb2_grpc as pb_grpc
 
-import builtin_interfaces_mcp
-import std_msgs_mcp
 from base_mcp import MoveCommand, RobotState
 from geometry_msgs_mcp import PoseStamped
-from std_msgs_mcp import Empty, String
+from std_msgs_mcp import Empty
 
-from robonix_py import mcp_contract
 from mcp.server.fastmcp import FastMCP
 
 # ── ROS2 lazy imports ────────────────────────────────────────────────────────
@@ -143,15 +111,14 @@ def _on_pose(msg):
 
 # ── MCP tools ────────────────────────────────────────────────────────────────
 
-@mcp_contract(mcp, contract_id="robonix/primitive/chassis/state")
-def state(msg: Empty) -> RobotState:
-    """Get the chassis pose (latest /amcl_pose). Returns codegen base/RobotState
+@mcp.tool(name="state")
+def state() -> dict:
+    """Get the chassis pose (latest /amcl_pose). Returns prm_base/RobotState
     with `base_pose` populated from AMCL when available; empty otherwise.
     Contract: robonix/primitive/chassis/state."""
-    _ = msg
     with _lock:
         pose = _latest_pose
-    state = RobotState()
+    out = RobotState()
     if pose is not None:
         bp = PoseStamped()
         bp.header.frame_id = pose.get("frame", "map")
@@ -164,37 +131,46 @@ def state(msg: Empty) -> RobotState:
         bp.pose.orientation.y = float(ori.get("y", 0.0))
         bp.pose.orientation.z = float(ori.get("z", 0.0))
         bp.pose.orientation.w = float(ori.get("w", 1.0))
-        state.base_pose = bp
-    return state
+        out.base_pose = bp
+    return out.to_dict()
 
 
-@mcp_contract(mcp, contract_id="robonix/primitive/chassis/cmd")
-def cmd(msg: MoveCommand) -> String:
-    """Send a velocity command to the chassis (publishes Twist on /cmd_vel
-    for `TIAGO_CHASSIS_CMD_DURATION_SEC` seconds, default 1.0).
+@mcp.tool(name="cmd")
+def cmd(
+    linear_x: float = 0.0,
+    linear_y: float = 0.0,
+    linear_z: float = 0.0,
+    angular_x: float = 0.0,
+    angular_y: float = 0.0,
+    angular_z: float = 0.0,
+) -> dict:
+    """Send a velocity command to the chassis. Each parameter mirrors a
+    field on prm_base/MoveCommand. Publishes Twist on /cmd_vel for
+    `TIAGO_CHASSIS_CMD_DURATION_SEC` seconds (default 1.0), then a zero
+    Twist to stop. Returns std_msgs/String JSON ack.
     Contract: robonix/primitive/chassis/cmd."""
     if _ros_node is None or _cmd_vel_pub is None:
-        return String(data=json.dumps({"error": "ROS2 not initialized"}))
+        return {"data": json.dumps({"error": "ROS2 not initialized"})}
     duration = float(os.environ.get("TIAGO_CHASSIS_CMD_DURATION_SEC", "1.0"))
     tw = _Twist()
-    tw.linear.x = float(msg.linear_x)
-    tw.linear.y = float(msg.linear_y)
-    tw.linear.z = float(msg.linear_z)
-    tw.angular.x = float(msg.angular_x)
-    tw.angular.y = float(msg.angular_y)
-    tw.angular.z = float(msg.angular_z)
+    tw.linear.x = float(linear_x)
+    tw.linear.y = float(linear_y)
+    tw.linear.z = float(linear_z)
+    tw.angular.x = float(angular_x)
+    tw.angular.y = float(angular_y)
+    tw.angular.z = float(angular_z)
     stop = _Twist()
     steps = max(1, int(duration / 0.1))
     for _ in range(steps):
         _cmd_vel_pub.publish(tw)
         time.sleep(0.1)
     _cmd_vel_pub.publish(stop)
-    return String(data=json.dumps({
+    return {"data": json.dumps({
         "status": "done",
-        "linear_x": msg.linear_x,
-        "angular_z": msg.angular_z,
+        "linear_x": linear_x,
+        "angular_z": angular_z,
         "duration": duration,
-    }))
+    })}
 
 
 # ── runtime wiring ───────────────────────────────────────────────────────────
@@ -270,7 +246,7 @@ def main() -> None:
             supported_transports=["mcp"],
             metadata_json=_single_tool_meta(
                 "cmd",
-                "Send a velocity command. base/MoveCommand wire JSON. "
+                "Send a velocity command. base/MoveCommand fields as parameters. "
                 "Publish duration: env TIAGO_CHASSIS_CMD_DURATION_SEC (default 1.0).",
                 MoveCommand.json_schema(),
             ),

@@ -49,37 +49,8 @@ def _ensure_mcp_types() -> None:
         d = d.parent
 
 
-def _ensure_robonix_py() -> None:
-    """Find the robonix_py helper lib (sibling pylib/robonix-py/ on host
-    or /robonix_pkgs/pylib/robonix-py/ inside the sim container) by
-    walking up from this driver. Falls back to `rbnx path` only if a
-    walk-up doesn't turn it up — that fallback never fires inside the
-    container because rbnx isn't installed there."""
-    d = Path(__file__).resolve().parent
-    while d.parent != d:
-        for cand in (d / "pylib" / "robonix-py", d / "robonix-py"):
-            if cand.is_dir() and (cand / "robonix_py" / "__init__.py").exists():
-                if str(cand) not in sys.path:
-                    sys.path.insert(0, str(cand))
-                return
-        d = d.parent
-    import subprocess
-    try:
-        out = subprocess.run(
-            ["rbnx", "path", "robonix-py"],
-            capture_output=True, text=True, timeout=5, check=False,
-        )
-        if out.returncode == 0:
-            lib = Path(out.stdout.strip())
-            if lib.is_dir() and str(lib) not in sys.path:
-                sys.path.insert(0, str(lib))
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-
-
 _ensure_proto_gen()
 _ensure_mcp_types()
-_ensure_robonix_py()
 
 for _logger_name in (
     "mcp", "mcp.server", "mcp.server.streamable_http",
@@ -97,7 +68,6 @@ import std_msgs_mcp
 from sensor_msgs_mcp import Image
 from std_msgs_mcp import Empty
 
-from robonix_py import mcp_contract
 from mcp.server.fastmcp import FastMCP
 
 # ── ROS2 lazy imports ────────────────────────────────────────────────────────
@@ -221,33 +191,32 @@ def _on_depth(msg):
 
 # ── MCP tools ────────────────────────────────────────────────────────────────
 
-@mcp_contract(mcp, contract_id="robonix/primitive/camera/snapshot")
-def snapshot(msg: Empty) -> Image:
-    """Get the current RGB head-camera frame as a JPEG-encoded sensor_msgs/Image.
+@mcp.tool(name="snapshot")
+def snapshot() -> dict:
+    """Get the current RGB head-camera frame as a JPEG-encoded sensor_msgs/Image
+    (binary `data` field is base64-encoded by .to_dict()).
     Contract: robonix/primitive/camera/snapshot."""
-    _ = msg
     with _lock:
         data = _latest_rgb
     if data is None:
-        return _image_error("no RGB image received yet")
+        return _image_error("no RGB image received yet").to_dict()
     return _jpeg_to_image_mcp(
         data, os.environ.get("TIAGO_RGB_FRAME_ID", "head_front_camera_rgb_optical_frame")
-    )
+    ).to_dict()
 
 
-@mcp_contract(mcp, contract_id="robonix/primitive/camera/depth_snapshot")
-def depth_snapshot(msg: Empty) -> Image:
+@mcp.tool(name="depth_snapshot")
+def depth_snapshot() -> dict:
     """Get the current depth head-camera frame as a JPEG-encoded sensor_msgs/Image
-    (depth normalized to grayscale).
+    (depth normalized to grayscale; binary `data` is base64).
     Contract: robonix/primitive/camera/depth_snapshot."""
-    _ = msg
     with _lock:
         data = _latest_depth
     if data is None:
-        return _image_error("no depth image received yet")
+        return _image_error("no depth image received yet").to_dict()
     return _jpeg_to_image_mcp(
         data, os.environ.get("TIAGO_DEPTH_FRAME_ID", "head_front_camera_depth_optical_frame")
-    )
+    ).to_dict()
 
 
 # ── runtime wiring ───────────────────────────────────────────────────────────

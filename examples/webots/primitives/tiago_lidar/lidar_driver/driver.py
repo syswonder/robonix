@@ -42,37 +42,8 @@ def _ensure_mcp_types() -> None:
         d = d.parent
 
 
-def _ensure_robonix_py() -> None:
-    """Find the robonix_py helper lib (sibling pylib/robonix-py/ on host
-    or /robonix_pkgs/pylib/robonix-py/ inside the sim container) by
-    walking up from this driver. Falls back to `rbnx path` only if a
-    walk-up doesn't turn it up — that fallback never fires inside the
-    container because rbnx isn't installed there."""
-    d = Path(__file__).resolve().parent
-    while d.parent != d:
-        for cand in (d / "pylib" / "robonix-py", d / "robonix-py"):
-            if cand.is_dir() and (cand / "robonix_py" / "__init__.py").exists():
-                if str(cand) not in sys.path:
-                    sys.path.insert(0, str(cand))
-                return
-        d = d.parent
-    import subprocess
-    try:
-        out = subprocess.run(
-            ["rbnx", "path", "robonix-py"],
-            capture_output=True, text=True, timeout=5, check=False,
-        )
-        if out.returncode == 0:
-            lib = Path(out.stdout.strip())
-            if lib.is_dir() and str(lib) not in sys.path:
-                sys.path.insert(0, str(lib))
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-
-
 _ensure_proto_gen()
 _ensure_mcp_types()
-_ensure_robonix_py()
 
 for _logger_name in (
     "mcp", "mcp.server", "mcp.server.streamable_http",
@@ -90,7 +61,6 @@ import std_msgs_mcp
 from sensor_msgs_mcp import LaserScan
 from std_msgs_mcp import Empty
 
-from robonix_py import mcp_contract
 from mcp.server.fastmcp import FastMCP
 
 # ── ROS2 lazy imports ────────────────────────────────────────────────────────
@@ -162,16 +132,15 @@ def _on_scan(msg):
 
 # ── MCP tool ─────────────────────────────────────────────────────────────────
 
-@mcp_contract(mcp, contract_id="robonix/primitive/lidar/snapshot")
-def snapshot(msg: Empty) -> LaserScan:
+@mcp.tool(name="snapshot")
+def snapshot() -> dict:
     """Get the latest planar lidar scan as sensor_msgs/LaserScan.
     Contract: robonix/primitive/lidar/snapshot."""
-    _ = msg
     with _lock:
         ros_scan = _latest_scan_msg
     if ros_scan is None:
-        return _laserscan_error("no lidar scan received yet")
-    return _ros_laserscan_to_mcp(ros_scan)
+        return _laserscan_error("no lidar scan received yet").to_dict()
+    return _ros_laserscan_to_mcp(ros_scan).to_dict()
 
 
 # ── runtime wiring ───────────────────────────────────────────────────────────

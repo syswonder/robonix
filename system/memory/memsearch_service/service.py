@@ -37,28 +37,6 @@ def _ensure_mcp_types() -> None:
         d = d.parent
 
 
-def _ensure_robonix_py() -> None:
-    """Add the shared Python helper lib (crates/robonix-py) to sys.path.
-
-    Uses `rbnx path robonix-py` when available; falls back to PYTHONPATH
-    injected by the package build.sh (rbnx-build/ws/install/setup.bash).
-    """
-    import subprocess
-    try:
-        out = subprocess.run(
-            ["rbnx", "path", "robonix-py"],
-            capture_output=True, text=True, timeout=5, check=False,
-        )
-        if out.returncode == 0:
-            lib = Path(out.stdout.strip())
-            if lib.is_dir() and str(lib) not in sys.path:
-                sys.path.insert(0, str(lib))
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass  # rbnx not installed → rely on PYTHONPATH set by build.sh
-
-
-_ensure_robonix_py()
-
 import grpc
 import atlas_legacy_pb2 as pb
 import atlas_legacy_pb2_grpc as pb_grpc
@@ -66,8 +44,6 @@ import std_msgs_mcp
 
 from mcp.server.fastmcp import FastMCP
 from memsearch import MemSearch
-
-from robonix_py import mcp_contract
 
 mcp = FastMCP("memsearch_provider")
 
@@ -83,35 +59,29 @@ mem = MemSearch(
 
 # ── Contract: robonix/system/memory/search ──────────────────────────────────────
 
-@mcp_contract(
-    mcp,
-    contract_id="robonix/system/memory/search",
-)
-async def search(msg: std_msgs_mcp.String) -> std_msgs_mcp.String:
+@mcp.tool(name="search")
+async def search(data: str) -> dict:
     """Search the agent's long-term memory for relevant past context, decisions, or user preferences.
-    Contract: robonix/system/memory/search (input/output std_msgs/String)."""
+    Returns std_msgs/String JSON.
+    Contract: robonix/system/memory/search."""
     try:
-        results = await mem.search(msg.data, top_k=2)
+        results = await mem.search(data, top_k=2)
     except Exception as e:
         logging.warning("[memsearch] search failed (returning empty): %s", e)
-        return std_msgs_mcp.String(
-            data="No relevant memories found (search unavailable)."
-        )
+        return {"data": "No relevant memories found (search unavailable)."}
     if not results:
-        return std_msgs_mcp.String(data="No relevant memories found.")
+        return {"data": "No relevant memories found."}
     context = "\n\n".join(f"- {m['content']}" for m in results)
-    return std_msgs_mcp.String(data=f"Relevant memories:\n{context}")
+    return {"data": f"Relevant memories:\n{context}"}
 
 
 # ── Contract: robonix/system/memory/compact ─────────────────────────────────────
 
-@mcp_contract(
-    mcp,
-    contract_id="robonix/system/memory/compact",
-)
-async def compact(msg: std_msgs_mcp.Empty) -> std_msgs_mcp.String:
+@mcp.tool(name="compact")
+async def compact() -> dict:
     """Compact and summarize recent memories. Call this at the end of a session.
-    Contract: robonix/system/memory/compact (input std_msgs/Empty, output std_msgs/String).
+    Returns std_msgs/String JSON.
+    Contract: robonix/system/memory/compact.
 
     Reuses pilot's OpenAI-compatible LLM endpoint so memory doesn't need a
     separate API key. Reads:
@@ -123,16 +93,13 @@ async def compact(msg: std_msgs_mcp.Empty) -> std_msgs_mcp.String:
     `VLM_*` are the names used in robonix_manifest.yaml `system.pilot.vlm.*`;
     `OPENAI_*` are accepted as a fallback so this also works under a stock
     OpenAI deployment."""
-    _ = msg
     base_url = os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
     api_key = os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
     model = os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
     if not api_key:
-        return std_msgs_mcp.String(
-            data="compact: no LLM credentials available. "
-                 "Set VLM_API_KEY (and VLM_BASE_URL for non-default endpoints) "
-                 "in the deploy manifest's system.memory env block."
-        )
+        return {"data": "compact: no LLM credentials available. "
+                        "Set VLM_API_KEY (and VLM_BASE_URL for non-default endpoints) "
+                        "in the deploy manifest's system.memory env block."}
     try:
         summary_path = await mem.compact(
             llm_provider="openai",
@@ -140,32 +107,28 @@ async def compact(msg: std_msgs_mcp.Empty) -> std_msgs_mcp.String:
             base_url=base_url,
             api_key=api_key,
         )
-        return std_msgs_mcp.String(
-            data=f"Memory compacted successfully to {summary_path}."
-        )
+        return {"data": f"Memory compacted successfully to {summary_path}."}
     except Exception as e:
-        return std_msgs_mcp.String(data=f"Failed to compact memory: {e}")
+        return {"data": f"Failed to compact memory: {e}"}
 
 
 # ── Contract: robonix/system/memory/save ────────────────────────────────────────
 
-@mcp_contract(
-    mcp,
-    contract_id="robonix/system/memory/save",
-)
-async def save(msg: std_msgs_mcp.String) -> std_msgs_mcp.String:
+@mcp.tool(name="save")
+async def save(data: str) -> dict:
     """Save an important fact, user preference, or decision to long-term memory.
-    Contract: robonix/system/memory/save (input/output std_msgs/String)."""
+    Returns std_msgs/String JSON.
+    Contract: robonix/system/memory/save."""
     from datetime import date
     p = Path(MEMORY_DIR) / f"{date.today()}_notes.md"
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a") as f:
-        f.write(f"\n{msg.data}\n")
+        f.write(f"\n{data}\n")
     try:
         await mem.index()
     except Exception as e:
         logging.warning("[memsearch] re-index after save failed: %s", e)
-    return std_msgs_mcp.String(data="Memory saved and indexed.")
+    return {"data": "Memory saved and indexed."}
 
 
 def _single_tool_meta(tool_name: str, description: str, input_schema: dict) -> str:
