@@ -6,7 +6,7 @@
 // memory cap is looked up via atlas the same way every other capability
 // is. Missing caps are silently tolerated — memory is never load-bearing.
 
-use crate::discovery;
+use crate::discovery::{self, llm_name};
 use crate::history::decode_string_output;
 use crate::pb::pilot::{CapabilityCall, Plan};
 use crate::planner::ExecutorConn;
@@ -61,15 +61,18 @@ pub async fn prefetch(
 
 /// Best-effort `compact_memory` on session teardown. Logs failures, never
 /// propagates errors (the cap may be absent entirely).
-pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, consumer_id: &str) {
-    let caps = match discovery::discover(atlas, consumer_id).await {
+pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _consumer_id: &str) {
+    let caps = match discovery::discover(atlas).await {
         Ok(c) => c,
         Err(e) => {
             log::debug!("[pilot] compact_memory: discovery failed: {e}");
             return;
         }
     };
-    let Some(target) = caps.iter().find(|c| c.name == "compact_memory") else {
+    let Some((cap_id, iface)) = caps
+        .iter()
+        .find(|(_, iface)| llm_name(&iface.contract_id) == "compact_memory")
+    else {
         return;
     };
 
@@ -79,8 +82,8 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, c
         round: 0,
         calls: vec![CapabilityCall {
             call_id: Uuid::new_v4().to_string(),
-            cap_id: target.cap_id.clone(),
-            contract_id: target.contract_id.clone(),
+            cap_id: cap_id.clone(),
+            contract_id: iface.contract_id.clone(),
             args_json: "{}".to_string(),
         }],
     };
