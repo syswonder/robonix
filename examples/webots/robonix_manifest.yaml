@@ -22,6 +22,12 @@ system:
       api_format: openai
 
 primitive: []
+# TODO: add tiago_sim_stack here once it grows a `*/driver` lifecycle
+# interface (Phase B of task #37). Deploy waits for `*/driver` over gRPC
+# and calls Driver(CMD_INIT) before moving on; tiago_sim_stack currently
+# registers via the legacy RegisterNode/DeclareInterface API and would
+# deadlock the deploy loop. Until then, start it manually:
+#   rbnx start -p ./primitives/tiago_sim_stack
 
 service: []
 

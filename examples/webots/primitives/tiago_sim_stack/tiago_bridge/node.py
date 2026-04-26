@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 # pyright: reportArgumentType=false
-"""Tiago robot bridge node: ROS2 ↔ MCP for robonix agent.
+"""Tiago bridge: ROS2 ↔ MCP for robonix agent (Webots sim).
 
 Subscribes to ROS2 topics (camera, pose, scan) and exposes them as MCP tools
-that the robonix agent can call.  Each MCP tool maps to exactly one contract.
+the robonix agent can call. One bridge process registers many caps to atlas.
 
-Contract → MCP tool mapping:
-  robonix/prm/camera/snapshot       → camera_snapshot()
-  robonix/prm/camera/depth_snapshot → camera_depth_snapshot()
-  robonix/prm/robot/state           → robot_state()
-  robonix/prm/sensor/lidar_snapshot → lidar_snapshot()
-  robonix/srv/navigation/navigate         → base_navigate(pose: PoseStamped)
-  robonix/srv/navigation/status       → base_nav_status(msg: String)
-  robonix/srv/navigation/cancel       → base_nav_cancel(msg: String)
-  robonix/prm/base/cmd              → base_cmd(msg: MoveCommand)
+Contract → MCP tool mapping (new dev-packaging namespacing):
+  robonix/primitive/camera/snapshot        → camera_snapshot()
+  robonix/primitive/camera/depth_snapshot  → camera_depth_snapshot()
+  robonix/primitive/camera/rgb (gRPC)      → PrmCameraRgb.Stream
+  robonix/primitive/chassis/state          → chassis_state()
+  robonix/primitive/chassis/cmd            → chassis_cmd(msg: MoveCommand)
+  robonix/primitive/lidar/snapshot         → lidar_snapshot()
+  robonix/service/navigation/navigate      → nav_navigate(pose: PoseStamped)
+  robonix/service/navigation/status        → nav_status(msg: String)
+  robonix/service/navigation/cancel        → nav_cancel(msg: String)
+
+NOTE: navigation contracts are transitionally hosted here; they will move
+to a standalone `tiago_nav2` service package (task #38) so the primitive
+sensor stack is independent of Nav2.
 
 Optional env vars:
   ROBONIX_ATLAS            Control-plane address (default: localhost:50051)
-  ROBONIX_NODE_ID          Registry node id (default: com.robonix.prm.tiago)
+  ROBONIX_NODE_ID          Registry node id (default: com.robonix.primitive.tiago)
   ROBONIX_DISTRO           Distro label for QueryNodes (default: humble)
   ROBONIX_CONTAINER_ID     Container label for QueryNodes (default: empty)
   ROBONIX_MCP_LISTEN_PORT  Free TCP port for MCP HTTP (0 = auto).
@@ -25,7 +30,7 @@ Optional env vars:
   TIAGO_RGB_STREAM_HZ      gRPC PrmCameraRgb.Stream max rate (default: 2)
   TIAGO_RGB_FRAME_ID       frame_id in streamed sensor_msgs/Image
   TIAGO_ROS_DOMAIN         ROS_DOMAIN_ID (default: unset)
-  TIAGO_BASE_CMD_DURATION_SEC  How long to publish cmd_vel for base_cmd (not in MoveCommand.msg; default 1.0)
+  TIAGO_CHASSIS_CMD_DURATION_SEC  How long to publish cmd_vel for chassis_cmd (not in MoveCommand.msg; default 1.0)
 """
 import json
 import logging
@@ -108,6 +113,9 @@ import robonix_runtime_pb2 as pb
 import robonix_runtime_pb2_grpc as pb_grpc
 
 # Contract IDL types (robonix-codegen --lang mcp → tiago_bridge/robonix_mcp_types/)
+# TODO: rename IDL package `prm_base` → `primitive_chassis` (and field
+# RobotState.base_pose → chassis_pose) to match the new namespacing — needs
+# coordinated update across all .msg/.srv consumers + codegen rerun.
 import builtin_interfaces_mcp
 import std_msgs_mcp
 import sensor_msgs_mcp
@@ -312,15 +320,15 @@ def _laserscan_error(message: str) -> LaserScan:
 # ── MCP tools (one per contract) ─────────────────────────────────────────────
 
 
-# Contract: robonix/prm/camera/snapshot
+# Contract: robonix/primitive/camera/snapshot
 # input: std_msgs/msg/Empty  output: sensor_msgs/msg/Image
 @mcp_contract(
     mcp,
-    contract_id="robonix/prm/camera/snapshot",
+    contract_id="robonix/primitive/camera/snapshot",
 )
 def camera_snapshot(msg: Empty) -> Image:
     """Get the current RGB camera image from the robot's head camera.
-    Contract: robonix/prm/camera/snapshot.
+    Contract: robonix/primitive/camera/snapshot.
     Returns codegen `sensor_msgs/Image` (JPEG in `data`)."""
     _ = msg
     with _lock:
@@ -331,15 +339,15 @@ def camera_snapshot(msg: Empty) -> Image:
     return _jpeg_to_image_mcp(data, fid)
 
 
-# Contract: robonix/prm/camera/depth_snapshot
+# Contract: robonix/primitive/camera/depth_snapshot
 # input: std_msgs/msg/Empty  output: sensor_msgs/msg/Image
 @mcp_contract(
     mcp,
-    contract_id="robonix/prm/camera/depth_snapshot",
+    contract_id="robonix/primitive/camera/depth_snapshot",
 )
 def camera_depth_snapshot(msg: Empty) -> Image:
     """Get the current depth image from the robot's head camera (normalized to grayscale JPEG).
-    Contract: robonix/prm/camera/depth_snapshot.
+    Contract: robonix/primitive/camera/depth_snapshot.
     Returns codegen `sensor_msgs/Image`."""
     _ = msg
     with _lock:
@@ -350,15 +358,15 @@ def camera_depth_snapshot(msg: Empty) -> Image:
     return _jpeg_to_image_mcp(data, fid)
 
 
-# Contract: robonix/prm/robot/state
+# Contract: robonix/primitive/chassis/state
 # input: std_msgs/msg/Empty  output: prm_base/msg/RobotState
 @mcp_contract(
     mcp,
-    contract_id="robonix/prm/robot/state",
+    contract_id="robonix/primitive/chassis/state",
 )
-def robot_state(msg: Empty) -> RobotState:
+def chassis_state(msg: Empty) -> RobotState:
     """Get the robot's current state (pose, joint state, gripper).
-    Contract: robonix/prm/robot/state.
+    Contract: robonix/primitive/chassis/state.
     Returns codegen `prm_base/RobotState`; base_pose from AMCL when available."""
     _ = msg
     with _lock:
@@ -380,15 +388,15 @@ def robot_state(msg: Empty) -> RobotState:
     return state
 
 
-# Contract: robonix/prm/sensor/lidar_snapshot
+# Contract: robonix/primitive/lidar/snapshot
 # input: std_msgs/msg/Empty  output: sensor_msgs/msg/LaserScan
 @mcp_contract(
     mcp,
-    contract_id="robonix/prm/sensor/lidar_snapshot",
+    contract_id="robonix/primitive/lidar/snapshot",
 )
 def lidar_snapshot(msg: Empty) -> LaserScan:
     """Get the latest lidar scan.
-    Contract: robonix/prm/sensor/lidar_snapshot.
+    Contract: robonix/primitive/lidar/snapshot.
     Returns codegen `sensor_msgs/LaserScan`."""
     _ = msg
     with _lock:
@@ -398,15 +406,15 @@ def lidar_snapshot(msg: Empty) -> LaserScan:
     return _ros_laserscan_to_mcp(ros_scan)
 
 
-# Contract: robonix/srv/navigation/navigate
+# Contract: robonix/service/navigation/navigate
 # input: geometry_msgs/msg/PoseStamped  output: std_msgs/msg/String
 @mcp_contract(
     mcp,
-    contract_id="robonix/srv/navigation/navigate",
+    contract_id="robonix/service/navigation/navigate",
 )
-def base_navigate(msg: PoseStamped) -> String:
+def nav_navigate(msg: PoseStamped) -> String:
     """Send the robot to a target pose.
-    Contract: robonix/srv/navigation/navigate.
+    Contract: robonix/service/navigation/navigate.
     pose: geometry_msgs/PoseStamped (codegen).
     Returns codegen `std_msgs/String`; `data` is JSON with goal_id / error."""
     if _ros_node is None:
@@ -427,16 +435,16 @@ def base_navigate(msg: PoseStamped) -> String:
     return String(data=json.dumps(result))
 
 
-# Contract: robonix/srv/navigation/status
+# Contract: robonix/service/navigation/status
 # input: std_msgs/msg/String (data = goal_id)  output: std_msgs/msg/String (data = status JSON)
 @mcp_contract(
     mcp,
-    contract_id="robonix/srv/navigation/status",
+    contract_id="robonix/service/navigation/status",
 )
-def base_nav_status(msg: String) -> String:
+def nav_status(msg: String) -> String:
     """Return stored navigation status for a goal_id.
-    Contract: robonix/srv/navigation/status.
-    msg.data is the goal_id from base_navigate.
+    Contract: robonix/service/navigation/status.
+    msg.data is the goal_id from nav_navigate.
     Returns codegen `std_msgs/String`; `data` is JSON status."""
     gid = msg.data
     with _lock:
@@ -448,16 +456,16 @@ def base_nav_status(msg: String) -> String:
     return String(data=json.dumps(result))
 
 
-# Contract: robonix/srv/navigation/cancel
+# Contract: robonix/service/navigation/cancel
 # input: std_msgs/msg/String (data = goal_id)  output: std_msgs/msg/String (data = status JSON)
 @mcp_contract(
     mcp,
-    contract_id="robonix/srv/navigation/cancel",
+    contract_id="robonix/service/navigation/cancel",
 )
-def base_nav_cancel(msg: String) -> String:
+def nav_cancel(msg: String) -> String:
     """Request cancellation of a navigation goal (Nav2 action only).
-    Contract: robonix/srv/navigation/cancel.
-    msg.data is the goal_id from base_navigate.
+    Contract: robonix/service/navigation/cancel.
+    msg.data is the goal_id from nav_navigate.
     Returns codegen `std_msgs/String`; `data` is JSON status."""
     gid = msg.data
     with _lock:
@@ -470,21 +478,21 @@ def base_nav_cancel(msg: String) -> String:
     return String(data=json.dumps(result))
 
 
-# Contract: robonix/prm/base/cmd
+# Contract: robonix/primitive/chassis/cmd
 # input: prm_base/msg/MoveCommand  output: std_msgs/msg/String
 @mcp_contract(
     mcp,
-    contract_id="robonix/prm/base/cmd",
+    contract_id="robonix/primitive/chassis/cmd",
 )
-def base_cmd(msg: MoveCommand) -> String:
-    """Send a velocity command to the robot base.
-    Contract: robonix/prm/base/cmd.
-    cmd: prm_base/MoveCommand. Publish duration: env `TIAGO_BASE_CMD_DURATION_SEC` (default 1.0).
+def chassis_cmd(msg: MoveCommand) -> String:
+    """Send a velocity command to the robot chassis.
+    Contract: robonix/primitive/chassis/cmd.
+    cmd: prm_base/MoveCommand. Publish duration: env `TIAGO_CHASSIS_CMD_DURATION_SEC` (default 1.0).
     Returns codegen `std_msgs/String`; `data` is JSON execution status."""
     if _ros_node is None:
         return String(data=json.dumps({"error": "ROS2 node not initialized"}))
 
-    duration = float(os.environ.get("TIAGO_BASE_CMD_DURATION_SEC", "1.0"))
+    duration = float(os.environ.get("TIAGO_CHASSIS_CMD_DURATION_SEC", "1.0"))
 
     from geometry_msgs.msg import Twist  # type: ignore
     tw = Twist()
@@ -727,7 +735,7 @@ def _jpeg_to_sensor_image_proto(jpg: bytes):
 
 
 class _PrmCameraRgbServicer(robonix_contracts_pb2_grpc.PrmCameraRgbServicer):
-    """Implements contract `robonix/prm/camera/rgb` (PrmCameraRgb.Stream gRPC)."""
+    """Implements contract `robonix/primitive/camera/rgb` (PrmCameraRgb.Stream gRPC)."""
 
     def Stream(self, request: empty_pb2.Empty, context):
         _ = request
@@ -783,12 +791,12 @@ def main() -> None:
 
     channel = grpc.insecure_channel(os.environ.get("ROBONIX_ATLAS", "localhost:50051"))
     stub = pb_grpc.RobonixRuntimeStub(channel)
-    node_id = os.environ.get("ROBONIX_NODE_ID", "com.robonix.prm.tiago")
+    node_id = os.environ.get("ROBONIX_NODE_ID", "com.robonix.primitive.tiago")
 
     stub.RegisterNode(
         pb.RegisterNodeRequest(
             node_id=node_id,
-            namespace="robonix/prm",
+            namespace="robonix/primitive",
             kind="primitive",
             skill_md="",
             distro=os.environ.get("ROBONIX_DISTRO", "humble"),
@@ -800,7 +808,7 @@ def main() -> None:
 
     # ── One DeclareInterface per contract ──────────────────────────────────────
 
-    # robonix/prm/camera/snapshot — Empty → Image
+    # robonix/primitive/camera/snapshot — Empty → Image
     stub.DeclareInterface(pb.DeclareInterfaceRequest(
         node_id=node_id, name="camera_snapshot",
         supported_transports=["mcp"],
@@ -810,10 +818,10 @@ def main() -> None:
             Empty.json_schema(),
         ),
         listen_port=mcp_port,
-        contract_id="robonix/prm/camera/snapshot",
+        contract_id="robonix/primitive/camera/snapshot",
     ))
 
-    # robonix/prm/camera/depth_snapshot — Empty → Image
+    # robonix/primitive/camera/depth_snapshot — Empty → Image
     stub.DeclareInterface(pb.DeclareInterfaceRequest(
         node_id=node_id, name="camera_depth_snapshot",
         supported_transports=["mcp"],
@@ -823,23 +831,23 @@ def main() -> None:
             Empty.json_schema(),
         ),
         listen_port=mcp_port,
-        contract_id="robonix/prm/camera/depth_snapshot",
+        contract_id="robonix/primitive/camera/depth_snapshot",
     ))
 
-    # robonix/prm/robot/state — Empty → RobotState
+    # robonix/primitive/chassis/state — Empty → RobotState
     stub.DeclareInterface(pb.DeclareInterfaceRequest(
-        node_id=node_id, name="robot_state",
+        node_id=node_id, name="chassis_state",
         supported_transports=["mcp"],
         metadata_json=_single_tool_meta(
-            "robot_state",
+            "chassis_state",
             "Get robot state (pose, joints, gripper). Returns prm_base/RobotState.",
             Empty.json_schema(),
         ),
         listen_port=mcp_port,
-        contract_id="robonix/prm/robot/state",
+        contract_id="robonix/primitive/chassis/state",
     ))
 
-    # robonix/prm/sensor/lidar_snapshot — Empty → LaserScan
+    # robonix/primitive/lidar/snapshot — Empty → LaserScan
     stub.DeclareInterface(pb.DeclareInterfaceRequest(
         node_id=node_id, name="lidar_snapshot",
         supported_transports=["mcp"],
@@ -849,59 +857,59 @@ def main() -> None:
             Empty.json_schema(),
         ),
         listen_port=mcp_port,
-        contract_id="robonix/prm/sensor/lidar_snapshot",
+        contract_id="robonix/primitive/lidar/snapshot",
     ))
 
-    # robonix/srv/navigation/navigate — PoseStamped → String
+    # robonix/service/navigation/navigate — PoseStamped → String
     stub.DeclareInterface(pb.DeclareInterfaceRequest(
-        node_id=node_id, name="base_navigate",
+        node_id=node_id, name="nav_navigate",
         supported_transports=["mcp"],
         metadata_json=_single_tool_meta(
-            "base_navigate",
+            "nav_navigate",
             "Navigate to pose. Arguments: geometry_msgs/PoseStamped wire JSON. Returns std_msgs/String (goal_id in data).",
             PoseStamped.json_schema(),
         ),
         listen_port=mcp_port,
-        contract_id="robonix/srv/navigation/navigate",
+        contract_id="robonix/service/navigation/navigate",
     ))
 
-    # robonix/srv/navigation/status — String → String
+    # robonix/service/navigation/status — String → String
     stub.DeclareInterface(pb.DeclareInterfaceRequest(
-        node_id=node_id, name="base_nav_status",
+        node_id=node_id, name="nav_status",
         supported_transports=["mcp"],
         metadata_json=_single_tool_meta(
-            "base_nav_status",
+            "nav_status",
             "Get navigation status. std_msgs/String; data is goal_id. Returns std_msgs/String.",
             String.json_schema(),
         ),
         listen_port=mcp_port,
-        contract_id="robonix/srv/navigation/status",
+        contract_id="robonix/service/navigation/status",
     ))
 
-    # robonix/srv/navigation/cancel — String → String
+    # robonix/service/navigation/cancel — String → String
     stub.DeclareInterface(pb.DeclareInterfaceRequest(
-        node_id=node_id, name="base_nav_cancel",
+        node_id=node_id, name="nav_cancel",
         supported_transports=["mcp"],
         metadata_json=_single_tool_meta(
-            "base_nav_cancel",
+            "nav_cancel",
             "Cancel navigation goal. std_msgs/String; data is goal_id. Returns std_msgs/String.",
             String.json_schema(),
         ),
         listen_port=mcp_port,
-        contract_id="robonix/srv/navigation/cancel",
+        contract_id="robonix/service/navigation/cancel",
     ))
 
-    # robonix/prm/base/cmd — MoveCommand → String
+    # robonix/primitive/chassis/cmd — MoveCommand → String
     stub.DeclareInterface(pb.DeclareInterfaceRequest(
-        node_id=node_id, name="base_cmd",
+        node_id=node_id, name="chassis_cmd",
         supported_transports=["mcp"],
         metadata_json=_single_tool_meta(
-            "base_cmd",
-            "Velocity command. prm_base/MoveCommand wire JSON. Optional wall duration: TIAGO_BASE_CMD_DURATION_SEC. Returns std_msgs/String.",
+            "chassis_cmd",
+            "Velocity command. prm_base/MoveCommand wire JSON. Optional wall duration: TIAGO_CHASSIS_CMD_DURATION_SEC. Returns std_msgs/String.",
             MoveCommand.json_schema(),
         ),
         listen_port=mcp_port,
-        contract_id="robonix/prm/base/cmd",
+        contract_id="robonix/primitive/chassis/cmd",
     ))
 
     # ── PRM gRPC camera rgb stream (separate from MCP) ─────────────────────────
@@ -911,14 +919,14 @@ def main() -> None:
         supported_transports=["grpc"],
         metadata_json="{}",
         listen_port=prm_grpc_port,
-        contract_id="robonix/prm/camera/rgb",
+        contract_id="robonix/primitive/camera/rgb",
     ))
     resp_cam_r = stub.DeclareInterface(pb.DeclareInterfaceRequest(
         node_id=node_id, name="rgb",
         supported_transports=["ros2"],
         metadata_json="{}",
         listen_port=0,
-        contract_id="robonix/prm/camera/rgb",
+        contract_id="robonix/primitive/camera/rgb",
     ))
     _RGB_ROS_TOPIC = resp_cam_r.allocated_endpoint
 

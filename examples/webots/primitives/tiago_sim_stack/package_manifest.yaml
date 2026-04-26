@@ -1,6 +1,10 @@
 # Tiago sim stack — Docker Compose brings up Webots (GUI), Nav2, and
-# tiago_bridge (MCP ↔ atlas). Control plane: registers primitive/service
-# capabilities for the simulated Tiago platform via tiago_bridge.
+# tiago_bridge (MCP ↔ atlas). One package, multiple primitive caps:
+# chassis (state + cmd), camera (rgb snapshot + depth + gRPC stream),
+# lidar (scan snapshot). The single `start` block (docker compose up)
+# spawns the bridge container which then registers each cap to atlas.
+#
+# Navigation is NOT here — see ../../services/tiago_nav2 (planned).
 # GPU layer (compose.gpu.yaml) auto-merged when nvidia-smi succeeds.
 manifestVersion: 1
 
@@ -8,7 +12,7 @@ package:
   name: com.robonix.example.tiago_sim_stack
   version: 0.1.0
   vendor: robonix
-  description: Tiago sim (Webots + Nav2 + MCP bridge) as a Docker Compose stack.
+  description: Tiago sim (Webots + tiago_bridge) — primitive cap stack: chassis/camera/lidar.
   license: MulanPSL-2.0
 
 build: bash scripts/build.sh
@@ -20,3 +24,20 @@ start: |
     echo "[tiago_sim_stack] NVIDIA GPU detected — merging compose.gpu.yaml"
   fi
   exec docker compose "${CF[@]}" up --build ros2-bridge
+
+# All caps share one bridge process (docker compose ros2-bridge). Each
+# entry below documents what the bridge registers to atlas at startup.
+# Currently the bridge declares these via legacy RegisterNode +
+# DeclareInterface (one node, many interfaces); future: per-cap
+# RegisterCapability + driver lifecycle.
+capabilities:
+  - name: robonix/primitive/camera/snapshot
+  - name: robonix/primitive/camera/depth_snapshot
+  - name: robonix/primitive/camera/rgb
+  - name: robonix/primitive/chassis/state
+  - name: robonix/primitive/chassis/cmd
+  - name: robonix/primitive/lidar/snapshot
+  # Transitional — moves to tiago_nav2 service package (task #38).
+  - name: robonix/service/navigation/navigate
+  - name: robonix/service/navigation/status
+  - name: robonix/service/navigation/cancel
