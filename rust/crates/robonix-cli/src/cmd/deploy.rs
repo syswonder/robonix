@@ -677,6 +677,21 @@ async fn spawn_and_init(
     .await?;
     let pkg_label = sp.name.clone();
 
+    // If the package declares no capabilities, it will never register with
+    // atlas — skip the registration wait to avoid a 60s timeout.
+    let pkg_path = resolve_entry_path(entry, cache_root, manifest_dir)?;
+    let has_caps = match robonix_cli::manifest::detect_and_load(&pkg_path) {
+        Ok(detected) => !detected.manifest.capabilities.is_empty(),
+        Err(_) => true, // can't load → assume it will register, fall through to wait
+    };
+
+    if !has_caps {
+        output::warning(&format!(
+            "[{component}/{pkg_label}] package declares no capabilities — skipping atlas registration wait"
+        ));
+        return Ok(sp);
+    }
+
     let (cap_id, driver_contract) =
         wait_for_registration(atlas, &before, &pkg_label, component).await?;
 
