@@ -408,6 +408,11 @@ pub async fn execute(
             children.push(sp);
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         }
+        // TODO(boot): Resolve non-builtin `system:` entries (e.g. memory /
+        // liaison / nexus) via `rbnx path` to their package directories, then
+        // start them during this system phase (same lifecycle discipline as
+        // current package bring-up) instead of ignoring them.
+        //
         // Warn (don't fail) on system entries we don't know how to bring up
         // yet (e.g. liaison while it's still being ported off robonix-sdk).
         for key in deploy.system.keys() {
