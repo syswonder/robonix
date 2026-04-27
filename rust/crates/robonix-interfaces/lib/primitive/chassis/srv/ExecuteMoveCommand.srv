@@ -1,0 +1,3 @@
+MoveCommand command
+---
+std_msgs/String status

@@ -29,7 +29,7 @@ stress_test
 .robonix
 rust/debug
 .artifacts/
-rbnx-deploy
+rbnx-boot
 tmp*
 .libero/
 
@@ -50,3 +50,4 @@ target
 
 .cursor/
 .claude/
+rbnx-boot

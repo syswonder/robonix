@@ -14,6 +14,7 @@ exec docker exec -i \
   -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
   -e ROBONIX_PKG_HOST_DIR="$(cd "$(dirname "$0")/.." && pwd)" \
   -e TIAGO_CHASSIS_MCP_PORT="${TIAGO_CHASSIS_MCP_PORT:-50111}" \
+  -e TIAGO_CHASSIS_DRIVER_PORT="${TIAGO_CHASSIS_DRIVER_PORT:-50211}" \
   -e TIAGO_CHASSIS_CMD_DURATION_SEC="${TIAGO_CHASSIS_CMD_DURATION_SEC:-1.0}" \
   robonix_tiago_sim \
   bash -lc 'source /opt/ros/humble/setup.bash && \

@@ -21,3 +21,4 @@ start: bash scripts/start.sh
 capabilities:
   - name: robonix/primitive/camera/snapshot
   - name: robonix/primitive/camera/depth_snapshot
+  - name: robonix/primitive/camera/driver

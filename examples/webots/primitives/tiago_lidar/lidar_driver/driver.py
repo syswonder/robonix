@@ -4,12 +4,18 @@
 """Tiago lidar driver — primitive cap.
 
 Subscribes to the planar lidar topic (default /scanner), exposes:
-  robonix/primitive/lidar/snapshot  → lidar_snapshot(Empty) → LaserScan
+  robonix/primitive/lidar/snapshot  → MCP snapshot(Empty) → LaserScan
+  robonix/primitive/lidar/driver    → gRPC LifecycleDriver.Driver(INIT/...)
+
+INIT waits for the first laser scan to arrive — `lidar_snapshot` returns
+ENO-DATA otherwise, so blocking boot until at least one frame is in
+hand removes a class of "tool says no scan" early-warmup confusion.
 
 Env vars:
-  ROBONIX_ATLAS          atlas endpoint (default 127.0.0.1:50051)
-  TIAGO_LIDAR_MCP_PORT   MCP HTTP port (default 50113)
-  TIAGO_SCAN_TOPIC       lidar topic (default /scanner)
+  ROBONIX_ATLAS            atlas endpoint (default 127.0.0.1:50051)
+  TIAGO_LIDAR_MCP_PORT     MCP HTTP port (default 50113)
+  TIAGO_LIDAR_DRIVER_PORT  LifecycleDriver gRPC port (default 50213)
+  TIAGO_SCAN_TOPIC         lidar topic (default /scanner)
 """
 import json
 import logging
@@ -227,10 +233,72 @@ def _decl_mcp(stub, cap_id: str, contract_id: str, port: int, fn) -> None:
     ))
 
 
+# ── lifecycle Driver gRPC server ────────────────────────────────────────────
+
+import lifecycle_pb2  # noqa: E402
+import robonix_contracts_pb2_grpc as contracts_grpc  # noqa: E402
+
+_CMD_INIT = 0
+_CMD_SHUTDOWN = 1
+
+
+def _wait_for_first_scan(timeout_s: float) -> tuple[bool, str]:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        with _lock:
+            have = _latest_scan_msg is not None
+        if have:
+            return True, ""
+        time.sleep(0.1)
+    return False, "no LaserScan received within timeout"
+
+
+class _LidarDriverServicer(contracts_grpc.PrimitiveLidarDriverServicer):
+    def Driver(self, request, context):
+        cmd = request.command
+        if cmd == _CMD_INIT:
+            ok, err = _wait_for_first_scan(timeout_s=15.0)
+            return lifecycle_pb2.Driver_Response(
+                ok=ok, state="ready" if ok else "error", error=err
+            )
+        if cmd == _CMD_SHUTDOWN:
+            return lifecycle_pb2.Driver_Response(ok=True, state="ready", error="")
+        return lifecycle_pb2.Driver_Response(ok=False, state="error", error="invalid command")
+
+
+def _start_driver_grpc(port: int) -> None:
+    from concurrent import futures
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    contracts_grpc.add_PrimitiveLidarDriverServicer_to_server(
+        _LidarDriverServicer(), server
+    )
+    server.add_insecure_port(f"[::]:{port}")
+    server.start()
+    print(f"[tiago_lidar] LifecycleDriver gRPC serving on 0.0.0.0:{port}")
+
+
+def _decl_driver(stub, cap_id: str, port: int) -> None:
+    stub.DeclareInterface(pb.DeclareInterfaceRequest(
+        capability_id=cap_id,
+        contract_id="robonix/primitive/lidar/driver",
+        transport=pb.TRANSPORT_GRPC,
+        endpoint=f"127.0.0.1:{port}",
+        params=pb.TransportParams(grpc=pb.GrpcParams(
+            proto_file="robonix_contracts.proto",
+            service_name="LifecycleDriver",
+            method="Driver",
+        )),
+    ))
+
+
 def main() -> None:
     atlas_addr = os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
-    port = int(os.environ.get("TIAGO_LIDAR_MCP_PORT", "50113"))
+    mcp_port = int(os.environ.get("TIAGO_LIDAR_MCP_PORT", "50113"))
+    driver_port = int(os.environ.get("TIAGO_LIDAR_DRIVER_PORT", "50213"))
     cap_id = os.environ.get("ROBONIX_CAPABILITY_ID", "com.robonix.primitive.tiago_lidar")
+
+    threading.Thread(target=_start_ros2, daemon=True).start()
+    _start_driver_grpc(driver_port)
 
     channel = grpc.insecure_channel(atlas_addr)
     stub = pb_grpc.AtlasStub(channel)
@@ -243,17 +311,17 @@ def main() -> None:
             namespace="robonix/primitive/lidar",
             capability_md_path=md_path,
         ))
-        _decl_mcp(stub, cap_id, "robonix/primitive/lidar/snapshot", port, snapshot)
-        print(f"[tiago_lidar] registered cap {cap_id} → 1 interface on port {port}")
+        _decl_driver(stub, cap_id, driver_port)
+        _decl_mcp(stub, cap_id, "robonix/primitive/lidar/snapshot", mcp_port, snapshot)
+        print(f"[tiago_lidar] registered cap {cap_id} → driver:{driver_port}, mcp:{mcp_port}")
     except Exception as e:
         print(f"[tiago_lidar] WARN: atlas registration failed: {e}")
 
     threading.Thread(target=_heartbeat_loop, args=(stub, cap_id), daemon=True).start()
-    threading.Thread(target=_start_ros2, daemon=True).start()
 
-    print(f"[tiago_lidar] MCP HTTP serving on 0.0.0.0:{port}")
+    print(f"[tiago_lidar] MCP HTTP serving on 0.0.0.0:{mcp_port}")
     import uvicorn
-    uvicorn.run(mcp.streamable_http_app(), host="0.0.0.0", port=port, log_level="warning")
+    uvicorn.run(mcp.streamable_http_app(), host="0.0.0.0", port=mcp_port, log_level="warning")
 
 
 if __name__ == "__main__":

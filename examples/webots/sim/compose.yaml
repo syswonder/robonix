@@ -3,12 +3,12 @@
 #
 # robonix drivers (chassis / camera / lidar primitive packages, plus
 # tiago_nav2 service) are NOT in this compose file. They get
-# `docker exec`'d into THIS container by `rbnx deploy` once it's up.
+# `docker exec`'d into THIS container by `rbnx boot` once it's up.
 #
 # Bring it up first:
 #   bash sim/start.sh         # auto-detects GPU and merges compose.gpu.yaml
 # Then in another terminal:
-#   rbnx deploy
+#   rbnx boot
 #
 # GUI: host must set DISPLAY and allow X11 (e.g. `xhost +local:docker`).
 # Performance: default Docker /dev/shm is 64MB — Qt/Webots thrash; we

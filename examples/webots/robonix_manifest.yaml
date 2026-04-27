@@ -8,30 +8,41 @@ env:
 system:
   atlas:
     listen: 127.0.0.1:50051
-    log:    info
+    log: info
   executor:
     listen: 127.0.0.1:50061
-    log:    info
+    log: info
   pilot:
     listen: 127.0.0.1:50071
-    log:    info
+    log: info
     vlm:
-      upstream:   ${VLM_BASE_URL}
-      api_key:    ${VLM_API_KEY}
-      model:      ${VLM_MODEL}
+      upstream: ${VLM_BASE_URL}
+      api_key: ${VLM_API_KEY}
+      model: ${VLM_MODEL}
       api_format: openai
+  liaison:
+    listen: 127.0.0.1:50081
+    log: info
+  nexus:
+    log: info
+  memory: []
 
-# Primitive driver packages — each is one device, one process. Every
-# entry below docker-exec's into the pre-running sim container (from
-# `bash sim/start.sh`) and registers its caps to atlas. Make sure sim
-# is up FIRST: `bash examples/webots/sim/start.sh`.
 primitive:
   - name: tiago_chassis
     path: ./primitives/tiago_chassis
+    config: []
   - name: tiago_camera
     path: ./primitives/tiago_camera
+    config:
+      serial_no: 1234567890
   - name: tiago_lidar
     path: ./primitives/tiago_lidar
+    config:
+      resolution: 0.08
+      min_range: 0.3
+      max_range: 50.0
+      frame_id: base_link
+      topic_prefix: /lidar-robonix
 
 service:
   - name: tiago_nav2

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MulanPSL-2.0
 # Sim ENVIRONMENT only — Webots + eaios_webots controller. Nav2 lives in
-# the tiago_nav2 service package (started by `rbnx deploy`); robonix
+# the tiago_nav2 service package (started by `rbnx boot`); robonix
 # drivers (tiago_chassis / tiago_camera / tiago_lidar) live in their
 # respective primitive packages and are exec'd into THIS container by
-# `rbnx deploy` via `docker exec`. So this container is the host for
+# `rbnx boot` via `docker exec`. So this container is the host for
 # both the simulator and (later) every robonix driver process.
 set -eo pipefail
 source /opt/ros/humble/setup.bash

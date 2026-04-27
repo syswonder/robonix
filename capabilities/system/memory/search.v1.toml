@@ -1,5 +1,3 @@
-# Unary query/response as text. ROS IDL: `lib/memory/srv/Search.srv`.
-# MCP providers may still expose tools; this contract is the aligned gRPC / ROS `.srv` path.
 [contract]
 id      = "robonix/system/memory/search"
 version = "1"

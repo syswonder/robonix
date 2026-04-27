@@ -1,7 +1,14 @@
 # Tiago chassis driver — primitive package.
 # One device = one package. This driver exposes the robot base/chassis:
-#   robonix/primitive/chassis/state  → MCP tool chassis_state(Empty) → RobotState
-#   robonix/primitive/chassis/cmd    → MCP tool chassis_cmd(MoveCommand) → String
+#   robonix/primitive/chassis/state   → MCP tool chassis_state(Empty) → RobotState
+#   robonix/primitive/chassis/move    → MCP tool chassis_move(MoveCommand) → String
+#   robonix/primitive/chassis/driver  → gRPC LifecycleDriver.Driver(INIT/PROBE/...)
+#
+# `*/driver` is the lifecycle interface every primitive should declare —
+# `rbnx boot` calls Driver(CMD_INIT) after RegisterCapability, waits for
+# ok=true, only then proceeds to next package. Skipping it means the boot
+# silently passes through this package and tools may be exposed before
+# the underlying sim is actually ready.
 #
 # Runs inside the sim container (started by examples/webots/sim/start.sh)
 # so it shares the same DDS graph as Webots; subscribes to /amcl_pose,
@@ -26,4 +33,5 @@ start: bash scripts/start.sh
 
 capabilities:
   - name: robonix/primitive/chassis/state
-  - name: robonix/primitive/chassis/cmd
+  - name: robonix/primitive/chassis/move
+  - name: robonix/primitive/chassis/driver

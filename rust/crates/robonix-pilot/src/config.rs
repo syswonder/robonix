@@ -7,7 +7,7 @@
 // Three sources, from lowest to highest priority:
 //   1. compiled defaults (atlas endpoint, listen address, capability_id, …)
 //   2. optional YAML at `$ROBONIX_CONFIG_PATH` or `--config <path>`
-//      (used by `rbnx deploy` to write a slice of `system.pilot` from
+//      (used by `rbnx boot` to write a slice of `system.pilot` from
 //      `robonix_manifest.yaml`)
 //   3. CLI flags / per-field env vars
 //

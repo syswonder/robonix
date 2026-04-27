@@ -3,7 +3,7 @@
 # Build Tiago Demo Package Script
 #
 # Build script for tiago_demo_package
-# This script is executed by 'rbnx deploy build' command
+# This script is executed by 'rbnx boot build' command
 # It should compile, install dependencies, or perform any necessary build steps
 
 set -e  # Exit on error
