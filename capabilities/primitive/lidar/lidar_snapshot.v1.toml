@@ -1,5 +1,5 @@
 [contract]
-id      = "robonix/primitive/lidar/lidar_snapshot"
+id      = "robonix/primitive/lidar/snapshot"
 version = "1"
 kind    = "primitive"
 
