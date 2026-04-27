@@ -1,6 +1,6 @@
 # Set initial pose hint for SLAM relocalization.
 [contract]
-id      = "robonix/service/slam/set_initial_pose"
+id      = "robonix/service/map/set_initial_pose"
 version = "1"
 kind    = "service"
 

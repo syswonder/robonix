@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MulanPSL-2.0
-# Bring up the Tiago Webots sim container. Run this BEFORE `rbnx deploy`
+# Bring up the Tiago Webots sim container. Run this BEFORE `rbnx boot`
 # from examples/webots/ — robonix drivers are docker-exec'd into the
 # container started here, so the container has to exist first.
 #

@@ -1,13 +1,5 @@
-# Primitive driver lifecycle interface. One contract per abstract hardware
-# category (e.g. robonix/primitive/sensor/lidar3d/driver). Single RPC shape;
-# the `command` field selects INIT / RESET / SHUTDOWN / PROBE.
-#
-# `config_json` is an opaque passthrough from the deploy manifest — the
-# driver package parses it however it needs. Robonix does not inspect it.
 uint8 CMD_INIT     = 0
-uint8 CMD_RESET    = 1
-uint8 CMD_SHUTDOWN = 2
-uint8 CMD_PROBE    = 3
+uint8 CMD_SHUTDOWN = 1
 
 uint8  command
 string config_json

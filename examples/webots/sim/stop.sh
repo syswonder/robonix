@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MulanPSL-2.0
-# Tear down everything `bash sim/start.sh` + `rbnx deploy` brought up.
+# Tear down everything `bash sim/start.sh` + `rbnx boot` brought up.
 # Run this when you want a clean slate (sim container + atlas/pilot/
 # executor + every docker-exec'd driver inside the sim container).
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-echo "[sim/stop] killing host-side robonix processes (atlas / pilot / executor / rbnx deploy)..."
-pkill -9 -f "rbnx deploy|robonix-atlas|robonix-pilot|robonix-executor|rbnx start -p" 2>/dev/null || true
+echo "[sim/stop] killing host-side robonix processes (atlas / pilot / executor / rbnx boot)..."
+pkill -9 -f "rbnx boot|rbnx deploy|robonix-atlas|robonix-pilot|robonix-executor|rbnx start -p" 2>/dev/null || true
 
 echo "[sim/stop] killing in-container drivers (chassis/camera/lidar/nav2 + nav2_bringup)..."
 docker exec robonix_tiago_sim sh -c \

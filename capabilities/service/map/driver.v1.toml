@@ -1,0 +1,14 @@
+# Lifecycle interface every map service implementation MUST declare
+# (semantic map / occupancy grid / etc.).
+# `rbnx boot` calls Driver(CMD_INIT, config_json) against this interface
+# AFTER all primitives have finished init.
+[contract]
+id      = "robonix/service/map/driver"
+version = "1"
+kind    = "service"
+
+[io.srv]
+srv = "lifecycle/srv/Driver"
+
+[mode]
+type = "rpc"

@@ -1,5 +1,3 @@
-# 非 RPC：订阅侧语义 — 客户端持续推送 `geometry_msgs/Twist`（如 cmd_vel），对应 gRPC client-stream 门面。
-# 与 `base/move`（`rpc_client_stream` + `prm_base/MoveCommand`）互补：本契约用标准 Twist 线型。
 [contract]
 id      = "robonix/primitive/chassis/twist_in"
 version = "1"

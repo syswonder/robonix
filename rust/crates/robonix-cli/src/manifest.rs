@@ -82,9 +82,25 @@ pub struct CapabilityRef {
     pub path: Option<String>,
 }
 
+/// One entry under a package's `depends:` list. Models a *source / lib*
+/// dependency (think Linux kernel module SOFT_DEPS) — i.e. another
+/// package whose codegen output / Python package this package needs at
+/// build or import time. NOT a boot-order dependency.
+///
+/// `name` is required (the depended-on package's `package.name`).
+/// Exactly one of `path` / `url` should be set:
+///   - `path`: filesystem path relative to this package's manifest dir
+///   - `url`:  git URL (cloned to `<pkg>/rbnx-build/deps/<name>/` on first build)
+///     Neither set means "expect it to already be installed / on PYTHONPATH".
 #[derive(Debug, Clone, Deserialize)]
 pub struct DependsRef {
     pub name: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 // ── raw shape accepting both old and new ────────────────────────────────

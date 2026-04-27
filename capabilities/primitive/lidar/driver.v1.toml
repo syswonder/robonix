@@ -1,0 +1,10 @@
+[contract]
+id      = "robonix/primitive/lidar/driver"
+version = "1"
+kind    = "primitive"
+
+[io.srv]
+srv = "lifecycle/srv/Driver"
+
+[mode]
+type = "rpc"

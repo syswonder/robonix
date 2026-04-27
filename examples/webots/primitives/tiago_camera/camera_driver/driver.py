@@ -3,13 +3,19 @@
 # pyright: reportArgumentType=false
 """Tiago camera driver — primitive cap.
 
-Subscribes to RGB + depth image topics, exposes two on-demand MCP tools:
-  robonix/primitive/camera/snapshot        → camera_snapshot(Empty) → Image (JPEG)
-  robonix/primitive/camera/depth_snapshot  → camera_depth_snapshot(Empty) → Image (JPEG)
+Subscribes to RGB + depth image topics, exposes:
+  robonix/primitive/camera/snapshot        → MCP snapshot(Empty) → Image (JPEG)
+  robonix/primitive/camera/depth_snapshot  → MCP depth_snapshot(Empty) → Image (JPEG)
+  robonix/primitive/camera/driver          → gRPC LifecycleDriver.Driver(INIT/...)
+
+The `/driver` interface gates `rbnx boot`: INIT here waits for the first
+RGB frame to arrive, so by the time the LLM gets `camera_snapshot` in its
+tool list we know the topic is actually delivering data.
 
 Env vars:
   ROBONIX_ATLAS              atlas endpoint (default 127.0.0.1:50051)
   TIAGO_CAMERA_MCP_PORT      MCP HTTP port (default 50112)
+  TIAGO_CAMERA_DRIVER_PORT   LifecycleDriver gRPC port (default 50212)
   TIAGO_RGB_TOPIC            ROS2 topic for RGB (default /head_front_camera/rgb/image_raw)
   TIAGO_DEPTH_TOPIC          ROS2 topic for depth (default /head_front_camera/depth_registered/image_raw)
   TIAGO_RGB_FRAME_ID         frame_id stamped on returned RGB Image
@@ -308,10 +314,72 @@ def _decl_mcp(stub, cap_id: str, contract_id: str, port: int, fn) -> None:
     ))
 
 
+# ── lifecycle Driver gRPC server ────────────────────────────────────────────
+
+import lifecycle_pb2  # noqa: E402
+import robonix_contracts_pb2_grpc as contracts_grpc  # noqa: E402
+
+_CMD_INIT = 0
+_CMD_SHUTDOWN = 1
+
+
+def _wait_for_first_rgb(timeout_s: float) -> tuple[bool, str]:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        with _lock:
+            have = _latest_rgb is not None
+        if have:
+            return True, ""
+        time.sleep(0.1)
+    return False, "no RGB frame received within timeout"
+
+
+class _CameraDriverServicer(contracts_grpc.PrimitiveCameraDriverServicer):
+    def Driver(self, request, context):
+        cmd = request.command
+        if cmd == _CMD_INIT:
+            ok, err = _wait_for_first_rgb(timeout_s=15.0)
+            return lifecycle_pb2.Driver_Response(
+                ok=ok, state="ready" if ok else "error", error=err
+            )
+        if cmd == _CMD_SHUTDOWN:
+            return lifecycle_pb2.Driver_Response(ok=True, state="ready", error="")
+        return lifecycle_pb2.Driver_Response(ok=False, state="error", error="invalid command")
+
+
+def _start_driver_grpc(port: int) -> None:
+    from concurrent import futures
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    contracts_grpc.add_PrimitiveCameraDriverServicer_to_server(
+        _CameraDriverServicer(), server
+    )
+    server.add_insecure_port(f"[::]:{port}")
+    server.start()
+    print(f"[tiago_camera] LifecycleDriver gRPC serving on 0.0.0.0:{port}")
+
+
+def _decl_driver(stub, cap_id: str, port: int) -> None:
+    stub.DeclareInterface(pb.DeclareInterfaceRequest(
+        capability_id=cap_id,
+        contract_id="robonix/primitive/camera/driver",
+        transport=pb.TRANSPORT_GRPC,
+        endpoint=f"127.0.0.1:{port}",
+        params=pb.TransportParams(grpc=pb.GrpcParams(
+            proto_file="robonix_contracts.proto",
+            service_name="LifecycleDriver",
+            method="Driver",
+        )),
+    ))
+
+
 def main() -> None:
     atlas_addr = os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
-    port = int(os.environ.get("TIAGO_CAMERA_MCP_PORT", "50112"))
+    mcp_port = int(os.environ.get("TIAGO_CAMERA_MCP_PORT", "50112"))
+    driver_port = int(os.environ.get("TIAGO_CAMERA_DRIVER_PORT", "50212"))
     cap_id = os.environ.get("ROBONIX_CAPABILITY_ID", "com.robonix.primitive.tiago_camera")
+
+    threading.Thread(target=_start_ros2, daemon=True).start()
+    _start_driver_grpc(driver_port)
 
     channel = grpc.insecure_channel(atlas_addr)
     stub = pb_grpc.AtlasStub(channel)
@@ -324,28 +392,18 @@ def main() -> None:
             namespace="robonix/primitive/camera",
             capability_md_path=md_path,
         ))
-        _decl_mcp(
-            stub, cap_id, "robonix/primitive/camera/snapshot", port,
-            "PRIMARY perception tool. Use freely — between every chassis/cmd burst — "
-            "to see what's in front of the robot and decide what to do next. Returns "
-            "the current RGB head-camera frame as a JPEG-encoded sensor_msgs/Image "
-            "(`data` is base64). For visual search tasks: snapshot → reason about it → "
-            "small chassis/cmd nudge → snapshot again.",
-        )
-        _decl_mcp(
-            stub, cap_id, "robonix/primitive/camera/depth_snapshot", port,
-            "Get the current depth head-camera frame as grayscale-JPEG sensor_msgs/Image (depth normalized).",
-        )
-        print(f"[tiago_camera] registered cap {cap_id} → 2 interfaces on port {port}")
+        _decl_driver(stub, cap_id, driver_port)
+        _decl_mcp(stub, cap_id, "robonix/primitive/camera/snapshot",       mcp_port, snapshot)
+        _decl_mcp(stub, cap_id, "robonix/primitive/camera/depth_snapshot", mcp_port, depth_snapshot)
+        print(f"[tiago_camera] registered cap {cap_id} → driver:{driver_port}, mcp:{mcp_port}")
     except Exception as e:
         print(f"[tiago_camera] WARN: atlas registration failed: {e}")
 
     threading.Thread(target=_heartbeat_loop, args=(stub, cap_id), daemon=True).start()
-    threading.Thread(target=_start_ros2, daemon=True).start()
 
-    print(f"[tiago_camera] MCP HTTP serving on 0.0.0.0:{port}")
+    print(f"[tiago_camera] MCP HTTP serving on 0.0.0.0:{mcp_port}")
     import uvicorn
-    uvicorn.run(mcp.streamable_http_app(), host="0.0.0.0", port=port, log_level="warning")
+    uvicorn.run(mcp.streamable_http_app(), host="0.0.0.0", port=mcp_port, log_level="warning")
 
 
 if __name__ == "__main__":

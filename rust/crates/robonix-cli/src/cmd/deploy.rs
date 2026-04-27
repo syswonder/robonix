@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// `rbnx deploy` — bring up a whole robonix deployment from a top-level
-// `robonix_manifest.yaml`.
+// `rbnx boot` — bring up the whole robonix stack from a top-level
+// `robonix_manifest.yaml`. (`rbnx boot` is a back-compat alias.)
 //
 // Conventions:
 //   - `system:` Rust binaries (atlas / pilot / executor) are launched with
@@ -35,8 +35,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tonic::Request;
 use tonic::transport::Endpoint;
 
-use crate::pb::contracts::lifecycle_driver_client::LifecycleDriverClient;
-use crate::pb::lifecycle::DriverRequest;
+use crate::pb::lifecycle::{DriverRequest, DriverResponse};
 
 // Driver.srv command discriminator.
 const CMD_INIT: u32 = 0;
@@ -76,8 +75,8 @@ struct PackageEntry {
     #[serde(default)]
     path: Option<String>,
     /// Git URL for remote packages (e.g. the standalone mapping or nav
-    /// repos too big to ship inside `examples/`). `rbnx deploy` clones
-    /// into `<manifest-dir>/rbnx-deploy/cache/<name>/` on first run and
+    /// repos too big to ship inside `examples/`). `rbnx boot` clones
+    /// into `<manifest-dir>/rbnx-boot/cache/<name>/` on first run and
     /// reuses that checkout on subsequent runs. Mutually exclusive with
     /// `path`.
     #[serde(default)]
@@ -350,11 +349,11 @@ pub async fn execute(
         expand_yaml(&mut e.config);
     }
 
-    let log_dir = log_dir.unwrap_or_else(|| manifest_dir.join("rbnx-deploy").join("logs"));
+    let log_dir = log_dir.unwrap_or_else(|| manifest_dir.join("rbnx-boot").join("logs"));
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
-    let cache_root = manifest_dir.join("rbnx-deploy").join("cache");
-    let instances_dir = manifest_dir.join("rbnx-deploy").join("instances");
+    let cache_root = manifest_dir.join("rbnx-boot").join("cache");
+    let instances_dir = manifest_dir.join("rbnx-boot").join("instances");
     std::fs::create_dir_all(&instances_dir)
         .with_context(|| format!("failed to create instances dir {}", instances_dir.display()))?;
 
@@ -644,13 +643,31 @@ async fn spawn_and_init(
             .connect()
             .await
             .with_context(|| format!("dial driver at '{normalized}'"))?;
-        let mut client = LifecycleDriverClient::new(channel);
+        // Each per-area driver TOML (`primitive/<area>/driver`,
+        // `service/<area>/driver`) generates its own gRPC service
+        // (`PrimitiveChassisDriver`, `ServiceNavigationDriver`, …) —
+        // they all share the lifecycle/srv/Driver wire shape but live
+        // at distinct gRPC paths. Build the path from the contract_id
+        // and call it directly via tonic's low-level Grpc client, so
+        // boot doesn't need to know which area it's talking to.
+        let svc_name = contract_id_to_service_name(&driver_contract);
+        let path: tonic::codegen::http::uri::PathAndQuery =
+            format!("/robonix.contracts.{svc_name}/Driver")
+                .parse()
+                .with_context(|| format!("build gRPC path for '{driver_contract}'"))?;
+        let mut grpc = tonic::client::Grpc::new(channel);
+        grpc.ready().await.with_context(|| "gRPC ready")?;
+        let codec: tonic_prost::ProstCodec<DriverRequest, DriverResponse> = Default::default();
         let resp = tokio::time::timeout(
             DRIVER_INIT_TIMEOUT,
-            client.driver(Request::new(DriverRequest {
-                command: CMD_INIT,
-                config_json,
-            })),
+            grpc.unary(
+                Request::new(DriverRequest {
+                    command: CMD_INIT,
+                    config_json,
+                }),
+                path,
+                codec,
+            ),
         )
         .await
         .map_err(|_| anyhow::anyhow!("Driver(CMD_INIT) timed out after {:?}", DRIVER_INIT_TIMEOUT))?
@@ -680,6 +697,31 @@ async fn spawn_and_init(
     }
 
     Ok(sp)
+}
+
+/// Mirrors `robonix_codegen::contract_gen::contract_id_to_service_name`.
+/// Strips the `robonix/` prefix and concatenates the remaining path
+/// segments in UpperCamelCase: `robonix/primitive/chassis/driver` →
+/// `PrimitiveChassisDriver`. The full gRPC service path is then
+/// `/robonix.contracts.<this>/Driver`, matching what the per-area driver
+/// TOMLs codegen emits in `robonix_contracts.proto`.
+fn contract_id_to_service_name(id: &str) -> String {
+    let body = id.strip_prefix("robonix/").unwrap_or(id);
+    body.split('/')
+        .filter(|x| !x.is_empty())
+        .map(|seg| {
+            seg.split('_')
+                .filter(|p| !p.is_empty())
+                .map(|p| {
+                    let mut c = p.chars();
+                    match c.next() {
+                        None => String::new(),
+                        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                    }
+                })
+                .collect::<String>()
+        })
+        .collect::<String>()
 }
 
 /// Poll atlas until a cap NOT in `before` appears. Returns the new

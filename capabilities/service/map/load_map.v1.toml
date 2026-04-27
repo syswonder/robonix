@@ -1,6 +1,6 @@
 # Load a pre-built map for relocalization.
 [contract]
-id      = "robonix/service/slam/load_map"
+id      = "robonix/service/map/load_map"
 version = "1"
 kind    = "service"
 

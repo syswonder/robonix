@@ -9,3 +9,4 @@ robonix_mcp_types/
 */.venv/
 
 *.egg-info/
+rbnx-*

@@ -4,9 +4,15 @@
 """Tiago Nav2 service — wraps Nav2's navigate_to_pose action.
 
 Capabilities:
-  robonix/service/navigation/navigate  → nav_navigate(PoseStamped) → String
-  robonix/service/navigation/status    → nav_status(String goal_id) → String
-  robonix/service/navigation/cancel    → nav_cancel(String goal_id) → String
+  robonix/service/navigation/navigate  → MCP navigate(PoseStamped) → String
+  robonix/service/navigation/status    → MCP status(String goal_id) → String
+  robonix/service/navigation/cancel    → MCP cancel(String goal_id) → String
+  robonix/service/navigation/driver    → gRPC LifecycleDriver.Driver(INIT/...)
+
+INIT waits for the Nav2 action server to come up (`navigate_to_pose`),
+which is the meaningful prerequisite for any goal dispatch. If Nav2 is
+slow to start, INIT returns ok=true with state="degraded" rather than
+hard-failing, since the driver still has the /goal_pose fallback path.
 
 start.sh launches nav2_bringup before exec'ing this script, so by the
 time we open the ActionClient the action server is already live (or we
@@ -343,10 +349,83 @@ def _decl_mcp(stub, cap_id: str, contract_id: str, port: int, fn) -> None:
     ))
 
 
+# ── lifecycle Driver gRPC server ────────────────────────────────────────────
+
+import lifecycle_pb2  # noqa: E402
+import robonix_contracts_pb2_grpc as contracts_grpc  # noqa: E402
+
+_CMD_INIT = 0
+_CMD_PROBE = 3
+
+
+def _wait_for_nav_ready(timeout_s: float) -> tuple[bool, bool]:
+    """Returns (ros_node_up, action_client_connected)."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _ros_node is not None:
+            return True, _nav_action_ready
+        time.sleep(0.1)
+    return False, False
+
+
+class _Nav2DriverServicer(contracts_grpc.ServiceNavigationDriverServicer):
+    def Driver(self, request, context):
+        cmd = request.command
+        if cmd == _CMD_INIT:
+            # Generous timeout — nav2 lifecycle takes a while to come up.
+            ros_up, action_up = _wait_for_nav_ready(timeout_s=45.0)
+            if not ros_up:
+                return lifecycle_pb2.Driver_Response(
+                    ok=False, state="error",
+                    error="ROS2 node did not come up within timeout",
+                )
+            # Nav action client missing is degraded (we still have the
+            # /goal_pose fallback), not a hard fail.
+            state = "ready" if action_up else "degraded"
+            return lifecycle_pb2.Driver_Response(ok=True, state=state, error="")
+        if cmd == _CMD_PROBE:
+            ok = _ros_node is not None
+            return lifecycle_pb2.Driver_Response(
+                ok=ok,
+                state=("ready" if _nav_action_ready else "degraded") if ok else "uninit",
+                error="",
+            )
+        return lifecycle_pb2.Driver_Response(ok=True, state="ready", error="")
+
+
+def _start_driver_grpc(port: int) -> None:
+    from concurrent import futures
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    contracts_grpc.add_ServiceNavigationDriverServicer_to_server(
+        _Nav2DriverServicer(), server
+    )
+    server.add_insecure_port(f"[::]:{port}")
+    server.start()
+    print(f"[tiago_nav2] LifecycleDriver gRPC serving on 0.0.0.0:{port}")
+
+
+def _decl_driver(stub, cap_id: str, port: int) -> None:
+    stub.DeclareInterface(pb.DeclareInterfaceRequest(
+        capability_id=cap_id,
+        contract_id="robonix/service/navigation/driver",
+        transport=pb.TRANSPORT_GRPC,
+        endpoint=f"127.0.0.1:{port}",
+        params=pb.TransportParams(grpc=pb.GrpcParams(
+            proto_file="robonix_contracts.proto",
+            service_name="LifecycleDriver",
+            method="Driver",
+        )),
+    ))
+
+
 def main() -> None:
     atlas_addr = os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
-    port = int(os.environ.get("TIAGO_NAV2_MCP_PORT", "50121"))
+    mcp_port = int(os.environ.get("TIAGO_NAV2_MCP_PORT", "50121"))
+    driver_port = int(os.environ.get("TIAGO_NAV2_DRIVER_PORT", "50221"))
     cap_id = os.environ.get("ROBONIX_CAPABILITY_ID", "com.robonix.service.tiago_nav2")
+
+    threading.Thread(target=_start_ros2, daemon=True).start()
+    _start_driver_grpc(driver_port)
 
     channel = grpc.insecure_channel(atlas_addr)
     stub = pb_grpc.AtlasStub(channel)
@@ -359,19 +438,19 @@ def main() -> None:
             namespace="robonix/service/navigation",
             capability_md_path=md_path,
         ))
-        _decl_mcp(stub, cap_id, "robonix/service/navigation/navigate", port, navigate)
-        _decl_mcp(stub, cap_id, "robonix/service/navigation/status",   port, status)
-        _decl_mcp(stub, cap_id, "robonix/service/navigation/cancel",   port, cancel)
-        print(f"[tiago_nav2] registered cap {cap_id} → 3 interfaces on port {port}")
+        _decl_driver(stub, cap_id, driver_port)
+        _decl_mcp(stub, cap_id, "robonix/service/navigation/navigate", mcp_port, navigate)
+        _decl_mcp(stub, cap_id, "robonix/service/navigation/status",   mcp_port, status)
+        _decl_mcp(stub, cap_id, "robonix/service/navigation/cancel",   mcp_port, cancel)
+        print(f"[tiago_nav2] registered cap {cap_id} → driver:{driver_port}, mcp:{mcp_port}")
     except Exception as e:
         print(f"[tiago_nav2] WARN: atlas registration failed: {e}")
 
     threading.Thread(target=_heartbeat_loop, args=(stub, cap_id), daemon=True).start()
-    threading.Thread(target=_start_ros2, daemon=True).start()
 
-    print(f"[tiago_nav2] MCP HTTP serving on 0.0.0.0:{port}")
+    print(f"[tiago_nav2] MCP HTTP serving on 0.0.0.0:{mcp_port}")
     import uvicorn
-    uvicorn.run(mcp.streamable_http_app(), host="0.0.0.0", port=port, log_level="warning")
+    uvicorn.run(mcp.streamable_http_app(), host="0.0.0.0", port=mcp_port, log_level="warning")
 
 
 if __name__ == "__main__":
