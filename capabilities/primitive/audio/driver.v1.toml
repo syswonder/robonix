@@ -1,0 +1,14 @@
+# Lifecycle interface every audio primitive implementation MUST declare
+# (mic / speaker / etc.).
+# `rbnx boot` calls Driver(CMD_INIT, config_json) against this interface
+# right after RegisterCapability and waits for ok=true before moving on.
+[contract]
+id      = "robonix/primitive/audio/driver"
+version = "1"
+kind    = "primitive"
+
+[io.srv]
+srv = "lifecycle/srv/Driver"
+
+[mode]
+type = "rpc"

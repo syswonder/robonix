@@ -1,5 +1,4 @@
 # Microphone audio stream (raw PCM or encoded).
-# ROS: `audio/msg/AudioChunk` published on a topic.
 [contract]
 id      = "robonix/primitive/audio/mic"
 version = "1"

@@ -86,7 +86,7 @@ colcon build --packages-select demo_service_provider
 Or use robonix-cli:
 
 ```bash
-rbnx deploy build
+rbnx boot build
 ```
 
 ### Install Dependencies
@@ -103,17 +103,17 @@ The package requires the following Python packages (automatically installed via 
 
 ### Start Services
 
-After registering a recipe that includes this package (`rbnx deploy register <recipe.yaml>`), start services via robonix-cli (pattern matches recipe item names):
+After registering a recipe that includes this package (`rbnx boot register <recipe.yaml>`), start services via robonix-cli (pattern matches recipe item names):
 
 ```bash
 # Start semantic map service (pattern matches srv::semantic_map)
-rbnx deploy start semantic_map
+rbnx boot start semantic_map
 
 # Start task plan service (pattern matches srv::task_plan)
-rbnx deploy start task_plan
+rbnx boot start task_plan
 
 # Or start all items in the active recipe
-rbnx deploy start all
+rbnx boot start all
 ```
 
 ### Service Endpoints

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 # ROS 2 Humble + Webots (GUI) + Nav2 deps + Python deps for robonix
-# drivers that get `docker exec`'d into this container by `rbnx deploy`.
+# drivers that get `docker exec`'d into this container by `rbnx boot`.
 # This image is the SIM container; it does NOT contain robonix driver
 # code. Driver code lives in each primitive/service package directory
 # on the host and is bind-mounted in by compose.yaml under /robonix_pkgs.

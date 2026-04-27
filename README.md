@@ -5,7 +5,7 @@
 <h3 align="center">Robonix — The Embodied AI Operating System</h3>
 
 <p align="center">
-  <em>Rust-native EAIOS. Skill-centric runtime with Liaison, Pilot, Atlas, Nexus, Executor — human intent to embodied action.</em>
+  <em>Rust-native EAIOS. Capability-centric runtime with Atlas (control plane), Pilot (LLM + plan), Executor (dispatch), Liaison (dialogue) — human intent to embodied action.</em>
 </p>
 
 <p align="center">
@@ -24,27 +24,50 @@
 ```bash
 git clone --recursive https://github.com/syswonder/robonix
 cd robonix/rust
-make install                              # → ~/.cargo/bin (rbnx, robonix-atlas, …)
-cd examples
-# edit robonix_manifest.yaml to set the VLM endpoint, api key, and model to your own
-rbnx deploy
+make install                              # → ~/.cargo/bin (rbnx, robonix-atlas, robonix-pilot, robonix-executor)
+                                          # also runs `rbnx setup` to register this clone as the source tree
 ```
 
-Open another terminal and talk to the agent:
+The Webots Tiago example (`examples/webots/`) is the standard end-to-end demo.
+It runs in two terminals: the simulator and Robonix itself.
 
 ```bash
-rbnx chat
+# T1 — simulation environment (Webots GUI; not a Robonix package — just docker compose)
+bash examples/webots/sim/start.sh
+
+# T2 — Robonix system + Tiago drivers + Nav2 wrapper
+export VLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
+export VLM_API_KEY=sk-...
+export VLM_MODEL=gpt-5.4-mini
+cd examples/webots
+rbnx boot                                # atlas + executor + pilot + 4 driver packages
+```
+
+Once `rbnx boot` reports `✓ 7 component(s) up`, in a third terminal:
+
+```bash
+rbnx caps          # list registered capabilities + interfaces
+rbnx tools         # tools the LLM agent sees
+rbnx chat          # interactive ratatui chat with the pilot
+```
+
+To tear everything down:
+
+```bash
+bash examples/webots/sim/stop.sh
 ```
 
 Full first-run walkthrough: [**docs/src/getting-started/quickstart.md**](https://github.com/syswonder/robonix-book/blob/main/src/getting-started/quickstart.md).
 
 ## Architecture
 
-A unified control plane (Atlas) handles registration, discovery, and channel negotiation across transports (gRPC, MCP, ROS 2, shared memory). Agent reasoning lives in Pilot (VLM + ReAct + TaskGraph), tool dispatch in Executor, user-facing interaction in Liaison.
+Atlas is the single control plane: every cap (`primitive` / `service` / `skill` / `system`) calls `RegisterCapability` + `DeclareInterface(transport, endpoint, params)` on startup; pilot/executor discover via `QueryCapabilities` and open data-plane connections via `ConnectCapability`. Transports are pluggable — gRPC, MCP, ROS 2 — and the contract TOMLs under `capabilities/` describe the schemas all of them are allowed to carry.
+
+Reasoning lives in **Pilot** (LLM + tool-calling agent loop with persistent execution semantics; CAPABILITY.md per cap is lazy-loaded by the LLM via `read_file`). Tool dispatch lives in **Executor** (cap-call routing + a few in-process builtins for filesystem / shell). User-facing dialogue lives in **Liaison** (audio / NLP front-end; pre-dev-packaging code, currently being ported).
 
 Dive deeper:
-- [**Overview**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/overview.md) — control/data plane, one full request end-to-end
-- [**Crates**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/crates.md) — each binary's role and port
+- [**Overview**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/overview.md) — control plane, one full request end-to-end
+- [**Crates**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/crates.md) — each binary's role and listening port
 - [**Namespaces & contracts**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/namespace-and-interfaces.md) — how `robonix/primitive/*` and `robonix/service/*` work
 - [**Interface catalog**](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md) — every primitive + service contract
 

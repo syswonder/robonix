@@ -155,7 +155,7 @@ pub async fn execute_start(
     let run_root = package_root
         .parent()
         .context("Package root has no parent")?;
-    let log_dir = run_root.join("rbnx-deploy").join("logs");
+    let log_dir = run_root.join("rbnx-boot").join("logs");
     let process_manager = ProcessManager::new(log_dir)?;
 
     output::action("Running", &manifest.package.name);

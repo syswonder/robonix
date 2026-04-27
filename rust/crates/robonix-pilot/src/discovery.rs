@@ -5,13 +5,33 @@ use anyhow::Result;
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 
-/// LLM-facing tool name = the last `/`-segment of a contract_id.
-/// `robonix/system/memory/search` → `search`.
-pub fn llm_name(contract_id: &str) -> &str {
-    contract_id
-        .rsplit_once('/')
-        .map(|(_, leaf)| leaf)
-        .unwrap_or(contract_id)
+/// LLM-facing tool name = `<area>_<leaf>` of a contract_id, where
+/// `<area>` is the segment immediately before the leaf.
+/// Examples:
+///   `robonix/primitive/camera/snapshot`        → `camera_snapshot`
+///   `robonix/primitive/lidar/snapshot`         → `lidar_snapshot`
+///   `robonix/primitive/chassis/move`           → `chassis_move`
+///   `robonix/system/memory/search`             → `memory_search`
+///   `robonix/service/navigation/navigate`      → `navigation_navigate`
+///
+/// Plain leaf-only used to be enough but multiple caps share leaves
+/// (`snapshot` on camera AND lidar). The OpenAI tool-list collapses
+/// duplicates and the LLM picks the wrong one. Prefixing with the
+/// area segment disambiguates while staying short and human-readable.
+///
+/// Executor still routes via the *full* `contract_id` (the leaf is
+/// the MCP-server-side tool name, which is unique within a single
+/// driver's FastMCP server). This function only renames at the
+/// LLM-↔-pilot boundary.
+pub fn llm_name(contract_id: &str) -> String {
+    let mut segs = contract_id.rsplit('/');
+    let leaf = segs.next().unwrap_or(contract_id);
+    let area = segs.next().unwrap_or("");
+    if area.is_empty() {
+        leaf.to_string()
+    } else {
+        format!("{area}_{leaf}")
+    }
 }
 
 /// One row per registered capability, summarised for the LLM-facing

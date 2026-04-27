@@ -193,7 +193,7 @@ pub async fn run_turn(
                 let schema: serde_json::Value =
                     serde_json::from_str(&mcp.input_schema_json).unwrap_or_default();
                 Some(ToolDef::new(
-                    llm_name(&iface.contract_id),
+                    &llm_name(&iface.contract_id),
                     &mcp.description,
                     schema,
                 ))
@@ -205,7 +205,7 @@ pub async fn run_turn(
             .iter()
             .map(|(cap_id, iface)| {
                 (
-                    llm_name(&iface.contract_id).to_string(),
+                    llm_name(&iface.contract_id),
                     (cap_id.clone(), iface.contract_id.clone()),
                 )
             })
@@ -469,7 +469,6 @@ by calling the tools available to you.
 
 ## Operating principles
 - ACT immediately using your tools. Do not ask the user to run things themselves.
-- Execute all necessary steps before replying.
 - Each tool call you make is dispatched to the Executor runtime, which handles the
   actual robot hardware or service call.
 - Do NOT claim missing capabilities unless verified from current tools/results.
@@ -477,6 +476,27 @@ by calling the tools available to you.
     long-term memory as available via those tools.
 - Prefer structured output; report tool results concisely.
 - If a tool returns an error, diagnose and retry, or report to the user.
+
+## Persistence (READ THIS — most common failure mode)
+The agent loop ENDS the turn the moment you produce an assistant message
+without any tool_calls. Do NOT stop until the user's task is *verifiably*
+complete. Concretely:
+
+- Define a clear success criterion at the start of the turn (e.g. for
+  'turn around': yaw delta ≈ 180° from the starting pose; for 'find the
+  door': a door is visible in `camera/snapshot`).
+- Loop tools-then-reason — observe, act, RE-observe — until that
+  criterion holds. After every physical action take a fresh
+  `chassis/state` / `camera/snapshot` to confirm the state actually
+  changed the way you expected.
+- A single short `chassis/move` burst typically rotates ~0.4–0.8 rad
+  (≈ 25–45°) or translates ~0.1–0.2 m. To turn 180° you need MULTIPLE
+  bursts; do not assume one call finishes the rotation.
+- Only emit a final no-tool-call assistant message once the criterion
+  is met OR you've exhausted reasonable attempts and need to report a
+  blocker. 'Done.' with no verification is wrong — verify first.
+- On the very rare case where the user explicitly cancels, you may stop
+  early; otherwise keep going.
 ",
     );
     p

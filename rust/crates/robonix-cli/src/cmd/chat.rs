@@ -357,7 +357,20 @@ fn draw(
             }
         }
 
-        let total = lines.len() as u16;
+        // Count wrapped *rows*, not logical lines. Paragraph::scroll
+        // operates on rendered rows after wrapping; if we feed it the
+        // logical count, anything that wraps overflows past the bottom
+        // and the last line(s) get clipped (which is what users hit as
+        // "the last line is always invisible"). Inner content width is
+        // `chunks[0].width - 2` (block border on both sides).
+        let inner_w = chunks[0].width.saturating_sub(2).max(1) as usize;
+        let total: u16 = lines
+            .iter()
+            .map(|l| {
+                let w = l.width().max(1);
+                w.div_ceil(inner_w) as u16
+            })
+            .sum();
         let visible = chunks[0].height.saturating_sub(2);
         let auto_scroll = if scroll == 0 {
             total.saturating_sub(visible)

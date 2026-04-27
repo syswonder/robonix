@@ -9,7 +9,7 @@ this container at deploy time.
 
 ## Run
 
-Start the sim **first**, then `rbnx deploy` from `examples/webots/`:
+Start the sim **first**, then `rbnx boot` from `examples/webots/`:
 
 ```bash
 # Terminal 1 — sim (GUI; Ctrl-C to stop):
@@ -17,7 +17,7 @@ bash examples/webots/sim/start.sh
 
 # Terminal 2 — robonix:
 cd examples/webots
-rbnx deploy
+rbnx boot
 ```
 
 `start.sh` auto-detects `nvidia-smi` and merges `compose.gpu.yaml` when
