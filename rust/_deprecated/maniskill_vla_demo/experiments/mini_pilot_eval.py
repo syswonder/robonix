@@ -389,7 +389,7 @@ def run_eval(mcp_url: str, suite: str, n_tasks: int, n_episodes: int,
     env_vars = _load_env_file(env_file)
     api_key = env_vars.get("VLM_API_KEY") or os.environ.get("VLM_API_KEY", "")
     base_url = env_vars.get("VLM_BASE_URL", "https://api.openai.com/v1")
-    model = env_vars.get("VLM_MODEL", "gpt-4o-mini")
+    model = env_vars.get("VLM_MODEL", "gpt-5.4-mini-mini")
     if not api_key:
         raise SystemExit(f"VLM_API_KEY missing in {env_file} and environment")
     print(f"[eval] pilot using VLM model={model} base_url={base_url}", flush=True)
@@ -497,7 +497,7 @@ def run_composite_eval(mcp_url: str, composite_json: Path, n_episodes: int,
     env_vars = _load_env_file(env_file)
     api_key = env_vars.get("VLM_API_KEY") or os.environ.get("VLM_API_KEY", "")
     base_url = env_vars.get("VLM_BASE_URL", "https://api.openai.com/v1")
-    model = env_vars.get("VLM_MODEL", "gpt-4o-mini")
+    model = env_vars.get("VLM_MODEL", "gpt-5.4-mini-mini")
     if not api_key:
         raise SystemExit(f"VLM_API_KEY missing in {env_file}")
     print(f"[eval] pilot using VLM model={model} base_url={base_url}", flush=True)

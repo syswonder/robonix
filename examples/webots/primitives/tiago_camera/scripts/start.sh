@@ -13,6 +13,7 @@ exec docker exec -i \
   -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
   -e ROBONIX_PKG_HOST_DIR="$(cd "$(dirname "$0")/.." && pwd)" \
   -e TIAGO_CAMERA_MCP_PORT="${TIAGO_CAMERA_MCP_PORT:-50112}" \
+  -e TIAGO_CAMERA_DRIVER_PORT="${TIAGO_CAMERA_DRIVER_PORT:-50212}" \
   -e TIAGO_RGB_TOPIC="${TIAGO_RGB_TOPIC:-/head_front_camera/rgb/image_raw}" \
   -e TIAGO_DEPTH_TOPIC="${TIAGO_DEPTH_TOPIC:-/head_front_camera/depth_registered/image_raw}" \
   -e TIAGO_RGB_FRAME_ID="${TIAGO_RGB_FRAME_ID:-head_front_camera_rgb_optical_frame}" \

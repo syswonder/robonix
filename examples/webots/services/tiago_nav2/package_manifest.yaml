@@ -22,3 +22,4 @@ capabilities:
   - name: robonix/service/navigation/navigate
   - name: robonix/service/navigation/status
   - name: robonix/service/navigation/cancel
+  - name: robonix/service/navigation/driver

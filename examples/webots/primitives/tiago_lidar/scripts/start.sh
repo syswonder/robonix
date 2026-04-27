@@ -12,6 +12,7 @@ exec docker exec -i \
   -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
   -e ROBONIX_PKG_HOST_DIR="$(cd "$(dirname "$0")/.." && pwd)" \
   -e TIAGO_LIDAR_MCP_PORT="${TIAGO_LIDAR_MCP_PORT:-50113}" \
+  -e TIAGO_LIDAR_DRIVER_PORT="${TIAGO_LIDAR_DRIVER_PORT:-50213}" \
   -e TIAGO_SCAN_TOPIC="${TIAGO_SCAN_TOPIC:-/scanner}" \
   robonix_tiago_sim \
   bash -lc 'source /opt/ros/humble/setup.bash && \

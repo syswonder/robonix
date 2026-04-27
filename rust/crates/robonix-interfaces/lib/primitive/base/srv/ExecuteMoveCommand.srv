@@ -1,4 +1,0 @@
-# robonix/primitive/base/cmd — discrete single-step motion (RPC; cf. StreamMove for streaming).
-MoveCommand command
----
-std_msgs/String status

@@ -1,5 +1,4 @@
 # Speaker audio stream input (raw PCM or encoded).
-# ROS: `audio/msg/AudioChunk` consumed from a topic.
 [contract]
 id      = "robonix/primitive/audio/speaker"
 version = "1"

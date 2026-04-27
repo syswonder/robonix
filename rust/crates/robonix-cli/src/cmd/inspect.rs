@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// `rbnx nodes / describe / tools / channels / inspect` — atlas introspection.
+// `rbnx caps / describe / tools / channels / inspect` — atlas introspection.
 //
 // All these are read-only views over `AtlasClient::query_capabilities` and
 // `AtlasClient::inner().inspect_atlas`. No state mutation, no Connect.
@@ -35,12 +35,7 @@ async fn connect(endpoint: &str) -> Result<AtlasClient> {
         .with_context(|| format!("connect to atlas at '{endpoint}'"))
 }
 
-pub async fn nodes(
-    endpoint: &str,
-    _distro: Option<&str>,
-    _container: Option<&str>,
-    json: bool,
-) -> Result<()> {
+pub async fn caps(endpoint: &str, json: bool) -> Result<()> {
     let mut atlas = connect(endpoint).await?;
     let records = atlas
         .query_capabilities("", "", atlas_pb::Transport::Unspecified)
@@ -65,7 +60,7 @@ pub async fn nodes(
     }
 
     if records.is_empty() {
-        println!("{} no capabilities registered", "[nodes]".yellow().bold());
+        println!("{} no capabilities registered", "[caps]".yellow().bold());
         return Ok(());
     }
     for rec in &records {
@@ -88,9 +83,9 @@ pub async fn nodes(
     Ok(())
 }
 
-pub async fn describe(endpoint: &str, node_id: Option<&str>, json: bool) -> Result<()> {
+pub async fn describe(endpoint: &str, cap_id: Option<&str>, json: bool) -> Result<()> {
     let mut atlas = connect(endpoint).await?;
-    let cap_filter = node_id.unwrap_or("");
+    let cap_filter = cap_id.unwrap_or("");
     let records = atlas
         .query_capabilities(cap_filter, "", atlas_pb::Transport::Unspecified)
         .await?;

@@ -3,9 +3,16 @@
 # pyright: reportArgumentType=false
 """Tiago chassis driver — primitive cap.
 
-Subscribes to /amcl_pose, publishes to /cmd_vel, exposes two MCP tools:
-  robonix/primitive/chassis/state  → state()  → RobotState (as dict)
-  robonix/primitive/chassis/cmd    → cmd(...) → ack JSON string
+Subscribes to /amcl_pose, publishes to /cmd_vel, and exposes:
+  robonix/primitive/chassis/state   → MCP state(Empty) → RobotState
+  robonix/primitive/chassis/move    → MCP move(MoveCommand) → String
+  robonix/primitive/chassis/driver  → gRPC LifecycleDriver.Driver(INIT/PROBE/...)
+
+The `/driver` gRPC interface is what makes `rbnx boot` block on this
+package: after RegisterCapability boot calls Driver(CMD_INIT), and only
+proceeds to the next package once we return ok=true. INIT here waits for
+the ROS2 node to come up so we know the DDS graph is wired before
+chassis tools are dispatched.
 
 Runs inside the sim docker container (sim/start.sh brings it up, then
 the package's `start:` block does `docker exec robonix_tiago_sim ...`).
@@ -13,6 +20,7 @@ the package's `start:` block does `docker exec robonix_tiago_sim ...`).
 Env vars:
   ROBONIX_ATLAS                   atlas endpoint (default 127.0.0.1:50051)
   TIAGO_CHASSIS_MCP_PORT          MCP HTTP port (default 50111)
+  TIAGO_CHASSIS_DRIVER_PORT       LifecycleDriver gRPC port (default 50211)
   TIAGO_CHASSIS_CMD_DURATION_SEC  how long to publish cmd_vel per call (default 1.0)
 """
 import json
@@ -93,7 +101,7 @@ import grpc
 import atlas_pb2 as pb
 import atlas_pb2_grpc as pb_grpc
 
-from base_mcp import MoveCommand, RobotState
+from chassis_mcp import MoveCommand, RobotState
 from geometry_msgs_mcp import PoseStamped
 from std_msgs_mcp import Empty, String
 
@@ -173,21 +181,59 @@ def state(msg: Empty) -> RobotState:
 
 @mcp_contract(mcp, contract_id="robonix/primitive/chassis/move")
 def move(msg: MoveCommand) -> String:
-    """PRIMARY motion controller. Drives the chassis: publishes Twist on
-    /cmd_vel for TIAGO_CHASSIS_CMD_DURATION_SEC seconds (default 1.0),
-    then a zero Twist to stop. Pair with camera/snapshot for visual
-    exploration: snapshot → reason → short move burst → snapshot again.
+    """PRIMARY motion controller. THREE modes — pick whichever is
+    non-zero, in priority order:
+
+      1. forward_m  != 0   drive straight by that signed distance (m).
+                            Driver picks linear speed, computes duration.
+                            Positive = forward. EX: forward_m=0.5 → "go 0.5 m forward".
+      2. rotate_deg != 0   in-place yaw rotation by signed degrees.
+                            Positive = CCW (left). EX: rotate_deg=360 → "turn 360°".
+      3. velocity mode     use linear_x / angular_z (twist) directly,
+                            for `duration_sec` seconds (or driver default
+                            if duration_sec == 0).
+
+    Use modes 1 / 2 by default — they finish what the user asked for in
+    one tool call, instead of you having to chain N velocity bursts and
+    re-snapshot. Mode 3 is for when you really need fine velocity control
+    or partial-second adjustments. Pair any move with camera_snapshot
+    BEFORE and AFTER to confirm the action actually had the intended
+    effect (Webots can ignore commands if the robot is wedged).
     Contract: robonix/primitive/chassis/move."""
     if _ros_node is None or _cmd_vel_pub is None:
         return String(data=json.dumps({"error": "ROS2 not initialized"}))
-    duration = float(os.environ.get("TIAGO_CHASSIS_CMD_DURATION_SEC", "1.0"))
+
+    import math
+    speed_mps = float(os.environ.get("TIAGO_CHASSIS_SPEED_MPS", "0.3"))
+    ang_speed_rps = float(os.environ.get("TIAGO_CHASSIS_ANG_SPEED_RPS", "0.6"))
+    default_dur = float(os.environ.get("TIAGO_CHASSIS_CMD_DURATION_SEC", "1.0"))
+
+    forward_m = float(getattr(msg, "forward_m", 0.0))
+    rotate_deg = float(getattr(msg, "rotate_deg", 0.0))
+    duration_sec = float(getattr(msg, "duration_sec", 0.0))
+
     tw = _Twist()
-    tw.linear.x = float(msg.linear_x)
-    tw.linear.y = float(msg.linear_y)
-    tw.linear.z = float(msg.linear_z)
-    tw.angular.x = float(msg.angular_x)
-    tw.angular.y = float(msg.angular_y)
-    tw.angular.z = float(msg.angular_z)
+    if forward_m != 0.0:
+        sign = 1.0 if forward_m > 0 else -1.0
+        tw.linear.x = sign * speed_mps
+        duration = abs(forward_m) / speed_mps
+        mode = "forward_m"
+    elif rotate_deg != 0.0:
+        rad = math.radians(rotate_deg)
+        sign = 1.0 if rad > 0 else -1.0
+        tw.angular.z = sign * ang_speed_rps
+        duration = abs(rad) / ang_speed_rps
+        mode = "rotate_deg"
+    else:
+        tw.linear.x = float(msg.linear_x)
+        tw.linear.y = float(msg.linear_y)
+        tw.linear.z = float(msg.linear_z)
+        tw.angular.x = float(msg.angular_x)
+        tw.angular.y = float(msg.angular_y)
+        tw.angular.z = float(msg.angular_z)
+        duration = duration_sec if duration_sec > 0 else default_dur
+        mode = "velocity"
+
     stop = _Twist()
     steps = max(1, int(duration / 0.1))
     for _ in range(steps):
@@ -196,9 +242,12 @@ def move(msg: MoveCommand) -> String:
     _cmd_vel_pub.publish(stop)
     return String(data=json.dumps({
         "status": "done",
-        "linear_x": msg.linear_x,
-        "angular_z": msg.angular_z,
-        "duration": duration,
+        "mode": mode,
+        "forward_m": forward_m,
+        "rotate_deg": rotate_deg,
+        "duration_sec": duration,
+        "linear_x": tw.linear.x,
+        "angular_z": tw.angular.z,
     }))
 
 
@@ -257,12 +306,80 @@ def _decl_mcp(stub, cap_id: str, contract_id: str, port: int, fn) -> None:
     ))
 
 
+# ── lifecycle Driver gRPC server ────────────────────────────────────────────
+# `rbnx boot` calls Driver(CMD_INIT, config_json) after seeing this cap's
+# `*/driver` interface in atlas; we ack only after the ROS2 thread has
+# finished bring-up so `state` / `move` MCP tools never fire against an
+# uninitialised node.
+
+import lifecycle_pb2  # noqa: E402  (codegen, available after _ensure_proto_gen)
+import robonix_contracts_pb2_grpc as contracts_grpc  # noqa: E402
+
+_CMD_INIT = 0
+_CMD_SHUTDOWN = 1
+
+
+def _wait_for_ros_ready(timeout_s: float) -> tuple[bool, str]:
+    """Block up to `timeout_s` for the ROS2 thread to finish setup.
+    Returns (ok, error). Used by INIT and PROBE."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _ros_node is not None and _cmd_vel_pub is not None:
+            return True, ""
+        time.sleep(0.1)
+    return False, "ROS2 node / /cmd_vel publisher did not come up in time"
+
+
+class _ChassisDriverServicer(contracts_grpc.PrimitiveChassisDriverServicer):
+    def Driver(self, request, context):
+        cmd = request.command
+        if cmd == _CMD_INIT:
+            ok, err = _wait_for_ros_ready(timeout_s=10.0)
+            return lifecycle_pb2.Driver_Response(
+                ok=ok, state="ready" if ok else "error", error=err
+            )
+        if cmd == _CMD_SHUTDOWN:
+            return lifecycle_pb2.Driver_Response(ok=True, state="ready", error="")
+        return lifecycle_pb2.Driver_Response(ok=False, state="error", error="invalid command")
+
+
+def _start_driver_grpc(port: int) -> None:
+    from concurrent import futures
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    contracts_grpc.add_PrimitiveChassisDriverServicer_to_server(
+        _ChassisDriverServicer(), server
+    )
+    server.add_insecure_port(f"[::]:{port}")
+    server.start()
+    print(f"[tiago_chassis] LifecycleDriver gRPC serving on 0.0.0.0:{port}")
+
+
+def _decl_driver(stub, cap_id: str, port: int) -> None:
+    stub.DeclareInterface(pb.DeclareInterfaceRequest(
+        capability_id=cap_id,
+        contract_id="robonix/primitive/chassis/driver",
+        transport=pb.TRANSPORT_GRPC,
+        endpoint=f"127.0.0.1:{port}",
+        params=pb.TransportParams(grpc=pb.GrpcParams(
+            proto_file="robonix_contracts.proto",
+            service_name="LifecycleDriver",
+            method="Driver",
+        )),
+    ))
+
+
 def main() -> None:
     atlas_addr = os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
-    port = int(os.environ.get("TIAGO_CHASSIS_MCP_PORT", "50111"))
+    mcp_port = int(os.environ.get("TIAGO_CHASSIS_MCP_PORT", "50111"))
+    driver_port = int(os.environ.get("TIAGO_CHASSIS_DRIVER_PORT", "50211"))
     cap_id = os.environ.get(
         "ROBONIX_CAPABILITY_ID", "com.robonix.primitive.tiago_chassis"
     )
+
+    # Bring up data planes BEFORE registering with atlas, so any interface
+    # the boot/agent connects to is immediately answerable.
+    threading.Thread(target=_start_ros2, daemon=True).start()
+    _start_driver_grpc(driver_port)
 
     channel = grpc.insecure_channel(atlas_addr)
     stub = pb_grpc.AtlasStub(channel)
@@ -275,18 +392,21 @@ def main() -> None:
             namespace="robonix/primitive/chassis",
             capability_md_path=md_path,
         ))
-        _decl_mcp(stub, cap_id, "robonix/primitive/chassis/state", port, state)
-        _decl_mcp(stub, cap_id, "robonix/primitive/chassis/move",  port, move)
-        print(f"[tiago_chassis] registered cap {cap_id} → 2 interfaces on port {port}")
+        # Declare driver FIRST — `rbnx boot` queries the cap right after
+        # RegisterCapability and runs INIT against the first `*/driver`
+        # interface it finds.
+        _decl_driver(stub, cap_id, driver_port)
+        _decl_mcp(stub, cap_id, "robonix/primitive/chassis/state", mcp_port, state)
+        _decl_mcp(stub, cap_id, "robonix/primitive/chassis/move",  mcp_port, move)
+        print(f"[tiago_chassis] registered cap {cap_id} → driver:{driver_port}, mcp:{mcp_port}")
     except Exception as e:
         print(f"[tiago_chassis] WARN: atlas registration failed: {e}")
 
     threading.Thread(target=_heartbeat_loop, args=(stub, cap_id), daemon=True).start()
-    threading.Thread(target=_start_ros2, daemon=True).start()
 
-    print(f"[tiago_chassis] MCP HTTP serving on 0.0.0.0:{port}")
+    print(f"[tiago_chassis] MCP HTTP serving on 0.0.0.0:{mcp_port}")
     import uvicorn
-    uvicorn.run(mcp.streamable_http_app(), host="0.0.0.0", port=port, log_level="warning")
+    uvicorn.run(mcp.streamable_http_app(), host="0.0.0.0", port=mcp_port, log_level="warning")
 
 
 if __name__ == "__main__":

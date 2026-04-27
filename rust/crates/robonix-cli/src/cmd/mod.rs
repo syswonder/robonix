@@ -16,12 +16,12 @@ mod config;
 mod deploy;
 mod info;
 mod init;
+mod inspect;
 mod install;
 mod list;
 mod package_new;
 mod path;
 mod run_package;
-mod runtime;
 mod setup;
 mod validate;
 
@@ -54,14 +54,16 @@ pub enum Commands {
         #[arg(long)]
         endpoint: Option<String>,
     },
-    /// Bring up an entire deployment described by a top-level `robonix_manifest.yaml`
-    /// — system services (atlas/executor/pilot/liaison/memory/vlm) plus every package
+    /// Boot the whole stack from a top-level `robonix_manifest.yaml` — system
+    /// services (atlas/executor/pilot/liaison/memory/vlm) plus every package
     /// declared under `primitive`/`service`/`skill`. Blocks until Ctrl-C.
-    Deploy {
+    /// `rbnx deploy` is kept as an alias for back-compat.
+    #[command(alias = "deploy")]
+    Boot {
         /// Path to the deployment manifest (default: `./robonix_manifest.yaml`).
         #[arg(short = 'f', long, default_value = "robonix_manifest.yaml")]
         file: PathBuf,
-        /// Directory for per-component logs (default: `<manifest-dir>/rbnx-deploy/logs`).
+        /// Directory for per-component logs (default: `<manifest-dir>/rbnx-boot/logs`).
         #[arg(long)]
         log_dir: Option<PathBuf>,
         /// Skip starting the `system:` block (atlas/pilot/etc). Useful when
@@ -135,34 +137,29 @@ pub enum Commands {
         key: String,
     },
 
-    /// List all registered nodes and their interfaces
-    Nodes {
+    /// List all registered capabilities and their interfaces
+    #[command(alias = "nodes")]
+    Caps {
         /// robonix-atlas endpoint
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
-        /// Filter by distro prefix (e.g. humble)
-        #[arg(long)]
-        distro: Option<String>,
-        /// Filter by exact container_id
-        #[arg(long)]
-        container: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
     },
-    /// Show SKILL.md for registered nodes (all, or one with --node)
+    /// Show CAPABILITY.md for registered caps (all, or one with --cap)
     Describe {
         /// robonix-atlas endpoint
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
-        /// Show full SKILL.md for a specific node
-        #[arg(long)]
-        node: Option<String>,
+        /// Show full CAPABILITY.md content for a specific cap_id
+        #[arg(long, alias = "node")]
+        cap: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
     },
-    /// Print all tools visible to the agent (builtin + node skills)
+    /// Print every MCP-callable tool visible to the agent (executor builtins + cap interfaces)
     Tools {
         /// robonix-atlas endpoint
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
@@ -171,13 +168,13 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Show active channels (negotiated connections)
+    /// Show active channels (consumer→provider connections opened via ConnectCapability)
     Channels {
         /// robonix-atlas endpoint
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
     },
-    /// Dump full runtime state as JSON (nodes, interfaces, channels)
+    /// Dump full runtime state as JSON (capabilities, interfaces, channels)
     Inspect {
         /// robonix-atlas endpoint
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
@@ -223,7 +220,7 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         Commands::Start { package, endpoint } => {
             run_package::execute_start(&config, package.as_deref(), endpoint.as_deref()).await
         }
-        Commands::Deploy {
+        Commands::Boot {
             file,
             log_dir,
             skip_system,
@@ -244,18 +241,13 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         } => codegen::execute(config, package, mcp, clean, out_dir).await,
         Commands::Setup { path } => setup::execute(config, path).await,
         Commands::Path { key } => path::execute(config, key).await,
-        Commands::Nodes {
-            server,
-            distro,
-            container,
-            json,
-        } => runtime::nodes(&server, distro.as_deref(), container.as_deref(), json).await,
-        Commands::Describe { server, node, json } => {
-            runtime::describe(&server, node.as_deref(), json).await
+        Commands::Caps { server, json } => inspect::caps(&server, json).await,
+        Commands::Describe { server, cap, json } => {
+            inspect::describe(&server, cap.as_deref(), json).await
         }
-        Commands::Tools { server, json } => runtime::tools(&server, json).await,
-        Commands::Channels { server } => runtime::channels(&server).await,
-        Commands::Inspect { server } => runtime::inspect(&server).await,
+        Commands::Tools { server, json } => inspect::tools(&server, json).await,
+        Commands::Channels { server } => inspect::channels(&server).await,
+        Commands::Inspect { server } => inspect::inspect(&server).await,
         Commands::Chat { server } => chat::execute(&server).await,
         Commands::Init { name, path } => init::execute(&name, path.as_deref()).await,
         Commands::PackageNew {
