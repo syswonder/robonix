@@ -11,7 +11,7 @@ exploration / search / wandering — paired with `camera/snapshot`.
   (`map` frame) when localization is up; otherwise zeros.
 - use to check where the robot currently is on the map.
 
-### `cmd` — `robonix/primitive/chassis/cmd`
+### `cmd` — `robonix/primitive/chassis/move`
 - input: any of `linear_x linear_y linear_z angular_x angular_y angular_z`
   (all default to 0 — pass only the axes you want to actuate).
 - duration: ~1 s by default (`TIAGO_CHASSIS_CMD_DURATION_SEC`); after the
