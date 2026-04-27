@@ -556,6 +556,7 @@ pub async fn execute(
 /// containing `[workspace]` is found (the robonix rust/ root). This is
 /// how we locate the cargo workspace when called as an installed binary
 /// or from `cargo run` alike.
+#[allow(dead_code)]
 fn find_rust_root() -> Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let mut cur: Option<&Path> = exe.parent();

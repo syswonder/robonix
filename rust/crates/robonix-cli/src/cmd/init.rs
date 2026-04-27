@@ -34,14 +34,24 @@ env:
 system:
   atlas:
     listen: 127.0.0.1:50051
+    log: info
   executor:
     listen: 127.0.0.1:50061
+    log: info
   pilot:
     listen: 127.0.0.1:50071
+    log: info
     vlm:
-      upstream: ${{VLM_BASE_URL}}
-      api_key: ${{VLM_API_KEY}}
+      upstream: ""
+      api_key: ""
+      model: ""
       api_format: openai
+  liaison:
+    listen: 127.0.0.1:50081
+    log: info
+  nexus:
+    log: info
+  memory: []
 
 primitive: []
 
