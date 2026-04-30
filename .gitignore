@@ -44,6 +44,9 @@ venv/
 # rbnx build
 rbnx-build/
 
+# rbnx deploy
+rbnx-deploy/
+
 # trae IDE
 .trae/
 target

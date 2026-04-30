@@ -204,7 +204,7 @@ pub enum Commands {
         /// Package type: primitive, service, or skill
         #[arg(short = 't', long = "type", default_value = "service")]
         pkg_type: String,
-        /// Project root (default: current directory; must contain robonix_manifest.yaml or role dirs)
+        /// Target package directory to create (when given, --type is ignored)
         #[arg(long)]
         path: Option<PathBuf>,
     },

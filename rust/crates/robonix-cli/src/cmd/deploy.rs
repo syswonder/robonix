@@ -552,28 +552,6 @@ pub async fn execute(
     Ok(())
 }
 
-/// Walk up from the running executable's directory until a `Cargo.toml`
-/// containing `[workspace]` is found (the robonix rust/ root). This is
-/// how we locate the cargo workspace when called as an installed binary
-/// or from `cargo run` alike.
-#[allow(dead_code)]
-fn find_rust_root() -> Result<PathBuf> {
-    let exe = std::env::current_exe()?;
-    let mut cur: Option<&Path> = exe.parent();
-    while let Some(d) = cur {
-        let cargo = d.join("Cargo.toml");
-        if cargo.is_file()
-            && let Ok(text) = std::fs::read_to_string(&cargo)
-            && text.contains("[workspace]")
-        {
-            return Ok(d.to_path_buf());
-        }
-        cur = d.parent();
-    }
-    // Fallback: current working dir (useful in dev).
-    std::env::current_dir().context("could not locate rust workspace root")
-}
-
 /// Translate a `system.<name>:` block into CLI args for the corresponding
 /// Rust binary. Per-binary mapping kept narrow — adding a new flag means
 /// touching exactly this function plus the binary's clap struct.
@@ -632,9 +610,25 @@ fn system_cli_args(
             );
             push_pair(&mut out, "--log", s("log"));
             // Embedded VLM block.
-            push_pair(&mut out, "--vlm-upstream", nested_str("vlm", "upstream"));
-            push_pair(&mut out, "--vlm-api-key", nested_str("vlm", "api_key"));
-            push_pair(&mut out, "--vlm-model", nested_str("vlm", "model"));
+            let vlm_upstream = nested_str("vlm", "upstream");
+            let vlm_api_key = nested_str("vlm", "api_key");
+            let vlm_model = nested_str("vlm", "model");
+            // Warn if any VLM field is empty — pilot will refuse to start.
+            for (field, val) in [
+                ("vlm.upstream", &vlm_upstream),
+                ("vlm.api_key", &vlm_api_key),
+                ("vlm.model", &vlm_model),
+            ] {
+                if val.as_ref().is_none_or(|v| v.trim().is_empty()) {
+                    output::warning(&format!(
+                        "[pilot] {field} is empty — pilot will fail to start. \
+                         Set the corresponding env var or fill it in the manifest."
+                    ));
+                }
+            }
+            push_pair(&mut out, "--vlm-upstream", vlm_upstream);
+            push_pair(&mut out, "--vlm-api-key", vlm_api_key);
+            push_pair(&mut out, "--vlm-model", vlm_model);
             push_pair(&mut out, "--vlm-format", nested_str("vlm", "api_format"));
         }
         _ => {}

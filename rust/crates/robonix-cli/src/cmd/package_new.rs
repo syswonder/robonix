@@ -12,7 +12,20 @@ use anyhow::{Context, Result};
 use robonix_cli::output;
 use std::path::{Path, PathBuf};
 
+/// Reject names containing path separators or traversal components.
+fn validate_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("name must not be empty");
+    }
+    if name.contains('/') || name.contains('\\') || name == ".." || name.starts_with("../") {
+        anyhow::bail!("invalid name '{name}': must not contain path separators or '..' components");
+    }
+    Ok(())
+}
+
 pub async fn execute(name: &str, pkg_type: &str, path: Option<&Path>) -> Result<()> {
+    validate_name(name)?;
+
     let pkg_dir: PathBuf = if let Some(p) = path {
         // --path given: use it directly, no type inference needed.
         if p.is_absolute() {
@@ -26,9 +39,9 @@ pub async fn execute(name: &str, pkg_type: &str, path: Option<&Path>) -> Result<
             "primitive" => "primitives",
             "service" => "services",
             "skill" => "skills",
-            other => anyhow::bail!(
-                "unknown package type '{other}'; expected: primitive, service, skill"
-            ),
+            other => {
+                anyhow::bail!("unknown package type '{other}'; expected: primitive, service, skill")
+            }
         };
         std::env::current_dir()?.join(role_dir).join(name)
     };
