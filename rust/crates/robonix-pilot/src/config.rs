@@ -155,16 +155,12 @@ impl PilotConfig {
             .vlm_api_key
             .or(file_vlm.api_key)
             .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| {
-                missing_field("vlm.api_key", "ROBONIX_VLM_API_KEY", "--vlm-api-key")
-            })?;
+            .ok_or_else(|| missing_field("vlm.api_key", "ROBONIX_VLM_API_KEY", "--vlm-api-key"))?;
         let model = args
             .vlm_model
             .or(file_vlm.model)
             .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| {
-                missing_field("vlm.model", "ROBONIX_VLM_MODEL", "--vlm-model")
-            })?;
+            .ok_or_else(|| missing_field("vlm.model", "ROBONIX_VLM_MODEL", "--vlm-model"))?;
 
         Ok(Self {
             atlas_endpoint,

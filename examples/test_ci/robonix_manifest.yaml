@@ -13,6 +13,7 @@ system:
     vlm:
       upstream: ${VLM_BASE_URL}
       api_key: ${VLM_API_KEY}
+      model: ${VLM_MODEL}
       api_format: openai
 
 primitive:

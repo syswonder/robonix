@@ -5,7 +5,20 @@ use anyhow::{Context, Result};
 use robonix_cli::output;
 use std::path::Path;
 
+/// Reject names containing path separators or traversal components.
+fn validate_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("name must not be empty");
+    }
+    if name.contains('/') || name.contains('\\') || name == ".." || name.starts_with("../") {
+        anyhow::bail!("invalid name '{name}': must not contain path separators or '..' components");
+    }
+    Ok(())
+}
+
 pub async fn execute(name: &str, path: Option<&Path>) -> Result<()> {
+    validate_name(name)?;
+
     let base = match path {
         Some(p) => p.to_path_buf(),
         None => std::env::current_dir()?,
@@ -42,9 +55,9 @@ system:
     listen: 127.0.0.1:50071
     log: info
     vlm:
-      upstream: ""
-      api_key: ""
-      model: ""
+      upstream: ${{VLM_BASE_URL}}
+      api_key: ${{VLM_API_KEY}}
+      model: ${{VLM_MODEL}}
       api_format: openai
   liaison:
     listen: 127.0.0.1:50081
@@ -66,7 +79,7 @@ skill: []
     // .gitignore
     let gitignore = "\
 rbnx-build/
-rbnx-deploy/
+rbnx-boot/
 __pycache__/
 *.pyc
 .venv/
