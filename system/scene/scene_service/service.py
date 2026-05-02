@@ -159,6 +159,9 @@ _CONTRACT_LEAF_TO_KIND: dict[str, str] = {
     "rgb": "rgb",
     "depth": "depth",
     "depth_registered": "depth",
+    # `lidar/lidar` is the canonical 2D LaserScan contract; `lidar2d`
+    # is also accepted in case a soma uses the explicit name.
+    "lidar": "lidar2d",
     "lidar2d": "lidar2d",
     "scan": "lidar2d",
     "lidar3d": "lidar3d",
@@ -607,7 +610,10 @@ async def _ingest_detections(registry: ObjectRegistry, detections):
 async def _run() -> None:
     config = _load_config()
     atlas_addr = os.environ.get("ROBONIX_ATLAS", "localhost:50051")
-    port = int(os.environ.get("SCENE_PORT", "50106"))
+    # Port resolution: deploy-manifest config wins; env var is the
+    # fallback so package devs can still override via shell. Defaults
+    # are 50106 (MCP HTTP for pilot) and 50107 (debug web UI).
+    port = int(config.get("mcp_port") or os.environ.get("SCENE_PORT", "50106"))
     cap_id = os.environ.get("ROBONIX_CAPABILITY_ID", "com.robonix.system.scene")
 
     channel = grpc.insecure_channel(atlas_addr)
@@ -671,9 +677,11 @@ async def _run() -> None:
 
     # Web debug UI on a separate port — top-down 2D canvas + objects
     # table + robot pose. Lives in the same asyncio loop as the rest
-    # of scene so registry reads are local. Disable with
-    # `SCENE_WEB_PORT=0`.
-    web_port = int(os.environ.get("SCENE_WEB_PORT", "50107"))
+    # of scene so registry reads are local. Set `web_port: 0` in the
+    # deploy-manifest scene block to disable. SCENE_WEB_PORT env is
+    # the override of last resort.
+    web_port = int(config.get("web_port") if config.get("web_port") is not None
+                   else os.environ.get("SCENE_WEB_PORT", "50107"))
     web_task = None
     if web_port > 0:
         web_app = web_ui.make_app(registry=registry, relations=relations)

@@ -291,6 +291,19 @@ def _decl_driver(stub, cap_id: str, port: int) -> None:
     ))
 
 
+def _decl_topic_out(stub, cap_id: str, contract_id: str, topic: str, qos_profile: str = "") -> None:
+    """Tell atlas which ROS topic carries this contract's data plane.
+    Consumers (scene, telemetry) discover the topic by querying atlas
+    for the contract over TRANSPORT_ROS2."""
+    stub.DeclareInterface(pb.DeclareInterfaceRequest(
+        capability_id=cap_id,
+        contract_id=contract_id,
+        transport=pb.TRANSPORT_ROS2,
+        endpoint=topic,
+        params=pb.TransportParams(ros2=pb.Ros2Params(qos_profile=qos_profile)),
+    ))
+
+
 def main() -> None:
     atlas_addr = os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
     mcp_port = int(os.environ.get("TIAGO_LIDAR_MCP_PORT", "50113"))
@@ -313,7 +326,10 @@ def main() -> None:
         ))
         _decl_driver(stub, cap_id, driver_port)
         _decl_mcp(stub, cap_id, "robonix/primitive/lidar/snapshot", mcp_port, snapshot)
-        print(f"[tiago_lidar] registered cap {cap_id} → driver:{driver_port}, mcp:{mcp_port}")
+        scan_topic = os.environ.get("TIAGO_SCAN_TOPIC", "/scanner")
+        _decl_topic_out(stub, cap_id, "robonix/primitive/lidar/lidar", scan_topic, "best_effort")
+        print(f"[tiago_lidar] registered cap {cap_id} → driver:{driver_port}, mcp:{mcp_port}, "
+              f"ros2: lidar={scan_topic}")
     except Exception as e:
         print(f"[tiago_lidar] WARN: atlas registration failed: {e}")
 

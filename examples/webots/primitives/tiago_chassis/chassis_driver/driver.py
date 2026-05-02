@@ -368,6 +368,20 @@ def _decl_driver(stub, cap_id: str, port: int) -> None:
     ))
 
 
+def _decl_topic_out(stub, cap_id: str, contract_id: str, topic: str, qos_profile: str = "") -> None:
+    """Tell atlas which ROS topic carries the data plane for a
+    topic_out contract. Consumers (scene, telemetry, …) discover the
+    topic via QueryCapabilities + this DeclareInterface — no
+    hard-coded topic names anywhere."""
+    stub.DeclareInterface(pb.DeclareInterfaceRequest(
+        capability_id=cap_id,
+        contract_id=contract_id,
+        transport=pb.TRANSPORT_ROS2,
+        endpoint=topic,
+        params=pb.TransportParams(ros2=pb.Ros2Params(qos_profile=qos_profile)),
+    ))
+
+
 def main() -> None:
     atlas_addr = os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
     mcp_port = int(os.environ.get("TIAGO_CHASSIS_MCP_PORT", "50111"))
@@ -398,7 +412,15 @@ def main() -> None:
         _decl_driver(stub, cap_id, driver_port)
         _decl_mcp(stub, cap_id, "robonix/primitive/chassis/state", mcp_port, state)
         _decl_mcp(stub, cap_id, "robonix/primitive/chassis/move",  mcp_port, move)
-        print(f"[tiago_chassis] registered cap {cap_id} → driver:{driver_port}, mcp:{mcp_port}")
+        # ROS2 topic_out contracts: tell atlas which topics this soma
+        # uses for chassis pose + odometry. Topic names come from env
+        # so a different deployment can override without code changes.
+        pose_topic = os.environ.get("TIAGO_POSE_TOPIC", "/amcl_pose")
+        odom_topic = os.environ.get("TIAGO_ODOM_TOPIC", "/odom")
+        _decl_topic_out(stub, cap_id, "robonix/primitive/chassis/pose", pose_topic, "reliable")
+        _decl_topic_out(stub, cap_id, "robonix/primitive/chassis/odom", odom_topic, "reliable")
+        print(f"[tiago_chassis] registered cap {cap_id} → driver:{driver_port}, mcp:{mcp_port}, "
+              f"ros2: pose={pose_topic} odom={odom_topic}")
     except Exception as e:
         print(f"[tiago_chassis] WARN: atlas registration failed: {e}")
 
