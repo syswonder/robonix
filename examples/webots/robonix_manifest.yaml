@@ -33,29 +33,15 @@ system:
     log: info
   memory: {}
   speech: {}
-  # Scene runs in its own docker container (image robonix-scene built
-  # by system/scene/scripts/build.sh) on `--network host` + Zenoh RMW
-  # so it shares the host DDS bus through zenoh-bridge-dds.
-  #
-  # Soma adapter: each entry names a logical observation `kind` and a
-  # `contract` ID. NO static topic / msg_type / QoS. Scene resolves
-  # everything from atlas at startup (see scene_service/service.py
-  # `_build_topic_specs` for the exact algorithm). If a primitive
-  # hasn't yet DeclareInterface'd the contract over ROS2, the entry
-  # is skipped with a warning — soma authors fix it by re-registering
-  # the primitive, not by editing manifests.
-  scene:
-    observations:
-      - kind: rgb
-        contract: robonix/primitive/camera/rgb
-      - kind: depth
-        contract: robonix/primitive/camera/depth
-      - kind: lidar2d
-        contract: robonix/primitive/lidar/lidar2d
-      - kind: pose
-        contract: robonix/primitive/chassis/pose
-      - kind: odom
-        contract: robonix/primitive/chassis/odom
+  # Scene auto-discovers its observation topics from atlas at startup
+  # (see scene_service/service.py `_discover_observations`). No per-
+  # deploy config needed: scene asks atlas for every cap with a
+  # ROS2-transport topic_out interface, recognises the contract leaf
+  # (rgb / depth / lidar2d / pose / odom / lidar3d), and subscribes
+  # accordingly. To override or disable a kind for a specific
+  # deployment, add an `observations:` block here — but the default
+  # is intentionally empty.
+  scene: {}
 
 primitive:
   - name: tiago_chassis
