@@ -1,0 +1,7 @@
+# ASR streaming recognition (bidirectional stream).
+# Client streams AsrAudioChunk; server streams back RecognizeStreamEvent.
+# Stream element types are referenced in the contract TOML.
+audio/AudioConfig audio_config
+string language
+---
+asr/RecognizeStreamEvent event

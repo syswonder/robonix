@@ -4,7 +4,7 @@
 // Command definitions and execution for robonix-cli
 
 use anyhow::Result;
-use clap::{Args, Subcommand};
+use clap::Subcommand;
 use std::path::PathBuf;
 
 use robonix_cli::Config;
@@ -13,34 +13,19 @@ mod build;
 mod chat;
 mod codegen;
 mod config;
-mod graph;
+mod deploy;
 mod info;
+mod inspect;
 mod install;
-mod launch_helpers;
 mod list;
 mod path;
 mod run_package;
-mod runtime;
 mod setup;
+mod shutdown;
+mod teardown;
 mod validate;
 
 const DEFAULT_ENDPOINT: &str = "localhost:50051";
-
-#[derive(Args)]
-pub struct GraphArgs {
-    /// robonix-atlas endpoint (ignored with `--test`)
-    #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
-    pub server: String,
-    /// Output file path (extension hints format when `--format` omitted: `.png` / `.svg`)
-    #[arg(short, long, default_value = "topology.png")]
-    pub output: PathBuf,
-    /// Output format (`png` default when extension is absent or unrecognized)
-    #[arg(long, value_enum)]
-    pub format: Option<graph::GraphOutputFormat>,
-    /// Random mock nodes and channels only (no server)
-    #[arg(long = "test")]
-    pub test_mode: bool,
-}
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -56,17 +41,45 @@ pub enum Commands {
         #[arg(long)]
         clean: bool,
     },
-    /// Start one node of a package (package and node required). Blocks until the process exits.
+    /// Start the package (runs its single top-level `start` shell block).
+    /// Defaults to the package containing the current directory when `-p`
+    /// is omitted. Blocks until the process exits. The pre-dev-packaging
+    /// `-n / --node` flag is gone — one package = one start body now.
     Start {
-        /// Package path or installed name; relative paths use $RBNX_INVOCATION_CWD, else process cwd
-        #[arg(short = 'p', long, required = true)]
-        package: String,
-        /// Node id to start (e.g. call_ping). Exactly one node per invocation.
-        #[arg(short = 'n', long, required = true)]
-        node: String,
+        /// Package path or installed name; relative paths use $RBNX_INVOCATION_CWD, else process cwd.
+        /// If omitted, rbnx walks up from the current directory to find a package manifest.
+        #[arg(short = 'p', long)]
+        package: Option<String>,
         /// Registry endpoint (default: 127.0.0.1:50051)
         #[arg(long)]
         endpoint: Option<String>,
+    },
+    /// Boot the whole stack from a top-level `robonix_manifest.yaml` — system
+    /// services (atlas/executor/pilot/liaison/memory/vlm) plus every package
+    /// declared under `primitive`/`service`/`skill`. Blocks until Ctrl-C.
+    /// `rbnx deploy` is kept as an alias for back-compat.
+    #[command(alias = "deploy")]
+    Boot {
+        /// Path to the deployment manifest (default: `./robonix_manifest.yaml`).
+        #[arg(short = 'f', long, default_value = "robonix_manifest.yaml")]
+        file: PathBuf,
+        /// Directory for per-component logs (default: `<manifest-dir>/rbnx-boot/logs`).
+        #[arg(long)]
+        log_dir: Option<PathBuf>,
+        /// Skip starting the `system:` block (atlas/pilot/etc). Useful when
+        /// those are already running externally.
+        #[arg(long)]
+        skip_system: bool,
+    },
+    /// Tear down a stack previously brought up by `rbnx boot`. Reads the
+    /// per-manifest state file boot writes (`<manifest-dir>/rbnx-boot/state.json`)
+    /// to know which process groups + docker containers to kill, so the
+    /// host doesn't accumulate orphaned drivers when boot dies on an error
+    /// path or its parent shell window is closed.
+    Shutdown {
+        /// Path to the deployment manifest (default: `./robonix_manifest.yaml`).
+        #[arg(short = 'f', long, default_value = "robonix_manifest.yaml")]
+        file: PathBuf,
     },
     /// Install a package from GitHub or local path
     Install {
@@ -84,10 +97,11 @@ pub enum Commands {
         /// Package name
         name: String,
     },
-    /// Validate a package manifest without building
+    /// Validate a package manifest without building. If no path is given,
+    /// rbnx walks up from the current directory to find a package manifest.
     Validate {
         /// Package directory (relative paths use $RBNX_INVOCATION_CWD, else process cwd)
-        path: PathBuf,
+        path: Option<PathBuf>,
     },
     /// Configure robonix-cli
     Config {
@@ -99,12 +113,14 @@ pub enum Commands {
         show: bool,
     },
     /// Run codegen for a package (wraps robonix-codegen + grpc_tools.protoc).
-    /// Regenerates robonix_proto, <pkg>/proto_gen/, and optional <pkg>/robonix_mcp_types/.
-    /// Replaces the copy-pasted boilerplate in package build.sh scripts.
+    /// Stages system protos under `<pkg>/rbnx-build/proto-staging/`, then emits
+    /// `<pkg>/proto_gen/` (and optional `<pkg>/robonix_mcp_types/`). Replaces the
+    /// copy-pasted boilerplate in package build.sh scripts. If `-p` is omitted,
+    /// rbnx walks up from the current directory to find a package manifest.
     Codegen {
         /// Package path (relative to $RBNX_INVOCATION_CWD, else process cwd)
-        #[arg(short = 'p', long, required = true)]
-        package: PathBuf,
+        #[arg(short = 'p', long)]
+        package: Option<PathBuf>,
         /// Also generate robonix_mcp_types/ (for MCP-based packages)
         #[arg(long)]
         mcp: bool,
@@ -118,47 +134,42 @@ pub enum Commands {
         out_dir: Option<PathBuf>,
     },
     /// Register this directory as the robonix source tree (persists to ~/.robonix/config.yaml).
-    /// Call once from a cloned robonix repo so packages anywhere on disk can find contracts/IDL.
+    /// Call once from a cloned robonix repo so packages anywhere on disk can find capabilities/IDL.
     Setup {
         /// Path to the robonix repo root (default: $RBNX_INVOCATION_CWD or process cwd).
         /// If the given path is a sub-directory, walks up to find the root.
         path: Option<PathBuf>,
     },
     /// Print an absolute path rooted in the configured robonix source tree (for build scripts).
-    /// Keys: root, rust, contracts, interfaces-lib, interfaces-proto, runtime-proto, robonix-py
+    /// Keys: root, rust, capabilities, interfaces-lib, runtime-proto, robonix-py
     Path {
         /// Path key to resolve (see above).
         key: String,
     },
 
-    /// List all registered nodes and their interfaces
-    Nodes {
+    /// List all registered capabilities and their interfaces
+    #[command(alias = "nodes")]
+    Caps {
         /// robonix-atlas endpoint
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
-        /// Filter by distro prefix (e.g. humble)
-        #[arg(long)]
-        distro: Option<String>,
-        /// Filter by exact container_id
-        #[arg(long)]
-        container: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
     },
-    /// Show SKILL.md for registered nodes (all, or one with --node)
+    /// Show CAPABILITY.md for registered caps (all, or one with --cap)
     Describe {
         /// robonix-atlas endpoint
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
-        /// Show full SKILL.md for a specific node
-        #[arg(long)]
-        node: Option<String>,
+        /// Show full CAPABILITY.md content for a specific cap_id
+        #[arg(long, alias = "node")]
+        cap: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
     },
-    /// Print all tools visible to the agent (builtin + node skills)
+    /// Print every MCP-callable tool visible to the agent (executor builtins + cap interfaces)
     Tools {
         /// robonix-atlas endpoint
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
@@ -167,13 +178,13 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Show active channels (negotiated connections)
+    /// Show active channels (consumer→provider connections opened via ConnectCapability)
     Channels {
         /// robonix-atlas endpoint
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
     },
-    /// Dump full runtime state as JSON (nodes, interfaces, channels)
+    /// Dump full runtime state as JSON (capabilities, interfaces, channels)
     Inspect {
         /// robonix-atlas endpoint
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
@@ -186,12 +197,6 @@ pub enum Commands {
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
     },
-
-    /// Generate a topology graph of the running system
-    Graph {
-        #[command(flatten)]
-        args: GraphArgs,
-    },
 }
 
 pub async fn execute(command: Commands, config: Config) -> Result<()> {
@@ -201,11 +206,15 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             global,
             clean,
         } => run_package::execute_build(config, path, global, clean).await,
-        Commands::Start {
-            package,
-            node,
-            endpoint,
-        } => run_package::execute_start(&config, &package, &node, endpoint.as_deref()).await,
+        Commands::Start { package, endpoint } => {
+            run_package::execute_start(&config, package.as_deref(), endpoint.as_deref()).await
+        }
+        Commands::Boot {
+            file,
+            log_dir,
+            skip_system,
+        } => deploy::execute(config, file, log_dir, skip_system).await,
+        Commands::Shutdown { file } => shutdown::execute(file).await,
         Commands::Install { github, path } => install::execute(config, github, path).await,
         Commands::List => list::execute(config).await,
         Commands::Info { name } => info::execute(config, &name).await,
@@ -222,21 +231,13 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         } => codegen::execute(config, package, mcp, clean, out_dir).await,
         Commands::Setup { path } => setup::execute(config, path).await,
         Commands::Path { key } => path::execute(config, key).await,
-        Commands::Nodes {
-            server,
-            distro,
-            container,
-            json,
-        } => runtime::nodes(&server, distro.as_deref(), container.as_deref(), json).await,
-        Commands::Describe { server, node, json } => {
-            runtime::describe(&server, node.as_deref(), json).await
+        Commands::Caps { server, json } => inspect::caps(&server, json).await,
+        Commands::Describe { server, cap, json } => {
+            inspect::describe(&server, cap.as_deref(), json).await
         }
-        Commands::Tools { server, json } => runtime::tools(&server, json).await,
-        Commands::Channels { server } => runtime::channels(&server).await,
-        Commands::Inspect { server } => runtime::inspect(&server).await,
+        Commands::Tools { server, json } => inspect::tools(&server, json).await,
+        Commands::Channels { server } => inspect::channels(&server).await,
+        Commands::Inspect { server } => inspect::inspect(&server).await,
         Commands::Chat { server } => chat::execute(&server).await,
-        Commands::Graph { args } => {
-            graph::execute(&args.server, args.output, args.format, args.test_mode).await
-        }
     }
 }

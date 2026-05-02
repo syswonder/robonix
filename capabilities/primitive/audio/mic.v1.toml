@@ -1,0 +1,12 @@
+# Microphone audio stream (raw PCM or encoded).
+[contract]
+id      = "robonix/primitive/audio/mic"
+version = "1"
+kind    = "primitive"
+
+[io.msg]
+msg = "audio/msg/AudioChunk"
+
+[mode]
+type = "topic_out"
+

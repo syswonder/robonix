@@ -1,0 +1,15 @@
+# Single-shot motion command. Driver publishes the inner Twist on the
+# robot's cmd_vel topic for a brief duration (driver-specific) then
+# stops. Returns a `std_msgs/String` ack with status JSON. NOT a stream
+# — the LLM drives motion as discrete bursts (snapshot → reason → move
+# → snapshot), not as a continuous client-stream.
+[contract]
+id      = "robonix/primitive/chassis/move"
+version = "1"
+kind    = "primitive"
+
+[io.srv]
+srv = "chassis/srv/ExecuteMoveCommand"
+
+[mode]
+type = "rpc"

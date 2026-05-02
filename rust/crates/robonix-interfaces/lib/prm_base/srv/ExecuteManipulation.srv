@@ -1,4 +1,0 @@
-# robonix/prm/manipulation/exec — interpret instruction and drive manipulation.
-std_msgs/String instruction
----
-std_msgs/String result

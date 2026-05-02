@@ -8,9 +8,11 @@ use robonix_cli::Config;
 use std::path::{Path, PathBuf};
 
 /// Markers that identify a directory as a valid robonix repo root.
+/// `capabilities/` lives at the repo root since the dev-packaging refactor;
+/// the IDL stays under `rust/crates/robonix-interfaces/lib`.
 const ROBONIX_ROOT_MARKERS: &[&str] = &[
     "rust/Cargo.toml",
-    "rust/contracts",
+    "capabilities",
     "rust/crates/robonix-interfaces/lib",
 ];
 
@@ -83,8 +85,6 @@ pub async fn execute(_config: Config, path: Option<PathBuf>) -> Result<()> {
         "\nOther packages can now resolve paths via `{}`.",
         "rbnx path <key>".bold()
     );
-    println!(
-        "Valid keys: root, rust, contracts, interfaces-lib, interfaces-proto, runtime-proto, robonix-py"
-    );
+    println!("Valid keys: root, rust, capabilities, interfaces-lib, runtime-proto, robonix-py");
     Ok(())
 }

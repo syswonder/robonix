@@ -1,32 +1,86 @@
-//! VLM gRPC client — contract `SrvCognitionReason` (`robonix_contracts.proto`).
-
-use crate::contracts::srv_cognition_reason_client::SrvCognitionReasonClient;
-use crate::robonix_msg::{
-    ChatMessage as PbChatMessage, ChatPart as PbChatPart, ToolCall as PbWireToolCall,
-    ToolSpec as PbToolSpec,
-};
-use crate::vlm_proto::{ChatStreamEvent, ChatStreamRequest};
+// SPDX-License-Identifier: MulanPSL-2.0
+// Author: wheatfox <wheatfox17@icloud.com>
+//
+// Embedded OpenAI-compatible chat-completions client.
+// TODO: maybe we will support Google/Anthropic/etc. in the future :D
+use crate::config::VlmConfig;
 use anyhow::{Context, Result};
-use robonix_sdk::QueryNodesOpts;
+use async_openai::Client;
+use async_openai::config::OpenAIConfig;
+use async_openai::types::chat::{
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
+    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
+    ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestMessageContentPartText,
+    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessageArgs,
+    ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContentPart, ChatCompletionTool, ChatCompletionTools,
+    CreateChatCompletionRequestArgs, FunctionCall, FunctionObject, FunctionObjectArgs, ImageDetail,
+    ImageUrl,
+};
+use futures_util::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tonic::Request;
+use std::collections::BTreeMap;
+use std::pin::Pin;
 
+/// One message in an OpenAI Chat Completions conversation.
+/// Spec: https://platform.openai.com/docs/api-reference/chat/create#chat/create-messages
+///
+/// One struct, four roles (`system` / `user` / `assistant` / `tool`); each
+/// role uses a different subset of the optional fields. `skip_serializing_if`
+/// on every Option prunes irrelevant fields at serialization, so the wire
+/// JSON for each role only carries what OpenAI expects:
+///
+///   system    → role + content
+///   user      → role + content (+ optional `name` for multi-user)
+///   assistant → role + content (may be null when only tool_calls are emitted)
+///                              + optional tool_calls[]
+///   tool      → role + content + tool_call_id (must match an id in the
+///                                              preceding assistant.tool_calls)
+///
+/// We use a flat struct with optional fields rather than a tagged enum because
+/// the planner does a lot of generic Vec<Message> manipulation (trim, sanitize,
+/// sliding-window slicing) that's awkward to express through `match` on every
+/// access. Type-safety for "tool messages must have tool_call_id" is delegated
+/// to runtime checks (`history::sanitize_for_vlm`) and the OpenAI server's
+/// own validation.
+///
+/// `image_base64` is a robonix-side simplification, NOT part of the OpenAI
+/// wire format. Callers set it on a `user` message; `build_openai_messages`
+/// in this file repackages content + image into OpenAI's multimodal `content`
+/// array (`[{type:"text",...}, {type:"image_url",...}]`) at request time.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Message {
+    /// "system" / "user" / "assistant" / "tool". Determines which other
+    /// fields are meaningful; OpenAI rejects mismatched combinations.
     pub role: String,
+
+    /// Optional sender name. Used by `user`/`assistant` for multi-user
+    /// disambiguation; rare in practice. Robonix doesn't set it today.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+
+    /// Message text. Always present except on `assistant` messages whose
+    /// only output is tool calls (then None / null on the wire).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+
+    /// Tool calls the LLM decided to make. Present only on `assistant`
+    /// messages. Each entry carries id + function.{name, arguments};
+    /// the corresponding `tool` message links back via `tool_call_id`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+
+    /// Correlates a `tool` result back to the `assistant.tool_calls[].id`
+    /// that produced it. Required on `tool` messages; absent on others.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+
+    /// Inline image attached to a `user` message (base64-encoded JPEG
+    /// bytes). Robonix-only field; rewritten into OpenAI's multimodal
+    /// content array at serialize time by `build_openai_messages`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_base64: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parts: Option<Vec<ChatPart>>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -41,27 +95,6 @@ pub struct ToolCall {
 pub struct FnCall {
     pub name: String,
     pub arguments: String,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct ChatPart {
-    pub kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mime_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data_base64: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub uri: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_arguments_json: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_result_json: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -100,7 +133,6 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             image_base64: None,
-            parts: Some(vec![ChatPart::text(content)]),
         }
     }
     pub fn user(content: &str) -> Self {
@@ -111,21 +143,16 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             image_base64: None,
-            parts: Some(vec![ChatPart::text(content)]),
         }
     }
-    pub fn user_with_image(content: &str, image: String) -> Self {
+    pub fn user_with_image(content: &str, image_base64: String) -> Self {
         Self {
             role: "user".into(),
             name: None,
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
-            image_base64: Some(image.clone()),
-            parts: Some(vec![
-                ChatPart::text(content),
-                ChatPart::inline_data("image/jpeg", image),
-            ]),
+            image_base64: Some(image_base64),
         }
     }
     pub fn assistant(content: &str) -> Self {
@@ -136,11 +163,9 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             image_base64: None,
-            parts: Some(vec![ChatPart::text(content)]),
         }
     }
     pub fn assistant_tool_calls(tc: Vec<ToolCall>) -> Self {
-        let parts = tc.iter().map(ChatPart::function_call).collect();
         Self {
             role: "assistant".into(),
             name: None,
@@ -148,7 +173,6 @@ impl Message {
             tool_calls: Some(tc),
             tool_call_id: None,
             image_base64: None,
-            parts: Some(parts),
         }
     }
     pub fn tool_result(id: &str, content: &str) -> Self {
@@ -159,322 +183,247 @@ impl Message {
             tool_calls: None,
             tool_call_id: Some(id.into()),
             image_base64: None,
-            parts: Some(vec![ChatPart::function_response(id, content)]),
-        }
-    }
-    #[allow(dead_code)]
-    pub fn tool_result_with_image(id: &str, content: &str, image: String) -> Self {
-        Self {
-            role: "tool".into(),
-            name: None,
-            content: Some(content.into()),
-            tool_calls: None,
-            tool_call_id: Some(id.into()),
-            image_base64: Some(image.clone()),
-            parts: Some(vec![
-                ChatPart::function_response(id, content),
-                ChatPart::inline_data("image/jpeg", image),
-            ]),
         }
     }
 }
 
-impl ChatPart {
-    pub fn text(text: &str) -> Self {
-        Self {
-            kind: "text".into(),
-            text: Some(text.into()),
-            mime_type: None,
-            data_base64: None,
-            uri: None,
-            tool_name: None,
-            tool_arguments_json: None,
-            tool_call_id: None,
-            tool_result_json: None,
-        }
-    }
-
-    pub fn inline_data(mime_type: &str, data_base64: String) -> Self {
-        Self {
-            kind: "inline_data".into(),
-            text: None,
-            mime_type: Some(mime_type.into()),
-            data_base64: Some(data_base64),
-            uri: None,
-            tool_name: None,
-            tool_arguments_json: None,
-            tool_call_id: None,
-            tool_result_json: None,
-        }
-    }
-
-    pub fn function_call(tc: &ToolCall) -> Self {
-        Self {
-            kind: "function_call".into(),
-            text: None,
-            mime_type: None,
-            data_base64: None,
-            uri: None,
-            tool_name: Some(tc.function.name.clone()),
-            tool_arguments_json: Some(tc.function.arguments.clone()),
-            tool_call_id: Some(tc.id.clone()),
-            tool_result_json: None,
-        }
-    }
-
-    pub fn function_response(tool_call_id: &str, result_json: &str) -> Self {
-        Self {
-            kind: "function_response".into(),
-            text: None,
-            mime_type: None,
-            data_base64: None,
-            uri: None,
-            tool_name: None,
-            tool_arguments_json: None,
-            tool_call_id: Some(tool_call_id.into()),
-            tool_result_json: Some(result_json.into()),
-        }
-    }
-}
-
-/// Stable contract id for the VLM cognition/reason capability (path + interface leaf).
-/// See `rust/docs/NAMESPACE.md` (“System abstract interfaces”).
-pub const VLM_CONTRACT_ID: &str = "robonix/srv/cognition/reason";
-
-/// Default `QueryNodes.namespace` prefix for legacy split discovery only.
-pub const DEFAULT_VLM_NAMESPACE_PREFIX: &str = "robonix/srv/model/vlm";
-
-fn vlm_contract_id_for_query() -> String {
-    match std::env::var("ROBONIX_VLM_CONTRACT_ID") {
-        Ok(s) => s.trim().to_string(),
-        Err(_) => VLM_CONTRACT_ID.to_string(),
-    }
-}
-
-fn vlm_query_namespace_prefix() -> String {
-    match std::env::var("ROBONIX_VLM_NAMESPACE_PREFIX") {
-        Ok(s) => s,
-        Err(_) => DEFAULT_VLM_NAMESPACE_PREFIX.to_string(),
-    }
-}
-
-fn vlm_interface_leaf() -> &'static str {
-    VLM_CONTRACT_ID
-        .rsplit_once('/')
-        .map(|(_, leaf)| leaf)
-        .unwrap_or("chat")
-}
-
-/// VLM client discovered through robonix-atlas's control plane.
-pub struct VlmClient {
-    inner: SrvCognitionReasonClient<tonic::transport::Channel>,
-}
-
-impl VlmClient {
-    /// Discover a VLM/LLM service via robonix-atlas and negotiate a gRPC channel.
-    pub async fn discover(
-        sdk: &mut robonix_sdk::RobonixClient,
-        agent_node_id: &str,
-    ) -> Result<Self> {
-        let contract_id = vlm_contract_id_for_query();
-        let mut nodes = if contract_id.is_empty() {
-            let ns_prefix = vlm_query_namespace_prefix();
-            let iface_leaf = vlm_interface_leaf();
-            sdk.query_nodes(&ns_prefix, iface_leaf, "grpc")
-                .await
-                .with_context(|| "failed to query nodes (legacy split namespace + name)")?
-        } else {
-            sdk.query_nodes_opts(QueryNodesOpts {
-                contract_id: contract_id.clone(),
-                transport: "grpc".into(),
-                ..Default::default()
-            })
-            .await
-            .with_context(|| format!("failed to query nodes for contract_id={contract_id}"))?
-        };
-
-        if nodes.len() > 1 {
-            nodes.sort_by_key(|b| std::cmp::Reverse(b.namespace.len()));
-            log::warn!(
-                "multiple VLM candidates ({}); using most specific namespace {:?}",
-                nodes.len(),
-                nodes[0].namespace
-            );
-        }
-
-        let vlm_node = nodes.first().ok_or_else(|| {
-            anyhow::anyhow!(
-                "no VLM node for contract {} (grpc). See rust/docs/NAMESPACE.md; \
-                 set ROBONIX_VLM_CONTRACT_ID or use legacy empty contract + ROBONIX_VLM_NAMESPACE_PREFIX.",
-                if contract_id.is_empty() {
-                    format!("{}+{}", vlm_query_namespace_prefix(), vlm_interface_leaf())
-                } else {
-                    contract_id.clone()
-                }
-            )
-        })?;
-
-        log::info!(
-            "discovered VLM service: node_id='{}' namespace='{}'",
-            vlm_node.node_id,
-            vlm_node.namespace
-        );
-
-        let iface_name: &str = if contract_id.is_empty() {
-            let iface_leaf = vlm_interface_leaf();
-            vlm_node
-                .interfaces
-                .iter()
-                .find(|i| {
-                    i.name == iface_leaf && i.supported_transports.contains(&"grpc".to_string())
-                })
-                .map(|i| i.name.as_str())
-                .unwrap_or(iface_leaf)
-        } else {
-            vlm_node
-                .interfaces
-                .iter()
-                .find(|i| {
-                    i.contract_id == contract_id
-                        && i.supported_transports.contains(&"grpc".to_string())
-                })
-                .map(|i| i.name.as_str())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "no grpc interface with contract_id='{contract_id}' on node '{}'",
-                        vlm_node.node_id
-                    )
-                })?
-        };
-
-        let channel = sdk
-            .negotiate_channel(agent_node_id, &vlm_node.node_id, iface_name, "grpc")
-            .await
-            .context("failed to negotiate channel with VLM service")?;
-
-        log::info!("VLM channel negotiated: endpoint='{}'", channel.endpoint);
-
-        let endpoint = if channel.endpoint.contains("://") {
-            channel.endpoint
-        } else {
-            format!("http://{}", channel.endpoint)
-        };
-
-        let tonic_channel = tonic::transport::Endpoint::new(endpoint)?
-            .connect()
-            .await
-            .context("failed to connect to VLM service data plane")?;
-
-        Ok(Self {
-            inner: SrvCognitionReasonClient::new(tonic_channel),
-        })
-    }
-
-    /// Open the contract `Stream` RPC and return the tonic `Streaming` handle.
-    pub async fn chat_stream(
-        &mut self,
-        messages: &[Message],
-        tools: &[ToolDef],
-    ) -> Result<tonic::Streaming<ChatStreamEvent>> {
-        let req = Self::build_chat_stream_request(messages, tools);
-        let resp = self
-            .inner
-            .stream(Request::new(req))
-            .await
-            .map_err(|e| anyhow::anyhow!("VLM gRPC Stream failed: {e}"))?;
-        Ok(resp.into_inner())
-    }
-
-    /// Parse a stream event into typed enum for convenience.
-    pub fn parse_stream_event(event: ChatStreamEvent) -> VlmStreamItem {
-        if !event.text_delta.is_empty() {
-            VlmStreamItem::TextDelta(event.text_delta)
-        } else if let Some(tc) = event.tool_call {
-            VlmStreamItem::ToolCall(ToolCall {
-                id: tc.id,
-                kind: "function".to_string(),
-                function: FnCall {
-                    name: tc.name,
-                    arguments: tc.arguments_json,
-                },
-            })
-        } else {
-            VlmStreamItem::Finish(())
-        }
-    }
-
-    fn build_chat_stream_request(messages: &[Message], tools: &[ToolDef]) -> ChatStreamRequest {
-        ChatStreamRequest {
-            messages: Self::build_chat_messages(messages),
-            tools: Self::build_tool_specs(tools),
-            tool_choice: Self::build_tool_choice(tools),
-            max_tokens: 0,
-        }
-    }
-
-    fn build_chat_messages(messages: &[Message]) -> Vec<PbChatMessage> {
-        messages
-            .iter()
-            .map(|m| PbChatMessage {
-                role: m.role.clone(),
-                name: m.name.clone().unwrap_or_default(),
-                content: m.content.clone().unwrap_or_default(),
-                image_base64: m.image_base64.clone().unwrap_or_default(),
-                tool_call_id: m.tool_call_id.clone().unwrap_or_default(),
-                tool_calls: m
-                    .tool_calls
-                    .clone()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|tc| PbWireToolCall {
-                        id: tc.id,
-                        name: tc.function.name,
-                        arguments_json: tc.function.arguments,
-                    })
-                    .collect(),
-                parts: m
-                    .parts
-                    .clone()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|p| PbChatPart {
-                        kind: p.kind,
-                        text: p.text.unwrap_or_default(),
-                        mime_type: p.mime_type.unwrap_or_default(),
-                        data_base64: p.data_base64.unwrap_or_default(),
-                        uri: p.uri.unwrap_or_default(),
-                        tool_name: p.tool_name.unwrap_or_default(),
-                        tool_arguments_json: p.tool_arguments_json.unwrap_or_default(),
-                        tool_call_id: p.tool_call_id.unwrap_or_default(),
-                        tool_result_json: p.tool_result_json.unwrap_or_default(),
-                    })
-                    .collect(),
-            })
-            .collect()
-    }
-
-    fn build_tool_specs(tools: &[ToolDef]) -> Vec<PbToolSpec> {
-        tools
-            .iter()
-            .map(|t| PbToolSpec {
-                name: t.function.name.clone(),
-                description: t.function.description.clone(),
-                input_schema_json: t.function.parameters.to_string(),
-            })
-            .collect()
-    }
-
-    fn build_tool_choice(tools: &[ToolDef]) -> String {
-        if tools.is_empty() {
-            String::new()
-        } else {
-            "auto".to_string()
-        }
-    }
-}
-
+/// Item yielded by the chat completion stream. `planner.rs` matches on this
+/// enum to drive token streaming, tool dispatch, and finish handling.
 pub enum VlmStreamItem {
     TextDelta(String),
     ToolCall(ToolCall),
-    Finish(()),
+    /// Stream complete. Finish reason ("stop" / "tool_calls" / "error") is
+    /// not surfaced to consumers yet — add a field here when the planner or
+    /// downstream PilotEvent grows a use for it.
+    Finish,
+}
+
+/// Direct HTTP client for an OpenAI-compatible chat-completions endpoint.
+/// Cheap to clone — `async_openai::Client` wraps a `reqwest::Client` (an
+/// `Arc<...>` internally). No mutex needed when sharing across tasks.
+#[derive(Clone)]
+pub struct VlmClient {
+    inner: Client<OpenAIConfig>,
+    model: String,
+}
+
+impl VlmClient {
+    pub fn new(cfg: &VlmConfig) -> Self {
+        let oa = OpenAIConfig::new()
+            .with_api_base(cfg.upstream.trim_end_matches('/'))
+            .with_api_key(&cfg.api_key);
+        Self {
+            inner: Client::with_config(oa),
+            model: cfg.model.clone(),
+        }
+    }
+
+    /// Open a streaming chat completion. Yields:
+    ///   - `TextDelta` for every assistant content chunk
+    ///   - `ToolCall` once per accumulated function call (after the upstream
+    ///     finishes streaming all argument deltas)
+    ///   - one final `Finish`
+    pub async fn chat_stream(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<VlmStreamItem>> + Send>>> {
+        let oai_messages = build_openai_messages(messages)?;
+        let oai_tools = build_openai_tools(tools)?;
+
+        let mut req_builder = CreateChatCompletionRequestArgs::default();
+        req_builder
+            .model(&self.model)
+            .messages(oai_messages)
+            .stream(true);
+        if !oai_tools.is_empty() {
+            req_builder.tools(oai_tools);
+        }
+        let request = req_builder
+            .build()
+            .context("build chat completion request")?;
+
+        let mut upstream = self
+            .inner
+            .chat()
+            .create_stream(request)
+            .await
+            .context("open VLM chat stream")?;
+
+        // Walk the upstream chunk-by-chunk, accumulating tool-call deltas by
+        // index until the upstream finishes; then emit one ToolCall per index
+        // and a final Finish event. Use mpsc + spawn so we can return the
+        // boxed Stream while the polling runs in the background.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<VlmStreamItem>>(64);
+        tokio::spawn(async move {
+            let mut tc_acc: BTreeMap<u32, AccumulatedToolCall> = BTreeMap::new();
+            let mut finish = "stop".to_string();
+            while let Some(chunk) = upstream.next().await {
+                match chunk {
+                    Ok(resp) => {
+                        let Some(choice) = resp.choices.into_iter().next() else {
+                            continue;
+                        };
+                        let delta = choice.delta;
+                        if let Some(content) = delta.content
+                            && !content.is_empty()
+                            && tx
+                                .send(Ok(VlmStreamItem::TextDelta(content)))
+                                .await
+                                .is_err()
+                        {
+                            return;
+                        }
+                        if let Some(tc_chunks) = delta.tool_calls {
+                            for tc in tc_chunks {
+                                let entry = tc_acc.entry(tc.index).or_default();
+                                if let Some(id) = tc.id {
+                                    entry.id = id;
+                                }
+                                if let Some(func) = tc.function {
+                                    if let Some(name) = func.name {
+                                        entry.name.push_str(&name);
+                                    }
+                                    if let Some(args) = func.arguments {
+                                        entry.arguments.push_str(&args);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(fr) = choice.finish_reason {
+                            finish = format!("{fr:?}").to_lowercase();
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx
+                            .send(Err(anyhow::anyhow!("VLM stream chunk error: {e}")))
+                            .await;
+                        return;
+                    }
+                }
+            }
+
+            for (_, tc) in tc_acc {
+                if tc.id.is_empty() && tc.name.is_empty() {
+                    continue;
+                }
+                let item = VlmStreamItem::ToolCall(ToolCall {
+                    id: tc.id,
+                    kind: "function".to_string(),
+                    function: FnCall {
+                        name: tc.name,
+                        arguments: tc.arguments,
+                    },
+                });
+                if tx.send(Ok(item)).await.is_err() {
+                    return;
+                }
+            }
+            let _ = finish; // surface to PilotEvent later if needed
+            let _ = tx.send(Ok(VlmStreamItem::Finish)).await;
+        });
+
+        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+}
+
+#[derive(Default)]
+struct AccumulatedToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+fn build_openai_messages(messages: &[Message]) -> Result<Vec<ChatCompletionRequestMessage>> {
+    let mut out = Vec::with_capacity(messages.len());
+    for m in messages {
+        let msg = match m.role.as_str() {
+            "system" => ChatCompletionRequestSystemMessageArgs::default()
+                .content(m.content.clone().unwrap_or_default())
+                .build()?
+                .into(),
+            "user" => {
+                if let Some(image) = &m.image_base64 {
+                    let text = m.content.clone().unwrap_or_default();
+                    let mut parts: Vec<ChatCompletionRequestUserMessageContentPart> = Vec::new();
+                    if !text.is_empty() {
+                        parts.push(ChatCompletionRequestUserMessageContentPart::Text(
+                            ChatCompletionRequestMessageContentPartText { text },
+                        ));
+                    }
+                    let url = format!("data:image/jpeg;base64,{image}");
+                    parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                        ChatCompletionRequestMessageContentPartImage {
+                            image_url: ImageUrl {
+                                url,
+                                detail: Some(ImageDetail::Auto),
+                            },
+                        },
+                    ));
+                    ChatCompletionRequestUserMessageArgs::default()
+                        .content(ChatCompletionRequestUserMessageContent::Array(parts))
+                        .build()?
+                        .into()
+                } else {
+                    ChatCompletionRequestUserMessageArgs::default()
+                        .content(m.content.clone().unwrap_or_default())
+                        .build()?
+                        .into()
+                }
+            }
+            "assistant" => {
+                let mut b = ChatCompletionRequestAssistantMessageArgs::default();
+                if let Some(c) = &m.content
+                    && !c.is_empty()
+                {
+                    b.content(c.clone());
+                }
+                if let Some(tcs) = &m.tool_calls {
+                    let oai_tcs: Vec<ChatCompletionMessageToolCalls> = tcs
+                        .iter()
+                        .map(|tc| {
+                            ChatCompletionMessageToolCalls::Function(
+                                ChatCompletionMessageToolCall {
+                                    id: tc.id.clone(),
+                                    function: FunctionCall {
+                                        name: tc.function.name.clone(),
+                                        arguments: tc.function.arguments.clone(),
+                                    },
+                                },
+                            )
+                        })
+                        .collect();
+                    b.tool_calls(oai_tcs);
+                }
+                b.build()?.into()
+            }
+            "tool" => {
+                let id = m.tool_call_id.clone().unwrap_or_default();
+                ChatCompletionRequestToolMessageArgs::default()
+                    .tool_call_id(id)
+                    .content(m.content.clone().unwrap_or_default())
+                    .build()?
+                    .into()
+            }
+            other => anyhow::bail!("unknown message role '{other}'"),
+        };
+        out.push(msg);
+    }
+    Ok(out)
+}
+
+fn build_openai_tools(tools: &[ToolDef]) -> Result<Vec<ChatCompletionTools>> {
+    tools
+        .iter()
+        .map(|t| -> Result<ChatCompletionTools> {
+            let func: FunctionObject = FunctionObjectArgs::default()
+                .name(&t.function.name)
+                .description(&t.function.description)
+                .parameters(t.function.parameters.clone())
+                .build()?;
+            Ok(ChatCompletionTools::Function(ChatCompletionTool {
+                function: func,
+            }))
+        })
+        .collect()
 }

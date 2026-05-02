@@ -1,0 +1,67 @@
+manifestVersion: 1
+name: robonix-webots-example-deploy
+
+env:
+  # ${VAR} in the blocks below resolves from the launching shell. This
+  # `env:` block is the place to inject extras / overrides for children.
+
+system:
+  atlas:
+    listen: 127.0.0.1:50051
+    log: info
+  executor:
+    listen: 127.0.0.1:50061
+    log: info
+  pilot:
+    listen: 127.0.0.1:50071
+    log: info
+    vlm:
+      upstream: ${VLM_BASE_URL}
+      api_key: ${VLM_API_KEY}
+      model: ${VLM_MODEL}
+      api_format: openai
+  # Non-builtin system entries (key != atlas/executor/pilot) are
+  # auto-resolved as packages at <robonix_source>/system/<key>/. The
+  # value below is handed to the package as RBNX_CONFIG_FILE; pass `{}`
+  # if the package needs no per-deploy config. Keys whose package dir
+  # doesn't exist on disk are skipped with a warning, not fatal — keep
+  # placeholders here for services that are planned but not yet vendored.
+  liaison:
+    listen: 127.0.0.1:50081
+    log: info
+  nexus:
+    log: info
+  memory: {}
+  speech: {}
+
+primitive:
+  - name: tiago_chassis
+    path: ./primitives/tiago_chassis
+    config: []
+  - name: tiago_camera
+    path: ./primitives/tiago_camera
+    config:
+      serial_no: 1234567890
+  - name: tiago_lidar
+    path: ./primitives/tiago_lidar
+    config:
+      resolution: 0.08
+      min_range: 0.3
+      max_range: 50.0
+      frame_id: base_link
+      topic_prefix: /lidar-robonix
+  # audio_driver works as a process (ALSA scan + mic/speaker gRPC servers
+  # come up fine) but its Atlas registration still uses the pre-dev-packaging
+  # robonix_runtime_pb2 monolith, which dev-packaging deleted in favour of
+  # per-IDL-package proto modules (atlas_pb2 + RegisterCapability). Until
+  # that registration block is ported, audio_driver never publishes a cap,
+  # boot waits 60s, then tears the stack down. Re-enable once migrated.
+  # - name: audio_driver
+  #   path: ./primitives/audio_driver
+  #   config: {}
+
+service:
+  - name: tiago_nav2
+    path: ./services/tiago_nav2
+
+skill: []

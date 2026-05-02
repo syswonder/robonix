@@ -1,0 +1,11 @@
+[contract]
+id      = "robonix/service/navigation/cancel"
+version = "1"
+kind    = "service"
+
+
+[io.srv]
+srv = "navigation/srv/CancelNavigation"
+
+[mode]
+type = "rpc"

@@ -1,0 +1,20 @@
+[
+  {
+    "label": "trash_cleanup_2items_soup_tomato",
+    "scene_suite": "libero_10",
+    "scene_task_id": 0,
+    "task_description": "Tidy up the table: put the alphabet soup in the basket, then put the tomato sauce in the basket."
+  },
+  {
+    "label": "trash_cleanup_2items_cream_butter",
+    "scene_suite": "libero_10",
+    "scene_task_id": 1,
+    "task_description": "Tidy up the table: put the cream cheese box in the basket, then put the butter in the basket."
+  },
+  {
+    "label": "trash_cleanup_2items_soup_cream",
+    "scene_suite": "libero_10",
+    "scene_task_id": 7,
+    "task_description": "Tidy up the table: put the alphabet soup in the basket, then put the cream cheese box in the basket."
+  }
+]

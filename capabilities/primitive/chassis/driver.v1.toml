@@ -1,0 +1,13 @@
+# Lifecycle interface every chassis primitive implementation MUST declare.
+# `rbnx boot` calls Driver(CMD_INIT, config_json) against this interface
+# right after RegisterCapability and waits for ok=true before moving on.
+[contract]
+id      = "robonix/primitive/chassis/driver"
+version = "1"
+kind    = "primitive"
+
+[io.srv]
+srv = "lifecycle/srv/Driver"
+
+[mode]
+type = "rpc"

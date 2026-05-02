@@ -1,31 +1,47 @@
 // SPDX-License-Identifier: MulanPSL-2.0
+// Author: wheatfox <wheatfox17@icloud.com>
+//
 // dispatch/mcp.rs — MCP tool dispatch
 //
 // TODO(executor owner): implement full MCP dispatch.
 // Skeleton: connects to the MCP endpoint and calls the named tool.
 
-use crate::pilot::TaskCallResult;
+use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
 use rmcp::ServiceExt;
 
 type McpClient = rmcp::service::RunningService<rmcp::RoleClient, ()>;
 
-pub async fn execute(call_id: &str, name: &str, args_json: &str, endpoint: &str) -> TaskCallResult {
-    match call_mcp(name, args_json, endpoint).await {
-        Ok(output) => TaskCallResult {
-            call_id: call_id.to_string(),
-            tool_name: name.to_string(),
-            success: true,
-            output,
-            error: String::new(),
-        },
-        Err(e) => TaskCallResult {
-            call_id: call_id.to_string(),
-            tool_name: name.to_string(),
-            success: false,
-            output: String::new(),
-            error: e.to_string(),
-        },
+/// MCP tool name = leaf of contract_id (e.g.
+/// `robonix/system/memory/search` → `search`). Servers expose tools by
+/// short name; the cap+contract grouping is Robonix-side bookkeeping.
+/// TODO: use leaf node as tool name may  introduce collisions across caps - wheatfox
+fn mcp_tool_name(contract_id: &str) -> &str {
+    contract_id
+        .rsplit_once('/')
+        .map(|(_, leaf)| leaf)
+        .unwrap_or(contract_id)
+}
+
+pub async fn execute(call: &CapabilityCall, endpoint: &str) -> CapabilityCallResult {
+    let name = mcp_tool_name(&call.contract_id);
+    let result = call_mcp(name, &call.args_json, endpoint).await;
+    let mut out = CapabilityCallResult {
+        call_id: call.call_id.clone(),
+        cap_id: call.cap_id.clone(),
+        contract_id: call.contract_id.clone(),
+        ..Default::default()
+    };
+    match result {
+        Ok(s) => {
+            out.success = true;
+            out.output = s;
+        }
+        Err(e) => {
+            out.success = false;
+            out.error = e.to_string();
+        }
     }
+    out
 }
 
 async fn call_mcp(name: &str, args_json: &str, endpoint: &str) -> anyhow::Result<String> {

@@ -1,0 +1,13 @@
+# nav_msgs/Odometry stream; gRPC `Stream(Empty) returns (stream Odometry)`.
+[contract]
+id      = "robonix/primitive/chassis/odom"
+version = "1"
+kind    = "primitive"
+
+
+[io.msg]
+msg = "nav_msgs/msg/Odometry"
+
+[mode]
+type = "topic_out"
+

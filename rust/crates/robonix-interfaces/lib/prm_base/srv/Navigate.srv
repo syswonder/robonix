@@ -1,5 +1,0 @@
-# robonix/srv/navigation/navigate — goal-based navigation (RPC)
-geometry_msgs/PoseStamped goal
----
-bool accepted
-string status_message

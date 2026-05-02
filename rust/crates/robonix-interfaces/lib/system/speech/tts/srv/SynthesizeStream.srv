@@ -1,0 +1,10 @@
+# TTS streaming synthesis (server stream).
+# Client sends text request; server streams back SynthesizeAudioChunk.
+# Stream element type is referenced in the contract TOML.
+string text
+string language
+string voice
+float32 speed
+audio/AudioConfig audio_config
+---
+tts/SynthesizeAudioChunk chunk

@@ -1,0 +1,13 @@
+# 2D occupancy grid projected from 3D SLAM map.
+# Consumable by Nav2 map_server / costmap static layer.
+[contract]
+id      = "robonix/service/map/occupancy_grid"
+version = "1"
+kind    = "service"
+
+[io.msg]
+msg = "nav_msgs/msg/OccupancyGrid"
+
+[mode]
+type = "topic_out"
+

@@ -1,6 +1,0 @@
-robonix_msg/ChatMessage[] messages
-robonix_msg/ToolSpec[] tools
-string tool_choice
-int32 max_tokens
----
-vlm/ChatStreamEvent event

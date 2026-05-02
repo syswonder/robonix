@@ -6,9 +6,9 @@
 //   - to_dict() / from_dict() for JSON serialization over MCP wire
 //   - json_schema() classmethod for MCP tool registration (input_schema / output_schema)
 //
-// Unlike --lang python (ctypes structs for iceoryx2), nested types are NOT flattened;
-// they appear as nested objects in both Python and JSON Schema.
-// uint8[] binary blobs are represented as `bytes` and base64-encoded in JSON.
+// Nested types appear as nested objects in both Python and JSON Schema
+// (no flattening). `uint8[]` binary blobs are represented as `bytes` and
+// base64-encoded in the JSON form.
 
 use anyhow::{Context, Result};
 use std::collections::BTreeSet;

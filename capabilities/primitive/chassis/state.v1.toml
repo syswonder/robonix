@@ -1,0 +1,12 @@
+# Single-shot robot state query.
+[contract]
+id      = "robonix/primitive/chassis/state"
+version = "1"
+kind    = "primitive"
+
+
+[io.srv]
+srv = "chassis/srv/GetRobotState"
+
+[mode]
+type = "rpc"

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // `rbnx path <key>` — print a well-known path rooted in the robonix source tree.
 // Used by package build.sh scripts in place of fragile relative-dir traversal:
-//   CONTRACTS_DIR="$(rbnx path contracts)"
+//   CAPABILITIES_DIR="$(rbnx path capabilities)"
 //   INTERFACES_LIB="$(rbnx path interfaces-lib)"
 
 use anyhow::Result;

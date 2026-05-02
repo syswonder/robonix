@@ -1,0 +1,10 @@
+[contract]
+id      = "robonix/primitive/lidar/snapshot"
+version = "1"
+kind    = "primitive"
+
+[io.srv]
+srv = "lidar/srv/GetLaserScan"
+
+[mode]
+type = "rpc"

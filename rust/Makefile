@@ -2,7 +2,7 @@
 # Robonix Makefile — workspace build commands
 
 .PHONY: help build release install clean pyrightconfig fmt check \
-        build-atlas build-pilot build-executor build-liaison proto-interfaces
+        build-atlas build-pilot build-executor build-liaison
 .DEFAULT_GOAL := help
 
 RUST_DIR := $(shell pwd)
@@ -21,8 +21,7 @@ help:
 	@echo "    make build-liaison   - Build robonix-liaison only"
 	@echo ""
 	@echo "  Install:"
-	@echo "    make install         - Regenerate robonix_proto + install binaries to ~/.cargo/bin"
-	@echo "    make proto-interfaces - Run robonix-codegen (lib + contracts → robonix_proto/)"
+	@echo "    make install         - Install binaries to ~/.cargo/bin (proto codegen runs in each crate's build.rs)"
 	@echo ""
 	@echo "  Format & Lint:"
 	@echo "    make fmt             - Format all Rust code"
@@ -60,20 +59,16 @@ check:
 	cargo fmt --all -- --check
 	cargo clippy --workspace -- -D warnings
 
-proto-interfaces:
-	cd $(RUST_DIR) && cargo run -p robonix-codegen -- --lang proto \
-		-I crates/robonix-interfaces/lib \
-		--contracts contracts \
-		-o crates/robonix-interfaces/robonix_proto
-
-install: install-atlas proto-interfaces
+install: install-atlas
 	cargo install --path crates/robonix-codegen  --bin robonix-codegen  $(CARGO_FLAGS)
-	cargo install --path crates/robonix-cli  --bin rbnx            $(CARGO_FLAGS)
 	cargo install --path crates/robonix-pilot    --bin robonix-pilot    $(CARGO_FLAGS)
 	cargo install --path crates/robonix-executor --bin robonix-executor $(CARGO_FLAGS)
-	cargo install --path crates/robonix-liaison  --bin robonix-liaison  $(CARGO_FLAGS)
+	cargo install --path crates/robonix-cli      --bin rbnx             $(CARGO_FLAGS)
+	@# robonix-liaison still references the deleted robonix-sdk crate;
+	@# uncomment once it migrates to robonix-atlas::client.
+	@# cargo install --path crates/robonix-liaison  --bin robonix-liaison   $(CARGO_FLAGS)
 	@# Register this clone as the robonix source tree so packages anywhere
-	@# on disk can resolve contracts/IDL via `rbnx path`. This updates
+	@# on disk can resolve capabilities/IDL via `rbnx path`. This updates
 	@# ~/.robonix/config.yaml robonix_source_path = <repo-root> (the parent of rust/).
 	@REPO_ROOT="$$(cd "$(RUST_ABS)/.." && pwd)"; \
 	echo ""; \
