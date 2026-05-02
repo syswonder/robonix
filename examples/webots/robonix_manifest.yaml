@@ -33,6 +33,22 @@ system:
     log: info
   memory: {}
   speech: {}
+  # Scene — current-state semantic + geometric map. Subscribes to whichever
+  # of the listed observation contracts atlas actually has registered;
+  # missing caps are silently skipped (Soma adapter). Webots Tiago has
+  # no 3D lidar, so we list rgb/lidar2d/odom only — depth_snapshot is
+  # available but not yet consumed by scene's geom layer.
+  scene:
+    observations:
+      - kind: rgb
+        contract: robonix/primitive/camera/snapshot
+        period_s: 4.0
+      - kind: lidar2d
+        contract: robonix/primitive/lidar/snapshot
+        period_s: 2.0
+      - kind: odom
+        contract: robonix/primitive/chassis/state
+        period_s: 1.0
 
 primitive:
   - name: tiago_chassis

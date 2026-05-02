@@ -1,0 +1,37 @@
+# Scene MCP server — current-state semantic + geometric map of the
+# robot's environment. Exposes 5 read-only MCP tools for Pilot:
+#   robonix/system/scene/{get_snapshot, query, get_object,
+#                         get_semantic_map, get_safety_context}
+#
+# Soma adapter: scene's ingest layer reads `config.observations[]`
+# (passed in via RBNX_CONFIG_FILE by `rbnx boot`) to know which
+# observation streams the current robot supports. Each entry pairs a
+# logical kind ("rgb", "depth", "lidar2d", "lidar3d", "odom") with an
+# atlas contract_id; scene queries atlas at startup, only enables the
+# poll loops whose cap is actually registered, and silently skips the
+# rest. So a Webots Tiago (no 3D lidar) gets rgb+depth+lidar2d+odom,
+# while a real robot with lidar3d adds the geometry pipeline that
+# feeds plane extraction. No per-deploy code changes required.
+manifestVersion: 1
+
+package:
+  name: com.robonix.system.scene
+  version: 0.1.0
+  vendor: robonix
+  description: Scene — semantic + geometric live map of the environment.
+  license: MulanPSL-2.0
+
+build: bash scripts/build.sh
+
+start: |
+  export PYTHONPATH="$(pwd)/rbnx-build/codegen/proto_gen:$(pwd)/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
+  mkdir -p rbnx-build/data
+  exec rbnx-build/venv/bin/python -m scene_service.service \
+       > rbnx-build/data/scene.log 2>&1
+
+capabilities:
+  - name: robonix/system/scene/get_snapshot
+  - name: robonix/system/scene/query
+  - name: robonix/system/scene/get_object
+  - name: robonix/system/scene/get_semantic_map
+  - name: robonix/system/scene/get_safety_context

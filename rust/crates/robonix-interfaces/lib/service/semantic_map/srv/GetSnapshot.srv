@@ -1,0 +1,6 @@
+# Region- and freshness-scoped read of the scene registry. Pilot calls
+# this every LLM round; payload is always region-scoped and capped by
+# `max_objects` to keep responses small.
+SnapshotSpec spec
+---
+SceneSnapshot snapshot
