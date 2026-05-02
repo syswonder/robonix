@@ -318,7 +318,7 @@ async fn spawn_package(
 // ── entry point ─────────────────────────────────────────────────────────
 
 pub async fn execute(
-    _config: robonix_cli::Config,
+    config: robonix_cli::Config,
     manifest_path: PathBuf,
     log_dir: Option<PathBuf>,
     skip_system: bool,
@@ -408,20 +408,6 @@ pub async fn execute(
             children.push(sp);
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         }
-        // TODO(boot): Resolve non-builtin `system:` entries (e.g. memory /
-        // liaison / nexus) via `rbnx path` to their package directories, then
-        // start them during this system phase (same lifecycle discipline as
-        // current package bring-up) instead of ignoring them.
-        //
-        // Warn (don't fail) on system entries we don't know how to bring up
-        // yet (e.g. liaison while it's still being ported off robonix-sdk).
-        for key in deploy.system.keys() {
-            if !bin_map.iter().any(|(n, _)| *n == key) {
-                output::sub_step(&format!(
-                    "[system] {key}: no built-in launcher; ignored (declare it as a service package if needed)"
-                ));
-            }
-        }
     } else {
         output::sub_step("Skipping system bring-up (--skip-system)");
     }
@@ -441,6 +427,56 @@ pub async fn execute(
             .with_context(|| {
                 format!("connect to atlas at '{atlas_endpoint}' for lifecycle init")
             })?;
+
+    // Non-builtin `system:` keys (memory / speech / …) are real robonix
+    // packages — same start/init/register flow as primitive/service, just
+    // resolved by name against `<robonix_source>/system/<key>/`. Builtin
+    // Rust binaries (atlas/executor/pilot) were spawned above and skipped
+    // here. A key whose package directory is missing on disk is warned
+    // and skipped, not fatal — manifests can declare optional services
+    // that aren't installed yet (e.g. liaison while it's being ported).
+    if !skip_system {
+        let builtin_names: &[&str] = &["atlas", "executor", "pilot"];
+        for (key, value) in &deploy.system {
+            if builtin_names.contains(&key.as_str()) {
+                continue;
+            }
+            let pkg_dir = match config.robonix_source_path.as_ref() {
+                Some(root) => root.join("system").join(key),
+                None => {
+                    output::sub_step(&format!(
+                        "[system] {key}: skipped — robonix_source_path unset (run `rbnx setup` from the repo root)"
+                    ));
+                    continue;
+                }
+            };
+            if !pkg_dir.exists() {
+                output::sub_step(&format!(
+                    "[system] {key}: skipped — no package found at {} (declared in manifest but absent on disk)",
+                    pkg_dir.display()
+                ));
+                continue;
+            }
+            let entry = PackageEntry {
+                name: key.clone(),
+                path: Some(pkg_dir.to_string_lossy().into_owned()),
+                url: None,
+                branch: None,
+                config: value.clone(),
+            };
+            let sp = spawn_and_init(
+                "system",
+                &entry,
+                &log_dir,
+                &cache_root,
+                &instances_dir,
+                &manifest_dir,
+                &mut atlas,
+            )
+            .await?;
+            children.push(sp);
+        }
+    }
 
     for e in &deploy.primitive {
         let sp = spawn_and_init(
