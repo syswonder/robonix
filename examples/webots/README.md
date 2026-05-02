@@ -33,16 +33,29 @@ Two terminals only:
 # T1 — sim (Ctrl-C stops):
 bash examples/webots/sim/start.sh
 
-# T2 — robonix: atlas + executor + pilot + 4 drivers + nav2:
+# T2 — robonix stack (whatever robonix_manifest.yaml declares):
 cd examples/webots
 rbnx boot
 ```
 
-Then a third terminal for `rbnx chat`. `rbnx caps` should show the
-4 driver registrations + 3 system caps (atlas / pilot / executor).
-`rbnx tools` lists every MCP tool the LLM agent sees.
+Then a third terminal for `rbnx chat`. `rbnx caps` lists the
+capabilities atlas knows about; `rbnx tools` lists the MCP tools
+the LLM agent can call.
 
-To tear everything down: `bash sim/stop.sh`.
+To tear everything down: Ctrl-C the `rbnx boot` terminal, OR from
+any other shell:
+
+```bash
+cd examples/webots && rbnx shutdown    # SIGTERM each component's PGID
+bash sim/stop.sh                       # then stop the Webots container
+```
+
+`rbnx shutdown` reads `rbnx-boot/state.json` (boot writes it
+incrementally as components come up) and tears them down in
+reverse order. Each chassis / camera / lidar / nav2 package's
+`scripts/start.sh` installs a `trap` that pkills the in-container
+python on EXIT/INT/TERM — so the docker-exec'd drivers don't
+strand the next bring-up by holding ports 50111-50113 / 50211-50213.
 
 ## Env vars
 

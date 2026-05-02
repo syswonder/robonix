@@ -38,15 +38,16 @@ It runs in two terminals: the simulator and Robonix itself.
 # T1 — simulation environment (Webots GUI; not a Robonix package — just docker compose)
 bash examples/webots/sim/start.sh
 
-# T2 — Robonix system + Tiago drivers + Nav2 wrapper
+# T2 — Robonix stack: system services + Tiago primitives + Nav2 service
 export VLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
 export VLM_API_KEY=sk-...
 export VLM_MODEL=gpt-5.4-mini
 cd examples/webots
-rbnx boot                                # atlas + executor + pilot + 4 driver packages
+rbnx boot                                # whatever the manifest declares,
+                                         # in dependency order
 ```
 
-Once `rbnx boot` reports `✓ 7 component(s) up`, in a third terminal:
+Once `rbnx boot` reports the stack is up, in a third terminal:
 
 ```bash
 rbnx caps          # list registered capabilities + interfaces
@@ -54,10 +55,13 @@ rbnx tools         # tools the LLM agent sees
 rbnx chat          # interactive ratatui chat with the pilot
 ```
 
-To tear everything down:
+To tear everything down — Ctrl-C the `rbnx boot` terminal, or from
+any other shell:
 
 ```bash
-bash examples/webots/sim/stop.sh
+cd examples/webots && rbnx shutdown      # reads rbnx-boot/state.json,
+                                         # SIGTERMs each component's PGID
+bash sim/stop.sh                         # then stop the Webots container
 ```
 
 Full first-run walkthrough: [**docs/src/getting-started/quickstart.md**](https://github.com/syswonder/robonix-book/blob/main/src/getting-started/quickstart.md).
