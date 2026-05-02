@@ -89,6 +89,7 @@ import atlas_pb2 as pb  # type: ignore
 import atlas_pb2_grpc as pb_grpc  # type: ignore
 
 from . import mcp_tools
+from . import web as web_ui
 from .ingest.perception_vlm import VLMObjectDetector
 from .ingest.ros_subscribers import (
     DEFAULT_WEBOTS_TIAGO_TOPICS,
@@ -150,74 +151,163 @@ def _load_config() -> dict:
 
 
 def _build_topic_specs(observations: list[dict], atlas_stub) -> list[TopicSpec]:
-    """Resolve each observation entry to a ROS topic.
+    """Resolve each Soma observation entry to a ROS-topic subscription.
 
-    Two-step lookup:
-      1. If the entry has a `contract`, ask atlas for the cap that
-         publishes it over the ROS2 transport. If found, use the
-         endpoint atlas reports (= the actual ROS topic name) and
-         derive msg_type from the contract's IDL metadata.
-      2. Fallback: use the static `topic` + `msg_type` fields from
-         the manifest entry.
+    NO static topic / msg_type / QoS in the manifest. Everything comes
+    from atlas + the contract's IDL metadata. The algorithm:
 
-    The atlas-first path means a soma can re-register its primitives
-    on different topics without editing the deploy manifest. The
-    static fallback covers contracts whose publisher hasn't been
-    migrated to DeclareInterface(transport=ROS2) yet (today: most of
-    them — Webots primitives publish to ROS but don't tell atlas
-    about it). Once a primitive registers its topic with atlas, the
-    fallback becomes unused for that entry.
+      For each (kind, contract_id) the manifest declares:
+
+        1. Atlas resolution
+           ─────────────────
+           records = atlas.QueryCapabilities(contract_id, transport=ROS2)
+           If `records` is empty → no primitive has DeclareInterface'd
+           this contract over ROS2. Log a one-line warning and skip
+           the entry; we never make up a topic name. Soma authors fix
+           this by registering the primitive properly, not by editing
+           the deploy manifest.
+
+           Otherwise pick the first matching interface:
+             topic        = iface.endpoint           (the ROS topic)
+             qos_profile  = iface.params.ros2.qos_profile  (optional hint)
+
+           Multiple records → log + take first; deterministic selection
+           is a separate ranking concern (atlas doesn't expose priority
+           today).
+
+        2. msg_type derivation from contract IDL
+           ──────────────────────────────────────
+           The contract TOML at `<robonix_capabilities>/<namespace>.v1.toml`
+           has `[io.msg].msg = "sensor_msgs/msg/Image"` (or similar).
+           Split on `/`, take the last segment ("Image") — that's the
+           Python class name in the corresponding `<package>_msgs` module
+           (sensor_msgs / nav_msgs / geometry_msgs / std_msgs / …).
+
+           The /capabilities directory is bind-mounted into the scene
+           container at /capabilities (see package_manifest.yaml start
+           block); we read the TOML file directly. No atlas API needed
+           for this — contract metadata is static and packaged with the
+           source tree.
+
+        3. Subscribe
+           ─────────
+           Hand (kind, topic, msg_type) to SubscribersHub which creates
+           the rclpy subscription with appropriate QoS.
+
+    Errors at any step skip that one entry but never fail bring-up —
+    a partially-resolvable scene config is still useful (e.g. RGB
+    works but lidar2d primitive isn't running yet).
     """
     out: list[TopicSpec] = []
     for entry in observations:
         kind = str(entry.get("kind", "")).lower()
-        if not kind:
+        contract = str(entry.get("contract", ""))
+        if not kind or not contract:
+            log.warning("[scene] observation %r: missing kind/contract; skipping", entry)
             continue
 
-        contract = str(entry.get("contract", ""))
+        # Step 1 — atlas resolution.
         topic = ""
-        msg_type = str(entry.get("msg_type", ""))
+        qos_profile = ""
+        try:
+            resp = atlas_stub.QueryCapabilities(pb.QueryCapabilitiesRequest(
+                contract_id=contract,
+                transport=pb.TRANSPORT_ROS2,
+            ))
+        except Exception as e:  # noqa: BLE001
+            log.warning("[scene] %r: atlas QueryCapabilities(%s, ROS2) failed: %s — skipping",
+                        kind, contract, e)
+            continue
 
-        if contract and atlas_stub is not None:
-            try:
-                resp = atlas_stub.QueryCapabilities(pb.QueryCapabilitiesRequest(
-                    contract_id=contract,
-                    transport=pb.TRANSPORT_ROS2,
-                ))
-                for rec in resp.records:
-                    for iface in rec.interfaces:
-                        if iface.contract_id == contract and iface.transport == pb.TRANSPORT_ROS2:
-                            topic = iface.endpoint or ""
-                            # Atlas msg_type is on the ROS2 TransportParams
-                            # if the publisher set it; otherwise inherits
-                            # from the contract IDL — leave the manifest
-                            # fallback for that.
-                            if hasattr(iface, "params") and hasattr(iface.params, "ros2"):
-                                ros2_params = iface.params.ros2
-                                if ros2_params.message_type:
-                                    msg_type = ros2_params.message_type
-                            break
-                    if topic:
-                        break
-            except Exception as e:  # noqa: BLE001
-                log.debug("[scene] atlas QueryCapabilities(%s, ROS2) failed: %s", contract, e)
+        for rec in resp.records:
+            for iface in rec.interfaces:
+                if iface.contract_id == contract and iface.transport == pb.TRANSPORT_ROS2:
+                    topic = iface.endpoint or ""
+                    if hasattr(iface, "params") and hasattr(iface.params, "ros2"):
+                        qos_profile = iface.params.ros2.qos_profile or ""
+                    break
+            if topic:
+                break
 
-        # Fallback: static topic from manifest.
         if not topic:
-            topic = str(entry.get("topic", ""))
-        if not topic or not msg_type:
             log.warning(
-                "[scene] observation %r: no atlas record for contract=%r and "
-                "no static topic/msg_type fallback — skipping",
+                "[scene] %r: no atlas record for contract=%r over ROS2 — skipping. "
+                "Have a primitive run DeclareInterface(transport=ROS2, endpoint=<topic>) for this contract.",
                 kind, contract,
             )
             continue
 
-        log.info("[scene] observation %r → topic=%s msg_type=%s%s",
-                 kind, topic, msg_type,
-                 f" (atlas:{contract})" if contract and entry.get("topic", "") != topic else "")
-        out.append(TopicSpec(kind=kind, topic=topic, msg_type=msg_type))
+        # Step 2 — msg_type from contract IDL.
+        msg_type = _msg_type_from_contract(contract)
+        if not msg_type:
+            log.warning(
+                "[scene] %r: contract %r has no [io.msg] entry on disk — skipping. "
+                "Only topic_out contracts are subscribable; rpc/srv contracts can't be ROS-subscribed.",
+                kind, contract,
+            )
+            continue
+
+        log.info("[scene] %r ← atlas: topic=%s msg=%s qos=%s",
+                 kind, topic, msg_type, qos_profile or "default")
+        out.append(TopicSpec(kind=kind, topic=topic, msg_type=msg_type, qos_profile=qos_profile or "default"))
     return out
+
+
+# Lazy-cached reverse map: contract_id → "Image" / "LaserScan" / …
+_CONTRACT_MSG_CACHE: dict[str, str] = {}
+
+
+def _msg_type_from_contract(contract_id: str) -> str:
+    """Read `[io.msg].msg` from `/capabilities/<contract_path>.v1.toml`
+    and return the Python class name. Returns "" when the contract is
+    RPC-only (no `[io.msg]` block) or the TOML can't be read.
+
+    Cache because we call this once per observation at startup and
+    contracts don't change at runtime; keep the implementation in one
+    place rather than littering atlas-resolution callers with TOML
+    parsing.
+    """
+    if contract_id in _CONTRACT_MSG_CACHE:
+        return _CONTRACT_MSG_CACHE[contract_id]
+    # contract_id like "robonix/primitive/camera/rgb" → file is at
+    # /capabilities/primitive/camera/rgb.v1.toml. Strip the leading
+    # "robonix/" namespace prefix.
+    parts = contract_id.split("/")
+    if not parts or parts[0] != "robonix":
+        _CONTRACT_MSG_CACHE[contract_id] = ""
+        return ""
+    rel = "/".join(parts[1:]) + ".v1.toml"
+    candidates = [
+        Path("/capabilities") / rel,
+        Path("/scene/.capabilities-mirror") / rel,  # alt mount path
+    ]
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            try:
+                import tomllib  # 3.11+
+                data = tomllib.loads(path.read_text())
+            except ImportError:
+                import tomli  # noqa: F401  # 3.10
+                data = __import__("tomli").loads(path.read_text())
+        except Exception as e:  # noqa: BLE001
+            log.debug("[scene] failed to parse %s: %s", path, e)
+            _CONTRACT_MSG_CACHE[contract_id] = ""
+            return ""
+        msg_field = (data.get("io", {}) or {}).get("msg", {}) or {}
+        msg = str(msg_field.get("msg", ""))
+        if not msg:
+            _CONTRACT_MSG_CACHE[contract_id] = ""
+            return ""
+        # "sensor_msgs/msg/Image" → "Image"
+        leaf = msg.rsplit("/", 1)[-1]
+        _CONTRACT_MSG_CACHE[contract_id] = leaf
+        return leaf
+    log.debug("[scene] no contract TOML found for %s in %s",
+              contract_id, [str(p) for p in candidates])
+    _CONTRACT_MSG_CACHE[contract_id] = ""
+    return ""
 
 
 # ── DeclareInterface helper (mirrors system/memory) ────────────────────────
@@ -523,6 +613,21 @@ async def _run() -> None:
     )
     server = uvicorn.Server(config_uv)
     server_task = asyncio.create_task(server.serve(), name="scene-mcp-http")
+
+    # Web debug UI on a separate port — top-down 2D canvas + objects
+    # table + robot pose. Lives in the same asyncio loop as the rest
+    # of scene so registry reads are local. Disable with
+    # `SCENE_WEB_PORT=0`.
+    web_port = int(os.environ.get("SCENE_WEB_PORT", "50107"))
+    web_task = None
+    if web_port > 0:
+        web_app = web_ui.make_app(registry=registry, relations=relations)
+        web_uv = uvicorn.Config(
+            app=web_app, host="0.0.0.0", port=web_port, log_level="warning",
+        )
+        web_server = uvicorn.Server(web_uv)
+        web_task = asyncio.create_task(web_server.serve(), name="scene-web-http")
+        log.info("web UI on http://0.0.0.0:%d", web_port)
 
     log.info("scene up; cap=%s port=%d atlas=%s observations=%d",
              cap_id, port, atlas_addr, len(config.get("observations", [])))
