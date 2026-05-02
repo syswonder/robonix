@@ -145,6 +145,11 @@ fn resolve_entry_path(
 // ── env expansion — replace ${VAR} / $VAR in scalar strings ─────────────
 
 fn expand_env_in_str(s: &str) -> String {
+    // We scan the source as bytes (cheap to index) but only care about ASCII
+    // sigils — `$`, `{`, `}`, alphanumerics, underscore — which are all
+    // single-byte in UTF-8. Multi-byte chars are passed through via
+    // `s[..].chars()` so non-ASCII (Chinese paths, en-dashes pasted from
+    // chat, …) stays intact.
     let mut out = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -171,8 +176,15 @@ fn expand_env_in_str(s: &str) -> String {
                 continue;
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        // Walk one full UTF-8 char from the current byte offset, not one
+        // byte. `bytes[i] as char` is a 7-bit cast that would corrupt any
+        // continuation byte of a multi-byte scalar.
+        let ch = s[i..]
+            .chars()
+            .next()
+            .expect("non-empty by while-loop guard");
+        out.push(ch);
+        i += ch.len_utf8();
     }
     out
 }
