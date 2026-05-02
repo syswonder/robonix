@@ -1,0 +1,15 @@
+# Optional merge: pass NVIDIA GPU into the stack (needs nvidia-container-toolkit on the host).
+# Usage from this directory:
+#   docker compose -f compose.yaml -f compose.gpu.yaml up --build
+#
+# If you do not use NVIDIA, skip this file; Intel/AMD may still use /dev/dri from compose.yaml.
+
+services:
+  sim:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

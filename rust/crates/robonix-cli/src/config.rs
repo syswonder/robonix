@@ -13,15 +13,9 @@ pub struct Config {
     pub package_storage_path: PathBuf,
     /// Absolute path to the cloned robonix repo root (the directory containing `rust/`).
     /// Set by `rbnx setup` from inside a working copy. Required so out-of-tree packages
-    /// (e.g. mapping_rbnx on a robot) can find rust/contracts and rust/crates/robonix-interfaces/lib.
+    /// (e.g. mapping_rbnx on a robot) can find capabilities/ and rust/crates/robonix-interfaces/lib.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub robonix_source_path: Option<PathBuf>,
-    /// Node identifier (e.g. hostname) for capabilities registered by this CLI; shown in core web UI.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<String>,
-    /// Core web HTTP base URL (e.g. http://core-host:8080) for pushing capability logs when core has a viewer open.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub core_http_url: Option<String>,
 }
 
 impl Config {
@@ -72,7 +66,7 @@ impl Config {
                     "[rbnx] config is missing robonix_source_path (legacy config from before the `rbnx setup` migration)."
                 );
                 eprintln!(
-                    "This is required so packages anywhere on disk can resolve contracts/IDL paths."
+                    "This is required so packages anywhere on disk can resolve capabilities/IDL paths."
                 );
                 eprintln!();
                 eprintln!("Fix:  cd /path/to/robonix   # the repo root (containing `rust/`)");
@@ -117,8 +111,6 @@ impl Config {
         Self {
             package_storage_path: default_path,
             robonix_source_path: None,
-            node_id: None,
-            core_http_url: None,
         }
     }
 
@@ -134,30 +126,14 @@ impl Config {
         let abs = match key {
             SourcePathKey::Root => root.clone(),
             SourcePathKey::RustRoot => root.join("rust"),
-            SourcePathKey::Contracts => root.join("rust").join("contracts"),
+            SourcePathKey::Capabilities => root.join("capabilities"),
             SourcePathKey::InterfacesLib => root
                 .join("rust")
                 .join("crates")
                 .join("robonix-interfaces")
                 .join("lib"),
-            SourcePathKey::InterfacesProto => root
-                .join("rust")
-                .join("crates")
-                .join("robonix-interfaces")
-                .join("robonix_proto"),
             SourcePathKey::RuntimeProto => root.join("rust").join("proto"),
-            SourcePathKey::RobonixPy => {
-                let new_loc = root.join("rust").join("crates").join("robonix-py");
-                if new_loc.exists() {
-                    new_loc
-                } else {
-                    // Fallback to old location for backward-compat.
-                    root.join("rust")
-                        .join("examples")
-                        .join("packages")
-                        .join("robonix_mcp_contract")
-                }
-            }
+            SourcePathKey::RobonixPy => root.join("pylib").join("robonix-py"),
         };
         if !abs.exists() {
             anyhow::bail!(
@@ -177,15 +153,15 @@ pub enum SourcePathKey {
     Root,
     /// `<root>/rust` (cargo workspace).
     RustRoot,
-    /// `<root>/rust/contracts` (contract TOMLs).
-    Contracts,
+    /// `<root>/capabilities` (contract TOMLs).
+    Capabilities,
     /// `<root>/rust/crates/robonix-interfaces/lib` (ROS IDL source).
     InterfacesLib,
-    /// `<root>/rust/crates/robonix-interfaces/robonix_proto` (generated protos).
-    InterfacesProto,
     /// `<root>/rust/proto` (runtime / atlas protos).
     RuntimeProto,
-    /// Shared Python helper library (robonix-py; fallback: examples/packages/robonix_mcp_contract).
+    /// `<root>/pylib/robonix-py` — shared Python helper lib.
+    /// Carries `mcp_contract` (codegen IO class → FastMCP tool wrapper).
+    /// Add this dir to PYTHONPATH; `from robonix_py import mcp_contract`.
     RobonixPy,
 }
 
@@ -195,28 +171,18 @@ impl std::str::FromStr for SourcePathKey {
         match s {
             "root" | "source" => Ok(Self::Root),
             "rust" | "rust-root" => Ok(Self::RustRoot),
-            "contracts" => Ok(Self::Contracts),
+            "capabilities" => Ok(Self::Capabilities),
             "interfaces-lib" | "idl" => Ok(Self::InterfacesLib),
-            "interfaces-proto" => Ok(Self::InterfacesProto),
             "runtime-proto" => Ok(Self::RuntimeProto),
-            "robonix-py" | "mcp-contract" => Ok(Self::RobonixPy),
+            "robonix-py" => Ok(Self::RobonixPy),
             other => Err(format!(
-                "unknown path key: {other}. Valid: root, rust, contracts, interfaces-lib, interfaces-proto, runtime-proto, robonix-py"
+                "unknown path key: {other}. Valid: root, rust, capabilities, interfaces-lib, runtime-proto, robonix-py"
             )),
         }
     }
 }
 
 impl Config {
-    /// Resolve node_id: config value or hostname.
-    pub fn effective_node_id(&self) -> String {
-        self.node_id.clone().unwrap_or_else(|| {
-            hostname::get()
-                .map(|h| h.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| String::new())
-        })
-    }
-
     pub fn ensure_storage_dir(&self) -> Result<()> {
         // Check if path exists and is a directory (following symlinks)
         if let Ok(metadata) = std::fs::metadata(&self.package_storage_path) {

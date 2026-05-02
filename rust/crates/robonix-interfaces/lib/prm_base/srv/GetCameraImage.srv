@@ -1,3 +1,0 @@
-# robonix/prm/camera/snapshot or depth_snapshot — on-demand single frame (RGB or depth encoding).
----
-sensor_msgs/Image image

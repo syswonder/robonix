@@ -4,18 +4,20 @@
 // package's build.sh.
 //
 // For a given package root:
-//   1. Regenerate `<robonix>/rust/crates/robonix-interfaces/robonix_proto/`
-//      from system IDL + contracts (robonix-codegen --lang proto).
+//   1. Stage the system-wide .proto files (IDL + capabilities) into
+//      `<pkg>/rbnx-build/proto-staging/`. This dir is package-local and
+//      transient — no committed artefacts elsewhere in the tree.
 //   2. If --mcp: regenerate `<pkg>/robonix_mcp_types/`
 //      (robonix-codegen --lang mcp).
-//   3. Regenerate `<pkg>/proto_gen/` via grpc_tools.protoc, covering the
-//      runtime proto + all of robonix_proto/*.proto.
+//   3. Run grpc_tools.protoc on the staged + runtime protos, emitting
+//      `<pkg>/proto_gen/`.
 //   4. Write `<pkg>/rbnx-build/ws/install/setup.bash` so `rbnx start`
 //      injects the right PYTHONPATH.
 //
-// TODO: union package-local contracts (`<pkg>/contracts/`) and package-local
-// IDL (`<pkg>/interfaces/lib/`) into a staging dir before running codegen —
-// currently those are a copy-pasted snippet in a few build.sh scripts.
+// TODO: union package-local capabilities (`<pkg>/capabilities/`) and
+// package-local IDL (`<pkg>/interfaces/lib/`) into a staging dir before
+// running codegen — currently those are a copy-pasted snippet in a few
+// build.sh scripts.
 
 use anyhow::{Context, Result};
 use colored::*;
@@ -58,18 +60,19 @@ fn resolve_pkg_root(package: &Path) -> Result<PathBuf> {
 
 pub async fn execute(
     config: Config,
-    package: PathBuf,
+    package: Option<PathBuf>,
     mcp: bool,
     clean: bool,
     out_dir: Option<PathBuf>,
 ) -> Result<()> {
-    let pkg_root = resolve_pkg_root(&package)?;
+    let pkg_root = match package {
+        Some(p) => resolve_pkg_root(&p)?,
+        None => super::run_package::find_package_from_cwd()?,
+    };
     let rust_root = config.resolve_source_path(SourcePathKey::RustRoot)?;
     let interfaces_lib = config.resolve_source_path(SourcePathKey::InterfacesLib)?;
-    let contracts_dir = config.resolve_source_path(SourcePathKey::Contracts)?;
-    let interfaces_proto = config.resolve_source_path(SourcePathKey::InterfacesProto)?;
+    let capabilities_dir = config.resolve_source_path(SourcePathKey::Capabilities)?;
     let runtime_proto = config.resolve_source_path(SourcePathKey::RuntimeProto)?;
-    let robonix_py = config.resolve_source_path(SourcePathKey::RobonixPy).ok();
 
     // Where to place proto_gen/ and robonix_mcp_types/. Defaults to package root;
     // override for packages that want them inside a sub-dir (e.g. tiago_bridge/).
@@ -81,6 +84,9 @@ pub async fn execute(
     let proto_gen = out_root.join("proto_gen");
     let mcp_types = out_root.join("robonix_mcp_types");
     let rbnx_build = pkg_root.join("rbnx-build");
+    // Per-invocation staging for the system-wide .proto files. No commits;
+    // grpc_tools.protoc reads from here in step 3.
+    let proto_staging = rbnx_build.join("proto-staging");
 
     if clean {
         for p in [&proto_gen, &mcp_types, &rbnx_build] {
@@ -89,6 +95,7 @@ pub async fn execute(
             }
         }
     }
+    std::fs::create_dir_all(&proto_staging)?;
 
     let cargo_bin = if Path::new("/usr/bin/cargo").exists() {
         "/usr/bin/cargo".to_string()
@@ -103,9 +110,9 @@ pub async fn execute(
         rust_root.display()
     );
 
-    // 1. Regenerate robonix_proto/ (system-wide; safe to re-run).
+    // 1. Stage system .proto into rbnx-build/proto-staging/.
     println!("{} robonix-codegen --lang proto ...", "[codegen]".bold());
-    // TODO: support <pkg>/contracts and <pkg>/interfaces/lib union.
+    // TODO: support <pkg>/capabilities and <pkg>/interfaces/lib union.
     run_cmd(
         "robonix-codegen proto",
         Command::new(&cargo_bin)
@@ -114,9 +121,9 @@ pub async fn execute(
             .args(["--", "--lang", "proto", "-I"])
             .arg(&interfaces_lib)
             .arg("--contracts")
-            .arg(&contracts_dir)
+            .arg(&capabilities_dir)
             .arg("-o")
-            .arg(&interfaces_proto),
+            .arg(&proto_staging),
     )?;
 
     // 2. Optional: MCP dataclasses.
@@ -143,7 +150,7 @@ pub async fn execute(
     );
     std::fs::create_dir_all(&proto_gen)?;
     let proto_files: Vec<PathBuf> = std::fs::read_dir(&runtime_proto)?
-        .chain(std::fs::read_dir(&interfaces_proto)?)
+        .chain(std::fs::read_dir(&proto_staging)?)
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("proto"))
         .collect();
@@ -153,7 +160,7 @@ pub async fn execute(
         .args(["-m", "grpc_tools.protoc", "-I"])
         .arg(&runtime_proto)
         .arg("-I")
-        .arg(&interfaces_proto)
+        .arg(&proto_staging)
         .arg(format!("--python_out={}", proto_gen.display()))
         .arg(format!("--grpc_python_out={}", proto_gen.display()));
     for f in &proto_files {
@@ -171,9 +178,6 @@ pub async fn execute(
     ];
     if mcp {
         py_parts.push(mcp_types.display().to_string());
-    }
-    if let Some(pp) = robonix_py {
-        py_parts.push(pp.display().to_string());
     }
     let joined = py_parts.join(":");
     let setup_bash = ws_install.join("setup.bash");

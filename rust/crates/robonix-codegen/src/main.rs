@@ -7,19 +7,19 @@ use std::collections::BTreeSet;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
-use robonix_codegen::codegen::{contract_gen, mcp_python_gen, msg_parser, proto_gen, python_gen};
+use robonix_codegen::codegen::{contract_gen, mcp_python_gen, msg_parser, proto_gen};
 
 #[derive(Parser)]
 #[command(name = "robonix-codegen")]
 #[command(
-    about = "ROS IDL + contract TOML codegen: .msg/.srv → .proto / Python; contracts → robonix_contracts.proto"
+    about = "ROS IDL + contract TOML codegen: .msg/.srv → .proto / MCP-Python; contracts → robonix_contracts.proto"
 )]
 struct Args {
     /// Type search path for ROS IDL (e.g. -I path/to/robonix-interfaces/lib). Optional if only `--contracts` with protobuf-only types (rare).
     #[arg(short = 'I', long = "include", number_of_values = 1)]
     include: Vec<PathBuf>,
 
-    /// Directory of contract `.toml` files (e.g. rust/contracts). Emits `robonix_contracts.proto` (proto only).
+    /// Directory of contract `.toml` files (e.g. <root>/capabilities). Emits `robonix_contracts.proto` (proto only).
     #[arg(long = "contracts")]
     contracts: Option<PathBuf>,
 
@@ -27,7 +27,8 @@ struct Args {
     #[arg(short = 'o', long = "out")]
     out: PathBuf,
 
-    /// Target language: "proto" or "python"
+    /// Target language: "proto" (gRPC stubs + contracts) or "mcp"
+    /// (Python typed-input helpers for MCP servers).
     #[arg(long = "lang", default_value = "proto")]
     lang: String,
 
@@ -64,10 +65,10 @@ fn main() -> Result<()> {
     }
 
     match args.lang.as_str() {
-        "proto" | "python" | "mcp" => {}
-        other => bail!(
-            "[robonix-codegen] unsupported --lang '{other}'. Supported: 'proto', 'python', 'mcp'."
-        ),
+        "proto" | "mcp" => {}
+        other => {
+            bail!("[robonix-codegen] unsupported --lang '{other}'. Supported: 'proto', 'mcp'.")
+        }
     }
 
     if verbose {
@@ -111,16 +112,6 @@ fn main() -> Result<()> {
     }
 
     match args.lang.as_str() {
-        "python" => {
-            python_gen::generate(&resolver, &args.out, verbose)?;
-            eprintln!(
-                "{} python: {} packages, {} msgs -> {}",
-                ridlc_prefix(),
-                pkgs.len(),
-                specs.len(),
-                args.out.display()
-            );
-        }
         "mcp" => {
             mcp_python_gen::generate(&resolver, &args.out, verbose)?;
             eprintln!(

@@ -1,0 +1,313 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Author: wheatfox <wheatfox17@icloud.com>
+syntax = "proto3";
+package robonix.atlas;
+
+// ───────────────────────────────────────────────────────────────────────────
+// Atlas — control-plane registry for Robonix capabilities.
+//
+// Vocabulary:
+//   capability instance — one running unit (a process or set of processes)
+//                         that registers with Atlas under a stable id.
+//                         An instance offers one or more capability
+//                         interfaces under a single namespace.
+//   capability interface — a single contract-bound endpoint, addressed by
+//                          its `contract_id` (e.g.
+//                          "robonix/primitive/base/move").
+//   transport — a wire protocol used to carry traffic for one interface.
+//               The closed set lives in the `Transport` enum below; new
+//               transports must be added there (no string escape hatch).
+//               Each (capability_id, contract_id, transport) tuple is
+//               unique: to expose the same interface over multiple
+//               transports, call DeclareInterface once per transport.
+//
+// Two-step registration on purpose:
+//   1) RegisterCapability — semantic announcement: "I am cap X, here are
+//      the contract_ids I'll offer". Heartbeat starts ticking from here.
+//   2) DeclareInterface (×N) — wire bind: "here's the actual transport
+//      and endpoint for one of those contract_ids". Late-binds so a cap
+//      can come up healthy before all transports are ready.
+// ───────────────────────────────────────────────────────────────────────────
+
+// Closed set of wire transports Atlas understands. Adding a transport is
+// a deliberate proto bump — Atlas needs to know per-transport whether it
+// can mint endpoint names (see DeclareInterfaceRequest), so a string
+// escape hatch would silently route unknown transports through a wrong
+// branch.
+enum Transport {
+  TRANSPORT_UNSPECIFIED = 0;
+  TRANSPORT_GRPC = 1;
+  TRANSPORT_ROS2 = 2;
+  TRANSPORT_MCP = 3;
+}
+
+// Register a capability instance. Instance lives until either Unregister
+// is called or heartbeats lapse past Atlas's eviction threshold.
+//
+// The same `capability_id` may NOT be registered twice — Atlas returns
+// AlreadyExists. Re-registration must be preceded by Unregister.
+//
+// Lazy-declare flow: at register time the cap has not initialised its
+// hardware yet, so it can't enumerate the contracts it will offer. After
+// register the cap MUST DeclareInterface for at least its `driver`
+// contract (used by the rbnx start-up code to invoke hardware init);
+// remaining interfaces are declared on demand once the cap discovers
+// what it can support.
+message RegisterCapabilityRequest {
+  // Reverse-DNS instance id, e.g. "com.robonix.primitive.base.ranger_mini".
+  // Empty => Atlas assigns "com.robonix.ephemeral.<uuid>".
+  // For example a `robonix_manifest.yaml` with two cameras would create
+  // two capability instances `front_camera` and `rear_camera`, each able
+  // to declare multiple interfaces under the `camera` namespace.
+  string capability_id = 1;
+  // Grouping namespace, e.g. "robonix/primitive/base". Every later
+  // DeclareInterface MUST carry a contract_id under this prefix;
+  // otherwise Atlas rejects that declare with InvalidArgument.
+  string namespace = 2;
+  // Absolute path to the package's single CAPABILITY.md. One markdown
+  // per package describes all interfaces; consumers read it via
+  // QueryCapabilityMd. Empty path => no markdown for this instance.
+  string capability_md_path = 3;
+}
+message RegisterCapabilityResponse { string capability_id = 1; }
+
+message UnregisterCapabilityRequest { string capability_id = 1; }
+// `was_present=true` means an existing record was removed; `false` means
+// the id was unknown to Atlas (idempotent caller-side semantics).
+message UnregisterCapabilityResponse { bool was_present = 1; }
+
+// Liveness signal. Atlas may evict instances whose heartbeat lapses.
+// Failure cases (unknown capability_id, etc.) come back as gRPC Status,
+// so the response carries no `ok` byte.
+message HeartbeatRequest { string capability_id = 1; }
+message HeartbeatResponse {}
+
+// ── Transport-specific declare params ──────────────────────────────────────
+// One Params message per Transport enum variant. The wrapper
+// `TransportParams.kind` MUST hold the variant matching the request's
+// `transport` field; Atlas rejects mismatches with InvalidArgument.
+
+// gRPC — `endpoint` already carries host:port. These three identify
+// WHICH protobuf service+method that endpoint speaks; consumers need
+// them to pick the right tonic-generated client. Request/response
+// message types are derivable from method via proto_file, so they are
+// NOT duplicated here.
+message GrpcParams {
+  string proto_file =
+      1; // e.g. "robonix-interfaces/.../robonix_contracts.proto"
+  string service_name = 2; // e.g. "robonix.contracts.SrvCognitionReason"
+  string method = 3; // e.g. "/robonix.contracts.SrvCognitionReason/Stream"
+}
+
+// ROS2 — `endpoint` carries the topic or service name; whether it's a
+// topic or service comes from the contract's `[io.srv]` vs `[io.msg]`,
+// not duplicated here.
+message Ros2Params {
+  // Optional QoS override; "" => ROS 2 default profile. Common values:
+  // "sensor_data", "reliable", "system_default", "parameters".
+  string qos_profile = 1;
+}
+
+// MCP — one DeclareInterface registers exactly ONE MCP tool (= one
+// contract_id). The tool name is the leaf of the contract_id; only the
+// MCP-protocol-required extras live here.
+message McpParams {
+  // One-line description shown to the LLM in MCP's `tools/list` reply.
+  string description = 1;
+  // JSON Schema describing the tool's input. MUST parse as a JSON
+  // object (or be empty for "no args"); MCP protocol fixes this format.
+  // see spec: https://modelcontextprotocol.io/specification/draft/server/tools
+  string input_schema_json = 2;
+}
+
+// Discriminated transport params. The `kind` set MUST match the
+// `Transport` value on the enclosing DeclareInterfaceRequest /
+// InterfaceEndpoint.
+message TransportParams {
+  oneof kind {
+    GrpcParams grpc = 1;
+    Ros2Params ros2 = 2;
+    McpParams mcp = 3;
+  }
+}
+
+// Bind ONE transport to ONE capability interface of an already-registered
+// capability. To expose the same `contract_id` over multiple transports,
+// call DeclareInterface once per transport.
+//
+// Caller supplies a *preferred* endpoint string in `endpoint`. Atlas
+// guarantees the returned endpoint is globally unique on (transport,
+// endpoint). Conflict-resolution rules (Atlas-side):
+//   - empty proposal + atlas-mintable transport (ros2)
+//                       -> Atlas mints "/rbnx/<dotted-contract>/<uuid8>"
+//   - empty proposal + non-mintable transport (grpc, mcp)
+//                       -> InvalidArgument (Atlas cannot allocate; caller
+//                          must bind first and supply host:port / URL etc.)
+//   - non-empty + no collision        -> stored verbatim
+//   - non-empty + collision + mintable transport
+//                       -> Atlas rewrites by appending "~<uuid8>"
+//   - non-empty + collision + non-mintable transport
+//                       -> AlreadyExists (caller must rebind / pick a new
+//                          name and retry)
+//
+// CALLER MUST USE the returned endpoint (it may differ from what was
+// proposed when Atlas rewrote to disambiguate).
+message DeclareInterfaceRequest {
+  // this id MUST have been registered in the system before
+  // like the "front_camera" or "rear_camera" in the example above.
+  string capability_id = 1;
+  // Must match a contract_id in visible contracts
+  // e.g., "robonix/primitive/camera/depth"
+  string contract_id = 2;
+  Transport transport = 3;
+  // Preferred address string. Format is transport-specific:
+  //   grpc:  "127.0.0.1:50105"   (caller binds first)
+  //   ros2:  "/scanner/cloud"     ("" => Atlas mints)
+  //   mcp:   "http://host:port/mcp"
+  string endpoint = 4;
+  // Transport-specific params; the oneof variant MUST match `transport`.
+  TransportParams params = 5;
+}
+message DeclareInterfaceResponse {
+  // Authoritative endpoint actually registered. Equal to request.endpoint
+  // when there was no collision; otherwise an Atlas-rewritten unique form.
+  string endpoint = 1;
+}
+
+// Public metadata of one declared interface. Returned by
+// QueryCapabilities — carries everything needed to render the cap to a
+// catalog (LLM tool docs, gRPC service/method names for codegen lookup,
+// ROS 2 QoS hints) EXCEPT the endpoint string. Endpoint disclosure is
+// gated behind ConnectCapability so atlas can record the consumer→
+// provider channel before any traffic flows.
+message InterfaceMetadata {
+  string contract_id = 1;
+  Transport transport = 2;
+  // Transport-specific public docs:
+  //   * grpc — proto_file / service_name / method (codegen lookup; not secret)
+  //   * ros2 — qos_profile
+  //   * mcp  — description + input_schema_json (LLM tool docs)
+  // Same shape as the `params` declared at DeclareInterface time, just
+  // without the endpoint.
+  TransportParams params = 3;
+}
+
+// Lifecycle state of a capability instance, observed (not driven) by Atlas.
+//   STATE_REGISTERED  — the cap exists in atlas but only its `driver`
+//                       interface has been declared (or no interface yet).
+//                       It hasn't been initialised; rbnx start hasn't yet
+//                       called Driver(CMD_INIT) — or the call is in flight,
+//                       or it failed.
+//   STATE_INITIALIZED — the cap has declared at least one non-driver
+//                       interface, which by convention only happens after
+//                       a successful Driver(CMD_INIT). The cap is serving.
+// System caps (atlas/pilot/executor/memory/…) skip the driver step and
+// transition straight to INITIALIZED on their first interface declare.
+enum CapabilityState {
+  STATE_UNSPECIFIED = 0;
+  STATE_REGISTERED  = 1;
+  STATE_INITIALIZED = 2;
+}
+
+// Read view of a registered capability instance. `interfaces` lists
+// what the cap currently offers as METADATA only (contract id +
+// transport) — endpoint strings + TransportParams are revealed only
+// via ConnectCapability. The set of contracts is derivable from
+// `interfaces` (`{m.contract_id for m in interfaces}`); there is no
+// separate pre-announced interface list (driver-flow: contracts are
+// declared lazily as the cap discovers them).
+message CapabilityRecord {
+  string capability_id = 1;
+  string namespace = 2;
+  string capability_md_path = 3;
+  uint64 last_heartbeat_ms = 4;
+  repeated InterfaceMetadata interfaces = 5;
+  CapabilityState state = 6;
+}
+
+// Discover capability instances. Filters AND together when set.
+message QueryCapabilitiesRequest {
+  // Each capability id is unique, so we can directly query by capability id.
+  string capability_id = 1;
+  // Filter by a contract_id
+  // e.g., I want a camera with depth, just set it to
+  // "robonix/primitive/camera/depth"
+  string contract_id = 2;
+  // Exact match on InterfaceMetadata.transport (filter is on the cap's
+  // interfaces, not on the instance itself). TRANSPORT_UNSPECIFIED =
+  // no filter.
+  Transport transport = 3;
+}
+message QueryCapabilitiesResponse { repeated CapabilityRecord records = 1; }
+
+// Get the package's CAPABILITY.md content for an instance. One markdown
+// per package — describes all interfaces in a single document.
+message QueryCapabilityMdRequest { string capability_id = 1; }
+message QueryCapabilityMdResponse {
+  // Empty when the instance was registered with no `capability_md_path`.
+  string capability_md = 1;
+}
+
+// ── Channels ───────────────────────────────────────────────────────────────
+// Discovery (QueryCapabilities) and consumption (ConnectCapability) are
+// distinct on purpose: consumers may browse without committing. Once a
+// consumer commits — "I'm going to use cap X's interface Y over Z" —
+// it calls ConnectCapability so atlas records the consumer→provider
+// edge, hands back the binding the consumer needs to dial themselves
+// (atlas can't dial for callers because each transport has its own
+// connect protocol), and the consumer is expected to call
+// DisconnectCapability when it's done. Provider eviction (unregister
+// or heartbeat lapse) auto-drops the provider's channels.
+
+message ConnectCapabilityRequest {
+  // Free-form id of the caller (a cap_id if the consumer is itself a
+  // registered cap, or any stable identifier otherwise — e.g.
+  // "rbnx-cli/<pid>"). Used by atlas only for bookkeeping / inspection.
+  string consumer_id = 1;
+  // Target provider cap. Must already be registered.
+  string capability_id = 2;
+  // Which interface of that cap. Must match an InterfaceMetadata the
+  // cap has declared, with a transport equal to `transport` below.
+  string contract_id = 3;
+  Transport transport = 4;
+}
+message ConnectCapabilityResponse {
+  // Unique handle for this channel. Pass to DisconnectCapability when
+  // the consumer is done.
+  string channel_id = 1;
+  // Authoritative endpoint string (host:port / topic / URL — same form
+  // the cap registered at DeclareInterface time).
+  string endpoint = 2;
+  // Full transport-specific binding (proto_file/service/method for gRPC,
+  // qos for ROS 2, schema for MCP). Saves the consumer a follow-up
+  // QueryCapabilities to resolve these fields.
+  TransportParams params = 3;
+}
+
+message DisconnectCapabilityRequest { string channel_id = 1; }
+// `was_open=true` means atlas removed an existing record; `false` means
+// the channel_id was unknown (already released, or expired with provider).
+message DisconnectCapabilityResponse { bool was_open = 1; }
+
+// Inspect Atlas state. Debug-only, returns implementation-defined JSON.
+message InspectAtlasRequest {}
+message InspectAtlasResponse { string json = 1; }
+
+service Atlas {
+  rpc RegisterCapability(RegisterCapabilityRequest)
+      returns (RegisterCapabilityResponse);
+  rpc UnregisterCapability(UnregisterCapabilityRequest)
+      returns (UnregisterCapabilityResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc DeclareInterface(DeclareInterfaceRequest)
+      returns (DeclareInterfaceResponse);
+  rpc QueryCapabilities(QueryCapabilitiesRequest)
+      returns (QueryCapabilitiesResponse);
+  rpc QueryCapabilityMd(QueryCapabilityMdRequest)
+      returns (QueryCapabilityMdResponse);
+  rpc ConnectCapability(ConnectCapabilityRequest)
+      returns (ConnectCapabilityResponse);
+  rpc DisconnectCapability(DisconnectCapabilityRequest)
+      returns (DisconnectCapabilityResponse);
+  rpc InspectAtlas(InspectAtlasRequest) returns (InspectAtlasResponse);
+}

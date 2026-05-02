@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+# Robonix system service: speech (ASR + TTS + Dialog manager).
+#
+# uv-managed: `uv sync` (called from scripts/build.sh) materialises the
+# local rbnx-build/venv/ from this file + the workspace uv.lock.
+
+[project]
+name = "robonix-system-speech"
+version = "0.1.0"
+description = "Robonix Speech Service — ASR (Whisper / FunASR) + TTS (Edge TTS) + Dialog Manager."
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "torchaudio>=2.0",
+    "transformers>=4.30",
+    "funasr>=1.0",
+    "edge-tts>=6.1",
+    "opencc-python-reimplemented>=0.1.7",
+    "grpcio>=1.60",
+    "grpcio-tools>=1.60",
+    "protobuf>=4.24",
+    "scipy>=1.10",
+    "numpy>=1.24,<2",
+    "robonix-py",
+]
+
+[tool.uv]
+package = false
+
+# Resolved through the workspace at the repo root (see /pyproject.toml).
+[tool.uv.sources]
+robonix-py = { workspace = true }

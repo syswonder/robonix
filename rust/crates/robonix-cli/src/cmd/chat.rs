@@ -1,5 +1,18 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// cmd/chat.rs — TUI chat client (connects to robonix-pilot via SrvPilot)
+// cmd/chat.rs — TUI chat client (connects to robonix-pilot via SystemPilot).
+//
+// dev-packaging note: this file deliberately tracks the structure of the
+// `dev` branch chat.rs so the liaison/voice contributor can rebase with
+// minimal conflict. Only the gRPC plumbing changed:
+//   - SrvPilotClient → SystemPilotClient (proto namespace rename)
+//   - Stream(Task)   → SubmitTask(Task)  (rpc rename)
+//   - robonix_sdk::query_nodes → AtlasClient::connect_to_capability
+//     (the sdk crate was deleted in dev-packaging)
+//
+// The Rc<RefCell> + spawned-stream + Esc-abort architecture, the
+// audio_data / source fields on Task (used by liaison's voice path),
+// PageUp/PageDown scroll, and the "Pilot:" prefix are kept verbatim
+// from dev.
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -15,11 +28,17 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
+use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use std::cell::RefCell;
 use std::io;
 use std::rc::Rc;
 use tokio_stream::StreamExt;
+use tonic::transport::Channel;
 use uuid::Uuid;
+
+use crate::pb::contracts::system_pilot_client::SystemPilotClient;
+
+const CONSUMER_ID: &str = "rbnx-cli/chat";
 
 struct ChatMessage {
     role: Role,
@@ -34,17 +53,16 @@ enum Role {
 }
 
 pub async fn execute(server: &str) -> Result<()> {
-    let atlas_endpoint = if server.starts_with("http") {
-        server.to_string()
-    } else {
-        format!("http://{server}")
-    };
-
-    let pilot_endpoint = discover_pilot(&atlas_endpoint).await.unwrap_or_else(|e| {
-        log::warn!("pilot discovery timed out ({e:#}), falling back to 127.0.0.1:50071");
-        "http://127.0.0.1:50071".to_string()
-    });
-    let pilot_endpoint = localhost_to_ipv4_loopback(&pilot_endpoint);
+    // Atlas-side discovery + tonic Channel setup happens BEFORE we enter
+    // the alternate screen so any connection error lands cleanly on the
+    // user's normal terminal instead of leaving a half-drawn TUI.
+    let mut atlas = AtlasClient::connect(server)
+        .await
+        .with_context(|| format!("connect to atlas at '{server}'"))?;
+    let (channel_id, pilot_cap_id, channel) =
+        atlas_client::connect_to_capability(&mut atlas, CONSUMER_ID, "robonix/system/pilot")
+            .await
+            .context("locate pilot via atlas")?;
 
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
@@ -53,75 +71,27 @@ pub async fn execute(server: &str) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_tui(&mut terminal, &pilot_endpoint).await;
+    let banner = format!(
+        "Connected to Pilot '{pilot_cap_id}' (channel {channel_id}). \
+         Enter = send, Esc = abort turn, Ctrl+C = quit."
+    );
+    let result = run_tui(&mut terminal, channel, banner).await;
 
     terminal::disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
+    let _ = atlas.disconnect_capability(&channel_id).await;
 
     result
 }
 
-/// Try to discover Pilot via Atlas, retrying for up to `timeout_secs` seconds.
-async fn discover_pilot(atlas_endpoint: &str) -> Result<String> {
-    const RETRY_INTERVAL_MS: u64 = 2_000;
-    const TIMEOUT_SECS: u64 = 60;
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(TIMEOUT_SECS);
-    let mut attempt = 0u32;
-
-    loop {
-        attempt += 1;
-        match try_discover_pilot_once(atlas_endpoint).await {
-            Ok(ep) => return Ok(ep),
-            Err(e) => {
-                if std::time::Instant::now() >= deadline {
-                    anyhow::bail!("pilot not found in Atlas after {TIMEOUT_SECS}s: {e:#}");
-                }
-                if attempt == 1 {
-                    // Show a one-time notice so the user knows we're waiting.
-                    eprintln!("[chat] waiting for Pilot to register in Atlas ({e:#})…");
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(RETRY_INTERVAL_MS)).await;
-            }
-        }
-    }
-}
-
-async fn try_discover_pilot_once(atlas_endpoint: &str) -> Result<String> {
-    let mut sdk = robonix_sdk::RobonixClient::connect(atlas_endpoint).await?;
-    let nodes = sdk
-        .query_nodes_opts(robonix_sdk::QueryNodesOpts {
-            contract_id: "robonix/srv/pilot".to_string(),
-            ..Default::default()
-        })
-        .await?;
-
-    for node in &nodes {
-        for iface in &node.interfaces {
-            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&iface.metadata_json)
-                && let Some(ep) = meta.get("endpoint").and_then(|v| v.as_str())
-            {
-                let uri = if ep.starts_with("http") {
-                    ep.to_string()
-                } else {
-                    format!("http://{ep}")
-                };
-                return Ok(localhost_to_ipv4_loopback(&uri));
-            }
-        }
-    }
-    anyhow::bail!("no pilot interface found in Atlas registry")
-}
-
 async fn run_tui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    pilot_endpoint: &str,
+    channel: Channel,
+    banner: String,
 ) -> Result<()> {
     let messages: Rc<RefCell<Vec<ChatMessage>>> = Rc::new(RefCell::new(vec![ChatMessage {
         role: Role::Status,
-        text: format!(
-            "Connected to Pilot at {pilot_endpoint}. Enter = send, Esc = abort turn, Ctrl+C = quit."
-        ),
+        text: banner,
     }]));
     let mut input = String::new();
     let mut scroll: u16 = 0;
@@ -135,7 +105,7 @@ async fn run_tui(
             && let Event::Key(key) = event::read()?
         {
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                let _ = notify_session_end(pilot_endpoint, &session_id).await;
+                let _ = notify_session_end(channel.clone(), &session_id).await;
                 break;
             }
             if busy {
@@ -155,7 +125,7 @@ async fn run_tui(
                         continue;
                     }
                     if msg == "quit" || msg == "exit" {
-                        let _ = notify_session_end(pilot_endpoint, &session_id).await;
+                        let _ = notify_session_end(channel.clone(), &session_id).await;
                         break;
                     }
                     messages.borrow_mut().push(ChatMessage {
@@ -166,7 +136,7 @@ async fn run_tui(
                     draw(terminal, &messages.borrow(), &input, scroll, busy)?;
 
                     match run_intent_with_esc_abort(
-                        pilot_endpoint,
+                        channel.clone(),
                         &session_id,
                         &msg,
                         Rc::clone(&messages),
@@ -199,15 +169,12 @@ async fn run_tui(
     Ok(())
 }
 
-async fn notify_session_end(pilot_endpoint: &str, session_id: &str) -> Result<()> {
-    use crate::pb::contracts::srv_pilot_client::SrvPilotClient;
+async fn notify_session_end(channel: Channel, session_id: &str) -> Result<()> {
     use crate::pb::pilot::Task;
 
     const INTENT_SOURCE_TEXT: u32 = 0;
 
-    let mut client = SrvPilotClient::connect(pilot_endpoint.to_string())
-        .await
-        .context("failed to connect to Pilot for session_end")?;
+    let mut client = SystemPilotClient::new(channel);
 
     let task = Task {
         task_id: Uuid::new_v4().to_string(),
@@ -220,24 +187,21 @@ async fn notify_session_end(pilot_endpoint: &str, session_id: &str) -> Result<()
     };
 
     let mut stream = client
-        .stream(tonic::Request::new(task))
+        .submit_task(tonic::Request::new(task))
         .await
-        .context("Pilot Stream session_end failed")?
+        .context("Pilot SubmitTask session_end failed")?
         .into_inner();
 
     while stream.next().await.is_some() {}
     Ok(())
 }
 
-async fn abort_pilot_session(pilot_endpoint: &str, session_id: &str) -> Result<()> {
-    use crate::pb::contracts::srv_pilot_client::SrvPilotClient;
+async fn abort_pilot_session(channel: Channel, session_id: &str) -> Result<()> {
     use crate::pb::pilot::Task;
 
     const INTENT_SOURCE_TEXT: u32 = 0;
 
-    let mut client = SrvPilotClient::connect(pilot_endpoint.to_string())
-        .await
-        .context("failed to connect to Pilot for abort_turn")?;
+    let mut client = SystemPilotClient::new(channel);
 
     let task = Task {
         task_id: Uuid::new_v4().to_string(),
@@ -250,16 +214,17 @@ async fn abort_pilot_session(pilot_endpoint: &str, session_id: &str) -> Result<(
     };
 
     let _ = client
-        .stream(tonic::Request::new(task))
+        .submit_task(tonic::Request::new(task))
         .await
-        .context("Pilot abort_turn Stream failed")?;
+        .context("Pilot SubmitTask abort_turn failed")?;
     Ok(())
 }
 
-/// Runs one `SrvPilot.Stream` while polling the keyboard: **Esc** calls
-/// [`abort_pilot_session`] (abort_turn `Task`) so Pilot cancels the in-flight turn.
+/// Runs one `SystemPilot.SubmitTask` while polling the keyboard: **Esc**
+/// calls [`abort_pilot_session`] (abort_turn `Task`) so Pilot cancels the
+/// in-flight turn.
 async fn run_intent_with_esc_abort(
-    pilot_endpoint: &str,
+    channel: Channel,
     session_id: &str,
     user_msg: &str,
     messages: Rc<RefCell<Vec<ChatMessage>>>,
@@ -267,25 +232,18 @@ async fn run_intent_with_esc_abort(
     input: &str,
     scroll: &mut u16,
 ) -> Result<()> {
-    use crate::pb::contracts::srv_pilot_client::SrvPilotClient;
     use crate::pb::pilot::{PilotEvent, Task};
     use tonic::Status;
 
     const INTENT_SOURCE_TEXT: u32 = 0;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(64);
-    let pilot_ep = pilot_endpoint.to_string();
+    let stream_channel = channel.clone();
     let sid = session_id.to_string();
     let text = user_msg.to_string();
 
     let _stream_task = tokio::spawn(async move {
-        let mut client = match SrvPilotClient::connect(pilot_ep.clone()).await {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = tx.send(Err(Status::unavailable(e.to_string()))).await;
-                return;
-            }
-        };
+        let mut client = SystemPilotClient::new(stream_channel);
         let task = Task {
             task_id: Uuid::new_v4().to_string(),
             session_id: sid,
@@ -295,7 +253,7 @@ async fn run_intent_with_esc_abort(
             context_json: String::new(),
             timestamp_ms: now_ms(),
         };
-        let stream = match client.stream(tonic::Request::new(task)).await {
+        let stream = match client.submit_task(tonic::Request::new(task)).await {
             Ok(r) => r.into_inner(),
             Err(e) => {
                 let _ = tx.send(Err(e)).await;
@@ -335,7 +293,7 @@ async fn run_intent_with_esc_abort(
                     && let Event::Key(key) = event::read()? {
                         match key.code {
                             KeyCode::Esc => {
-                                let _ = abort_pilot_session(pilot_endpoint, session_id).await;
+                                let _ = abort_pilot_session(channel.clone(), session_id).await;
                                 messages.borrow_mut().push(ChatMessage {
                                     role: Role::Status,
                                     text: "Esc — abort_turn sent to Pilot (in-flight turn should stop)."
@@ -364,8 +322,9 @@ fn apply_pilot_event(
     messages: &Rc<RefCell<Vec<ChatMessage>>>,
     event: &crate::pb::pilot::PilotEvent,
 ) -> Result<()> {
+    // event_kind discriminants — see PilotEvent.msg.
     const EVT_TEXT_CHUNK: u32 = 0;
-    const EVT_TASK_GRAPH: u32 = 1;
+    const EVT_PLAN: u32 = 1;
     const EVT_FINAL_TEXT: u32 = 4;
 
     let mut m = messages.borrow_mut();
@@ -398,12 +357,22 @@ fn apply_pilot_event(
                 });
             }
         }
-        EVT_TASK_GRAPH => {
-            if let Some(ref g) = event.task_graph {
-                for call in &g.calls {
+        EVT_PLAN => {
+            // dev called this EVT_TASK_GRAPH with `event.task_graph` carrying
+            // tool_name + args_json. dev-packaging renamed the message to
+            // Plan/CapabilityCall; only contract_id + args_json are exposed,
+            // so we leaf-strip contract_id back into a tool-name lookalike to
+            // preserve the same `[r{round}] {name}({args})` line shape.
+            if let Some(ref p) = event.plan {
+                for call in &p.calls {
+                    let leaf = call
+                        .contract_id
+                        .rsplit_once('/')
+                        .map(|(_, l)| l.to_string())
+                        .unwrap_or_else(|| call.contract_id.clone());
                     m.push(ChatMessage {
                         role: Role::ToolCall,
-                        text: format!("[r{}] {}({})", g.round, call.tool_name, call.args_json),
+                        text: format!("[r{}] {}({})", p.round, leaf, call.args_json),
                     });
                 }
             }
@@ -491,10 +460,4 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-/// Pilot binds IPv4 (`0.0.0.0`). Resolving `localhost` often prefers `::1`, so the
-/// gRPC client hits IPv6 and gets connection refused — force IPv4 loopback.
-fn localhost_to_ipv4_loopback(url: &str) -> String {
-    url.replace("localhost", "127.0.0.1")
 }

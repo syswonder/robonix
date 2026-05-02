@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 # Start Base Navigate Primitive Script
 #
-# Start script for prm::base.navigate (navigate to target pose)
+# Start script for primitive::base.navigate (navigate to target pose)
 # This script verifies that Nav2 is running and the goal topic is available.
 # It also starts a simple node to publish navigation status.
 

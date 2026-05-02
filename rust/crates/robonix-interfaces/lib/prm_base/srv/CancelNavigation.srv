@@ -1,5 +1,0 @@
-# robonix/prm/base/cancel_nav — request cancellation of a navigation goal (RPC)
-string goal_id
----
-bool accepted
-string message

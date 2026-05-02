@@ -7,11 +7,8 @@ use anyhow::Result;
 use clap::Parser;
 use robonix_cli::Config;
 
-mod pb {
-    pub use robonix_interfaces::{contracts, pilot};
-}
-
 mod cmd;
+mod pb;
 
 #[derive(Parser)]
 #[command(name = "rbnx")]

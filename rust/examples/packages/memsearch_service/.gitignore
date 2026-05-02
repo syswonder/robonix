@@ -1,4 +1,0 @@
-.agent_milvus.db.lock
-# robonix-codegen --lang mcp generated Python dataclasses
-robonix_mcp_types/
-proto_gen/

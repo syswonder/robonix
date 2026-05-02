@@ -1,119 +1,92 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// service.rs — gRPC contract services (SrvExecutor, SrvExecutorListTools)
+// Author: wheatfox <wheatfox17@icloud.com>
+//
+// gRPC contract handler: SystemExecutor.Execute(Plan) → stream CapabilityCallEvent.
 
-use crate::contracts::{
-    srv_executor_list_tools_server::SrvExecutorListTools, srv_executor_server::SrvExecutor,
-};
 use crate::dispatch;
 use crate::exec_wire;
-use crate::executor::{ListToolsRequest, ListToolsResponse, TaskCallEvent, ToolSpec};
-use crate::pilot::TaskGraph;
-use crate::tools;
-use robonix_sdk::RobonixClient;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use crate::pb::contracts::system_executor_server::SystemExecutor;
+use crate::pb::executor::CapabilityCallEvent;
+use crate::pb::pilot::Plan;
+use robonix_atlas::client::AtlasClient;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
+/// `AtlasClient` is cheap to clone — each Execute RPC clones it so per-plan
+/// dispatch runs without serialising on a single mutex.
 #[derive(Clone)]
 pub struct ExecutorServiceImpl {
-    sdk: Arc<Mutex<RobonixClient>>,
+    atlas: AtlasClient,
+    /// Executor's own cap_id. Two roles:
+    ///   1. consumer_id passed to atlas on every ConnectCapability so the
+    ///      channel record reflects who is using each downstream cap.
+    ///   2. self-detection: when a CapabilityCall in the plan targets this
+    ///      cap_id, dispatch short-circuits to the in-process builtin
+    ///      handlers instead of going through MCP loopback.
+    cap_id: String,
 }
 
 impl ExecutorServiceImpl {
-    pub fn new(sdk: Arc<Mutex<RobonixClient>>) -> Self {
-        Self { sdk }
+    pub fn new(atlas: AtlasClient, cap_id: String) -> Self {
+        Self { atlas, cap_id }
     }
 }
 
 #[tonic::async_trait]
-impl SrvExecutor for ExecutorServiceImpl {
-    type StreamStream = ReceiverStream<Result<TaskCallEvent, Status>>;
+impl SystemExecutor for ExecutorServiceImpl {
+    type ExecuteStream = ReceiverStream<Result<CapabilityCallEvent, Status>>;
 
-    async fn stream(
+    async fn execute(
         &self,
-        request: Request<TaskGraph>,
-    ) -> Result<Response<Self::StreamStream>, Status> {
-        let graph = request.into_inner();
+        request: Request<Plan>,
+    ) -> Result<Response<Self::ExecuteStream>, Status> {
+        let plan = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(64);
-        let sdk = Arc::clone(&self.sdk);
+        let atlas = self.atlas.clone();
+        let cap_id = self.cap_id.clone();
 
         tokio::spawn(async move {
-            let routing_map = {
-                let mut sdk = sdk.lock().await;
-                match tools::load_tools(&mut sdk).await {
-                    Ok(list) => tools::routing_map(&list),
-                    Err(e) => {
-                        log::warn!("failed to load tools: {e:#}");
-                        Default::default()
-                    }
-                }
-            };
-
-            let graph_id = graph.graph_id.clone();
+            let plan_id = plan.plan_id.clone();
             let mut any_failed = false;
 
-            for call in &graph.calls {
+            for call in &plan.calls {
                 let _ = tx
                     .send(Ok(exec_wire::started(
                         call.call_id.clone(),
-                        call.tool_name.clone(),
+                        call.cap_id.clone(),
+                        call.contract_id.clone(),
                     )))
                     .await;
 
                 log::info!(
-                    "[executor] dispatching '{}' (call_id={})",
-                    call.tool_name,
-                    call.call_id
+                    "[executor] dispatching call_id={} cap='{}' contract='{}'",
+                    call.call_id,
+                    call.cap_id,
+                    call.contract_id,
                 );
-                let result = dispatch::dispatch(call, &routing_map).await;
+                let mut atlas_for_call = atlas.clone();
+                let result = dispatch::dispatch(call, &cap_id, &mut atlas_for_call).await;
 
                 if result.success {
                     let preview: String = result.output.chars().take(120).collect();
                     let ellipsis = if result.output.len() > 120 { "…" } else { "" };
                     log::info!(
                         "[executor] '{}' ok: {}{}",
-                        call.tool_name,
+                        call.contract_id,
                         preview,
                         ellipsis
                     );
                 } else {
                     any_failed = true;
-                    log::warn!("[executor] '{}' failed: {}", call.tool_name, result.error);
+                    log::warn!("[executor] '{}' failed: {}", call.contract_id, result.error);
                 }
 
                 let _ = tx.send(Ok(exec_wire::result(result))).await;
             }
 
-            let _ = tx.send(Ok(exec_wire::complete(graph_id, any_failed))).await;
+            let _ = tx.send(Ok(exec_wire::complete(plan_id, any_failed))).await;
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
-    }
-}
-
-#[tonic::async_trait]
-impl SrvExecutorListTools for ExecutorServiceImpl {
-    async fn call(
-        &self,
-        request: Request<ListToolsRequest>,
-    ) -> Result<Response<ListToolsResponse>, Status> {
-        let _refresh = request.into_inner().refresh;
-        let mut sdk = self.sdk.lock().await;
-        let tool_list = tools::load_tools(&mut sdk)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        let specs = tool_list
-            .into_iter()
-            .map(|t| ToolSpec {
-                tool_name: t.name,
-                description: t.description,
-                input_schema_json: t.input_schema.to_string(),
-                routing: Some(t.routing),
-            })
-            .collect();
-
-        Ok(Response::new(ListToolsResponse { tools: specs }))
     }
 }

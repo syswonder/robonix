@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: MulanPSL-2.0
+// Author: wheatfox <wheatfox17@icloud.com>
+//
 // dispatch/builtin.rs — built-in tool implementations
 
-use crate::pilot::TaskCallResult;
+use crate::pb::pilot::CapabilityCallResult;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 /// Workspace root for file operations. All file paths are resolved relative to
 /// this directory, and path traversal beyond it is rejected.
+/// > `wheatfox's note: the definition of this "workspace" is where all the built-in tools
+/// > like read_file, write_file, exec command will be ran, as the linux CWD`
 fn workspace_root() -> PathBuf {
     std::env::var("ROBONIX_WORKSPACE")
         .map(PathBuf::from)
@@ -52,28 +56,39 @@ fn safe_resolve(user_path: &str) -> anyhow::Result<PathBuf> {
     Ok(resolved)
 }
 
-pub async fn execute(call_id: &str, name: &str, args_json: &str) -> TaskCallResult {
-    let output = run(name, args_json).await;
-    match output {
-        Ok(out) => TaskCallResult {
-            call_id: call_id.to_string(),
-            tool_name: name.to_string(),
-            success: true,
-            output: out,
-            error: String::new(),
-        },
-        Err(e) => TaskCallResult {
-            call_id: call_id.to_string(),
-            tool_name: name.to_string(),
-            success: false,
-            output: String::new(),
-            error: e.to_string(),
-        },
+use crate::pb::pilot::CapabilityCall;
+
+/// One in-process builtin (no network, runs in executor's own process).
+/// `call.contract_id`'s last segment names the operation —
+/// e.g. `robonix/system/executor/builtin/read_file` → `read_file`.
+pub async fn execute(call: &CapabilityCall) -> CapabilityCallResult {
+    let op = call
+        .contract_id
+        .rsplit_once('/')
+        .map(|(_, leaf)| leaf)
+        .unwrap_or(call.contract_id.as_str());
+    let result = run(op, &call.args_json).await;
+    let mut out = CapabilityCallResult {
+        call_id: call.call_id.clone(),
+        cap_id: call.cap_id.clone(),
+        contract_id: call.contract_id.clone(),
+        ..Default::default()
+    };
+    match result {
+        Ok(s) => {
+            out.success = true;
+            out.output = s;
+        }
+        Err(e) => {
+            out.success = false;
+            out.error = e.to_string();
+        }
     }
+    out
 }
 
-async fn run(name: &str, args_json: &str) -> anyhow::Result<String> {
-    match name {
+async fn run(op: &str, args_json: &str) -> anyhow::Result<String> {
+    match op {
         "read_file" => read_file(args_json),
         "write_file" => write_file(args_json),
         "patch_file" => patch_file(args_json),
@@ -82,6 +97,42 @@ async fn run(name: &str, args_json: &str) -> anyhow::Result<String> {
         other => anyhow::bail!("unknown builtin: {}", other),
     }
 }
+
+/// Static metadata for the 5 builtin ops. Used by main.rs to declare them
+/// against atlas at startup so pilot can discover them like any other cap.
+pub struct BuiltinSpec {
+    pub op: &'static str,
+    pub description: &'static str,
+    pub input_schema_json: &'static str,
+}
+
+pub const BUILTINS: &[BuiltinSpec] = &[
+    BuiltinSpec {
+        op: "read_file",
+        description: "Read a file and return its contents",
+        input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"Absolute or relative file path"}},"required":["path"]}"#,
+    },
+    BuiltinSpec {
+        op: "write_file",
+        description: "Write content to a file (creates or overwrites)",
+        input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}"#,
+    },
+    BuiltinSpec {
+        op: "patch_file",
+        description: "Replace the first occurrence of a string in a file",
+        input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}"#,
+    },
+    BuiltinSpec {
+        op: "list_dir",
+        description: "List files and directories at a path",
+        input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"Directory path (default: current dir)"}}}"#,
+    },
+    BuiltinSpec {
+        op: "run_command",
+        description: "Run a shell command and return stdout/stderr",
+        input_schema_json: r#"{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}"#,
+    },
+];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -143,6 +194,7 @@ fn write_file(args: &str) -> anyhow::Result<String> {
 }
 
 fn patch_file(args: &str) -> anyhow::Result<String> {
+    // TODO: use standard tools like sed, awk, etc.
     let a: PatchArgs = serde_json::from_str(args)?;
     let path = safe_resolve(&a.path)?;
     let content = std::fs::read_to_string(&path)?;
@@ -216,8 +268,6 @@ async fn run_command(args: &str) -> anyhow::Result<String> {
 mod tests {
     use super::*;
 
-    // ── Path traversal tests ─────────────────────────────────────────────
-
     #[test]
     fn path_traversal_dotdot_is_rejected() {
         // Set workspace to a temp dir so we have a known root
@@ -278,7 +328,16 @@ mod tests {
         let _ = std::fs::remove_dir(&tmp);
     }
 
-    // ── execute() integration tests for path traversal ───────────────────
+    // CapabilityCall builder — tests dispatch by contract_id leaf, so each
+    // call's contract_id is `<anything>/<op>` and the leaf names the op.
+    fn call(call_id: &str, op: &str, args_json: &str) -> CapabilityCall {
+        CapabilityCall {
+            call_id: call_id.to_string(),
+            cap_id: "com.robonix.system.executor".to_string(),
+            contract_id: format!("robonix/system/executor/builtin/{op}"),
+            args_json: args_json.to_string(),
+        }
+    }
 
     #[tokio::test]
     async fn read_file_rejects_path_traversal() {
@@ -286,7 +345,12 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
 
-        let result = execute("test-1", "read_file", r#"{"path": "../../../etc/passwd"}"#).await;
+        let result = execute(&call(
+            "test-1",
+            "read_file",
+            r#"{"path": "../../../etc/passwd"}"#,
+        ))
+        .await;
         assert!(!result.success, "read_file should fail for path traversal");
         assert!(
             result.error.contains("traversal") || result.error.contains("does not exist"),
@@ -301,11 +365,11 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         unsafe { std::env::set_var("ROBONIX_WORKSPACE", tmp.to_str().unwrap()) };
 
-        let result = execute(
+        let result = execute(&call(
             "test-2",
             "write_file",
             r#"{"path": "/tmp/outside_workspace_evil.txt", "content": "pwned"}"#,
-        )
+        ))
         .await;
         assert!(
             !result.success,
@@ -319,13 +383,11 @@ mod tests {
         );
     }
 
-    // ── Command length limit test ────────────────────────────────────────
-
     #[tokio::test]
     async fn run_command_rejects_oversized_command() {
         let long_cmd = "a".repeat(MAX_COMMAND_LEN + 1);
         let args = format!(r#"{{"command": "{}"}}"#, long_cmd);
-        let result = execute("test-3", "run_command", &args).await;
+        let result = execute(&call("test-3", "run_command", &args)).await;
         assert!(!result.success, "oversized command should be rejected");
         assert!(
             result.error.contains("command too long"),
@@ -336,7 +398,12 @@ mod tests {
 
     #[tokio::test]
     async fn run_command_accepts_normal_command() {
-        let result = execute("test-4", "run_command", r#"{"command": "echo hello"}"#).await;
+        let result = execute(&call(
+            "test-4",
+            "run_command",
+            r#"{"command": "echo hello"}"#,
+        ))
+        .await;
         assert!(
             result.success,
             "normal command should succeed: {}",
@@ -348,8 +415,6 @@ mod tests {
             result.output
         );
     }
-
-    // ── UTF-8 truncation safety test ─────────────────────────────────────
 
     #[test]
     fn truncate_ascii_works() {
@@ -398,11 +463,9 @@ mod tests {
         );
     }
 
-    // ── Unknown builtin test ─────────────────────────────────────────────
-
     #[tokio::test]
     async fn unknown_builtin_returns_error() {
-        let result = execute("test-5", "evil_tool", "{}").await;
+        let result = execute(&call("test-5", "evil_tool", "{}")).await;
         assert!(!result.success);
         assert!(result.error.contains("unknown builtin"));
     }

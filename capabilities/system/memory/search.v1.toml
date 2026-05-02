@@ -1,0 +1,11 @@
+[contract]
+id      = "robonix/system/memory/search"
+version = "1"
+kind    = "system"
+
+
+[io.srv]
+srv = "memory/srv/Search"
+
+[mode]
+type = "rpc"

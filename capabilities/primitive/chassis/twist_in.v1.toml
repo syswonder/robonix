@@ -1,0 +1,12 @@
+[contract]
+id      = "robonix/primitive/chassis/twist_in"
+version = "1"
+kind    = "primitive"
+
+
+[io.msg]
+msg = "geometry_msgs/msg/Twist"
+
+[mode]
+type = "topic_in"
+

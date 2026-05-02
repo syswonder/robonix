@@ -1,4 +1,0 @@
-# robonix/prm/base/stop — synchronous stop (RPC)
----
-bool success
-string message

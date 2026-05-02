@@ -1,0 +1,198 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// ─────────────────────────────────────────────────────────────────────────────
+// DEPRECATED — frozen wire snapshot of the pre-refactor "RobonixRuntime"
+// service. Kept alive solely so older callers (liaison, audio bridges, and any
+// service that hasn't migrated yet) keep talking to Atlas while they're being
+// rewritten against `atlas.proto`'s `Atlas` service.
+//
+// Atlas serves BOTH this service and the new `robonix.atlas.Atlas` service on
+// the same gRPC port. All RPCs here are translated into the new vocabulary
+// internally (see crate::legacy) and emit a WARN log on every call.
+//
+// Removal target: once liaison + audio + last legacy package have migrated.
+// Do NOT add new fields or methods here — extend `atlas.proto` instead.
+// ─────────────────────────────────────────────────────────────────────────────
+syntax = "proto3";
+package robonix.runtime;
+
+// Structured skill metadata (name + description + path to SKILL.md)
+message SkillInfo {
+  string name = 1;           // unique skill name (snake_case), from SKILL.md frontmatter
+  string description = 2;    // one-line description for agent prompt
+  string path = 3;           // absolute filesystem path to SKILL.md (agent can read_file)
+  // extras (JSON), e.g. {"disable_model_invocation":true,"user_invocable":true}
+  string metadata_json = 4;
+}
+
+// TODO(atlas/skill-library): add structured Skill-as-graph persistence.
+//
+// A structured skill is a named, reusable TaskGraph (BT-shaped; v1 linear list) stored in Atlas.
+// It differs from SKILL.md (natural-language guidance for the VLM) in that it
+// is machine-executable: Pilot can look it up by name and dispatch it directly
+// via Executor without an extra VLM reasoning round.
+//
+// Proposed additions:
+//   message SkillGraph {
+//     string skill_id = 1;         // unique ID, e.g. "pick_and_place_v1"
+//     string name = 2;
+//     string description = 3;
+//     repeated SkillGraphNode nodes = 4;
+//     repeated SkillGraphEdge edges = 5;  // dependency ordering
+//   }
+//   message SkillGraphNode {
+//     string node_id = 1;
+//     string tool_name = 2;        // tool call to issue
+//     string params_json = 3;      // default params (may be overridden at invocation)
+//     robonix.pilot.ToolRouting routing = 4;
+//   }
+//   message SkillGraphEdge { string from_id = 1; string to_id = 2; }
+//
+//   rpc RegisterSkillGraph(RegisterSkillGraphRequest) returns (RegisterSkillGraphResponse);
+//   rpc QuerySkillGraph(QuerySkillGraphRequest) returns (QuerySkillGraphResponse);
+//
+// Owner: atlas / skill-library team
+
+// Node registration
+message RegisterNodeRequest {
+  string node_id = 1;        // reverse-DNS, e.g. com.vendor.service (empty => server assigns com.robonix.ephemeral.<uuid>)
+  string namespace = 2;      // e.g. "robonix/primitive/camera"
+  string kind = 3;           // "primitive", "service", "skill"
+  string skill_md = 4;       // optional: single SKILL.md content (legacy, prefer `skills`)
+  string distro = 5;         // ROS distro if applicable: "humble", "jazzy", "" for non-ROS
+  string container_id = 6;   // logical container grouping (e.g. docker container name)
+  repeated SkillInfo skills = 7;  // structured skills from package skills/ directory
+}
+message RegisterNodeResponse {
+  string node_id = 1;
+}
+
+// Remove a node from the registry (channels involving this node are dropped)
+message UnregisterNodeRequest {
+  string node_id = 1;
+}
+message UnregisterNodeResponse {
+  bool ok = 1;
+}
+
+// Refresh node liveness (orchestrator may evict stale nodes later)
+message NodeHeartbeatRequest {
+  string node_id = 1;
+}
+message NodeHeartbeatResponse {
+  bool ok = 1;
+  uint64 server_time_ms = 2;
+}
+
+// Interface declaration (a node can declare multiple interfaces)
+message DeclareInterfaceRequest {
+  string node_id = 1;
+  string name = 2;                      // e.g. "rgb" — local leaf key for NegotiateChannel
+  repeated string supported_transports = 3;  // e.g. ["ros2", "shared_memory", "grpc"]
+  string metadata_json = 4;             // opaque JSON; for transport "ros2", optional "ros2_topic" / "ros2_service" may be used as the allocated data-plane name when free (else /rbnx/ch/n<uuid>)
+  // If non-zero, data-plane endpoint is ROBONIX_DATA_PLANE_HOST:listen_port (client already bound).
+  // If zero, server picks the next port from its allocator (may collide with host services).
+  uint32 listen_port = 5;
+  // Stable capability path — same string as in contract TOML `[contract] id` (see <root>/capabilities/).
+  // Example: "robonix/primitive/camera/rgb". Version is not appended here; it is in the TOML only.
+  // Empty = Atlas derives from RegisterNode.namespace + "/" + name.
+  string contract_id = 6;
+}
+message DeclareInterfaceResponse {
+  bool ok = 1;
+  string allocated_endpoint = 2;  // server-allocated data-plane endpoint (e.g. "localhost:50101")
+}
+
+// Discover nodes by namespace/name/transport, or by contract_id.
+message QueryNodesRequest {
+  string namespace = 1;      // filter by namespace (prefix match); ignored if contract_id is set
+  string name = 2;           // filter by interface name (optional); ignored if contract_id is set
+  string transport = 3;      // filter by supported transport (optional)
+  string distro_prefix = 4;  // filter: node.distro has this prefix (optional)
+  string container_id = 5;   // filter: exact match on container_id (optional)
+  // Exact match on InterfaceInfo.contract_id.
+  // When non-empty, namespace and name filters are ignored; transport still applies if set.
+  string contract_id = 6;
+}
+message NodeInfo {
+  string node_id = 1;
+  string namespace = 2;
+  string kind = 3;
+  repeated InterfaceInfo interfaces = 4;
+  bool has_skill_md = 5;
+  string distro = 6;
+  string container_id = 7;
+  uint64 last_heartbeat_ms = 8;
+  repeated SkillInfo skills = 9;
+}
+message InterfaceInfo {
+  string name = 1;
+  repeated string supported_transports = 2;
+  string metadata_json = 3;
+  // Resolved stable capability path (never empty after DeclareInterface).
+  string contract_id = 4;
+}
+message QueryNodesResponse {
+  repeated NodeInfo nodes = 1;
+}
+
+// Channel negotiation -- consumer picks transport, system allocates endpoint
+message NegotiateChannelRequest {
+  string consumer_id = 1;    // same reverse-DNS form as node_id
+  string provider_node_id = 2;
+  string interface_name = 3;
+  string transport = 4;      // which transport to use
+}
+message NegotiateChannelResponse {
+  string channel_id = 1;
+  string transport = 2;
+  string endpoint = 3;       // system-allocated endpoint (topic name, shm key, etc.)
+  string metadata_json = 4;  // provider interface metadata (geometry, format, IPC handles, etc.)
+}
+
+// Release a channel
+message ReleaseChannelRequest {
+  string channel_id = 1;
+}
+message ReleaseChannelResponse {
+  bool ok = 1;
+}
+
+// Get SKILL.md content for a specific node
+message QuerySkillMdRequest {
+  string node_id = 1;
+}
+message QuerySkillMdResponse {
+  string skill_md = 1;
+}
+
+// Get all SKILL.md contents (for agent system prompt)
+message QueryAllSkillsRequest {}
+message SkillEntry {
+  string node_id = 1;
+  string namespace = 2;
+  string kind = 3;
+  string skill_md = 4;
+  repeated SkillInfo skills = 5;
+}
+message QueryAllSkillsResponse {
+  repeated SkillEntry skills = 1;
+}
+
+// Runtime inspection
+message InspectRuntimeRequest {}
+message InspectRuntimeResponse {
+  string json = 1;
+}
+
+service RobonixRuntime {
+  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
+  rpc UnregisterNode(UnregisterNodeRequest) returns (UnregisterNodeResponse);
+  rpc NodeHeartbeat(NodeHeartbeatRequest) returns (NodeHeartbeatResponse);
+  rpc DeclareInterface(DeclareInterfaceRequest) returns (DeclareInterfaceResponse);
+  rpc QueryNodes(QueryNodesRequest) returns (QueryNodesResponse);
+  rpc NegotiateChannel(NegotiateChannelRequest) returns (NegotiateChannelResponse);
+  rpc ReleaseChannel(ReleaseChannelRequest) returns (ReleaseChannelResponse);
+  rpc QuerySkillMd(QuerySkillMdRequest) returns (QuerySkillMdResponse);
+  rpc QueryAllSkills(QueryAllSkillsRequest) returns (QueryAllSkillsResponse);
+  rpc InspectRuntime(InspectRuntimeRequest) returns (InspectRuntimeResponse);
+}
