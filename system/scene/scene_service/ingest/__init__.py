@@ -1,18 +1,24 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 """Ingest layer — async tasks that pull observations into the registry.
-v1 design: poll existing primitive caps via atlas-mediated channels
-(MCP for image/scan tools, gRPC for chassis state) instead of native
-ROS subscription. Reasoning: scene runs on host, primitives run inside
-the Webots docker container; ROS DDS over host network is fragile,
-while atlas's transport-aware Connect already gives us a portable
-connection. When we eventually run scene on a real robot with rclpy
-on host, native subscribers can be added alongside.
 
-The Soma adapter (see service.py) reads `config.observations[]` to
-decide which of these tasks to launch. Missing caps → task is silently
-skipped (not an error)."""
+v2 (current): scene runs in its own docker container with rclpy on
+the host DDS bus. ROS2 subscribers are the primary ingest path; VLM
+perception consumes the latest RGB frame each tick and produces
+Detections that go through state/data_assoc.
 
-from .poll_primitive import PrimitivePoller, ChassisStatePoller
+v1 (removed): MCP-based polling of primitive caps via atlas. MCP is
+for pilot only; scene's own data fetching uses the fast direct path."""
+
 from .perception_vlm import VLMObjectDetector
+from .ros_subscribers import (
+    DEFAULT_WEBOTS_TIAGO_TOPICS,
+    SubscribersHub,
+    TopicSpec,
+)
 
-__all__ = ["PrimitivePoller", "ChassisStatePoller", "VLMObjectDetector"]
+__all__ = [
+    "DEFAULT_WEBOTS_TIAGO_TOPICS",
+    "SubscribersHub",
+    "TopicSpec",
+    "VLMObjectDetector",
+]

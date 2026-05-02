@@ -33,22 +33,37 @@ system:
     log: info
   memory: {}
   speech: {}
-  # Scene — current-state semantic + geometric map. Subscribes to whichever
-  # of the listed observation contracts atlas actually has registered;
-  # missing caps are silently skipped (Soma adapter). Webots Tiago has
-  # no 3D lidar, so we list rgb/lidar2d/odom only — depth_snapshot is
-  # available but not yet consumed by scene's geom layer.
+  # Scene runs in its own docker container (image robonix-scene built
+  # by system/scene/scripts/build.sh) on `--network host` so it shares
+  # the host DDS bus. Each `observations[]` entry names a logical kind
+  # + a `contract` (resolved against atlas) + a static `topic`+`msg_type`
+  # used ONLY as fallback when atlas doesn't yet have a ROS2-transport
+  # DeclareInterface for that contract. The atlas-first lookup means a
+  # different soma can override topics by re-registering its primitives,
+  # without editing this file.
   scene:
     observations:
       - kind: rgb
         contract: robonix/primitive/camera/snapshot
         period_s: 4.0
+        topic: /head_front_camera/rgb/image_raw
+        msg_type: Image
+      - kind: depth
+        topic: /head_front_camera/depth_registered/image_raw
+        msg_type: Image
       - kind: lidar2d
         contract: robonix/primitive/lidar/snapshot
         period_s: 2.0
+        topic: /scan
+        msg_type: LaserScan
+      - kind: pose
+        topic: /amcl_pose
+        msg_type: PoseWithCovarianceStamped
       - kind: odom
         contract: robonix/primitive/chassis/state
         period_s: 1.0
+        topic: /odom
+        msg_type: Odometry
 
 primitive:
   - name: tiago_chassis

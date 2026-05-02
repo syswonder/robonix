@@ -1,0 +1,14 @@
+# Scene-container Python deps. Subset of pyproject.toml's [project.dependencies]
+# minus what the base image already provides (numpy / cv-bridge / rclpy /
+# tf2_ros) and minus Open3D (plane_extract no-ops without it; voxel ops
+# can come back when we actually need them).
+scipy>=1.11
+mcp
+fastmcp
+grpcio
+grpcio-tools
+protobuf
+uvicorn
+httpx
+Pillow
+PyYAML
