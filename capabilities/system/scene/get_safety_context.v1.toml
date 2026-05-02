@@ -1,0 +1,12 @@
+# Stub. v1 returns status="not_implemented" + empty arrays. Sentinel
+# will fill it.
+[contract]
+id      = "robonix/system/scene/get_safety_context"
+version = "1"
+kind    = "system"
+
+[io.srv]
+srv = "semantic_map/srv/GetSafetyContext"
+
+[mode]
+type = "rpc"
