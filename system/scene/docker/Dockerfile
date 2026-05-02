@@ -43,6 +43,8 @@ RUN apt-get update \
         python3-numpy \
         ros-humble-tf2-ros \
         ros-humble-tf-transformations \
+        ros-humble-rmw-zenoh-cpp \
+        ros-humble-zenoh-bridge-dds \
  && rm -rf /var/lib/apt/lists/*
 
 # Python deps for scene. Versions chosen to match what
@@ -57,10 +59,13 @@ RUN pip install -r /tmp/requirements.txt \
 
 WORKDIR /scene
 COPY entrypoint.sh /entrypoint.sh
-COPY fastdds_no_shm.xml /etc/scene/fastdds_no_shm.xml
 RUN chmod +x /entrypoint.sh
 
-# Force pure UDP4 transport (see fastdds_no_shm.xml header comment).
-ENV FASTRTPS_DEFAULT_PROFILES_FILE=/etc/scene/fastdds_no_shm.xml
+# Use Zenoh as the RMW. The scene container starts its own Zenoh
+# router (rmw_zenohd) and a zenoh-bridge-dds that mirrors the sim
+# container's FastRTPS topics into Zenoh. No FastRTPS XML needed
+# anymore — that was the workaround for the cross-container SHM
+# problem we no longer have.
+ENV RMW_IMPLEMENTATION=rmw_zenoh_cpp
 
 ENTRYPOINT ["/entrypoint.sh"]
