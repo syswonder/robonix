@@ -150,54 +150,102 @@ def _load_config() -> dict:
     return cfg
 
 
+# Map of (contract leaf → logical scene kind). Primitives DeclareInterface
+# their ROS2 topics with contract IDs like `robonix/primitive/camera/rgb`;
+# scene auto-classifies by leaf so the manifest doesn't have to enumerate.
+# A leaf not in this table is still subscribed (`kind = leaf`) — scene
+# just doesn't have specialised consumers for it yet.
+_CONTRACT_LEAF_TO_KIND: dict[str, str] = {
+    "rgb": "rgb",
+    "depth": "depth",
+    "depth_registered": "depth",
+    "lidar2d": "lidar2d",
+    "scan": "lidar2d",
+    "lidar3d": "lidar3d",
+    "pointcloud": "lidar3d",
+    "pose": "pose",
+    "amcl_pose": "pose",
+    "odom": "odom",
+}
+
+# Optional manifest opt-out: kinds listed here are dropped even if atlas
+# advertises them. Useful when a deployment doesn't want scene burning
+# CPU on, say, a high-rate depth stream.
+_DEFAULT_DISABLED_KINDS: frozenset[str] = frozenset()
+
+
 def _build_topic_specs(observations: list[dict], atlas_stub) -> list[TopicSpec]:
-    """Resolve each Soma observation entry to a ROS-topic subscription.
+    """Two paths:
 
-    NO static topic / msg_type / QoS in the manifest. Everything comes
-    from atlas + the contract's IDL metadata. The algorithm:
+      A. Auto-discovery (default — when manifest's `observations[]` is
+         empty / absent). Scene queries atlas for ALL caps + their
+         ROS2-transport interfaces, classifies each by contract leaf
+         via `_CONTRACT_LEAF_TO_KIND`, and subscribes. Zero per-deploy
+         config: a soma plugs in a new sensor primitive that
+         DeclareInterface's its topic, scene picks it up on next
+         start without touching robonix_manifest.yaml.
 
-      For each (kind, contract_id) the manifest declares:
+      B. Explicit overrides (when manifest provides `observations[]`).
+         Each entry is `{kind, contract}`; scene resolves the topic +
+         msg_type + qos identically. Used to disable a kind for a
+         specific deployment, or to point at a non-canonical contract.
 
-        1. Atlas resolution
-           ─────────────────
-           records = atlas.QueryCapabilities(contract_id, transport=ROS2)
-           If `records` is empty → no primitive has DeclareInterface'd
-           this contract over ROS2. Log a one-line warning and skip
-           the entry; we never make up a topic name. Soma authors fix
-           this by registering the primitive properly, not by editing
-           the deploy manifest.
+    msg_type derivation in both paths: read `[io.msg].msg` from the
+    contract TOML at `/capabilities/<contract_path>.v1.toml`. Split
+    on `/`, take the leaf — that's the ROS Python class name. The
+    /capabilities dir is bind-mounted into the scene container.
 
-           Otherwise pick the first matching interface:
-             topic        = iface.endpoint           (the ROS topic)
-             qos_profile  = iface.params.ros2.qos_profile  (optional hint)
-
-           Multiple records → log + take first; deterministic selection
-           is a separate ranking concern (atlas doesn't expose priority
-           today).
-
-        2. msg_type derivation from contract IDL
-           ──────────────────────────────────────
-           The contract TOML at `<robonix_capabilities>/<namespace>.v1.toml`
-           has `[io.msg].msg = "sensor_msgs/msg/Image"` (or similar).
-           Split on `/`, take the last segment ("Image") — that's the
-           Python class name in the corresponding `<package>_msgs` module
-           (sensor_msgs / nav_msgs / geometry_msgs / std_msgs / …).
-
-           The /capabilities directory is bind-mounted into the scene
-           container at /capabilities (see package_manifest.yaml start
-           block); we read the TOML file directly. No atlas API needed
-           for this — contract metadata is static and packaged with the
-           source tree.
-
-        3. Subscribe
-           ─────────
-           Hand (kind, topic, msg_type) to SubscribersHub which creates
-           the rclpy subscription with appropriate QoS.
-
-    Errors at any step skip that one entry but never fail bring-up —
-    a partially-resolvable scene config is still useful (e.g. RGB
-    works but lidar2d primitive isn't running yet).
+    Errors at any step skip that one entry but never fail bring-up:
+    a partially-resolvable scene config is still useful (RGB works
+    even if lidar2d primitive isn't running yet).
     """
+    if observations:
+        return _resolve_explicit(observations, atlas_stub)
+    return _resolve_auto(atlas_stub)
+
+
+def _resolve_auto(atlas_stub) -> list[TopicSpec]:
+    """Path A: scan everything atlas knows about, take what looks
+    subscribable. We pull a single QueryCapabilities with empty
+    contract_id and transport=ROS2 — atlas returns every cap with
+    at least one ROS2-transport interface."""
+    try:
+        resp = atlas_stub.QueryCapabilities(pb.QueryCapabilitiesRequest(
+            contract_id="",
+            transport=pb.TRANSPORT_ROS2,
+        ))
+    except Exception as e:  # noqa: BLE001
+        log.warning("[scene] atlas QueryCapabilities(*,ROS2) failed: %s", e)
+        return []
+
+    seen_kinds: set[str] = set()
+    out: list[TopicSpec] = []
+    for rec in resp.records:
+        for iface in rec.interfaces:
+            if iface.transport != pb.TRANSPORT_ROS2:
+                continue
+            spec = _spec_from_iface(iface)
+            if spec is None:
+                continue
+            if spec.kind in _DEFAULT_DISABLED_KINDS:
+                log.info("[scene] auto-discover: skipping kind=%s (in _DEFAULT_DISABLED_KINDS)", spec.kind)
+                continue
+            if spec.kind in seen_kinds:
+                # Multiple primitives advertising the same kind. Take
+                # the first (deterministic via atlas's record order).
+                log.info("[scene] auto-discover: kind=%s already taken; ignoring %s on %s",
+                         spec.kind, iface.contract_id, iface.endpoint)
+                continue
+            seen_kinds.add(spec.kind)
+            log.info("[scene] auto-discover %r ← atlas: topic=%s msg=%s qos=%s contract=%s",
+                     spec.kind, spec.topic, spec.msg_type, spec.qos_profile, iface.contract_id)
+            out.append(spec)
+    return out
+
+
+def _resolve_explicit(observations: list[dict], atlas_stub) -> list[TopicSpec]:
+    """Path B: per-entry contract lookup. Only used when the manifest
+    has an explicit `observations[]` list."""
     out: list[TopicSpec] = []
     for entry in observations:
         kind = str(entry.get("kind", "")).lower()
@@ -205,52 +253,59 @@ def _build_topic_specs(observations: list[dict], atlas_stub) -> list[TopicSpec]:
         if not kind or not contract:
             log.warning("[scene] observation %r: missing kind/contract; skipping", entry)
             continue
-
-        # Step 1 — atlas resolution.
-        topic = ""
-        qos_profile = ""
         try:
             resp = atlas_stub.QueryCapabilities(pb.QueryCapabilitiesRequest(
-                contract_id=contract,
-                transport=pb.TRANSPORT_ROS2,
+                contract_id=contract, transport=pb.TRANSPORT_ROS2,
             ))
         except Exception as e:  # noqa: BLE001
-            log.warning("[scene] %r: atlas QueryCapabilities(%s, ROS2) failed: %s — skipping",
-                        kind, contract, e)
+            log.warning("[scene] %r: atlas query for %s failed: %s — skipping", kind, contract, e)
             continue
-
+        chosen: Optional[TopicSpec] = None
         for rec in resp.records:
             for iface in rec.interfaces:
-                if iface.contract_id == contract and iface.transport == pb.TRANSPORT_ROS2:
-                    topic = iface.endpoint or ""
-                    if hasattr(iface, "params") and hasattr(iface.params, "ros2"):
-                        qos_profile = iface.params.ros2.qos_profile or ""
+                if iface.contract_id != contract or iface.transport != pb.TRANSPORT_ROS2:
+                    continue
+                chosen = _spec_from_iface(iface, kind_override=kind)
+                if chosen:
                     break
-            if topic:
+            if chosen:
                 break
-
-        if not topic:
+        if chosen is None:
             log.warning(
                 "[scene] %r: no atlas record for contract=%r over ROS2 — skipping. "
-                "Have a primitive run DeclareInterface(transport=ROS2, endpoint=<topic>) for this contract.",
+                "Have a primitive DeclareInterface(transport=ROS2) for it.",
                 kind, contract,
             )
             continue
-
-        # Step 2 — msg_type from contract IDL.
-        msg_type = _msg_type_from_contract(contract)
-        if not msg_type:
-            log.warning(
-                "[scene] %r: contract %r has no [io.msg] entry on disk — skipping. "
-                "Only topic_out contracts are subscribable; rpc/srv contracts can't be ROS-subscribed.",
-                kind, contract,
-            )
-            continue
-
-        log.info("[scene] %r ← atlas: topic=%s msg=%s qos=%s",
-                 kind, topic, msg_type, qos_profile or "default")
-        out.append(TopicSpec(kind=kind, topic=topic, msg_type=msg_type, qos_profile=qos_profile or "default"))
+        log.info("[scene] override %r ← atlas: topic=%s msg=%s qos=%s",
+                 chosen.kind, chosen.topic, chosen.msg_type, chosen.qos_profile)
+        out.append(chosen)
     return out
+
+
+def _spec_from_iface(iface, *, kind_override: Optional[str] = None) -> Optional[TopicSpec]:
+    """Build a TopicSpec from one atlas Iface. Resolves msg_type from
+    the contract TOML on disk. Returns None when the interface isn't
+    usable (no [io.msg], unknown contract leaf, missing endpoint)."""
+    topic = (iface.endpoint or "").strip()
+    if not topic:
+        return None
+    contract = iface.contract_id
+    msg_type = _msg_type_from_contract(contract)
+    if not msg_type:
+        # Contract is rpc/srv (no [io.msg]) — not subscribable.
+        return None
+    qos_profile = ""
+    if hasattr(iface, "params") and hasattr(iface.params, "ros2"):
+        qos_profile = iface.params.ros2.qos_profile or ""
+    leaf = contract.rsplit("/", 1)[-1].lower()
+    kind = kind_override or _CONTRACT_LEAF_TO_KIND.get(leaf, leaf)
+    return TopicSpec(
+        kind=kind,
+        topic=topic,
+        msg_type=msg_type,
+        qos_profile=qos_profile or "default",
+    )
 
 
 # Lazy-cached reverse map: contract_id → "Image" / "LaserScan" / …
