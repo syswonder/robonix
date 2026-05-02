@@ -105,7 +105,9 @@ fn resolve_package_path(
 /// Resolve package path for `start`: same `-p` rules as `build`, then system-installed name fallback.
 fn resolve_package_path_for_start(config: &Config, spec: &str) -> Result<PathBuf> {
     let path = resolve_local_path_for_filesystem(Path::new(spec))?;
-    if path.join(manifest::MANIFEST_FILE).is_file() {
+    if path.join(manifest::MANIFEST_FILE).is_file()
+        || path.join(manifest::LEGACY_MANIFEST_FILE).is_file()
+    {
         return path
             .canonicalize()
             .with_context(|| format!("Failed to canonicalize: {}", path.display()));

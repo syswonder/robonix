@@ -20,12 +20,19 @@ system:
       api_key: ${VLM_API_KEY}
       model: ${VLM_MODEL}
       api_format: openai
+  # Non-builtin system entries (key != atlas/executor/pilot) are
+  # auto-resolved as packages at <robonix_source>/system/<key>/. The
+  # value below is handed to the package as RBNX_CONFIG_FILE; pass `{}`
+  # if the package needs no per-deploy config. Keys whose package dir
+  # doesn't exist on disk are skipped with a warning, not fatal — keep
+  # placeholders here for services that are planned but not yet vendored.
   liaison:
     listen: 127.0.0.1:50081
     log: info
   nexus:
     log: info
-  memory: []
+  memory: {}
+  speech: {}
 
 primitive:
   - name: tiago_chassis
