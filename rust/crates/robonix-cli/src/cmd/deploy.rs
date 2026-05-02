@@ -246,7 +246,7 @@ async fn spawn_system_binary(
     let arg_preview = if args.is_empty() {
         String::new()
     } else {
-        format!(" ({})", args.join(" "))
+        format!(" ({})", redact_secrets_for_log(args).join(" "))
     };
     output::sub_step(&format!(
         "[system] {name}{arg_preview} -> {}",
@@ -705,6 +705,37 @@ fn system_cli_args(
             push_pair(&mut out, "--vlm-format", nested_str("vlm", "api_format"));
         }
         _ => {}
+    }
+    out
+}
+
+/// Mask the value following any flag whose name suggests a secret, before
+/// the args are echoed to the boot log / user terminal. We pass these
+/// secrets to the child via argv (not env) for visibility in `ps`, but
+/// printing them verbatim into our own log is gratuitous — the log lands
+/// in `<manifest-dir>/rbnx-boot/logs/` and is the kind of thing that ends
+/// up shared in bug reports / pasted into chat.
+fn redact_secrets_for_log(args: &[String]) -> Vec<String> {
+    let is_secret_flag = |s: &str| {
+        let lower = s.to_ascii_lowercase();
+        s.starts_with("--")
+            && (lower.contains("api-key")
+                || lower.contains("api_key")
+                || lower.contains("secret")
+                || lower.contains("password")
+                || lower.ends_with("-token")
+                || lower.ends_with("_token"))
+    };
+    let mut out = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        out.push(args[i].clone());
+        if is_secret_flag(&args[i]) && i + 1 < args.len() {
+            out.push("<redacted>".to_string());
+            i += 2;
+        } else {
+            i += 1;
+        }
     }
     out
 }
