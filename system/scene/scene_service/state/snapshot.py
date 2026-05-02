@@ -35,6 +35,14 @@ class SnapshotScope:
 
 _DEFAULT_LAYERS = ("object", "relation")
 _VALID_LAYERS = ("object", "relation", "surface")
+# Pilot's LLM tends to pass plural forms ("objects" / "relations" /
+# "surfaces") rather than the canonical singular. Accept both — the
+# canonicalised set is what the rest of state/ branches on.
+_LAYER_ALIASES = {
+    "objects": "object",
+    "relations": "relation",
+    "surfaces": "surface",
+}
 _RADIUS_CAP_M = 50.0
 
 
@@ -69,7 +77,8 @@ def validate_scope(
     if max_objects < 0:
         raise ValueError("max_objects must be >= 0")
 
-    eff_layers = tuple(layers) if layers else _DEFAULT_LAYERS
+    raw_layers = tuple(layers) if layers else _DEFAULT_LAYERS
+    eff_layers = tuple(_LAYER_ALIASES.get(l, l) for l in raw_layers)
     bad = [l for l in eff_layers if l not in _VALID_LAYERS]
     if bad:
         raise ValueError(f"unknown snapshot layer(s) {bad!r}; valid: {_VALID_LAYERS}")
