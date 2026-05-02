@@ -90,7 +90,11 @@ import atlas_pb2_grpc as pb_grpc  # type: ignore
 
 from . import mcp_tools
 from .ingest.perception_vlm import VLMObjectDetector
-from .ingest.poll_primitive import ChassisStatePoller, PrimitivePoller
+from .ingest.ros_subscribers import (
+    DEFAULT_WEBOTS_TIAGO_TOPICS,
+    SubscribersHub,
+    TopicSpec,
+)
 from .state import (
     BBox3D,
     ObjectRegistry,
@@ -108,14 +112,17 @@ log = logging.getLogger("scene-service")
 
 
 # ── Defaults: Soma adapter for Webots Tiago ────────────────────────────────
+# v2 — ROS2-topic-based ingest (scene runs in its own container with
+# rclpy and shares the host DDS bus with the primitives). Each entry
+# names a logical kind + ROS topic + sensor_msgs / nav_msgs class.
+# Pollers (the v1 MCP-poll path) are gone: MCP is for pilot only,
+# scene's own data fetching uses the fast direct-DDS path.
 _DEFAULT_OBSERVATIONS = [
-    {"kind": "rgb",     "contract": "robonix/primitive/camera/snapshot",       "period_s": 3.0},
-    {"kind": "lidar2d", "contract": "robonix/primitive/lidar/snapshot",        "period_s": 2.0},
-    {"kind": "odom",    "contract": "robonix/primitive/chassis/state",         "period_s": 1.0},
-    # `lidar3d` and `depth` are ignored when no matching cap is on
-    # atlas; uncomment + extend if a sensor profile actually has them.
-    # {"kind": "lidar3d", "contract": "robonix/primitive/lidar/lidar3d",        "period_s": 1.0},
-    # {"kind": "depth",   "contract": "robonix/primitive/camera/depth_snapshot","period_s": 3.0},
+    {"kind": "rgb",     "topic": "/head_front_camera/rgb/image_raw",                 "msg_type": "Image"},
+    {"kind": "depth",   "topic": "/head_front_camera/depth_registered/image_raw",    "msg_type": "Image"},
+    {"kind": "lidar2d", "topic": "/scan",                                            "msg_type": "LaserScan"},
+    {"kind": "pose",    "topic": "/amcl_pose",                                       "msg_type": "PoseWithCovarianceStamped"},
+    {"kind": "odom",    "topic": "/odom",                                            "msg_type": "Odometry"},
 ]
 
 
@@ -140,6 +147,77 @@ def _load_config() -> dict:
         cfg = {}
     cfg.setdefault("observations", _DEFAULT_OBSERVATIONS)
     return cfg
+
+
+def _build_topic_specs(observations: list[dict], atlas_stub) -> list[TopicSpec]:
+    """Resolve each observation entry to a ROS topic.
+
+    Two-step lookup:
+      1. If the entry has a `contract`, ask atlas for the cap that
+         publishes it over the ROS2 transport. If found, use the
+         endpoint atlas reports (= the actual ROS topic name) and
+         derive msg_type from the contract's IDL metadata.
+      2. Fallback: use the static `topic` + `msg_type` fields from
+         the manifest entry.
+
+    The atlas-first path means a soma can re-register its primitives
+    on different topics without editing the deploy manifest. The
+    static fallback covers contracts whose publisher hasn't been
+    migrated to DeclareInterface(transport=ROS2) yet (today: most of
+    them — Webots primitives publish to ROS but don't tell atlas
+    about it). Once a primitive registers its topic with atlas, the
+    fallback becomes unused for that entry.
+    """
+    out: list[TopicSpec] = []
+    for entry in observations:
+        kind = str(entry.get("kind", "")).lower()
+        if not kind:
+            continue
+
+        contract = str(entry.get("contract", ""))
+        topic = ""
+        msg_type = str(entry.get("msg_type", ""))
+
+        if contract and atlas_stub is not None:
+            try:
+                resp = atlas_stub.QueryCapabilities(pb.QueryCapabilitiesRequest(
+                    contract_id=contract,
+                    transport=pb.TRANSPORT_ROS2,
+                ))
+                for rec in resp.records:
+                    for iface in rec.interfaces:
+                        if iface.contract_id == contract and iface.transport == pb.TRANSPORT_ROS2:
+                            topic = iface.endpoint or ""
+                            # Atlas msg_type is on the ROS2 TransportParams
+                            # if the publisher set it; otherwise inherits
+                            # from the contract IDL — leave the manifest
+                            # fallback for that.
+                            if hasattr(iface, "params") and hasattr(iface.params, "ros2"):
+                                ros2_params = iface.params.ros2
+                                if ros2_params.message_type:
+                                    msg_type = ros2_params.message_type
+                            break
+                    if topic:
+                        break
+            except Exception as e:  # noqa: BLE001
+                log.debug("[scene] atlas QueryCapabilities(%s, ROS2) failed: %s", contract, e)
+
+        # Fallback: static topic from manifest.
+        if not topic:
+            topic = str(entry.get("topic", ""))
+        if not topic or not msg_type:
+            log.warning(
+                "[scene] observation %r: no atlas record for contract=%r and "
+                "no static topic/msg_type fallback — skipping",
+                kind, contract,
+            )
+            continue
+
+        log.info("[scene] observation %r → topic=%s msg_type=%s%s",
+                 kind, topic, msg_type,
+                 f" (atlas:{contract})" if contract and entry.get("topic", "") != topic else "")
+        out.append(TopicSpec(kind=kind, topic=topic, msg_type=msg_type))
+    return out
 
 
 # ── DeclareInterface helper (mirrors system/memory) ────────────────────────
@@ -234,86 +312,137 @@ async def _stale_tick(registry: ObjectRegistry, *, period_s: float = 1.0) -> Non
         await asyncio.sleep(period_s)
 
 
-# ── Wire pollers per Soma config ───────────────────────────────────────────
-async def _start_pollers(
+# ── Wire ROS subscribers + downstream consumers ────────────────────────────
+async def _start_ros_ingest(
     *,
     atlas_stub,
     registry: ObjectRegistry,
-    self_tracker: _SelfTracker,
+    self_tracker: "_SelfTracker",
     config: dict,
-) -> tuple[list[Any], Optional[VLMObjectDetector]]:
-    """For each observation kind in config, attempt to start the
-    corresponding poller. Missing caps → log + skip. Returns the list
-    of started tasks for shutdown."""
-    started: list[Any] = []
-    rgb_poller: Optional[PrimitivePoller] = None
+) -> tuple[SubscribersHub, Optional[VLMObjectDetector], list[asyncio.Task]]:
+    """Bring up the rclpy hub + the per-kind consumers (self-pose
+    bridge, VLM perception). Returns (hub, vlm_or_None, bg_tasks_for_shutdown).
+
+    Each consumer is its own asyncio task so a hung VLM call doesn't
+    starve the pose updater, and vice versa."""
+    specs = _build_topic_specs(config.get("observations") or [], atlas_stub)
+    if not specs:
+        log.warning("no observation topics configured — registry will stay empty")
+        specs = []
+    hub = SubscribersHub(specs=specs)
+    await hub.start()
+
+    bg_tasks: list[asyncio.Task] = []
+
+    # ── self-pose bridge ───────────────────────────────────────────────────
+    # Polls hub.latest("pose") at 5 Hz and feeds the SelfTracker. Pose
+    # callbacks fire ~10 Hz on /amcl_pose, so 5 Hz consumer is enough
+    # to keep the registry's robot record fresh without flooding the
+    # asyncio loop. Falls back to /odom when /amcl_pose isn't there.
+    if hub.has("pose") or hub.has("odom"):
+        bg_tasks.append(asyncio.create_task(
+            _self_pose_loop(hub, self_tracker), name="scene-self-pose"
+        ))
+
+    # ── VLM perception ─────────────────────────────────────────────────────
     vlm: Optional[VLMObjectDetector] = None
+    if hub.has("rgb"):
+        # Convert sensor_msgs/Image to JPEG bytes lazily on each tick.
+        # cv_bridge is too heavy to import at module-top; we only need
+        # the encoder here.
+        def _rgb_jpeg() -> Optional[bytes]:
+            msg, stamp, _ = hub.latest("rgb")
+            if msg is None or stamp == 0.0:
+                return None
+            return _image_msg_to_jpeg(msg)
 
-    for entry in config.get("observations") or []:
-        kind = str(entry.get("kind", "")).lower()
-        contract = str(entry.get("contract", ""))
-        period_s = float(entry.get("period_s", 2.0))
-        if not kind or not contract:
-            continue
-        try:
-            if kind == "odom":
-                p = ChassisStatePoller(
-                    atlas_stub=atlas_stub, pb=pb,
-                    period_s=period_s,
-                    on_pose=self_tracker.on_pose,
-                )
-                await p.start()
-                started.append(p)
-            elif kind == "rgb":
-                async def _save_rgb_payload(payload: dict) -> None:
-                    rgb_poller_state["last"] = payload  # noqa: F821
-                rgb_poller_state: dict[str, Any] = {"last": None}
+        vlm = VLMObjectDetector(
+            rgb_fetcher=_rgb_jpeg,
+            chassis_pose_fn=self_tracker.latest_xy_yaw,
+            on_detections=lambda dets: _ingest_detections(registry, dets),
+            period_s=4.0,  # one VLM call every ~4 s; LLM calls aren't free
+        )
+        await vlm.start()
 
-                rgb_poller = PrimitivePoller(
-                    atlas_stub=atlas_stub, pb=pb,
-                    contract_id=contract,
-                    period_s=period_s,
-                    on_result=_save_rgb_payload,
-                    name="rgb",
-                )
-                await rgb_poller.start()
-                started.append(rgb_poller)
+    return hub, vlm, bg_tasks
 
-                # Wire the VLM detector against rgb_poller's last payload.
-                async def _rgb_fetch() -> Optional[dict]:
-                    return rgb_poller_state["last"]
 
-                vlm = VLMObjectDetector(
-                    rgb_fetcher=_rgb_fetch,
-                    chassis_pose_fn=self_tracker.latest_xy_yaw,
-                    on_detections=lambda dets: _ingest_detections(registry, dets),
-                    period_s=max(period_s, 2.0),
-                )
-                await vlm.start()
-                started.append(vlm)
-            else:
-                # lidar2d / lidar3d / depth: launched as raw pollers but
-                # we don't yet have downstream consumers in v1. The
-                # Soma adapter still spawns them so we know whether
-                # caps are present (visible in scene logs) — the
-                # ingest pipeline will start using them once the
-                # geom layer learns to consume.
-                async def _drop_payload(_: dict) -> None:
-                    return None
+async def _self_pose_loop(hub: SubscribersHub, self_tracker: "_SelfTracker") -> None:
+    """Read latest amcl_pose / odom from the hub, feed SelfTracker.
+    /amcl_pose is preferred (post-localisation); /odom is the fallback
+    early in a session before AMCL has converged."""
+    last_count_pose = 0
+    last_count_odom = 0
+    while True:
+        if hub.has("pose"):
+            msg, stamp, count = hub.latest("pose")
+            if msg is not None and count != last_count_pose:
+                last_count_pose = count
+                p = msg.pose.pose  # PoseWithCovarianceStamped
+                x, y, z = p.position.x, p.position.y, p.position.z
+                yaw = _quat_to_yaw(p.orientation.x, p.orientation.y,
+                                   p.orientation.z, p.orientation.w)
+                await self_tracker.on_pose(x, y, z, yaw)
+        if hub.has("odom") and last_count_pose == 0:
+            # Only use odom as backup until amcl publishes.
+            msg, stamp, count = hub.latest("odom")
+            if msg is not None and count != last_count_odom:
+                last_count_odom = count
+                p = msg.pose.pose
+                yaw = _quat_to_yaw(p.orientation.x, p.orientation.y,
+                                   p.orientation.z, p.orientation.w)
+                await self_tracker.on_pose(p.position.x, p.position.y, p.position.z, yaw)
+        await asyncio.sleep(0.2)
 
-                p = PrimitivePoller(
-                    atlas_stub=atlas_stub, pb=pb,
-                    contract_id=contract,
-                    period_s=period_s,
-                    on_result=_drop_payload,
-                    name=kind,
-                )
-                await p.start()
-                started.append(p)
-        except Exception as e:  # noqa: BLE001
-            log.warning("failed to start poller %s (%s): %s", kind, contract, e)
 
-    return started, vlm
+def _quat_to_yaw(x: float, y: float, z: float, w: float) -> float:
+    import math
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def _image_msg_to_jpeg(msg) -> Optional[bytes]:
+    """sensor_msgs/Image → JPEG bytes. Webots Tiago publishes
+    `bgr8` / `rgb8` for the head camera; we accept both. Falls back
+    to None on unknown encodings (rather than throwing — VLM tick
+    just skips that frame)."""
+    try:
+        import numpy as np  # noqa: F401
+        from PIL import Image as PILImage
+        h, w = msg.height, msg.width
+        if h == 0 or w == 0:
+            return None
+        enc = (msg.encoding or "").lower()
+        if enc == "rgb8":
+            arr = _bytes_to_array(msg.data, h, w, 3)
+            img = PILImage.fromarray(arr, "RGB")
+        elif enc == "bgr8":
+            arr = _bytes_to_array(msg.data, h, w, 3)
+            arr = arr[..., ::-1]  # BGR → RGB
+            img = PILImage.fromarray(arr, "RGB")
+        elif enc in ("rgba8", "bgra8"):
+            arr = _bytes_to_array(msg.data, h, w, 4)
+            if enc == "bgra8":
+                arr = arr[..., [2, 1, 0, 3]]
+            img = PILImage.fromarray(arr, "RGBA").convert("RGB")
+        elif enc == "mono8":
+            arr = _bytes_to_array(msg.data, h, w, 1).reshape(h, w)
+            img = PILImage.fromarray(arr, "L").convert("RGB")
+        else:
+            log.debug("[scene-vlm] unsupported encoding %r", enc)
+            return None
+        import io
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=80)
+        return buf.getvalue()
+    except Exception as e:  # noqa: BLE001
+        log.debug("[scene-vlm] image→jpeg failed: %s", e)
+        return None
+
+
+def _bytes_to_array(data, h: int, w: int, channels: int):
+    import numpy as np
+    arr = np.frombuffer(bytes(data), dtype=np.uint8)
+    return arr.reshape(h, w, channels)
 
 
 async def _ingest_detections(registry: ObjectRegistry, detections):
@@ -372,22 +501,25 @@ async def _run() -> None:
     except Exception as e:  # noqa: BLE001
         log.warning("DeclareInterface failed: %s", e)
 
-    # Spin pollers / detector / heartbeat / stale-tick.
-    started, _vlm = await _start_pollers(
+    # ROS2 ingest hub + downstream consumers (self-pose, VLM perception).
+    hub, vlm, ingest_bg = await _start_ros_ingest(
         atlas_stub=stub, registry=registry, self_tracker=self_tracker, config=config,
     )
     bg_tasks = [
         asyncio.create_task(_heartbeat_loop(stub, cap_id), name="scene-heartbeat"),
         asyncio.create_task(_stale_tick(registry), name="scene-stale-tick"),
+        *ingest_bg,
     ]
 
-    # FastMCP HTTP server. Run uvicorn inside an executor since it
-    # blocks the loop otherwise. uvicorn 0.30+ has a programmatic
-    # async API but we keep parity with system/memory's pattern.
+    # FastMCP HTTP server. Bind 0.0.0.0 (not 127.0.0.1) because scene
+    # runs in a container with --network host; binding to loopback
+    # would still work via host network but explicit 0.0.0.0 makes it
+    # easier to swap to bridge networking later if we ever drop
+    # --network host.
     import uvicorn
     config_uv = uvicorn.Config(
         app=mcp_tools.mcp.streamable_http_app(),
-        host="127.0.0.1", port=port, log_level="warning",
+        host="0.0.0.0", port=port, log_level="warning",
     )
     server = uvicorn.Server(config_uv)
     server_task = asyncio.create_task(server.serve(), name="scene-mcp-http")
@@ -405,11 +537,11 @@ async def _run() -> None:
     log.info("shutdown signal received; tearing down")
 
     # Tear down ingest first so we stop mutating the registry…
-    for t in started:
-        try:
-            await t.stop()
-        except Exception:  # noqa: BLE001
-            pass
+    if vlm is not None:
+        with contextlib.suppress(Exception):
+            await vlm.stop()
+    with contextlib.suppress(Exception):
+        await hub.stop()
     await relations.stop()
     for t in bg_tasks:
         t.cancel()

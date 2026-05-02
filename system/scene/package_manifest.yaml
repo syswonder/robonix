@@ -1,17 +1,17 @@
 # Scene MCP server — current-state semantic + geometric map of the
-# robot's environment. Exposes 5 read-only MCP tools for Pilot:
-#   robonix/system/scene/{get_snapshot, query, get_object,
-#                         get_semantic_map, get_safety_context}
+# robot's environment. Exposes 5 read-only MCP tools for Pilot.
+#
+# Deployment shape: scene runs in its OWN docker container (image
+# `robonix-scene`, built by scripts/build.sh). Joins host network so:
+#   - it can reach atlas at 127.0.0.1:50051
+#   - it shares the host DDS bus with whatever sim/robot container
+#     is publishing /amcl_pose, /scan, /head_front_camera/* etc.
 #
 # Soma adapter: scene's ingest layer reads `config.observations[]`
-# (passed in via RBNX_CONFIG_FILE by `rbnx boot`) to know which
-# observation streams the current robot supports. Each entry pairs a
-# logical kind ("rgb", "depth", "lidar2d", "lidar3d", "odom") with an
-# atlas contract_id; scene queries atlas at startup, only enables the
-# poll loops whose cap is actually registered, and silently skips the
-# rest. So a Webots Tiago (no 3D lidar) gets rgb+depth+lidar2d+odom,
-# while a real robot with lidar3d adds the geometry pipeline that
-# feeds plane extraction. No per-deploy code changes required.
+# (passed in via RBNX_CONFIG_FILE by `rbnx boot`) to know which ROS2
+# topics to subscribe to. Each entry pairs a logical kind ("rgb",
+# "depth", "lidar2d", "pose", "odom") with a topic name and ROS msg
+# class. Default mapping matches Webots Tiago.
 manifestVersion: 1
 
 package:
@@ -23,11 +23,55 @@ package:
 
 build: bash scripts/build.sh
 
+# `start:` runs the scene container. It joins host network so DDS
+# multicast reaches whatever ROS publishers are alive on the host
+# (the webots sim container is also `--network host`, so they share
+# the same DDS scope). The package dir is bind-mounted at /scene so
+# code edits don't need an image rebuild — only Dockerfile/requirements
+# changes do.
+#
+# Trap discipline: when boot SIGTERMs our PGID, bash's TERM trap
+# stops + removes the container. `docker run --name ... --rm` alone
+# isn't enough — docker leaks the container if the host wrapper dies
+# without sending stop.
 start: |
-  export PYTHONPATH="$(pwd)/rbnx-build/codegen/proto_gen:$(pwd)/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
+  CT="${ROBONIX_SCENE_CONTAINER:-robonix_scene}"
+  cleanup() {
+    docker stop "$CT" >/dev/null 2>&1 || true
+    kill -- "-$$" 2>/dev/null || true
+  }
+  trap cleanup EXIT INT TERM
+
+  # If a previous run left a stopped container behind, drop it.
+  docker rm -f "$CT" >/dev/null 2>&1 || true
+
   mkdir -p rbnx-build/data
-  exec rbnx-build/venv/bin/python -m scene_service.service \
-       > rbnx-build/data/scene.log 2>&1
+
+  # `--ipc=host` is the critical flag that took us a debug session to
+  # find: FastRTPS's default transport stack uses SHM (shared memory)
+  # for same-host endpoints, and each container has its own /dev/shm.
+  # Without --ipc=host scene saw publishers on `ros2 topic info` but
+  # received zero messages. Sharing host IPC namespace lets the
+  # SHM transport keys line up between sim and scene containers.
+  exec docker run --rm \
+    --name "$CT" \
+    --network host \
+    --ipc=host \
+    -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
+    -e ROBONIX_CAPABILITY_ID="${ROBONIX_CAPABILITY_ID:-com.robonix.system.scene}" \
+    -e ROBONIX_PKG_HOST_DIR="$(pwd)" \
+    -e SCENE_PORT="${SCENE_PORT:-50106}" \
+    -e SCENE_LOG_LEVEL="${SCENE_LOG_LEVEL:-INFO}" \
+    -e VLM_BASE_URL="${VLM_BASE_URL:-}" \
+    -e VLM_API_KEY="${VLM_API_KEY:-}" \
+    -e VLM_MODEL="${VLM_MODEL:-}" \
+    -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
+    -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
+    -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}" \
+    -v "$(pwd)":/scene \
+    -v "$(rbnx path robonix-py)":/robonix-py:ro \
+    ${RBNX_CONFIG_FILE:+-v "$RBNX_CONFIG_FILE":"$RBNX_CONFIG_FILE":ro} \
+    robonix-scene
 
 capabilities:
   - name: robonix/system/scene/get_snapshot

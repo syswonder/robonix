@@ -82,13 +82,17 @@ class VLMObjectDetector:
     def __init__(
         self,
         *,
-        rgb_fetcher: Callable[[], Awaitable[Optional[dict]]],
+        rgb_fetcher: Callable[[], Optional[bytes]],
         chassis_pose_fn: Callable[[], Optional[tuple[float, float, float, float]]],
         on_detections: Callable[[list[Detection]], Awaitable[None]],
         period_s: float = 3.0,
         camera_frame_id: str = "head_front_camera_rgb_optical_frame",
         intrinsics: Optional[_CamIntrinsics] = None,
     ) -> None:
+        # `rgb_fetcher` returns the latest JPEG bytes (or None when no
+        # frame has arrived yet). When ROS subscribers are the source,
+        # the hub hands us a sensor_msgs/Image whose `data` is raw RGB;
+        # service.py's adapter turns that into JPEG before calling us.
         self.rgb_fetcher = rgb_fetcher
         self.chassis_pose_fn = chassis_pose_fn
         self.on_detections = on_detections
@@ -135,36 +139,19 @@ class VLMObjectDetector:
                 pass
 
     async def _tick(self) -> None:
-        rgb_payload = await self.rgb_fetcher()
-        if rgb_payload is None:
+        # `rgb_fetcher` is a sync callable returning JPEG bytes (or
+        # None). Synchronous because the ROS subscriber side caches
+        # the latest frame in a thread-safe slot — no awaiting needed.
+        jpeg_bytes = self.rgb_fetcher()
+        if not jpeg_bytes:
             return
-        jpeg_b64 = self._extract_image_b64(rgb_payload)
-        if not jpeg_b64:
-            return
+        jpeg_b64 = base64.b64encode(jpeg_bytes).decode("ascii")
         detections_json = await self._call_vlm(jpeg_b64)
         if not detections_json:
             return
         detections = self._project_to_world(detections_json)
         if detections:
             await self.on_detections(detections)
-
-    @staticmethod
-    def _extract_image_b64(payload: dict) -> Optional[str]:
-        """camera/snapshot returns a sensor_msgs/Image whose `data` is
-        base64-encoded JPEG (per robonix-py mcp_contract conventions).
-        FastMCP wraps it in result.content[0].text as JSON."""
-        try:
-            content = payload.get("result", {}).get("content", [])
-            if not content:
-                return None
-            text = content[0].get("text", "{}")
-            obj = json.loads(text)
-            data = obj.get("data")
-            if isinstance(data, str):
-                return data
-            return None
-        except Exception:  # noqa: BLE001
-            return None
 
     async def _call_vlm(self, jpeg_b64: str) -> list[dict]:
         """One OpenAI-compatible chat-completions call with image input.
