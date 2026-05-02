@@ -91,9 +91,24 @@ impl legacy::robonix_runtime_server::RobonixRuntime for LegacyRuntimeService {
             String::new()
         };
 
+        // Pre-PR `RegisterNode` accepted an empty `namespace`; the new
+        // `Atlas.register` rejects it with `namespace required`. Keep
+        // legacy callers (audio_driver, anything still on the deprecated
+        // SDK) un-broken by synthesising a namespace from the cap id when
+        // they don't supply one.
+        let namespace = if r.namespace.trim().is_empty() {
+            warn!(
+                "[atlas-legacy] '{cap_id}' RegisterNode without namespace; \
+                 synthesising 'robonix/legacy/{cap_id}' for compat"
+            );
+            format!("robonix/legacy/{cap_id}")
+        } else {
+            r.namespace.clone()
+        };
+
         let resolved = self
             .registry
-            .register(&cap_id, &r.namespace, &capability_md_path)
+            .register(&cap_id, &namespace, &capability_md_path)
             .await?;
         Ok(Response::new(legacy::RegisterNodeResponse {
             node_id: resolved,
