@@ -372,6 +372,19 @@ def _decl_driver(stub, cap_id: str, port: int) -> None:
     ))
 
 
+def _decl_topic_out(stub, cap_id: str, contract_id: str, topic: str, qos_profile: str = "") -> None:
+    """Tell atlas which ROS topic carries this contract's data plane.
+    Consumers (scene, telemetry) discover the topic by querying atlas
+    for the contract over TRANSPORT_ROS2."""
+    stub.DeclareInterface(pb.DeclareInterfaceRequest(
+        capability_id=cap_id,
+        contract_id=contract_id,
+        transport=pb.TRANSPORT_ROS2,
+        endpoint=topic,
+        params=pb.TransportParams(ros2=pb.Ros2Params(qos_profile=qos_profile)),
+    ))
+
+
 def main() -> None:
     atlas_addr = os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
     mcp_port = int(os.environ.get("TIAGO_CAMERA_MCP_PORT", "50112"))
@@ -395,7 +408,12 @@ def main() -> None:
         _decl_driver(stub, cap_id, driver_port)
         _decl_mcp(stub, cap_id, "robonix/primitive/camera/snapshot",       mcp_port, snapshot)
         _decl_mcp(stub, cap_id, "robonix/primitive/camera/depth_snapshot", mcp_port, depth_snapshot)
-        print(f"[tiago_camera] registered cap {cap_id} → driver:{driver_port}, mcp:{mcp_port}")
+        rgb_topic = os.environ.get("TIAGO_RGB_TOPIC", "/head_front_camera/rgb/image_raw")
+        depth_topic = os.environ.get("TIAGO_DEPTH_TOPIC", "/head_front_camera/depth_registered/image_raw")
+        _decl_topic_out(stub, cap_id, "robonix/primitive/camera/rgb",   rgb_topic,   "reliable")
+        _decl_topic_out(stub, cap_id, "robonix/primitive/camera/depth", depth_topic, "reliable")
+        print(f"[tiago_camera] registered cap {cap_id} → driver:{driver_port}, mcp:{mcp_port}, "
+              f"ros2: rgb={rgb_topic} depth={depth_topic}")
     except Exception as e:
         print(f"[tiago_camera] WARN: atlas registration failed: {e}")
 
