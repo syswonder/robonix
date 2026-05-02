@@ -162,7 +162,12 @@ def associate(
                 continue
             d = dets[r]
             o = objs[c]
-            registry.update_object_pose(o, d.pose, d.confidence, now)
+            # ema_pose=0.10 (was 0.30): VLM-derived poses jitter ~5–10 cm
+            # per tick because the depth source isn't precise. With 0.10
+            # the existing pose dominates and we still pick up genuine
+            # motion within ~10 ticks. Confidence keeps the higher EMA
+            # because per-frame confidence is more directly meaningful.
+            registry.update_object_pose(o, d.pose, d.confidence, now, ema_pose=0.10)
             # Confidence-weighted bbox blend: new bbox shrinks toward the
             # detection's by 30% per frame. Cheap, stays stable.
             o.bbox = BBox3D(
