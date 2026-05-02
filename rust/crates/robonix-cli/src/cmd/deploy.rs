@@ -37,6 +37,8 @@ use tonic::transport::Endpoint;
 
 use crate::pb::lifecycle::{DriverRequest, DriverResponse};
 
+use super::teardown;
+
 // Driver.srv command discriminator.
 const CMD_INIT: u32 = 0;
 // How long to wait for a freshly spawned package to register its driver
@@ -197,7 +199,15 @@ fn expand_yaml(v: &mut serde_yaml::Value) {
 
 struct Spawned {
     name: String,
+    /// "system_builtin" | "system_package" | "primitive" | "service"
+    kind: String,
     child: Child,
+    pid: u32,
+    /// Process group id. Each child is spawned with `process_group(0)` so
+    /// it becomes the leader of a new PGID == its own PID. Tear-down
+    /// signals `-PGID` to take the whole subtree (rbnx start wrapper +
+    /// inner interpreter + any docker-exec wrappers it forked).
+    pgid: u32,
 }
 
 fn log_path(log_dir: &Path, name: &str) -> PathBuf {
@@ -223,12 +233,16 @@ async fn spawn_system_binary(
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::from(log))
-        .stderr(Stdio::from(err));
+        .stderr(Stdio::from(err))
+        .process_group(0);
     let child = cmd.spawn().with_context(|| {
         format!(
             "failed to spawn system binary `{bin}` — is it installed (try `make install` from the rust/ workspace)?"
         )
     })?;
+    let pid = child
+        .id()
+        .ok_or_else(|| anyhow::anyhow!("spawned `{bin}` but it had no pid"))?;
     let arg_preview = if args.is_empty() {
         String::new()
     } else {
@@ -240,7 +254,10 @@ async fn spawn_system_binary(
     ));
     Ok(Spawned {
         name: name.to_string(),
+        kind: "system_builtin".to_string(),
         child,
+        pid,
+        pgid: pid,
     })
 }
 
@@ -297,21 +314,33 @@ async fn spawn_package(
         .env("RBNX_INVOCATION_CWD", manifest_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
-        .stderr(Stdio::from(err));
+        .stderr(Stdio::from(err))
+        .process_group(0);
     let child = cmd.spawn().with_context(|| {
         format!(
             "failed to spawn package {name} via `{} start`",
             rbnx_bin.display()
         )
     })?;
+    let pid = child
+        .id()
+        .ok_or_else(|| anyhow::anyhow!("spawned package '{name}' but it had no pid"))?;
     output::sub_step(&format!(
         "[{component}] {name} -> {} (config: {})",
         log_path(log_dir, &log_name).display(),
         cfg_file.display(),
     ));
+    let kind = match component {
+        "system" => "system_package",
+        other => other,
+    }
+    .to_string();
     Ok(Spawned {
         name: log_name,
+        kind,
         child,
+        pid,
+        pgid: pid,
     })
 }
 
@@ -381,38 +410,11 @@ pub async fn execute(
     );
 
     let mut children: Vec<Spawned> = Vec::new();
-
-    if !skip_system {
-        // System Rust binaries: launched in atlas → executor → pilot order.
-        // Each is fed CLI flags translated from `system.<name>:` block.
-        // executor + pilot inherit `--atlas` from `system.atlas.listen`
-        // unless they declare their own `atlas:` (rare).
-        let atlas_listen = deploy
-            .system
-            .get("atlas")
-            .and_then(|v| v.as_mapping())
-            .and_then(|m| m.get(serde_yaml::Value::String("listen".into())))
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let bin_map: &[(&str, &str)] = &[
-            ("atlas", "robonix-atlas"),
-            ("executor", "robonix-executor"),
-            ("pilot", "robonix-pilot"),
-        ];
-        for (name, bin) in bin_map {
-            if !deploy.system.contains_key(*name) {
-                continue;
-            }
-            let args = system_cli_args(name, deploy.system.get(*name), atlas_listen.as_deref());
-            let sp = spawn_system_binary(&log_dir, name, bin, &args).await?;
-            children.push(sp);
-            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        }
-    } else {
-        output::sub_step("Skipping system bring-up (--skip-system)");
-    }
-
-    // Connect to atlas once; reuse for every primitive/service init dance.
+    let state_path = teardown::state_path(&manifest_dir);
+    let started_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
     let atlas_endpoint = deploy
         .system
         .get("atlas")
@@ -421,52 +423,103 @@ pub async fn execute(
         .and_then(|v| v.as_str())
         .unwrap_or("127.0.0.1:50051")
         .to_string();
-    let mut atlas =
-        AtlasClient::connect_with_retry(&atlas_endpoint, 20, Duration::from_millis(500))
-            .await
-            .with_context(|| {
-                format!("connect to atlas at '{atlas_endpoint}' for lifecycle init")
-            })?;
 
-    // Non-builtin `system:` keys (memory / speech / …) are real robonix
-    // packages — same start/init/register flow as primitive/service, just
-    // resolved by name against `<robonix_source>/system/<key>/`. Builtin
-    // Rust binaries (atlas/executor/pilot) were spawned above and skipped
-    // here. A key whose package directory is missing on disk is warned
-    // and skipped, not fatal — manifests can declare optional services
-    // that aren't installed yet (e.g. liaison while it's being ported).
-    if !skip_system {
-        let builtin_names: &[&str] = &["atlas", "executor", "pilot"];
-        for (key, value) in &deploy.system {
-            if builtin_names.contains(&key.as_str()) {
-                continue;
+    let outcome: Result<()> = async {
+        if !skip_system {
+            // System Rust binaries: launched in atlas → executor → pilot order.
+            // Each is fed CLI flags translated from `system.<name>:` block.
+            // executor + pilot inherit `--atlas` from `system.atlas.listen`
+            // unless they declare their own `atlas:` (rare).
+            let atlas_listen = deploy
+                .system
+                .get("atlas")
+                .and_then(|v| v.as_mapping())
+                .and_then(|m| m.get(serde_yaml::Value::String("listen".into())))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let bin_map: &[(&str, &str)] = &[
+                ("atlas", "robonix-atlas"),
+                ("executor", "robonix-executor"),
+                ("pilot", "robonix-pilot"),
+            ];
+            for (name, bin) in bin_map {
+                if !deploy.system.contains_key(*name) {
+                    continue;
+                }
+                let args =
+                    system_cli_args(name, deploy.system.get(*name), atlas_listen.as_deref());
+                let sp = spawn_system_binary(&log_dir, name, bin, &args).await?;
+                children.push(sp);
+                persist_state(&state_path, &manifest_path, &atlas_endpoint, started_at_ms, &children);
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             }
-            let pkg_dir = match config.robonix_source_path.as_ref() {
-                Some(root) => root.join("system").join(key),
-                None => {
+        } else {
+            output::sub_step("Skipping system bring-up (--skip-system)");
+        }
+
+        // Connect to atlas once; reuse for every primitive/service init dance.
+        let mut atlas =
+            AtlasClient::connect_with_retry(&atlas_endpoint, 20, Duration::from_millis(500))
+                .await
+                .with_context(|| {
+                    format!("connect to atlas at '{atlas_endpoint}' for lifecycle init")
+                })?;
+
+        // Non-builtin `system:` keys (memory / speech / …) are real robonix
+        // packages — same start/init/register flow as primitive/service, just
+        // resolved by name against `<robonix_source>/system/<key>/`. Builtin
+        // Rust binaries (atlas/executor/pilot) were spawned above and skipped
+        // here. A key whose package directory is missing on disk is warned
+        // and skipped, not fatal — manifests can declare optional services
+        // that aren't installed yet (e.g. liaison while it's being ported).
+        if !skip_system {
+            let builtin_names: &[&str] = &["atlas", "executor", "pilot"];
+            for (key, value) in &deploy.system {
+                if builtin_names.contains(&key.as_str()) {
+                    continue;
+                }
+                let pkg_dir = match config.robonix_source_path.as_ref() {
+                    Some(root) => root.join("system").join(key),
+                    None => {
+                        output::sub_step(&format!(
+                            "[system] {key}: skipped — robonix_source_path unset (run `rbnx setup` from the repo root)"
+                        ));
+                        continue;
+                    }
+                };
+                if !pkg_dir.exists() {
                     output::sub_step(&format!(
-                        "[system] {key}: skipped — robonix_source_path unset (run `rbnx setup` from the repo root)"
+                        "[system] {key}: skipped — no package found at {} (declared in manifest but absent on disk)",
+                        pkg_dir.display()
                     ));
                     continue;
                 }
-            };
-            if !pkg_dir.exists() {
-                output::sub_step(&format!(
-                    "[system] {key}: skipped — no package found at {} (declared in manifest but absent on disk)",
-                    pkg_dir.display()
-                ));
-                continue;
+                let entry = PackageEntry {
+                    name: key.clone(),
+                    path: Some(pkg_dir.to_string_lossy().into_owned()),
+                    url: None,
+                    branch: None,
+                    config: value.clone(),
+                };
+                let sp = spawn_and_init(
+                    "system",
+                    &entry,
+                    &log_dir,
+                    &cache_root,
+                    &instances_dir,
+                    &manifest_dir,
+                    &mut atlas,
+                )
+                .await?;
+                children.push(sp);
+                persist_state(&state_path, &manifest_path, &atlas_endpoint, started_at_ms, &children);
             }
-            let entry = PackageEntry {
-                name: key.clone(),
-                path: Some(pkg_dir.to_string_lossy().into_owned()),
-                url: None,
-                branch: None,
-                config: value.clone(),
-            };
+        }
+
+        for e in &deploy.primitive {
             let sp = spawn_and_init(
-                "system",
-                &entry,
+                "primitive",
+                e,
                 &log_dir,
                 &cache_root,
                 &instances_dir,
@@ -475,50 +528,58 @@ pub async fn execute(
             )
             .await?;
             children.push(sp);
+            persist_state(&state_path, &manifest_path, &atlas_endpoint, started_at_ms, &children);
         }
+        for e in &deploy.service {
+            let sp = spawn_and_init(
+                "service",
+                e,
+                &log_dir,
+                &cache_root,
+                &instances_dir,
+                &manifest_dir,
+                &mut atlas,
+            )
+            .await?;
+            children.push(sp);
+            persist_state(&state_path, &manifest_path, &atlas_endpoint, started_at_ms, &children);
+        }
+        // Skills are NOT spawned at deploy — the executor invokes them on demand.
+        // Just report what was registered so the user has visibility.
+        for e in &deploy.skill {
+            let label = if e.name.is_empty() {
+                e.path
+                    .as_deref()
+                    .or(e.url.as_deref())
+                    .unwrap_or("(unnamed)")
+                    .to_string()
+            } else {
+                e.name.clone()
+            };
+            output::sub_step(&format!(
+                "[skill] {label}: registered (invoked on demand by executor — not spawned at deploy)"
+            ));
+        }
+        Ok(())
     }
+    .await;
 
-    for e in &deploy.primitive {
-        let sp = spawn_and_init(
-            "primitive",
-            e,
-            &log_dir,
-            &cache_root,
-            &instances_dir,
-            &manifest_dir,
-            &mut atlas,
-        )
-        .await?;
-        children.push(sp);
-    }
-    for e in &deploy.service {
-        let sp = spawn_and_init(
-            "service",
-            e,
-            &log_dir,
-            &cache_root,
-            &instances_dir,
-            &manifest_dir,
-            &mut atlas,
-        )
-        .await?;
-        children.push(sp);
-    }
-    // Skills are NOT spawned at deploy — the executor invokes them on demand.
-    // Just report what was registered so the user has visibility.
-    for e in &deploy.skill {
-        let label = if e.name.is_empty() {
-            e.path
-                .as_deref()
-                .or(e.url.as_deref())
-                .unwrap_or("(unnamed)")
-                .to_string()
-        } else {
-            e.name.clone()
-        };
-        output::sub_step(&format!(
-            "[skill] {label}: registered (invoked on demand by executor — not spawned at deploy)"
-        ));
+    if let Err(e) = outcome {
+        output::action("Boot failed", &format!("{e:#}"));
+        // Make sure shutdown.rs can still reach what we did spawn, then
+        // immediately tear it down ourselves so the user doesn't have to
+        // type `rbnx shutdown` after every aborted bring-up.
+        persist_state(
+            &state_path,
+            &manifest_path,
+            &atlas_endpoint,
+            started_at_ms,
+            &children,
+        );
+        let records = component_records(&children);
+        teardown::teardown(&records).await;
+        let _ = std::fs::remove_file(&state_path);
+        return Err(e);
     }
 
     output::success(&format!(
@@ -526,7 +587,7 @@ pub async fn execute(
         children.len(),
         log_dir.display()
     ));
-    output::sub_step("Ctrl-C to tear down.");
+    output::sub_step("Ctrl-C to tear down (or run `rbnx shutdown` from another shell).");
 
     // Wait for SIGINT / SIGTERM, then shut children down.
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -536,14 +597,48 @@ pub async fn execute(
         _ = sigterm.recv() => {}
     }
     output::action("Stopping", &format!("{} child(ren)", children.len()));
-    for sp in &mut children {
-        let _ = sp.child.start_kill();
-    }
+    let records = component_records(&children);
+    teardown::teardown(&records).await;
+    // Best-effort wait so we get clean "exited" lines in our own log.
     for sp in &mut children {
         let _ = sp.child.wait().await;
-        output::sub_step(&format!("{} stopped", sp.name));
     }
+    let _ = std::fs::remove_file(&state_path);
     Ok(())
+}
+
+fn component_records(children: &[Spawned]) -> Vec<teardown::ComponentRecord> {
+    children
+        .iter()
+        .map(|s| teardown::ComponentRecord {
+            name: s.name.clone(),
+            kind: s.kind.clone(),
+            pid: s.pid,
+            pgid: s.pgid,
+        })
+        .collect()
+}
+
+fn persist_state(
+    state_path: &Path,
+    manifest_path: &Path,
+    atlas_endpoint: &str,
+    started_at_ms: u64,
+    children: &[Spawned],
+) {
+    let state = teardown::BootState {
+        manifest_path: manifest_path.display().to_string(),
+        boot_pid: std::process::id(),
+        started_at_ms,
+        atlas_endpoint: atlas_endpoint.to_string(),
+        components: component_records(children),
+    };
+    if let Err(e) = teardown::write_state(state_path, &state) {
+        output::sub_step(&format!(
+            "[boot] warning: failed to persist boot state to {}: {e:#}",
+            state_path.display()
+        ));
+    }
 }
 
 /// Translate a `system.<name>:` block into CLI args for the corresponding
