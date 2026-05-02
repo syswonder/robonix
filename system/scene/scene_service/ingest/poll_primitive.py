@@ -56,9 +56,10 @@ class _AtlasMixin:
         except grpc.RpcError as e:
             log.warning("[scene-ingest] QueryCapabilities(%s) failed: %s", contract_id, e)
             return None
-        if not resp.capabilities:
+        # Wire field is `records` (per atlas.proto QueryCapabilitiesResponse).
+        if not resp.records:
             return None
-        cap = resp.capabilities[0]
+        cap = resp.records[0]
         # ConnectCapability gives us the actual endpoint + params.
         try:
             cresp = await loop.run_in_executor(
@@ -146,25 +147,38 @@ class PrimitivePoller(_AtlasMixin):
                 pass
 
     async def _fetch_once(self) -> Any:
-        """Default impl: HTTP MCP `tools/call` with empty arguments. Override
-        when the tool needs args. Returns the decoded JSON `result.content`."""
-        import httpx
+        """Default impl: open an MCP streamable-HTTP session, call the
+        contract's leaf tool with empty arguments, return a dict mirroring
+        the JSON-RPC shape (`{"result": {"content": [{"text": ...}]}}`)
+        that the original raw-JSON code expected. Going through the real
+        MCP client SDK avoids the initialize / session-id handshake we'd
+        otherwise have to reimplement (FastMCP rejects naked tools/call
+        with 400)."""
+        from mcp.client.session import ClientSession
+        from mcp.client.streamable_http import streamablehttp_client
+
         assert self._iface is not None
-        url = self._iface.endpoint.rstrip("/")
-        # FastMCP serves JSON-RPC at <endpoint>/mcp/. The tools/call
-        # method expects a body of {"jsonrpc": "2.0", "id": ...,
-        # "method": "tools/call", "params": {"name": <leaf>, "arguments": {}}}.
         leaf = self.contract_id.rsplit("/", 1)[-1]
-        body = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": leaf, "arguments": {}},
-        }
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.post(url, json=body, headers={"Accept": "application/json, text/event-stream"})
-            r.raise_for_status()
-            return r.json()
+        # Atlas publishes with trailing slash; the SDK handles redirect
+        # itself, but be explicit so we don't hit FastMCP's slash quirk.
+        url = self._iface.endpoint.rstrip("/")
+
+        async with streamablehttp_client(url) as (read, write, _get_session_id):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(name=leaf, arguments={})
+                # `result.content` is list[TextContent | ImageContent | ...].
+                # We mirror the legacy raw-JSON shape so on_result handlers
+                # written against r["result"]["content"][0]["text"] keep working.
+                content_dicts: list[dict[str, Any]] = []
+                for c in result.content or []:
+                    # All MCP content types expose `.type`; TextContent has
+                    # `.text`. We don't care about non-text in v1.
+                    text = getattr(c, "text", None)
+                    if text is None:
+                        continue
+                    content_dicts.append({"type": "text", "text": text})
+                return {"result": {"content": content_dicts}}
 
 
 class ChassisStatePoller(PrimitivePoller):
