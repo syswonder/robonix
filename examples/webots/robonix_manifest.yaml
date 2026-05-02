@@ -50,6 +50,15 @@ primitive:
       max_range: 50.0
       frame_id: base_link
       topic_prefix: /lidar-robonix
+  # audio_driver works as a process (ALSA scan + mic/speaker gRPC servers
+  # come up fine) but its Atlas registration still uses the pre-dev-packaging
+  # robonix_runtime_pb2 monolith, which dev-packaging deleted in favour of
+  # per-IDL-package proto modules (atlas_pb2 + RegisterCapability). Until
+  # that registration block is ported, audio_driver never publishes a cap,
+  # boot waits 60s, then tears the stack down. Re-enable once migrated.
+  # - name: audio_driver
+  #   path: ./primitives/audio_driver
+  #   config: {}
 
 service:
   - name: tiago_nav2

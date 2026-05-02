@@ -5,8 +5,8 @@ Architecture position: robonix/primitive/audio (primitive / hardware layer)
   - Sits BELOW the srv layer (speech_service) and ABOVE the hardware
   - Auto-discovers ALSA audio devices (microphones and speakers)
   - Provides two gRPC interfaces for audio I/O:
-      1. PrmAudioMic.Stream    — server-streaming, outputs mic audio
-      2. PrmAudioSpeaker.Stream — client-streaming, plays received audio
+      1. PrimitiveAudioMic.Stream    — server-streaming, outputs mic audio
+      2. PrimitiveAudioSpeaker.Stream — client-streaming, plays received audio
 
 This node follows the **tiago_bridge pattern** for primitive driver packages:
   1. Auto-scan ALSA devices (arecord -l / aplay -l)
@@ -14,8 +14,8 @@ This node follows the **tiago_bridge pattern** for primitive driver packages:
   3. DeclareInterface for mic + speaker (2 contracts)
   4. Start daemon threads:
      - Heartbeat thread (15s interval to Atlas)
-     - Mic gRPC server thread (PrmAudioMicServicer)
-     - Speaker gRPC server thread (PrmAudioSpeakerServicer)
+     - Mic gRPC server thread (PrimitiveAudioMicServicer)
+     - Speaker gRPC server thread (PrimitiveAudioSpeakerServicer)
   5. Main thread blocks until KeyboardInterrupt
 
 Proto stubs are loaded from codegen-generated files:
@@ -71,7 +71,11 @@ def _ensure_proto_gen() -> None:
 _ensure_proto_gen()
 
 import grpc
-import robonix_msg_pb2
+# dev-packaging codegen split the old monolithic robonix_msg_pb2 into
+# per-IDL-package modules. AudioChunk lives in audio_pb2 (from
+# audio/msg/AudioChunk.msg), Empty in std_msgs_pb2.
+import audio_pb2
+import std_msgs_pb2
 import robonix_contracts_pb2_grpc as contracts_grpc
 
 from audio_driver.alsa_utils import scan_alsa_devices, find_default_mic, find_default_speaker
@@ -83,7 +87,7 @@ from audio_driver.speaker_driver import SpeakerDriver
 # the corresponding driver. The servicers are registered on separate gRPC
 # servers running in daemon threads.
 
-class MicServicer(contracts_grpc.PrmAudioMicServicer):
+class MicServicer(contracts_grpc.PrimitiveAudioMicServicer):
     """Implements contract robonix/primitive/audio/mic — server-streaming mic audio.
 
     When a client calls Stream():
@@ -109,7 +113,7 @@ class MicServicer(contracts_grpc.PrmAudioMicServicer):
                 chunk = self.mic_driver.read_chunk()
                 if chunk is None:
                     break
-                yield robonix_msg_pb2.AudioChunk(
+                yield audio_pb2.AudioChunk(
                     timestamp_ns=chunk["timestamp_ns"],
                     data=chunk["data"],
                     sequence=chunk["sequence"],
@@ -120,7 +124,7 @@ class MicServicer(contracts_grpc.PrmAudioMicServicer):
             log.info("Mic stream client disconnected")
 
 
-class SpeakerServicer(contracts_grpc.PrmAudioSpeakerServicer):
+class SpeakerServicer(contracts_grpc.PrimitiveAudioSpeakerServicer):
     """Implements contract robonix/primitive/audio/speaker — client-streaming playback.
 
     When a client calls Stream() with a stream of AudioChunk messages:
@@ -142,7 +146,7 @@ class SpeakerServicer(contracts_grpc.PrmAudioSpeakerServicer):
         finally:
             log.info("Speaker stream client disconnected")
 
-        return robonix_msg_pb2.Empty()
+        return std_msgs_pb2.Empty()
 
 
 # ── Atlas registration (optional) ─────────────────────────────────────────
@@ -333,7 +337,7 @@ def main() -> None:
     if mic_driver:
         def _run_mic_server():
             server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-            contracts_grpc.add_PrmAudioMicServicer_to_server(
+            contracts_grpc.add_PrimitiveAudioMicServicer_to_server(
                 MicServicer(mic_driver), server)
             server.add_insecure_port(f"0.0.0.0:{mic_port}")
             server.start()
@@ -345,7 +349,7 @@ def main() -> None:
     if speaker_driver:
         def _run_speaker_server():
             server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-            contracts_grpc.add_PrmAudioSpeakerServicer_to_server(
+            contracts_grpc.add_PrimitiveAudioSpeakerServicer_to_server(
                 SpeakerServicer(speaker_driver), server)
             server.add_insecure_port(f"0.0.0.0:{speaker_port}")
             server.start()

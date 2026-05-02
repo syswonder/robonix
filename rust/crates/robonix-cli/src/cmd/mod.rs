@@ -21,6 +21,8 @@ mod list;
 mod path;
 mod run_package;
 mod setup;
+mod shutdown;
+mod teardown;
 mod validate;
 
 const DEFAULT_ENDPOINT: &str = "localhost:50051";
@@ -68,6 +70,16 @@ pub enum Commands {
         /// those are already running externally.
         #[arg(long)]
         skip_system: bool,
+    },
+    /// Tear down a stack previously brought up by `rbnx boot`. Reads the
+    /// per-manifest state file boot writes (`<manifest-dir>/rbnx-boot/state.json`)
+    /// to know which process groups + docker containers to kill, so the
+    /// host doesn't accumulate orphaned drivers when boot dies on an error
+    /// path or its parent shell window is closed.
+    Shutdown {
+        /// Path to the deployment manifest (default: `./robonix_manifest.yaml`).
+        #[arg(short = 'f', long, default_value = "robonix_manifest.yaml")]
+        file: PathBuf,
     },
     /// Install a package from GitHub or local path
     Install {
@@ -202,6 +214,7 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             log_dir,
             skip_system,
         } => deploy::execute(config, file, log_dir, skip_system).await,
+        Commands::Shutdown { file } => shutdown::execute(file).await,
         Commands::Install { github, path } => install::execute(config, github, path).await,
         Commands::List => list::execute(config).await,
         Commands::Info { name } => info::execute(config, &name).await,
