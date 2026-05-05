@@ -91,11 +91,16 @@ def _resolve_inputs(stub, deadline_s: float = 30.0) -> dict:
     primitive/service swap away from running on a different robot.
     """
     wanted = {
-        "odom_topic": "robonix/primitive/chassis/odom",
-        "scan_topic": "robonix/primitive/lidar/lidar",
-        "cmd_topic":  "robonix/primitive/chassis/twist_in",
-        "map_topic":  "robonix/service/map/occupancy_grid",
-        "pose_topic": "robonix/primitive/chassis/pose",
+        "odom_topic":  "robonix/primitive/chassis/odom",
+        "scan_topic":  "robonix/primitive/lidar/lidar",
+        "cmd_topic":   "robonix/primitive/chassis/twist_in",
+        "map_topic":   "robonix/service/map/occupancy_grid",
+        "pose_topic":  "robonix/primitive/chassis/pose",
+        # Optional: depth image for the second-line forward e-stop.
+        # Lidar at chassis height passes through tall thin obstacles
+        # (potted plants, table legs); depth catches them. Robots
+        # without an RGBD camera fall back to lidar-only e-stop.
+        "depth_topic": "robonix/primitive/camera/depth",
     }
     required = ("odom_topic", "scan_topic", "cmd_topic", "map_topic")
     resolved: dict[str, str] = {}
@@ -254,12 +259,14 @@ def main() -> int:
         cmd_topic=inputs["cmd_topic"],
         map_topic=inputs["map_topic"],
         pose_topic=inputs.get("pose_topic"),
+        depth_topic=inputs.get("depth_topic"),
     )
     nav.start()
     log.info(
-        "nav node up: scan=%s odom=%s cmd=%s map=%s pose=%s",
+        "nav node up: scan=%s odom=%s cmd=%s map=%s pose=%s depth=%s",
         inputs["scan_topic"], inputs["odom_topic"], inputs["cmd_topic"],
-        inputs["map_topic"], inputs.get("pose_topic"))
+        inputs["map_topic"], inputs.get("pose_topic"),
+        inputs.get("depth_topic", "(none)"))
 
     # FastMCP server (Streamable HTTP).
     mcp = _make_mcp_server(nav)

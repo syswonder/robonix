@@ -32,7 +32,7 @@ def _import_ros():
     from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
     from rclpy.duration import Duration
     from rclpy.time import Time
-    from sensor_msgs.msg import LaserScan
+    from sensor_msgs.msg import LaserScan, Image
     from nav_msgs.msg import Odometry, OccupancyGrid, Path
     from geometry_msgs.msg import Twist, PoseWithCovarianceStamped, PoseStamped
     from std_msgs.msg import Header
@@ -93,6 +93,7 @@ class NavNode:
                   cmd_topic: str = "/cmd_vel",
                   map_topic: str = "/map",
                   pose_topic: Optional[str] = None,
+                  depth_topic: Optional[str] = None,
                   goal_topic: str = "/goal_pose",
                   path_pub_topic: str = "/simple_nav/path") -> None:
         self.scan_topic = scan_topic
@@ -100,6 +101,13 @@ class NavNode:
         self.cmd_topic = cmd_topic
         self.map_topic = map_topic
         self.pose_topic = pose_topic
+        # Depth image (sensor_msgs/Image, 32FC1 metres or 16UC1 mm) used
+        # for the second-line forward e-stop. 2D lidar at chassis height
+        # passes through tall thin obstacles (potted plants, table legs
+        # under thin tablecloths, dangling wires) — depth catches them.
+        # Optional: deployments without an RGBD camera fall back to
+        # lidar-only e-stop.
+        self.depth_topic = depth_topic
         self.goal_topic = goal_topic
         self.path_pub_topic = path_pub_topic
 
@@ -125,6 +133,7 @@ class NavNode:
         self._pose: Optional[Tuple[float, float, float]] = None
         self._odom_pose: Optional[Tuple[float, float, float]] = None
         self._scan = None
+        self._depth: Optional[Any] = None  # latest sensor_msgs/Image
         self._map: Optional[Any] = None  # latest OccupancyGrid
         # Bumped on every /map callback; the active goal stores the
         # value at plan time so the tick can detect "map updated since
@@ -170,6 +179,13 @@ class NavNode:
         if self.pose_topic:
             node.create_subscription(self._ros["PoseWithCovarianceStamped"],
                                       self.pose_topic, self._on_pose, odom_qos)
+        if self.depth_topic:
+            # Cameras spam at >10 Hz; we only need the freshest frame
+            # for the per-tick e-stop check. KEEP_LAST(1) is enough.
+            depth_qos = QoS(reliability=Rel.RELIABLE, durability=Dur.VOLATILE,
+                            history=Hist.KEEP_LAST, depth=1)
+            node.create_subscription(self._ros["Image"], self.depth_topic,
+                                      self._on_depth, depth_qos)
         if self.goal_topic:
             node.create_subscription(self._ros["PoseStamped"],
                                       self.goal_topic, self._on_goal_pose, odom_qos)
@@ -280,6 +296,10 @@ class NavNode:
         with self._lock:
             self._scan = msg
 
+    def _on_depth(self, msg) -> None:
+        with self._lock:
+            self._depth = msg
+
     def _on_map(self, msg) -> None:
         with self._lock:
             self._map = msg
@@ -371,6 +391,7 @@ class NavNode:
             pose = self._pose
             scan = self._scan
             mp = self._map
+            depth = self._depth
 
         if g is None or g.state != "active":
             return
@@ -397,6 +418,30 @@ class NavNode:
             g.state = "aborted"
             g.detail = (f"emergency stop: lidar {nearest_beam:.2f}m "
                         f"(threshold {EMERGENCY_STOP_M:.2f}m, 360°)")
+            return
+
+        # ── Depth-based forward e-stop (second line) ─────────────────
+        # 2D lidar at chassis height misses tall thin obstacles —
+        # potted plants whose stem is above the lidar plane, table
+        # legs blocked by a low fringe, etc. Webots tiago demo: the
+        # robot drove straight into a potted plant because its lidar
+        # rays passed between the leaves. Depth from the head camera
+        # catches anything in the forward cone that has volume above
+        # chassis height.
+        #
+        # Threshold tighter than lidar (0.30 m vs 0.25 m): depth has
+        # noisy edge pixels at long range that we don't want to abort
+        # on at the same distance the lidar would. Aborts the goal
+        # like the lidar e-stop does — explore picks a new frontier,
+        # nav doesn't try to inch around the obstacle.
+        DEPTH_STOP_M = 0.30
+        nearest_depth = _forward_depth_min(depth)
+        if nearest_depth is not None and nearest_depth < DEPTH_STOP_M:
+            self._publish_twist(0.0, 0.0)
+            self._publish_path([])
+            g.state = "aborted"
+            g.detail = (f"emergency stop: depth {nearest_depth:.2f}m "
+                        f"(threshold {DEPTH_STOP_M:.2f}m, forward cone)")
             return
 
         # ── Stuck detector ─────────────────────────────────────────────
@@ -721,6 +766,51 @@ def _forward_clearance(scan) -> Optional[float]:
     if not arc:
         return None
     return min(arc)
+
+
+def _forward_depth_min(depth_msg) -> Optional[float]:
+    """Sample the central horizontal strip of a depth image and return
+    the smallest valid (non-zero, finite, non-floor) distance in metres,
+    or None if no usable depth samples are available.
+
+    The strip is the middle vertical third of the image (skip ceiling
+    + floor) and the central horizontal third (forward cone, roughly
+    matches the lidar's ±30° forward arc). We're looking for "is
+    there a solid object less than ~0.3 m in front of the robot",
+    not building a full free-space map — sub-sampling is fine and
+    keeps the per-tick cost trivial.
+
+    Encoding handling: 32FC1 metres (webots, RealSense), 16UC1 mm
+    (Astra, Kinect). Anything else returns None and the caller falls
+    back to lidar-only e-stop.
+
+    Filters out: NaN/Inf (no return), 0 (no return on int encodings),
+    < 0.05 m (sensor self-floor / cable reflections).
+    """
+    if depth_msg is None:
+        return None
+    h, w = int(getattr(depth_msg, "height", 0)), int(getattr(depth_msg, "width", 0))
+    if h == 0 or w == 0:
+        return None
+    enc = (getattr(depth_msg, "encoding", "") or "").lower()
+    try:
+        import numpy as np
+        if enc in ("32fc1", "32fc1; 32fc1"):
+            arr = np.frombuffer(bytes(depth_msg.data), dtype=np.float32).reshape(h, w)
+        elif enc in ("16uc1", "16uc1; 16uc1"):
+            arr = np.frombuffer(bytes(depth_msg.data), dtype=np.uint16).reshape(h, w).astype(np.float32) / 1000.0
+        else:
+            return None
+        # Central vertical third × central horizontal third.
+        y0, y1 = h // 3, (2 * h) // 3
+        x0, x1 = w // 3, (2 * w) // 3
+        patch = arr[y0:y1, x0:x1]
+        valid = np.isfinite(patch) & (patch > 0.05)
+        if not valid.any():
+            return None
+        return float(patch[valid].min())
+    except Exception:
+        return None
 
 
 def _min_range_360(scan) -> Optional[float]:
