@@ -125,7 +125,7 @@ fn resolve_entry_path(
             let dest = cache_root.join(&name);
             if !dest.exists() {
                 std::fs::create_dir_all(cache_root)?;
-                output::sub_step(&format!("cloning {url} -> {}", dest.display()));
+                output::boot_note(&name, &format!("cloning from {url}"));
                 let mut clone = std::process::Command::new("git");
                 clone.arg("clone").arg("--depth").arg("1");
                 if let Some(b) = &entry.branch {
@@ -139,7 +139,7 @@ fn resolve_entry_path(
                     anyhow::bail!("git clone {url} exited with {:?}", status.code());
                 }
             } else {
-                output::sub_step(&format!("[cache hit] {} -> {}", name, dest.display()));
+                output::boot_note(&name, &format!("local cache (rbnx-boot/cache/{name})"));
             }
             Ok(dest)
         }

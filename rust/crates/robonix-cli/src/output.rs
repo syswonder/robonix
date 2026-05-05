@@ -62,70 +62,74 @@ pub fn summary(message: &str) {
 // like a systemd / SysV bring-up (`[ OK ] component  detail`) instead
 // of the previous indented free-form `sub_step("[system] foo -> long
 // path...")` lines that buried the salient info.
+//
+// IMPORTANT: rust's `{:<N}` formatter pads to N BYTES, not visible
+// chars. `colored` returns strings with ANSI escape sequences embedded
+// (`"[ OK ]".green()` is ~13 bytes for 6 visible chars), so a naive
+// `{:<7}` against a colored string produces no padding (already past
+// 7 bytes). Fix: emit the colored badge as a fixed-width unpadded
+// fragment, the padding lives between the (uncolored) name and the
+// detail. Every badge below is exactly 6 visible chars (`[ OK ]`,
+// `[FAIL]`, `[SKIP]`, `[ →  ]`, `[ ⠙ ]`, …) so no badge-side
+// alignment is needed; two spaces separate it from the name.
 
-const W_BADGE: usize = 7; // "[ OK ] " etc.
 const W_NAME: usize = 18;
 
-/// `[ OK ] name  detail` — a component came up. The leading
-/// `\r\x1b[K` clears any in-place spinner line that boot_progress
-/// might have left, so the final result lands cleanly without a
-/// trailing fragment of "registering... 4.2s".
+/// `[ OK ]  name              detail` — a component came up.
+/// Leading `\r\x1b[K` clears any in-place spinner line so the final
+/// result lands cleanly without a trailing fragment of "registering…".
 pub fn boot_ok(name: &str, detail: &str) {
     println!(
-        "\r\x1b[K{}  {:<width$}{}",
-        format!("{:<bw$}", "[ OK ]".green().bold().to_string(), bw = W_BADGE),
+        "\r\x1b[K{}  {:<width$}  {}",
+        "[ OK ]".green().bold(),
         name,
         detail.dimmed(),
         width = W_NAME,
     );
 }
 
-/// `[FAIL] name  detail` — a component failed to come up.
+/// `[FAIL]  name              detail` — a component failed to come up.
 pub fn boot_fail(name: &str, detail: &str) {
     eprintln!(
-        "\r\x1b[K{}  {:<width$}{}",
-        format!("{:<bw$}", "[FAIL]".red().bold().to_string(), bw = W_BADGE),
+        "\r\x1b[K{}  {:<width$}  {}",
+        "[FAIL]".red().bold(),
         name,
         detail.red(),
         width = W_NAME,
     );
 }
 
-/// In-place spinner frame. Renders to stdout with `\r` (no newline),
-/// flushes, returns. Caller is expected to overwrite or `boot_ok` /
-/// `boot_fail` to finalize. Frames cycle through Braille dots — the
-/// systemd-look spinner most users recognise from Linux init logs.
-pub fn boot_progress(name: &str, detail: &str, frame: usize) {
-    const GLYPHS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-    let g = GLYPHS[frame % GLYPHS.len()];
-    let badge = format!("[ {} ]", g);
-    print!(
-        "\r\x1b[K{}  {:<width$}{}",
-        format!("{:<bw$}", badge.cyan().to_string(), bw = W_BADGE),
-        name,
-        detail.dimmed(),
-        width = W_NAME,
-    );
-    let _ = io::stdout().flush();
-}
-
-/// `[SKIP] name  detail` — declared in manifest but skipped (not
-/// installed / disabled / out-of-scope on this host).
+/// `[SKIP]  name              detail` — declared in manifest but
+/// skipped (not installed / disabled / out-of-scope on this host).
 pub fn boot_skip(name: &str, detail: &str) {
     println!(
-        "{}  {:<width$}{}",
-        format!("{:<bw$}", "[SKIP]".yellow().to_string(), bw = W_BADGE),
+        "{}  {:<width$}  {}",
+        "[SKIP]".yellow(),
         name,
         detail.dimmed(),
         width = W_NAME,
     );
 }
 
-/// `[....] name  detail` — component is starting (use boot_ok / boot_fail later).
+/// `[ →  ]  name              detail` — informational note (cache
+/// hit, fetched a remote package, …). Uses an arrow rather than a
+/// status badge since it's neither "up" nor "skipped".
+pub fn boot_note(name: &str, detail: &str) {
+    println!(
+        "{}  {:<width$}  {}",
+        "[ →  ]".cyan(),
+        name,
+        detail.dimmed(),
+        width = W_NAME,
+    );
+}
+
+/// `[....]  name              detail` — component is starting.
+/// Caller should follow up with boot_ok / boot_fail.
 pub fn boot_wait(name: &str, detail: &str) {
     println!(
-        "{}  {:<width$}{}",
-        format!("{:<bw$}", "[....]".cyan().to_string(), bw = W_BADGE),
+        "{}  {:<width$}  {}",
+        "[....]".cyan(),
         name,
         detail.dimmed(),
         width = W_NAME,
@@ -134,10 +138,24 @@ pub fn boot_wait(name: &str, detail: &str) {
 
 /// `== section ==` — group header above a run of boot lines.
 pub fn boot_section(label: &str) {
-    println!("\n{} {} {}",
-             "==".dimmed(),
-             label.bold(),
-             "==".dimmed());
+    println!("\n{} {} {}", "==".dimmed(), label.bold(), "==".dimmed());
+}
+
+/// In-place spinner frame. Renders to stdout with `\r` (no newline)
+/// and flushes; caller is expected to overwrite or boot_ok /
+/// boot_fail to finalize. Frames cycle through Braille dots — the
+/// systemd-look spinner most users recognise from Linux init logs.
+pub fn boot_progress(name: &str, detail: &str, frame: usize) {
+    const GLYPHS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let g = GLYPHS[frame % GLYPHS.len()];
+    print!(
+        "\r\x1b[K{}  {:<width$}  {}",
+        format!("[ {} ]", g).cyan(),
+        name,
+        detail.dimmed(),
+        width = W_NAME,
+    );
+    let _ = io::stdout().flush();
 }
 
 /// Final boot summary line.
@@ -147,8 +165,7 @@ pub fn boot_summary(ok: usize, total: usize, hint: &str) {
     } else {
         "⚠".yellow().bold()
     };
-    println!("\n{} {}/{} components up — {}",
-             badge, ok, total, hint.dimmed());
+    println!("\n{} {}/{} components up — {}", badge, ok, total, hint.dimmed());
 }
 
 /// Spinner for animated progress indication
