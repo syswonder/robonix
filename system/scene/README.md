@@ -50,11 +50,16 @@ ConceptGraphs-style per-frame perception with 4 stages:
    per-detection mask.
 3. **Lift to 3D.** Mask-aware depth backprojection through pinhole
    intrinsics gives a per-detection point cloud in camera-optical
-   frame; `tf2 lookup_transform(camera_optical, "map")` carries it
-   into map frame. **No `/odom` math** — once SLAM corrects
-   `map → odom`, reading `/odom` directly puts the robot in odom
-   frame and the registry drifts away from rviz. tf2 is the
-   authoritative source.
+   frame. The world transform comes from atlas-resolved contracts,
+   not tf2: `T(world ← base_link)` from `service/map/pose` and
+   `T(base_link ← camera_optical)` from `primitive/camera/extrinsics`,
+   composed into a single 4×4. The world frame name is whatever
+   `header.frame_id` the localizer publishes — never a hardcoded
+   `"map"`. tf2 stays only as a last-resort fallback for legacy
+   stacks where the camera primitive hasn't declared `extrinsics`
+   yet (logged once via "no pose contract resolved"). Reading
+   `/odom` directly is **NOT** acceptable — once SLAM corrects
+   `map → odom`, the registry drifts away from rviz.
 4. **Match + merge.** Per-detection 512-d OpenCLIP ViT-B-32 image
    feature + 3D-AABB IoU drives the concept-graphs merge pipeline:
    `compute_spatial_similarities` + `compute_visual_similarities` +
@@ -111,31 +116,27 @@ After `rbnx boot` reports `✓ 11 component(s) up`:
 
 ### Drive the robot to populate the map
 
-The `explore` skill autonomously frontiers the room. From a third
-terminal:
+Easiest path — let pilot drive the explore skill via natural language:
 
 ```bash
-python3 - <<'PY'
-import httpx, json
-H = {"Content-Type":"application/json","Accept":"application/json, text/event-stream"}
-with httpx.Client(timeout=15) as c:
-    r = c.post("http://127.0.0.1:50130/mcp", headers=H, json={
-        "jsonrpc":"2.0","id":1,"method":"initialize",
-        "params":{"protocolVersion":"2025-06-18","capabilities":{},
-                  "clientInfo":{"name":"x","version":"0"}}})
-    H["Mcp-Session-Id"] = r.headers["mcp-session-id"]
-    c.post("http://127.0.0.1:50130/mcp", headers=H,
-           json={"jsonrpc":"2.0","method":"notifications/initialized"})
-    r = c.post("http://127.0.0.1:50130/mcp", headers=H, json={
-        "jsonrpc":"2.0","id":2,"method":"tools/call",
-        "params":{"name":"explore","arguments":{
-            "area_hint":"office","timeout_s":900,"max_speed_m_s":0.40}}})
-    print(json.loads([l for l in r.text.splitlines() if l.startswith("data: ")][0][6:]))
-PY
+# 3rd terminal, anywhere on the host
+rbnx ask "请彻底探索整个房间，等待 explore 完成"
 ```
 
-You should see the robot start driving on rviz, the 2D map fill in,
-and objects accumulate in the web UI's right panel within ~15 s.
+Pilot calls `skill/explore/explore`, polls `status` every few seconds,
+and lets rtabmap + scene fill in the map as the robot frontiers across
+the room. With the default Webots Tiago scene this takes ~3–4 minutes
+to cover ~6 frontier hops.
+
+For interactive use: `rbnx chat`, type `请探索环境` and watch tool
+calls scroll. Esc cancels current reasoning; `Ctrl+C` exits.
+
+You should see, within ~15 s of the explore goal landing:
+- the robot driving in rviz / Webots,
+- the 2D occupancy filling in (web UI left panel),
+- detected objects accumulating in the 3D panel and the scene
+  registry (`rbnx tools`-callable `get_snapshot`),
+- live RGB + depth in the cam panel (the third column).
 
 ### Just scene, attached to your own webots/sim
 
@@ -204,11 +205,13 @@ curl -s http://127.0.0.1:50106/mcp/ -H "Content-Type: application/json" \
 
 ## Web UI quick tour
 
-* `/` — combined 2D + 3D split layout (default)
+* `/` — combined 3-column layout (default): 2D map · 3D scene · cam stack
 * `/2d` — only the 2D top-down map
 * `/3d` — only the 3D point clouds + bboxes
+* `/cam` — only the camera stack: live RGB on top, live depth below
 * `/api/state` — JSON: registry + relations + occupancy PNG + robot pose
 * `/api/objects3d` — JSON: per-object pcd + 8 bbox corners + CLIP class
+* `/api/camera` — JSON: latest RGB + depth as base64 PNGs (5 Hz polling)
 
 The 3D viz draws the OccupancyGrid as a translucent floor plane at
 z = -0.01 (so you can read room geometry under the point clouds), each
@@ -216,6 +219,13 @@ detected object as a coloured pcd + yaw-rotated wireframe bbox + class
 label sprite, and the robot as a composite Tiago-shaped proxy (mobile
 base + torso + shoulder + head + arm), all parented to a `THREE.Group`
 that updates from `/api/state`'s `robot` field at 4 Hz.
+
+The cam panel pulls the same RGB + depth frames the perception
+pipeline consumes, so when detections look wrong it's a one-glance
+debug: "is this the image YOLO-World was given?" Depth is shown as
+a per-frame normalised grayscale (near = bright). Each tile shows
+the encoding + age of the latest sample; the meta line turns red
+once a stream has been silent for >2 s.
 
 ## Troubleshooting
 
