@@ -227,8 +227,19 @@ def _build_topic_specs(observations: list[dict], atlas_stub, transport: str) -> 
 
 
 def _resolve_auto(atlas_stub, pb_transport: int) -> list[TopicSpec]:
-    """Path A: scan everything atlas knows about, filter to interfaces
-    on the configured transport, take what scene knows how to ingest."""
+    """Path A: scan every cap atlas knows about, classify by contract
+    leaf, then collapse multiple providers per kind by namespace
+    preference.
+
+    Why preference matters: `primitive/chassis/pose` (raw chassis or
+    AMCL output) and `service/map/pose` (SLAM-corrected) BOTH have leaf
+    `pose`. If we just took whichever atlas returned first, the world-
+    frame self-tracker silently ended up reading the chassis stream
+    (drifty / empty when nav stack is down). Same story for
+    `chassis/odom` vs `service/map/odom`. The preference order below
+    encodes scene's actual intent — for world-frame purposes always
+    prefer the localizer.
+    """
     try:
         resp = atlas_stub.QueryCapabilities(pb.QueryCapabilitiesRequest(
             contract_id="",
@@ -239,8 +250,9 @@ def _resolve_auto(atlas_stub, pb_transport: int) -> list[TopicSpec]:
                     _pb_transport_name(pb_transport), e)
         return []
 
-    seen_kinds: set[str] = set()
-    out: list[TopicSpec] = []
+    # Per-kind candidate buckets. Each entry is (priority, contract_id, spec).
+    # Lower priority number wins.
+    candidates: dict[str, list[tuple[int, str, TopicSpec]]] = {}
     for rec in resp.records:
         for iface in rec.interfaces:
             if iface.transport != pb_transport:
@@ -251,17 +263,37 @@ def _resolve_auto(atlas_stub, pb_transport: int) -> list[TopicSpec]:
             if spec.kind in _DEFAULT_DISABLED_KINDS:
                 log.info("[scene] auto-discover: skipping kind=%s (in _DEFAULT_DISABLED_KINDS)", spec.kind)
                 continue
-            if spec.kind in seen_kinds:
-                # Multiple primitives advertising the same kind. Take
-                # the first (deterministic via atlas's record order).
-                log.info("[scene] auto-discover: kind=%s already taken; ignoring %s on %s",
-                         spec.kind, iface.contract_id, spec.topic)
-                continue
-            seen_kinds.add(spec.kind)
-            log.info("[scene] auto-discover %r ← atlas: topic=%s msg=%s qos=%s contract=%s",
-                     spec.kind, spec.topic, spec.msg_type, spec.qos_profile, iface.contract_id)
-            out.append(spec)
+            prio = _provider_priority(spec.kind, iface.contract_id)
+            candidates.setdefault(spec.kind, []).append((prio, iface.contract_id, spec))
+
+    out: list[TopicSpec] = []
+    for kind, cands in candidates.items():
+        cands.sort(key=lambda t: t[0])
+        chosen_prio, chosen_id, chosen = cands[0]
+        for losing_prio, losing_id, losing in cands[1:]:
+            log.info(
+                "[scene] auto-discover: kind=%s — preferring %s (prio=%d) over %s (prio=%d)",
+                kind, chosen_id, chosen_prio, losing_id, losing_prio,
+            )
+        log.info("[scene] auto-discover %r ← atlas: topic=%s msg=%s qos=%s contract=%s",
+                 chosen.kind, chosen.topic, chosen.msg_type, chosen.qos_profile, chosen_id)
+        out.append(chosen)
     return out
+
+
+def _provider_priority(kind: str, contract_id: str) -> int:
+    """Lower wins. For pose/odom prefer SLAM-corrected (`service/map/*`)
+    over raw chassis output (`primitive/chassis/*`). All other kinds
+    have a single producer in practice; ties default to insertion order
+    (which atlas already serialises deterministically).
+    """
+    cid = contract_id.lower()
+    if kind in ("pose", "odom"):
+        if cid.startswith("robonix/service/map/"):
+            return 0
+        if cid.startswith("robonix/primitive/chassis/"):
+            return 10
+    return 5
 
 
 def _resolve_explicit(observations: list[dict], atlas_stub, pb_transport: int) -> list[TopicSpec]:

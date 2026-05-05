@@ -112,14 +112,28 @@ from robonix_py import mcp_contract
 
 _rclpy = None
 _Image = None
+_TransformStamped = None
+_TfBuffer = None
+_TfListener = None
+_RclpyDuration = None
+_RclpyTime = None
 
 
 def _import_ros2():
-    global _rclpy, _Image
+    global _rclpy, _Image, _TransformStamped, _TfBuffer, _TfListener, _RclpyDuration, _RclpyTime
     import rclpy  # type: ignore
     from sensor_msgs.msg import Image as RosImage  # type: ignore
+    from geometry_msgs.msg import TransformStamped as RosTfStamped  # type: ignore
+    from tf2_ros import Buffer as RosTfBuffer, TransformListener as RosTfListener  # type: ignore
+    from rclpy.duration import Duration as RosDuration  # type: ignore
+    from rclpy.time import Time as RosTime  # type: ignore
     _rclpy = rclpy
     _Image = RosImage
+    _TransformStamped = RosTfStamped
+    _TfBuffer = RosTfBuffer
+    _TfListener = RosTfListener
+    _RclpyDuration = RosDuration
+    _RclpyTime = RosTime
 
 
 # ── shared state ─────────────────────────────────────────────────────────────
@@ -265,10 +279,11 @@ def depth_snapshot(msg: Empty) -> Image:
 # ── runtime wiring ───────────────────────────────────────────────────────────
 
 def _start_ros2():
-    global _ros_node
+    global _ros_node, _tf_buffer
     _import_ros2()
     _rclpy.init()
     from rclpy.executors import SingleThreadedExecutor  # type: ignore
+    from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy  # type: ignore
 
     node = _rclpy.create_node("tiago_camera_driver")
     _ros_node = node
@@ -277,11 +292,87 @@ def _start_ros2():
     node.create_subscription(_Image, rgb_topic, _on_rgb, 1)
     node.create_subscription(_Image, depth_topic, _on_depth, 1)
 
+    # tf2 listener — used once at startup to look up the static
+    # base_link → camera_optical transform, then republished as the
+    # `primitive/camera/extrinsics` contract so consumers (scene 3D
+    # projection, multi-camera fusion) don't have to touch tf2.
+    _tf_buffer = _TfBuffer()
+    _TfListener(_tf_buffer, node)
+
+    # Latched (TRANSIENT_LOCAL + RELIABLE) publisher for extrinsics.
+    # Late subscribers receive the cached value automatically.
+    extrinsics_qos = QoSProfile(
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        history=HistoryPolicy.KEEP_LAST,
+        depth=1,
+    )
+    extrinsics_topic = os.environ.get(
+        "TIAGO_CAMERA_EXTRINSICS_TOPIC", "/tiago/camera/extrinsics"
+    )
+    global _extrinsics_pub, _extrinsics_topic
+    _extrinsics_pub = node.create_publisher(_TransformStamped, extrinsics_topic, extrinsics_qos)
+    _extrinsics_topic = extrinsics_topic
+
     executor = SingleThreadedExecutor()
     executor.add_node(node)
-    print(f"[tiago_camera] ROS2 ready: sub {rgb_topic} + {depth_topic}")
+    print(f"[tiago_camera] ROS2 ready: sub {rgb_topic} + {depth_topic}; "
+          f"tf2 listener up; extrinsics publisher → {extrinsics_topic}")
+
+    # Background thread that resolves and publishes the static
+    # extrinsics once tf2 has the chain available.
+    threading.Thread(target=_publish_camera_extrinsics, daemon=True).start()
+
     while _rclpy.ok():
         executor.spin_once(timeout_sec=0.1)
+
+
+_tf_buffer = None
+_extrinsics_pub = None
+_extrinsics_topic: str | None = None
+_extrinsics_published = False
+
+
+def _publish_camera_extrinsics() -> None:
+    """Resolve `base_link → camera_optical` from tf2 once it's available,
+    publish it on the latched extrinsics topic, then exit. tf2 is used
+    here purely as the local-to-this-primitive mechanism for reading
+    the URDF chain — consumers never touch tf2; they go through the
+    declared `primitive/camera/extrinsics` contract.
+    """
+    global _extrinsics_published
+    base_frame = os.environ.get("TIAGO_BASE_FRAME", "base_link")
+    cam_frame = os.environ.get(
+        "TIAGO_RGB_FRAME_ID", "head_front_camera_rgb_optical_frame"
+    )
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline and not _extrinsics_published:
+        if _tf_buffer is None or _extrinsics_pub is None:
+            time.sleep(0.5)
+            continue
+        try:
+            tf = _tf_buffer.lookup_transform(
+                base_frame, cam_frame, _RclpyTime(),
+                _RclpyDuration(seconds=0.5),
+            )
+        except Exception as e:  # noqa: BLE001
+            time.sleep(0.5)
+            continue
+        # Stamp it with our header so downstream sees frame_id=base_link
+        # / child_frame_id=cam_frame; the lookup_transform result already
+        # carries those, but re-stamping keeps the contract clean.
+        tf.header.frame_id = base_frame
+        tf.child_frame_id = cam_frame
+        _extrinsics_pub.publish(tf)
+        _extrinsics_published = True
+        t = tf.transform.translation
+        print(f"[tiago_camera] published extrinsics {base_frame}→{cam_frame}: "
+              f"({t.x:.3f}, {t.y:.3f}, {t.z:.3f})")
+        return
+    if not _extrinsics_published:
+        print(f"[tiago_camera] WARN: extrinsics publish gave up — tf2 chain "
+              f"{base_frame}→{cam_frame} not resolvable. Scene will fall back "
+              f"to its own tf2 lookup.")
 
 
 def _heartbeat_loop(stub, node_id: str) -> None:
@@ -338,7 +429,12 @@ class _CameraDriverServicer(contracts_grpc.PrimitiveCameraDriverServicer):
     def Driver(self, request, context):
         cmd = request.command
         if cmd == _CMD_INIT:
-            ok, err = _wait_for_first_rgb(timeout_s=15.0)
+            # 60s rather than 15s: webots's camera publisher is racy
+            # to come online on cold boot — sometimes the first frame
+            # arrives 20-40s after rclpy spins up. Keeping the gate
+            # generous avoids spurious boot failures while still
+            # catching truly broken sims.
+            ok, err = _wait_for_first_rgb(timeout_s=60.0)
             return lifecycle_pb2.Driver_Response(
                 ok=ok, state="ready" if ok else "error", error=err
             )
@@ -410,10 +506,14 @@ def main() -> None:
         _decl_mcp(stub, cap_id, "robonix/primitive/camera/depth_snapshot", mcp_port, depth_snapshot)
         rgb_topic = os.environ.get("TIAGO_RGB_TOPIC", "/head_front_camera/rgb/image_raw")
         depth_topic = os.environ.get("TIAGO_DEPTH_TOPIC", "/head_front_camera/depth_registered/image_raw")
-        _decl_topic_out(stub, cap_id, "robonix/primitive/camera/rgb",   rgb_topic,   "reliable")
-        _decl_topic_out(stub, cap_id, "robonix/primitive/camera/depth", depth_topic, "reliable")
+        extrinsics_topic = os.environ.get(
+            "TIAGO_CAMERA_EXTRINSICS_TOPIC", "/tiago/camera/extrinsics"
+        )
+        _decl_topic_out(stub, cap_id, "robonix/primitive/camera/rgb",        rgb_topic,        "reliable")
+        _decl_topic_out(stub, cap_id, "robonix/primitive/camera/depth",      depth_topic,      "reliable")
+        _decl_topic_out(stub, cap_id, "robonix/primitive/camera/extrinsics", extrinsics_topic, "reliable_transient_local")
         print(f"[tiago_camera] registered cap {cap_id} → driver:{driver_port}, mcp:{mcp_port}, "
-              f"ros2: rgb={rgb_topic} depth={depth_topic}")
+              f"ros2: rgb={rgb_topic} depth={depth_topic} extrinsics={extrinsics_topic}")
     except Exception as e:
         print(f"[tiago_camera] WARN: atlas registration failed: {e}")
 
