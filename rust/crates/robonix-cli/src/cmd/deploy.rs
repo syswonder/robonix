@@ -265,15 +265,12 @@ async fn spawn_system_binary(
     let pid = child
         .id()
         .ok_or_else(|| anyhow::anyhow!("spawned `{bin}` but it had no pid"))?;
-    let arg_preview = if args.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", redact_secrets_for_log(args).join(" "))
-    };
-    output::sub_step(&format!(
-        "[system] {name}{arg_preview} -> {}",
-        log_path(log_dir, name).display()
-    ));
+    // Salient detail per builtin: port + role, redact long flag soup
+    // (--capabilities path lists, --vlm-api-key, …). Full args are
+    // available in the package's log file; the boot line stays terse
+    // so users can scan the bring-up sequence at a glance.
+    let detail = system_boot_detail(name, args);
+    output::boot_ok(name, &detail);
     Ok(Spawned {
         name: name.to_string(),
         kind: "system_builtin".to_string(),
@@ -347,11 +344,9 @@ async fn spawn_package(
     let pid = child
         .id()
         .ok_or_else(|| anyhow::anyhow!("spawned package '{name}' but it had no pid"))?;
-    output::sub_step(&format!(
-        "[{component}] {name} -> {} (config: {})",
-        log_path(log_dir, &log_name).display(),
-        cfg_file.display(),
-    ));
+    // No spawn line here — wait until cap registration and emit one
+    // boot_ok with the cap_id so each component takes ONE line in the
+    // boot log instead of three (spawn + waiting + registered).
     let kind = match component {
         "system" => "system_package",
         other => other,
@@ -448,6 +443,7 @@ pub async fn execute(
 
     let outcome: Result<()> = async {
         if !skip_system {
+            output::boot_section("system");
             // System Rust binaries: launched in atlas → executor → pilot order.
             // Each is fed CLI flags translated from `system.<name>:` block.
             // executor + pilot inherit `--atlas` from `system.atlas.listen`
@@ -542,17 +538,12 @@ pub async fn execute(
                 let pkg_dir = match config.robonix_source_path.as_ref() {
                     Some(root) => root.join("system").join(key),
                     None => {
-                        output::sub_step(&format!(
-                            "[system] {key}: skipped — robonix_source_path unset (run `rbnx setup` from the repo root)"
-                        ));
+                        output::boot_skip(key, "robonix_source_path unset (`rbnx setup` from repo root)");
                         continue;
                     }
                 };
                 if !pkg_dir.exists() {
-                    output::sub_step(&format!(
-                        "[system] {key}: skipped — no package found at {} (declared in manifest but absent on disk)",
-                        pkg_dir.display()
-                    ));
+                    output::boot_skip(key, "not on disk");
                     continue;
                 }
                 let entry = PackageEntry {
@@ -577,6 +568,9 @@ pub async fn execute(
             }
         }
 
+        if !deploy.primitive.is_empty() {
+            output::boot_section("primitive");
+        }
         for e in &deploy.primitive {
             let sp = spawn_and_init(
                 "primitive",
@@ -590,6 +584,9 @@ pub async fn execute(
             .await?;
             children.push(sp);
             persist_state(&state_path, &manifest_path, &atlas_endpoint, started_at_ms, &children);
+        }
+        if !deploy.service.is_empty() {
+            output::boot_section("service");
         }
         for e in &deploy.service {
             let sp = spawn_and_init(
@@ -616,6 +613,9 @@ pub async fn execute(
         // "registered, not spawned" — that lied to consumers about
         // what was actually running. Now skill: spawns the same way
         // service: does, just kept distinct for documentation.
+        if !deploy.skill.is_empty() {
+            output::boot_section("skill");
+        }
         for e in &deploy.skill {
             let sp = spawn_and_init(
                 "skill",
@@ -708,6 +708,39 @@ fn persist_state(
             "[boot] warning: failed to persist boot state to {}: {e:#}",
             state_path.display()
         ));
+    }
+}
+
+/// Render a one-line "what is this binary doing" string for the boot
+/// log. Pulls out the high-signal flags (port, vlm model+host) and
+/// drops noisy ones (--capabilities, --log, raw API keys).
+fn system_boot_detail(name: &str, args: &[String]) -> String {
+    let mut listen: Option<&str> = None;
+    let mut vlm_upstream: Option<&str> = None;
+    let mut vlm_model: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let next = args.get(i + 1).map(|s| s.as_str());
+        match (a, next) {
+            ("--listen", Some(v)) => { listen = Some(v); i += 2; }
+            ("--vlm-upstream", Some(v)) => { vlm_upstream = Some(v); i += 2; }
+            ("--vlm-model", Some(v)) => { vlm_model = Some(v); i += 2; }
+            _ => { i += 1; }
+        }
+    }
+    let port = listen
+        .and_then(|s| s.rsplit(':').next())
+        .map(|p| format!(":{p}"))
+        .unwrap_or_default();
+    if name == "pilot" {
+        let host = vlm_upstream
+            .and_then(|u| u.trim_start_matches("https://").trim_start_matches("http://").split('/').next())
+            .unwrap_or("?");
+        let model = vlm_model.unwrap_or("?");
+        format!("{port}  vlm={model}@{host}")
+    } else {
+        port
     }
 }
 
@@ -858,9 +891,7 @@ async fn spawn_and_init(
 
     let Some(driver_contract) = driver_contract else {
         // Legacy / no-lifecycle package: registration alone is enough.
-        output::sub_step(&format!(
-            "[{component}/{pkg_label}] cap '{cap_id}' registered (no `*/driver` interface — skipping Driver(INIT))"
-        ));
+        output::boot_ok(&pkg_label, &format!("cap={cap_id}"));
         return Ok(sp);
     };
 
@@ -924,10 +955,10 @@ async fn spawn_and_init(
 
     match init_result {
         Ok(r) if r.ok => {
-            output::sub_step(&format!(
-                "[{component}/{pkg_label}] Driver(INIT) ok (state={})",
-                r.state
-            ));
+            output::boot_ok(
+                &pkg_label,
+                &format!("cap={cap_id}  driver(INIT)={}", r.state),
+            );
         }
         Ok(r) => {
             anyhow::bail!(
@@ -979,37 +1010,56 @@ async fn wait_for_registration(
     pkg_label: &str,
     component: &str,
 ) -> Result<(String, Option<String>)> {
-    output::sub_step(&format!(
-        "[{component}/{pkg_label}] waiting for cap registration..."
-    ));
-    let deadline = Instant::now() + DRIVER_REGISTER_TIMEOUT;
+    // Render an in-place spinner so the user can see boot is
+    // alive while atlas polls. Spinner ticks at SPINNER_TICK; we
+    // poll atlas only every N ticks so the RPC rate stays the
+    // same (200 ms vs the previous 500 ms is fine — query is
+    // cheap, atlas-local).
+    const SPINNER_TICK: Duration = Duration::from_millis(100);
+    const POLLS_PER_TICK: u32 = 2;        // poll atlas every 200 ms
+    let started = Instant::now();
+    let deadline = started + DRIVER_REGISTER_TIMEOUT;
+    let mut frame: usize = 0;
     loop {
-        let records = atlas
-            .query_capabilities("", "", atlas_pb::Transport::Unspecified)
-            .await
-            .with_context(|| format!("[{component}/{pkg_label}] poll atlas"))?;
-        for rec in records {
-            if before.contains(&rec.capability_id) {
-                continue;
+        let elapsed_s = started.elapsed().as_secs_f32();
+        output::boot_progress(
+            pkg_label,
+            &format!("registering with atlas… {elapsed_s:>4.1}s"),
+            frame,
+        );
+        if frame % POLLS_PER_TICK as usize == 0 {
+            let records = atlas
+                .query_capabilities("", "", atlas_pb::Transport::Unspecified)
+                .await
+                .with_context(|| format!("[{component}/{pkg_label}] poll atlas"))?;
+            for rec in records {
+                if before.contains(&rec.capability_id) {
+                    continue;
+                }
+                // Found a new cap. If it has a `*/driver` gRPC interface,
+                // the caller should run Driver(CMD_INIT); otherwise it's a
+                // legacy / no-lifecycle package and we just record the cap.
+                let driver = rec.interfaces.iter().find(|iface| {
+                    iface.transport == atlas_pb::Transport::Grpc as i32
+                        && iface.contract_id.ends_with("/driver")
+                });
+                return Ok((
+                    rec.capability_id.clone(),
+                    driver.map(|i| i.contract_id.clone()),
+                ));
             }
-            // Found a new cap. If it has a `*/driver` gRPC interface,
-            // the caller should run Driver(CMD_INIT); otherwise it's a
-            // legacy / no-lifecycle package and we just record the cap.
-            let driver = rec.interfaces.iter().find(|iface| {
-                iface.transport == atlas_pb::Transport::Grpc as i32
-                    && iface.contract_id.ends_with("/driver")
-            });
-            return Ok((
-                rec.capability_id.clone(),
-                driver.map(|i| i.contract_id.clone()),
-            ));
         }
         if Instant::now() >= deadline {
+            output::boot_fail(
+                pkg_label,
+                &format!("registration timeout after {:?}", DRIVER_REGISTER_TIMEOUT),
+            );
             anyhow::bail!(
                 "[{component}/{pkg_label}] timed out after {:?} — package never registered a cap with atlas. Check its log.",
                 DRIVER_REGISTER_TIMEOUT
             );
         }
-        tokio::time::sleep(DRIVER_POLL_INTERVAL).await;
+        tokio::time::sleep(SPINNER_TICK).await;
+        frame = frame.wrapping_add(1);
     }
 }
