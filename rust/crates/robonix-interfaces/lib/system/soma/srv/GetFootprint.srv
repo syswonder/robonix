@@ -1,0 +1,16 @@
+# Get the robot's 2D footprint polygon in the base frame. Used by
+# nav2_wrapper for costmap inflation, by simple_nav for the inscribed
+# radius, by collision-monitor services for anti-bump checks. Closed
+# polygon — first point is NOT repeated as last; consumers close it
+# themselves.
+#
+# Polygon is computed once at soma startup from the URDF (axis-aligned
+# convex hull of every link mesh's projection onto the base plane).
+# Override path: deploy manifest's `config.footprint_xy_pts` lets you
+# hand-supply a polygon when the URDF mesh hull is too generous (e.g.
+# Tiago's torso overhang is way wider than its base).
+---
+geometry_msgs/Point[] points    # CCW-ordered vertices in `base_frame`, z=0
+string base_frame               # e.g. "base_link"
+float64 inscribed_radius_m      # largest disc fitting inside the polygon
+float64 circumscribed_radius_m  # smallest disc enclosing the polygon
