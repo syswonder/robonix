@@ -33,9 +33,17 @@ def _import_ros():
     import rclpy  # type: ignore
     from rclpy.node import Node  # type: ignore
     from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy  # type: ignore
-    from sensor_msgs.msg import Image, LaserScan  # type: ignore
-    from geometry_msgs.msg import PoseWithCovarianceStamped  # type: ignore
-    from nav_msgs.msg import Odometry  # type: ignore
+    from rclpy.duration import Duration  # type: ignore
+    from rclpy.time import Time  # type: ignore
+    from sensor_msgs.msg import Image, LaserScan, PointCloud2  # type: ignore
+    from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped  # type: ignore
+    from nav_msgs.msg import Odometry, OccupancyGrid  # type: ignore
+    # tf2 is the authoritative source for `map → base_link` and
+    # `map → camera_optical`. Reading /odom directly puts the robot in
+    # *odom-frame* — once SLAM accumulates drift, the map → odom
+    # transform is non-identity, and the web UI shows the robot offset
+    # from where rviz (which goes through tf) shows it.
+    from tf2_ros import Buffer, TransformListener  # type: ignore
     return {
         "rclpy": rclpy,
         "Node": Node,
@@ -43,10 +51,21 @@ def _import_ros():
         "ReliabilityPolicy": ReliabilityPolicy,
         "DurabilityPolicy": DurabilityPolicy,
         "HistoryPolicy": HistoryPolicy,
+        "Duration": Duration,
+        "Time": Time,
         "Image": Image,
         "LaserScan": LaserScan,
+        # mapping declares /rtabmap/cloud_map under
+        # robonix/service/map/pointcloud — scene auto-classifies it
+        # as kind=lidar3d. Without this import scene crashes the
+        # moment mapping appears.
+        "PointCloud2": PointCloud2,
         "PoseWithCovarianceStamped": PoseWithCovarianceStamped,
+        "TransformStamped": TransformStamped,
         "Odometry": Odometry,
+        "OccupancyGrid": OccupancyGrid,
+        "Buffer": Buffer,
+        "TransformListener": TransformListener,
     }
 
 
@@ -117,6 +136,9 @@ class SubscribersHub:
         self._node: Any = None
         self._spin_thread: threading.Thread | None = None
         self._stop_evt = threading.Event()
+        # tf2 buffer + listener — populated in start() once rclpy is up.
+        self._tf_buffer: Any = None
+        self._tf_listener: Any = None
 
     # ── lifecycle ──────────────────────────────────────────────────────────
     async def start(self) -> None:
@@ -133,6 +155,14 @@ class SubscribersHub:
         Node = self._ros["Node"]
         node = Node(self.node_name)
         self._node = node
+        # tf2 buffer + listener spin alongside the topic subs. The
+        # buffer accumulates /tf + /tf_static; consumers call
+        # `lookup_transform(map, base_link, ...)` to get the SLAM-
+        # corrected pose without ever touching /odom or /amcl_pose.
+        Buffer = self._ros["Buffer"]
+        TransformListener = self._ros["TransformListener"]
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, node)
         for spec in self.specs:
             self._subscribe(spec)
         self._spin_thread = threading.Thread(
@@ -141,7 +171,25 @@ class SubscribersHub:
             daemon=True,
         )
         self._spin_thread.start()
-        log.info("[scene-ros] hub up: %d topic(s)", len(self.specs))
+        log.info("[scene-ros] hub up: %d topic(s) + tf2", len(self.specs))
+
+    def add_spec(self, spec: TopicSpec) -> bool:
+        """Add a new (kind, topic) subscription to a hub already up.
+        Used by the background reconciler to absorb topics that come
+        online after start(). Returns True if added, False if the
+        kind was already known."""
+        if self._ros is None:
+            return False
+        if spec.kind in self._slots:
+            return False
+        self._slots[spec.kind] = _LatestSlot()
+        self.specs.append(spec)
+        self._subscribe(spec)
+        log.info("[scene-ros] dynamic add: %s on %s", spec.kind, spec.topic)
+        return True
+
+    def has_kinds(self) -> set[str]:
+        return set(self._slots.keys())
 
     async def stop(self) -> None:
         if self._ros is None:
@@ -205,6 +253,27 @@ class SubscribersHub:
                 history=HistoryPolicy.KEEP_LAST,
                 depth=2,
             )
+        elif spec.kind == "occupancy_grid":
+            # slam_toolbox publishes /map RELIABLE + TRANSIENT_LOCAL
+            # (the standard "latched" map). A late subscriber needs
+            # TRANSIENT_LOCAL to receive the cached snapshot.
+            qos = QoSProfile(
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                history=HistoryPolicy.KEEP_LAST,
+                depth=1,
+            )
+        elif spec.kind == "camera_extrinsics":
+            # Static camera mount transform (primitive/camera/extrinsics).
+            # Publisher emits once at startup; consumers must use
+            # TRANSIENT_LOCAL to pick up the cached value when scene
+            # starts after the camera primitive.
+            qos = QoSProfile(
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                history=HistoryPolicy.KEEP_LAST,
+                depth=1,
+            )
         else:
             # Pose / odom are typically reliable + small.
             qos = QoSProfile(
@@ -234,3 +303,87 @@ class SubscribersHub:
 
     def has(self, kind: str) -> bool:
         return kind in self._slots
+
+    # ── tf2 accessors ────────────────────────────────────────────────────
+    def lookup_xy_yaw(
+        self,
+        target_frame: str = "base_link",
+        source_frame: str = "map",
+    ) -> Optional[tuple[float, float, float, float]]:
+        """Return (x, y, z, yaw) of `target_frame` expressed in
+        `source_frame` via tf2, or None when the transform isn't
+        available yet. This is the SLAM-corrected pose: it goes
+        through /tf (rtabmap publishes map→odom; chassis publishes
+        odom→base_link), so it tracks rviz exactly. Reading /odom
+        instead leaves the consumer in odom-frame and drifts away
+        from the map once SLAM corrects.
+        """
+        if self._ros is None or self._tf_buffer is None:
+            return None
+        try:
+            Time = self._ros["Time"]
+            Duration = self._ros["Duration"]
+            tf = self._tf_buffer.lookup_transform(
+                source_frame, target_frame,
+                Time(),                        # latest available
+                Duration(seconds=0.1),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.debug("[scene-ros] tf2 lookup %s→%s failed: %s",
+                      source_frame, target_frame, e)
+            return None
+        t = tf.transform.translation
+        q = tf.transform.rotation
+        # Quaternion → yaw (around Z).
+        import math
+        yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        )
+        return float(t.x), float(t.y), float(t.z), float(yaw)
+
+    def lookup_transform_4x4(
+        self,
+        target_frame: str,
+        source_frame: str = "map",
+    ):
+        """Return a 4x4 numpy homogeneous transform that maps points
+        from `target_frame` into `source_frame`. None when tf isn't
+        available. Used by perception to project camera-optical
+        depth points directly into map frame without composing odom-
+        frame chassis pose by hand."""
+        if self._ros is None or self._tf_buffer is None:
+            return None
+        try:
+            import numpy as np
+            Time = self._ros["Time"]
+            Duration = self._ros["Duration"]
+            tf = self._tf_buffer.lookup_transform(
+                source_frame, target_frame,
+                Time(),
+                Duration(seconds=0.1),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.debug("[scene-ros] tf2 4x4 %s→%s failed: %s",
+                      source_frame, target_frame, e)
+            return None
+        t = tf.transform.translation
+        q = tf.transform.rotation
+        # Quaternion → 3x3 rotation.
+        x, y, z, w = float(q.x), float(q.y), float(q.z), float(q.w)
+        n = x*x + y*y + z*z + w*w
+        if n < 1e-12:
+            return None
+        s = 2.0 / n
+        wx, wy, wz = s*w*x, s*w*y, s*w*z
+        xx, xy, xz = s*x*x, s*x*y, s*x*z
+        yy, yz, zz = s*y*y, s*y*z, s*z*z
+        R = np.array([
+            [1.0 - (yy + zz), xy - wz,         xz + wy],
+            [xy + wz,         1.0 - (xx + zz), yz - wx],
+            [xz - wy,         yz + wx,         1.0 - (xx + yy)],
+        ], dtype=np.float64)
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = R
+        T[:3, 3] = [float(t.x), float(t.y), float(t.z)]
+        return T

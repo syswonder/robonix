@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import faulthandler
 import json
 import logging
 import os
@@ -31,6 +32,12 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
+
+# torch + open3d C-extension calls can segfault on driver / kernel
+# mismatches. Without faulthandler, exit 139 lands without a Python
+# trace and we have to guess. Enable it as early as possible so the C
+# stack lands in scene's stderr the moment a SIGSEGV/SIGFPE hits.
+faulthandler.enable(all_threads=True)
 
 
 # ── Codegen + robonix-py path bootstrap ────────────────────────────────────
@@ -90,7 +97,8 @@ import atlas_pb2_grpc as pb_grpc  # type: ignore
 
 from . import mcp_tools
 from . import web as web_ui
-from .ingest.perception_vlm import VLMObjectDetector
+from .ingest.perception_concept_graphs import ConceptGraphsDetector
+from .ingest.perception_vlm import VLMObjectDetector, _CamIntrinsics
 from .ingest.ros_subscribers import (
     DEFAULT_WEBOTS_TIAGO_TOPICS,
     SubscribersHub,
@@ -112,28 +120,16 @@ logging.basicConfig(
 log = logging.getLogger("scene-service")
 
 
-# ── Defaults: Soma adapter for Webots Tiago ────────────────────────────────
-# v2 — ROS2-topic-based ingest (scene runs in its own container with
-# rclpy and shares the host DDS bus with the primitives). Each entry
-# names a logical kind + ROS topic + sensor_msgs / nav_msgs class.
-# Pollers (the v1 MCP-poll path) are gone: MCP is for pilot only,
-# scene's own data fetching uses the fast direct-DDS path.
-_DEFAULT_OBSERVATIONS = [
-    {"kind": "rgb",     "topic": "/head_front_camera/rgb/image_raw",                 "msg_type": "Image"},
-    {"kind": "depth",   "topic": "/head_front_camera/depth_registered/image_raw",    "msg_type": "Image"},
-    {"kind": "lidar2d", "topic": "/scan",                                            "msg_type": "LaserScan"},
-    {"kind": "pose",    "topic": "/amcl_pose",                                       "msg_type": "PoseWithCovarianceStamped"},
-    {"kind": "odom",    "topic": "/odom",                                            "msg_type": "Odometry"},
-]
-
-
 def _load_config() -> dict:
-    """Read RBNX_CONFIG_FILE if set; otherwise use defaults. The file
-    contents are a YAML-or-JSON dict; missing keys fall back to
-    defaults so partial overrides are easy."""
+    """Read RBNX_CONFIG_FILE if set; otherwise return an empty config.
+    Empty `observations` triggers auto-discovery against atlas — scene
+    asks for every cap with a ROS2 topic_out interface and subscribes
+    by contract leaf. The manifest only needs to populate
+    `observations[]` to override / disable a kind for a deployment.
+    """
     path = os.environ.get("RBNX_CONFIG_FILE")
     if not path:
-        return {"observations": _DEFAULT_OBSERVATIONS}
+        return {}
     try:
         text = Path(path).read_text()
         try:
@@ -142,11 +138,10 @@ def _load_config() -> dict:
             import yaml  # PyYAML is in deps
             cfg = yaml.safe_load(text) or {}
     except Exception as e:  # noqa: BLE001
-        log.warning("failed to read %s: %s; using defaults", path, e)
-        return {"observations": _DEFAULT_OBSERVATIONS}
+        log.warning("failed to read %s: %s; using empty config", path, e)
+        return {}
     if not isinstance(cfg, dict):
         cfg = {}
-    cfg.setdefault("observations", _DEFAULT_OBSERVATIONS)
     return cfg
 
 
@@ -169,6 +164,13 @@ _CONTRACT_LEAF_TO_KIND: dict[str, str] = {
     "pose": "pose",
     "amcl_pose": "pose",
     "odom": "odom",
+    # primitive/camera/extrinsics — static base_link → camera_optical
+    # transform. Goes through atlas, not tf2, so the dependency is
+    # auditable via `rbnx caps`/`rbnx channels`.
+    "extrinsics": "camera_extrinsics",
+    # mapping outputs (declared by mapping_rbnx as ROS2 topic_out
+    # endpoints under robonix/service/map/*).
+    "occupancy_grid": "occupancy_grid",
 }
 
 # Optional manifest opt-out: kinds listed here are dropped even if atlas
@@ -177,57 +179,73 @@ _CONTRACT_LEAF_TO_KIND: dict[str, str] = {
 _DEFAULT_DISABLED_KINDS: frozenset[str] = frozenset()
 
 
-def _build_topic_specs(observations: list[dict], atlas_stub) -> list[TopicSpec]:
+# Transport pref: "ros2" (default) drives the rclpy ingest path that
+# scene actually has wired today; "grpc" is a placeholder for the
+# future streaming-RPC ingest path. Contracts themselves are
+# transport-agnostic — `mode = "topic_out"` says "this is a
+# unidirectional output stream" and a primitive may serve it over
+# ROS2 OR gRPC. Scene picks the transport its ingest understands.
+_PB_TRANSPORTS: dict[str, int] = {
+    "ros2": pb.TRANSPORT_ROS2,
+    "grpc": pb.TRANSPORT_GRPC,
+}
+
+
+def _resolve_pb_transport(name: str) -> int:
+    pb_t = _PB_TRANSPORTS.get(name.lower())
+    if pb_t is None:
+        log.warning("[scene] unknown transport %r in config — defaulting to ros2", name)
+        return pb.TRANSPORT_ROS2
+    return pb_t
+
+
+def _build_topic_specs(observations: list[dict], atlas_stub, transport: str) -> list[TopicSpec]:
     """Two paths:
 
       A. Auto-discovery (default — when manifest's `observations[]` is
-         empty / absent). Scene queries atlas for ALL caps + their
-         ROS2-transport interfaces, classifies each by contract leaf
-         via `_CONTRACT_LEAF_TO_KIND`, and subscribes. Zero per-deploy
-         config: a soma plugs in a new sensor primitive that
-         DeclareInterface's its topic, scene picks it up on next
-         start without touching robonix_manifest.yaml.
+         empty / absent). Scene queries atlas for every cap, filters
+         by `transport`, classifies each interface by its contract
+         leaf via `_CONTRACT_LEAF_TO_KIND`, asks atlas for the
+         endpoint via ConnectCapability, and subscribes.
 
       B. Explicit overrides (when manifest provides `observations[]`).
-         Each entry is `{kind, contract}`; scene resolves the topic +
-         msg_type + qos identically. Used to disable a kind for a
-         specific deployment, or to point at a non-canonical contract.
+         Each entry is `{kind, contract}`; scene picks any cap that
+         has declared that contract over `transport`.
 
-    msg_type derivation in both paths: read `[io.msg].msg` from the
-    contract TOML at `/capabilities/<contract_path>.v1.toml`. Split
-    on `/`, take the leaf — that's the ROS Python class name. The
-    /capabilities dir is bind-mounted into the scene container.
+    `transport` is `"ros2"` (today's wired ingest) or `"grpc"`
+    (future). msg_type is resolved through atlas's QueryContract — no
+    on-disk TOML reads.
 
     Errors at any step skip that one entry but never fail bring-up:
     a partially-resolvable scene config is still useful (RGB works
     even if lidar2d primitive isn't running yet).
     """
+    pb_t = _resolve_pb_transport(transport)
     if observations:
-        return _resolve_explicit(observations, atlas_stub)
-    return _resolve_auto(atlas_stub)
+        return _resolve_explicit(observations, atlas_stub, pb_t)
+    return _resolve_auto(atlas_stub, pb_t)
 
 
-def _resolve_auto(atlas_stub) -> list[TopicSpec]:
-    """Path A: scan everything atlas knows about, take what looks
-    subscribable. We pull a single QueryCapabilities with empty
-    contract_id and transport=ROS2 — atlas returns every cap with
-    at least one ROS2-transport interface."""
+def _resolve_auto(atlas_stub, pb_transport: int) -> list[TopicSpec]:
+    """Path A: scan everything atlas knows about, filter to interfaces
+    on the configured transport, take what scene knows how to ingest."""
     try:
         resp = atlas_stub.QueryCapabilities(pb.QueryCapabilitiesRequest(
             contract_id="",
-            transport=pb.TRANSPORT_ROS2,
+            transport=pb_transport,
         ))
     except Exception as e:  # noqa: BLE001
-        log.warning("[scene] atlas QueryCapabilities(*,ROS2) failed: %s", e)
+        log.warning("[scene] atlas QueryCapabilities(*,%s) failed: %s",
+                    _pb_transport_name(pb_transport), e)
         return []
 
     seen_kinds: set[str] = set()
     out: list[TopicSpec] = []
     for rec in resp.records:
         for iface in rec.interfaces:
-            if iface.transport != pb.TRANSPORT_ROS2:
+            if iface.transport != pb_transport:
                 continue
-            spec = _spec_from_iface(iface)
+            spec = _spec_from_iface(rec, iface, atlas_stub, pb_transport)
             if spec is None:
                 continue
             if spec.kind in _DEFAULT_DISABLED_KINDS:
@@ -237,7 +255,7 @@ def _resolve_auto(atlas_stub) -> list[TopicSpec]:
                 # Multiple primitives advertising the same kind. Take
                 # the first (deterministic via atlas's record order).
                 log.info("[scene] auto-discover: kind=%s already taken; ignoring %s on %s",
-                         spec.kind, iface.contract_id, iface.endpoint)
+                         spec.kind, iface.contract_id, spec.topic)
                 continue
             seen_kinds.add(spec.kind)
             log.info("[scene] auto-discover %r ← atlas: topic=%s msg=%s qos=%s contract=%s",
@@ -246,9 +264,8 @@ def _resolve_auto(atlas_stub) -> list[TopicSpec]:
     return out
 
 
-def _resolve_explicit(observations: list[dict], atlas_stub) -> list[TopicSpec]:
-    """Path B: per-entry contract lookup. Only used when the manifest
-    has an explicit `observations[]` list."""
+def _resolve_explicit(observations: list[dict], atlas_stub, pb_transport: int) -> list[TopicSpec]:
+    """Path B: per-entry contract lookup."""
     out: list[TopicSpec] = []
     for entry in observations:
         kind = str(entry.get("kind", "")).lower()
@@ -258,7 +275,7 @@ def _resolve_explicit(observations: list[dict], atlas_stub) -> list[TopicSpec]:
             continue
         try:
             resp = atlas_stub.QueryCapabilities(pb.QueryCapabilitiesRequest(
-                contract_id=contract, transport=pb.TRANSPORT_ROS2,
+                contract_id=contract, transport=pb_transport,
             ))
         except Exception as e:  # noqa: BLE001
             log.warning("[scene] %r: atlas query for %s failed: %s — skipping", kind, contract, e)
@@ -266,18 +283,18 @@ def _resolve_explicit(observations: list[dict], atlas_stub) -> list[TopicSpec]:
         chosen: Optional[TopicSpec] = None
         for rec in resp.records:
             for iface in rec.interfaces:
-                if iface.contract_id != contract or iface.transport != pb.TRANSPORT_ROS2:
+                if iface.contract_id != contract or iface.transport != pb_transport:
                     continue
-                chosen = _spec_from_iface(iface, kind_override=kind)
+                chosen = _spec_from_iface(rec, iface, atlas_stub, pb_transport, kind_override=kind)
                 if chosen:
                     break
             if chosen:
                 break
         if chosen is None:
             log.warning(
-                "[scene] %r: no atlas record for contract=%r over ROS2 — skipping. "
-                "Have a primitive DeclareInterface(transport=ROS2) for it.",
-                kind, contract,
+                "[scene] %r: no atlas record for contract=%r over %s — skipping. "
+                "Have a primitive DeclareInterface(transport=%s) for it.",
+                kind, contract, _pb_transport_name(pb_transport), _pb_transport_name(pb_transport),
             )
             continue
         log.info("[scene] override %r ← atlas: topic=%s msg=%s qos=%s",
@@ -286,86 +303,96 @@ def _resolve_explicit(observations: list[dict], atlas_stub) -> list[TopicSpec]:
     return out
 
 
-def _spec_from_iface(iface, *, kind_override: Optional[str] = None) -> Optional[TopicSpec]:
-    """Build a TopicSpec from one atlas Iface. Resolves msg_type from
-    the contract TOML on disk. Returns None when the interface isn't
-    usable (no [io.msg], unknown contract leaf, missing endpoint)."""
-    topic = (iface.endpoint or "").strip()
-    if not topic:
-        return None
+def _spec_from_iface(rec, iface, atlas_stub, pb_transport: int, *,
+                      kind_override: Optional[str] = None) -> Optional[TopicSpec]:
+    """Build a TopicSpec from one atlas (cap, iface) pair.
+
+    Endpoints are NOT exposed by `QueryCapabilities` (atlas hides them
+    until consumer→provider is recorded). We `ConnectCapability` to
+    open the edge and read the authoritative endpoint string. For
+    ROS2 that string is the topic; for gRPC it would be `host:port`
+    (gRPC ingest path is not yet wired).
+
+    `msg_type` is resolved through atlas's QueryContract. Returns
+    None when the interface is unusable (RPC-only contract, missing
+    endpoint, atlas doesn't know the contract, etc.).
+    """
     contract = iface.contract_id
-    msg_type = _msg_type_from_contract(contract)
+    leaf = contract.rsplit("/", 1)[-1].lower()
+    if leaf not in _CONTRACT_LEAF_TO_KIND and kind_override is None:
+        # Skip contracts scene has no consumer for. Saves us a
+        # ConnectCapability round-trip per uninteresting iface.
+        return None
+    msg_type = _msg_type_from_contract(atlas_stub, contract)
     if not msg_type:
-        # Contract is rpc/srv (no [io.msg]) — not subscribable.
+        return None
+    try:
+        conn = atlas_stub.ConnectCapability(pb.ConnectCapabilityRequest(
+            consumer_id="com.robonix.system.scene",
+            capability_id=rec.capability_id,
+            contract_id=contract,
+            transport=pb_transport,
+        ))
+    except Exception as e:  # noqa: BLE001
+        log.warning("[scene] ConnectCapability(%s/%s) failed: %s",
+                    rec.capability_id, contract, e)
+        return None
+    endpoint = (conn.endpoint or "").strip()
+    if not endpoint:
         return None
     qos_profile = ""
-    if hasattr(iface, "params") and hasattr(iface.params, "ros2"):
-        qos_profile = iface.params.ros2.qos_profile or ""
-    leaf = contract.rsplit("/", 1)[-1].lower()
+    if pb_transport == pb.TRANSPORT_ROS2 and conn.params and conn.params.HasField("ros2"):
+        qos_profile = conn.params.ros2.qos_profile or ""
     kind = kind_override or _CONTRACT_LEAF_TO_KIND.get(leaf, leaf)
     return TopicSpec(
         kind=kind,
-        topic=topic,
+        topic=endpoint,
         msg_type=msg_type,
         qos_profile=qos_profile or "default",
     )
+
+
+def _pb_transport_name(t: int) -> str:
+    for name, val in _PB_TRANSPORTS.items():
+        if val == t:
+            return name
+    return f"transport({t})"
 
 
 # Lazy-cached reverse map: contract_id → "Image" / "LaserScan" / …
 _CONTRACT_MSG_CACHE: dict[str, str] = {}
 
 
-def _msg_type_from_contract(contract_id: str) -> str:
-    """Read `[io.msg].msg` from `/capabilities/<contract_path>.v1.toml`
-    and return the Python class name. Returns "" when the contract is
-    RPC-only (no `[io.msg]` block) or the TOML can't be read.
+def _msg_type_from_contract(atlas_stub, contract_id: str) -> str:
+    """Resolve `[io.msg].msg` for `contract_id` by calling atlas's
+    `QueryContract` and returning just the Python class name. Returns
+    "" when atlas doesn't know the contract, the contract is RPC-only
+    (no `[io.msg]`), or the call fails.
 
-    Cache because we call this once per observation at startup and
-    contracts don't change at runtime; keep the implementation in one
-    place rather than littering atlas-resolution callers with TOML
-    parsing.
+    Cached because every observation triggers this at startup and the
+    contract registry is loaded once at atlas boot — no churn.
     """
     if contract_id in _CONTRACT_MSG_CACHE:
         return _CONTRACT_MSG_CACHE[contract_id]
-    # contract_id like "robonix/primitive/camera/rgb" → file is at
-    # /capabilities/primitive/camera/rgb.v1.toml. Strip the leading
-    # "robonix/" namespace prefix.
-    parts = contract_id.split("/")
-    if not parts or parts[0] != "robonix":
+    try:
+        resp = atlas_stub.QueryContract(pb.QueryContractRequest(contract_id=contract_id))
+    except Exception as e:  # noqa: BLE001
+        log.debug("[scene] atlas QueryContract(%s) failed: %s", contract_id, e)
         _CONTRACT_MSG_CACHE[contract_id] = ""
         return ""
-    rel = "/".join(parts[1:]) + ".v1.toml"
-    candidates = [
-        Path("/capabilities") / rel,
-        Path("/scene/.capabilities-mirror") / rel,  # alt mount path
-    ]
-    for path in candidates:
-        if not path.is_file():
-            continue
-        try:
-            try:
-                import tomllib  # 3.11+
-                data = tomllib.loads(path.read_text())
-            except ImportError:
-                import tomli  # noqa: F401  # 3.10
-                data = __import__("tomli").loads(path.read_text())
-        except Exception as e:  # noqa: BLE001
-            log.debug("[scene] failed to parse %s: %s", path, e)
-            _CONTRACT_MSG_CACHE[contract_id] = ""
-            return ""
-        msg_field = (data.get("io", {}) or {}).get("msg", {}) or {}
-        msg = str(msg_field.get("msg", ""))
-        if not msg:
-            _CONTRACT_MSG_CACHE[contract_id] = ""
-            return ""
-        # "sensor_msgs/msg/Image" → "Image"
-        leaf = msg.rsplit("/", 1)[-1]
-        _CONTRACT_MSG_CACHE[contract_id] = leaf
-        return leaf
-    log.debug("[scene] no contract TOML found for %s in %s",
-              contract_id, [str(p) for p in candidates])
-    _CONTRACT_MSG_CACHE[contract_id] = ""
-    return ""
+    if not resp.found:
+        log.debug("[scene] atlas: contract %s not loaded (found=false)", contract_id)
+        _CONTRACT_MSG_CACHE[contract_id] = ""
+        return ""
+    io_msg = resp.contract.io_msg_type or ""
+    if not io_msg:
+        # rpc-only contract (uses io_srv_type instead).
+        _CONTRACT_MSG_CACHE[contract_id] = ""
+        return ""
+    # "sensor_msgs/msg/Image" → "Image"
+    leaf = io_msg.rsplit("/", 1)[-1]
+    _CONTRACT_MSG_CACHE[contract_id] = leaf
+    return leaf
 
 
 # ── DeclareInterface helper (mirrors system/memory) ────────────────────────
@@ -402,31 +429,37 @@ class _SelfTracker:
         self.registry = registry
         self._latest: Optional[tuple[float, float, float, float]] = None
         self._object_id: Optional[str] = None
+        # World frame name used for stamped outputs. Updated by the
+        # pose loop from the localizer's `header.frame_id` so we never
+        # hardcode a specific provider's frame name (`map` for rtabmap,
+        # `world` for some mocap setups, etc.).
+        self.world_frame_id: str = "map"
 
     def latest_xy_yaw(self) -> Optional[tuple[float, float, float, float]]:
         return self._latest
 
     async def on_pose(self, x: float, y: float, z: float, yaw: float) -> None:
         self._latest = (x, y, z, yaw)
+        wf = self.world_frame_id
         async with self.registry.lock():
             if self._object_id is None or self._object_id not in self.registry._objects:  # noqa: SLF001
                 obj = self.registry.insert_object(
                     cls="robot",
-                    pose=Pose3D(x=x, y=y, z=z, yaw=yaw, frame_id="map"),
-                    bbox=BBox3D(size_x=0.6, size_y=0.6, size_z=1.5, frame_id="map"),
+                    pose=Pose3D(x=x, y=y, z=z, yaw=yaw, frame_id=wf),
+                    bbox=BBox3D(size_x=0.6, size_y=0.6, size_z=1.5, frame_id=wf),
                     confidence=1.0,
                     now=now_unix(),
                     is_robot=True,
                     source="self",
                 )
                 self._object_id = obj.object_id
-                log.info("[self] registered self-object %s", self._object_id)
+                log.info("[self] registered self-object %s (frame=%s)", self._object_id, wf)
             else:
                 obj = self.registry.get_object(self._object_id)
                 if obj is not None:
                     self.registry.update_object_pose(
                         obj,
-                        Pose3D(x=x, y=y, z=z, yaw=yaw, frame_id="map"),
+                        Pose3D(x=x, y=y, z=z, yaw=yaw, frame_id=wf),
                         new_confidence=1.0,
                         now=now_unix(),
                         ema_pose=1.0,  # robot's own pose: hard-overwrite
@@ -460,6 +493,28 @@ async def _stale_tick(registry: ObjectRegistry, *, period_s: float = 1.0) -> Non
         await asyncio.sleep(period_s)
 
 
+async def _auto_discover_loop(*, atlas_stub, hub, transport: str,
+                                 explicit: list[dict],
+                                 period_s: float = 5.0) -> None:
+    """Background reconciler. Re-runs discovery every `period_s` and
+    dynamically adds new (kind, topic) subscriptions as they appear.
+    Keeps scene picking up mapping/nav outputs that come online minutes
+    after scene started. Explicit observations skip this loop —
+    they're static."""
+    if explicit:
+        return
+    while True:
+        try:
+            await asyncio.sleep(period_s)
+            current = hub.has_kinds()
+            specs = _build_topic_specs(explicit, atlas_stub, transport)
+            for spec in specs:
+                if spec.kind not in current:
+                    hub.add_spec(spec)
+        except Exception as e:  # noqa: BLE001
+            log.debug("[scene] auto-discover loop tick: %s", e)
+
+
 # ── Wire ROS subscribers + downstream consumers ────────────────────────────
 async def _start_ros_ingest(
     *,
@@ -467,13 +522,50 @@ async def _start_ros_ingest(
     registry: ObjectRegistry,
     self_tracker: "_SelfTracker",
     config: dict,
-) -> tuple[SubscribersHub, Optional[VLMObjectDetector], list[asyncio.Task]]:
+) -> tuple[SubscribersHub, Optional[Any], list[asyncio.Task]]:
     """Bring up the rclpy hub + the per-kind consumers (self-pose
-    bridge, VLM perception). Returns (hub, vlm_or_None, bg_tasks_for_shutdown).
+    bridge, ConceptGraphs perception, VLM fallback). Returns
+    (hub, detector_or_None, bg_tasks_for_shutdown).
 
-    Each consumer is its own asyncio task so a hung VLM call doesn't
-    starve the pose updater, and vice versa."""
-    specs = _build_topic_specs(config.get("observations") or [], atlas_stub)
+    Each consumer is its own asyncio task so a hung perception call
+    doesn't starve the pose updater, and vice versa.
+
+    Detector preference:
+      1. ConceptGraphsDetector — RGB + depth + camera_info present and
+         YOLO-World/MobileSAM weights baked into the image. This is the
+         only path that gives metric-accurate object positions.
+      2. VLMObjectDetector — fallback when there is no depth stream.
+         Approximate only; positions wobble.
+      3. None — neither RGB nor depth available."""
+    # Auto-discovery is a never-ending background concern: scene is a
+    # system service that runs alongside primitives + other services
+    # which may declare their ROS2 outputs at any time (mapping comes
+    # up after primitives, a soma can hot-plug a new sensor, etc.).
+    # Strategy:
+    #   1. Wait until at least one matching contract appears (keeps
+    #      retrying — no timeout, scene's whole job is to track these).
+    #   2. Background reconciler keeps re-polling forever and adds new
+    #      kinds to the hub as they show up.
+    # Explicit `observations:` in the manifest skips both phases —
+    # those references are static and authoritative.
+    explicit = config.get("observations") or []
+    transport = str(config.get("transport") or "ros2")
+    specs = _build_topic_specs(explicit, atlas_stub, transport)
+    if not specs and not explicit:
+        attempt = 0
+        while not specs:
+            attempt += 1
+            await asyncio.sleep(2.0)
+            specs = _build_topic_specs(explicit, atlas_stub, transport)
+            if specs:
+                log.info("[scene] auto-discover: found %d topic(s) on attempt %d",
+                         len(specs), attempt)
+                break
+            if attempt % 5 == 1:
+                log.info("[scene] auto-discover attempt %d: 0 %s topics yet, retrying",
+                         attempt, transport)
+
+
     if not specs:
         log.warning("no observation topics configured — registry will stay empty")
         specs = []
@@ -492,54 +584,170 @@ async def _start_ros_ingest(
             _self_pose_loop(hub, self_tracker), name="scene-self-pose"
         ))
 
-    # ── VLM perception ─────────────────────────────────────────────────────
-    vlm: Optional[VLMObjectDetector] = None
-    if hub.has("rgb"):
-        # Convert sensor_msgs/Image to JPEG bytes lazily on each tick.
-        # cv_bridge is too heavy to import at module-top; we only need
-        # the encoder here.
+    # Perception startup races with camera primitive cap registration:
+    # the chassis cap usually shows up first (its `pose`/`odom` topics
+    # populate hub.specs at the initial discovery), but the camera
+    # primitive's RGB/depth contracts may take a few extra seconds to
+    # land in atlas. Wait up to a bounded window for them to appear via
+    # the auto-discover reconciler loop, so we don't permanently lose
+    # the ConceptGraphs path because of a startup race.
+    perception_wait_s = float(os.environ.get("SCENE_PERCEPTION_WAIT_S", "30"))
+    deadline = time.time() + perception_wait_s
+    while time.time() < deadline and not (hub.has("rgb") and hub.has("depth")):
+        # Pull fresh specs from atlas and add anything new.
+        new_specs = _build_topic_specs(explicit, atlas_stub, transport)
+        for spec in new_specs:
+            if spec.kind not in hub.has_kinds():
+                hub.add_spec(spec)
+        if hub.has("rgb") and hub.has("depth"):
+            log.info("[scene] perception-wait: rgb+depth now available")
+            break
+        await asyncio.sleep(2.0)
+
+    # ── perception ─────────────────────────────────────────────────────────
+    # ConceptGraphs path is *strongly* preferred: it owns metric-accurate
+    # depth-backprojected poses. The VLM path stays as a no-depth fallback
+    # but we log loudly when we fall into it because pose accuracy will
+    # suffer.
+    detector: Optional[Any] = None
+    if hub.has("rgb") and hub.has("depth"):
+        def _rgb_msg() -> Optional[Any]:
+            msg, stamp, _ = hub.latest("rgb")
+            if msg is None or stamp == 0.0:
+                return None
+            return msg
+
+        def _depth_msg() -> Optional[Any]:
+            msg, stamp, _ = hub.latest("depth")
+            if msg is None or stamp == 0.0:
+                return None
+            return msg
+
+        # Camera intrinsics: prefer a dedicated camera_info topic if a
+        # primitive ever publishes one (TODO: subscribe to camera_info as
+        # a separate kind). For now we fall back to the static webots
+        # tiago intrinsics — same as the VLM path used. If a deployment
+        # has different intrinsics it can override via
+        # SCENE_CAMERA_INTRINSICS=fx,fy,cx,cy,w,h.
+        def _cam_info() -> Optional[_CamIntrinsics]:
+            return _resolved_cam_intrinsics()
+
+        detector = ConceptGraphsDetector(
+            rgb_fetcher_msg=_rgb_msg,
+            depth_fetcher_msg=_depth_msg,
+            camera_info_fetcher=_cam_info,
+            chassis_pose_fn=self_tracker.latest_xy_yaw,
+            world_frame_fn=lambda: getattr(self_tracker, "world_frame_id", "map"),
+            on_detections=lambda dets: _ingest_detections(registry, dets),
+            registry=registry,
+            # Pass the hub so the detector can compose camera→world
+            # from atlas-resolved contracts (`service/map/pose` ⊕
+            # `primitive/camera/extrinsics`). tf2 is reserved for the
+            # legacy fallback path.
+            hub=hub,
+        )
+        await detector.start()
+        log.info("[scene] perception: ConceptGraphsDetector (rgb+depth)")
+    elif hub.has("rgb"):
+        log.warning(
+            "[scene] perception: no depth stream — falling back to "
+            "VLMObjectDetector. Object positions will be approximate. "
+            "Configure a depth topic to get metric-accurate poses."
+        )
         def _rgb_jpeg() -> Optional[bytes]:
             msg, stamp, _ = hub.latest("rgb")
             if msg is None or stamp == 0.0:
                 return None
             return _image_msg_to_jpeg(msg)
 
-        vlm = VLMObjectDetector(
+        detector = VLMObjectDetector(
             rgb_fetcher=_rgb_jpeg,
             chassis_pose_fn=self_tracker.latest_xy_yaw,
             on_detections=lambda dets: _ingest_detections(registry, dets),
-            period_s=4.0,  # one VLM call every ~4 s; LLM calls aren't free
+            period_s=4.0,
         )
-        await vlm.start()
+        await detector.start()
+    else:
+        log.warning("[scene] perception: no RGB stream — detector disabled")
 
-    return hub, vlm, bg_tasks
+    return hub, detector, bg_tasks
+
+
+def _resolved_cam_intrinsics() -> _CamIntrinsics:
+    """Camera intrinsics for the ConceptGraphs detector. Default is
+    webots tiago head_front_camera at 640x480 (60° HFOV). Override
+    via SCENE_CAMERA_INTRINSICS=fx,fy,cx,cy,w,h."""
+    raw = os.environ.get("SCENE_CAMERA_INTRINSICS", "").strip()
+    if raw:
+        try:
+            parts = [float(s) for s in raw.split(",")]
+            if len(parts) >= 4:
+                fx, fy, cx, cy = parts[:4]
+                w = int(parts[4]) if len(parts) > 4 else 640
+                h = int(parts[5]) if len(parts) > 5 else 480
+                return _CamIntrinsics(width=w, height=h, fx=fx, fy=fy, cx=cx, cy=cy)
+        except Exception:  # noqa: BLE001
+            pass
+    return _CamIntrinsics()
 
 
 async def _self_pose_loop(hub: SubscribersHub, self_tracker: "_SelfTracker") -> None:
-    """Read latest amcl_pose / odom from the hub, feed SelfTracker.
-    /amcl_pose is preferred (post-localisation); /odom is the fallback
-    early in a session before AMCL has converged."""
-    last_count_pose = 0
-    last_count_odom = 0
+    """Feed SelfTracker the robot's world-frame pose, sourced through
+    the `service/map/pose` (or fallback `service/map/odom`) atlas
+    contract — i.e. whatever provider mapping/AMCL/mocap registered.
+
+    Frame name comes from the message's `header.frame_id` (so the
+    rest of scene's outputs stamp the same world frame the localizer
+    is using), not a hardcoded `"map"` constant: a Ranger Mini deploy
+    using a stack that publishes pose in `world` or `odom_combined`
+    Just Works without scene caring.
+
+    Falls back to tf2 only when neither contract is wired (legacy
+    transition path; logged once).
+    """
+    fallback_warned = False
     while True:
+        x = y = z = yaw = None
+        frame_id: Optional[str] = None
+
+        # Path A: SLAM-corrected pose contract (preferred — bounded drift).
         if hub.has("pose"):
-            msg, stamp, count = hub.latest("pose")
-            if msg is not None and count != last_count_pose:
-                last_count_pose = count
-                p = msg.pose.pose  # PoseWithCovarianceStamped
-                x, y, z = p.position.x, p.position.y, p.position.z
-                yaw = _quat_to_yaw(p.orientation.x, p.orientation.y,
-                                   p.orientation.z, p.orientation.w)
-                await self_tracker.on_pose(x, y, z, yaw)
-        if hub.has("odom") and last_count_pose == 0:
-            # Only use odom as backup until amcl publishes.
-            msg, stamp, count = hub.latest("odom")
-            if msg is not None and count != last_count_odom:
-                last_count_odom = count
+            msg, stamp_unix, _count = hub.latest("pose")
+            if msg is not None and stamp_unix > 0:
+                p = msg.pose.pose if hasattr(msg, "pose") and hasattr(msg.pose, "pose") else msg.pose
+                q = p.orientation
+                x = float(p.position.x); y = float(p.position.y); z = float(p.position.z)
+                yaw = _quat_to_yaw(float(q.x), float(q.y), float(q.z), float(q.w))
+                frame_id = getattr(getattr(msg, "header", None), "frame_id", None) or None
+
+        # Path B: SLAM odom (smoothly varying — for high-rate trackers).
+        if x is None and hub.has("odom"):
+            msg, stamp_unix, _count = hub.latest("odom")
+            if msg is not None and stamp_unix > 0:
                 p = msg.pose.pose
-                yaw = _quat_to_yaw(p.orientation.x, p.orientation.y,
-                                   p.orientation.z, p.orientation.w)
-                await self_tracker.on_pose(p.position.x, p.position.y, p.position.z, yaw)
+                q = p.orientation
+                x = float(p.position.x); y = float(p.position.y); z = float(p.position.z)
+                yaw = _quat_to_yaw(float(q.x), float(q.y), float(q.z), float(q.w))
+                frame_id = getattr(getattr(msg, "header", None), "frame_id", None) or None
+
+        # Path C: tf2 fallback. Only when no pose contract is in atlas.
+        if x is None:
+            if not fallback_warned:
+                log.warning(
+                    "[scene] no pose contract resolved (service/map/pose, /odom). "
+                    "Falling back to tf2 lookup; declare a pose provider in atlas to "
+                    "remove this side-channel."
+                )
+                fallback_warned = True
+            res = hub.lookup_xy_yaw("base_link", "map")
+            if res is not None:
+                x, y, z, yaw = res
+                frame_id = "map"
+
+        if x is not None:
+            if frame_id:
+                self_tracker.world_frame_id = frame_id  # type: ignore[attr-defined]
+            await self_tracker.on_pose(x, y, z, yaw)
         await asyncio.sleep(0.2)
 
 
@@ -652,13 +860,25 @@ async def _run() -> None:
     except Exception as e:  # noqa: BLE001
         log.warning("DeclareInterface failed: %s", e)
 
-    # ROS2 ingest hub + downstream consumers (self-pose, VLM perception).
-    hub, vlm, ingest_bg = await _start_ros_ingest(
+    # ROS2 ingest hub + downstream consumers (self-pose, perception).
+    hub, perception, ingest_bg = await _start_ros_ingest(
         atlas_stub=stub, registry=registry, self_tracker=self_tracker, config=config,
     )
     bg_tasks = [
         asyncio.create_task(_heartbeat_loop(stub, cap_id), name="scene-heartbeat"),
         asyncio.create_task(_stale_tick(registry), name="scene-stale-tick"),
+        # Background reconciler: keeps scene's hub adding subscriptions
+        # for new ROS2 topic_outs that appear on atlas after start
+        # (mapping comes up after scene; same pattern for any future
+        # service that publishes a contract scene knows about).
+        asyncio.create_task(
+            _auto_discover_loop(
+                atlas_stub=stub, hub=hub,
+                transport=str(config.get("transport") or "ros2"),
+                explicit=(config.get("observations") or []),
+            ),
+            name="scene-auto-discover",
+        ),
         *ingest_bg,
     ]
 
@@ -684,7 +904,10 @@ async def _run() -> None:
                    else os.environ.get("SCENE_WEB_PORT", "50107"))
     web_task = None
     if web_port > 0:
-        web_app = web_ui.make_app(registry=registry, relations=relations)
+        web_app = web_ui.make_app(
+            registry=registry, relations=relations, hub=hub,
+            detector=perception,
+        )
         web_uv = uvicorn.Config(
             app=web_app, host="0.0.0.0", port=web_port, log_level="warning",
         )
@@ -705,9 +928,9 @@ async def _run() -> None:
     log.info("shutdown signal received; tearing down")
 
     # Tear down ingest first so we stop mutating the registry…
-    if vlm is not None:
+    if perception is not None:
         with contextlib.suppress(Exception):
-            await vlm.stop()
+            await perception.stop()
     with contextlib.suppress(Exception):
         await hub.stop()
     await relations.stop()
