@@ -165,7 +165,13 @@ pub fn boot_summary(ok: usize, total: usize, hint: &str) {
     } else {
         "⚠".yellow().bold()
     };
-    println!("\n{} {}/{} components up — {}", badge, ok, total, hint.dimmed());
+    println!(
+        "\n{} {}/{} components up — {}",
+        badge,
+        ok,
+        total,
+        hint.dimmed()
+    );
 }
 
 /// Spinner for animated progress indication

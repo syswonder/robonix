@@ -156,11 +156,17 @@ pub async fn execute_build(
 }
 
 /// Build every package referenced by a top-level `robonix_manifest.yaml`.
-/// `path:` entries are built in-place; `url:` entries are built in
-/// their `rbnx-boot/cache/<name>/` location if already cloned (run
-/// `rbnx boot` once first to populate the cache, since `git clone` is
-/// boot's job, not build's). Failure on any single package aborts —
-/// boot expects every declared package to be buildable.
+/// Two phases:
+///   1. **fetch** — `path:` entries already on disk; `url:` entries
+///      get `git clone --depth 1` into `rbnx-boot/cache/<name>/`
+///      (idempotent — skipped when the cache dir already exists).
+///   2. **build** — for each resolved package, run its `build.sh`.
+///
+/// `rbnx boot` deliberately does NOT do either; it just verifies
+/// both phases happened (warns + remediates if not). This lets
+/// "fetch → build" be a controlled offline step the user can run
+/// when they have network / time, then `rbnx boot` is a fast,
+/// online-optional bring-up.
 fn build_deploy_manifest(manifest_path: &Path, clean: bool) -> Result<()> {
     use serde_yaml::Value;
     let manifest_dir = manifest_path
@@ -169,8 +175,8 @@ fn build_deploy_manifest(manifest_path: &Path, clean: bool) -> Result<()> {
         .to_path_buf();
     let raw = std::fs::read_to_string(manifest_path)
         .with_context(|| format!("read {}", manifest_path.display()))?;
-    let root: Value = serde_yaml::from_str(&raw)
-        .with_context(|| format!("parse {}", manifest_path.display()))?;
+    let root: Value =
+        serde_yaml::from_str(&raw).with_context(|| format!("parse {}", manifest_path.display()))?;
     let cache_root = manifest_dir.join("rbnx-boot").join("cache");
 
     output::action(
@@ -178,15 +184,19 @@ fn build_deploy_manifest(manifest_path: &Path, clean: bool) -> Result<()> {
         &format!("packages declared in {}", manifest_path.display()),
     );
 
-    let mut total = 0usize;
-    let mut built = 0usize;
-    let mut skipped = 0usize;
+    // Collect (section, name, pkg_dir, url_to_clone) for every entry.
+    struct Resolved {
+        section: &'static str,
+        name: String,
+        pkg_dir: PathBuf,
+        url_to_clone: Option<(String, Option<String>)>, // (url, branch)
+    }
+    let mut entries: Vec<Resolved> = Vec::new();
     for section in &["primitive", "service", "skill"] {
         let Some(seq) = root.get(*section).and_then(|v| v.as_sequence()) else {
             continue;
         };
         for entry in seq {
-            total += 1;
             let name = entry
                 .get("name")
                 .and_then(|v| v.as_str())
@@ -194,36 +204,84 @@ fn build_deploy_manifest(manifest_path: &Path, clean: bool) -> Result<()> {
                 .to_string();
             let local_path = entry.get("path").and_then(|v| v.as_str());
             let url = entry.get("url").and_then(|v| v.as_str());
-            let pkg_dir: PathBuf = match (local_path, url) {
-                (Some(p), _) => manifest_dir.join(p),
-                (None, Some(_u)) => cache_root.join(&name),
+            let branch = entry
+                .get("branch")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            match (local_path, url) {
+                (Some(p), _) => entries.push(Resolved {
+                    section,
+                    name,
+                    pkg_dir: manifest_dir.join(p),
+                    url_to_clone: None,
+                }),
+                (None, Some(u)) => entries.push(Resolved {
+                    section,
+                    name: name.clone(),
+                    pkg_dir: cache_root.join(&name),
+                    url_to_clone: Some((u.to_string(), branch)),
+                }),
                 (None, None) => {
                     output::warning(&format!(
                         "skipping {section}/{name}: entry has neither `path` nor `url`"
                     ));
-                    skipped += 1;
-                    continue;
                 }
-            };
-            if !pkg_dir.join("package_manifest.yaml").is_file() {
-                output::warning(&format!(
-                    "skipping {section}/{name}: no package_manifest.yaml at {} \
-                     (run `rbnx boot` once to clone url-remote packages)",
-                    pkg_dir.display()
-                ));
-                skipped += 1;
-                continue;
             }
-            let canon = pkg_dir
-                .canonicalize()
-                .with_context(|| format!("canonicalize {}", pkg_dir.display()))?;
-            output::step(section, &name);
-            build::build_local_package(&canon, clean)?;
-            built += 1;
         }
     }
+
+    // Phase 1: fetch. git clone url-remote pkgs into cache.
+    let to_clone: Vec<&Resolved> = entries
+        .iter()
+        .filter(|e| e.url_to_clone.is_some() && !e.pkg_dir.exists())
+        .collect();
+    if !to_clone.is_empty() {
+        output::step("fetch", &format!("{} package(s)", to_clone.len()));
+        std::fs::create_dir_all(&cache_root)?;
+        for r in &to_clone {
+            let (url, branch) = r.url_to_clone.as_ref().unwrap();
+            output::sub_step(&format!("git clone {url} -> {}", r.pkg_dir.display()));
+            let mut clone = std::process::Command::new("git");
+            clone.arg("clone").arg("--depth").arg("1");
+            if let Some(b) = branch {
+                clone.arg("--branch").arg(b);
+            }
+            clone.arg(url).arg(&r.pkg_dir);
+            let status = clone
+                .status()
+                .with_context(|| format!("git clone {url} failed to spawn"))?;
+            if !status.success() {
+                anyhow::bail!("git clone {url} exited with {:?}", status.code());
+            }
+        }
+    }
+
+    // Phase 2: build. Run build.sh for each resolved pkg.
+    let mut built = 0usize;
+    let mut skipped = 0usize;
+    for r in &entries {
+        if !r.pkg_dir.join("package_manifest.yaml").is_file() {
+            output::warning(&format!(
+                "skipping {}/{}: no package_manifest.yaml at {}",
+                r.section,
+                r.name,
+                r.pkg_dir.display()
+            ));
+            skipped += 1;
+            continue;
+        }
+        let canon = r
+            .pkg_dir
+            .canonicalize()
+            .with_context(|| format!("canonicalize {}", r.pkg_dir.display()))?;
+        output::step(r.section, &r.name);
+        build::build_local_package(&canon, clean)?;
+        built += 1;
+    }
     output::success(&format!(
-        "built {built} / skipped {skipped} / total {total} from {}",
+        "fetched {} / built {built} / skipped {skipped} / total {} from {}",
+        to_clone.len(),
+        entries.len(),
         manifest_path
             .file_name()
             .and_then(|n| n.to_str())
