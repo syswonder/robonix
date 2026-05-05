@@ -491,28 +491,38 @@ _COMBINED_HTML = r"""<!doctype html>
        headline view (you mostly check it when detections look wrong). */
     #grid { display: grid; grid-template-columns: 5fr 5fr 2fr;
             height: 100vh; gap: 1px; background: #1a1d24; }
-    .panel { position: relative; background: #08090c;
-             min-width: 0; min-height: 0; overflow: hidden; }
-    .panel iframe { width: 100%; height: 100%; border: 0; display: block; }
-    /* Tiny single-letter badge in top-left of each panel — was a
-       multi-word strip ("cam rgb + depth · live", "3D ConceptGraphs ·
-       WASD/click", ...) that collided with the ⛶ expand button on
-       narrow columns. Click the badge to read a tooltip with the
-       full description. */
-    .panel .head { position: absolute; top: 8px; left: 8px;
-                   z-index: 10; padding: 3px 7px;
-                   background: rgba(10,12,16,0.78); border: 1px solid #303542;
-                   border-radius: 4px; font-size: 11px; color: #f0c050;
-                   font-weight: 600; pointer-events: auto;
-                   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    /* Windows-style chrome: titlebar is its OWN row at the top of the
+       panel, NOT an overlay floating over the iframe. iframe gets the
+       clean remainder. The previous absolute-positioned head + ⛶
+       button always covered the iframe content beneath them no matter
+       how small they were. */
+    .panel { background: #08090c;
+             min-width: 0; min-height: 0; overflow: hidden;
+             display: flex; flex-direction: column; }
+    .panel .titlebar {
+      flex: 0 0 auto;
+      display: flex; align-items: center; gap: 8px;
+      padding: 0 6px 0 10px; height: 24px;
+      background: #14171f; border-bottom: 1px solid #303542;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px; line-height: 1; user-select: none;
+    }
+    .panel .titlebar .badge { color: #f0c050; font-weight: 600;
+                              letter-spacing: 0.04em; }
+    .panel .titlebar .desc { flex: 1; color: #6a6f7a;
+                             white-space: nowrap; overflow: hidden;
+                             text-overflow: ellipsis; }
     .panel button.expand {
-      position: absolute; top: 8px; right: 8px; z-index: 10;
-      width: 28px; height: 28px; padding: 0;
-      background: rgba(10,12,16,0.78); color: #d8dde6;
-      border: 1px solid #303542; border-radius: 4px;
-      cursor: pointer; font-size: 14px; line-height: 1;
+      flex: 0 0 auto;
+      width: 22px; height: 18px; padding: 0;
+      background: transparent; color: #889;
+      border: 1px solid #303542; border-radius: 3px;
+      cursor: pointer; font-size: 11px; line-height: 1;
     }
     .panel button.expand:hover { color: #f0c050; border-color: #5a606e; }
+    .panel iframe { flex: 1 1 auto;
+                    width: 100%; min-height: 0;
+                    border: 0; display: block; background: #08090c; }
     .panel.expanded {
       position: fixed; inset: 0; z-index: 99;
       grid-column: unset; grid-row: unset;
