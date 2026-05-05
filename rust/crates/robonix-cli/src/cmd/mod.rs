@@ -15,9 +15,11 @@ mod codegen;
 mod config;
 mod deploy;
 mod info;
+mod init;
 mod inspect;
 mod install;
 mod list;
+mod package_new;
 mod path;
 mod run_package;
 mod setup;
@@ -197,6 +199,27 @@ pub enum Commands {
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
     },
+
+    /// Initialize a new robonix project (creates robonix_manifest.yaml + directory skeleton)
+    Init {
+        /// Project name (also used as directory name)
+        name: String,
+        /// Parent directory (default: current directory)
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+
+    /// Create a new package under the appropriate role directory
+    PackageNew {
+        /// Package name
+        name: String,
+        /// Package type: primitive, service, or skill
+        #[arg(short = 't', long = "type", default_value = "service")]
+        pkg_type: String,
+        /// Target package directory to create (when given, --type is ignored)
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
 }
 
 pub async fn execute(command: Commands, config: Config) -> Result<()> {
@@ -239,5 +262,11 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         Commands::Channels { server } => inspect::channels(&server).await,
         Commands::Inspect { server } => inspect::inspect(&server).await,
         Commands::Chat { server } => chat::execute(&server).await,
+        Commands::Init { name, path } => init::execute(&name, path.as_deref()).await,
+        Commands::PackageNew {
+            name,
+            pkg_type,
+            path,
+        } => package_new::execute(&name, &pkg_type, path.as_deref()).await,
     }
 }
