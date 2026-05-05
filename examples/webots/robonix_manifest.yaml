@@ -31,9 +31,11 @@ system:
     log: info
   nexus:
     log: info
-  # memory disabled while milvus init issue is unrelated to mapping demo.
-  # memory: {}
-  speech: {}
+  memory:
+    backend: sqlite
+    log: info
+  speech:
+    log: info
   # Scene auto-discovers its observation topics from atlas at startup
   # (see scene_service/service.py `_discover_observations`). No per-
   # deploy config needed: scene asks atlas for every cap with a
@@ -42,7 +44,8 @@ system:
   # accordingly. To override or disable a kind for a specific
   # deployment, add an `observations:` block here — but the default
   # is intentionally empty.
-  scene: {}
+  scene:
+    log: info
 
 primitive:
   - name: tiago_chassis
@@ -60,20 +63,29 @@ primitive:
       max_range: 50.0
       frame_id: base_link
       topic_prefix: /lidar-robonix
-  # audio_driver works as a process (ALSA scan + mic/speaker gRPC servers
-  # come up fine) but its Atlas registration still uses the pre-dev-packaging
-  # robonix_runtime_pb2 monolith, which dev-packaging deleted in favour of
-  # per-IDL-package proto modules (atlas_pb2 + RegisterCapability). Until
-  # that registration block is ported, audio_driver never publishes a cap,
-  # boot waits 60s, then tears the stack down. Re-enable once migrated.
+  # audio_driver integration WIP
   # - name: audio_driver
   #   path: ./primitives/audio_driver
   #   config: {}
 
 service:
-  # simple_nav — minimal goto-with-avoidance nav service. Runs inside
-  # the sim container via docker-exec (same as primitive drivers).
-  # Pure pursuit toward target + lidar slowdown; no Nav2.
+  # ── navigation ─────────────────────────────────────────────────────
+  # `simple_nav` IS the navigation service for this deploy. The
+  # package directory is named after the implementation; the contract
+  # namespace it declares on atlas is `robonix/service/navigation/*`
+  # (navigate, status, cancel). Consumers (explore, pilot via MCP)
+  # only ever know the contract namespace, so swapping in a nav2
+  # wrapper later means dropping in a different package that declares
+  # the same three contracts — no caller-side change.
+  #
+  # Implementation: A* on rtabmap's /map (35 cm inscribed + 40 cm
+  # inflation costmap) → Regulated Pure Pursuit follower → publishes
+  # /cmd_vel. Re-validates the cached path on every /map update and
+  # auto-replans if a waypoint becomes blocked. 360° lidar emergency
+  # stop. Target_yaw align phase. NOT Nav2 — Nav2 would live as a
+  # separate package (e.g. `services/nav2_wrapper/`) declaring the
+  # same `robonix/service/navigation/*` contract surface; that's the
+  # planned path for the Ranger Mini deploy.
   - name: simple_nav
     path: ./services/simple_nav
     config: {}
@@ -95,11 +107,12 @@ service:
       sensors:
         lidar2d: true
         lidar3d: false
-        rgb: true        # rtabmap fuses RGB for visual loop closure
-        rgbd: true       # depth fills below-lidar-plane obstacles
+        rgb: true # rtabmap fuses RGB for visual loop closure
+        rgbd: true # depth fills below-lidar-plane obstacles
         imu: false
         odom: true
 
+skill:
   # explore_rbnx — autonomous frontier exploration. Contract kind is
   # `skill` (user-invocable, declared at robonix/skill/explore/*) but
   # we deploy it under `service:` because rbnx CLI's `skill:` section
@@ -113,5 +126,3 @@ service:
     url: https://github.com/enkerewpo/explore_rbnx
     branch: main
     config: {}
-
-skill: []
