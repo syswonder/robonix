@@ -13,6 +13,25 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Auto-detect DISPLAY if the launching shell didn't export one. Probes
+# the standard local X server slots via `xset q`; if any responds, use
+# it. Falls back to :0 so headless / non-X bash still gets a sensible
+# default the docker compose env interpolation can use. Without this,
+# users repeatedly forgot to `export DISPLAY=:0` and Webots / rviz2
+# came up invisible.
+if [[ -z "${DISPLAY:-}" ]]; then
+    if command -v xset &>/dev/null; then
+        for d in :0 :1 :10; do
+            if DISPLAY="$d" xset q &>/dev/null; then
+                export DISPLAY="$d"
+                echo "[sim/start] auto-detected DISPLAY=$DISPLAY"
+                break
+            fi
+        done
+    fi
+    : "${DISPLAY:=:0}"; export DISPLAY
+fi
+
 CF=(-f compose.yaml)
 if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]] && command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
   CF+=(-f compose.gpu.yaml)
