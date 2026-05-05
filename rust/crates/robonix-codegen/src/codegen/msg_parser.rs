@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// Shared ROS .msg / .srv file parser — used by rust_gen, proto_gen, etc.
+// Shared ROS .msg / .srv file parser — used by proto_gen, mcp_python_gen,
+// and atlas's contract registry.
 
 use anyhow::{Context, Result, bail};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,12 +16,192 @@ pub struct MsgField {
     pub is_array: bool,
     /// Fixed array size (e.g. 9 for `float32[9]`). None means unbounded (`T[]`).
     pub array_size: Option<usize>,
+    /// Upper bound for `string<=N` / `wstring<=N` fields. None when not
+    /// declared. Preserved so MCP JSON Schema can emit `maxLength`.
+    pub string_max_len: Option<usize>,
+    /// Trailing-comment annotation from the .msg line, e.g.
+    /// `# in metres` or `# range [0, 1]`. Empty when there was no
+    /// comment. Standard ROS messages use these for units / value
+    /// ranges; we propagate them to MCP `description` because they
+    /// give an LLM real semantic hints about the field.
+    pub description: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MsgTypeRef {
+    /// Carries the canonical ROS primitive identifier as a string. Use
+    /// `RosPrimitive::parse(...)` to recover the strongly-typed enum
+    /// when generating code; the string representation is the source
+    /// of truth for cross-generator consistency.
     Primitive(String),
     Named { package: String, name: String },
+}
+
+/// Strongly-typed enum of every ROS2 IDL primitive. **This is the
+/// single source of truth for how a primitive maps to wire formats
+/// across generators.** Both `proto_gen` and `mcp_python_gen` consume
+/// the methods on this enum so a new primitive only has to be added
+/// here once.
+///
+/// The catch-all silent fallbacks that used to live in each generator
+/// (`_ => "int"`, `_ => "bytes"`) are gone — every primitive must be
+/// listed explicitly. An unrecognised type now panics at codegen time
+/// instead of silently producing the wrong wire shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RosPrimitive {
+    Bool,
+    Byte,    // ROS2: signed 8-bit. NOT the same as uint8 (unsigned).
+    Char,    // ROS2: unsigned 8-bit. NOT the same as int8.
+    Int8,
+    Uint8,
+    Int16,
+    Uint16,
+    Int32,
+    Uint32,
+    Int64,
+    Uint64,
+    Float32,
+    Float64,
+    String,
+    Wstring,
+}
+
+impl RosPrimitive {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "bool" => Self::Bool,
+            "byte" => Self::Byte,
+            "char" => Self::Char,
+            "int8" => Self::Int8,
+            "uint8" => Self::Uint8,
+            "int16" => Self::Int16,
+            "uint16" => Self::Uint16,
+            "int32" => Self::Int32,
+            "uint32" => Self::Uint32,
+            "int64" => Self::Int64,
+            "uint64" => Self::Uint64,
+            "float32" => Self::Float32,
+            "float64" => Self::Float64,
+            "string" => Self::String,
+            "wstring" => Self::Wstring,
+            _ => return None,
+        })
+    }
+
+    pub fn as_ros_str(&self) -> &'static str {
+        match self {
+            Self::Bool => "bool",
+            Self::Byte => "byte",
+            Self::Char => "char",
+            Self::Int8 => "int8",
+            Self::Uint8 => "uint8",
+            Self::Int16 => "int16",
+            Self::Uint16 => "uint16",
+            Self::Int32 => "int32",
+            Self::Uint32 => "uint32",
+            Self::Int64 => "int64",
+            Self::Uint64 => "uint64",
+            Self::Float32 => "float32",
+            Self::Float64 => "float64",
+            Self::String => "string",
+            Self::Wstring => "wstring",
+        }
+    }
+
+    /// proto3 wire type for this primitive.
+    pub fn proto_type(&self) -> &'static str {
+        match self {
+            Self::Bool => "bool",
+            // ROS `byte` is signed 8-bit, ROS `char` is unsigned 8-bit;
+            // proto3 has no narrower-than-32-bit ints, so widen but
+            // preserve sign.
+            Self::Byte | Self::Int8 => "int32",
+            Self::Char | Self::Uint8 => "uint32",
+            Self::Int16 => "int32",
+            Self::Uint16 => "uint32",
+            Self::Int32 => "int32",
+            Self::Uint32 => "uint32",
+            Self::Int64 => "int64",
+            Self::Uint64 => "uint64",
+            Self::Float32 => "float",
+            Self::Float64 => "double",
+            Self::String | Self::Wstring => "string",
+        }
+    }
+
+    /// Python type name used in MCP dataclass annotations.
+    pub fn python_type(&self) -> &'static str {
+        match self {
+            Self::Bool => "bool",
+            Self::Float32 | Self::Float64 => "float",
+            Self::String | Self::Wstring => "str",
+            Self::Byte
+            | Self::Char
+            | Self::Int8
+            | Self::Uint8
+            | Self::Int16
+            | Self::Uint16
+            | Self::Int32
+            | Self::Uint32
+            | Self::Int64
+            | Self::Uint64 => "int",
+        }
+    }
+
+    /// Default literal in Python for a non-array field.
+    pub fn python_default(&self) -> &'static str {
+        match self {
+            Self::Bool => "False",
+            Self::Float32 | Self::Float64 => "0.0",
+            Self::String | Self::Wstring => "\"\"",
+            _ => "0",
+        }
+    }
+
+    /// Python cast invoked by `from_dict()` when validating an inbound
+    /// JSON value. Same as the type name for builtin casts.
+    pub fn python_cast(&self) -> &'static str {
+        self.python_type()
+    }
+
+    /// JSON Schema base type ("integer" / "number" / "boolean" / "string").
+    pub fn json_schema_type(&self) -> &'static str {
+        match self {
+            Self::Bool => "boolean",
+            Self::Float32 | Self::Float64 => "number",
+            Self::String | Self::Wstring => "string",
+            _ => "integer",
+        }
+    }
+
+    /// Inclusive range constraint for integer primitives (used by
+    /// `from_dict` validation and JSON Schema `minimum`/`maximum`).
+    /// Floats / strings / bool return None — JSON Schema's defaults
+    /// already cover them.
+    pub fn integer_range(&self) -> Option<(i128, i128)> {
+        Some(match self {
+            Self::Byte | Self::Int8 => (i8::MIN as i128, i8::MAX as i128),
+            Self::Char | Self::Uint8 => (0, u8::MAX as i128),
+            Self::Int16 => (i16::MIN as i128, i16::MAX as i128),
+            Self::Uint16 => (0, u16::MAX as i128),
+            Self::Int32 => (i32::MIN as i128, i32::MAX as i128),
+            Self::Uint32 => (0, u32::MAX as i128),
+            Self::Int64 => (i64::MIN as i128, i64::MAX as i128),
+            // uint64 max overflows i128's signed range only in the
+            // very upper bit; i128 holds it fine.
+            Self::Uint64 => (0, u64::MAX as i128),
+            _ => return None,
+        })
+    }
+
+    /// True if this primitive is the canonical "raw byte buffer" type.
+    /// Only `uint8` qualifies — `byte` is signed 8-bit and shouldn't
+    /// be conflated. Used by both proto and MCP gens to decide whether
+    /// a `T[]` field becomes a wire-level byte blob (`bytes` in proto,
+    /// base64-encoded `bytes` in MCP).
+    pub fn is_blob_element(&self) -> bool {
+        matches!(self, Self::Uint8)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -84,8 +265,30 @@ impl MsgResolver {
         name: &str,
         from: Option<(&str, &ResolveContext)>,
     ) -> Result<()> {
+        let mut visiting: BTreeSet<(String, String)> = BTreeSet::new();
+        self.resolve_named_type_inner(package, name, from, &mut visiting)
+    }
+
+    /// Inner recursive resolver that detects cycles. A self-referential
+    /// or mutually-recursive .msg used to stack-overflow here; now we
+    /// short-circuit on revisit (the dependency closure is already
+    /// being satisfied by an outer frame, so the second visit can be a
+    /// no-op without losing the field list).
+    fn resolve_named_type_inner(
+        &mut self,
+        package: &str,
+        name: &str,
+        from: Option<(&str, &ResolveContext)>,
+        visiting: &mut BTreeSet<(String, String)>,
+    ) -> Result<()> {
         let key = (package.to_string(), name.to_string());
         if self.cache.contains_key(&key) {
+            return Ok(());
+        }
+        if !visiting.insert(key.clone()) {
+            // Cycle: we're already resolving this type higher up the
+            // call stack. Bail without re-parsing — the outer frame
+            // will populate the cache once it returns.
             return Ok(());
         }
         let full_type = ros_msg_type_fmt(package, name);
@@ -101,13 +304,15 @@ impl MsgResolver {
                     interface_name: Some(spec.name.clone()),
                     field_name: Some(field.name.clone()),
                 };
-                self.resolve_named_type(
+                self.resolve_named_type_inner(
                     package,
                     name,
                     Some((&ros_msg_type_fmt(package, name), &dep_ctx)),
+                    visiting,
                 )?;
             }
         }
+        visiting.remove(&key);
         self.cache.insert(key, spec);
         Ok(())
     }
@@ -324,12 +529,32 @@ pub fn parse_srv_file(package: &str, name: &str, path: &Path) -> Result<SrvSpec>
         )
     })?;
     let body = strip_leading_robonix_grpc_lines(&src);
-    let parts: Vec<&str> = body.splitn(2, "---").collect();
-    let request_src = parts.first().unwrap_or(&"");
-    let response_src = parts.get(1).unwrap_or(&"");
 
-    let request = parse_msg_section(package, &format!("{name}_Request"), request_src)?;
-    let response = parse_msg_section(package, &format!("{name}_Response"), response_src)?;
+    // Split on a line that's exactly `---` after trimming. The
+    // previous `splitn(2, "---")` matched `---` as a substring, so a
+    // comment like `# --- separator` would split mid-comment and
+    // wreck the response section. Line-based split avoids that.
+    let mut request_lines: Vec<&str> = Vec::new();
+    let mut response_lines: Vec<&str> = Vec::new();
+    let mut in_response = false;
+    for line in body.lines() {
+        if !in_response && line.trim() == "---" {
+            in_response = true;
+            continue;
+        }
+        if in_response {
+            response_lines.push(line);
+        } else {
+            request_lines.push(line);
+        }
+    }
+    let request_src = request_lines.join("\n");
+    let response_src = response_lines.join("\n");
+
+    let request = parse_msg_section(package, &format!("{name}_Request"), &request_src)
+        .with_context(|| format!("{RIDLC_ERR_PREFIX} parsing request of '{}'", path.display()))?;
+    let response = parse_msg_section(package, &format!("{name}_Response"), &response_src)
+        .with_context(|| format!("{RIDLC_ERR_PREFIX} parsing response of '{}'", path.display()))?;
 
     Ok(SrvSpec {
         package: package.to_string(),
@@ -340,32 +565,77 @@ pub fn parse_srv_file(package: &str, name: &str, path: &Path) -> Result<SrvSpec>
 }
 
 fn parse_msg_section(package: &str, name: &str, src: &str) -> Result<MsgSpec> {
+    let fields = parse_fields_from_lines(package, src, None)?;
+    Ok(MsgSpec {
+        package: package.to_string(),
+        name: name.to_string(),
+        fields,
+    })
+}
+
+/// Single field-parsing pass shared between `parse_msg_file` and
+/// `parse_msg_section` (for srv request / response bodies). Captures:
+///
+///   - constants (`int32 FOO = 42`) are skipped (current scope; could
+///     be promoted to first-class `MsgConstant` records later)
+///   - trailing comments (`float64 x  # in metres`) → `field.description`
+///   - `string<=N` upper bounds → `field.string_max_len`
+///
+/// `path_hint` is used purely for error messages.
+fn parse_fields_from_lines(
+    package: &str,
+    src: &str,
+    path_hint: Option<&Path>,
+) -> Result<Vec<MsgField>> {
     let mut fields = Vec::new();
     for raw_line in src.lines() {
-        let line = raw_line.split('#').next().unwrap_or_default().trim();
-        if line.is_empty() || line.contains('=') {
+        // Split off the trailing comment (if any). The comment text
+        // is preserved as `description` so MCP JSON Schema can show
+        // it to the LLM.
+        let (code, comment) = match raw_line.find('#') {
+            Some(idx) => (&raw_line[..idx], raw_line[idx + 1..].trim()),
+            None => (raw_line, ""),
+        };
+        let code = code.trim();
+        if code.is_empty() {
             continue;
         }
-        let mut parts = line.split_whitespace();
+        // ROS constants like `int32 FOO=42` use `=`. Skip; constant
+        // promotion to first-class records is deferred (B2).
+        if code.contains('=') {
+            continue;
+        }
+        let mut parts = code.split_whitespace();
         let Some(raw_type) = parts.next() else {
             continue;
         };
         let Some(raw_name) = parts.next() else {
             continue;
         };
-        let (type_ref, is_array, array_size) = parse_msg_field_type(package, raw_type)?;
+        let (type_ref, is_array, array_size, string_max_len) = parse_msg_field_type(
+            package, raw_type,
+        )
+        .with_context(|| match path_hint {
+            Some(p) => format!(
+                "{RIDLC_ERR_PREFIX} invalid field in '{}' at line with type '{}'",
+                p.display(),
+                raw_type
+            ),
+            None => format!(
+                "{RIDLC_ERR_PREFIX} invalid field at line with type '{}'",
+                raw_type
+            ),
+        })?;
         fields.push(MsgField {
             name: raw_name.to_string(),
             type_ref,
             is_array,
             array_size,
+            string_max_len,
+            description: comment.to_string(),
         });
     }
-    Ok(MsgSpec {
-        package: package.to_string(),
-        name: name.to_string(),
-        fields,
-    })
+    Ok(fields)
 }
 
 pub fn infer_package_name(path: &Path) -> Option<String> {
@@ -388,34 +658,7 @@ pub fn parse_msg_file(package: &str, name: &str, path: &Path) -> Result<MsgSpec>
             path.display()
         )
     })?;
-    let mut fields = Vec::new();
-    for raw_line in src.lines() {
-        let line = raw_line.split('#').next().unwrap_or_default().trim();
-        if line.is_empty() || line.contains('=') {
-            continue;
-        }
-        let mut parts = line.split_whitespace();
-        let Some(raw_type) = parts.next() else {
-            continue;
-        };
-        let Some(raw_name) = parts.next() else {
-            continue;
-        };
-        let (type_ref, is_array, array_size) = parse_msg_field_type(package, raw_type)
-            .with_context(|| {
-                format!(
-                    "{RIDLC_ERR_PREFIX} invalid field in '{}' at line with type '{}'",
-                    path.display(),
-                    raw_type
-                )
-            })?;
-        fields.push(MsgField {
-            name: raw_name.to_string(),
-            type_ref,
-            is_array,
-            array_size,
-        });
-    }
+    let fields = parse_fields_from_lines(package, &src, Some(path))?;
     Ok(MsgSpec {
         package: package.to_string(),
         name: name.to_string(),
@@ -423,11 +666,33 @@ pub fn parse_msg_file(package: &str, name: &str, path: &Path) -> Result<MsgSpec>
     })
 }
 
+/// Parse the type-side of one .msg field line. Returns
+/// `(type_ref, is_array, array_size, string_max_len)`.
+///
+/// `string_max_len` carries the `<=N` upper bound on `string<=N` /
+/// `wstring<=N` declarations (preserved into MCP JSON Schema as
+/// `maxLength`). It only applies to the string primitives.
 pub fn parse_msg_field_type(
     current_package: &str,
     raw_type: &str,
-) -> Result<(MsgTypeRef, bool, Option<usize>)> {
-    let normalized = raw_type.split("<=").next().unwrap_or(raw_type).trim();
+) -> Result<(MsgTypeRef, bool, Option<usize>, Option<usize>)> {
+    // Capture string-bound `<=N` BEFORE stripping it, so we can
+    // surface it on MsgField. Only meaningful for string/wstring;
+    // other types ignore it.
+    let (without_bound, bound) = match raw_type.split_once("<=") {
+        Some((lhs, rhs)) => {
+            let n = rhs
+                .trim_matches(|c: char| c.is_whitespace() || c == ']' || c == '[')
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .unwrap_or("")
+                .parse::<usize>()
+                .ok();
+            (lhs.trim(), n)
+        }
+        None => (raw_type.trim(), None),
+    };
+    let normalized = without_bound;
     let (base_type, is_array, array_size) = if let Some(idx) = normalized.find('[') {
         let bracket = &normalized[idx..]; // e.g. "[]" or "[9]"
         let size = bracket
@@ -442,33 +707,56 @@ pub fn parse_msg_field_type(
     if base_type.is_empty() {
         bail!("{RIDLC_ERR_PREFIX} empty message field type in .msg file");
     }
-    if is_ros_primitive(base_type) {
+    let string_max_len = match base_type {
+        "string" | "wstring" => bound,
+        _ => None,
+    };
+    if RosPrimitive::parse(base_type).is_some() {
         return Ok((
             MsgTypeRef::Primitive(base_type.to_string()),
             is_array,
             array_size,
+            string_max_len,
         ));
     }
     // `pkg/msg/TypeName` (ROS fully-qualified message type)
     let segs: Vec<&str> = base_type.split('/').collect();
     if segs.len() == 3 && segs[1] == "msg" {
+        let pkg = segs[0].trim();
+        let nm = segs[2].trim();
+        if pkg.is_empty() || nm.is_empty() {
+            bail!(
+                "{RIDLC_ERR_PREFIX} invalid pkg/msg/Name reference '{}': empty package or name",
+                base_type
+            );
+        }
         return Ok((
             MsgTypeRef::Named {
-                package: segs[0].to_string(),
-                name: segs[2].to_string(),
+                package: pkg.to_string(),
+                name: nm.to_string(),
             },
             is_array,
             array_size,
+            string_max_len,
         ));
     }
     if let Some((package, name)) = base_type.split_once('/') {
+        let pkg = package.trim();
+        let nm = name.trim();
+        if pkg.is_empty() || nm.is_empty() {
+            bail!(
+                "{RIDLC_ERR_PREFIX} invalid pkg/Name reference '{}': empty package or name",
+                base_type
+            );
+        }
         return Ok((
             MsgTypeRef::Named {
-                package: package.to_string(),
-                name: name.to_string(),
+                package: pkg.to_string(),
+                name: nm.to_string(),
             },
             is_array,
             array_size,
+            string_max_len,
         ));
     }
     Ok((
@@ -478,43 +766,56 @@ pub fn parse_msg_field_type(
         },
         is_array,
         array_size,
+        string_max_len,
     ))
 }
 
+/// Back-compat alias around the canonical `RosPrimitive::parse`. Kept
+/// because external callers may still spell it this way.
 pub fn is_ros_primitive(raw: &str) -> bool {
-    matches!(
-        raw,
-        "bool"
-            | "byte"
-            | "uint8"
-            | "char"
-            | "int8"
-            | "float32"
-            | "float64"
-            | "int16"
-            | "uint16"
-            | "int32"
-            | "uint32"
-            | "int64"
-            | "uint64"
-            | "string"
-            | "wstring"
-    )
+    RosPrimitive::parse(raw).is_some()
 }
 
+/// Parse a fully-qualified IDL type ref of the form `pkg/msg/Name` or
+/// `pkg/srv/Name`. Returns `(package, name)` — the middle segment is
+/// dropped after validation. Use `parse_qualified_type_ref` if the
+/// caller needs to know whether it was a msg or srv reference.
+///
+/// Trailing `[]` (array-ness in TOML refs) is stripped from the name.
 pub fn parse_ridl_type_ref(type_ref: &str) -> Option<(String, String)> {
+    parse_qualified_type_ref(type_ref).map(|(_, p, n)| (p, n))
+}
+
+/// Like `parse_ridl_type_ref` but also returns whether the middle was
+/// `msg` or `srv`. Returns `None` for any other middle segment or for
+/// shapes that aren't `pkg/<msg|srv>/Name`.
+pub fn parse_qualified_type_ref(type_ref: &str) -> Option<(IdlKind, String, String)> {
     let trimmed = type_ref.trim();
     let mut parts = trimmed.split('/');
     let package = parts.next()?;
     let middle = parts.next()?;
     let mut name = parts.next()?.to_string();
-    if middle != "msg" {
+    if parts.next().is_some() {
+        return None;
+    }
+    let kind = match middle {
+        "msg" => IdlKind::Msg,
+        "srv" => IdlKind::Srv,
+        _ => return None,
+    };
+    if package.is_empty() || name.is_empty() {
         return None;
     }
     if name.ends_with("[]") {
         name.truncate(name.len().saturating_sub(2));
     }
-    Some((package.to_string(), name))
+    Some((kind, package.to_string(), name))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdlKind {
+    Msg,
+    Srv,
 }
 
 pub fn ros_msg_type_fmt(package: &str, name: &str) -> String {

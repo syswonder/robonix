@@ -20,7 +20,7 @@ package:
   license: MulanPSL-2.0
 
 nodes:
-  - id: com.robonix.services.speech
+  - id: com.robonix.system.speech
     type: python
     start: |
       # Activate the per-package uv venv built by scripts/build.sh.

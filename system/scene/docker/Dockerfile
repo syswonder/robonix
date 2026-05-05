@@ -27,7 +27,10 @@ FROM ros:humble-ros-base
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/ \
+    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
+    HF_ENDPOINT=https://hf-mirror.com
 
 # System packages we need at runtime:
 #   python3-pip          — install scene deps
@@ -47,25 +50,92 @@ RUN apt-get update \
         ros-humble-zenoh-bridge-dds \
  && rm -rf /var/lib/apt/lists/*
 
-# Python deps for scene. Versions chosen to match what
-# system/scene/pyproject.toml asks for, except we skip Open3D (no
-# ARM/CP wheels needed in the container; plane_extract no-ops).
+# torch + torchvision pinned to cu124 — required for sm_120 (Blackwell
+# RTX 5090); the cu118 wheels concept-graphs originally pinned can't
+# even import on this hardware. CPU-only torch fallback would be too
+# slow for YOLO-World/MobileSAM. Jetson AGX builds will swap this for
+# NVIDIA's torch fork wheel; the rest of the deps in requirements.txt
+# stay identical because they're CPU-side or torch-only consumers.
+RUN pip install --index-url https://download.pytorch.org/whl/cu124 \
+        torch==2.5.1 torchvision==0.20.1
+
+# Generic scene deps + concept-graphs perception stack (no
+# pytorch3d / chamferdist / gradslam — those are needed only by
+# concept-graphs' full SLAM pipeline, not by detection + merge,
+# which is all we use).
 COPY requirements.txt /tmp/requirements.txt
-# Ubuntu 22.04 ships pip 22 which doesn't have PEP 668 enforcement,
-# so plain `pip install` suffices. The `--break-system-packages` flag
-# is for newer base images; we don't need it here.
 RUN pip install -r /tmp/requirements.txt \
  && rm /tmp/requirements.txt
 
+# concept-graphs source from the ali-dev branch (smaller, no
+# Grounded-SAM / pytorch3d dependency tangle). We need the
+# `conceptgraph.slam.utils` and `conceptgraph.slam.mapping` modules
+# (depth backproject + per-object pcd + DBSCAN-based merge). Install
+# editable so we can edit-and-test from inside the container without
+# rebuilding when iterating on their helpers.
+RUN git clone --depth 1 --branch ali-dev \
+        https://github.com/concept-graphs/concept-graphs.git \
+        /opt/concept-graphs \
+ && pip install -e /opt/concept-graphs \
+ || (echo "concept-graphs install failed — see comment in Dockerfile" \
+     && exit 1)
+
+# Bake CV model weights into the image — robonix invariant: a robot
+# booting on a customer network can't reach github releases /
+# huggingface CDN. ali-dev's recommended stack:
+#   yolov8l-world.pt — 91 MB, open-vocab YOLO via CLIP text encoder
+#   mobile_sam.pt    — 40 MB, MobileSAM for promptable masks
+# Plus open_clip ViT-B-32 LAION-2B for per-object CLIP features (~150 MB,
+# small enough for Jetson; 5090 build can swap to ViT-L/14 via env).
+#
+# YOLO + MobileSAM are pre-downloaded onto the host into docker/_weights/
+# (out-of-band, see scripts/build.sh's `pre_fetch_weights` block) and
+# COPY'd into the image. We tried `RUN curl` from inside buildx but
+# github CDN connections from CN drop mid-stream after ~10 minutes and
+# break a multi-hundred-MB build. Out-of-band download with retries is
+# more robust and lets buildx cache the COPY layer.
+#
+# open_clip ViT-B-32 LAION-2B comes from huggingface via HF_ENDPOINT
+# (hf-mirror.com); much smaller and reliable.
+ENV HF_HOME=/opt/models/hf
+RUN mkdir -p /opt/models /opt/models/hf /root/.cache/clip
+COPY _weights/yolov8l-world.pt /opt/models/yolov8l-world.pt
+COPY _weights/mobile_sam.pt    /opt/models/mobile_sam.pt
+# Two CLIP-flavored downloads bake in here:
+#   1. open_clip's ViT-B-32 LAION-2B (we use this for per-detection
+#      visual-similarity dedup in concept-graphs) — goes to HF_HOME.
+#   2. openai's `clip` ViT-B/32 (separate package; ultralytics'
+#      YOLO-World text encoder calls clip.load("ViT-B/32") during
+#      set_classes() and would otherwise pull 354 MB from openai's
+#      CDN at first inference — robonix invariant violation).
+RUN python3 -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')" \
+ && python3 -c "import clip; clip.load('ViT-B/32', device='cpu', download_root='/root/.cache/clip')" \
+ && ls -la /opt/models/ /root/.cache/clip/
+
+# Fixed env so perception_concept_graphs.py knows where the weights
+# live without each deployment having to override.
+ENV SCENE_YOLO_WORLD_WEIGHTS=/opt/models/yolov8l-world.pt \
+    SCENE_MOBILE_SAM_WEIGHTS=/opt/models/mobile_sam.pt \
+    SCENE_CLIP_MODEL=ViT-B-32 \
+    SCENE_CLIP_PRETRAINED=laion2b_s34b_b79k
+
 WORKDIR /scene
 COPY entrypoint.sh /entrypoint.sh
+COPY no_shm_profile.xml /etc/fastrtps_no_shm.xml
 RUN chmod +x /entrypoint.sh
 
-# Use Zenoh as the RMW. The scene container starts its own Zenoh
-# router (rmw_zenohd) and a zenoh-bridge-dds that mirrors the sim
-# container's FastRTPS topics into Zenoh. No FastRTPS XML needed
-# anymore — that was the workaround for the cross-container SHM
-# problem we no longer have.
-ENV RMW_IMPLEMENTATION=rmw_zenoh_cpp
+# Force FastRTPS to skip SHM transport — see mapping_rbnx/docker for
+# full reasoning. UDP-only is the only path that data-flows reliably
+# across our containers (sim ↔ scene ↔ mapping) in this layout.
+ENV FASTRTPS_DEFAULT_PROFILES_FILE=/etc/fastrtps_no_shm.xml
+
+# Stick with FastRTPS (sim's default RMW). With --network host +
+# --ipc=host the SHM transport shares cleanly between sim and scene,
+# and FastRTPS UDP multicast discovery covers the rest. We tried
+# Zenoh first but `zenoh_bridge_dds` cannot see FastRTPS-only SHM
+# publishers reliably across containers, so this is the path that
+# actually delivers /amcl_pose, /odom, /scanner, /head_front_camera/*
+# into scene's rclpy hub.
+ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
 ENTRYPOINT ["/entrypoint.sh"]

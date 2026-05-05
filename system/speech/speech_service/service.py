@@ -791,7 +791,7 @@ def _register_with_atlas(port: int) -> None:
     """Register with Atlas control plane. Non-fatal on failure.
 
     Registration flow:
-        1. RegisterNode: node_id="com.robonix.services.speech",
+        1. RegisterNode: node_id="com.robonix.system.speech",
            namespace="robonix/system/speech", kind="service"
         2. DeclareInterface x 5: one per contract (asr, asr_stream, tts,
            tts_stream, dialog), each with its gRPC mode.
@@ -818,7 +818,7 @@ def _register_with_atlas(port: int) -> None:
         channel = grpc.insecure_channel(atlas_addr)
         stub = pb_grpc.RobonixRuntimeStub(channel)
 
-        node_id = "com.robonix.services.speech"
+        node_id = "com.robonix.system.speech"
         stub.RegisterNode(pb.RegisterNodeRequest(
             node_id=node_id,
             namespace="robonix/system/speech",

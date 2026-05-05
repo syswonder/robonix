@@ -15,7 +15,9 @@ Env vars:
   ROBONIX_ATLAS            atlas endpoint (default 127.0.0.1:50051)
   TIAGO_LIDAR_MCP_PORT     MCP HTTP port (default 50113)
   TIAGO_LIDAR_DRIVER_PORT  LifecycleDriver gRPC port (default 50213)
-  TIAGO_SCAN_TOPIC         lidar topic (default /scanner)
+  TIAGO_SCAN_TOPIC         lidar topic (default /scanner_normalized — the
+                           webots-quirks-fixed scan published by the relay
+                           in scripts/start.sh; raw /scanner stays internal)
 """
 import json
 import logging
@@ -193,7 +195,7 @@ def _start_ros2():
 
     node = _rclpy.create_node("tiago_lidar_driver")
     _ros_node = node
-    scan_topic = os.environ.get("TIAGO_SCAN_TOPIC", "/scanner")
+    scan_topic = os.environ.get("TIAGO_SCAN_TOPIC", "/scanner_normalized")
     node.create_subscription(_LaserScan, scan_topic, _on_scan, 1)
 
     executor = SingleThreadedExecutor()
@@ -326,7 +328,7 @@ def main() -> None:
         ))
         _decl_driver(stub, cap_id, driver_port)
         _decl_mcp(stub, cap_id, "robonix/primitive/lidar/snapshot", mcp_port, snapshot)
-        scan_topic = os.environ.get("TIAGO_SCAN_TOPIC", "/scanner")
+        scan_topic = os.environ.get("TIAGO_SCAN_TOPIC", "/scanner_normalized")
         _decl_topic_out(stub, cap_id, "robonix/primitive/lidar/lidar", scan_topic, "best_effort")
         print(f"[tiago_lidar] registered cap {cap_id} → driver:{driver_port}, mcp:{mcp_port}, "
               f"ros2: lidar={scan_topic}")

@@ -1,0 +1,22 @@
+# Continuous SLAM-corrected odometry stream. The mapping service
+# exports this for consumers that want a high-rate, smoothly-varying
+# pose (e.g. nav velocity controllers, explore trajectory tracking).
+#
+# Difference from service/map/pose: pose is corrected on every loop
+# closure (can jump). odom is continuous between corrections (frame:
+# `odom`). Both are derived from the same SLAM solution; pick the one
+# whose continuity guarantee matches your consumer.
+#
+# Distinct from primitive/chassis/odom: chassis odom is raw wheel
+# encoder integration (drifts unboundedly). This is SLAM-corrected
+# (drift bounded by loop closure).
+[contract]
+id      = "robonix/service/map/odom"
+version = "1"
+kind    = "service"
+
+[io.msg]
+msg = "nav_msgs/msg/Odometry"
+
+[mode]
+type = "topic_out"

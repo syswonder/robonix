@@ -33,6 +33,35 @@ FLAGS=(--mcp --out-dir "$GEN")
 echo "[build] rbnx codegen ${FLAGS[*]}"
 rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
+# ── 1.5 Pre-fetch model weights onto host ──────────────────────────────────
+# Pulled out of the docker build because github CDN connections from CN
+# drop mid-stream on multi-hundred-MB transfers; an out-of-band download
+# with curl --retry-all-errors is much more robust, and the resulting
+# files become a cache-key-stable COPY into the image.
+WEIGHTS_DIR="$PKG/docker/_weights"
+mkdir -p "$WEIGHTS_DIR"
+fetch_weight() {
+    local url="$1"
+    local dest="$2"
+    if [[ -s "$dest" ]]; then
+        echo "[build] weight already present: $(basename "$dest")"
+        return 0
+    fi
+    echo "[build] downloading $(basename "$dest") from $url"
+    curl -fL --connect-timeout 30 --retry 5 --retry-all-errors --retry-delay 5 \
+        -o "$dest" "$url" || {
+        echo "[build] error: failed to download $url" >&2
+        rm -f "$dest"
+        exit 1
+    }
+}
+fetch_weight \
+    "https://github.com/ultralytics/assets/releases/download/v8.1.0/yolov8l-world.pt" \
+    "$WEIGHTS_DIR/yolov8l-world.pt"
+fetch_weight \
+    "https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt" \
+    "$WEIGHTS_DIR/mobile_sam.pt"
+
 # ── 2. Docker image (scene's Python deps + ROS Humble base) ────────────────
 if ! command -v docker >/dev/null 2>&1; then
     echo "[build] error: docker not found on PATH" >&2
