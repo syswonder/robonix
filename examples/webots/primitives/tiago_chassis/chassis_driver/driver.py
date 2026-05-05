@@ -417,10 +417,16 @@ def main() -> None:
         # so a different deployment can override without code changes.
         pose_topic = os.environ.get("TIAGO_POSE_TOPIC", "/amcl_pose")
         odom_topic = os.environ.get("TIAGO_ODOM_TOPIC", "/odom")
+        twist_in_topic = os.environ.get("TIAGO_CMD_VEL_TOPIC", "/cmd_vel")
         _decl_topic_out(stub, cap_id, "robonix/primitive/chassis/pose", pose_topic, "reliable")
         _decl_topic_out(stub, cap_id, "robonix/primitive/chassis/odom", odom_topic, "reliable")
+        # twist_in: where consumers (nav, teleop) publish geometry_msgs/Twist
+        # for the chassis to act on. Same DeclareInterface call shape as a
+        # topic_out — atlas reads mode.type=topic_in from the contract TOML
+        # and routes consumer→producer accordingly.
+        _decl_topic_out(stub, cap_id, "robonix/primitive/chassis/twist_in", twist_in_topic, "reliable")
         print(f"[tiago_chassis] registered cap {cap_id} → driver:{driver_port}, mcp:{mcp_port}, "
-              f"ros2: pose={pose_topic} odom={odom_topic}")
+              f"ros2: pose={pose_topic} odom={odom_topic} twist_in={twist_in_topic}")
     except Exception as e:
         print(f"[tiago_chassis] WARN: atlas registration failed: {e}")
 

@@ -37,19 +37,13 @@ fi
 
 mkdir -p /scene/rbnx-build/data
 
-# ── 1. Zenoh router ─────────────────────────────────────────────────────────
-# `rmw_zenohd` is provided by ros-humble-rmw-zenoh-cpp. Bind to the host
-# default ports (zenoh listens 7447 by default + scout multicast on 7446).
-# We don't override config; defaults fit a single-host dev setup.
-rmw_zenohd > /scene/rbnx-build/data/zenohd.log 2>&1 &
-ZENOHD_PID=$!
-
-# ── 2. Zenoh ↔ DDS bridge ───────────────────────────────────────────────────
-# Mirrors the sim container's FastRTPS topics into Zenoh. `--mode peer`
-# joins the same Zenoh net as our rmw_zenoh nodes; `--no-multicast-scouting
-# false` keeps default scouting on. Default DDS domain 0 matches the sim.
-zenoh-bridge-dds --mode peer > /scene/rbnx-build/data/zenoh-bridge.log 2>&1 &
-BRIDGE_PID=$!
+# Direct-DDS path: same RMW (FastRTPS) as sim, --network host shares
+# the IP namespace so UDP multicast discovery works, and --ipc=host
+# shares /dev/shm so SHM data transfer lines up. No Zenoh router or
+# bridge needed in this layout (we tried, the bridge could not see
+# FastRTPS-only SHM publishers across containers reliably).
+ZENOHD_PID=
+BRIDGE_PID=
 
 cleanup() {
     kill -TERM "$BRIDGE_PID" 2>/dev/null || true

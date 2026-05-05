@@ -27,4 +27,32 @@ if command -v xhost &>/dev/null; then
   xhost +local:docker >/dev/null 2>&1 || true
 fi
 
-exec docker compose "${CF[@]}" up --build
+# Bring sim up detached so we can layer rviz on top before tailing logs.
+docker compose "${CF[@]}" up --build -d
+
+# Wait until ros2 inside the container has more than a handful of
+# topics — proxy for "webots controller has spawned the robot and is
+# publishing /scanner /odom /head_front_camera/* etc."
+echo "[sim/start] waiting for sim ros topics..."
+for _ in $(seq 1 60); do
+    n=$(docker exec robonix_tiago_sim bash -c \
+        'source /opt/ros/humble/setup.bash 2>/dev/null && ros2 topic list 2>/dev/null | wc -l' 2>/dev/null || echo 0)
+    if [[ "${n:-0}" -gt 20 ]]; then
+        echo "[sim/start] ros up ($n topics)"
+        break
+    fi
+    sleep 2
+done
+
+# Auto-launch rviz2 inside the sim container (it has ros-humble-rviz2,
+# host doesn't have to). Same DDS bus as the rest of the stack so
+# /map, /scanner, /tf, /goal_pose all work. User can click "2D Nav
+# Goal" → simple_nav drives the robot.
+if command -v xhost &>/dev/null; then
+    xhost +local:docker >/dev/null 2>&1 || true
+fi
+echo "[sim/start] launching rviz2 (config: rviz2_default.rviz)"
+bash "$(dirname "$0")/start_rviz.sh" >/tmp/rviz2.log 2>&1 &
+
+# Stay foreground tailing logs so Ctrl-C is the natural stop pattern.
+exec docker compose "${CF[@]}" logs -f

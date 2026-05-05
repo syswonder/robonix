@@ -22,57 +22,7 @@ package:
   license: MulanPSL-2.0
 
 build: bash scripts/build.sh
-
-# `start:` runs the scene container. It joins host network so DDS
-# multicast reaches whatever ROS publishers are alive on the host
-# (the webots sim container is also `--network host`, so they share
-# the same DDS scope). The package dir is bind-mounted at /scene so
-# code edits don't need an image rebuild — only Dockerfile/requirements
-# changes do.
-#
-# Trap discipline: when boot SIGTERMs our PGID, bash's TERM trap
-# stops + removes the container. `docker run --name ... --rm` alone
-# isn't enough — docker leaks the container if the host wrapper dies
-# without sending stop.
-start: |
-  CT="${ROBONIX_SCENE_CONTAINER:-robonix_scene}"
-  cleanup() {
-    docker stop "$CT" >/dev/null 2>&1 || true
-    kill -- "-$$" 2>/dev/null || true
-  }
-  trap cleanup EXIT INT TERM
-
-  # If a previous run left a stopped container behind, drop it.
-  docker rm -f "$CT" >/dev/null 2>&1 || true
-
-  mkdir -p rbnx-build/data
-
-  # `--ipc=host` is the critical flag that took us a debug session to
-  # find: FastRTPS's default transport stack uses SHM (shared memory)
-  # for same-host endpoints, and each container has its own /dev/shm.
-  # Without --ipc=host scene saw publishers on `ros2 topic info` but
-  # received zero messages. Sharing host IPC namespace lets the
-  # SHM transport keys line up between sim and scene containers.
-  exec docker run --rm \
-    --name "$CT" \
-    --network host \
-    --ipc=host \
-    -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
-    -e ROBONIX_CAPABILITY_ID="${ROBONIX_CAPABILITY_ID:-com.robonix.system.scene}" \
-    -e ROBONIX_PKG_HOST_DIR="$(pwd)" \
-    -e SCENE_PORT="${SCENE_PORT:-50106}" \
-    -e SCENE_WEB_PORT="${SCENE_WEB_PORT:-50107}" \
-    -e SCENE_LOG_LEVEL="${SCENE_LOG_LEVEL:-INFO}" \
-    -e VLM_BASE_URL="${VLM_BASE_URL:-}" \
-    -e VLM_API_KEY="${VLM_API_KEY:-}" \
-    -e VLM_MODEL="${VLM_MODEL:-}" \
-    -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
-    -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
-    -v "$(pwd)":/scene \
-    -v "$(rbnx path robonix-py)":/robonix-py:ro \
-    -v "$(rbnx path capabilities)":/capabilities:ro \
-    ${RBNX_CONFIG_FILE:+-v "$RBNX_CONFIG_FILE":"$RBNX_CONFIG_FILE":ro} \
-    robonix-scene
+start: bash scripts/start.sh
 
 capabilities:
   - name: robonix/system/scene/get_snapshot

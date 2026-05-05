@@ -20,6 +20,7 @@ use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+use crate::contract_registry::ContractRegistry;
 use crate::pb;
 pub use pb::Transport;
 
@@ -191,9 +192,30 @@ impl State {
 /// In-memory state shared by all gRPC handlers (new + legacy). All ops go
 /// through one of the typed async methods below. `Arc<AtlasRegistry>` is
 /// cheap to clone; the interior `RwLock` serialises mutations.
+///
+/// `contracts` is loaded once at startup from `<robonix_source>/capabilities/**`
+/// and is read-only for the lifetime of the process — handlers serve
+/// QueryContract / ListContracts directly off it without locking.
 #[derive(Debug, Default)]
 pub struct AtlasRegistry {
     pub(crate) inner: RwLock<State>,
+    contracts: ContractRegistry,
+}
+
+impl AtlasRegistry {
+    /// Construct a registry with an empty capability/channel state plus a
+    /// pre-loaded contract registry. Use this from `main.rs` once the
+    /// capabilities dir has been resolved.
+    pub fn with_contracts(contracts: ContractRegistry) -> Self {
+        Self {
+            inner: RwLock::new(State::default()),
+            contracts,
+        }
+    }
+
+    pub fn contracts(&self) -> &ContractRegistry {
+        &self.contracts
+    }
 }
 
 impl AtlasRegistry {
@@ -782,6 +804,37 @@ impl pb::atlas_server::Atlas for AtlasService {
     ) -> Result<Response<pb::InspectAtlasResponse>, Status> {
         let json = self.registry.inspect_json().await?;
         Ok(Response::new(pb::InspectAtlasResponse { json }))
+    }
+
+    async fn query_contract(
+        &self,
+        req: Request<pb::QueryContractRequest>,
+    ) -> Result<Response<pb::QueryContractResponse>, Status> {
+        let r = req.into_inner();
+        let id = r.contract_id.trim();
+        if id.is_empty() {
+            return Err(Status::invalid_argument("contract_id required"));
+        }
+        let resp = match self.registry.contracts().get(id) {
+            Some(d) => pb::QueryContractResponse {
+                contract: Some(d.clone()),
+                found: true,
+            },
+            None => pb::QueryContractResponse {
+                contract: Some(pb::ContractDescriptor::default()),
+                found: false,
+            },
+        };
+        Ok(Response::new(resp))
+    }
+
+    async fn list_contracts(
+        &self,
+        req: Request<pb::ListContractsRequest>,
+    ) -> Result<Response<pb::ListContractsResponse>, Status> {
+        let r = req.into_inner();
+        let contracts = self.registry.contracts().list_with_prefix(&r.namespace_prefix);
+        Ok(Response::new(pb::ListContractsResponse { contracts }))
     }
 }
 

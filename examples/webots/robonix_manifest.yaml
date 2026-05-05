@@ -31,7 +31,8 @@ system:
     log: info
   nexus:
     log: info
-  memory: {}
+  # memory disabled while milvus init issue is unrelated to mapping demo.
+  # memory: {}
   speech: {}
   # Scene auto-discovers its observation topics from atlas at startup
   # (see scene_service/service.py `_discover_observations`). No per-
@@ -70,7 +71,47 @@ primitive:
   #   config: {}
 
 service:
-  - name: tiago_nav2
-    path: ./services/tiago_nav2
+  # simple_nav — minimal goto-with-avoidance nav service. Runs inside
+  # the sim container via docker-exec (same as primitive drivers).
+  # Pure pursuit toward target + lidar slowdown; no Nav2.
+  - name: simple_nav
+    path: ./services/simple_nav
+    config: {}
+
+  # mapping_rbnx — SLAM service. Algos shipped: rtabmap (sensor-
+  # agnostic graph SLAM; deploy-driven via the sensors: block below),
+  # dlio (3D Livox + IMU; real robot path), fastlio2 [BROKEN: drift].
+  # slam_toolbox + cartographer were removed after rtabmap
+  # consistently outperformed them on curve-motion mapping. Output
+  # contracts (algo-agnostic): robonix/service/map/{occupancy_grid,
+  # pointcloud}. Container uses FastRTPS UDP-only profile so it sees
+  # the sim's DDS topics without a Zenoh bridge.
+  - name: mapping
+    url: https://github.com/enkerewpo/mapping_rbnx
+    branch: main
+    config:
+      algo: rtabmap
+      platform: x86_desktop
+      sensors:
+        lidar2d: true
+        lidar3d: false
+        rgb: true        # rtabmap fuses RGB for visual loop closure
+        rgbd: true       # depth fills below-lidar-plane obstacles
+        imu: false
+        odom: true
+
+  # explore_rbnx — autonomous frontier exploration. Contract kind is
+  # `skill` (user-invocable, declared at robonix/skill/explore/*) but
+  # we deploy it under `service:` because rbnx CLI's `skill:` section
+  # is currently parsed-and-skipped (line 18-20 of deploy.rs: "NOT
+  # started at deploy time — the executor invokes them on demand"),
+  # and that on-demand spawn isn't yet implemented in executor. The
+  # process needs to be alive so its MCP tools register with atlas;
+  # `service:` slot achieves that without changing the contract type.
+  # When rbnx CLI grows real skill-spawn semantics this entry can move.
+  - name: explore
+    url: https://github.com/enkerewpo/explore_rbnx
+    branch: main
+    config: {}
 
 skill: []

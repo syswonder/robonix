@@ -26,5 +26,6 @@ pub mod legacy_pb {
 }
 
 pub mod client;
+pub mod contract_registry;
 pub mod legacy;
 pub mod service;

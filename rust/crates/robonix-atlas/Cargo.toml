@@ -15,12 +15,18 @@ log.workspace = true
 env_logger.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
+walkdir.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 prost.workspace = true
 tonic-prost.workspace = true
 uuid.workspace = true
+# Reuse the codegen crate's .msg/.srv parser for IDL field-level
+# introspection. Atlas only links against the parser submodule (no
+# code generation at runtime).
+robonix-codegen = { path = "../robonix-codegen" }
 
 [build-dependencies]
 protoc-bin-vendored.workspace = true

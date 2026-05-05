@@ -71,7 +71,7 @@ def test_register_speech():
     log.info("Test 2: Register speech_service with Atlas")
     stub, ch = atlas_stub()
 
-    node_id = "com.robonix.services.speech"
+    node_id = "com.robonix.system.speech"
     contracts = [
         ("robonix/service/speech/asr",        "asr",        "rpc"),
         ("robonix/service/speech/asr_stream",  "asr_stream", "rpc_bidirectional_stream"),

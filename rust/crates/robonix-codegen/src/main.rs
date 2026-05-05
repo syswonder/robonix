@@ -19,9 +19,12 @@ struct Args {
     #[arg(short = 'I', long = "include", number_of_values = 1)]
     include: Vec<PathBuf>,
 
-    /// Directory of contract `.toml` files (e.g. <root>/capabilities). Emits `robonix_contracts.proto` (proto only).
-    #[arg(long = "contracts")]
-    contracts: Option<PathBuf>,
+    /// One or more directories of contract `.toml` files (e.g.
+    /// <root>/capabilities and <pkg>/capabilities). Pass multiple times
+    /// to merge per-package contracts with the global tree. Emits
+    /// `robonix_contracts.proto` (proto only).
+    #[arg(long = "contracts", number_of_values = 1)]
+    contracts: Vec<PathBuf>,
 
     /// Output directory for generated code
     #[arg(short = 'o', long = "out")]
@@ -60,7 +63,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let verbose = verbose_from_args_and_env(&args);
 
-    if args.include.is_empty() && args.contracts.is_none() {
+    if args.include.is_empty() && args.contracts.is_empty() {
         bail!("[robonix-codegen] pass at least one -I/--include and/or --contracts (see --help)");
     }
 
@@ -76,7 +79,10 @@ fn main() -> Result<()> {
         eprintln!(
             "{} contracts: {:?}",
             ridlc_prefix(),
-            args.contracts.as_ref().map(|p| p.display().to_string())
+            args.contracts
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
         );
         eprintln!("{} out: {}", ridlc_prefix(), args.out.display());
     }
@@ -96,9 +102,16 @@ fn main() -> Result<()> {
         );
     }
 
-    let contract_srvs: Option<BTreeSet<(String, String)>> = match &args.contracts {
-        Some(cdir) => Some(contract_gen::collect_referenced_srvs(cdir)?),
-        None => None,
+    let contract_srvs: Option<BTreeSet<(String, String)>> = if args.contracts.is_empty() {
+        None
+    } else {
+        let mut set = BTreeSet::new();
+        for cdir in &args.contracts {
+            for pair in contract_gen::collect_referenced_srvs(cdir)? {
+                set.insert(pair);
+            }
+        }
+        Some(set)
     };
 
     let specs = resolver.ordered_specs();
@@ -132,8 +145,8 @@ fn main() -> Result<()> {
                 srvs.len(),
                 args.out.display()
             );
-            if let Some(ref cdir) = args.contracts {
-                contract_gen::generate(&mut resolver, cdir, &args.out, verbose)?;
+            if !args.contracts.is_empty() {
+                contract_gen::generate(&mut resolver, &args.contracts, &args.out, verbose)?;
                 if !verbose {
                     eprintln!(
                         "{} contracts: robonix_contracts.proto + contract_proto_modules.rs (under {})",

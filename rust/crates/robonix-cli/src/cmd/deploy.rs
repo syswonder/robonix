@@ -46,7 +46,11 @@ const CMD_INIT: u32 = 0;
 const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
 const DRIVER_POLL_INTERVAL: Duration = Duration::from_millis(500);
 // How long Driver(CMD_INIT) is given to return.
-const DRIVER_INIT_TIMEOUT: Duration = Duration::from_secs(60);
+// 90s gives generous slack for slow-warming sensors (webots's camera
+// can take 30-50s to start publishing on cold boot). Primitive
+// driver-side waits should still be < this so they own their own
+// timeout semantics rather than racing the CLI deadline.
+const DRIVER_INIT_TIMEOUT: Duration = Duration::from_secs(90);
 const DEPLOY_CONSUMER_ID: &str = "rbnx-cli/deploy";
 
 // ── Deploy manifest schema (subset used by this orchestrator) ───────────
@@ -449,6 +453,38 @@ pub async fn execute(
                 .and_then(|m| m.get(serde_yaml::Value::String("listen".into())))
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
+            // Atlas's contract registry walks every dir in
+            // --capabilities at startup. We seed it with:
+            //   1. <robonix_source>/capabilities — the global tree
+            //   2. <pkg>/capabilities for every primitive/service/skill
+            //      package whose source dir is on disk and contains a
+            //      `capabilities/` subdir
+            // Roots are merged in order; later wins on duplicate id, so
+            // a package can re-declare a global contract for itself.
+            // A manifest-level override `system.atlas.capabilities`
+            // still wins via system_cli_args (clobbers the auto list).
+            let mut atlas_caps_roots: Vec<String> = Vec::new();
+            if let Some(root) = config.robonix_source_path.as_ref() {
+                atlas_caps_roots.push(root.join("capabilities").to_string_lossy().into_owned());
+            }
+            for entry in deploy
+                .primitive
+                .iter()
+                .chain(deploy.service.iter())
+                .chain(deploy.skill.iter())
+            {
+                if let Ok(pkg_path) = resolve_entry_path(entry, &cache_root, &manifest_dir) {
+                    let caps = pkg_path.join("capabilities");
+                    if caps.is_dir() {
+                        atlas_caps_roots.push(caps.to_string_lossy().into_owned());
+                    }
+                }
+            }
+            let atlas_caps_default: Option<String> = if atlas_caps_roots.is_empty() {
+                None
+            } else {
+                Some(atlas_caps_roots.join(","))
+            };
             let bin_map: &[(&str, &str)] = &[
                 ("atlas", "robonix-atlas"),
                 ("executor", "robonix-executor"),
@@ -458,8 +494,15 @@ pub async fn execute(
                 if !deploy.system.contains_key(*name) {
                     continue;
                 }
-                let args =
+                let mut args =
                     system_cli_args(name, deploy.system.get(*name), atlas_listen.as_deref());
+                if *name == "atlas"
+                    && !args.iter().any(|a| a == "--capabilities")
+                    && let Some(p) = atlas_caps_default.as_ref()
+                {
+                    args.push("--capabilities".into());
+                    args.push(p.clone());
+                }
                 let sp = spawn_system_binary(&log_dir, name, bin, &args).await?;
                 children.push(sp);
                 persist_state(&state_path, &manifest_path, &atlas_endpoint, started_at_ms, &children);
@@ -692,6 +735,14 @@ fn system_cli_args(
         "atlas" => {
             push_pair(&mut out, "--listen", s("listen"));
             push_pair(&mut out, "--log", s("log"));
+            // Atlas walks `<root>/capabilities/**/*.toml` at startup to
+            // build the contract registry. Honour an explicit override
+            // from the manifest, otherwise let atlas fall back to its
+            // own ROBONIX_SOURCE_PATH-derived default (we don't pass
+            // --capabilities here from rbnx; deploy.rs sets the env var
+            // on the spawned process so the default path stays correct
+            // even when manifests don't mention atlas at all).
+            push_pair(&mut out, "--capabilities", s("capabilities"));
         }
         "executor" => {
             push_pair(&mut out, "--listen", s("listen"));

@@ -127,11 +127,13 @@ impl Config {
             SourcePathKey::Root => root.clone(),
             SourcePathKey::RustRoot => root.join("rust"),
             SourcePathKey::Capabilities => root.join("capabilities"),
-            SourcePathKey::InterfacesLib => root
-                .join("rust")
-                .join("crates")
-                .join("robonix-interfaces")
-                .join("lib"),
+            // capabilities/lib is the unified IDL root: a relative
+            // symlink (or in the future, real files) into the
+            // robonix-interfaces tree. Codegen and any downstream IDL
+            // search starts from here so msg/srv references in contract
+            // TOMLs (e.g. `[io.srv].srv = "demo/srv/Hello"`) have a
+            // single, unambiguous base.
+            SourcePathKey::InterfacesLib => root.join("capabilities").join("lib"),
             SourcePathKey::RuntimeProto => root.join("rust").join("proto"),
             SourcePathKey::RobonixPy => root.join("pylib").join("robonix-py"),
         };

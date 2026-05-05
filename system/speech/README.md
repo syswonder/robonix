@@ -127,7 +127,7 @@ Callers do not need to worry about audio format -- the server automatically hand
 
 Optionally registers with the Atlas control plane at startup:
 
-- **RegisterCapability** (legacy `RegisterNode` shim): `com.robonix.services.speech`, namespace `robonix/system/speech`
+- **RegisterCapability** (legacy `RegisterNode` shim): `com.robonix.system.speech`, namespace `robonix/system/speech`
 - **DeclareInterface × 5**: asr, asr_stream, tts, tts_stream, dialog
 
 Automatically degrades to standalone mode when Atlas is unavailable.

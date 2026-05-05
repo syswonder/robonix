@@ -70,9 +70,27 @@ pub async fn execute(
         None => super::run_package::find_package_from_cwd()?,
     };
     let rust_root = config.resolve_source_path(SourcePathKey::RustRoot)?;
-    let interfaces_lib = config.resolve_source_path(SourcePathKey::InterfacesLib)?;
+    // <root>/capabilities — contract TOMLs (top level) + IDL under lib/.
     let capabilities_dir = config.resolve_source_path(SourcePathKey::Capabilities)?;
+    // <root>/capabilities/lib — single canonical IDL search root.
+    // msg/srv references in contract TOMLs (e.g. `demo/srv/Hello`)
+    // resolve as `<root>/capabilities/lib/demo/srv/Hello.srv`.
+    let interfaces_lib = config.resolve_source_path(SourcePathKey::InterfacesLib)?;
     let runtime_proto = config.resolve_source_path(SourcePathKey::RuntimeProto)?;
+    // Per-package overlay: `<pkg>/capabilities/` mirrors the global
+    // layout. When present we add it both as an IDL include
+    // (`<pkg>/capabilities/lib/`) and as a contracts root, so packages
+    // can ship their own msg/srv/contracts that merge with the global
+    // set (symmetric with how atlas's contract registry merges roots).
+    let pkg_caps = pkg_root.join("capabilities");
+    let pkg_caps_lib: Option<PathBuf> = {
+        let p = pkg_caps.join("lib");
+        p.is_dir().then_some(p)
+    };
+    // <pkg>/capabilities/ also gets passed to --contracts so per-package
+    // contracts merge with the global tree (atlas does the same merge
+    // at the registry level — this keeps codegen consistent).
+    let pkg_caps_root: Option<PathBuf> = pkg_caps.is_dir().then_some(pkg_caps);
 
     // Where to place proto_gen/ and robonix_mcp_types/. Defaults to package root;
     // override for packages that want them inside a sub-dir (e.g. tiago_bridge/).
@@ -111,20 +129,25 @@ pub async fn execute(
     );
 
     // 1. Stage system .proto into rbnx-build/proto-staging/.
+    //    Includes: global <root>/capabilities/lib + (if present) per-package
+    //    <pkg>/capabilities/lib. --contracts: global capabilities tree
+    //    (per-package contracts merging through codegen is a follow-up).
     println!("{} robonix-codegen --lang proto ...", "[codegen]".bold());
-    // TODO: support <pkg>/capabilities and <pkg>/interfaces/lib union.
-    run_cmd(
-        "robonix-codegen proto",
-        Command::new(&cargo_bin)
-            .args(["run", "-p", "robonix-codegen", "--manifest-path"])
-            .arg(rust_root.join("Cargo.toml"))
-            .args(["--", "--lang", "proto", "-I"])
-            .arg(&interfaces_lib)
-            .arg("--contracts")
-            .arg(&capabilities_dir)
-            .arg("-o")
-            .arg(&proto_staging),
-    )?;
+    let mut proto_cmd = Command::new(&cargo_bin);
+    proto_cmd
+        .args(["run", "-p", "robonix-codegen", "--manifest-path"])
+        .arg(rust_root.join("Cargo.toml"))
+        .args(["--", "--lang", "proto", "-I"])
+        .arg(&interfaces_lib);
+    if let Some(p) = pkg_caps_lib.as_ref() {
+        proto_cmd.arg("-I").arg(p);
+    }
+    proto_cmd.arg("--contracts").arg(&capabilities_dir);
+    if let Some(p) = pkg_caps_root.as_ref() {
+        proto_cmd.arg("--contracts").arg(p);
+    }
+    proto_cmd.arg("-o").arg(&proto_staging);
+    run_cmd("robonix-codegen proto", &mut proto_cmd)?;
 
     // 2. Optional: MCP dataclasses.
     if mcp {
