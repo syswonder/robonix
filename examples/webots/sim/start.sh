@@ -11,7 +11,16 @@
 # Stop with Ctrl-C, or from another terminal: `docker compose -f compose.yaml down`.
 set -euo pipefail
 
-cd "$(dirname "$0")"
+# Resolve the script's own directory ONCE in absolute form. We cd into
+# it below; afterwards `$(dirname "$0")` no longer points anywhere
+# usable (it's relative to the *original* CWD, which is gone). The
+# previous code used `$(dirname "$0")` later in the file to find
+# start_rviz.sh, which silently failed on every invocation that
+# wasn't run from the sim/ directory itself — rviz never launched
+# even though the script printed "[sim/start] launching rviz2 ..."
+# because the bash sub-process couldn't find start_rviz.sh.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 
 # Auto-detect DISPLAY if the launching shell didn't export one. Probes
 # the standard local X server slots via `xset q`; if any responds, use
@@ -71,7 +80,7 @@ if command -v xhost &>/dev/null; then
     xhost +local:docker >/dev/null 2>&1 || true
 fi
 echo "[sim/start] launching rviz2 (config: rviz2_default.rviz)"
-bash "$(dirname "$0")/start_rviz.sh" >/tmp/rviz2.log 2>&1 &
+bash "$SCRIPT_DIR/start_rviz.sh" >/tmp/rviz2.log 2>&1 &
 
 # Stay foreground tailing logs so Ctrl-C is the natural stop pattern.
 exec docker compose "${CF[@]}" logs -f
