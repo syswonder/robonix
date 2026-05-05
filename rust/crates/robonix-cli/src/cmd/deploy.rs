@@ -103,8 +103,12 @@ struct PackageEntry {
     config: serde_yaml::Value,
 }
 
-/// Resolve a `PackageEntry` to a filesystem path, cloning from `url` into
-/// `<cache_root>/<name>/` if necessary.
+/// Compute a `PackageEntry`'s expected on-disk path. PURE — no I/O,
+/// no logging, no cloning. `path:` entries land at `manifest_dir/path`;
+/// `url:` entries land at `cache_root/<name>` (whether or not it's
+/// been cloned yet). Use `entry_path_exists_on_disk` to check
+/// presence; use the public `cmd::fetch::clone_remote_packages`
+/// (called from `rbnx build`) to actually populate the cache.
 fn resolve_entry_path(
     entry: &PackageEntry,
     cache_root: &Path,
@@ -122,26 +126,7 @@ fn resolve_entry_path(
             } else {
                 entry.name.clone()
             };
-            let dest = cache_root.join(&name);
-            if !dest.exists() {
-                std::fs::create_dir_all(cache_root)?;
-                output::boot_note(&name, &format!("cloning from {url}"));
-                let mut clone = std::process::Command::new("git");
-                clone.arg("clone").arg("--depth").arg("1");
-                if let Some(b) = &entry.branch {
-                    clone.arg("--branch").arg(b);
-                }
-                clone.arg(url).arg(&dest);
-                let status = clone.status().with_context(|| {
-                    format!("git clone {url} failed to spawn (is git installed?)")
-                })?;
-                if !status.success() {
-                    anyhow::bail!("git clone {url} exited with {:?}", status.code());
-                }
-            } else {
-                output::boot_note(&name, &format!("local cache (rbnx-boot/cache/{name})"));
-            }
-            Ok(dest)
+            Ok(cache_root.join(&name))
         }
         (Some(_), Some(_)) => {
             anyhow::bail!("package entry has both `path` and `url`; pick one")
@@ -150,6 +135,94 @@ fn resolve_entry_path(
             anyhow::bail!("package entry has neither `path` nor `url`")
         }
     }
+}
+
+/// Boot-time prerequisites check:
+///   - any url-remote package whose cache dir doesn't exist → warn,
+///     clone it inline (so the user isn't blocked) and tell them to
+///     run `rbnx build` for proper bring-up.
+///   - any package whose `rbnx-build/.rbnx-built` sentinel is missing
+///     → warn and run its build.sh inline.
+///
+/// Boot's job is to spawn and atlas-register; fetching and building
+/// belong to `rbnx build`. We do the inline remediation here ONLY so
+/// the user isn't stuck after a fresh clone with no build done — the
+/// warnings are deliberately loud so the right path (build first,
+/// then boot) stays visible.
+fn check_prerequisites(
+    deploy: &DeployManifest,
+    cache_root: &Path,
+    manifest_dir: &Path,
+) -> Result<()> {
+    use std::collections::BTreeMap;
+    let mut needs_clone: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
+    let mut needs_build: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for entry in deploy
+        .primitive
+        .iter()
+        .chain(deploy.service.iter())
+        .chain(deploy.skill.iter())
+    {
+        let pkg_path = match resolve_entry_path(entry, cache_root, manifest_dir) {
+            Ok(p) => p,
+            Err(_) => continue, // bad manifest entry; later steps will surface it
+        };
+        let name = if entry.name.is_empty() {
+            pkg_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("(unnamed)")
+                .to_string()
+        } else {
+            entry.name.clone()
+        };
+        if !pkg_path.exists() {
+            if let Some(url) = entry.url.as_ref() {
+                needs_clone.insert(name.clone(), (url.clone(), entry.branch.clone()));
+                continue;
+            }
+        }
+        let stamp = pkg_path.join("rbnx-build").join(".rbnx-built");
+        if !stamp.exists() {
+            needs_build.insert(name, pkg_path);
+        }
+    }
+    if needs_clone.is_empty() && needs_build.is_empty() {
+        return Ok(());
+    }
+    output::boot_section("prerequisites");
+    for (name, (url, branch)) in &needs_clone {
+        output::warning(&format!(
+            "{name}: not in cache — `rbnx build` should run before `rbnx boot`. cloning inline."
+        ));
+        let dest = cache_root.join(name);
+        std::fs::create_dir_all(cache_root)?;
+        let mut clone = std::process::Command::new("git");
+        clone.arg("clone").arg("--depth").arg("1");
+        if let Some(b) = branch {
+            clone.arg("--branch").arg(b);
+        }
+        clone.arg(url).arg(&dest);
+        let status = clone
+            .status()
+            .with_context(|| format!("git clone {url} failed to spawn"))?;
+        if !status.success() {
+            anyhow::bail!("git clone {url} exited with {:?}", status.code());
+        }
+        // Newly-cloned package needs a build too.
+        let stamp = dest.join("rbnx-build").join(".rbnx-built");
+        if !stamp.exists() {
+            needs_build.insert(name.clone(), dest);
+        }
+    }
+    for (name, pkg_path) in &needs_build {
+        output::warning(&format!(
+            "{name}: not built — `rbnx build` should run before `rbnx boot`. building inline."
+        ));
+        crate::cmd::build::build_local_package(pkg_path, false)
+            .with_context(|| format!("inline build of {name} at {} failed", pkg_path.display()))?;
+    }
+    Ok(())
 }
 
 // ── env expansion — replace ${VAR} / $VAR in scalar strings ─────────────
@@ -441,6 +514,13 @@ pub async fn execute(
         .unwrap_or("127.0.0.1:50051")
         .to_string();
 
+    // Boot is responsible for spawning + atlas registration ONLY.
+    // Fetching (git clone of url-remote pkgs) and building are
+    // `rbnx build`'s job. We just verify both have happened; if
+    // not, warn loudly and remediate inline so the user isn't
+    // stuck on a fresh clone.
+    check_prerequisites(&deploy, &cache_root, &manifest_dir)?;
+
     let outcome: Result<()> = async {
         if !skip_system {
             output::boot_section("system");
@@ -507,7 +587,13 @@ pub async fn execute(
                 }
                 let sp = spawn_system_binary(&log_dir, name, bin, &args).await?;
                 children.push(sp);
-                persist_state(&state_path, &manifest_path, &atlas_endpoint, started_at_ms, &children);
+                persist_state(
+                    &state_path,
+                    &manifest_path,
+                    &atlas_endpoint,
+                    started_at_ms,
+                    &children,
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             }
         } else {
@@ -538,7 +624,10 @@ pub async fn execute(
                 let pkg_dir = match config.robonix_source_path.as_ref() {
                     Some(root) => root.join("system").join(key),
                     None => {
-                        output::boot_skip(key, "robonix_source_path unset (`rbnx setup` from repo root)");
+                        output::boot_skip(
+                            key,
+                            "robonix_source_path unset (`rbnx setup` from repo root)",
+                        );
                         continue;
                     }
                 };
@@ -564,7 +653,13 @@ pub async fn execute(
                 )
                 .await?;
                 children.push(sp);
-                persist_state(&state_path, &manifest_path, &atlas_endpoint, started_at_ms, &children);
+                persist_state(
+                    &state_path,
+                    &manifest_path,
+                    &atlas_endpoint,
+                    started_at_ms,
+                    &children,
+                );
             }
         }
 
@@ -583,7 +678,13 @@ pub async fn execute(
             )
             .await?;
             children.push(sp);
-            persist_state(&state_path, &manifest_path, &atlas_endpoint, started_at_ms, &children);
+            persist_state(
+                &state_path,
+                &manifest_path,
+                &atlas_endpoint,
+                started_at_ms,
+                &children,
+            );
         }
         if !deploy.service.is_empty() {
             output::boot_section("service");
@@ -600,7 +701,13 @@ pub async fn execute(
             )
             .await?;
             children.push(sp);
-            persist_state(&state_path, &manifest_path, &atlas_endpoint, started_at_ms, &children);
+            persist_state(
+                &state_path,
+                &manifest_path,
+                &atlas_endpoint,
+                started_at_ms,
+                &children,
+            );
         }
         // Skills are spawned at deploy time, same as services. The
         // semantic distinction (skill = atomic intent invokable by
@@ -628,7 +735,13 @@ pub async fn execute(
             )
             .await?;
             children.push(sp);
-            persist_state(&state_path, &manifest_path, &atlas_endpoint, started_at_ms, &children);
+            persist_state(
+                &state_path,
+                &manifest_path,
+                &atlas_endpoint,
+                started_at_ms,
+                &children,
+            );
         }
         Ok(())
     }
@@ -723,10 +836,21 @@ fn system_boot_detail(name: &str, args: &[String]) -> String {
         let a = args[i].as_str();
         let next = args.get(i + 1).map(|s| s.as_str());
         match (a, next) {
-            ("--listen", Some(v)) => { listen = Some(v); i += 2; }
-            ("--vlm-upstream", Some(v)) => { vlm_upstream = Some(v); i += 2; }
-            ("--vlm-model", Some(v)) => { vlm_model = Some(v); i += 2; }
-            _ => { i += 1; }
+            ("--listen", Some(v)) => {
+                listen = Some(v);
+                i += 2;
+            }
+            ("--vlm-upstream", Some(v)) => {
+                vlm_upstream = Some(v);
+                i += 2;
+            }
+            ("--vlm-model", Some(v)) => {
+                vlm_model = Some(v);
+                i += 2;
+            }
+            _ => {
+                i += 1;
+            }
         }
     }
     let port = listen
@@ -735,7 +859,12 @@ fn system_boot_detail(name: &str, args: &[String]) -> String {
         .unwrap_or_default();
     if name == "pilot" {
         let host = vlm_upstream
-            .and_then(|u| u.trim_start_matches("https://").trim_start_matches("http://").split('/').next())
+            .and_then(|u| {
+                u.trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .split('/')
+                    .next()
+            })
             .unwrap_or("?");
         let model = vlm_model.unwrap_or("?");
         format!("{port}  vlm={model}@{host}")
@@ -891,7 +1020,7 @@ async fn spawn_and_init(
 
     let Some(driver_contract) = driver_contract else {
         // Legacy / no-lifecycle package: registration alone is enough.
-        output::boot_ok(&pkg_label, &format!("cap={cap_id}"));
+        output::boot_ok(short_label(&pkg_label, component), &format!("cap={cap_id}"));
         return Ok(sp);
     };
 
@@ -956,7 +1085,7 @@ async fn spawn_and_init(
     match init_result {
         Ok(r) if r.ok => {
             output::boot_ok(
-                &pkg_label,
+                short_label(&pkg_label, component),
                 &format!("cap={cap_id}  driver(INIT)={}", r.state),
             );
         }
@@ -1004,6 +1133,16 @@ fn contract_id_to_service_name(id: &str) -> String {
 /// `cap_id` plus an optional `driver_contract_id` if the new cap
 /// declared a `*/driver` gRPC interface (signal to the caller that
 /// Driver(CMD_INIT) lifecycle should run).
+/// Strip the leading `<component>_` from the boot-log pkg_label.
+/// `system_memory` → `memory`; `primitive_tiago_chassis` → `tiago_chassis`.
+/// Keeps boot-output columns narrow (the section header above already
+/// said which class the entry belongs to).
+fn short_label<'a>(pkg_label: &'a str, component: &str) -> &'a str {
+    pkg_label
+        .strip_prefix(&format!("{component}_"))
+        .unwrap_or(pkg_label)
+}
+
 async fn wait_for_registration(
     atlas: &mut AtlasClient,
     before: &HashSet<String>,
@@ -1016,14 +1155,23 @@ async fn wait_for_registration(
     // same (200 ms vs the previous 500 ms is fine — query is
     // cheap, atlas-local).
     const SPINNER_TICK: Duration = Duration::from_millis(100);
-    const POLLS_PER_TICK: u32 = 2;        // poll atlas every 200 ms
+    const POLLS_PER_TICK: u32 = 2; // poll atlas every 200 ms
     let started = Instant::now();
     let deadline = started + DRIVER_REGISTER_TIMEOUT;
     let mut frame: usize = 0;
+    let display_label = short_label(pkg_label, component);
+    // Heuristic to disambiguate when multiple new caps appear in the
+    // same poll window: prefer caps whose id contains the package's
+    // short name. Without this, an orphan from a previous boot
+    // (e.g. a leaked speech_service polling atlas in the background)
+    // can register against the new atlas and the first new cap we
+    // see is its `com.robonix.system.speech`, not the `memory` we
+    // were waiting on. Symptom: `[ OK ] memory cap=...system.speech`.
+    let name_hint = display_label.to_lowercase();
     loop {
         let elapsed_s = started.elapsed().as_secs_f32();
         output::boot_progress(
-            pkg_label,
+            display_label,
             &format!("registering with atlas… {elapsed_s:>4.1}s"),
             frame,
         );
@@ -1032,13 +1180,25 @@ async fn wait_for_registration(
                 .query_capabilities("", "", atlas_pb::Transport::Unspecified)
                 .await
                 .with_context(|| format!("[{component}/{pkg_label}] poll atlas"))?;
-            for rec in records {
+            // First pass: prefer a cap whose id mentions the package
+            // name. Second pass: any cap not in `before` (legacy
+            // behaviour, kept for packages whose cap_id doesn't
+            // include the package name verbatim).
+            let mut name_match: Option<&atlas_pb::CapabilityRecord> = None;
+            let mut any_match: Option<&atlas_pb::CapabilityRecord> = None;
+            for rec in &records {
                 if before.contains(&rec.capability_id) {
                     continue;
                 }
-                // Found a new cap. If it has a `*/driver` gRPC interface,
-                // the caller should run Driver(CMD_INIT); otherwise it's a
-                // legacy / no-lifecycle package and we just record the cap.
+                if any_match.is_none() {
+                    any_match = Some(rec);
+                }
+                if rec.capability_id.to_lowercase().contains(&name_hint) {
+                    name_match = Some(rec);
+                    break;
+                }
+            }
+            if let Some(rec) = name_match.or(any_match) {
                 let driver = rec.interfaces.iter().find(|iface| {
                     iface.transport == atlas_pb::Transport::Grpc as i32
                         && iface.contract_id.ends_with("/driver")
@@ -1051,7 +1211,7 @@ async fn wait_for_registration(
         }
         if Instant::now() >= deadline {
             output::boot_fail(
-                pkg_label,
+                display_label,
                 &format!("registration timeout after {:?}", DRIVER_REGISTER_TIMEOUT),
             );
             anyhow::bail!(
