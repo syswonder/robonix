@@ -66,6 +66,14 @@ class Goal:
     # samples ``cost`` at the robot's pose to slow down near walls and
     # ``passable`` to detect "we're inside the inscribed halo, abort".
     costmap: Optional[object] = None  # PlanResult, kept loose to avoid forward-import
+    # Map version (NavNode._map_counter) the cached `path` was planned
+    # against. When _map_counter advances past this, the next tick
+    # re-validates the path against the fresh map; if any remaining
+    # waypoint lies in a now-impassable cell, the path is invalidated
+    # and the next tick replans. Without this the robot follows a
+    # stale plan straight into newly-discovered obstacles until the
+    # stuck detector aborts the goal eight seconds later.
+    plan_map_counter: int = -1
     # Stuck-detector state. Pose snapshots tagged with wall-clock time;
     # if we've moved < `stuck_progress_m` toward the goal over
     # `stuck_window_s` while the controller was actively trying, we
@@ -118,6 +126,10 @@ class NavNode:
         self._odom_pose: Optional[Tuple[float, float, float]] = None
         self._scan = None
         self._map: Optional[Any] = None  # latest OccupancyGrid
+        # Bumped on every /map callback; the active goal stores the
+        # value at plan time so the tick can detect "map updated since
+        # we planned" and re-validate the cached path. See Goal.plan_map_counter.
+        self._map_counter: int = 0
         self._goal: Optional[Goal] = None
         self._last_v = 0.0  # for velocity-scaled lookahead
 
@@ -271,6 +283,7 @@ class NavNode:
     def _on_map(self, msg) -> None:
         with self._lock:
             self._map = msg
+            self._map_counter += 1
         # Publish a fresh costmap whenever the source map updates, so
         # rviz can show inflation/lethal layers even before a goal is
         # set. Computing the costmap requires running the same
@@ -419,8 +432,55 @@ class NavNode:
             g.last_pose_xy = (rx, ry)
             g.last_dist_to_goal = dist_to_goal
 
+        # ── Map-driven replan ───────────────────────────────────────────
+        # If the map has updated since we planned, re-validate the
+        # cached path against the fresh costmap. A path waypoint that
+        # was free at plan time may now sit inside a wall the SLAM
+        # service just discovered (the robot's lidar swept a previously-
+        # unknown corner, rtabmap committed it to /map). Walking blindly
+        # into the new obstacle is what made the user catch us — robot
+        # bashed against a freshly-mapped table for 8s before the stuck
+        # detector aborted the goal.
+        with self._lock:
+            current_map_counter = self._map_counter
+        if (g.path is not None and mp is not None
+                and g.plan_map_counter < current_map_counter):
+            try:
+                gm = _planner.GridMap.from_msg(mp)
+                passable, cost = _planner.build_costmap(
+                    gm, inscribed_m=0.35, inflation_m=0.40)
+                # Sample the path at every waypoint past the robot's
+                # current position. Cells outside the grid are treated
+                # as passable so a goal beyond the current map edge
+                # isn't punished (matches `_passable_at` semantics).
+                blocked = False
+                for (wx, wy) in g.path:
+                    cx, cy = gm.world_to_cell(wx, wy)
+                    if not gm.in_bounds(cx, cy):
+                        continue
+                    if not bool(passable[cy, cx]):
+                        blocked = True
+                        break
+                if blocked:
+                    g.path = None
+                    g.detail = "replan: cached path blocked by updated map"
+                    g.costmap = _planner.PlanResult(
+                        path=[], gm=gm, passable=passable, cost=cost)
+                    self._publish_path([])
+                    g.plan_attempts = 0
+                else:
+                    # Path still valid — refresh costmap so the follower
+                    # uses the latest cost layer (gradients near newly
+                    # mapped walls slow us down even before they block).
+                    g.costmap = _planner.PlanResult(
+                        path=g.path, gm=gm, passable=passable, cost=cost)
+            except Exception as e:  # noqa: BLE001
+                g.detail = f"path re-validation failed: {e}"
+            g.plan_map_counter = current_map_counter
+
         # ── Replan on demand: if path is None we just got a new goal,
-        # or the previous plan failed; try again with the current map.
+        # or the previous plan failed, or the map-driven replan above
+        # invalidated the cached path; try again with the current map.
         if g.path is None:
             if mp is None:
                 # Map not yet available — cannot plan. Bail; we'll try
@@ -465,6 +525,7 @@ class NavNode:
                     self._publish_twist(0.0, 0.0)
                 return
             g.path = path
+            g.plan_map_counter = current_map_counter
             g.detail = f"plan ok ({len(path)} pts)"
             self._publish_path(path)
 
