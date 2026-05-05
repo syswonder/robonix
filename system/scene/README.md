@@ -1,171 +1,267 @@
 # `system/scene` — live semantic + geometric map
 
 Robonix system service that maintains the **current best estimate** of
-what's in the robot's environment. Per-`Object` records (stable id,
-fused pose, class, confidence, last_seen), pairwise `Relation`s
-(`on` / `inside` / `near` / `reachable_by`), and a planar surface
-layer for "things sit on top of things" reasoning. Exposes 5 read-only
-MCP tools that Pilot calls each LLM round.
+what's in the robot's environment: per-`Object` records (stable id,
+fused pose, class, confidence, last_seen, point cloud), pairwise
+`Relation`s (`on` / `inside` / `near` / `reachable_by`), and a
+projected 2D occupancy grid republished from the SLAM service.
+Exposes 5 read-only MCP tools that Pilot calls each LLM round, and a
+self-contained 2D + 3D web viewer.
 
 This service is **NOT** a memory store (see `spatial_memory_service`
 for episodic recall) and **NOT** a hardware controller. Current-state
 only. Reads observations; never writes back to the robot.
 
-## Layout
+## What's inside
 
 ```
 system/scene/
-├── README.md                   ← this file
-├── IMPLEMENTATION_NOTES.md     deviations / TODOs / known limits
-├── package_manifest.yaml       Robonix package: 5 capabilities
-├── pyproject.toml              uv-managed deps (numpy / scipy / open3d / mcp / fastmcp / robonix-py / httpx / Pillow)
+├── README.md                    ← this file
+├── package_manifest.yaml        Robonix package: 5 MCP capabilities
+├── docker/
+│   ├── Dockerfile               ROS Humble + torch cu124 + CV stack
+│   ├── requirements.txt         scene + concept-graphs deps
+│   ├── _weights/                pre-fetched YOLO-World + MobileSAM .pt
+│   └── no_shm_profile.xml       FastRTPS UDP-only profile
 ├── scripts/
-│   └── build.sh                uv venv + uv sync + rbnx codegen
-└── scene_service/
-    ├── service.py              entrypoint: atlas register + asyncio loop + FastMCP
-    ├── mcp_tools.py            5 @mcp_contract handlers (thin wrappers)
-    ├── state/                  ObjectRegistry, data assoc, relations, snapshot scoping
-    ├── geom/                   pointcloud / plane extraction (Open3D, optional)
-    └── ingest/                 atlas-mediated MCP pollers + VLM-based perception
+│   ├── build.sh                 rbnx codegen + docker build (+ weight pre-fetch)
+│   └── start.sh                 docker run wrapper used by `rbnx boot`
+├── scene_service/
+│   ├── service.py               entrypoint: atlas register + asyncio + FastMCP
+│   ├── mcp_tools.py             5 @mcp_contract handlers (thin wrappers)
+│   ├── web.py                   2D + 3D web viewer (Starlette + three.js)
+│   ├── state/                   ObjectRegistry, data assoc, relations, snapshot
+│   ├── geom/                    pointcloud / plane extraction (Open3D)
+│   ├── ingest/
+│   │   ├── ros_subscribers.py   rclpy hub: /tf2 + topic slots (rgb/depth/lidar/...)
+│   │   ├── perception_concept_graphs.py  THE perception pipeline (this file)
+│   │   └── perception_vlm.py    VLM fallback (no-depth deploys only)
+│   └── static/urdf/meshes/      Tiago STL meshes (kept around for future URDF viz)
 ```
 
-## How it works (one paragraph)
+## What it actually does
 
-`scripts/build.sh` materialises a per-package venv and runs `rbnx
-codegen --mcp` to generate Python dataclasses from the IDL under
-`rust/crates/robonix-interfaces/lib/service/semantic_map/`. At
-startup, `service.py` registers `com.robonix.system.scene` with
-atlas, declares 5 MCP interfaces, and (per the Soma config block in
-`RBNX_CONFIG_FILE`) launches one async task per observation kind.
-Each task calls `atlas.QueryCapabilities + ConnectCapability` for the
-configured contract and starts polling — missing caps are silently
-skipped, so a Webots Tiago (no 3D lidar) just gets the rgb / lidar2d
-/ odom subset without per-deploy code edits.
+ConceptGraphs-style per-frame perception with 4 stages:
 
-The RGB stream feeds the **VLM-based perception** module: every few
-seconds, scene posts the latest camera frame to the same OpenAI-
-compatible endpoint Pilot uses (`VLM_BASE_URL` / `VLM_API_KEY` /
-`VLM_MODEL`) with a prompt that asks for a JSON list of detections
-with image-pixel bboxes + approximate depth. Detections are
-back-projected through pinhole intrinsics + the chassis pose to
-world coordinates, then handed to `state/data_assoc.py` for Hungarian
-spatial-gated assignment against the existing registry. Matched
-detections EMA-update existing objects; unmatched detections allocate
-new ones. Unmatched objects stick around for a 5 s grace period, then
-flip `missing=True` (records are never deleted).
+1. **Detect.** YOLO-World v2 (open-vocab via CLIP text encoder) on the
+   live RGB frame. Class list is a 55-entry indoor-office vocabulary;
+   override at runtime via `SCENE_OPEN_VOCAB_CLASSES=cup,chair,...`.
+2. **Segment.** MobileSAM, prompted with each YOLO bbox, produces a
+   per-detection mask.
+3. **Lift to 3D.** Mask-aware depth backprojection through pinhole
+   intrinsics gives a per-detection point cloud in camera-optical
+   frame; `tf2 lookup_transform(camera_optical, "map")` carries it
+   into map frame. **No `/odom` math** — once SLAM corrects
+   `map → odom`, reading `/odom` directly puts the robot in odom
+   frame and the registry drifts away from rviz. tf2 is the
+   authoritative source.
+4. **Match + merge.** Per-detection 512-d OpenCLIP ViT-B-32 image
+   feature + 3D-AABB IoU drives the concept-graphs merge pipeline:
+   `compute_spatial_similarities` + `compute_visual_similarities` +
+   `aggregate_similarities` + `merge_detections_to_objects`. Three
+   hard gates filter the agg_sim matrix:
+   * **Distance gate** — centroid > 1.5 m apart → never merge (kills
+     "9 × 5 m bbox spanning the room" failure).
+   * **Same-class gate** — different YOLO class names → never merge
+     (kills "potted_plant on cabinet collapses to one record").
+   * **Threshold** — agg_sim < 0.55 → spawn new object instead.
+5. **Project to registry.** A persistent `MapObjectList.uuid →
+   ObjectRegistry.object_id` cache keeps registry IDs stable across
+   ticks. Bounding boxes are yaw-only (numpy 2D PCA on the XY
+   footprint, no Open3D OBB — `get_oriented_bounding_box(robust=True)`
+   segfaults qhull on near-coplanar pcds), with 5–95 percentile
+   extents to ignore depth-spike outliers.
 
-The relation engine (1 Hz tick) walks the registry and computes
-`on / inside / near / reachable_by` — purely geometric in v1, no
-learning — caching the triple list for fast serving by `query` and
-`get_snapshot`.
+Periodic cleanup (every 30 ticks) runs concept-graphs's `denoise_objects`
++ `filter_objects` + `merge_overlap_objects` so duplicates from edge-
+case detections eventually collapse.
 
 ## Build + run
 
-```bash
-cd system/scene
-bash scripts/build.sh              # uv sync + rbnx codegen (a few minutes first time)
-```
-
-For the canonical Webots demo, `scene` is declared in
-`examples/webots/robonix_manifest.yaml` and brought up alongside
-chassis / camera / lidar by `rbnx boot`:
+### Reproduce the canonical Webots demo (what most people want)
 
 ```bash
-# T1 — sim (Webots + DDS bus, must be up before scene)
-bash examples/webots/sim/start.sh
+git clone --recursive https://github.com/syswonder/robonix
+cd robonix/rust && make install      # rbnx + atlas + pilot + executor + codegen → ~/.cargo/bin
 
-# T2 — full stack (atlas / pilot / executor / scene / chassis / camera / lidar / nav2)
-export VLM_BASE_URL=https://api.openai.com/v1
-export VLM_API_KEY=sk-...
-export VLM_MODEL=gpt-5.4-mini
-cd examples/webots
+# Build the scene image once. Pulls torch+cu124 wheels and the
+# concept-graphs source; pre-fetches YOLO-World + MobileSAM .pt to
+# docker/_weights/ so the docker layer stays cache-friendly.
+cd ../system/scene && bash scripts/build.sh
+
+# T1 — sim. Bring up Webots + chassis driver + camera + lidar in
+# their own docker compose stack. The script also auto-launches rviz2
+# inside the sim container; if you don't want rviz, edit sim/start.sh.
+cd ../../examples/webots && bash sim/start.sh
+
+# T2 — robonix stack. atlas + executor + pilot + 3 primitives +
+# scene + mapping (rtabmap) + simple_nav + explore. 11 components up.
+export DISPLAY=:0                    # sim's webots/rviz need an X display
 rbnx boot
 ```
 
-Then in T3:
+After `rbnx boot` reports `✓ 11 component(s) up`:
+
+* **Web UI** — http://localhost:50107  (2D occupancy + objects on the
+  left, 3D point clouds + bboxes on the right)
+* **rviz2** — already up inside the sim container (map, scan, /tf,
+  /goal_pose). Use the "2D Nav Goal" tool to drive the robot manually
+  via simple_nav.
+* **MCP tools** — `rbnx tools | grep scene`
+
+### Drive the robot to populate the map
+
+The `explore` skill autonomously frontiers the room. From a third
+terminal:
 
 ```bash
-rbnx caps                          # com.robonix.system.scene with 5 declared MCP interfaces
-rbnx tools | grep scene            # the 5 tools Pilot can call
-rbnx chat                          # chat with pilot; ask about objects in front of the robot
+python3 - <<'PY'
+import httpx, json
+H = {"Content-Type":"application/json","Accept":"application/json, text/event-stream"}
+with httpx.Client(timeout=15) as c:
+    r = c.post("http://127.0.0.1:50130/mcp", headers=H, json={
+        "jsonrpc":"2.0","id":1,"method":"initialize",
+        "params":{"protocolVersion":"2025-06-18","capabilities":{},
+                  "clientInfo":{"name":"x","version":"0"}}})
+    H["Mcp-Session-Id"] = r.headers["mcp-session-id"]
+    c.post("http://127.0.0.1:50130/mcp", headers=H,
+           json={"jsonrpc":"2.0","method":"notifications/initialized"})
+    r = c.post("http://127.0.0.1:50130/mcp", headers=H, json={
+        "jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"explore","arguments":{
+            "area_hint":"office","timeout_s":900,"max_speed_m_s":0.40}}})
+    print(json.loads([l for l in r.text.splitlines() if l.startswith("data: ")][0][6:]))
+PY
 ```
 
-Drive the robot around the office; after a few seconds the VLM
-detector starts populating the registry. Sample direct probe:
+You should see the robot start driving on rviz, the 2D map fill in,
+and objects accumulate in the web UI's right panel within ~15 s.
+
+### Just scene, attached to your own webots/sim
 
 ```bash
-# Fastest way to see what scene knows: pilot's executor will MCP-call
-# scene/get_snapshot for you. From rbnx chat:
-> what objects are around me
+cd system/scene
+bash scripts/build.sh                # one-time
+bash scripts/start.sh                # docker run, stays foreground
 ```
 
-Or hit the MCP HTTP endpoint directly (port from atlas `rbnx caps`):
+scene's container joins the host DDS bus (`--network host` +
+FastRTPS UDP-only) and auto-discovers any cap on atlas advertising a
+ROS2 `topic_out` interface. Required topics:
+
+* RGB image (`sensor_msgs/Image`)
+* Depth registered to RGB (`sensor_msgs/Image`, 32FC1 metres or 16UC1 mm)
+* `/tf` chain ending at `head_front_camera_rgb_optical_frame` and
+  `base_link` in `map` frame.
+* Optional: `nav_msgs/OccupancyGrid` (for the 2D underlay)
+
+If your camera frame isn't `head_front_camera_rgb_optical_frame`,
+override via env when starting scene:
 
 ```bash
-curl http://127.0.0.1:50106/mcp/ -H "Content-Type: application/json" \
-     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_snapshot","arguments":{"spec":{"layers":["object","relation"],"region_frame":"map","region_center_x":0.0,"region_center_y":0.0,"region_center_z":0.0,"region_radius_m":5.0,"freshness_s":30.0,"include_stale":false,"min_confidence":0.0,"max_objects":50}}}}'
+SCENE_CAMERA_FRAME=my_camera_optical bash scripts/start.sh
 ```
 
-## Soma config (which observations to subscribe to)
+## Configuration knobs (env vars)
 
-Default — for Webots Tiago — set in `service.py`'s `_DEFAULT_OBSERVATIONS`:
-
-```yaml
-observations:
-  - kind: rgb       # contract: robonix/primitive/camera/snapshot, period 3s, drives VLM perception
-  - kind: lidar2d   # contract: robonix/primitive/lidar/snapshot,  period 2s
-  - kind: odom      # contract: robonix/primitive/chassis/state,   period 1s, drives the robot self-object
-```
-
-Override in `examples/<your-deploy>/robonix_manifest.yaml`:
-
-```yaml
-system:
-  scene:
-    observations:
-      - kind: rgb
-        contract: robonix/primitive/camera/snapshot
-        period_s: 2.0
-      - kind: lidar3d
-        contract: robonix/primitive/lidar/lidar3d
-        period_s: 1.0
-      - kind: depth
-        contract: robonix/primitive/camera/depth_snapshot
-        period_s: 3.0
-      - kind: odom
-        contract: robonix/primitive/chassis/state
-        period_s: 1.0
-```
-
-`kind` is just a label for the log; the contract is what scene
-actually queries on atlas. Missing caps log a one-line "skipped" and
-don't block startup.
+| Env | Default | Notes |
+|---|---|---|
+| `SCENE_OPEN_VOCAB_CLASSES` | (55-entry default) | comma-separated YOLO-World class list |
+| `SCENE_CG_FORCE_CPU` | `` | set to `1` to force CPU mode (~3× slower) |
+| `SCENE_PERCEPTION_WAIT_S` | `30` | how long to wait for camera caps before falling back |
+| `SCENE_CAMERA_INTRINSICS` | webots tiago default | `fx,fy,cx,cy,w,h` |
+| `SCENE_YOLO_WORLD_WEIGHTS` | `/opt/models/yolov8l-world.pt` | path inside container |
+| `SCENE_MOBILE_SAM_WEIGHTS` | `/opt/models/mobile_sam.pt` | |
+| `SCENE_CLIP_MODEL` / `SCENE_CLIP_PRETRAINED` | `ViT-B-32` / `laion2b_s34b_b79k` | |
+| `SCENE_CG_MERGE_THRESHOLD` | `0.55` | per-tick merge threshold |
+| `SCENE_CG_MAX_MERGE_DIST_M` | `1.5` | hard distance gate |
+| `SCENE_PORT` / `SCENE_WEB_PORT` | `50106` / `50107` | gRPC + web UI ports |
 
 ## Capabilities exposed
 
-| Contract                                       | Tool name                | What it does                            |
-|------------------------------------------------|--------------------------|------------------------------------------|
-| `robonix/system/scene/get_snapshot`            | `get_snapshot`           | Region- and freshness-scoped read; cap'd |
-| `robonix/system/scene/query`                   | `query`                  | Class + relation + spatial filter        |
-| `robonix/system/scene/get_object`              | `get_object`             | Direct lookup by stable id               |
-| `robonix/system/scene/get_semantic_map`        | `get_semantic_map`       | Surfaces + ref to Nav2 occupancy grid    |
-| `robonix/system/scene/get_safety_context`      | `get_safety_context`     | Stub (Sentinel placeholder)              |
+| Contract                                       | Tool name                | What it does                                |
+|------------------------------------------------|--------------------------|---------------------------------------------|
+| `robonix/system/scene/get_snapshot`            | `get_snapshot`           | Region- and freshness-scoped read; cap'd    |
+| `robonix/system/scene/query`                   | `query`                  | Class + relation + spatial filter           |
+| `robonix/system/scene/get_object`              | `get_object`             | Direct lookup by stable id                  |
+| `robonix/system/scene/get_semantic_map`        | `get_semantic_map`       | Surfaces + ref to occupancy grid            |
+| `robonix/system/scene/get_safety_context`      | `get_safety_context`     | Stub (Sentinel placeholder)                 |
 
 All 5 are MCP-only (transport=mcp). Schemas auto-derive from the IDL
-via `robonix-py`'s `@mcp_contract`.
+via `robonix-py`'s `@mcp_contract`. Direct hit:
+
+```bash
+curl -s http://127.0.0.1:50106/mcp/ -H "Content-Type: application/json" \
+     -H "Accept: application/json, text/event-stream" \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+         "name":"get_snapshot","arguments":{"spec":{
+             "layers":["object","relation"],"region_frame":"map",
+             "region_center_x":0,"region_center_y":0,"region_center_z":0,
+             "region_radius_m":5.0,"freshness_s":30.0,
+             "include_stale":false,"min_confidence":0.0,
+             "max_objects":50}}}}'
+```
+
+## Web UI quick tour
+
+* `/` — combined 2D + 3D split layout (default)
+* `/2d` — only the 2D top-down map
+* `/3d` — only the 3D point clouds + bboxes
+* `/api/state` — JSON: registry + relations + occupancy PNG + robot pose
+* `/api/objects3d` — JSON: per-object pcd + 8 bbox corners + CLIP class
+
+The 3D viz draws the OccupancyGrid as a translucent floor plane at
+z = -0.01 (so you can read room geometry under the point clouds), each
+detected object as a coloured pcd + yaw-rotated wireframe bbox + class
+label sprite, and the robot as a composite Tiago-shaped proxy (mobile
+base + torso + shoulder + head + arm), all parented to a `THREE.Group`
+that updates from `/api/state`'s `robot` field at 4 Hz.
+
+## Troubleshooting
+
+**`/api/state` returns 500 with "Out of range float values are not JSON
+compliant"** — depth backprojection produced NaN/Inf. Should be
+caught by the snapshot finite-mask + final-guard; if it still hits,
+the camera_info may be wrong. Check `SCENE_CAMERA_INTRINSICS`.
+
+**Scene container exits with status 139 (SIGSEGV)** — was the
+Open3D `get_oriented_bounding_box(robust=True)` qhull bug; replaced
+with numpy PCA. If you still see it, `faulthandler.enable(all_threads=True)`
+(already on in `service.py`) prints the C trace to docker logs.
+
+**Robot dot in web UI doesn't match rviz** — was the `/odom` vs.
+`map` frame mismatch; fixed by reading tf2 directly. If still off,
+`docker exec robonix_tiago_sim ros2 run tf2_ros tf2_echo map base_link`
+should match the web UI's `robot` field exactly.
+
+**Lots of duplicate objects across the room ("重影")** — lower
+`SCENE_CG_MERGE_THRESHOLD` (default 0.55). Or raise
+`SCENE_CG_MAX_MERGE_DIST_M` if you have very large objects (e.g.
+big tables) that span >1.5 m.
+
+**"Desk" detected on the floor** — YOLO-World mask leaked past the
+object's footprint and the depth points are floor. Floor-noise filter
+already drops detections of falling-class types if `pcd.z_max < 0.30`;
+adjust the floor_classes list in `perception_concept_graphs.py` if
+your robot has a low desk.
+
+**No detections firing** — usually a topic mismatch. Check
+`docker logs robonix_scene` for `auto-discover 'rgb' / 'depth'`
+lines; if missing, scene didn't find a cap on atlas advertising
+`robonix/primitive/camera/rgb` over ROS2. `rbnx caps` should list
+your camera primitive.
 
 ## Scope (what's NOT here)
 
-- **No write API**. No `IngestObservation`, no `UpdateTaskContext`. Per the
-  spec, scene is a sink. If you want to push state into it, that's a
-  v2 design decision — open an issue.
-- **No subscribe-stream**. `SubscribeUpdates` doesn't fit MCP semantics.
-  Pilot polls.
-- **No episodic memory**. `record_episode` / time-range queries belong
-  to `spatial_memory_service`.
-- **No real reachability**. `reachable_by` is a distance stub. TODO
-  swap to Soma's kinematics adapter when it lands.
-- **No Sentinel**. `get_safety_context` always returns
-  `status="not_implemented"` so Pilot can call without exception.
-
-See `IMPLEMENTATION_NOTES.md` for everything else.
+- **No write API.** No `IngestObservation`, no `UpdateTaskContext`.
+  Per the spec, scene is a sink.
+- **No subscribe-stream.** `SubscribeUpdates` doesn't fit MCP
+  semantics. Pilot polls.
+- **No episodic memory.** Belongs to `spatial_memory_service`.
+- **No real reachability.** `reachable_by` is a distance stub.
+- **No Sentinel.** `get_safety_context` always returns
+  `status="not_implemented"`.
+- **No real Tiago URDF in the 3D viz.** The composite primitive
+  proxy is good enough; PAL's `tiago_description` xacro chain is
+  too heavy to ship into the browser. STLs are pre-staged under
+  `static/urdf/meshes/` if anyone wants to wire urdf-loader-three.js.
