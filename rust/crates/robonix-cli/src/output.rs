@@ -56,6 +56,101 @@ pub fn summary(message: &str) {
     println!("\n{}", message.dimmed());
 }
 
+// ── Boot-log helpers (init-system style) ────────────────────────────
+//
+// All boot/start lines route through these so the boot output reads
+// like a systemd / SysV bring-up (`[ OK ] component  detail`) instead
+// of the previous indented free-form `sub_step("[system] foo -> long
+// path...")` lines that buried the salient info.
+
+const W_BADGE: usize = 7; // "[ OK ] " etc.
+const W_NAME: usize = 18;
+
+/// `[ OK ] name  detail` — a component came up. The leading
+/// `\r\x1b[K` clears any in-place spinner line that boot_progress
+/// might have left, so the final result lands cleanly without a
+/// trailing fragment of "registering... 4.2s".
+pub fn boot_ok(name: &str, detail: &str) {
+    println!(
+        "\r\x1b[K{}  {:<width$}{}",
+        format!("{:<bw$}", "[ OK ]".green().bold().to_string(), bw = W_BADGE),
+        name,
+        detail.dimmed(),
+        width = W_NAME,
+    );
+}
+
+/// `[FAIL] name  detail` — a component failed to come up.
+pub fn boot_fail(name: &str, detail: &str) {
+    eprintln!(
+        "\r\x1b[K{}  {:<width$}{}",
+        format!("{:<bw$}", "[FAIL]".red().bold().to_string(), bw = W_BADGE),
+        name,
+        detail.red(),
+        width = W_NAME,
+    );
+}
+
+/// In-place spinner frame. Renders to stdout with `\r` (no newline),
+/// flushes, returns. Caller is expected to overwrite or `boot_ok` /
+/// `boot_fail` to finalize. Frames cycle through Braille dots — the
+/// systemd-look spinner most users recognise from Linux init logs.
+pub fn boot_progress(name: &str, detail: &str, frame: usize) {
+    const GLYPHS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let g = GLYPHS[frame % GLYPHS.len()];
+    let badge = format!("[ {} ]", g);
+    print!(
+        "\r\x1b[K{}  {:<width$}{}",
+        format!("{:<bw$}", badge.cyan().to_string(), bw = W_BADGE),
+        name,
+        detail.dimmed(),
+        width = W_NAME,
+    );
+    let _ = io::stdout().flush();
+}
+
+/// `[SKIP] name  detail` — declared in manifest but skipped (not
+/// installed / disabled / out-of-scope on this host).
+pub fn boot_skip(name: &str, detail: &str) {
+    println!(
+        "{}  {:<width$}{}",
+        format!("{:<bw$}", "[SKIP]".yellow().to_string(), bw = W_BADGE),
+        name,
+        detail.dimmed(),
+        width = W_NAME,
+    );
+}
+
+/// `[....] name  detail` — component is starting (use boot_ok / boot_fail later).
+pub fn boot_wait(name: &str, detail: &str) {
+    println!(
+        "{}  {:<width$}{}",
+        format!("{:<bw$}", "[....]".cyan().to_string(), bw = W_BADGE),
+        name,
+        detail.dimmed(),
+        width = W_NAME,
+    );
+}
+
+/// `== section ==` — group header above a run of boot lines.
+pub fn boot_section(label: &str) {
+    println!("\n{} {} {}",
+             "==".dimmed(),
+             label.bold(),
+             "==".dimmed());
+}
+
+/// Final boot summary line.
+pub fn boot_summary(ok: usize, total: usize, hint: &str) {
+    let badge = if ok == total {
+        "✓".green().bold()
+    } else {
+        "⚠".yellow().bold()
+    };
+    println!("\n{} {}/{} components up — {}",
+             badge, ok, total, hint.dimmed());
+}
+
 /// Spinner for animated progress indication
 pub struct Spinner {
     message: String,
