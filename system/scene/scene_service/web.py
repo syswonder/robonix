@@ -596,18 +596,27 @@ _COMBINED_HTML = r"""<!doctype html>
 <body>
   <div id="grid">
     <div class="panel" id="panel-2d">
-      <div class="head" title="2D top-down map · occupancy grid + tracked objects · 5 Hz">2D</div>
-      <button class="expand" title="expand">⛶</button>
+      <div class="titlebar">
+        <span class="badge">2D</span>
+        <span class="desc">map · occupancy grid + tracked objects · 5 Hz</span>
+        <button class="expand" title="expand">⛶</button>
+      </div>
       <iframe src="/2d" loading="eager"></iframe>
     </div>
     <div class="panel" id="panel-3d">
-      <div class="head" title="3D scene · ConceptGraphs point clouds + bboxes · drag rotate, WASD fly, click pick">3D</div>
-      <button class="expand" title="expand">⛶</button>
+      <div class="titlebar">
+        <span class="badge">3D</span>
+        <span class="desc">ConceptGraphs · drag rotate · WASD fly · click pick</span>
+        <button class="expand" title="expand">⛶</button>
+      </div>
       <iframe src="/3d" loading="eager"></iframe>
     </div>
     <div class="panel" id="panel-cam">
-      <div class="head" title="camera · live RGB on top, live depth below · the same frames the perception pipeline consumes">cam</div>
-      <button class="expand" title="expand">⛶</button>
+      <div class="titlebar">
+        <span class="badge">cam</span>
+        <span class="desc">live RGB + depth · perception input</span>
+        <button class="expand" title="expand">⛶</button>
+      </div>
       <iframe src="/cam" loading="eager"></iframe>
     </div>
   </div>
