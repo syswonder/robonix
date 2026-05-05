@@ -494,12 +494,17 @@ _COMBINED_HTML = r"""<!doctype html>
     .panel { position: relative; background: #08090c;
              min-width: 0; min-height: 0; overflow: hidden; }
     .panel iframe { width: 100%; height: 100%; border: 0; display: block; }
+    /* Tiny single-letter badge in top-left of each panel — was a
+       multi-word strip ("cam rgb + depth · live", "3D ConceptGraphs ·
+       WASD/click", ...) that collided with the ⛶ expand button on
+       narrow columns. Click the badge to read a tooltip with the
+       full description. */
     .panel .head { position: absolute; top: 8px; left: 8px;
-                   z-index: 10; padding: 4px 10px;
+                   z-index: 10; padding: 3px 7px;
                    background: rgba(10,12,16,0.78); border: 1px solid #303542;
-                   border-radius: 4px; font-size: 11px; color: #889;
-                   pointer-events: none; }
-    .panel .head b { color: #f0c050; font-weight: 600; }
+                   border-radius: 4px; font-size: 11px; color: #f0c050;
+                   font-weight: 600; pointer-events: auto;
+                   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     .panel button.expand {
       position: absolute; top: 8px; right: 8px; z-index: 10;
       width: 28px; height: 28px; padding: 0;
@@ -581,17 +586,17 @@ _COMBINED_HTML = r"""<!doctype html>
 <body>
   <div id="grid">
     <div class="panel" id="panel-2d">
-      <div class="head"><b>2D</b> map · objects · grid</div>
+      <div class="head" title="2D top-down map · occupancy grid + tracked objects · 5 Hz">2D</div>
       <button class="expand" title="expand">⛶</button>
       <iframe src="/2d" loading="eager"></iframe>
     </div>
     <div class="panel" id="panel-3d">
-      <div class="head"><b>3D</b> ConceptGraphs · WASD/click</div>
+      <div class="head" title="3D scene · ConceptGraphs point clouds + bboxes · drag rotate, WASD fly, click pick">3D</div>
       <button class="expand" title="expand">⛶</button>
       <iframe src="/3d" loading="eager"></iframe>
     </div>
     <div class="panel" id="panel-cam">
-      <div class="head"><b>cam</b> rgb + depth · live</div>
+      <div class="head" title="camera · live RGB on top, live depth below · the same frames the perception pipeline consumes">cam</div>
       <button class="expand" title="expand">⛶</button>
       <iframe src="/cam" loading="eager"></iframe>
     </div>
@@ -888,33 +893,46 @@ _INDEX_3D_HTML = r"""<!doctype html>
                  color: #d8dde6; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     #app { position: absolute; inset: 0; }
     canvas { display: block; }
-    /* HUD: tip strip (top-left). Collapsible — defaults to collapsed
-       so it doesn't fight the inspector panel for space when the
-       iframe is narrow (combined-layout 3rd column on a MacBook Air). */
-    #hud { position: absolute; top: 8px; left: 8px; padding: 6px 10px;
-           background: rgba(10,12,16,0.85); border: 1px solid #303542;
-           border-radius: 4px; font-size: 11px; line-height: 1.3;
-           max-width: calc(50vw - 16px); }
-    #hud .head { display: flex; align-items: center; gap: 8px;
-                 cursor: pointer; user-select: none; }
-    #hud b { color: #f0c050; font-weight: 600; }
-    #hud .key { color: #5fc; }
-    #hud-stats { color: #889; margin-top: 6px; font-size: 11px; }
-    #hud .help { display: none; margin-top: 6px; color: #aab;
-                 line-height: 1.5; }
-    #hud.expanded .help { display: block; }
+    /* HUD: collapsed state is a tiny `[?]` pill in the top-left so it
+       can NEVER overlap the inspector on a narrow iframe (combined-
+       layout middle column on a MacBook Air). Expanded reveals title
+       + keymap. Stats moved to a separate bottom-left bubble so the
+       3D iframe never shows two boxes fighting at the top. */
+    #hud { position: absolute; top: 8px; left: 8px; z-index: 5; }
+    #hud .head {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 8px; background: rgba(10,12,16,0.85);
+      border: 1px solid #303542; border-radius: 4px;
+      cursor: pointer; user-select: none; font-size: 11px; color: #889;
+    }
+    #hud .head:hover { color: #f0c050; border-color: #5a606e; }
+    #hud .head b { color: #f0c050; font-weight: 600;
+                   display: none; }      /* hidden when collapsed */
+    #hud.expanded .head b { display: inline; }
     #hud .toggle { color: #6a6f7a; font-size: 10px; }
-    /* Inspector: top-right. Compact-pill layout when nothing's selected
-       so it doesn't overlap the HUD on narrow iframes. Expands on
-       click. Click → cyan border to signal interactive. */
-    #panel { position: absolute; top: 8px; right: 8px; padding: 8px 12px;
-             background: rgba(10,12,16,0.85); border: 1px solid #303542;
-             border-radius: 4px; max-width: calc(50vw - 16px);
-             font-size: 12px; line-height: 1.5; }
-    #panel.empty { padding: 4px 10px; font-size: 11px;
+    #hud .help {
+      display: none; margin-top: 4px; padding: 6px 10px;
+      background: rgba(10,12,16,0.85); border: 1px solid #303542;
+      border-radius: 4px; max-width: 280px; font-size: 11px;
+      line-height: 1.5; color: #aab;
+    }
+    #hud.expanded .help { display: block; }
+    #hud .help .k, #hud .help .key { color: #5fc; }
+    #hud-stats {
+      position: absolute; bottom: 30px; left: 8px;
+      padding: 3px 8px; background: rgba(10,12,16,0.7);
+      border-radius: 3px; font-size: 10px; color: #889;
+      pointer-events: none;
+    }
+    /* Inspector: top-right. Tiny dot when empty so it can't overflow.
+       Click sets `.expanded` and fills in object details. */
+    #panel { position: absolute; top: 8px; right: 8px; z-index: 5;
+             padding: 6px 10px; background: rgba(10,12,16,0.85);
+             border: 1px solid #303542; border-radius: 4px;
+             max-width: 280px; font-size: 12px; line-height: 1.5; }
+    #panel.empty { padding: 3px 8px; font-size: 10px;
                    color: #6a6f7a; font-style: italic; }
-    #panel.empty h3 { display: none; }
-    #panel:not(.empty) { min-width: 240px; }
+    #panel:not(.empty) { min-width: 200px; }
     #panel h3 { margin: 0 0 6px; font-size: 13px; color: #f0c050; }
     #panel .row { display: flex; justify-content: space-between; gap: 16px; }
     #panel .k { color: #889; }
@@ -936,9 +954,9 @@ _INDEX_3D_HTML = r"""<!doctype html>
 <body>
   <div id="app"></div>
   <div id="hud">
-    <div class="head" id="hud-head" title="click to show/hide help">
-      <b>scene 3D</b><span id="hud-stats">objects: 0 · points: 0</span>
-      <span class="toggle" id="hud-toggle">[?]</span>
+    <div class="head" id="hud-head" title="click to expand / collapse">
+      <span class="toggle" id="hud-toggle">▸</span>
+      <b>scene 3D</b>
     </div>
     <div class="help">
       <div><span class="k">drag</span> rotate · <span class="k">scroll</span> zoom · <span class="k">right-drag</span> pan</div>
@@ -946,7 +964,8 @@ _INDEX_3D_HTML = r"""<!doctype html>
       <div><span class="key">click</span> pick object · <span class="key">R</span> reset · <span class="key">G</span> grid</div>
     </div>
   </div>
-  <div id="panel" class="empty">click an object</div>
+  <div id="hud-stats">objects: 0 · points: 0</div>
+  <div id="panel" class="empty">▸</div>
   <div id="foot"><a href="/">← back to 2D map</a> · auto-refresh 1Hz · <span id="foot-time">—</span></div>
 
   <script type="module">
@@ -1472,18 +1491,20 @@ _INDEX_3D_HTML = r"""<!doctype html>
         renderer.setSize(window.innerWidth, window.innerHeight);
     });
 
-    // ── HUD help collapse toggle ──────────────────────────────────────
-    // Default: collapsed (just title + stats). Click [?] or anywhere on
-    // the head row to show the full keymap. Persists in localStorage.
+    // ── HUD collapse toggle ───────────────────────────────────────────
+    // Default: collapsed (just the ▸ arrow). Click to expand and reveal
+    // title + keymap; the arrow flips to ▾. Persists in localStorage.
     const hudEl = document.getElementById('hud');
     const hudHead = document.getElementById('hud-head');
-    const HUD_KEY = 'scene3dHud.help';
-    if (localStorage.getItem(HUD_KEY) === '1') hudEl.classList.add('expanded');
-    hudHead.addEventListener('click', () => {
-      hudEl.classList.toggle('expanded');
-      try { localStorage.setItem(HUD_KEY,
-                                 hudEl.classList.contains('expanded') ? '1' : '0'); } catch (_) {}
-    });
+    const hudToggle = document.getElementById('hud-toggle');
+    const HUD_KEY = 'scene3dHud.expanded';
+    function setHud(expanded) {
+      hudEl.classList.toggle('expanded', expanded);
+      hudToggle.textContent = expanded ? '▾' : '▸';
+      try { localStorage.setItem(HUD_KEY, expanded ? '1' : '0'); } catch (_) {}
+    }
+    setHud(localStorage.getItem(HUD_KEY) === '1');
+    hudHead.addEventListener('click', () => setHud(!hudEl.classList.contains('expanded')));
 
     // ── Render loop ────────────────────────────────────────────────────
     let last = performance.now();
