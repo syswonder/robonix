@@ -15,9 +15,15 @@
 //     the start body via `RBNX_CONFIG_FILE`; whether the init logic reads
 //     it from the env file or from the Driver call's `config_json` arg
 //     is the package's choice.
-//   - `skill:` entries are NOT started at deploy time — the executor
-//     invokes them on demand. We just log them so the user can see they
-//     were registered with the manifest.
+//   - `skill:` entries are spawned identically to `service:` — they
+//     need a long-lived process for their MCP tools to be registered
+//     on atlas. The semantic difference (skill = atomic intent
+//     invokable by pilot, service = always-on capability) lives in
+//     the contract namespace (`robonix/skill/*` vs `robonix/service/*`),
+//     not in the lifecycle. The earlier "skill is registered but not
+//     spawned" model lied about what was actually running and forced
+//     manifest authors to put skills like explore in `service:` as a
+//     workaround.
 //
 // Out of scope: crash-restart, health checks beyond Driver(INIT).
 
@@ -599,21 +605,30 @@ pub async fn execute(
             children.push(sp);
             persist_state(&state_path, &manifest_path, &atlas_endpoint, started_at_ms, &children);
         }
-        // Skills are NOT spawned at deploy — the executor invokes them on demand.
-        // Just report what was registered so the user has visibility.
+        // Skills are spawned at deploy time, same as services. The
+        // semantic distinction (skill = atomic intent invokable by
+        // pilot, service = always-on capability) is in the contract
+        // namespace (`robonix/skill/*` vs `robonix/service/*`), not
+        // in the lifecycle. Skills still need a long-lived process
+        // so their MCP tools are registered with atlas; pilot calls
+        // those tools on demand. Earlier the manifest had to put
+        // `explore` in `service:` as a workaround because skill: was
+        // "registered, not spawned" — that lied to consumers about
+        // what was actually running. Now skill: spawns the same way
+        // service: does, just kept distinct for documentation.
         for e in &deploy.skill {
-            let label = if e.name.is_empty() {
-                e.path
-                    .as_deref()
-                    .or(e.url.as_deref())
-                    .unwrap_or("(unnamed)")
-                    .to_string()
-            } else {
-                e.name.clone()
-            };
-            output::sub_step(&format!(
-                "[skill] {label}: registered (invoked on demand by executor — not spawned at deploy)"
-            ));
+            let sp = spawn_and_init(
+                "skill",
+                e,
+                &log_dir,
+                &cache_root,
+                &instances_dir,
+                &manifest_dir,
+                &mut atlas,
+            )
+            .await?;
+            children.push(sp);
+            persist_state(&state_path, &manifest_path, &atlas_endpoint, started_at_ms, &children);
         }
         Ok(())
     }
