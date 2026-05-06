@@ -31,6 +31,8 @@ from semantic_map_mcp import (  # type: ignore
     BoundingBox,
     FrameMapping,
     GetObjectResult,
+    GetSafeGoalNearObject_Request,
+    GetSafeGoalNearObject_Response,
     Object,
     Point3D,
     QueryConstraints,
@@ -44,6 +46,7 @@ from semantic_map_mcp import (  # type: ignore
     SemanticMapSlice,
     SnapshotSpec,
 )
+from geometry_msgs_mcp import PoseStamped, Point, Quaternion  # type: ignore
 from std_msgs_mcp import String
 
 from mcp.server.fastmcp import FastMCP
@@ -56,6 +59,7 @@ log = logging.getLogger(__name__)
 _REGISTRY: ObjectRegistry | None = None
 _RELATIONS: RelationEngine | None = None
 _TRANSFORM_TO_MAP = None  # callable(Pose3D)->Pose3D, or None
+_HUB = None  # SubscribersHub, exposes .latest("occupancy_grid") for safe-goal BFS
 
 
 def attach_state(
@@ -63,11 +67,13 @@ def attach_state(
     registry: ObjectRegistry,
     relations: RelationEngine,
     transform_to_map=None,
+    hub=None,
 ) -> None:
-    global _REGISTRY, _RELATIONS, _TRANSFORM_TO_MAP
+    global _REGISTRY, _RELATIONS, _TRANSFORM_TO_MAP, _HUB
     _REGISTRY = registry
     _RELATIONS = relations
     _TRANSFORM_TO_MAP = transform_to_map
+    _HUB = hub
 
 
 # ── conversions: Python state → IDL ────────────────────────────────────────
@@ -335,6 +341,167 @@ async def get_semantic_map(region: Region) -> SemanticMapSlice:
     )
 
 
+@mcp_contract(mcp, contract_id="robonix/system/scene/get_safe_goal_near_object")
+async def get_safe_goal_near_object(req: GetSafeGoalNearObject_Request) -> GetSafeGoalNearObject_Response:
+    """Find a navigation-safe approach pose near a registered scene object.
+    Returns a PoseStamped in the map frame, facing back toward the object
+    centre. Use this instead of guessing map coordinates and feed the result
+    straight into `service/navigation/navigate`.
+
+    Algorithm (when an OccupancyGrid is available via the ingest hub):
+      1. Compute the bbox-derived standoff distance.
+      2. Build an inflated obstacle mask: occupied (>50) and unknown (<0)
+         cells; inflate by `(robot_radius + clearance) / resolution` cells.
+      3. Sweep candidate goals on rings around the object centre at
+         standoff..standoff+search_radius_m, sweeping ±90° about the robot's
+         approach direction. Pick the first inflation-free cell.
+      4. Set yaw to face the object centre.
+
+    Without an occupancy grid (mapping not yet up) we fall back to the
+    bbox-derived approach point and report the limitation in `reason`.
+
+    Contract: robonix/system/scene/get_safe_goal_near_object."""
+    import math
+    if _REGISTRY is None:
+        return GetSafeGoalNearObject_Response(
+            reachable=False, pose=PoseStamped(),
+            reason="scene mcp_tools.attach_state was never called",
+        )
+    objs, _ = await _REGISTRY.snapshot()
+    o = objs.get(req.object_id.data)
+    if o is None:
+        return GetSafeGoalNearObject_Response(
+            reachable=False, pose=PoseStamped(),
+            reason=f"unknown object_id {req.object_id.data!r}",
+        )
+
+    clearance = float(req.clearance_m) if req.clearance_m > 0 else 0.4
+    search_r = float(req.search_radius_m) if req.search_radius_m > 0 else 3.0
+    cx, cy = float(o.pose.x), float(o.pose.y)
+    # BBox3D is axis-aligned (modulo yaw) and centered on the object pose;
+    # half_x / half_y are the bbox extents we need for the standoff radius.
+    ox = oy = 0.0
+    if o.bbox is not None:
+        ox = float(o.bbox.half_x)
+        oy = float(o.bbox.half_y)
+    standoff = max(0.5, math.hypot(ox, oy)) + clearance
+
+    # Approach direction = from robot toward the object. Without a self
+    # pose any direction is as valid as another; -x is fine for nav.
+    self_xy = None
+    if _RELATIONS is not None and getattr(_RELATIONS, "_self_tracker", None):
+        latest = _RELATIONS._self_tracker.latest_xy_yaw()  # type: ignore[attr-defined]
+        if latest:
+            self_xy = (latest[0], latest[1])
+    if self_xy is None:
+        appr_dx, appr_dy = -1.0, 0.0
+    else:
+        dx, dy = cx - self_xy[0], cy - self_xy[1]
+        n = math.hypot(dx, dy)
+        appr_dx, appr_dy = (dx / n, dy / n) if n > 1e-3 else (-1.0, 0.0)
+    appr_ang = math.atan2(appr_dy, appr_dx)
+
+    # ── 1. real BFS on the occupancy grid (preferred) ──────────────────
+    if _HUB is not None and _HUB.has("occupancy_grid"):
+        try:
+            import numpy as np
+            msg, _stamp, count = _HUB.latest("occupancy_grid")
+            if msg is not None and count > 0 and msg.info.width and msg.info.height:
+                info = msg.info
+                w, h = int(info.width), int(info.height)
+                res = float(info.resolution)
+                ogx = float(info.origin.position.x)
+                ogy = float(info.origin.position.y)
+                grid = np.frombuffer(bytes(msg.data), dtype=np.int8).reshape(h, w)
+                # Treat unknown as obstacle: a navigation goal in unmapped
+                # space is the same kind of risk as one in a wall.
+                blocked = (grid > 50) | (grid < 0)
+
+                # Robot footprint inflation. 0.3 m is a Tiago-sized default;
+                # `clearance_m` from the caller bumps it further.
+                robot_radius = 0.3
+                infl = max(1, int(math.ceil((robot_radius + clearance) / res)))
+
+                def is_safe(gx: int, gy: int) -> bool:
+                    if (gx - infl < 0 or gy - infl < 0
+                            or gx + infl >= w or gy + infl >= h):
+                        return False
+                    return not bool(
+                        blocked[gy - infl: gy + infl + 1,
+                                gx - infl: gx + infl + 1].any()
+                    )
+
+                # Sweep: rings of radius standoff..standoff+search_r at
+                # 0.1 m steps; angles ±π/2 about approach in 0.2 rad steps.
+                # First hit wins (closest to caller's preferred geometry).
+                step_r = max(res, 0.1)
+                n_rings = int(search_r / step_r) + 1
+                d_angles = [0.0]
+                for k in range(1, 9):  # ±0.2..±1.6 rad ≈ ±91°
+                    d_angles.extend((k * 0.2, -k * 0.2))
+
+                best = None
+                for i in range(n_rings):
+                    r = standoff + i * step_r
+                    for dth in d_angles:
+                        ang = appr_ang + dth
+                        wx = cx - math.cos(ang) * r
+                        wy = cy - math.sin(ang) * r
+                        gx = int((wx - ogx) / res)
+                        gy = int((wy - ogy) / res)
+                        if 0 <= gx < w and 0 <= gy < h and is_safe(gx, gy):
+                            best = (wx, wy, ang, r, dth)
+                            break
+                    if best is not None:
+                        break
+
+                if best is not None:
+                    bx, by, _bang, br, bdth = best
+                    yaw = math.atan2(cy - by, cx - bx)
+                    pose = PoseStamped()
+                    pose.header.frame_id = "map"
+                    pose.pose.position = Point(x=float(bx), y=float(by), z=0.0)
+                    pose.pose.orientation = Quaternion(
+                        x=0.0, y=0.0,
+                        z=float(math.sin(yaw / 2.0)),
+                        w=float(math.cos(yaw / 2.0)),
+                    )
+                    return GetSafeGoalNearObject_Response(
+                        reachable=True, pose=pose,
+                        reason=(f"occupancy grid: r={br:.2f}m "
+                                f"Δθ={math.degrees(bdth):+.0f}° "
+                                f"inflate={infl}cells({(infl*res):.2f}m)"),
+                    )
+                # Map exists but found no free goal — explicit failure rather
+                # than returning a bbox guess that lands in a wall.
+                return GetSafeGoalNearObject_Response(
+                    reachable=False, pose=PoseStamped(),
+                    reason=(f"occupancy grid had no free cell within "
+                            f"{search_r:.1f}m of {req.object_id.data} "
+                            f"at standoff={standoff:.2f}m, inflate={infl}cells"),
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning("[safe_goal] occupancy BFS errored, falling back to bbox: %s", e)
+
+    # ── 2. bbox fallback (no map yet) ──────────────────────────────────
+    ax = cx - appr_dx * standoff
+    ay = cy - appr_dy * standoff
+    yaw = math.atan2(cy - ay, cx - ax)
+    pose = PoseStamped()
+    pose.header.frame_id = "map"
+    pose.pose.position = Point(x=float(ax), y=float(ay), z=0.0)
+    pose.pose.orientation = Quaternion(
+        x=0.0, y=0.0,
+        z=float(math.sin(yaw / 2.0)),
+        w=float(math.cos(yaw / 2.0)),
+    )
+    return GetSafeGoalNearObject_Response(
+        reachable=True, pose=pose,
+        reason=(f"no occupancy_grid yet; bbox-derived "
+                f"standoff={standoff:.2f}m from {req.object_id.data}"),
+    )
+
+
 @mcp_contract(mcp, contract_id="robonix/system/scene/get_safety_context")
 async def get_safety_context(scope: String) -> SafetyContext:
     """Stub. v1 always returns status="not_implemented" with empty
@@ -355,6 +522,7 @@ __all__ = [
     "query",
     "get_object",
     "get_semantic_map",
+    "get_safe_goal_near_object",
     "get_safety_context",
 ]
 

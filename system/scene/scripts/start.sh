@@ -51,7 +51,6 @@ exec docker run --rm \
     -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
     -e ROBONIX_CAPABILITY_ID="${ROBONIX_CAPABILITY_ID:-com.robonix.system.scene}" \
     -e ROBONIX_PKG_HOST_DIR="$(pwd)" \
-    -e SCENE_PORT="${SCENE_PORT:-50106}" \
     -e SCENE_WEB_PORT="${SCENE_WEB_PORT:-50107}" \
     -e SCENE_LOG_LEVEL="${SCENE_LOG_LEVEL:-INFO}" \
     -e SCENE_CG_FORCE_CPU="${SCENE_CG_FORCE_CPU:-}" \
