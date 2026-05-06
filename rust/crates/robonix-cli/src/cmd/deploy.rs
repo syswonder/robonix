@@ -50,7 +50,6 @@ const CMD_INIT: u32 = 0;
 // How long to wait for a freshly spawned package to register its driver
 // interface with atlas before giving up.
 const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
-const DRIVER_POLL_INTERVAL: Duration = Duration::from_millis(500);
 // How long Driver(CMD_INIT) is given to return.
 // 90s gives generous slack for slow-warming sensors (webots's camera
 // can take 30-50s to start publishing on cold boot). Primitive
@@ -176,11 +175,11 @@ fn check_prerequisites(
         } else {
             entry.name.clone()
         };
-        if !pkg_path.exists() {
-            if let Some(url) = entry.url.as_ref() {
-                needs_clone.insert(name.clone(), (url.clone(), entry.branch.clone()));
-                continue;
-            }
+        if !pkg_path.exists()
+            && let Some(url) = entry.url.as_ref()
+        {
+            needs_clone.insert(name.clone(), (url.clone(), entry.branch.clone()));
+            continue;
         }
         let stamp = pkg_path.join("rbnx-build").join(".rbnx-built");
         if !stamp.exists() {
@@ -945,37 +944,6 @@ fn system_cli_args(
             push_pair(&mut out, "--vlm-format", nested_str("vlm", "api_format"));
         }
         _ => {}
-    }
-    out
-}
-
-/// Mask the value following any flag whose name suggests a secret, before
-/// the args are echoed to the boot log / user terminal. We pass these
-/// secrets to the child via argv (not env) for visibility in `ps`, but
-/// printing them verbatim into our own log is gratuitous — the log lands
-/// in `<manifest-dir>/rbnx-boot/logs/` and is the kind of thing that ends
-/// up shared in bug reports / pasted into chat.
-fn redact_secrets_for_log(args: &[String]) -> Vec<String> {
-    let is_secret_flag = |s: &str| {
-        let lower = s.to_ascii_lowercase();
-        s.starts_with("--")
-            && (lower.contains("api-key")
-                || lower.contains("api_key")
-                || lower.contains("secret")
-                || lower.contains("password")
-                || lower.ends_with("-token")
-                || lower.ends_with("_token"))
-    };
-    let mut out = Vec::with_capacity(args.len());
-    let mut i = 0;
-    while i < args.len() {
-        out.push(args[i].clone());
-        if is_secret_flag(&args[i]) && i + 1 < args.len() {
-            out.push("<redacted>".to_string());
-            i += 2;
-        } else {
-            i += 1;
-        }
     }
     out
 }
