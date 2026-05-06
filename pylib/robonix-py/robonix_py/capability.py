@@ -145,6 +145,14 @@ class Capability:
         self._on_up: Callable | None = None
         self._on_down: Callable | None = None
 
+        # Lifecycle state. Source of truth on the cap side; pushed to
+        # atlas via SetCapabilityState whenever it transitions (see
+        # _set_state below). Initial value is REGISTERED — it flips to
+        # INITIALIZED on Driver(CMD_INIT) success, ONLINE on CMD_UP,
+        # OFFLINE on CMD_DOWN. Atlas-side fallback infers state from
+        # interface declares for legacy caps that never push.
+        self._state: str = "registered"
+
         # Layer 2 registries (populated by decorators / methods).
         self._mcp_app = None  # FastMCP app, lazy
         self._mcp_handlers: list[Callable] = []  # decorated funcs
@@ -171,6 +179,31 @@ class Capability:
     def on_down(self, fn: Callable[[], Any]) -> Callable[[], Any]:
         self._on_down = fn
         return fn
+
+    # ── lifecycle state ──────────────────────────────────────────────────
+    @property
+    def state(self) -> str:
+        """Current lifecycle state — one of registered / initialized /
+        online / offline / error. The framework drives this off Driver
+        cmd transitions; users typically don't write to it directly."""
+        return self._state
+
+    def _set_state(self, new_state: str, detail: str = "") -> None:
+        """Update local state + push to atlas. Idempotent on no-change."""
+        new_state = (new_state or "").lower()
+        if new_state == self._state:
+            return
+        prev = self._state
+        self._state = new_state
+        log.info("[%s] state %s → %s%s",
+                 self.id, prev, new_state,
+                 f" ({detail})" if detail else "")
+        try:
+            self._atlas.set_capability_state(self.id, new_state, detail)
+        except Exception:  # noqa: BLE001
+            # set_capability_state already logs at debug; swallow to keep
+            # the cap usable even if atlas is briefly unreachable.
+            pass
 
     # ── Driver_Response helpers ──────────────────────────────────────────
     def ready(self, state: str = "ready") -> dict:
@@ -405,13 +438,21 @@ class Capability:
 
     def _do_bootstrap(self) -> None:
         # 1. atlas register
+        registered_ok = False
         try:
             new = self._atlas.register_capability(self.id, self.namespace,
                                                   self._md_path or "")
             log.info("registered cap %s%s", self.id,
                      "" if new else " (already existed)")
+            registered_ok = True
         except Exception as e:  # noqa: BLE001
             log.warning("RegisterCapability failed: %s", e)
+        # Push the initial REGISTERED state explicitly, so atlas reflects
+        # "process is alive but Driver(CMD_INIT) hasn't run yet" instead of
+        # leaning on the legacy "first non-driver interface declare → init"
+        # inference. No-op if register itself failed.
+        if registered_ok:
+            self._set_state("registered")
 
         # 2. gRPC server — build everything BEFORE start (gRPC python requires
         # all servicers added before server.start()).
@@ -433,6 +474,7 @@ class Capability:
             on_up=self._on_up,
             on_down=self._on_down,
             on_shutdown=self._teardown,
+            on_state_change=self._set_state,
             log_tag=self.id,
         )
         if lifecycle_info is not None:

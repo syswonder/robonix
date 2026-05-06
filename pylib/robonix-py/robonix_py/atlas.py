@@ -172,6 +172,23 @@ class AtlasClient:
         except Exception as e:  # noqa: BLE001
             log.debug("heartbeat: %s", e)
 
+    def set_capability_state(self, capability_id: str, state: str, detail: str = "") -> None:
+        """Push a lifecycle-state transition to atlas. `state` is a string
+        from `LIFECYCLE_STATES` (REGISTERED/INITIALIZED/ONLINE/OFFLINE/ERROR).
+        Best-effort — atlas downtime should not crash a healthy cap."""
+        self._ensure_stub()
+        enum_name = "STATE_" + state.upper()
+        enum_val = getattr(self.pb.CapabilityState, enum_name, None)
+        if enum_val is None:
+            log.warning("set_capability_state: unknown state %r", state)
+            return
+        try:
+            self.stub.SetCapabilityState(self.pb.SetCapabilityStateRequest(
+                capability_id=capability_id, state=enum_val, detail=detail,
+            ))
+        except Exception as e:  # noqa: BLE001
+            log.debug("SetCapabilityState(%s, %s): %s", capability_id, state, e)
+
     def start_heartbeat(self, capability_id: str, period_s: float = 15.0) -> threading.Thread:
         def _loop():
             while True:

@@ -52,6 +52,14 @@ import time
 import uuid
 from typing import Any, Awaitable, Callable, Optional
 
+# numpy is unconditionally imported because (a) the detector loop
+# uses it on every tick and (b) the per-method lazy-import convention
+# elsewhere in this file kept biting us — every helper that touched
+# `np.*` had to remember the import or the whole tick silently bailed
+# with NameError. One module-level import is cheap and removes the
+# class of bug entirely.
+import numpy as np
+
 log = logging.getLogger("scene.ingest.cg")
 
 
@@ -595,9 +603,20 @@ class ConceptGraphsDetector:
         rgb_msg = self._rgb_msg()
         depth_msg = self._depth_msg()
         if rgb_msg is None or depth_msg is None:
+            # One-line diagnostic so "no ticks at all" stops looking
+            # like a silent crash. Throttle to once every 25 polls (~15s
+            # at the default 0.6s tick) so it doesn't drown the log.
+            self._tick_idx += 1
+            if self._tick_idx % 25 == 1:
+                log.info("[scene-cg] waiting for frames: rgb=%s depth=%s",
+                         "ok" if rgb_msg is not None else "none",
+                         "ok" if depth_msg is not None else "none")
             return
         K = self._cam_info()
         if K is None or K.fx <= 0 or K.fy <= 0:
+            self._tick_idx += 1
+            if self._tick_idx % 25 == 1:
+                log.info("[scene-cg] waiting for camera intrinsics")
             return
         try:
             import numpy as np
@@ -647,6 +666,17 @@ class ConceptGraphsDetector:
             cls_idx = cls_idx[top]
 
         names = getattr(r0, "names", None) or {i: c for i, c in enumerate(self._classes)}
+        # Per-tick diagnostic: how many bboxes did YOLO-World return,
+        # what classes? Throttled to once every 25 ticks (~15s @ 0.6s
+        # period). Without this it's impossible to tell whether
+        # "1 dets" downstream means YOLO sees one thing vs the rest
+        # got dropped by class/floor/SAM/pcd filters.
+        if self._tick_idx % 25 == 0:
+            cls_names = [str(names.get(int(c), f"c{int(c)}")) for c in cls_idx]
+            log.info("[scene-cg] yolo: %d boxes, top conf=%.2f, classes=%s",
+                     int(xyxy.shape[0]),
+                     float(confs.max()) if confs.size else 0.0,
+                     cls_names[:8])
 
         # Filter ignored classes BEFORE running SAM (saves work).
         keep = np.array([
@@ -857,10 +887,15 @@ class ConceptGraphsDetector:
                 # on coplanar bbox vertices via pytorch3d.box3d_overlap. AABB-IoU
                 # was the previous fallback but was too weak for the cross-view
                 # merge case. See `_voxel_pcd_overlap_matrix` for the rationale.
-                spatial_sim = self._voxel_pcd_overlap_torch(det_list, self._map_objects)
+                #
+                # Visual sim comes back on whatever device CLIP runs on
+                # (cuda when available); pin our spatial_sim to that same
+                # device before they're added together by aggregate_similarities.
                 visual_sim = self._cg["compute_visual_similarities"](
                     det_list, self._map_objects,
                 )
+                spatial_sim = self._voxel_pcd_overlap_torch(det_list, self._map_objects)
+                spatial_sim = spatial_sim.to(visual_sim.device)
                 agg_sim = self._cg["aggregate_similarities"](
                     self.cfg["match_method"], self.cfg["phys_bias"],
                     spatial_sim, visual_sim,
@@ -975,7 +1010,7 @@ class ConceptGraphsDetector:
     @staticmethod
     def _voxel_pcd_overlap_matrix(
         objects_a, objects_b=None, *, voxel_size: float = 0.025,
-    ) -> "np.ndarray":
+    ):
         """Pairwise voxel-set fraction-overlap.
 
         For each pair (i, j) returns
@@ -986,10 +1021,15 @@ class ConceptGraphsDetector:
         (coplanar / sparse) point clouds, which crash concept-graphs's
         canonical `compute_overlap_matrix_general` via box3d_overlap.
 
-        Returns an (M, N) float32 array, where M = len(objects_a) and
-        N = len(objects_b) (or M when `objects_b is None`, with a
+        Returns an (M, N) float32 numpy array, where M = len(objects_a)
+        and N = len(objects_b) (or M when `objects_b is None`, with a
         symmetric matrix and zero diagonal).
         """
+        # Lazy numpy import — matches the per-method pattern the rest of
+        # this file uses (every other method that calls np.* imports it
+        # locally). Without this, `np` is unbound here at run time.
+        import numpy as np
+
         def voxel_set(pcd) -> frozenset:
             pts = np.asarray(pcd.points)
             if pts.size == 0:
@@ -1129,6 +1169,13 @@ class ConceptGraphsDetector:
         merge_visual_sim_thresh, even though their point clouds are
         on top of each other in 3D.
         """
+        # Same per-method lazy numpy import as the rest of this file —
+        # without it, `np.*` references below raise NameError and the
+        # whole class-agnostic merge pass silently bails every cleanup
+        # tick (visible in scene log as "cross-class geometric
+        # collapse failed: name 'np' is not defined").
+        import numpy as np
+
         n = len(objects)
         if n < 2:
             return objects
@@ -1140,7 +1187,7 @@ class ConceptGraphsDetector:
             except Exception:
                 return objects
 
-        bboxes: list[tuple[np.ndarray, np.ndarray]] = []
+        bboxes: list[tuple["np.ndarray", "np.ndarray"]] = []
         for o in objects:
             pts = np.asarray(o["pcd"].points)
             pts = pts[np.all(np.isfinite(pts), axis=1)] if pts.size else pts

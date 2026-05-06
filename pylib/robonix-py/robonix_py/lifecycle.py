@@ -89,12 +89,23 @@ def bind_user_handler(servicer_cls: type, method_name: str, fn: Callable) -> typ
     return type(f"Robonix{servicer_cls.__name__}Impl", (servicer_cls,), {method_name: impl})
 
 
+def _is_skill_namespace(ns: str) -> bool:
+    parts = [p for p in ns.strip("/").split("/") if p]
+    if not parts:
+        return False
+    # Either "robonix/skill/<name>" or "skill/<name>".
+    if parts[0] == "robonix" and len(parts) > 1:
+        return parts[1] == "skill"
+    return parts[0] == "skill"
+
+
 def build_lifecycle_servicer(
     namespace: str,
     contracts_grpc_module,
     response_cls,
     *,
     on_init=None, on_up=None, on_down=None, on_shutdown=None,
+    on_state_change=None,
     log_tag: str = "robonix_py",
 ):
     """Build (without starting a server) the lifecycle Servicer instance.
@@ -104,7 +115,13 @@ def build_lifecycle_servicer(
     `None` when the package doesn't have a driver contract (typical for
     system/* services like memory/scene/speech that have no hardware-init
     phase — they expose only MCP tools / gRPC RPCs and don't participate in
-    the rbnx-boot Driver(CMD_INIT) handshake)."""
+    the rbnx-boot Driver(CMD_INIT) handshake).
+
+    `on_state_change(state, detail)` is invoked AFTER each handler returns
+    ok=true and is the framework's hook for pushing state transitions to
+    atlas. State strings: "initialized" / "online" / "offline" / "error".
+    Capability layer wires this; lower-level callers can leave it None.
+    """
     base = driver_pascal_for_namespace(namespace)
     servicer_cls = getattr(contracts_grpc_module, f"{base}Servicer", None)
     add_fn = getattr(contracts_grpc_module, f"add_{base}Servicer_to_server", None)
@@ -116,6 +133,29 @@ def build_lifecycle_servicer(
         )
         return None
 
+    is_skill = _is_skill_namespace(namespace)
+
+    def _emit_state(target: str, detail: str = "") -> None:
+        if on_state_change is not None:
+            try:
+                on_state_change(target, detail)
+            except Exception:  # noqa: BLE001
+                log.exception("[%s] on_state_change(%s) raised", log_tag, target)
+
+    def _post_handler_state(cmd: int, resp) -> None:
+        # Only transition on success. Driver_Response carries `ok` + `state`
+        # + `error` — we treat ok=true as the trigger, regardless of the
+        # nominal `state` string the handler chose to attach.
+        if not getattr(resp, "ok", False):
+            _emit_state("error", getattr(resp, "error", "") or getattr(resp, "state", ""))
+            return
+        if cmd == CMD_INIT:
+            _emit_state("initialized")
+        elif cmd == CMD_UP:
+            _emit_state("online")
+        elif cmd == CMD_DOWN:
+            _emit_state("offline")
+
     def Driver(self, request, context):  # noqa: N802 — matches generated stub
         cmd = int(request.command)
         log.info("[%s] Driver(cmd=%d) received", log_tag, cmd)
@@ -123,16 +163,40 @@ def build_lifecycle_servicer(
             if cmd == CMD_INIT:
                 if on_init is None:
                     return response_cls(ok=False, state="error", error="no on_init handler")
-                return coerce_response(response_cls, on_init(parse_cfg(request)))
+                resp = coerce_response(response_cls, on_init(parse_cfg(request)))
+                _post_handler_state(cmd, resp)
+                return resp
             if cmd == CMD_UP:
                 if on_up is None:
-                    return response_cls(ok=False, state="error",
-                                        error="no on_up handler (this capability isn't a skill?)")
-                return coerce_response(response_cls, on_up(parse_cfg(request)))
+                    # Primitives + services don't need a separate on_up phase
+                    # (their on_init does all the work). Treat the implicit
+                    # "INITIALIZED → ONLINE" transition as a no-op success
+                    # so rbnx-cli's auto-CMD_UP after CMD_INIT succeeds.
+                    # Skills must define on_up — that's where they actually
+                    # allocate hot resources, so missing it is a real bug.
+                    if is_skill:
+                        return response_cls(ok=False, state="error",
+                                            error="skill is missing @cap.on_up handler")
+                    resp = response_cls(ok=True, state="ready", error="")
+                    _post_handler_state(cmd, resp)
+                    return resp
+                resp = coerce_response(response_cls, on_up(parse_cfg(request)))
+                _post_handler_state(cmd, resp)
+                return resp
             if cmd == CMD_DOWN:
                 if on_down is None:
-                    return response_cls(ok=False, state="error", error="no on_down handler")
-                return coerce_response(response_cls, on_down())
+                    # Same argument as CMD_UP: prim/svc don't have a teardown
+                    # phase distinct from process exit. Treat as no-op success
+                    # for them; require explicit handler for skills.
+                    if is_skill:
+                        return response_cls(ok=False, state="error",
+                                            error="skill is missing @cap.on_down handler")
+                    resp = response_cls(ok=True, state="offline", error="")
+                    _post_handler_state(cmd, resp)
+                    return resp
+                resp = coerce_response(response_cls, on_down())
+                _post_handler_state(cmd, resp)
+                return resp
             if cmd == CMD_SHUTDOWN:
                 if on_shutdown is not None:
                     on_shutdown()

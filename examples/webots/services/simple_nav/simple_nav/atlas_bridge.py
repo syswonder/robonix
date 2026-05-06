@@ -88,11 +88,13 @@ def navigate(req: Navigate_Request) -> Navigate_Response:
     orientation if you don't care about final heading; the robot
     succeeds on xy alone.)
 
-    Returns Navigate_Response.status_message as JSON: `{goal_id, ...}`.
-    Track via status() / cancel() using the goal_id."""
+    Per Navigate.srv the response carries `goal_id` directly; track
+    via the sibling `status` / `cancel` contracts. `status_message`
+    is free-form text only — never a JSON envelope."""
     if nav is None:
-        return Navigate_Response(accepted=False,
-                                 status_message=json.dumps({"error": "nav not initialized"}))
+        return Navigate_Response(
+            accepted=False, goal_id="", status_message="nav not initialized",
+        )
     goal = req.goal
     target_yaw = quat_to_yaw(goal.pose.orientation.z, goal.pose.orientation.w)
     # Heuristic: if orientation is the identity quaternion (z=0,w=1), the
@@ -108,15 +110,9 @@ def navigate(req: Navigate_Request) -> Navigate_Response:
         # Tolerance is a service-side default — not a contract knob.
         tolerance_m=0.5,
     ))
-    return Navigate_Response(
-        accepted=True,
-        status_message=json.dumps({
-            "goal_id": goal_id,
-            "target_x": float(goal.pose.position.x),
-            "target_y": float(goal.pose.position.y),
-            "target_yaw": target_yaw if use_yaw else None,
-        }),
-    )
+    msg = (f"goto ({goal.pose.position.x:.2f},{goal.pose.position.y:.2f})"
+           + (f" yaw={target_yaw:.2f}" if use_yaw else ""))
+    return Navigate_Response(accepted=True, goal_id=goal_id, status_message=msg)
 
 
 @cap.mcp("robonix/service/navigation/status")
@@ -143,9 +139,11 @@ def cancel(req: CancelNavigation_Request) -> CancelNavigation_Response:
     """Cancel an active navigation goal. Empty `goal_id` cancels the
     currently active goal. Idempotent."""
     if nav is None:
-        return CancelNavigation_Response(accepted=False, message="nav not initialized")
+        return CancelNavigation_Response(accepted=False, status_message="nav not initialized")
     ok = nav.cancel_goal(req.goal_id or None)
-    return CancelNavigation_Response(accepted=ok, message="cancelled" if ok else "no active goal")
+    return CancelNavigation_Response(
+        accepted=ok, status_message="cancelled" if ok else "no active goal",
+    )
 
 
 # ── lifecycle ────────────────────────────────────────────────────────────────
