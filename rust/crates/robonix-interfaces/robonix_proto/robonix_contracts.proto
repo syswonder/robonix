@@ -19,6 +19,8 @@ import "asr.proto";
 import "tts.proto";
 import "speech.proto";
 import "robonix_msg.proto";
+import "liaison.proto";
+import "voiceprint.proto";
 
 // contract: robonix/prm/base/cmd (v1)
 service PrmBaseCmd {
@@ -116,8 +118,13 @@ service SrvExecutorListTools {
 }
 
 // contract: robonix/srv/liaison (v1)
+//   Stream             — text/text-equivalent path: client builds the Task itself.
+//   StartVoiceSession  — voice path: Liaison drives mic → ASR → voiceprint → Pilot
+//                         → (optional) TTS → speaker; client just renders VoiceEvents.
 service SrvLiaison {
   rpc Stream(robonix.pilot.Task) returns (stream robonix.pilot.PilotEvent);
+  rpc StartVoiceSession(robonix.liaison.StartVoiceSession_Request)
+      returns (stream robonix.liaison.VoiceEvent);
 }
 
 // contract: robonix/srv/memory/compact (v1)
@@ -218,5 +225,10 @@ service SrvSpeechTtsStream {
 // contract: robonix/srv/speech/dialog (v1)
 service SrvSpeechDialog {
   rpc Stream(robonix.speech.StartDialog_Request) returns (stream robonix.robonix_msg.DialogEvent);
+}
+
+// contract: robonix/srv/speech/voiceprint (v1)
+service SrvSpeechVoiceprint {
+  rpc Call(robonix.voiceprint.Identify_Request) returns (robonix.voiceprint.Identify_Response);
 }
 

@@ -43,6 +43,7 @@ message Task {
   bytes audio_data = 5;
   string context_json = 6;
   uint64 timestamp_ms = 7;
+  string user_id = 8;
 }
 
 message TaskCall {

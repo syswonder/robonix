@@ -1,0 +1,17 @@
+# Voiceprint identification (one-shot).
+# Caller sends raw audio; service returns the matched user_id.
+# Used by Liaison.StartVoiceSession to attribute a voice turn to a user.
+# ROS: `lib/voiceprint/srv/Identify.srv` (TODO: regen ROS IDL).
+[contract]
+id      = "robonix/srv/speech/voiceprint"
+version = "1"
+kind    = "service"
+
+[io.srv]
+srv = "voiceprint/srv/Identify"
+
+[mode]
+type = "rpc"
+
+[semantics]
+stateless = true
