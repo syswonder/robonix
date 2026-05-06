@@ -400,6 +400,7 @@ fn spec_to_field_specs(spec: &MsgSpec) -> Vec<pb::FieldSpec> {
 ///   1. explicit CLI/env paths (any non-empty entries from
 ///      `--capabilities a,b,c` or `ROBONIX_ATLAS_CAPABILITIES=a,b,c`)
 ///   2. `$ROBONIX_SOURCE_PATH/capabilities` as a single fallback root
+///
 /// Returns an empty vec if nothing is configured; atlas then runs with
 /// an empty registry (handlers return found=false on every query).
 ///

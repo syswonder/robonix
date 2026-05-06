@@ -260,7 +260,7 @@ fn emit_json_schema_prop(out: &mut String, field: &MsgField, pkg: &str, depth: u
             // or longer payload.
             if let Some(n) = field.array_size {
                 let _ = p; // primitive identity already validated by is_byte_blob
-                let encoded = ((n + 2) / 3) * 4;
+                let encoded = n.div_ceil(3) * 4;
                 entries.push(format!(r#""minLength": {encoded}"#));
                 entries.push(format!(r#""maxLength": {encoded}"#));
             }
