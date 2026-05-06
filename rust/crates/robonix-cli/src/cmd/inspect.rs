@@ -25,6 +25,9 @@ fn state_name(s: i32) -> &'static str {
     {
         atlas_pb::CapabilityState::StateRegistered => "REGISTERED",
         atlas_pb::CapabilityState::StateInitialized => "INITIALIZED",
+        atlas_pb::CapabilityState::StateOnline => "ONLINE",
+        atlas_pb::CapabilityState::StateOffline => "OFFLINE",
+        atlas_pb::CapabilityState::StateError => "ERROR",
         atlas_pb::CapabilityState::StateUnspecified => "?",
     }
 }
@@ -48,6 +51,7 @@ pub async fn caps(endpoint: &str, json: bool) -> Result<()> {
                     "capability_id":  r.capability_id,
                     "namespace":      r.namespace,
                     "state":          state_name(r.state),
+                    "state_detail":   r.state_detail,
                     "interfaces":     r.interfaces.iter().map(|i| serde_json::json!({
                         "contract_id": i.contract_id,
                         "transport":   transport_name(i.transport),
@@ -64,12 +68,18 @@ pub async fn caps(endpoint: &str, json: bool) -> Result<()> {
         return Ok(());
     }
     for rec in &records {
+        let detail = if rec.state_detail.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", rec.state_detail)
+        };
         println!(
-            "{} {} {} {}",
+            "{} {} {} {}{}",
             "●".green(),
             rec.capability_id.bold(),
             format!("[{}]", state_name(rec.state)).cyan(),
-            rec.namespace.dimmed()
+            rec.namespace.dimmed(),
+            detail.dimmed()
         );
         for iface in &rec.interfaces {
             println!(
