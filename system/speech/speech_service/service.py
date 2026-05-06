@@ -123,12 +123,16 @@ class WhisperASRBackend:
         batch_size = int(os.environ.get("ASR_BATCH_SIZE", "4"))
 
         log.info("Loading Whisper model from %s on %s ...", model_path, device)
+        # `local_files_only` must be a top-level kwarg, not inside model_kwargs:
+        # transformers>=5 reads it from kwargs into hub_kwargs and also forwards
+        # model_kwargs to AutoConfig.from_pretrained — so duplicating it via
+        # model_kwargs raises "got multiple values for keyword argument".
         self.pipe = hf_pipeline(
             "automatic-speech-recognition",
             model=model_path,
             device=device,
             torch_dtype=torch.float16,
-            model_kwargs={"local_files_only": True},
+            local_files_only=True,
         )
         self.chunk_length_s = chunk_length
         self.batch_size = batch_size
@@ -803,36 +807,81 @@ def _try_backend(name: str, factory):
         return None
 
 
-# Backend init at module level (eager) — attach_grpc_servicer must run
-# before cap.run()'s bootstrap step starts the gRPC server. Failed
-# backends are non-fatal; only "all three down" is a hard fail (Init
-# checks that and returns cap.error).
+# Servicers attached with None backends; backends are loaded inside
+# on_init(cfg) so the boot manifest's `system: speech: {...}` block can
+# gate which engines come up. Each servicer's Recognize/Synthesize
+# already returns UNAVAILABLE when its backend is None, which covers
+# the small window between gRPC server start and Driver(CMD_INIT).
 log.info("Starting speech service (ci_mode=%s)", CI_MODE)
-if CI_MODE:
-    _asr_backend = MockASRBackend()
-    _asr_stream_backend = MockASRStreamingBackend()
-    _tts_backend = MockTTSBackend()
-else:
-    _asr_backend = _try_backend("Whisper ASR", WhisperASRBackend)
-    _asr_stream_backend = _try_backend("FunASR (streaming)", FunASRStreamingBackend)
-    _tts_backend = _try_backend("Edge TTS", EdgeTTSBackend)
-
-log.info("Backend status: Whisper=%s FunASR=%s EdgeTTS=%s",
-         "OK" if _asr_backend else "UNAVAILABLE",
-         "OK" if _asr_stream_backend else "UNAVAILABLE",
-         "OK" if _tts_backend else "UNAVAILABLE")
-
 _dialog_manager = DialogManager()
-cap.attach_grpc_servicer("robonix/system/speech/asr",        SpeechAsrServicer(_asr_backend))
-cap.attach_grpc_servicer("robonix/system/speech/asr_stream", SpeechAsrStreamServicer(_asr_stream_backend))
-cap.attach_grpc_servicer("robonix/system/speech/tts",        SpeechTtsServicer(_tts_backend))
-cap.attach_grpc_servicer("robonix/system/speech/tts_stream", SpeechTtsStreamServicer(_tts_backend))
-cap.attach_grpc_servicer("robonix/system/speech/dialog",     SpeechDialogServicer(_dialog_manager))
+_asr_servicer        = SpeechAsrServicer(None)
+_asr_stream_servicer = SpeechAsrStreamServicer(None)
+_tts_servicer        = SpeechTtsServicer(None)
+_tts_stream_servicer = SpeechTtsStreamServicer(None)
+_dialog_servicer     = SpeechDialogServicer(_dialog_manager)
+cap.attach_grpc_servicer("robonix/system/speech/asr",        _asr_servicer)
+cap.attach_grpc_servicer("robonix/system/speech/asr_stream", _asr_stream_servicer)
+cap.attach_grpc_servicer("robonix/system/speech/tts",        _tts_servicer)
+cap.attach_grpc_servicer("robonix/system/speech/tts_stream", _tts_stream_servicer)
+cap.attach_grpc_servicer("robonix/system/speech/dialog",     _dialog_servicer)
+
+
+# Map package_manifest cfg keys to the env vars that backend
+# constructors read. Cfg wins; absent keys leave existing env intact so
+# operators who export ASR_MODEL etc. in the start: block still work.
+_CFG_ENV_MAP = {
+    "asr_model":         "ASR_MODEL",
+    "asr_device":        "ASR_DEVICE",
+    "asr_chunk_length":  "ASR_CHUNK_LENGTH",
+    "asr_batch_size":    "ASR_BATCH_SIZE",
+    "funasr_model":      "FUNASR_MODEL",
+    "funasr_chunk_size": "FUNASR_CHUNK_SIZE",
+    "tts_voice":         "TTS_VOICE",
+}
+
+
+def _apply_cfg_to_env(cfg: dict) -> None:
+    for key, env in _CFG_ENV_MAP.items():
+        if key not in cfg:
+            continue
+        v = cfg[key]
+        os.environ[env] = v if isinstance(v, str) else json.dumps(v)
 
 
 @cap.on_init
 def init(cfg):
-    if not any([_asr_backend, _asr_stream_backend, _tts_backend]):
+    log.info("Driver(INIT) cfg keys: %s", sorted(cfg.keys()))
+    _apply_cfg_to_env(cfg)
+
+    disable_whisper = bool(cfg.get(
+        "disable_whisper",
+        os.environ.get("SPEECH_DISABLE_WHISPER", "").strip() in ("1", "true", "yes"),
+    ))
+
+    if CI_MODE:
+        asr = MockASRBackend()
+        asr_stream = MockASRStreamingBackend()
+        tts = MockTTSBackend()
+    else:
+        if disable_whisper:
+            log.info("Whisper ASR disabled by config; asr contract will return UNAVAILABLE")
+            asr = None
+        else:
+            asr = _try_backend("Whisper ASR", WhisperASRBackend)
+        asr_stream = _try_backend("FunASR (streaming)", FunASRStreamingBackend)
+        tts = _try_backend("Edge TTS", EdgeTTSBackend)
+
+    _asr_servicer.asr_backend = asr
+    _asr_stream_servicer.stream_asr_backend = asr_stream
+    _tts_servicer.tts_backend = tts
+    _tts_stream_servicer.tts_backend = tts
+
+    log.info("Backend status: Whisper=%s FunASR=%s EdgeTTS=%s",
+             "OK" if asr else "UNAVAILABLE",
+             "OK" if asr_stream else "UNAVAILABLE",
+             "OK" if tts else "UNAVAILABLE")
+
+    if not any([asr, asr_stream, tts]):
         return cap.error(
             "all backends failed; set SPEECH_CI_MODE=1 for mocks or fix "
             "model / network issues (see backend errors above)"
