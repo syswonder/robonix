@@ -123,9 +123,7 @@ impl ContractRegistry {
                     // ROS msg/srv source for IDL codegen. Skip it so any
                     // stray .toml under lib/ never lands in the contract
                     // registry.
-                    !(e.file_type().is_dir()
-                        && e.file_name() == "lib"
-                        && e.depth() > 0)
+                    !(e.file_type().is_dir() && e.file_name() == "lib" && e.depth() > 0)
                 })
                 .filter_map(|e| e.ok())
             {
@@ -149,10 +147,7 @@ impl ContractRegistry {
                         }
                         loaded_from_root += 1;
                     }
-                    Err(e) => warn!(
-                        "[atlas] contract registry: skip {} ({e:#})",
-                        path.display()
-                    ),
+                    Err(e) => warn!("[atlas] contract registry: skip {} ({e:#})", path.display()),
                 }
             }
             info!(
@@ -202,8 +197,8 @@ impl ContractRegistry {
 fn load_one(path: &Path) -> anyhow::Result<pb::ContractDescriptor> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("read contract toml: {}", path.display()))?;
-    let parsed: RawContract = toml::from_str(&raw)
-        .with_context(|| format!("parse contract toml: {}", path.display()))?;
+    let parsed: RawContract =
+        toml::from_str(&raw).with_context(|| format!("parse contract toml: {}", path.display()))?;
     let id = parsed.contract.id.trim().to_string();
     if id.is_empty() {
         anyhow::bail!("[contract].id is empty");
@@ -263,10 +258,7 @@ fn load_one(path: &Path) -> anyhow::Result<pb::ContractDescriptor> {
 /// (e.g. type "X" not present in any `lib/`) just keeps its empty
 /// `msg_fields` / `srv_*_fields`. Atlas startup must not fail because
 /// of a single missing `.msg`.
-fn attach_idl_fields(
-    by_id: &mut HashMap<String, pb::ContractDescriptor>,
-    roots: &[&Path],
-) {
+fn attach_idl_fields(by_id: &mut HashMap<String, pb::ContractDescriptor>, roots: &[&Path]) {
     // The msg_parser indexes from `include_paths`. For each capability
     // root, the IDL files live under `<root>/lib`; everything else
     // under the root is either contract TOMLs or non-IDL data.
@@ -276,9 +268,7 @@ fn attach_idl_fields(
         .filter(|p| p.exists())
         .collect();
     if lib_paths.is_empty() {
-        info!(
-            "[atlas] contract registry: no <root>/lib/ found — skipping IDL field attachment"
-        );
+        info!("[atlas] contract registry: no <root>/lib/ found — skipping IDL field attachment");
         return;
     }
     let mut resolver = match MsgResolver::new(&lib_paths) {
@@ -369,9 +359,11 @@ fn resolve_srv_fields(
         .with_context(|| format!("not a fully-qualified srv type ref: {type_ref}"))?;
     let key = (pkg.clone(), name.clone());
     if !resolver.srv_cache.contains_key(&key) {
-        let path = resolver.srv_index.get(&key).cloned().with_context(|| {
-            format!("MsgResolver srv_index has no entry for {pkg}/{name}")
-        })?;
+        let path = resolver
+            .srv_index
+            .get(&key)
+            .cloned()
+            .with_context(|| format!("MsgResolver srv_index has no entry for {pkg}/{name}"))?;
         let parsed = robonix_codegen::codegen::msg_parser::parse_srv_file(&pkg, &name, &path)?;
         resolver.srv_cache.insert(key.clone(), parsed);
     }

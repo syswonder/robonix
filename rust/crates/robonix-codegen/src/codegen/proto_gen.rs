@@ -41,9 +41,7 @@ fn proto_field_type(field: &MsgField, current_package: &str) -> String {
             // `repeated uint32` and let the consumer enforce length.
             // `byte[]` is signed 8-bit and stays `repeated int32`.
             let prim = RosPrimitive::parse(p).unwrap_or_else(|| {
-                panic!(
-                    "[robonix-codegen] proto: primitive '{p}' is not in RosPrimitive::parse"
-                )
+                panic!("[robonix-codegen] proto: primitive '{p}' is not in RosPrimitive::parse")
             });
             if field.is_array && field.array_size.is_none() && prim.is_blob_element() {
                 return "bytes".to_string();
