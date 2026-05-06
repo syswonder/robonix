@@ -22,4 +22,4 @@ Head-mounted RGB + depth camera. PRIMARY perception tool — call freely.
 
 For "find X" tasks: snapshot → describe what you see → if you don't see X,
 issue a small chassis/cmd nudge → snapshot again. Don't try to navigate by
-absolute coordinates; you don't have a map.
+absolute coordinates when you don't have a map.

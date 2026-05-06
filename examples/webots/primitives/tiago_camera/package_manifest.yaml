@@ -1,17 +1,10 @@
 # Tiago camera driver — primitive package.
-# One device = one package. Exposes the head front camera (RGB + depth):
-#   robonix/primitive/camera/snapshot        → camera_snapshot(Empty) → Image (JPEG)
-#   robonix/primitive/camera/depth_snapshot  → camera_depth_snapshot(Empty) → Image (JPEG)
-#
-# TODO: gRPC stream contract `robonix/primitive/camera/rgb`
-# (PrmCameraRgb.Stream) is not exposed yet; add when a consumer needs
-# continuous frames rather than on-demand snapshots.
 manifestVersion: 1
 
 package:
   name: com.robonix.example.tiago_camera
   version: 0.1.0
-  vendor: robonix
+  vendor: wheatfox <wheatfox17@icloud.com>
   description: Tiago camera driver — RGB + depth head camera over Webots ROS2.
   license: MulanPSL-2.0
 

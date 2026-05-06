@@ -3,13 +3,11 @@
 The robot's mobile base. Use this for ALL movement during interactive
 exploration / search / wandering — paired with `camera/snapshot`.
 
-## Tools
+For "where is the robot" queries, subscribe to `service/map/pose`
+(SLAM-corrected, map-frame) — that's a localization concern, not a
+chassis-primitive one.
 
-### `state` — `robonix/primitive/chassis/state`
-- input: none
-- returns: `prm_base/RobotState` JSON. `base_pose` is the latest AMCL pose
-  (`map` frame) when localization is up; otherwise zeros.
-- use to check where the robot currently is on the map.
+## Tools
 
 ### `cmd` — `robonix/primitive/chassis/move`
 - input: any of `linear_x linear_y linear_z angular_x angular_y angular_z`

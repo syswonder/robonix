@@ -98,5 +98,5 @@ each driver still registers tools by leaf name.
 
 The pilot's persistence prompt instructs the LLM to keep iterating
 tools-then-reason until the task is *verifiably* done — taking a
-fresh `chassis/state` or `camera/snapshot` after every physical action
-to confirm progress.
+fresh `camera/snapshot` after every physical action to confirm
+progress.
