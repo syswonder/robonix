@@ -1,3 +1,4 @@
+# TODO: migrate to `package_manifest.yaml` - wheatfox
 manifestVersion: 1
 
 build:

@@ -28,6 +28,12 @@ system:
     log: info
   speech:
     log: info
+    # FunASR (paraformer-zh-streaming) handles streaming ASR for the
+    # rbnx ask / dialog paths; Whisper is the one-shot full-utterance
+    # backend and pulls 6 GB of weights — opt out unless you have a
+    # caller for the `robonix/system/speech/asr` (one-shot) contract.
+    disable_whisper: true
+    tts_voice: zh-CN-XiaoxiaoNeural
   scene:
     log: info
 
