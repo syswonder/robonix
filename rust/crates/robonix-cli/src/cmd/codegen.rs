@@ -48,9 +48,12 @@ fn resolve_pkg_root(package: &Path) -> Result<PathBuf> {
     let abs = abs
         .canonicalize()
         .with_context(|| format!("package path not found: {}", abs.display()))?;
-    if !abs.join("robonix_manifest.yaml").exists() && !abs.join("rbnx_manifest.yaml").exists() {
+    if !abs.join("package_manifest.yaml").exists()
+        && !abs.join("robonix_manifest.yaml").exists()
+        && !abs.join("rbnx_manifest.yaml").exists()
+    {
         eprintln!(
-            "{}: {} has no robonix_manifest.yaml (continuing anyway)",
+            "{}: {} has no package_manifest.yaml (continuing anyway)",
             "warn".yellow().bold(),
             abs.display()
         );
