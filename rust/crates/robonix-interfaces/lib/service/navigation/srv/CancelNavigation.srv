@@ -1,5 +1,8 @@
-# robonix/primitive/base/cancel_nav — request cancellation of a navigation goal (RPC)
+# robonix/service/navigation/cancel — request cancellation of a
+# navigation goal (RPC). Empty `goal_id` cancels the current active
+# goal. The response uses the same `status_message` field name as
+# Navigate.srv for naming consistency across the namespace.
 string goal_id
 ---
 bool accepted
-string message
+string status_message

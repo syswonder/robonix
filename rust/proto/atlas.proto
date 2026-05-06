@@ -192,21 +192,54 @@ message InterfaceMetadata {
   TransportParams params = 3;
 }
 
-// Lifecycle state of a capability instance, observed (not driven) by Atlas.
-//   STATE_REGISTERED  — the cap exists in atlas but only its `driver`
-//                       interface has been declared (or no interface yet).
-//                       It hasn't been initialised; rbnx start hasn't yet
-//                       called Driver(CMD_INIT) — or the call is in flight,
-//                       or it failed.
-//   STATE_INITIALIZED — the cap has declared at least one non-driver
-//                       interface, which by convention only happens after
-//                       a successful Driver(CMD_INIT). The cap is serving.
-// System caps (atlas/pilot/executor/memory/…) skip the driver step and
-// transition straight to INITIALIZED on their first interface declare.
+// Lifecycle state of a capability instance. The cap itself is the source
+// of truth; atlas only stores what the cap reported via SetCapabilityState
+// (or was inferred from the first interface declare for legacy caps).
+//
+//   STATE_REGISTERED  — process up, atlas knows about the cap, but
+//                       Driver(CMD_INIT) hasn't completed (in flight, or
+//                       not yet called by `rbnx boot`).
+//   STATE_INITIALIZED — Driver(CMD_INIT) returned ok=true. Resources
+//                       parsed/validated but not yet "hot". Skills sit
+//                       here until the executor sends CMD_UP. Primitives
+//                       and services pass through this state immediately
+//                       and rbnx auto-sends CMD_UP next.
+//   STATE_ONLINE      — Driver(CMD_UP) returned ok=true. The cap is
+//                       actively serving requests / holding hot resources.
+//                       Primitives and services normally stay here for
+//                       the lifetime of the boot.
+//   STATE_OFFLINE     — Driver(CMD_DOWN) returned ok=true. Skill-only:
+//                       skill keeps the gRPC server up + the contract
+//                       in atlas, but heavy resources are released. The
+//                       executor can re-send CMD_UP later (and a future
+//                       eviction policy will drive that).
+//   STATE_ERROR       — terminal failure of the last Driver(CMD_*) call.
+//                       Cap remains visible so debug tooling can find it,
+//                       but consumers must not call its data interfaces.
 enum CapabilityState {
   STATE_UNSPECIFIED = 0;
   STATE_REGISTERED  = 1;
   STATE_INITIALIZED = 2;
+  STATE_ONLINE      = 3;
+  STATE_OFFLINE     = 4;
+  STATE_ERROR       = 5;
+}
+
+// Push a state transition. Caps call this after their on_init / on_up /
+// on_down handler returns; rbnx and the executor use the result to gate
+// follow-up Driver(CMD_*) calls without polling. Atlas just stores the
+// last value reported per cap; it does not validate transition legality.
+message SetCapabilityStateRequest {
+  string capability_id = 1;
+  CapabilityState state = 2;
+  // Optional human-readable reason / error attached to this transition,
+  // shown in `rbnx caps`. Empty when the transition is a normal success.
+  string detail = 3;
+}
+message SetCapabilityStateResponse {
+  // Previous state — useful for the caller to log "X went from
+  // INITIALIZED → ONLINE" without a separate query.
+  CapabilityState previous_state = 1;
 }
 
 // Read view of a registered capability instance. `interfaces` lists
@@ -223,6 +256,12 @@ message CapabilityRecord {
   uint64 last_heartbeat_ms = 4;
   repeated InterfaceMetadata interfaces = 5;
   CapabilityState state = 6;
+  // Last `detail` string attached via SetCapabilityState; empty for
+  // legacy caps that don't push state transitions. Surfaced verbatim
+  // by `rbnx caps` so operators can see "deferred: waiting for
+  // service/map" or "error: missing /opt/models/yolov8l-world.pt"
+  // without grepping per-package logs.
+  string state_detail = 7;
 }
 
 // Discover capability instances. Filters AND together when set.
@@ -375,6 +414,8 @@ service Atlas {
   rpc UnregisterCapability(UnregisterCapabilityRequest)
       returns (UnregisterCapabilityResponse);
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc SetCapabilityState(SetCapabilityStateRequest)
+      returns (SetCapabilityStateResponse);
   rpc DeclareInterface(DeclareInterfaceRequest)
       returns (DeclareInterfaceResponse);
   rpc QueryCapabilities(QueryCapabilitiesRequest)

@@ -25,7 +25,27 @@ fn state_name(s: i32) -> &'static str {
     {
         atlas_pb::CapabilityState::StateRegistered => "REGISTERED",
         atlas_pb::CapabilityState::StateInitialized => "INITIALIZED",
+        atlas_pb::CapabilityState::StateOnline => "ONLINE",
+        atlas_pb::CapabilityState::StateOffline => "OFFLINE",
+        atlas_pb::CapabilityState::StateError => "ERROR",
         atlas_pb::CapabilityState::StateUnspecified => "?",
+    }
+}
+
+/// Color the [STATE] tag the same way every printer does it. Picked to
+/// match the boot-log feel: green=running healthy, yellow=came up but
+/// nothing's driving it yet, red=problem, dim=quiescent.
+fn state_tag(s: i32) -> colored::ColoredString {
+    let label = format!("[{}]", state_name(s));
+    match atlas_pb::CapabilityState::try_from(s)
+        .unwrap_or(atlas_pb::CapabilityState::StateUnspecified)
+    {
+        atlas_pb::CapabilityState::StateOnline => label.green().bold(),
+        atlas_pb::CapabilityState::StateInitialized => label.yellow(),
+        atlas_pb::CapabilityState::StateRegistered => label.blue(),
+        atlas_pb::CapabilityState::StateOffline => label.dimmed(),
+        atlas_pb::CapabilityState::StateError => label.red().bold(),
+        atlas_pb::CapabilityState::StateUnspecified => label.dimmed(),
     }
 }
 
@@ -35,7 +55,7 @@ async fn connect(endpoint: &str) -> Result<AtlasClient> {
         .with_context(|| format!("connect to atlas at '{endpoint}'"))
 }
 
-pub async fn caps(endpoint: &str, json: bool) -> Result<()> {
+pub async fn caps(endpoint: &str, json: bool, verbose: bool) -> Result<()> {
     let mut atlas = connect(endpoint).await?;
     let records = atlas
         .query_capabilities("", "", atlas_pb::Transport::Unspecified)
@@ -48,6 +68,7 @@ pub async fn caps(endpoint: &str, json: bool) -> Result<()> {
                     "capability_id":  r.capability_id,
                     "namespace":      r.namespace,
                     "state":          state_name(r.state),
+                    "state_detail":   r.state_detail,
                     "interfaces":     r.interfaces.iter().map(|i| serde_json::json!({
                         "contract_id": i.contract_id,
                         "transport":   transport_name(i.transport),
@@ -63,22 +84,47 @@ pub async fn caps(endpoint: &str, json: bool) -> Result<()> {
         println!("{} no capabilities registered", "[caps]".yellow().bold());
         return Ok(());
     }
+    // Default: one row per cap, no interfaces. -v expands the interface
+    // list (lspci -tv style — quick scan vs full dump).
     for rec in &records {
+        let detail = if rec.state_detail.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", rec.state_detail)
+        };
+        let iface_count_hint = if verbose {
+            String::new()
+        } else {
+            format!(" ({} ifaces)", rec.interfaces.len())
+                .dimmed()
+                .to_string()
+        };
         println!(
-            "{} {} {} {}",
+            "{} {} {} {}{}{}",
             "●".green(),
             rec.capability_id.bold(),
-            format!("[{}]", state_name(rec.state)).cyan(),
-            rec.namespace.dimmed()
+            state_tag(rec.state),
+            rec.namespace.dimmed(),
+            iface_count_hint,
+            detail.dimmed()
         );
-        for iface in &rec.interfaces {
-            println!(
-                "    {} {} {}",
-                "└─".dimmed(),
-                iface.contract_id,
-                format!("({})", transport_name(iface.transport)).dimmed()
-            );
+        if verbose {
+            for iface in &rec.interfaces {
+                println!(
+                    "    {} {} {}",
+                    "└─".dimmed(),
+                    iface.contract_id,
+                    format!("({})", transport_name(iface.transport)).dimmed()
+                );
+            }
         }
+    }
+    if !verbose {
+        println!(
+            "\n{} pass {} for the per-cap interface list",
+            "tip:".dimmed(),
+            "-v".bold()
+        );
     }
     Ok(())
 }
@@ -115,7 +161,7 @@ pub async fn describe(endpoint: &str, cap_id: Option<&str>, json: bool) -> Resul
                 "{} {} {}",
                 "●".green(),
                 rec.capability_id.bold(),
-                format!("[{}]", state_name(rec.state)).cyan()
+                state_tag(rec.state)
             );
             for iface in &rec.interfaces {
                 println!(
