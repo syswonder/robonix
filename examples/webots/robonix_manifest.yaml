@@ -26,8 +26,8 @@ system:
   memory:
     backend: sqlite
     log: info
-    # speech:
-    # log: info
+  speech:
+    log: info
   scene:
     log: info
 
@@ -57,10 +57,9 @@ primitive:
       # example place holders
       update_rate: 10
       frame_id: lidar
-  # audio_driver integration WIP
-  # - name: audio_driver
-  #   path: ./primitives/audio_driver
-  #   config: {}
+  - name: audio_driver
+    path: ./primitives/audio_driver
+    config: {}
 
 service:
   # mapping_rbnx — SLAM service. Listed FIRST because simple_nav
