@@ -975,7 +975,7 @@ class ConceptGraphsDetector:
     @staticmethod
     def _voxel_pcd_overlap_matrix(
         objects_a, objects_b=None, *, voxel_size: float = 0.025,
-    ) -> "np.ndarray":
+    ):
         """Pairwise voxel-set fraction-overlap.
 
         For each pair (i, j) returns
@@ -986,10 +986,15 @@ class ConceptGraphsDetector:
         (coplanar / sparse) point clouds, which crash concept-graphs's
         canonical `compute_overlap_matrix_general` via box3d_overlap.
 
-        Returns an (M, N) float32 array, where M = len(objects_a) and
-        N = len(objects_b) (or M when `objects_b is None`, with a
+        Returns an (M, N) float32 numpy array, where M = len(objects_a)
+        and N = len(objects_b) (or M when `objects_b is None`, with a
         symmetric matrix and zero diagonal).
         """
+        # Lazy numpy import — matches the per-method pattern the rest of
+        # this file uses (every other method that calls np.* imports it
+        # locally). Without this, `np` is unbound here at run time.
+        import numpy as np
+
         def voxel_set(pcd) -> frozenset:
             pts = np.asarray(pcd.points)
             if pts.size == 0:
