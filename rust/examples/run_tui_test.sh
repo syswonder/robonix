@@ -70,6 +70,19 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
+# ── 检查本地端口冲突 ─────────────────────────────────────────────────────────
+check_local_port() {
+  local port=$1
+  local name=$2
+  if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+    echo "[tui-test] ERROR: port $port ($name) is already in use by another process."
+    echo "[tui-test] Try: ROBONIX_LIAISON_PORT=50182 MOCK_AUDIO_PORT=50191 $0"
+    exit 1
+  fi
+}
+check_local_port "$ROBONIX_LIAISON_PORT" "Liaison"
+check_local_port "$MOCK_AUDIO_PORT" "mock_audio"
+
 # ── 0. 前置检查：确认 dev 栈已启动 ───────────────────────────────────────────
 ATLAS_PORT="${ROBONIX_ATLAS##*:}"
 PILOT_PORT="${ROBONIX_PILOT_ENDPOINT##*:}"

@@ -15,6 +15,11 @@ srv = "liaison/srv/SubmitTask"
 [mode]
 type = "rpc_server_stream"
 
+[[extra_rpc]]
+srv  = "liaison/srv/StartVoiceSession"
+type = "rpc_server_stream"
+name = "StartVoiceSession"
+
 [semantics]
 unified_entry = true
 interruptible = true

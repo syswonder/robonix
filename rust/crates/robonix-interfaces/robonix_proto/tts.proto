@@ -38,3 +38,4 @@ message SynthesizeStream_Request {
 message SynthesizeStream_Response {
   SynthesizeAudioChunk chunk = 1;
 }
+
