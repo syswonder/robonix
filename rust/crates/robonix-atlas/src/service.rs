@@ -95,6 +95,16 @@ fn serialize_transport<S: serde::Serializer>(t: &Transport, ser: S) -> Result<S:
     ser.serialize_str(t.as_str_name())
 }
 
+fn serialize_pushed_state<S: serde::Serializer>(
+    s: &Option<pb::CapabilityState>,
+    ser: S,
+) -> Result<S::Ok, S::Error> {
+    match s {
+        Some(v) => ser.serialize_str(v.as_str_name()),
+        None => ser.serialize_none(),
+    }
+}
+
 impl From<&EndpointRec> for pb::InterfaceMetadata {
     fn from(e: &EndpointRec) -> Self {
         Self {
@@ -112,6 +122,12 @@ struct CapRecord {
     capability_md_path: String,
     last_heartbeat_ms: u64,
     endpoints: Vec<EndpointRec>,
+    /// Last value reported by SetCapabilityState. None for legacy caps
+    /// that never push, in which case `state()` falls back to the old
+    /// "first non-driver interface declare → INITIALIZED" inference.
+    #[serde(serialize_with = "serialize_pushed_state")]
+    pushed_state: Option<pb::CapabilityState>,
+    state_detail: String,
 }
 
 impl From<&CapRecord> for pb::CapabilityRecord {
@@ -123,20 +139,21 @@ impl From<&CapRecord> for pb::CapabilityRecord {
             last_heartbeat_ms: rec.last_heartbeat_ms,
             interfaces: rec.endpoints.iter().map(Into::into).collect(),
             state: rec.state() as i32,
+            state_detail: rec.state_detail.clone(),
         }
     }
 }
 
 impl CapRecord {
-    /// Observed lifecycle state. INITIALIZED iff the cap has declared at
-    /// least one interface whose contract_id is NOT a `*/driver` (the
-    /// lifecycle hook). By convention, primitives + scene services declare
-    /// only `<kind>/driver` until rbnx calls `Driver(CMD_INIT)` succeeds,
-    /// after which they lazy-declare their real interfaces. System caps
-    /// (atlas/pilot/executor/memory/...) skip the driver step and declare
-    /// their real interfaces directly, transitioning to INITIALIZED on
-    /// first declare.
+    /// Lifecycle state. The cap pushes via SetCapabilityState whenever its
+    /// on_init / on_up / on_down handler returns; that pushed value wins.
+    /// For legacy caps that never push, fall back to "any non-driver
+    /// interface declared → INITIALIZED" (preserves behaviour for code
+    /// still on the old register-then-declare-only flow).
     fn state(&self) -> pb::CapabilityState {
+        if let Some(s) = self.pushed_state {
+            return s;
+        }
         let any_non_driver = self
             .endpoints
             .iter()
@@ -266,6 +283,8 @@ impl AtlasRegistry {
                 capability_md_path: capability_md_path.trim().to_string(),
                 last_heartbeat_ms: Self::now_ms(),
                 endpoints: Vec::new(),
+                pushed_state: None,
+                state_detail: String::new(),
             },
         );
         info!("[atlas] register {cap_id}");
@@ -287,6 +306,44 @@ impl AtlasRegistry {
             "[atlas] unregister {cap_id} (was_present={was_present}, channels_dropped={dropped})"
         );
         was_present
+    }
+
+    /// Update the cap's lifecycle state. Returns the previous value (or
+    /// the inferred fallback when nothing's been pushed yet) so callers
+    /// can log "X went INITIALIZED → ONLINE" without a separate query.
+    /// Atlas does NOT validate the transition — capability-side code is
+    /// the source of truth for what state ordering makes sense.
+    pub async fn set_capability_state(
+        &self,
+        cap_id: &str,
+        new_state: pb::CapabilityState,
+        detail: &str,
+    ) -> Result<pb::CapabilityState, Status> {
+        let cap_id = Self::require("capability_id", cap_id)?;
+        if new_state == pb::CapabilityState::StateUnspecified {
+            return Err(Status::invalid_argument(
+                "state: must not be STATE_UNSPECIFIED",
+            ));
+        }
+        let mut state = self.inner.write().await;
+        let rec = state
+            .caps
+            .get_mut(cap_id)
+            .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
+        let prev = rec.state();
+        rec.pushed_state = Some(new_state);
+        rec.state_detail = detail.trim().to_string();
+        info!(
+            "[atlas] state {cap_id}: {:?} -> {:?}{}",
+            prev,
+            new_state,
+            if rec.state_detail.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", rec.state_detail)
+            }
+        );
+        Ok(prev)
     }
 
     /// Updates `last_heartbeat_ms` to now. Returns the timestamp it set.
@@ -397,6 +454,7 @@ impl AtlasRegistry {
                 capability_md_path: rec.capability_md_path.clone(),
                 last_heartbeat_ms: rec.last_heartbeat_ms,
                 state: rec.state() as i32,
+                state_detail: rec.state_detail.clone(),
                 interfaces,
             });
         }
@@ -727,6 +785,23 @@ impl pb::atlas_server::Atlas for AtlasService {
         let r = req.into_inner();
         self.registry.heartbeat(&r.capability_id).await?;
         Ok(Response::new(pb::HeartbeatResponse {}))
+    }
+
+    async fn set_capability_state(
+        &self,
+        req: Request<pb::SetCapabilityStateRequest>,
+    ) -> Result<Response<pb::SetCapabilityStateResponse>, Status> {
+        let r = req.into_inner();
+        let new_state = pb::CapabilityState::try_from(r.state).map_err(|_| {
+            Status::invalid_argument(format!("unknown CapabilityState value: {}", r.state))
+        })?;
+        let prev = self
+            .registry
+            .set_capability_state(&r.capability_id, new_state, &r.detail)
+            .await?;
+        Ok(Response::new(pb::SetCapabilityStateResponse {
+            previous_state: prev as i32,
+        }))
     }
 
     async fn declare_interface(
