@@ -81,6 +81,18 @@ class Goal:
     last_pose_at: float = 0.0
     last_pose_xy: Optional[Tuple[float, float]] = None
     last_dist_to_goal: float = float("inf")
+    # Lethal-halo bounce detector. When the robot's center walks into
+    # an inscribed-obstacle cell the tick reverses (-0.10, 0). Next
+    # tick the new pose is usually outside the halo, the planner picks
+    # the same target, the follower drives forward — and back into the
+    # same cell. Without bounce-counting the robot wiggles in place
+    # forever (or until the 8s stuck detector fires, but at 0.10 m/s
+    # reverse + replan you can sustain enough net motion to dodge that).
+    # We count consecutive lethal-halo entries within a short window;
+    # >= 3 in `lethal_bounce_window_s` aborts the goal so explore picks
+    # a different frontier instead of inflating the same halo.
+    lethal_bounce_count: int = 0
+    lethal_bounce_first_at: float = 0.0
 
 
 class NavNode:
@@ -588,8 +600,31 @@ class NavNode:
             # Robot center inside an obstacle's inscribed halo.
             # Reverse straight back along current heading to escape;
             # don't try to plan from a forbidden cell.
+            #
+            # Bounce-detect: if we've come back here >= 3 times in 5 s
+            # the planner is stuck oscillating around the inflation
+            # boundary of an obstacle that's right on the path to the
+            # goal. Abort and let explore pick a different frontier
+            # instead of inflating the same halo into the next minute.
+            now = time.time()
+            LETHAL_BOUNCE_WINDOW_S = 5.0
+            LETHAL_BOUNCE_LIMIT = 3
+            if now - g.lethal_bounce_first_at > LETHAL_BOUNCE_WINDOW_S:
+                g.lethal_bounce_count = 1
+                g.lethal_bounce_first_at = now
+            else:
+                g.lethal_bounce_count += 1
+            if g.lethal_bounce_count >= LETHAL_BOUNCE_LIMIT:
+                g.state = "aborted"
+                g.detail = (f"oscillating at lethal halo "
+                            f"({g.lethal_bounce_count} entries in "
+                            f"{now - g.lethal_bounce_first_at:.1f}s)")
+                self._publish_twist(0.0, 0.0)
+                self._publish_path([])
+                return
             self._publish_twist(-0.10, 0.0)
-            g.detail = "in lethal halo; reversing"
+            g.detail = (f"in lethal halo; reversing "
+                        f"(bounce {g.lethal_bounce_count}/{LETHAL_BOUNCE_LIMIT})")
             # Force replan once we're out.
             g.path = None
             g.costmap = None
