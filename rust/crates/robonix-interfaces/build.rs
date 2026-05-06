@@ -18,7 +18,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    println!("cargo:rerun-if-changed={}", contracts_proto.display());
+    // Re-run if any proto in the directory changes, not just the root contracts file.
+    println!("cargo:rerun-if-changed={}", ridl_proto.display());
 
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
     unsafe { std::env::set_var("PROTOC", protoc) };

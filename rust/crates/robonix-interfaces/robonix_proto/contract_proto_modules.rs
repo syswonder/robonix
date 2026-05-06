@@ -68,3 +68,11 @@ pub mod speech {
     tonic::include_proto!("robonix.speech");
 }
 
+pub mod liaison {
+    tonic::include_proto!("robonix.liaison");
+}
+
+pub mod voiceprint {
+    tonic::include_proto!("robonix.voiceprint");
+}
+

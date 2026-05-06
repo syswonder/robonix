@@ -23,3 +23,5 @@ env_logger.workspace = true
 uuid.workspace = true
 robonix-sdk.workspace = true
 robonix-interfaces.workspace = true
+futures = "0.3"
+whoami = "1.5"

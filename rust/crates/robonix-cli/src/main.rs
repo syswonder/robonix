@@ -8,7 +8,7 @@ use clap::Parser;
 use robonix_cli::Config;
 
 mod pb {
-    pub use robonix_interfaces::{contracts, pilot};
+    pub use robonix_interfaces::{contracts, liaison, pilot};
 }
 
 mod cmd;

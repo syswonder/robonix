@@ -6,6 +6,32 @@ package robonix.liaison;
 
 import "pilot.proto";
 
+message VoiceEvent {
+  uint32 event_kind = 1;
+  string session_id = 2;
+  string text = 3;
+  string user_id = 4;
+  float confidence = 5;
+  robonix.pilot.PilotEvent pilot = 6;
+  string error = 7;
+  string status_message = 8;
+  uint64 timestamp_ms = 9;
+}
+
+message StartVoiceSession_Request {
+  string session_id = 1;
+  string client_user_id = 2;
+  uint32 record_seconds = 3;
+  string language = 4;
+  bool tts_enabled = 5;
+  string mic_node_id = 6;
+  string asr_node_id = 7;
+  string voiceprint_node_id = 8;
+  string tts_node_id = 9;
+  string speaker_node_id = 10;
+  string context_json = 11;
+}
+
 message SubmitTask_Request {
   robonix.pilot.Task task = 1;
 }
