@@ -1,8 +1,9 @@
 # Tiago chassis driver — primitive package.
 # One device = one package. This driver exposes the robot base/chassis:
-#   robonix/primitive/chassis/state   → MCP tool chassis_state(Empty) → RobotState
-#   robonix/primitive/chassis/move    → MCP tool chassis_move(MoveCommand) → String
-#   robonix/primitive/chassis/driver  → gRPC LifecycleDriver.Driver(INIT/PROBE/...)
+#   robonix/primitive/chassis/move      → MCP tool chassis_move(MoveCommand) → String
+#   robonix/primitive/chassis/odom      → ROS2 topic_out (nav_msgs/Odometry, /odom)
+#   robonix/primitive/chassis/twist_in  → ROS2 topic_in (geometry_msgs/Twist, /cmd_vel)
+#   robonix/primitive/chassis/driver    → gRPC LifecycleDriver.Driver(INIT/PROBE/...)
 #
 # `*/driver` is the lifecycle interface every primitive should declare —
 # `rbnx boot` calls Driver(CMD_INIT) after RegisterCapability, waits for
@@ -11,8 +12,7 @@
 # the underlying sim is actually ready.
 #
 # Runs inside the sim container (started by examples/webots/sim/start.sh)
-# so it shares the same DDS graph as Webots; subscribes to /amcl_pose,
-# publishes to /cmd_vel.
+# so it shares the same DDS graph as Webots; publishes to /cmd_vel.
 manifestVersion: 1
 
 package:
@@ -32,6 +32,7 @@ build: bash scripts/build.sh
 start: bash scripts/start.sh
 
 capabilities:
-  - name: robonix/primitive/chassis/state
   - name: robonix/primitive/chassis/move
+  - name: robonix/primitive/chassis/odom
+  - name: robonix/primitive/chassis/twist_in
   - name: robonix/primitive/chassis/driver
