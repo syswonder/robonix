@@ -107,6 +107,7 @@ pub async fn dispatch(
 /// primitives, services, system caps, and skills already in ONLINE.
 async fn ensure_skill_online(atlas: &mut AtlasClient, cap_id: &str) -> Result<()> {
     if already_up(cap_id) {
+        log::debug!("[skill-up] {cap_id}: already up, skipping CMD_UP");
         return Ok(());
     }
     let recs = atlas
@@ -114,17 +115,19 @@ async fn ensure_skill_online(atlas: &mut AtlasClient, cap_id: &str) -> Result<()
         .await
         .with_context(|| format!("query_capabilities({cap_id})"))?;
     let Some(rec) = recs.into_iter().next() else {
-        // Not in atlas — let ConnectCapability surface the error.
+        log::info!("[skill-up] {cap_id}: not in atlas, letting connect_capability surface the error");
         return Ok(());
     };
     if !is_skill_namespace(&rec.namespace) {
+        log::debug!("[skill-up] {cap_id} (ns={}): not a skill, no CMD_UP", rec.namespace);
         return Ok(());
     }
     if rec.state == atlas_pb::CapabilityState::StateOnline as i32 {
-        // Skill self-reports ONLINE already; mark + skip the RPC.
+        log::info!("[skill-up] {cap_id}: already ONLINE per atlas, marking sticky");
         mark_up(cap_id);
         return Ok(());
     }
+    log::info!("[skill-up] {cap_id} (ns={}, state={}): sending Driver(CMD_UP)", rec.namespace, rec.state);
     let driver_contract = rec
         .interfaces
         .iter()
