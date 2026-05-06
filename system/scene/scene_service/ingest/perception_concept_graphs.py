@@ -111,19 +111,20 @@ _CFG_DEFAULTS = {
     #   'iou' / 'giou'                  — axis-aligned bbox IoU
     #   'iou_accurate' / 'giou_accurate' — oriented-bbox IoU
     #   'overlap'                       — voxel-grid pcd intersection
-    # 'overlap' is concept-graphs's CANONICAL choice for graph-merge
-    # because it captures dense pcd similarity (cabinet+shelf at the
-    # same position have very high pcd overlap even when their AABBs
-    # differ). Requires pytorch3d for compute_3d_iou_accurate_batch
-    # under the hood; we ship pytorch3d as a prebuilt wheel from
-    # miropsota.github.io (see docker/requirements.txt).
-    # NB: was "overlap" briefly, but that calls
-    # compute_3d_iou_accurate_batch via pytorch3d.ops.box3d_overlap,
-    # which raises ValueError on coplanar bbox vertices (very common
-    # for thin objects + floor pcds) and Open3D's qhull fallback also
-    # blows up on degenerate inputs. "iou" is plain axis-aligned bbox
-    # IoU — pure torch ops, no pytorch3d, robust to degeneracy. Good
-    # enough for the static-scene merge case.
+    # 'overlap' is concept-graphs's CANONICAL choice — captures dense
+    # pcd similarity so cabinet+shelf at the same position merge even
+    # when their AABBs differ. Concept-graphs's reference impl routes
+    # through pytorch3d.ops.box3d_overlap, which raises ValueError on
+    # coplanar bbox vertices (thin objects on floor) and the Open3D
+    # qhull fallback segfaults on degenerate input. We don't use that
+    # path: see `_voxel_pcd_overlap_matrix` below — pure numpy
+    # voxel-set fraction-overlap, no pytorch3d, no qhull. The
+    # `spatial_sim_type` value below is still threaded into
+    # concept-graphs internals (merge_detections_to_objects,
+    # denoise_objects, merge_overlap_objects); they use it only to
+    # decide which similarity to recompute when caller didn't provide
+    # one — we always provide our overlap matrix, so 'iou' here is a
+    # safe sentinel that avoids touching the broken pytorch3d path.
     "spatial_sim_type": "iou",
     # `match_method`: how to combine spatial + visual sims.
     "match_method": "sim_sum",
@@ -141,11 +142,14 @@ _CFG_DEFAULTS = {
     #   the room) usually has IoU≈0 and visual≈0.6 → 0.60 < 1.10 →
     #   spawned as a NEW object. That's the "重影" (duplicate) the
     #   user kept catching.
-    #   Lowering to 0.55 means visual-similarity alone can carry the
-    #   match; the periodic merge_overlap_objects pass picks up the
-    #   rest. Aggressive merging is recoverable (split is rare); the
-    #   over-segmentation we had wasn't.
-    "merge_threshold": 0.55,
+    #   Lowering to 0.55 was needed when spatial sim was AABB IoU
+    #   (which is ≈0 for partial-view bboxes). With voxel pcd-overlap
+    #   replacing IoU (`_voxel_pcd_overlap_torch`), spatial sim alone
+    #   reliably reaches 0.4–0.7 for "same physical object seen from
+    #   another angle" — combined with visual sim that's 1.0–1.3 for
+    #   true matches and 0.3–0.7 for spurious pairs, threshold 0.85
+    #   is the sweet spot. Lower → over-merging, higher → 重影 again.
+    "merge_threshold": 0.85,
     # Hard centroid-distance gate on the per-tick merge. With
     # merge_threshold low, visual similarity alone can match; this
     # caps the physical separation so two "potted_plant" detections
@@ -771,6 +775,14 @@ class ConceptGraphsDetector:
                 continue
             cls_id_i = int(cls_idx[i])
             cls_name = str(names.get(cls_id_i, f"class_{cls_id_i}")).lower()
+            # Drop background classes (floor/wall/ceiling/carpet) — these
+            # exist in `_resolved_classes` so YOLO-World *can* label
+            # them when it gets confused on a flat surface, but they're
+            # not "objects" in the scene-graph sense. The previous code
+            # set an `is_background` flag on the detection record but
+            # never read it, so floor/wall ended up in the registry.
+            if cls_name in _BG_CLASSES:
+                continue
             # Floor-only filter — when YOLO's mask leaks past an
             # object's footprint or there's a thin object on the floor
             # the depth-backprojected pcd ends up almost entirely
@@ -840,10 +852,12 @@ class ConceptGraphsDetector:
             log.info("[scene-cg] init map with %d objects", len(self._map_objects))
         else:
             try:
-                spatial_sim = self._cg["compute_spatial_similarities"](
-                    self.cfg["spatial_sim_type"], det_list, self._map_objects,
-                    self.cfg["downsample_voxel_size"],
-                )
+                # Voxel pcd-overlap (our impl) instead of concept-graphs's
+                # compute_spatial_similarities('overlap', ...) which crashes
+                # on coplanar bbox vertices via pytorch3d.box3d_overlap. AABB-IoU
+                # was the previous fallback but was too weak for the cross-view
+                # merge case. See `_voxel_pcd_overlap_matrix` for the rationale.
+                spatial_sim = self._voxel_pcd_overlap_torch(det_list, self._map_objects)
                 visual_sim = self._cg["compute_visual_similarities"](
                     det_list, self._map_objects,
                 )
@@ -957,6 +971,66 @@ class ConceptGraphsDetector:
         self._maybe_periodic_cleanup()
         self._project_to_registry()
 
+    # ── Voxel pcd-overlap (replaces concept-graphs `overlap` mode) ──
+    @staticmethod
+    def _voxel_pcd_overlap_matrix(
+        objects_a, objects_b=None, *, voxel_size: float = 0.025,
+    ) -> "np.ndarray":
+        """Pairwise voxel-set fraction-overlap.
+
+        For each pair (i, j) returns
+            overlap(i, j) = |A_i ∩ B_j| / min(|A_i|, |B_j|)
+        where A_i / B_j are the voxel-grid hashes of the i-th / j-th
+        point clouds at `voxel_size` resolution. Pure numpy + Python
+        set ops — no pytorch3d, no qhull. Robust to degenerate
+        (coplanar / sparse) point clouds, which crash concept-graphs's
+        canonical `compute_overlap_matrix_general` via box3d_overlap.
+
+        Returns an (M, N) float32 array, where M = len(objects_a) and
+        N = len(objects_b) (or M when `objects_b is None`, with a
+        symmetric matrix and zero diagonal).
+        """
+        def voxel_set(pcd) -> frozenset:
+            pts = np.asarray(pcd.points)
+            if pts.size == 0:
+                return frozenset()
+            ix = np.floor(pts / voxel_size).astype(np.int64)
+            return frozenset(map(tuple, ix.tolist()))
+
+        a_sets = [voxel_set(o["pcd"]) for o in objects_a]
+        symmetric = objects_b is None
+        b_sets = a_sets if symmetric else [voxel_set(o["pcd"]) for o in objects_b]
+
+        m, n = len(a_sets), len(b_sets)
+        out = np.zeros((m, n), dtype=np.float32)
+        for i, a in enumerate(a_sets):
+            if not a:
+                continue
+            j_start = i + 1 if symmetric else 0
+            for j in range(j_start, n):
+                b = b_sets[j]
+                if not b:
+                    continue
+                inter = len(a & b)
+                if inter == 0:
+                    continue
+                v = inter / min(len(a), len(b))
+                out[i, j] = v
+                if symmetric:
+                    out[j, i] = v
+        return out
+
+    def _voxel_pcd_overlap_torch(self, det_list, map_objects):
+        """Wrap `_voxel_pcd_overlap_matrix` for the per-tick merge —
+        returns an (M, N) torch tensor on `self._device` so it can be
+        passed directly to `aggregate_similarities` alongside the CLIP
+        visual similarity matrix."""
+        import torch
+        arr = self._voxel_pcd_overlap_matrix(
+            det_list, map_objects, voxel_size=self.cfg["downsample_voxel_size"],
+        )
+        return torch.from_numpy(arr).to(self._device)
+
     # ── Periodic cleanup ─────────────────────────────────────────────
     def _maybe_periodic_cleanup(self) -> None:
         if self._map_objects is None or len(self._map_objects) == 0:
@@ -997,10 +1071,14 @@ class ConceptGraphsDetector:
                 # `merge_detections_to_objects` only matches new dets
                 # against the existing map, so two BRAND NEW dets in
                 # one tick both get appended; this pass collapses them.
-                overlap_mat = self._cg["compute_overlap_matrix_general"](
-                    objects_a=self._map_objects,
+                # Same swap as the per-tick merge: our voxel pcd-overlap
+                # impl avoids concept-graphs's pytorch3d crash path. The
+                # `merge_overlap_objects` callee accepts the matrix as a
+                # plain numpy array of shape (N, N).
+                overlap_mat = self._voxel_pcd_overlap_matrix(
+                    self._map_objects,
                     objects_b=None,
-                    downsample_voxel_size=self.cfg["downsample_voxel_size"],
+                    voxel_size=self.cfg["downsample_voxel_size"],
                 )
                 # concept-graphs `merge_overlap_objects` returns
                 # `(MapObjectList, index_updates)` — assigning the
