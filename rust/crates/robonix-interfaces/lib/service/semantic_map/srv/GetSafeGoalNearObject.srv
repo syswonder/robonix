@@ -1,0 +1,23 @@
+# Find a navigation-safe approach pose near a registered scene object.
+#
+# Input: an object_id from scene's registry. Optionally a desired
+# `clearance_m` (extra free-space margin around the result, in metres) and
+# a max search radius `search_radius_m` (cap the BFS — beyond this we
+# give up rather than find a useless faraway free cell).
+#
+# Output: a PoseStamped in the map frame whose `position.{x,y}` lies in a
+# free cell of the latest occupancy_grid, at least `clearance_m` from any
+# obstacle, and within `search_radius_m` of the object's centre. The
+# `pose.orientation` faces back toward the object (yaw = atan2(obj-pose,
+# pose-obj)) so the LLM doesn't have to compose facing logic. `reachable`
+# is false when we couldn't satisfy the constraints — caller should treat
+# that as "object is unreachable from the current map" and pick a
+# different target. `reason` carries a short human-readable explanation
+# either way.
+std_msgs/String object_id
+float32 clearance_m       # 0 → use service-side default (e.g. inscribed_radius + 0.1m)
+float32 search_radius_m   # 0 → use service-side default (e.g. 3.0m)
+---
+bool reachable
+geometry_msgs/PoseStamped pose
+string reason

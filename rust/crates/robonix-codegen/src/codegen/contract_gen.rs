@@ -86,29 +86,41 @@ pub fn collect_referenced_srvs(contracts_dir: &Path) -> Result<BTreeSet<(String,
 
 pub fn generate(
     resolver: &mut MsgResolver,
-    contracts_dir: &Path,
+    contracts_dirs: &[PathBuf],
     out_dir: &Path,
     verbose: bool,
 ) -> Result<()> {
-    let paths = collect_tomls(contracts_dir)?;
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for d in contracts_dirs {
+        for p in collect_tomls(d)? {
+            paths.push(p);
+        }
+    }
     if paths.is_empty() {
         if verbose {
-            eprintln!(
-                "[robonix-codegen] contracts: no .toml under {}",
-                contracts_dir.display()
-            );
+            for d in contracts_dirs {
+                eprintln!(
+                    "[robonix-codegen] contracts: no .toml under {}",
+                    d.display()
+                );
+            }
         }
         return Ok(());
     }
 
-    let mut contracts: Vec<(PathBuf, ContractToml)> = Vec::new();
+    // De-dup on contract id: later root wins, matching atlas's
+    // contract-registry merge semantics. This lets a per-package
+    // contract override a global one of the same id during codegen.
+    let mut by_id: std::collections::BTreeMap<String, (PathBuf, ContractToml)> =
+        std::collections::BTreeMap::new();
     for p in paths {
         let raw =
             fs::read_to_string(&p).with_context(|| format!("read contract {}", p.display()))?;
         let c: ContractToml =
             toml::from_str(&raw).with_context(|| format!("parse TOML {}", p.display()))?;
-        contracts.push((p, c));
+        by_id.insert(c.contract.id.clone(), (p, c));
     }
+    let mut contracts: Vec<(PathBuf, ContractToml)> = by_id.into_values().collect();
     contracts.sort_by(|a, b| a.1.contract.id.cmp(&b.1.contract.id));
 
     let mut out = String::new();
@@ -710,6 +722,13 @@ fn collect_tomls_inner(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         let entry = entry?;
         let p = entry.path();
         if p.is_dir() {
+            // Hard convention: `<capabilities>/lib/` holds only ROS
+            // msg/srv source for the IDL resolver. Skip it here so
+            // any stray .toml dropped under lib/ never gets picked up
+            // as a contract.
+            if p.file_name().and_then(|s| s.to_str()) == Some("lib") {
+                continue;
+            }
             collect_tomls_inner(&p, out)?;
         } else if p.extension().and_then(|x| x.to_str()) == Some("toml") {
             out.push(p);

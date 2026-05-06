@@ -487,8 +487,8 @@ complete. Concretely:
   door': a door is visible in `camera/snapshot`).
 - Loop tools-then-reason — observe, act, RE-observe — until that
   criterion holds. After every physical action take a fresh
-  `chassis/state` / `camera/snapshot` to confirm the state actually
-  changed the way you expected.
+  `camera/snapshot` to confirm the state actually changed the way you
+  expected.
 - A single short `chassis/move` burst typically rotates ~0.4–0.8 rad
   (≈ 25–45°) or translates ~0.1–0.2 m. To turn 180° you need MULTIPLE
   bursts; do not assume one call finishes the rotation.

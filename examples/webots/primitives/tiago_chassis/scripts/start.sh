@@ -6,8 +6,8 @@
 # Trap discipline: when `rbnx boot` SIGTERMs our PGID, bash's EXIT/TERM
 # trap fires and explicitly kills the python interpreter inside the
 # container. `docker exec` doesn't reliably propagate signals to the
-# exec'd process, so without this trap the chassis_driver stays alive,
-# keeps holding port 50111, and breaks the next boot.
+# exec'd process, so without this trap the chassis_driver stays alive
+# and breaks the next boot.
 set -euo pipefail
 
 if ! docker ps --format '{{.Names}}' | grep -qx robonix_tiago_sim; then
@@ -25,9 +25,7 @@ trap cleanup EXIT INT TERM
 docker exec -i \
   -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
   -e ROBONIX_PKG_HOST_DIR="$(cd "$(dirname "$0")/.." && pwd)" \
-  -e TIAGO_CHASSIS_MCP_PORT="${TIAGO_CHASSIS_MCP_PORT:-50111}" \
-  -e TIAGO_CHASSIS_DRIVER_PORT="${TIAGO_CHASSIS_DRIVER_PORT:-50211}" \
-  -e TIAGO_CHASSIS_CMD_DURATION_SEC="${TIAGO_CHASSIS_CMD_DURATION_SEC:-1.0}" \
+  -e PYTHONPATH="/robonix_pkgs/pylib/robonix-py:/robonix_pkgs/primitives/tiago_chassis/rbnx-build/codegen/proto_gen:/robonix_pkgs/primitives/tiago_chassis/rbnx-build/codegen/robonix_mcp_types" \
   robonix_tiago_sim \
   bash -lc 'source /opt/ros/humble/setup.bash && \
             cd /robonix_pkgs/primitives/tiago_chassis && \

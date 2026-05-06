@@ -2,7 +2,8 @@
 // Author: wheatfox <wheatfox17@icloud.com>
 
 use clap::Parser;
-use log::info;
+use log::{info, warn};
+use robonix_atlas::contract_registry::{ContractRegistry, resolve_capabilities_roots};
 use robonix_atlas::service::{AtlasRegistry, serve_atlas};
 use std::sync::Arc;
 
@@ -14,6 +15,19 @@ struct Args {
     /// Address Atlas binds its gRPC service on (default 0.0.0.0:50051).
     #[arg(long, env = "ROBONIX_ATLAS_LISTEN")]
     listen: Option<String>,
+
+    /// Comma-separated list of directories atlas walks for contract
+    /// TOMLs at startup. Each `*.toml` whose `[contract].id` is set
+    /// becomes a `ContractDescriptor` served by `QueryContract` /
+    /// `ListContracts`. Roots are merged in order: a duplicate id from
+    /// a later root overrides earlier ones, which lets a per-package
+    /// `<pkg>/capabilities/` re-declare a contract from the global
+    /// `<robonix_source>/capabilities/`. When unset, atlas falls back
+    /// to `$ROBONIX_SOURCE_PATH/capabilities`. When neither is set,
+    /// the contract registry runs empty (clients see found=false on
+    /// every QueryContract).
+    #[arg(long, env = "ROBONIX_ATLAS_CAPABILITIES", value_delimiter = ',')]
+    capabilities: Vec<String>,
 
     /// Log filter (env_logger syntax: `info`, `robonix_atlas=debug`, …).
     /// Default: `robonix_atlas=info`. Also reads `RUST_LOG` if set.
@@ -41,7 +55,27 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let registry = Arc::new(AtlasRegistry::default());
+    let roots = resolve_capabilities_roots(&args.capabilities);
+    let contracts = if roots.is_empty() {
+        warn!(
+            "[atlas] contract registry: no capabilities dir configured \
+             (pass --capabilities or set ROBONIX_SOURCE_PATH); QueryContract \
+             will return found=false for every id"
+        );
+        ContractRegistry::default()
+    } else {
+        let refs: Vec<&std::path::Path> = roots.iter().map(|p| p.as_path()).collect();
+        match ContractRegistry::load_from_capability_roots(&refs) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(
+                    "[atlas] contract registry: load failed ({e:#}); running with empty registry"
+                );
+                ContractRegistry::default()
+            }
+        }
+    };
+    let registry = Arc::new(AtlasRegistry::with_contracts(contracts));
 
     info!("atlas gRPC on {listen}");
 

@@ -1,0 +1,13 @@
+# Composable query over the object registry: class + relation +
+# spatial filters. "Latest snapshot" semantics; episodic memory belongs
+# to spatial_memory_service.
+[contract]
+id      = "robonix/system/scene/query"
+version = "1"
+kind    = "system"
+
+[io.srv]
+srv = "semantic_map/srv/Query"
+
+[mode]
+type = "rpc"
