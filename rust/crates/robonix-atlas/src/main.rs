@@ -68,7 +68,9 @@ async fn main() {
         match ContractRegistry::load_from_capability_roots(&refs) {
             Ok(r) => r,
             Err(e) => {
-                warn!("[atlas] contract registry: load failed ({e:#}); running with empty registry");
+                warn!(
+                    "[atlas] contract registry: load failed ({e:#}); running with empty registry"
+                );
                 ContractRegistry::default()
             }
         }

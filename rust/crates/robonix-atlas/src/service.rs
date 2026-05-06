@@ -833,7 +833,10 @@ impl pb::atlas_server::Atlas for AtlasService {
         req: Request<pb::ListContractsRequest>,
     ) -> Result<Response<pb::ListContractsResponse>, Status> {
         let r = req.into_inner();
-        let contracts = self.registry.contracts().list_with_prefix(&r.namespace_prefix);
+        let contracts = self
+            .registry
+            .contracts()
+            .list_with_prefix(&r.namespace_prefix);
         Ok(Response::new(pb::ListContractsResponse { contracts }))
     }
 }

@@ -153,16 +153,21 @@ pub async fn execute(
     if mcp {
         println!("{} robonix-codegen --lang mcp ...", "[codegen]".bold());
         std::fs::create_dir_all(&mcp_types).ok();
-        run_cmd(
-            "robonix-codegen mcp",
-            Command::new(&cargo_bin)
-                .args(["run", "-p", "robonix-codegen", "--manifest-path"])
-                .arg(rust_root.join("Cargo.toml"))
-                .args(["--", "--lang", "mcp", "-I"])
-                .arg(&interfaces_lib)
-                .arg("-o")
-                .arg(&mcp_types),
-        )?;
+        let mut mcp_cmd = Command::new(&cargo_bin);
+        mcp_cmd
+            .args(["run", "-p", "robonix-codegen", "--manifest-path"])
+            .arg(rust_root.join("Cargo.toml"))
+            .args(["--", "--lang", "mcp", "-I"])
+            .arg(&interfaces_lib);
+        // Include per-package <pkg>/capabilities/lib too — same merge
+        // semantics as the proto step, so per-pkg srv files (e.g.
+        // explore_rbnx's Explore.srv) emit their MCP Request/Response
+        // dataclasses alongside the global ones.
+        if let Some(p) = pkg_caps_lib.as_ref() {
+            mcp_cmd.arg("-I").arg(p);
+        }
+        mcp_cmd.arg("-o").arg(&mcp_types);
+        run_cmd("robonix-codegen mcp", &mut mcp_cmd)?;
     }
 
     // 3. Package-local Python stubs via grpc_tools.protoc.

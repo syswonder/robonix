@@ -496,17 +496,36 @@ fn emit_class(out: &mut String, spec: &MsgSpec) {
 pub fn generate(resolver: &MsgResolver, out_dir: &Path, verbose: bool) -> Result<()> {
     fs::create_dir_all(out_dir)?;
 
+    // Cover every package that has at least one msg OR srv. srv files
+    // emit two classes each: <Name>_Request and <Name>_Response, derived
+    // directly from the SrvSpec's request / response MsgSpec halves.
+    // Packages with srv-only (no msg) still need a *_mcp.py generated.
     let mut all_packages: BTreeSet<String> = BTreeSet::new();
     for spec in resolver.ordered_specs() {
         all_packages.insert(spec.package.clone());
     }
+    for srv in resolver.ordered_srvs() {
+        all_packages.insert(srv.package.clone());
+    }
 
     for package in &all_packages {
-        let raw_specs: Vec<_> = resolver
+        let mut raw_specs: Vec<_> = resolver
             .ordered_specs()
             .into_iter()
             .filter(|s| &s.package == package)
             .collect();
+
+        // Append the synthetic Request/Response specs for every srv in
+        // this package. They look like ordinary msg dataclasses to the
+        // emitter — `request.name` / `response.name` are already
+        // "<Srv>_Request" / "<Srv>_Response" courtesy of parse_srv_file.
+        for srv in resolver.ordered_srvs() {
+            if &srv.package != package {
+                continue;
+            }
+            raw_specs.push(&srv.request);
+            raw_specs.push(&srv.response);
+        }
 
         if raw_specs.is_empty() {
             continue;
@@ -561,7 +580,10 @@ pub fn generate(resolver: &MsgResolver, out_dir: &Path, verbose: bool) -> Result
         // validate=True makes b64decode raise on garbage characters
         // instead of silently returning truncated/junk bytes. A
         // typo'd payload over MCP should fail loudly.
-        let _ = writeln!(out, "    return base64.b64decode(s, validate=True) if s else b\"\"");
+        let _ = writeln!(
+            out,
+            "    return base64.b64decode(s, validate=True) if s else b\"\""
+        );
         let _ = writeln!(out);
         let _ = writeln!(out);
 
@@ -607,10 +629,7 @@ fn topo_sort_same_package<'a>(specs: &[&'a MsgSpec]) -> Vec<&'a MsgSpec> {
         return Vec::new();
     }
     let pkg = specs[0].package.clone();
-    let by_name: BTreeMap<String, &MsgSpec> = specs
-        .iter()
-        .map(|s| (s.name.clone(), *s))
-        .collect();
+    let by_name: BTreeMap<String, &MsgSpec> = specs.iter().map(|s| (s.name.clone(), *s)).collect();
 
     enum Mark {
         Temp,
@@ -631,10 +650,15 @@ fn topo_sort_same_package<'a>(specs: &[&'a MsgSpec]) -> Vec<&'a MsgSpec> {
             Some(Mark::Temp) => return, // cycle — give up on ordering
             None => {}
         }
-        let Some(spec) = by_name.get(name) else { return; };
+        let Some(spec) = by_name.get(name) else {
+            return;
+        };
         marks.insert(name.to_string(), Mark::Temp);
         for f in &spec.fields {
-            if let MsgTypeRef::Named { package, name: dep_name } = &f.type_ref
+            if let MsgTypeRef::Named {
+                package,
+                name: dep_name,
+            } = &f.type_ref
                 && package == pkg
             {
                 visit(dep_name, pkg, by_name, marks, order);

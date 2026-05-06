@@ -34,7 +34,10 @@ pub enum MsgTypeRef {
     /// when generating code; the string representation is the source
     /// of truth for cross-generator consistency.
     Primitive(String),
-    Named { package: String, name: String },
+    Named {
+        package: String,
+        name: String,
+    },
 }
 
 /// Strongly-typed enum of every ROS2 IDL primitive. **This is the
@@ -50,8 +53,8 @@ pub enum MsgTypeRef {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RosPrimitive {
     Bool,
-    Byte,    // ROS2: signed 8-bit. NOT the same as uint8 (unsigned).
-    Char,    // ROS2: unsigned 8-bit. NOT the same as int8.
+    Byte, // ROS2: signed 8-bit. NOT the same as uint8 (unsigned).
+    Char, // ROS2: unsigned 8-bit. NOT the same as int8.
     Int8,
     Uint8,
     Int16,
@@ -554,7 +557,12 @@ pub fn parse_srv_file(package: &str, name: &str, path: &Path) -> Result<SrvSpec>
     let request = parse_msg_section(package, &format!("{name}_Request"), &request_src)
         .with_context(|| format!("{RIDLC_ERR_PREFIX} parsing request of '{}'", path.display()))?;
     let response = parse_msg_section(package, &format!("{name}_Response"), &response_src)
-        .with_context(|| format!("{RIDLC_ERR_PREFIX} parsing response of '{}'", path.display()))?;
+        .with_context(|| {
+            format!(
+                "{RIDLC_ERR_PREFIX} parsing response of '{}'",
+                path.display()
+            )
+        })?;
 
     Ok(SrvSpec {
         package: package.to_string(),
@@ -612,20 +620,18 @@ fn parse_fields_from_lines(
         let Some(raw_name) = parts.next() else {
             continue;
         };
-        let (type_ref, is_array, array_size, string_max_len) = parse_msg_field_type(
-            package, raw_type,
-        )
-        .with_context(|| match path_hint {
-            Some(p) => format!(
-                "{RIDLC_ERR_PREFIX} invalid field in '{}' at line with type '{}'",
-                p.display(),
-                raw_type
-            ),
-            None => format!(
-                "{RIDLC_ERR_PREFIX} invalid field at line with type '{}'",
-                raw_type
-            ),
-        })?;
+        let (type_ref, is_array, array_size, string_max_len) =
+            parse_msg_field_type(package, raw_type).with_context(|| match path_hint {
+                Some(p) => format!(
+                    "{RIDLC_ERR_PREFIX} invalid field in '{}' at line with type '{}'",
+                    p.display(),
+                    raw_type
+                ),
+                None => format!(
+                    "{RIDLC_ERR_PREFIX} invalid field at line with type '{}'",
+                    raw_type
+                ),
+            })?;
         fields.push(MsgField {
             name: raw_name.to_string(),
             type_ref,
