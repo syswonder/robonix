@@ -29,8 +29,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tonic::transport::Endpoint;
 use tonic::Request;
+use tonic::transport::Endpoint;
 
 use crate::pb::lifecycle::{DriverRequest, DriverResponse};
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
@@ -115,11 +115,16 @@ async fn ensure_skill_online(atlas: &mut AtlasClient, cap_id: &str) -> Result<()
         .await
         .with_context(|| format!("query_capabilities({cap_id})"))?;
     let Some(rec) = recs.into_iter().next() else {
-        log::info!("[skill-up] {cap_id}: not in atlas, letting connect_capability surface the error");
+        log::info!(
+            "[skill-up] {cap_id}: not in atlas, letting connect_capability surface the error"
+        );
         return Ok(());
     };
     if !is_skill_namespace(&rec.namespace) {
-        log::debug!("[skill-up] {cap_id} (ns={}): not a skill, no CMD_UP", rec.namespace);
+        log::debug!(
+            "[skill-up] {cap_id} (ns={}): not a skill, no CMD_UP",
+            rec.namespace
+        );
         return Ok(());
     }
     if rec.state == atlas_pb::CapabilityState::StateOnline as i32 {
@@ -127,7 +132,11 @@ async fn ensure_skill_online(atlas: &mut AtlasClient, cap_id: &str) -> Result<()
         mark_up(cap_id);
         return Ok(());
     }
-    log::info!("[skill-up] {cap_id} (ns={}, state={}): sending Driver(CMD_UP)", rec.namespace, rec.state);
+    log::info!(
+        "[skill-up] {cap_id} (ns={}, state={}): sending Driver(CMD_UP)",
+        rec.namespace,
+        rec.state
+    );
     let driver_contract = rec
         .interfaces
         .iter()
@@ -204,7 +213,10 @@ fn contract_id_to_service_name(id: &str) -> String {
                 .map(|p| {
                     let mut c = p.chars();
                     match c.next() {
-                        Some(f) => f.to_uppercase().chain(c.flat_map(char::to_lowercase)).collect::<String>(),
+                        Some(f) => f
+                            .to_uppercase()
+                            .chain(c.flat_map(char::to_lowercase))
+                            .collect::<String>(),
                         None => String::new(),
                     }
                 })
