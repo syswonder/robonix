@@ -35,23 +35,23 @@ The Webots Tiago example (`examples/webots/`) is the standard end-to-end demo.
 It runs in two terminals: the simulator and Robonix itself.
 
 ```bash
-# T1 — simulation environment (Webots GUI; not a Robonix package — just docker compose)
+# Terminal (1) — simulation environment (Webots GUI; not a Robonix package — just docker compose)
 bash examples/webots/sim/start.sh
 
-# T2 — Robonix stack: system services + Tiago primitives + Nav2 service
+# Then in another terminal (2) — Robonix stack: system services + Tiago primitives + Nav2 service
 export VLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
 export VLM_API_KEY=sk-...
 export VLM_MODEL=gpt-5.4-mini
 cd examples/webots
-rbnx boot                                # whatever the manifest declares,
-                                         # in dependency order
+rbnx build 
+rbnx boot
 ```
 
 Once `rbnx boot` reports the stack is up, in a third terminal:
 
 ```bash
+# Terminal (3)
 rbnx caps          # list registered capabilities + interfaces
-rbnx tools         # tools the LLM agent sees
 rbnx chat          # interactive ratatui chat with the pilot
 ```
 
