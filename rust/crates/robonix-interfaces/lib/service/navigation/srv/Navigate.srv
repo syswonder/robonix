@@ -1,5 +1,10 @@
-# robonix/service/navigation/navigate — goal-based navigation (RPC)
+# robonix/service/navigation/navigate — goal-based navigation (RPC).
+# Returns the provider-allocated `goal_id` so callers can address the
+# goal in the sibling `status` / `cancel` contracts. status_message is
+# a free-form, human-readable description of accept/reject — never a
+# JSON envelope (callers should NOT parse it).
 geometry_msgs/PoseStamped goal
 ---
 bool accepted
+string goal_id
 string status_message
