@@ -150,15 +150,20 @@ pub enum Commands {
         key: String,
     },
 
-    /// List all registered capabilities and their interfaces
+    /// List all registered capabilities (one row per cap by default;
+    /// pass -v to expand the per-cap interface list, lspci -tv style)
     #[command(alias = "nodes")]
     Caps {
         /// robonix-atlas endpoint
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
-        /// Output as JSON
+        /// Output as JSON (forces full detail regardless of -v)
         #[arg(long)]
         json: bool,
+        /// Expand each cap's interface list; without this, only the
+        /// summary header line per cap is printed.
+        #[arg(short = 'v', long)]
+        verbose: bool,
     },
     /// Show CAPABILITY.md for registered caps (all, or one with --cap)
     Describe {
@@ -272,7 +277,7 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         } => codegen::execute(config, package, mcp, clean, out_dir).await,
         Commands::Setup { path } => setup::execute(config, path).await,
         Commands::Path { key } => path::execute(config, key).await,
-        Commands::Caps { server, json } => inspect::caps(&server, json).await,
+        Commands::Caps { server, json, verbose } => inspect::caps(&server, json, verbose).await,
         Commands::Describe { server, cap, json } => {
             inspect::describe(&server, cap.as_deref(), json).await
         }
