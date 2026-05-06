@@ -45,8 +45,12 @@ use crate::pb::lifecycle::{DriverRequest, DriverResponse};
 
 use super::teardown;
 
-// Driver.srv command discriminator.
+// Driver.srv command discriminators (mirrors lifecycle/srv/Driver.srv).
 const CMD_INIT: u32 = 0;
+#[allow(dead_code)]
+const CMD_SHUTDOWN: u32 = 1;
+const CMD_UP: u32 = 2;
+const CMD_DOWN: u32 = 3;
 // How long to wait for a freshly spawned package to register its driver
 // interface with atlas before giving up.
 const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
@@ -992,38 +996,95 @@ async fn spawn_and_init(
         return Ok(sp);
     };
 
+    let config_json = serde_json::to_string(&entry.config).unwrap_or_else(|_| "{}".into());
+
+    // Driver(CMD_INIT) — every kind goes through this. Skills stop here
+    // (executor will send CMD_UP just-in-time on the first MCP call);
+    // primitives and services follow with CMD_UP below to reach ONLINE.
+    let init_state = call_driver_cmd(
+        atlas,
+        &cap_id,
+        &driver_contract,
+        component,
+        &pkg_label,
+        CMD_INIT,
+        config_json.clone(),
+    )
+    .await?;
+
+    if component == "skill" {
+        output::boot_ok(
+            short_label(&pkg_label, component),
+            &format!("cap={cap_id}  driver(INIT)={init_state}"),
+        );
+        return Ok(sp);
+    }
+
+    // Primitive / service: auto-promote to ONLINE. Capability framework
+    // treats "no on_up handler" as a no-op success for these kinds, so
+    // existing packages with only an on_init handler keep working — the
+    // CMD_UP just exists to push the lifecycle state past INITIALIZED.
+    let up_state = call_driver_cmd(
+        atlas,
+        &cap_id,
+        &driver_contract,
+        component,
+        &pkg_label,
+        CMD_UP,
+        config_json,
+    )
+    .await?;
+    output::boot_ok(
+        short_label(&pkg_label, component),
+        &format!("cap={cap_id}  driver(INIT)={init_state}  driver(UP)={up_state}"),
+    );
+
+    Ok(sp)
+}
+
+/// Issue one Driver(cmd) RPC against a freshly-connected channel, then
+/// release the channel. Returns the response's `state` string on success;
+/// bail-errors when ok=false or the RPC itself fails. Used by the boot
+/// path for both CMD_INIT and CMD_UP, with identical timeout / channel
+/// hygiene.
+async fn call_driver_cmd(
+    atlas: &mut AtlasClient,
+    cap_id: &str,
+    driver_contract: &str,
+    component: &str,
+    pkg_label: &str,
+    cmd: u32,
+    config_json: String,
+) -> Result<String> {
+    let cmd_name = match cmd {
+        CMD_INIT => "INIT",
+        CMD_UP => "UP",
+        CMD_DOWN => "DOWN",
+        _ => "?",
+    };
     let (channel_id, endpoint, _params) = atlas
         .connect_capability(
             DEPLOY_CONSUMER_ID,
-            &cap_id,
-            &driver_contract,
+            cap_id,
+            driver_contract,
             atlas_pb::Transport::Grpc,
         )
         .await
         .with_context(|| {
             format!("[{component}/{pkg_label}] ConnectCapability for {driver_contract}")
         })?;
-
-    let config_json = serde_json::to_string(&entry.config).unwrap_or_else(|_| "{}".into());
     let normalized = if endpoint.starts_with("http") {
-        endpoint.clone()
+        endpoint
     } else {
-        format!("http://{}", endpoint)
+        format!("http://{endpoint}")
     };
-    let init_result = async {
+    let result = async {
         let channel = Endpoint::new(normalized.clone())
             .with_context(|| format!("invalid driver endpoint '{normalized}'"))?
             .connect()
             .await
             .with_context(|| format!("dial driver at '{normalized}'"))?;
-        // Each per-area driver TOML (`primitive/<area>/driver`,
-        // `service/<area>/driver`) generates its own gRPC service
-        // (`PrimitiveChassisDriver`, `ServiceNavigationDriver`, …) —
-        // they all share the lifecycle/srv/Driver wire shape but live
-        // at distinct gRPC paths. Build the path from the contract_id
-        // and call it directly via tonic's low-level Grpc client, so
-        // boot doesn't need to know which area it's talking to.
-        let svc_name = contract_id_to_service_name(&driver_contract);
+        let svc_name = contract_id_to_service_name(driver_contract);
         let path: tonic::codegen::http::uri::PathAndQuery =
             format!("/robonix.contracts.{svc_name}/Driver")
                 .parse()
@@ -1035,7 +1096,7 @@ async fn spawn_and_init(
             DRIVER_INIT_TIMEOUT,
             grpc.unary(
                 Request::new(DriverRequest {
-                    command: CMD_INIT,
+                    command: cmd,
                     config_json,
                 }),
                 path,
@@ -1043,33 +1104,27 @@ async fn spawn_and_init(
             ),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("Driver(CMD_INIT) timed out after {:?}", DRIVER_INIT_TIMEOUT))?
-        .with_context(|| "Driver(CMD_INIT) RPC failed")?;
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Driver(CMD_{cmd_name}) timed out after {:?}",
+                DRIVER_INIT_TIMEOUT
+            )
+        })?
+        .with_context(|| format!("Driver(CMD_{cmd_name}) RPC failed"))?;
         Ok::<_, anyhow::Error>(resp.into_inner())
     }
     .await;
     let _ = atlas.disconnect_capability(&channel_id).await;
-
-    match init_result {
-        Ok(r) if r.ok => {
-            output::boot_ok(
-                short_label(&pkg_label, component),
-                &format!("cap={cap_id}  driver(INIT)={}", r.state),
-            );
-        }
-        Ok(r) => {
-            anyhow::bail!(
-                "[{component}/{pkg_label}] Driver(INIT) returned ok=false (state={}, error={})",
-                r.state,
-                r.error
-            );
-        }
-        Err(e) => {
-            anyhow::bail!("[{component}/{pkg_label}] Driver(INIT) failed: {e:#}");
-        }
+    let r = result
+        .map_err(|e| anyhow::anyhow!("[{component}/{pkg_label}] Driver(CMD_{cmd_name}): {e:#}"))?;
+    if !r.ok {
+        anyhow::bail!(
+            "[{component}/{pkg_label}] Driver(CMD_{cmd_name}) returned ok=false (state={}, error={})",
+            r.state,
+            r.error
+        );
     }
-
-    Ok(sp)
+    Ok(r.state)
 }
 
 /// Mirrors `robonix_codegen::contract_gen::contract_id_to_service_name`.
