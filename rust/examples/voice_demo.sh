@@ -38,9 +38,26 @@ ATLAS_PORT=${ATLAS_PORT:-50051}
 PILOT_PORT=${MOCK_PILOT_PORT:-50071}
 LIAISON_PORT=${ROBONIX_LIAISON_PORT:-50081}
 
+# Check if ports are available
+check_port() {
+    local port=$1
+    local name=$2
+    if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+        echo "[voice_demo] ERROR: port $port ($name) is already in use."
+        echo "[voice_demo] Try: ATLAS_PORT=50151 MOCK_PILOT_PORT=50171 ROBONIX_LIAISON_PORT=50181 $0"
+        exit 1
+    fi
+}
+check_port $ATLAS_PORT "Atlas"
+check_port $PILOT_PORT "mock_pilot"
+check_port $LIAISON_PORT "Liaison"
+
 export ROBONIX_ATLAS="127.0.0.1:$ATLAS_PORT"
+export ROBONIX_META_GRPC_ADDR="0.0.0.0:$ATLAS_PORT"
+export ROBONIX_META_GRPC_ENDPOINT="127.0.0.1:$ATLAS_PORT"
 export ROBONIX_PILOT_ENDPOINT="http://127.0.0.1:$PILOT_PORT"
 export ROBONIX_LIAISON_PORT="$LIAISON_PORT"
+export MOCK_PILOT_PORT="$PILOT_PORT"
 # Enable mock mode: Liaison skips real mic+ASR and uses a canned transcript.
 export ROBONIX_LIAISON_VOICE_MOCK=1
 export ROBONIX_LIAISON_VOICE_MOCK_TEXT="你好，请介绍一下你自己。"
@@ -48,7 +65,7 @@ export ROBONIX_LIAISON_VOICE_MOCK_TEXT="你好，请介绍一下你自己。"
 # ── 1. Atlas ─────────────────────────────────────────────────────────────────
 echo ""
 echo "[voice_demo] starting Atlas on :$ATLAS_PORT …"
-cargo run --release -p robonix-atlas -- --port "$ATLAS_PORT" &>/dev/null &
+cargo run --release -p robonix-atlas &>/dev/null &
 ATLAS_PID=$!
 sleep 1
 

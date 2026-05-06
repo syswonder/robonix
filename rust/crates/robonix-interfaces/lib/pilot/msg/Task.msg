@@ -6,3 +6,4 @@ string text
 uint8[] audio_data
 string context_json
 uint64 timestamp_ms
+string user_id

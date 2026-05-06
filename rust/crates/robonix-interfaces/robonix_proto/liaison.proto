@@ -32,6 +32,10 @@ message StartVoiceSession_Request {
   string context_json = 11;
 }
 
+message StartVoiceSession_Response {
+  VoiceEvent event = 1;
+}
+
 message SubmitTask_Request {
   robonix.pilot.Task task = 1;
 }

@@ -40,3 +40,4 @@ message RecognizeStream_Request {
 message RecognizeStream_Response {
   RecognizeStreamEvent event = 1;
 }
+

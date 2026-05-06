@@ -4,14 +4,6 @@
 // Most generated types are unused in any single binary.
 // (Suppress dead_code on the `robonix-interfaces` crate — not `#![allow]` here: included via `include!`.)
 
-pub mod pilot {
-    tonic::include_proto!("robonix.pilot");
-}
-
-pub mod executor {
-    tonic::include_proto!("robonix.executor");
-}
-
 pub mod builtin_interfaces {
     tonic::include_proto!("robonix.builtin_interfaces");
 }
@@ -24,16 +16,36 @@ pub mod geometry_msgs {
     tonic::include_proto!("robonix.geometry_msgs");
 }
 
+pub mod sensor_msgs {
+    tonic::include_proto!("robonix.sensor_msgs");
+}
+
+pub mod robonix_msg {
+    tonic::include_proto!("robonix.robonix_msg");
+}
+
+pub mod asr {
+    tonic::include_proto!("robonix.asr");
+}
+
+pub mod pilot {
+    tonic::include_proto!("robonix.pilot");
+}
+
+pub mod executor {
+    tonic::include_proto!("robonix.executor");
+}
+
+pub mod liaison {
+    tonic::include_proto!("robonix.liaison");
+}
+
 pub mod memory {
     tonic::include_proto!("robonix.memory");
 }
 
 pub mod nav_msgs {
     tonic::include_proto!("robonix.nav_msgs");
-}
-
-pub mod sensor_msgs {
-    tonic::include_proto!("robonix.sensor_msgs");
 }
 
 pub mod prm_base {
@@ -44,35 +56,23 @@ pub mod slam {
     tonic::include_proto!("robonix.slam");
 }
 
-pub mod robonix_msg {
-    tonic::include_proto!("robonix.robonix_msg");
-}
-
-pub mod vlm {
-    tonic::include_proto!("robonix.vlm");
-}
-
-pub mod contracts {
-    tonic::include_proto!("robonix.contracts");
-}
-
-pub mod asr {
-    tonic::include_proto!("robonix.asr");
+pub mod speech {
+    tonic::include_proto!("robonix.speech");
 }
 
 pub mod tts {
     tonic::include_proto!("robonix.tts");
 }
 
-pub mod speech {
-    tonic::include_proto!("robonix.speech");
-}
-
-pub mod liaison {
-    tonic::include_proto!("robonix.liaison");
+pub mod vlm {
+    tonic::include_proto!("robonix.vlm");
 }
 
 pub mod voiceprint {
     tonic::include_proto!("robonix.voiceprint");
+}
+
+pub mod contracts {
+    tonic::include_proto!("robonix.contracts");
 }
 

@@ -6,21 +6,31 @@ package robonix.contracts;
 
 import "google/protobuf/empty.proto";
 
+import "asr.proto";
 import "executor.proto";
 import "geometry_msgs.proto";
+import "liaison.proto";
 import "memory.proto";
 import "nav_msgs.proto";
 import "pilot.proto";
 import "prm_base.proto";
+import "robonix_msg.proto";
 import "sensor_msgs.proto";
 import "slam.proto";
-import "vlm.proto";
-import "asr.proto";
-import "tts.proto";
 import "speech.proto";
-import "robonix_msg.proto";
-import "liaison.proto";
+import "tts.proto";
+import "vlm.proto";
 import "voiceprint.proto";
+
+// contract: robonix/prm/audio/mic (v1)
+service PrmAudioMic {
+  rpc Stream(google.protobuf.Empty) returns (stream robonix.robonix_msg.AudioChunk);
+}
+
+// contract: robonix/prm/audio/speaker (v1)
+service PrmAudioSpeaker {
+  rpc Stream(stream robonix.robonix_msg.AudioChunk) returns (google.protobuf.Empty);
+}
 
 // contract: robonix/prm/base/cmd (v1)
 service PrmBaseCmd {
@@ -118,13 +128,9 @@ service SrvExecutorListTools {
 }
 
 // contract: robonix/srv/liaison (v1)
-//   Stream             — text/text-equivalent path: client builds the Task itself.
-//   StartVoiceSession  — voice path: Liaison drives mic → ASR → voiceprint → Pilot
-//                         → (optional) TTS → speaker; client just renders VoiceEvents.
 service SrvLiaison {
   rpc Stream(robonix.pilot.Task) returns (stream robonix.pilot.PilotEvent);
-  rpc StartVoiceSession(robonix.liaison.StartVoiceSession_Request)
-      returns (stream robonix.liaison.VoiceEvent);
+  rpc StartVoiceSession(robonix.liaison.StartVoiceSession_Request) returns (stream robonix.liaison.VoiceEvent);
 }
 
 // contract: robonix/srv/memory/compact (v1)
@@ -192,16 +198,6 @@ service SrvSlamSwitchMode {
   rpc Call(robonix.slam.SwitchMode_Request) returns (robonix.slam.SwitchMode_Response);
 }
 
-// contract: robonix/prm/audio/mic (v1)
-service PrmAudioMic {
-  rpc Stream(google.protobuf.Empty) returns (stream robonix.robonix_msg.AudioChunk);
-}
-
-// contract: robonix/prm/audio/speaker (v1)
-service PrmAudioSpeaker {
-  rpc Stream(stream robonix.robonix_msg.AudioChunk) returns (google.protobuf.Empty);
-}
-
 // contract: robonix/srv/speech/asr (v1)
 service SrvSpeechAsr {
   rpc Call(robonix.asr.Recognize_Request) returns (robonix.asr.Recognize_Response);
@@ -212,6 +208,11 @@ service SrvSpeechAsrStream {
   rpc Stream(stream robonix.asr.AsrAudioChunk) returns (stream robonix.asr.RecognizeStreamEvent);
 }
 
+// contract: robonix/srv/speech/dialog (v1)
+service SrvSpeechDialog {
+  rpc Stream(robonix.speech.StartDialog_Request) returns (stream robonix.robonix_msg.DialogEvent);
+}
+
 // contract: robonix/srv/speech/tts (v1)
 service SrvSpeechTts {
   rpc Call(robonix.tts.Synthesize_Request) returns (robonix.tts.Synthesize_Response);
@@ -220,11 +221,6 @@ service SrvSpeechTts {
 // contract: robonix/srv/speech/tts_stream (v1)
 service SrvSpeechTtsStream {
   rpc Stream(robonix.tts.SynthesizeStream_Request) returns (stream robonix.tts.SynthesizeAudioChunk);
-}
-
-// contract: robonix/srv/speech/dialog (v1)
-service SrvSpeechDialog {
-  rpc Stream(robonix.speech.StartDialog_Request) returns (stream robonix.robonix_msg.DialogEvent);
 }
 
 // contract: robonix/srv/speech/voiceprint (v1)
