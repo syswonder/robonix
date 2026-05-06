@@ -469,7 +469,7 @@ class SpeechAsrServicer(contracts_grpc.SystemSpeechAsrServicer):
     def __init__(self, asr_backend):
         self.asr_backend = asr_backend
 
-    def Call(self, request, context):
+    def Recognize(self, request, context):
         """Handle one-shot ASR: receive complete audio, return transcription.
 
         Request fields (from asr.proto Recognize_Request):
@@ -532,7 +532,7 @@ class SpeechAsrStreamServicer(contracts_grpc.SystemSpeechAsrStreamServicer):
     def __init__(self, stream_asr_backend):
         self.stream_asr_backend = stream_asr_backend
 
-    def Stream(self, request_iterator, context):
+    def RecognizeStream(self, request_iterator, context):
         """Handle streaming ASR: receive audio chunks, yield partial/final results.
 
         Input: asr_pb2.AsrAudioChunk (has .chunk with .data field from robonix_msg.AudioChunk)
@@ -622,7 +622,7 @@ class SpeechTtsServicer(contracts_grpc.SystemSpeechTtsServicer):
     def __init__(self, tts_backend):
         self.tts_backend = tts_backend
 
-    def Call(self, request, context):
+    def Synthesize(self, request, context):
         """Handle one-shot TTS: receive text, return complete MP3 audio.
 
         Request fields (from tts.proto Synthesize_Request):
@@ -676,7 +676,7 @@ class SpeechTtsStreamServicer(contracts_grpc.SystemSpeechTtsStreamServicer):
     def __init__(self, tts_backend):
         self.tts_backend = tts_backend
 
-    def Stream(self, request, context):
+    def SynthesizeStream(self, request, context):
         """Handle streaming TTS: receive text, yield MP3 audio chunks.
 
         Request fields (from tts.proto SynthesizeStream_Request):
@@ -746,7 +746,7 @@ class SpeechDialogServicer(contracts_grpc.SystemSpeechDialogServicer):
     def __init__(self, dialog_manager):
         self.dialog_manager = dialog_manager
 
-    def Stream(self, request, context):
+    def StartDialog(self, request, context):
         """Handle dialog session: create session, stream state updates.
 
         Request fields (from speech.proto StartDialog_Request):
