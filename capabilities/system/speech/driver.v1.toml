@@ -1,0 +1,15 @@
+# Lifecycle interface for the speech service.
+# `rbnx boot` calls Driver(CMD_INIT, config_json) against this interface
+# AFTER the speech process has registered with atlas. The cfg dict is
+# read inside speech_service.service.init(cfg) and gates which ASR/TTS
+# backends to load (see system/speech/README for the cfg schema).
+[contract]
+id      = "robonix/system/speech/driver"
+version = "1"
+kind    = "system"
+
+[io.srv]
+srv = "lifecycle/srv/Driver"
+
+[mode]
+type = "rpc"

@@ -1,0 +1,14 @@
+# Get the robot's URDF + high-level metadata. Single source of truth
+# for "what does this robot look like, geometrically and physically" —
+# replaces hardcoded URDF paths in nav2 / scene viz / collision
+# monitors. Loaded once at soma startup; cached on the wire.
+[contract]
+id      = "robonix/system/soma/description"
+version = "1"
+kind    = "system"
+
+[io.srv]
+srv = "soma/srv/GetDescription"
+
+[mode]
+type = "rpc"

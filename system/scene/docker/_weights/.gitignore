@@ -1,0 +1,7 @@
+# Pre-fetched CV model weights — populated by scripts/build.sh's
+# fetch_weight() and COPY'd into the docker image. Keep them out of
+# the git history (they're large binaries that the build script can
+# always re-download).
+*.pt
+*.pth
+*.bin

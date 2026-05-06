@@ -289,6 +289,82 @@ message DisconnectCapabilityRequest { string channel_id = 1; }
 // the channel_id was unknown (already released, or expired with provider).
 message DisconnectCapabilityResponse { bool was_open = 1; }
 
+// ── Contract registry ─────────────────────────────────────────────────────
+// Atlas loads `<robonix_source>/capabilities/**/*.toml` at startup and
+// holds the parsed contract metadata in memory. Consumers call
+// QueryContract / ListContracts instead of walking the filesystem and
+// parsing TOMLs themselves — atlas is the single source of truth for
+// "what contracts exist and what's their wire shape".
+//
+// Scope is deliberately small — only the fields current contract
+// TOMLs actually carry. Richer metadata (summary / intent / examples
+// / safety) waits until the TOML schema grows; capability card is a
+// later concept layered on top of this, not part of v1.
+message ContractDescriptor {
+  string id = 1;             // "robonix/primitive/camera/rgb"
+  string version = 2;        // "1"
+  string kind = 3;           // "primitive" | "service" | "system" | "skill"
+  string mode = 4;           // "topic_out" | "rpc" | "rpc_server_stream" | ...
+  // io.msg.msg from the TOML, e.g. "sensor_msgs/msg/Image". Empty when
+  // the contract is rpc-mode (uses io_srv_type instead).
+  string io_msg_type = 5;
+  // io.srv.srv from the TOML, e.g. "memory/srv/Search". Empty when the
+  // contract is topic-mode.
+  string io_srv_type = 6;
+  // Where atlas read this descriptor from; populated for debug/audit.
+  string source_toml_path = 7;
+  // Field-level wire schema, populated when atlas can find the
+  // matching .msg / .srv source under any of its capabilities/lib
+  // roots at startup. Empty when the IDL was not found (e.g. a
+  // contract pointing at a ROS-builtin we don't ship in lib/).
+  //
+  // For topic-mode contracts (io_msg_type set): top-level fields of
+  // the message. Nested types appear as `type_name="pkg/Name"` —
+  // clients can recursively QueryContract or read the .msg directly
+  // if they want a deeper expansion.
+  repeated FieldSpec msg_fields = 8;
+  // For rpc-mode contracts (io_srv_type set): request + response
+  // top-level fields. ROS .srv files split request/response with
+  // "---", which the parser turns into these two lists.
+  repeated FieldSpec srv_request_fields = 9;
+  repeated FieldSpec srv_response_fields = 10;
+}
+
+// One field of a .msg or .srv message. Mirrors what robonix-codegen's
+// msg_parser produces, projected into a wire-friendly shape.
+message FieldSpec {
+  // Field name as written in the .msg, e.g. "header", "image_width".
+  string name = 1;
+  // Full type name. For ROS primitives: "float64", "string", "int32",
+  // "bool", "byte", … For nested types: "pkg/Name" where pkg is the
+  // ROS package, e.g. "geometry_msgs/Pose".
+  string type_name = 2;
+  // True when the field type is a ROS primitive (float, int, string,
+  // bool, byte, char, …). Saves clients from re-deciding via name.
+  bool is_primitive = 3;
+  // True when the field is declared as an array (`type[]` or
+  // `type[N]`).
+  bool is_array = 4;
+  // 0 means unbounded array (`type[]`); >0 is the fixed array size
+  // (`type[N]`). Ignored when is_array is false.
+  uint32 array_size = 5;
+}
+
+message QueryContractRequest { string contract_id = 1; }
+message QueryContractResponse {
+  // Empty descriptor (id="") when the contract isn't loaded.
+  ContractDescriptor contract = 1;
+  bool found = 2;
+}
+
+message ListContractsRequest {
+  // Optional filter — return only contracts whose id starts with this
+  // prefix. Empty matches everything. Useful for "give me every
+  // primitive/camera/* contract" without walking the full set client-side.
+  string namespace_prefix = 1;
+}
+message ListContractsResponse { repeated ContractDescriptor contracts = 1; }
+
 // Inspect Atlas state. Debug-only, returns implementation-defined JSON.
 message InspectAtlasRequest {}
 message InspectAtlasResponse { string json = 1; }
@@ -309,5 +385,7 @@ service Atlas {
       returns (ConnectCapabilityResponse);
   rpc DisconnectCapability(DisconnectCapabilityRequest)
       returns (DisconnectCapabilityResponse);
+  rpc QueryContract(QueryContractRequest) returns (QueryContractResponse);
+  rpc ListContracts(ListContractsRequest) returns (ListContractsResponse);
   rpc InspectAtlas(InspectAtlasRequest) returns (InspectAtlasResponse);
 }

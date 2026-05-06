@@ -12,33 +12,41 @@ use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::Path;
 
-use super::msg_parser::{MsgField, MsgResolver, MsgSpec, MsgTypeRef, SrvSpec};
+use super::msg_parser::{MsgField, MsgResolver, MsgSpec, MsgTypeRef, RosPrimitive, SrvSpec};
 
-fn ros_to_proto_primitive(ros_type: &str) -> &'static str {
-    match ros_type {
-        "bool" => "bool",
-        "byte" | "uint8" => "uint32",
-        "char" | "int8" => "int32",
-        "uint16" => "uint32",
-        "int16" => "int32",
-        "uint32" => "uint32",
-        "int32" => "int32",
-        "uint64" => "uint64",
-        "int64" => "int64",
-        "float32" => "float",
-        "float64" => "double",
-        "string" | "wstring" => "string",
-        _ => "bytes",
-    }
+fn proto_primitive_type(p: &str) -> &'static str {
+    // Single source of truth for primitive → proto3 mapping is
+    // RosPrimitive::proto_type. Panic on a primitive the parser
+    // wouldn't have accepted — that's a codegen bug, not a runtime
+    // condition we want to silently swallow as `bytes` (which used to
+    // be the catch-all and produced wrong wire formats).
+    let prim = RosPrimitive::parse(p).unwrap_or_else(|| {
+        panic!(
+            "[robonix-codegen] proto: primitive '{p}' is not in RosPrimitive::parse — \
+             every primitive accepted by the parser must have a proto mapping; \
+             extend RosPrimitive if this is a new ROS primitive."
+        )
+    });
+    prim.proto_type()
 }
 
 fn proto_field_type(field: &MsgField, current_package: &str) -> String {
     let base = match &field.type_ref {
         MsgTypeRef::Primitive(p) => {
-            if field.is_array && (p == "uint8" || p == "byte") {
+            // `uint8[]` (unsigned 8-bit, unbounded) is the canonical
+            // raw-byte buffer and becomes proto `bytes`. `uint8[N]`
+            // (fixed-size) does NOT collapse to `bytes` because proto3
+            // bytes has no length constraint, so a fixed-size array
+            // would lose its size invariant on the wire — keep it as
+            // `repeated uint32` and let the consumer enforce length.
+            // `byte[]` is signed 8-bit and stays `repeated int32`.
+            let prim = RosPrimitive::parse(p).unwrap_or_else(|| {
+                panic!("[robonix-codegen] proto: primitive '{p}' is not in RosPrimitive::parse")
+            });
+            if field.is_array && field.array_size.is_none() && prim.is_blob_element() {
                 return "bytes".to_string();
             }
-            ros_to_proto_primitive(p).to_string()
+            proto_primitive_type(p).to_string()
         }
         MsgTypeRef::Named { package, name } => {
             if package == current_package {

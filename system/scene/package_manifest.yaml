@@ -1,0 +1,33 @@
+# Scene MCP server — current-state semantic + geometric map of the
+# robot's environment. Exposes 5 read-only MCP tools for Pilot.
+#
+# Deployment shape: scene runs in its OWN docker container (image
+# `robonix-scene`, built by scripts/build.sh). Joins host network so:
+#   - it can reach atlas at 127.0.0.1:50051
+#   - it shares the host DDS bus with whatever sim/robot container
+#     is publishing /amcl_pose, /scan, /head_front_camera/* etc.
+#
+# Soma adapter: scene's ingest layer reads `config.observations[]`
+# (passed in via RBNX_CONFIG_FILE by `rbnx boot`) to know which ROS2
+# topics to subscribe to. Each entry pairs a logical kind ("rgb",
+# "depth", "lidar2d", "pose", "odom") with a topic name and ROS msg
+# class. Default mapping matches Webots Tiago.
+manifestVersion: 1
+
+package:
+  name: com.robonix.system.scene
+  version: 0.1.0
+  vendor: robonix
+  description: Scene — semantic + geometric live map of the environment.
+  license: MulanPSL-2.0
+
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+
+capabilities:
+  - name: robonix/system/scene/get_snapshot
+  - name: robonix/system/scene/query
+  - name: robonix/system/scene/get_object
+  - name: robonix/system/scene/get_semantic_map
+  - name: robonix/system/scene/get_safe_goal_near_object
+  - name: robonix/system/scene/get_safety_context

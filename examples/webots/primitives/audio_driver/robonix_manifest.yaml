@@ -1,3 +1,4 @@
+# TODO: migrate to `package_manifest.yaml` - wheatfox
 manifestVersion: 1
 
 build:
@@ -15,5 +16,7 @@ nodes:
   - id: com.robonix.primitive.audio
     type: python
     start: |
-      export PYTHONPATH="$(pwd)/proto_gen:${PYTHONPATH:-}"
-      exec python -m audio_driver.node
+      # Capability framework (robonix-py) + per-package codegen.
+      # arecord / aplay run on the host directly; no sim container.
+      export PYTHONPATH="$(rbnx path robonix-py):$(pwd)/rbnx-build/codegen/proto_gen:$(pwd)/proto_gen:${PYTHONPATH:-}"
+      exec python3 -m audio_driver.node

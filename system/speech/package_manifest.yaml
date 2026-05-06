@@ -1,0 +1,39 @@
+# Robonix speech service — ASR (Whisper one-shot + FunASR streaming) +
+# TTS (Edge TTS) + Dialog manager. Declares 5 data-plane gRPC contracts
+# and a driver lifecycle contract so `rbnx boot` ships the boot
+# manifest's `system: speech: {...}` block as Driver(CMD_INIT, config_json).
+#
+# Config schema consumed by the on_init handler (see speech_service.service):
+#   disable_whisper:   bool  — skip Whisper backend entirely (asr returns UNAVAILABLE)
+#   asr_model:         str   — Whisper model id / path (default: openai/whisper-large-v3)
+#   asr_device:        str   — cuda | cpu (default: cuda)
+#   asr_chunk_length:  float — Whisper long-form chunk seconds (default: 30.0)
+#   asr_batch_size:    int   — Whisper batch (default: 4)
+#   funasr_model:      str   — FunASR model id (default: paraformer-zh-streaming)
+#   funasr_chunk_size: list  — Paraformer [left, current, right] (default: [0,10,5])
+#   tts_voice:         str   — Edge TTS voice (default: zh-CN-XiaoxiaoNeural)
+#   log:               str   — log level (default: info)
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.speech_service
+  version: 0.1.0
+  vendor: robonix
+  description: Voice interaction service (ASR + TTS + Dialog) under robonix/system/speech.
+  license: MulanPSL-2.0
+
+build: bash scripts/build.sh
+
+start: |
+  export PYTHONPATH="$(pwd)/rbnx-build/codegen/proto_gen:${PYTHONPATH:-}"
+  mkdir -p rbnx-build/data
+  exec rbnx-build/venv/bin/python -m speech_service.service \
+       > rbnx-build/data/speech.log 2>&1
+
+capabilities:
+  - name: robonix/system/speech/driver
+  - name: robonix/system/speech/asr
+  - name: robonix/system/speech/asr_stream
+  - name: robonix/system/speech/tts
+  - name: robonix/system/speech/tts_stream
+  - name: robonix/system/speech/dialog

@@ -133,8 +133,161 @@ pub async fn execute_build(
     global: Option<String>,
     clean: bool,
 ) -> Result<()> {
+    // Deploy-manifest mode: if `path` (or cwd, when -p is omitted)
+    // contains a `robonix_manifest.yaml`, build every primitive /
+    // service / skill entry it lists. This lets the user run
+    //   `cd examples/webots && rbnx build`
+    // and get all packages built in one shot rather than chasing
+    // each package directory by hand. The corresponding lookup for
+    // `package_manifest.yaml` (single-package mode) stays as the
+    // fallback below.
+    let candidate_dir = match &path {
+        Some(p) => Some(p.clone()),
+        None => std::env::current_dir().ok(),
+    };
+    if let Some(dir) = candidate_dir {
+        let deploy_manifest = dir.join("robonix_manifest.yaml");
+        if deploy_manifest.is_file() {
+            return build_deploy_manifest(&deploy_manifest, clean);
+        }
+    }
     let package_root = resolve_package_path(&config, path, global)?;
     build::execute_local(package_root, clean).await
+}
+
+/// Build every package referenced by a top-level `robonix_manifest.yaml`.
+/// Two phases:
+///   1. **fetch** — `path:` entries already on disk; `url:` entries
+///      get `git clone --depth 1` into `rbnx-boot/cache/<name>/`
+///      (idempotent — skipped when the cache dir already exists).
+///   2. **build** — for each resolved package, run its `build.sh`.
+///
+/// `rbnx boot` deliberately does NOT do either; it just verifies
+/// both phases happened (warns + remediates if not). This lets
+/// "fetch → build" be a controlled offline step the user can run
+/// when they have network / time, then `rbnx boot` is a fast,
+/// online-optional bring-up.
+fn build_deploy_manifest(manifest_path: &Path, clean: bool) -> Result<()> {
+    use serde_yaml::Value;
+    let manifest_dir = manifest_path
+        .parent()
+        .context("deploy manifest has no parent directory")?
+        .to_path_buf();
+    let raw = std::fs::read_to_string(manifest_path)
+        .with_context(|| format!("read {}", manifest_path.display()))?;
+    let root: Value =
+        serde_yaml::from_str(&raw).with_context(|| format!("parse {}", manifest_path.display()))?;
+    let cache_root = manifest_dir.join("rbnx-boot").join("cache");
+
+    output::action(
+        "Building",
+        &format!("packages declared in {}", manifest_path.display()),
+    );
+
+    // Collect (section, name, pkg_dir, url_to_clone) for every entry.
+    struct Resolved {
+        section: &'static str,
+        name: String,
+        pkg_dir: PathBuf,
+        url_to_clone: Option<(String, Option<String>)>, // (url, branch)
+    }
+    let mut entries: Vec<Resolved> = Vec::new();
+    for section in &["primitive", "service", "skill"] {
+        let Some(seq) = root.get(*section).and_then(|v| v.as_sequence()) else {
+            continue;
+        };
+        for entry in seq {
+            let name = entry
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unnamed)")
+                .to_string();
+            let local_path = entry.get("path").and_then(|v| v.as_str());
+            let url = entry.get("url").and_then(|v| v.as_str());
+            let branch = entry
+                .get("branch")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            match (local_path, url) {
+                (Some(p), _) => entries.push(Resolved {
+                    section,
+                    name,
+                    pkg_dir: manifest_dir.join(p),
+                    url_to_clone: None,
+                }),
+                (None, Some(u)) => entries.push(Resolved {
+                    section,
+                    name: name.clone(),
+                    pkg_dir: cache_root.join(&name),
+                    url_to_clone: Some((u.to_string(), branch)),
+                }),
+                (None, None) => {
+                    output::warning(&format!(
+                        "skipping {section}/{name}: entry has neither `path` nor `url`"
+                    ));
+                }
+            }
+        }
+    }
+
+    // Phase 1: fetch. git clone url-remote pkgs into cache.
+    let to_clone: Vec<&Resolved> = entries
+        .iter()
+        .filter(|e| e.url_to_clone.is_some() && !e.pkg_dir.exists())
+        .collect();
+    if !to_clone.is_empty() {
+        output::step("fetch", &format!("{} package(s)", to_clone.len()));
+        std::fs::create_dir_all(&cache_root)?;
+        for r in &to_clone {
+            let (url, branch) = r.url_to_clone.as_ref().unwrap();
+            output::sub_step(&format!("git clone {url} -> {}", r.pkg_dir.display()));
+            let mut clone = std::process::Command::new("git");
+            clone.arg("clone").arg("--depth").arg("1");
+            if let Some(b) = branch {
+                clone.arg("--branch").arg(b);
+            }
+            clone.arg(url).arg(&r.pkg_dir);
+            let status = clone
+                .status()
+                .with_context(|| format!("git clone {url} failed to spawn"))?;
+            if !status.success() {
+                anyhow::bail!("git clone {url} exited with {:?}", status.code());
+            }
+        }
+    }
+
+    // Phase 2: build. Run build.sh for each resolved pkg.
+    let mut built = 0usize;
+    let mut skipped = 0usize;
+    for r in &entries {
+        if !r.pkg_dir.join("package_manifest.yaml").is_file() {
+            output::warning(&format!(
+                "skipping {}/{}: no package_manifest.yaml at {}",
+                r.section,
+                r.name,
+                r.pkg_dir.display()
+            ));
+            skipped += 1;
+            continue;
+        }
+        let canon = r
+            .pkg_dir
+            .canonicalize()
+            .with_context(|| format!("canonicalize {}", r.pkg_dir.display()))?;
+        output::step(r.section, &r.name);
+        build::build_local_package(&canon, clean)?;
+        built += 1;
+    }
+    output::success(&format!(
+        "fetched {} / built {built} / skipped {skipped} / total {} from {}",
+        to_clone.len(),
+        entries.len(),
+        manifest_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("manifest")
+    ));
+    Ok(())
 }
 
 pub async fn execute_start(

@@ -1,0 +1,12 @@
+# Region- and freshness-scoped read of the live scene registry. Pilot
+# calls this every LLM round; payload is region-scoped + capped.
+[contract]
+id      = "robonix/system/scene/get_snapshot"
+version = "1"
+kind    = "system"
+
+[io.srv]
+srv = "semantic_map/srv/GetSnapshot"
+
+[mode]
+type = "rpc"

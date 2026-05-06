@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use robonix_cli::Config;
 
+mod ask;
 mod build;
 mod chat;
 mod codegen;
@@ -220,6 +221,23 @@ pub enum Commands {
         #[arg(long)]
         path: Option<PathBuf>,
     },
+
+    /// One-shot non-interactive prompt — same gRPC path as `rbnx chat`
+    /// (atlas connect → SubmitTask → stream PilotEvent), but prints
+    /// events to stdout and exits when the stream closes. Useful for
+    /// scripted tests / CI / agent-driven runs where stdout is the
+    /// artifact.
+    Ask {
+        /// The user message to send to the pilot.
+        prompt: String,
+        /// robonix-atlas endpoint
+        #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
+        server: String,
+        /// Emit one JSON object per pilot event on stdout (line-delimited).
+        /// Default is human-readable text with tool-call summaries.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub async fn execute(command: Commands, config: Config) -> Result<()> {
@@ -268,5 +286,10 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             pkg_type,
             path,
         } => package_new::execute(&name, &pkg_type, path.as_deref()).await,
+        Commands::Ask {
+            prompt,
+            server,
+            json,
+        } => ask::execute(&server, &prompt, json).await,
     }
 }

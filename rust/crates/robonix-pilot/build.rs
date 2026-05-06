@@ -39,7 +39,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let contract_srvs: BTreeSet<(String, String)> =
         contract_gen::collect_referenced_srvs(&contracts_root)?;
     proto_gen::generate(&resolver, &proto_out, Some(&contract_srvs), false)?;
-    contract_gen::generate(&mut resolver, &contracts_root, &proto_out, false)?;
+    contract_gen::generate(
+        &mut resolver,
+        std::slice::from_ref(&contracts_root),
+        &proto_out,
+        false,
+    )?;
 
     // 2. Compile every emitted .proto with tonic-prost-build (server+client).
     let protoc = protoc_bin_vendored::protoc_bin_path()?;

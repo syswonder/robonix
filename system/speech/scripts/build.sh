@@ -50,10 +50,20 @@ echo "[build] rbnx codegen ${FLAGS[*]}"
 rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
 # ── 4. Pre-download models (skip in CI / SKIP_MODEL_DOWNLOAD=1) ─────────────
+# Default HF_ENDPOINT to hf-mirror.com — direct huggingface.co is essentially
+# unreachable from CN networks (was failing with 0% throughput on partial
+# 1.6GB cache). Override by exporting HF_ENDPOINT before invoking build.sh.
+: "${HF_ENDPOINT:=https://hf-mirror.com}"
+export HF_ENDPOINT
 if [[ "${SPEECH_CI_MODE:-}" != "1" && "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
     PY="$VENV/bin/python"
     echo "[build] downloading ASR model (openai/whisper-large-v3)…"
-    "$PY" -c "from transformers import pipeline; pipeline('automatic-speech-recognition', model='openai/whisper-large-v3', model_kwargs={'local_files_only': False})" \
+    # `local_files_only=False` is the pipeline default; passing it via
+    # model_kwargs collides with the explicit kwarg in newer transformers
+    # (TypeError: got multiple values). `snapshot_download` is more direct
+    # for "just fetch the weights into the HF cache" intent and avoids
+    # spinning up the full pipeline (CPU-side load is wasted at build time).
+    "$PY" -c "from huggingface_hub import snapshot_download; snapshot_download('openai/whisper-large-v3')" \
         || echo "[build] WARNING: Whisper model download failed; ASR backend will fail at runtime."
     echo "[build] downloading FunASR model (paraformer-zh-streaming)…"
     "$PY" -c "from funasr import AutoModel; AutoModel(model='paraformer-zh-streaming')" \
