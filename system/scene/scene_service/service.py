@@ -2,22 +2,10 @@
 """scene_service entrypoint — wires the registry, ingest pollers,
 relation engine, FastMCP server, and atlas registration together.
 
-Lifecycle:
-
-  1. Bootstrap codegen / robonix-py paths (mirrors system/memory).
-  2. Read RBNX_CONFIG_FILE for the Soma adapter (which observation
-     kinds to enable). Defaults make sense for Webots Tiago.
-  3. Spin up the asyncio event loop:
-       - registry.lock-protected ObjectRegistry
-       - RelationEngine periodic task (1 Hz)
-       - per-observation pollers (gated by Soma config + atlas
-         availability — missing caps are silently skipped)
-       - VLMObjectDetector that runs on the rgb stream
-       - self-pose tracker that updates the `robot` SceneObject
-  4. Register cap + DeclareInterface for each MCP tool.
-  5. Start FastMCP HTTP server.
-  6. Heartbeat to atlas every 15 s.
-  7. SIGTERM/SIGINT → cancel ingest tasks, unregister cap, exit.
+Capability owns atlas register / driver lifecycle / MCP HTTP / heartbeat
+(`cap.bootstrap()` + `cap.use_mcp_app(mcp_tools.mcp)`); everything below
+is scene-specific: registry + relations engine, ROS2 ingest hub,
+VLM perception, web debug UI.
 """
 from __future__ import annotations
 
@@ -28,10 +16,11 @@ import json
 import logging
 import os
 import signal
-import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
+
+import uvicorn  # used for the web debug UI; cap owns the MCP HTTP server
 
 # torch + open3d C-extension calls can segfault on driver / kernel
 # mismatches. Without faulthandler, exit 139 lands without a Python
@@ -40,60 +29,11 @@ from typing import Any, Optional
 faulthandler.enable(all_threads=True)
 
 
-# ── Codegen + robonix-py path bootstrap ────────────────────────────────────
-def _ensure_proto_gen() -> None:
-    d = Path(__file__).resolve().parent
-    while d.parent != d:
-        pg = d / "rbnx-build" / "codegen" / "proto_gen"
-        if pg.is_dir() and (pg / "atlas_pb2.py").exists():
-            if str(pg) not in sys.path:
-                sys.path.insert(0, str(pg))
-            return
-        d = d.parent
+from robonix_py import Capability  # noqa: E402
 
+cap = Capability(id="com.robonix.system.scene", namespace="robonix/system/scene")
 
-def _ensure_mcp_types() -> None:
-    d = Path(__file__).resolve().parent
-    while d.parent != d:
-        mt = d / "rbnx-build" / "codegen" / "robonix_mcp_types"
-        if mt.is_dir() and (mt / "__init__.py").exists():
-            if str(mt) not in sys.path:
-                sys.path.insert(0, str(mt))
-            return
-        d = d.parent
-
-
-def _ensure_robonix_py() -> None:
-    d = Path(__file__).resolve().parent
-    while d.parent != d:
-        for cand in (d / "pylib" / "robonix-py", d / "robonix-py"):
-            if cand.is_dir() and (cand / "robonix_py" / "__init__.py").exists():
-                if str(cand) not in sys.path:
-                    sys.path.insert(0, str(cand))
-                return
-        d = d.parent
-    import subprocess
-    try:
-        out = subprocess.run(
-            ["rbnx", "path", "robonix-py"],
-            capture_output=True, text=True, timeout=5, check=False,
-        )
-        if out.returncode == 0:
-            lib = Path(out.stdout.strip())
-            if lib.is_dir() and str(lib) not in sys.path:
-                sys.path.insert(0, str(lib))
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-
-
-_ensure_proto_gen()
-_ensure_mcp_types()
-_ensure_robonix_py()
-
-
-import grpc
-import atlas_pb2 as pb  # type: ignore
-import atlas_pb2_grpc as pb_grpc  # type: ignore
+import atlas_pb2 as pb  # type: ignore  # noqa: E402  (auto-discover loop uses raw QueryCapabilities)
 
 from . import mcp_tools
 from . import web as web_ui
@@ -427,34 +367,14 @@ def _msg_type_from_contract(atlas_stub, contract_id: str) -> str:
     return leaf
 
 
-# ── DeclareInterface helper (mirrors system/memory) ────────────────────────
-def _decl_mcp(stub, cap_id: str, contract_id: str, port: int, fn) -> None:
-    """Register one MCP tool with atlas. The schema comes from the
-    @mcp_contract input class stashed on `fn`."""
-    description = (fn.__doc__ or "").strip()
-    input_cls = getattr(fn, "_robonix_input_cls", None)
-    schema_json = json.dumps(
-        input_cls.json_schema() if input_cls is not None
-        else {"type": "object", "properties": {}, "required": []}
-    )
-    stub.DeclareInterface(pb.DeclareInterfaceRequest(
-        capability_id=cap_id,
-        contract_id=contract_id,
-        transport=pb.TRANSPORT_MCP,
-        endpoint=f"http://127.0.0.1:{port}/mcp/",
-        params=pb.TransportParams(mcp=pb.McpParams(
-            description=description,
-            input_schema_json=schema_json,
-        )),
-    ))
-
-
 # ── Self-pose tracker ──────────────────────────────────────────────────────
 class _SelfTracker:
-    """Owns the `robot` SceneObject — created on first chassis-state
-    poll, then EMA-updated. Never goes `missing` (we just stop refreshing
-    if chassis stops responding). Also exposes a sync `latest_xy_yaw`
-    callback that the VLM detector consumes for camera-to-map projection.
+    """Owns the `robot` SceneObject — created on first pose update from
+    the atlas-resolved pose stream (`service/map/pose` preferred,
+    `primitive/chassis/pose` as a fallback), then EMA-updated. Never
+    goes `missing` (we just stop refreshing if the upstream stops
+    responding). Also exposes a sync `latest_xy_yaw` callback that the
+    VLM detector consumes for camera-to-map projection.
     """
 
     def __init__(self, registry: ObjectRegistry) -> None:
@@ -497,22 +417,6 @@ class _SelfTracker:
                         ema_pose=1.0,  # robot's own pose: hard-overwrite
                         ema_conf=1.0,
                     )
-
-
-# ── Heartbeat task ─────────────────────────────────────────────────────────
-async def _heartbeat_loop(stub, cap_id: str, *, period_s: float = 15.0) -> None:
-    """Periodic NodeHeartbeat → atlas. Without this atlas evicts our
-    cap after the configured timeout (default 60s) and Pilot can no
-    longer call our tools."""
-    loop = asyncio.get_running_loop()
-    while True:
-        try:
-            await loop.run_in_executor(
-                None, lambda: stub.Heartbeat(pb.HeartbeatRequest(capability_id=cap_id))
-            )
-        except Exception as e:  # noqa: BLE001
-            log.debug("heartbeat failed (will retry): %s", e)
-        await asyncio.sleep(period_s)
 
 
 # ── Stale-tick: flip missing flag after grace period ───────────────────────
@@ -849,27 +753,16 @@ async def _ingest_detections(registry: ObjectRegistry, detections):
 # ── main ───────────────────────────────────────────────────────────────────
 async def _run() -> None:
     config = _load_config()
-    atlas_addr = os.environ.get("ROBONIX_ATLAS", "localhost:50051")
-    # Port resolution: deploy-manifest config wins; env var is the
-    # fallback so package devs can still override via shell. Defaults
-    # are 50106 (MCP HTTP for pilot) and 50107 (debug web UI).
-    port = int(config.get("mcp_port") or os.environ.get("SCENE_PORT", "50106"))
-    cap_id = os.environ.get("ROBONIX_CAPABILITY_ID", "com.robonix.system.scene")
 
-    channel = grpc.insecure_channel(atlas_addr)
-    stub = pb_grpc.AtlasStub(channel)
-
-    # Atlas registration.
-    pkg_dir = os.environ.get("ROBONIX_PKG_HOST_DIR", "")
-    md_path = f"{pkg_dir}/CAPABILITY.md" if pkg_dir else ""
-    try:
-        stub.RegisterCapability(pb.RegisterCapabilityRequest(
-            capability_id=cap_id,
-            namespace="robonix/system/scene",
-            capability_md_path=md_path,
-        ))
-    except Exception as e:  # noqa: BLE001
-        log.warning("RegisterCapability failed (will keep running): %s", e)
+    # Hand the FastMCP app from mcp_tools to Capability so it owns the
+    # HTTP server. Capability auto-allocates the port (was hand-set to
+    # 50106) and atlas-routes consumers via QueryCapabilities. The 6
+    # tools were already decorated with @mcp_contract on mcp_tools.mcp
+    # at import time; we still need to declare each on atlas — Capability
+    # only auto-declares tools registered via @cap.mcp(), and we kept
+    # the @mcp_contract pattern in mcp_tools to avoid a cyclic-import
+    # rewrite. Manual declare per tool:
+    cap.use_mcp_app(mcp_tools.mcp)
 
     # Wire state.
     registry = ObjectRegistry(grace_period_s=5.0)
@@ -878,26 +771,45 @@ async def _run() -> None:
     self_tracker = _SelfTracker(registry)
     mcp_tools.attach_state(registry=registry, relations=relations, transform_to_map=None)
 
-    # Declare MCP tools to atlas (must happen after RegisterCapability).
-    try:
-        for cid, fn in (
-            ("robonix/system/scene/get_snapshot",       mcp_tools.get_snapshot),
-            ("robonix/system/scene/query",              mcp_tools.query),
-            ("robonix/system/scene/get_object",         mcp_tools.get_object),
-            ("robonix/system/scene/get_semantic_map",   mcp_tools.get_semantic_map),
-            ("robonix/system/scene/get_safety_context", mcp_tools.get_safety_context),
-        ):
-            _decl_mcp(stub, cap_id, cid, port, fn)
-        log.info("registered cap %s with 5 MCP interfaces on port %d", cap_id, port)
-    except Exception as e:  # noqa: BLE001
-        log.warning("DeclareInterface failed: %s", e)
+    # Bring up atlas + lifecycle gRPC + MCP HTTP. Non-blocking; scene
+    # keeps running its own asyncio event loop after this returns.
+    cap.bootstrap()
+
+    # Declare each scene MCP tool on atlas. Each handler has
+    # `_robonix_*` attrs stashed by @mcp_contract — re-use them so the
+    # description / JSON schema stay in sync with the codegen types.
+    for fn in (
+        mcp_tools.get_snapshot, mcp_tools.query, mcp_tools.get_object,
+        mcp_tools.get_semantic_map, mcp_tools.get_safe_goal_near_object,
+        mcp_tools.get_safety_context,
+    ):
+        cid = getattr(fn, "_robonix_contract_id", None)
+        if cid is None:
+            log.warning("scene tool %s missing _robonix_contract_id; skipping", fn.__name__)
+            continue
+        in_cls = getattr(fn, "_robonix_input_cls", None)
+        schema = json.dumps(in_cls.json_schema()) if in_cls else "{}"
+        cap.declare_mcp(cid, cap.mcp_endpoint,
+                        description=(fn.__doc__ or "").strip(),
+                        input_schema_json=schema)
+    log.info("scene declared 6 MCP tools at %s", cap.mcp_endpoint)
 
     # ROS2 ingest hub + downstream consumers (self-pose, perception).
+    # _start_ros_ingest still wants a raw atlas stub for QueryCapabilities;
+    # cap exposes its underlying atlas client via _atlas.stub for these
+    # cases that pre-date the Capability API.
+    stub = cap._atlas.stub
     hub, perception, ingest_bg = await _start_ros_ingest(
         atlas_stub=stub, registry=registry, self_tracker=self_tracker, config=config,
     )
+    # Now that the hub exists, hand it to mcp_tools so safe-goal BFS can
+    # read the occupancy grid. (Earlier attach_state call set registry +
+    # relations; this one overwrites with the same values plus hub —
+    # attach_state is intentionally cheap and idempotent.)
+    mcp_tools.attach_state(
+        registry=registry, relations=relations, transform_to_map=None, hub=hub,
+    )
     bg_tasks = [
-        asyncio.create_task(_heartbeat_loop(stub, cap_id), name="scene-heartbeat"),
         asyncio.create_task(_stale_tick(registry), name="scene-stale-tick"),
         # Background reconciler: keeps scene's hub adding subscriptions
         # for new ROS2 topic_outs that appear on atlas after start
@@ -913,19 +825,6 @@ async def _run() -> None:
         ),
         *ingest_bg,
     ]
-
-    # FastMCP HTTP server. Bind 0.0.0.0 (not 127.0.0.1) because scene
-    # runs in a container with --network host; binding to loopback
-    # would still work via host network but explicit 0.0.0.0 makes it
-    # easier to swap to bridge networking later if we ever drop
-    # --network host.
-    import uvicorn
-    config_uv = uvicorn.Config(
-        app=mcp_tools.mcp.streamable_http_app(),
-        host="0.0.0.0", port=port, log_level="warning",
-    )
-    server = uvicorn.Server(config_uv)
-    server_task = asyncio.create_task(server.serve(), name="scene-mcp-http")
 
     # Web debug UI on a separate port — top-down 2D canvas + objects
     # table + robot pose. Lives in the same asyncio loop as the rest
@@ -947,8 +846,8 @@ async def _run() -> None:
         web_task = asyncio.create_task(web_server.serve(), name="scene-web-http")
         log.info("web UI on http://0.0.0.0:%d", web_port)
 
-    log.info("scene up; cap=%s port=%d atlas=%s observations=%d",
-             cap_id, port, atlas_addr, len(config.get("observations", [])))
+    log.info("scene up; cap=%s mcp=%s observations=%d",
+             cap.id, cap.mcp_endpoint, len(config.get("observations", [])))
 
     # Wait for SIGTERM/SIGINT.
     stop = asyncio.Event()
@@ -968,16 +867,11 @@ async def _run() -> None:
     await relations.stop()
     for t in bg_tasks:
         t.cancel()
-    server.should_exit = True
+    if web_task is not None:
+        web_server.should_exit = True
 
-    # Unregister from atlas (best effort).
-    try:
-        stub.UnregisterCapability(pb.UnregisterCapabilityRequest(capability_id=cap_id))
-    except Exception:  # noqa: BLE001
-        pass
-
-    with contextlib.suppress(Exception):
-        await asyncio.wait_for(server_task, timeout=5.0)
+    # Capability owns the gRPC server, MCP HTTP, heartbeat — stop them.
+    cap._teardown()
 
 
 def main() -> None:

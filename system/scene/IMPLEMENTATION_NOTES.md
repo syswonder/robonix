@@ -50,10 +50,10 @@ Instead, scene's pollers go through atlas:
   2. `ConnectCapability(...)` for the endpoint,
   3. periodic JSON-RPC `tools/call` to the primitive's MCP HTTP.
 
-This works for `chassis/state`, `camera/snapshot`, `lidar/snapshot` —
-all already MCP-exposed by the Webots tiago primitives. When a real
-robot eventually runs scene alongside `rclpy`, native subscribers can
-be added in `ingest/` without touching the rest of the codebase.
+This works for `camera/snapshot`, `lidar/snapshot` — both already
+MCP-exposed by the Webots tiago primitives. When a real robot
+eventually runs scene alongside `rclpy`, native subscribers can be
+added in `ingest/` without touching the rest of the codebase.
 
 ### 3. No `scripts/mock_perception.py`
 

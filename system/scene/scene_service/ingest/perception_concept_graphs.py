@@ -714,7 +714,23 @@ class ConceptGraphsDetector:
                 self._classes, self._device,
             )
         except Exception as e:  # noqa: BLE001
-            log.warning("CLIP feature compute failed: %s — skipping tick", e)
+            # First failure: dump full traceback so we know which list
+            # in concept-graphs's batched CLIP path was overrun (cls
+            # idx vs class list mismatch is the usual cause). Subsequent
+            # failures stay terse.
+            if not getattr(self, "_clip_fail_logged", False):
+                import traceback
+                log.warning(
+                    "CLIP feature compute failed (first occurrence — full trace; "
+                    "n_dets=%d, n_classes=%d, max_cls_idx=%s):\n%s",
+                    int(xyxy.shape[0]) if hasattr(xyxy, "shape") else -1,
+                    len(self._classes) if hasattr(self, "_classes") else -1,
+                    int(max(cls_idx)) if len(cls_idx) else "n/a",
+                    traceback.format_exc(),
+                )
+                self._clip_fail_logged = True
+            else:
+                log.warning("CLIP feature compute failed: %s — skipping tick", e)
             return
 
         # ── Per-detection PCD + bbox in map frame ────────────────────

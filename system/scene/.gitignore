@@ -1,0 +1,16 @@
+# All generated artefacts (codegen output, model weights, runtime data)
+# live under rbnx-build/.
+rbnx-build/
+
+# Legacy default codegen output paths (kept ignored so older trees don't
+# leak generated stuff into git after a `rbnx codegen` run that doesn't
+# pass --out-dir).
+proto_gen/
+robonix_mcp_types/
+
+# Pre-fetched model weights (yolov8l-world.pt etc.) live under docker/
+# during build to keep the docker COPY cache-stable; not committed.
+docker/_weights/
+
+# Container-side editable install cache that scene's build.sh uses.
+.uv-cache/
