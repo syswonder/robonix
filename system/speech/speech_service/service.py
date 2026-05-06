@@ -787,190 +787,62 @@ class SpeechDialogServicer(contracts_grpc.SystemSpeechDialogServicer):
 # other nodes can discover it. If Atlas is unavailable or the runtime protos
 # are not installed, the service runs in standalone mode.
 
-def _register_with_atlas(port: int) -> None:
-    """Register with Atlas control plane. Non-fatal on failure.
+from robonix_py import Capability  # noqa: E402
 
-    Registration flow:
-        1. RegisterNode: node_id="com.robonix.system.speech",
-           namespace="robonix/system/speech", kind="service"
-        2. DeclareInterface x 5: one per contract (asr, asr_stream, tts,
-           tts_stream, dialog), each with its gRPC mode.
-        3. Atlas returns allocated_endpoint for each interface.
+cap = Capability(id="com.robonix.system.speech", namespace="robonix/system/speech")
 
-    If robonix_runtime_pb2 is not importable, or Atlas is unreachable,
-    logs a warning and continues. The service is fully functional without
-    Atlas -- it just won't be discoverable by other nodes.
 
-    Args:
-        port: The gRPC port the service is listening on.
-    """
+def _try_backend(name: str, factory):
+    """Best-effort backend init; failed backends become None and the
+    corresponding servicer returns UNAVAILABLE rather than bringing the
+    whole package down."""
     try:
-        import robonix_runtime_pb2 as pb
-        import robonix_runtime_pb2_grpc as pb_grpc
-    except ImportError:
-        log.warning("robonix_runtime_pb2 not found, skipping Atlas registration")
-        return
-
-    atlas_addr = os.environ.get("ROBONIX_ATLAS", "localhost:50051")
-    log.info("Connecting to Atlas at %s ...", atlas_addr)
-
-    try:
-        channel = grpc.insecure_channel(atlas_addr)
-        stub = pb_grpc.RobonixRuntimeStub(channel)
-
-        node_id = "com.robonix.system.speech"
-        stub.RegisterNode(pb.RegisterNodeRequest(
-            node_id=node_id,
-            namespace="robonix/system/speech",
-            kind="service",
-        ))
-        log.info("Registered node %s with Atlas", node_id)
-
-        contracts = [
-            ("robonix/system/speech/asr",        "asr",        "rpc"),
-            ("robonix/system/speech/asr_stream",  "asr_stream", "rpc_bidirectional_stream"),
-            ("robonix/system/speech/tts",         "tts",         "rpc"),
-            ("robonix/system/speech/tts_stream",  "tts_stream",  "rpc_server_stream"),
-            ("robonix/system/speech/dialog",      "dialog",      "rpc_server_stream"),
-        ]
-        for contract_id, name, mode in contracts:
-            meta = json.dumps({"transport": "grpc", "contract": {"idl_type": "protobuf", "mode": mode}})
-            resp = stub.DeclareInterface(pb.DeclareInterfaceRequest(
-                node_id=node_id, name=name,
-                supported_transports=["grpc"],
-                metadata_json=meta, listen_port=port,
-                contract_id=contract_id,
-            ))
-            log.info("Declared %s -> endpoint=%s", contract_id, resp.allocated_endpoint)
-
-        channel.close()
-    except grpc.RpcError as e:
-        log.warning("Atlas not available (%s), running standalone", e.code())
+        return factory()
+    except Exception as e:  # noqa: BLE001
+        log.error("%s backend FAILED (%s); the contract will return UNAVAILABLE", name, str(e)[:120])
+        return None
 
 
-# -- Main --------------------------------------------------------------------
-# Entry point. Called via `python -m speech_service.service` or via the
-# robonix_manifest.yaml start command: `exec python -m speech_service.service`.
+# Backend init at module level (eager) — attach_grpc_servicer must run
+# before cap.run()'s bootstrap step starts the gRPC server. Failed
+# backends are non-fatal; only "all three down" is a hard fail (Init
+# checks that and returns cap.error).
+log.info("Starting speech service (ci_mode=%s)", CI_MODE)
+if CI_MODE:
+    _asr_backend = MockASRBackend()
+    _asr_stream_backend = MockASRStreamingBackend()
+    _tts_backend = MockTTSBackend()
+else:
+    _asr_backend = _try_backend("Whisper ASR", WhisperASRBackend)
+    _asr_stream_backend = _try_backend("FunASR (streaming)", FunASRStreamingBackend)
+    _tts_backend = _try_backend("Edge TTS", EdgeTTSBackend)
 
-def main() -> None:
-    """Start the speech service.
+log.info("Backend status: Whisper=%s FunASR=%s EdgeTTS=%s",
+         "OK" if _asr_backend else "UNAVAILABLE",
+         "OK" if _asr_stream_backend else "UNAVAILABLE",
+         "OK" if _tts_backend else "UNAVAILABLE")
 
-    Startup sequence:
-        1. Initialize backends (real or mock based on SPEECH_CI_MODE)
-           - Each backend init is wrapped in try/except
-           - Failed backends are set to None; servicers return UNAVAILABLE
-           - If ALL backends fail, exit with error
-        2. Create gRPC server with thread pool (8 workers)
-        3. Register all 5 servicers (ASR, ASR Stream, TTS, TTS Stream, Dialog)
-        4. Bind to SPEECH_BIND_ADDR:SPEECH_PORT (default 0.0.0.0:0 = auto)
-        5. Optionally register with Atlas control plane
-        6. Block until server terminates
-    """
-    log.info("Starting speech service (ci_mode=%s)", CI_MODE)
+_dialog_manager = DialogManager()
+cap.attach_grpc_servicer("robonix/system/speech/asr",        SpeechAsrServicer(_asr_backend))
+cap.attach_grpc_servicer("robonix/system/speech/asr_stream", SpeechAsrStreamServicer(_asr_stream_backend))
+cap.attach_grpc_servicer("robonix/system/speech/tts",        SpeechTtsServicer(_tts_backend))
+cap.attach_grpc_servicer("robonix/system/speech/tts_stream", SpeechTtsStreamServicer(_tts_backend))
+cap.attach_grpc_servicer("robonix/system/speech/dialog",     SpeechDialogServicer(_dialog_manager))
 
-    # -- Initialize backends -------------------------------------------------
-    asr_backend = None
-    asr_stream_backend = None
-    tts_backend = None
 
-    if CI_MODE:
-        asr_backend = MockASRBackend()
-        asr_stream_backend = MockASRStreamingBackend()
-        tts_backend = MockTTSBackend()
-    else:
-        # Whisper ASR (one-shot)
-        try:
-            asr_backend = WhisperASRBackend()
-        except Exception as e:
-            log.error("+============================================================+")
-            log.error("| Whisper ASR backend FAILED to initialize                   |")
-            log.error("| Error: %s", str(e)[:51])
-            log.error("|                                                            |")
-            log.error("| To fix, choose ONE of:                                     |")
-            log.error("|   1. Pre-download model and set ASR_MODEL=/path/to/model   |")
-            log.error("|   2. Set SPEECH_CI_MODE=1 for testing (mock backend)       |")
-            log.error("|                                                            |")
-            log.error("| Note: local_files_only=True -- no runtime downloads        |")
-            log.error("| The service will start without ASR (Call -> UNAVAILABLE)   |")
-            log.error("+============================================================+")
-            asr_backend = None
+@cap.on_init
+def init(cfg):
+    if not any([_asr_backend, _asr_stream_backend, _tts_backend]):
+        return cap.error(
+            "all backends failed; set SPEECH_CI_MODE=1 for mocks or fix "
+            "model / network issues (see backend errors above)"
+        )
+    return cap.ready()
 
-        # FunASR Paraformer (streaming ASR)
-        try:
-            asr_stream_backend = FunASRStreamingBackend()
-        except Exception as e:
-            log.error("+============================================================+")
-            log.error("| FunASR streaming ASR backend FAILED to initialize          |")
-            log.error("| Error: %s", str(e)[:51])
-            log.error("|                                                            |")
-            log.error("| To fix, choose ONE of:                                     |")
-            log.error("|   1. Pre-download model and set FUNASR_MODEL=/path/to/model|")
-            log.error("|   2. Set SPEECH_CI_MODE=1 for testing                      |")
-            log.error("|                                                            |")
-            log.error("| Note: local_files_only=True -- no runtime downloads        |")
-            log.error("| Streaming ASR (Stream) will be UNAVAILABLE                 |")
-            log.error("+============================================================+")
-            asr_stream_backend = None
 
-        # Edge TTS
-        try:
-            tts_backend = EdgeTTSBackend()
-        except Exception as e:
-            log.error("+============================================================+")
-            log.error("| Edge TTS backend FAILED to initialize                      |")
-            log.error("| Error: %s", str(e)[:51])
-            log.error("|                                                            |")
-            log.error("| To fix: ensure network access to Microsoft TTS endpoint    |")
-            log.error("|   or set SPEECH_CI_MODE=1 for testing                      |")
-            log.error("|                                                            |")
-            log.error("| TTS (Call/Stream) will be UNAVAILABLE                      |")
-            log.error("+============================================================+")
-            tts_backend = None
-
-        # Bail out if nothing is available
-        available = [b is not None for b in (asr_backend, asr_stream_backend, tts_backend)]
-        if not any(available):
-            log.error("All backends failed -- cannot start service.")
-            log.error("Set SPEECH_CI_MODE=1 for testing, or fix model/network issues above.")
-            sys.exit(1)
-
-    # -- Startup summary -----------------------------------------------------
-    log.info("Backend status:")
-    log.info("  Whisper ASR (Call):            %s",
-             "OK" if asr_backend is not None else "UNAVAILABLE")
-    log.info("  FunASR (Stream):               %s",
-             "OK" if asr_stream_backend is not None else "UNAVAILABLE")
-    log.info("  Edge TTS (Call/Stream):        %s",
-             "OK" if tts_backend is not None else "UNAVAILABLE")
-
-    dialog_manager = DialogManager()
-
-    # Start gRPC server
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
-
-    # Register servicers (5 separate contracts from robonix_contracts.proto)
-    spb_grpc = contracts_grpc  # for add_*_to_server calls
-    spb_grpc.add_SystemSpeechAsrServicer_to_server(SpeechAsrServicer(asr_backend), server)
-    spb_grpc.add_SystemSpeechAsrStreamServicer_to_server(SpeechAsrStreamServicer(asr_stream_backend), server)
-    spb_grpc.add_SystemSpeechTtsServicer_to_server(SpeechTtsServicer(tts_backend), server)
-    spb_grpc.add_SystemSpeechTtsStreamServicer_to_server(SpeechTtsStreamServicer(tts_backend), server)
-    spb_grpc.add_SystemSpeechDialogServicer_to_server(SpeechDialogServicer(dialog_manager), server)
-
-    # Bind port
-    bind_addr = os.environ.get("SPEECH_BIND_ADDR", "0.0.0.0")
-    port_str = os.environ.get("SPEECH_PORT", "0")
-    port = server.add_insecure_port(f"{bind_addr}:{port_str}")
-    if port == 0:
-        log.error("Failed to bind gRPC server on %s:%s", bind_addr, port_str)
-        sys.exit(1)
-
-    server.start()
-    log.info("Speech service gRPC listening on %s:%d", bind_addr, port)
-
-    # Try Atlas registration (non-blocking, continues on failure)
-    _register_with_atlas(port)
-
-    server.wait_for_termination()
+def main() -> int:
+    cap.run()
+    return 0
 
 
 if __name__ == "__main__":
