@@ -857,10 +857,15 @@ class ConceptGraphsDetector:
                 # on coplanar bbox vertices via pytorch3d.box3d_overlap. AABB-IoU
                 # was the previous fallback but was too weak for the cross-view
                 # merge case. See `_voxel_pcd_overlap_matrix` for the rationale.
-                spatial_sim = self._voxel_pcd_overlap_torch(det_list, self._map_objects)
+                #
+                # Visual sim comes back on whatever device CLIP runs on
+                # (cuda when available); pin our spatial_sim to that same
+                # device before they're added together by aggregate_similarities.
                 visual_sim = self._cg["compute_visual_similarities"](
                     det_list, self._map_objects,
                 )
+                spatial_sim = self._voxel_pcd_overlap_torch(det_list, self._map_objects)
+                spatial_sim = spatial_sim.to(visual_sim.device)
                 agg_sim = self._cg["aggregate_similarities"](
                     self.cfg["match_method"], self.cfg["phys_bias"],
                     spatial_sim, visual_sim,
