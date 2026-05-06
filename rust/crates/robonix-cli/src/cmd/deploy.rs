@@ -1143,7 +1143,7 @@ async fn wait_for_registration(
             &format!("registering with atlas… {elapsed_s:>4.1}s"),
             frame,
         );
-        if frame % POLLS_PER_TICK as usize == 0 {
+        if frame.is_multiple_of(POLLS_PER_TICK as usize) {
             let records = atlas
                 .query_capabilities("", "", atlas_pb::Transport::Unspecified)
                 .await
