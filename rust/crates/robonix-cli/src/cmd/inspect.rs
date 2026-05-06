@@ -95,7 +95,9 @@ pub async fn caps(endpoint: &str, json: bool, verbose: bool) -> Result<()> {
         let iface_count_hint = if verbose {
             String::new()
         } else {
-            format!(" ({} ifaces)", rec.interfaces.len()).dimmed().to_string()
+            format!(" ({} ifaces)", rec.interfaces.len())
+                .dimmed()
+                .to_string()
         };
         println!(
             "{} {} {} {}{}{}",
@@ -118,8 +120,11 @@ pub async fn caps(endpoint: &str, json: bool, verbose: bool) -> Result<()> {
         }
     }
     if !verbose {
-        println!("\n{} pass {} for the per-cap interface list",
-                 "tip:".dimmed(), "-v".bold());
+        println!(
+            "\n{} pass {} for the per-cap interface list",
+            "tip:".dimmed(),
+            "-v".bold()
+        );
     }
     Ok(())
 }

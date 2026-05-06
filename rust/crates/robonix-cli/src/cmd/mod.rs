@@ -277,7 +277,11 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         } => codegen::execute(config, package, mcp, clean, out_dir).await,
         Commands::Setup { path } => setup::execute(config, path).await,
         Commands::Path { key } => path::execute(config, key).await,
-        Commands::Caps { server, json, verbose } => inspect::caps(&server, json, verbose).await,
+        Commands::Caps {
+            server,
+            json,
+            verbose,
+        } => inspect::caps(&server, json, verbose).await,
         Commands::Describe { server, cap, json } => {
             inspect::describe(&server, cap.as_deref(), json).await
         }

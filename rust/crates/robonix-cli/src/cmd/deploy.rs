@@ -1095,21 +1095,28 @@ async fn call_driver_cmd(
         let resp = tokio::time::timeout(
             DRIVER_INIT_TIMEOUT,
             grpc.unary(
-                Request::new(DriverRequest { command: cmd, config_json }),
+                Request::new(DriverRequest {
+                    command: cmd,
+                    config_json,
+                }),
                 path,
                 codec,
             ),
         )
         .await
         .map_err(|_| {
-            anyhow::anyhow!("Driver(CMD_{cmd_name}) timed out after {:?}", DRIVER_INIT_TIMEOUT)
+            anyhow::anyhow!(
+                "Driver(CMD_{cmd_name}) timed out after {:?}",
+                DRIVER_INIT_TIMEOUT
+            )
         })?
         .with_context(|| format!("Driver(CMD_{cmd_name}) RPC failed"))?;
         Ok::<_, anyhow::Error>(resp.into_inner())
     }
     .await;
     let _ = atlas.disconnect_capability(&channel_id).await;
-    let r = result.map_err(|e| anyhow::anyhow!("[{component}/{pkg_label}] Driver(CMD_{cmd_name}): {e:#}"))?;
+    let r = result
+        .map_err(|e| anyhow::anyhow!("[{component}/{pkg_label}] Driver(CMD_{cmd_name}): {e:#}"))?;
     if !r.ok {
         anyhow::bail!(
             "[{component}/{pkg_label}] Driver(CMD_{cmd_name}) returned ok=false (state={}, error={})",
