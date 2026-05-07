@@ -233,6 +233,12 @@ class FunASRStreamingBackend:
 
         model_name = os.environ.get("FUNASR_MODEL", "paraformer-zh-streaming")
         chunk_size_str = os.environ.get("FUNASR_CHUNK_SIZE", "[0,10,5]")
+        # Default CPU. paraformer-zh-streaming is tiny (~80 MB) and fast
+        # enough on a single CPU thread for real-time. CUDA is opt-in
+        # because robonix's GPU is usually shared with scene's YOLO+SAM+
+        # CLIP stack and trying to wedge whisper / FunASR in alongside
+        # produces `CUDA error: out of memory` at the first inference.
+        device = os.environ.get("FUNASR_DEVICE", "cpu")
         try:
             self.chunk_size = json.loads(chunk_size_str)
         except json.JSONDecodeError:
@@ -240,9 +246,13 @@ class FunASRStreamingBackend:
 
         self.chunk_stride = self.chunk_size[1] * 960
 
-        log.info("Loading FunASR model %s (chunk_size=%s, stride=%d samples)...",
-                 model_name, self.chunk_size, self.chunk_stride)
-        self.model = AutoModel(model=model_name, hub_kwargs={"local_files_only": True})
+        log.info("Loading FunASR model %s on %s (chunk_size=%s, stride=%d samples)...",
+                 model_name, device, self.chunk_size, self.chunk_stride)
+        self.model = AutoModel(
+            model=model_name,
+            device=device,
+            hub_kwargs={"local_files_only": True},
+        )
         log.info("FunASR model loaded.")
 
     def recognize_chunk(
@@ -835,6 +845,7 @@ _CFG_ENV_MAP = {
     "asr_chunk_length":  "ASR_CHUNK_LENGTH",
     "asr_batch_size":    "ASR_BATCH_SIZE",
     "funasr_model":      "FUNASR_MODEL",
+    "funasr_device":     "FUNASR_DEVICE",
     "funasr_chunk_size": "FUNASR_CHUNK_SIZE",
     "tts_voice":         "TTS_VOICE",
 }

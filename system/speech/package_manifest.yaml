@@ -10,6 +10,7 @@
 #   asr_chunk_length:  float — Whisper long-form chunk seconds (default: 30.0)
 #   asr_batch_size:    int   — Whisper batch (default: 4)
 #   funasr_model:      str   — FunASR model id (default: paraformer-zh-streaming)
+#   funasr_device:     str   — cuda | cpu (default: cpu — see service.py for why)
 #   funasr_chunk_size: list  — Paraformer [left, current, right] (default: [0,10,5])
 #   tts_voice:         str   — Edge TTS voice (default: zh-CN-XiaoxiaoNeural)
 #   log:               str   — log level (default: info)
