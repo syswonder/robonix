@@ -3,25 +3,47 @@ name = "robonix-liaison"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Robonix Liaison: input layer — converts user input into structured Intent and streams responses"
+description = "Robonix Liaison: unified user-facing entry — text + voice → SystemPilot stream"
+
+[lib]
+name = "robonix_liaison"
+path = "src/lib.rs"
 
 [[bin]]
 name = "robonix-liaison"
 path = "src/main.rs"
 
+[[example]]
+name = "mock_pilot"
+path = "examples/mock_pilot.rs"
+
+[[example]]
+name = "mock_audio"
+path = "examples/mock_audio.rs"
+
+[[example]]
+name = "voice_demo_client"
+path = "examples/voice_demo_client.rs"
+
 [dependencies]
 tokio.workspace = true
 tokio-stream = "0.1"
 tonic.workspace = true
-prost.workspace = true
 tonic-prost.workspace = true
+prost.workspace = true
 anyhow.workspace = true
+clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
 env_logger.workspace = true
 uuid.workspace = true
-robonix-sdk.workspace = true
-robonix-interfaces.workspace = true
 futures = "0.3"
 whoami = "1.5"
+robonix-atlas = { path = "../robonix-atlas" }
+
+[build-dependencies]
+robonix-codegen.workspace = true
+tonic-build.workspace = true
+tonic-prost-build.workspace = true
+protoc-bin-vendored.workspace = true

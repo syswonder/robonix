@@ -3,41 +3,35 @@
 //
 // Exercises the same gRPC link `rbnx chat` uses, end to end:
 //
-//   1. Discover Liaison via Atlas (robonix/srv/liaison).
-//   2. Text path   → SrvLiaison.Stream(Task{text="ping"})
-//        Asserts: at least one TextChunk, non-empty FinalText, text
-//        echoed back by mock_pilot contains the user_id or "ping".
-//   3. Voice path  → SrvLiaison.StartVoiceSession(mock_mode)
+//   1. Discover Liaison via Atlas (contract robonix/system/liaison).
+//   2. Text path  → SystemLiaison.SubmitTask(Task{text="ping"})
+//        Asserts: at least one TextChunk, non-empty FinalText, text echoed
+//        back by mock_pilot contains the user_id or "ping".
+//   3. Voice path → SystemLiaison.StartVoiceSession(mock_mode)
 //        Asserts: SESSION_STARTED → RECORDING_* → ASR_FINAL (non-empty
 //        transcript) → USER_IDENTIFIED → PILOT(FinalText containing the
 //        mock transcript) → SESSION_DONE, no ERROR event.
 //
 // Requires Liaison started with `ROBONIX_LIAISON_VOICE_MOCK=1` so the
-// canned transcript (env ROBONIX_LIAISON_VOICE_MOCK_TEXT, default
-// "你好，请介绍一下你自己。") is used instead of real mic + ASR.
-// Voiceprint absence is expected and handled as a graceful fallback.
-//
-// A 30-second per-stream timeout prevents the client from hanging if a
-// service misbehaves.
+// canned transcript (env ROBONIX_LIAISON_VOICE_MOCK_TEXT) is used instead
+// of real mic + ASR. Voiceprint absence is expected and degrades to the
+// client_user_id hint.
 //
 // Exit code: 0 = all checks pass; non-zero = at least one check failed.
 
 use anyhow::{Context, Result, bail};
-use robonix_interfaces::{
-    contracts::srv_liaison_client::SrvLiaisonClient,
-    liaison::StartVoiceSessionRequest,
-    pilot::Task,
-};
-use robonix_sdk::RobonixClient;
+use robonix_atlas::client::AtlasClient;
+use robonix_atlas::pb as atlas_pb;
+use robonix_liaison::pb::contracts::system_liaison_client::SystemLiaisonClient;
+use robonix_liaison::pb::liaison::StartVoiceSessionRequest;
+use robonix_liaison::pb::pilot::Task;
 use std::time::Duration;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
-// ── PilotEvent kinds ─────────────────────────────────────────────────────────
 const EVT_TEXT_CHUNK: u32 = 0;
 const EVT_FINAL_TEXT: u32 = 4;
 
-// ── VoiceEvent kinds ─────────────────────────────────────────────────────────
 const KIND_SESSION_STARTED: u32 = 0;
 const KIND_RECORDING_STARTED: u32 = 1;
 const KIND_RECORDING_DONE: u32 = 2;
@@ -61,20 +55,17 @@ async fn main() -> Result<()> {
     };
 
     println!("[pipeline-test] discovering Liaison via Atlas at {atlas_http}…");
-    let liaison_endpoint = discover(&atlas_http, "robonix/srv/liaison").await?;
+    let liaison_endpoint = discover(&atlas_http, "robonix/system/liaison").await?;
     println!("[pipeline-test] Liaison endpoint: {liaison_endpoint}");
 
-    let mut client = SrvLiaisonClient::connect(liaison_endpoint.clone())
+    let mut client = SystemLiaisonClient::connect(liaison_endpoint.clone())
         .await
         .with_context(|| format!("connect Liaison at {liaison_endpoint}"))?;
 
     let session_id = Uuid::new_v4().to_string();
     let user_id = "local:demo-user".to_string();
 
-    // ────────────────────────────────────────────────────────────────────────
     // Stage 1 — Text path
-    //   TUI sends a Task → Liaison forwards to Pilot → PilotEvent stream back
-    // ────────────────────────────────────────────────────────────────────────
     println!("\n[stage-1] ── text path ──────────────────────────────────────────");
     let text_task = Task {
         task_id: Uuid::new_v4().to_string(),
@@ -82,17 +73,16 @@ async fn main() -> Result<()> {
         source: 0,
         text: "ping".to_string(),
         audio_data: vec![],
-        context_json: String::new(),
+        context_json: serde_json::json!({"user_id": user_id}).to_string(),
         timestamp_ms: now_ms(),
-        user_id: user_id.clone(),
     };
     let text_stream = tokio::time::timeout(
         STREAM_TIMEOUT,
-        client.stream(tonic::Request::new(text_task)),
+        client.submit_task(tonic::Request::new(text_task)),
     )
     .await
-    .context("Liaison.Stream RPC timeout")?
-    .context("Liaison.Stream RPC failed")?
+    .context("Liaison.SubmitTask RPC timeout")?
+    .context("Liaison.SubmitTask RPC failed")?
     .into_inner();
 
     let mut text_chunks = String::new();
@@ -116,10 +106,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Assertions:
-    // - Got at least one TextChunk (streaming works)
-    // - FinalText is non-empty
-    // - mock_pilot echoes back the user_id or the task text ("ping")
     let got_text_chunk = !text_chunks.is_empty();
     let got_text_final = !text_final.is_empty();
     let text_content_ok =
@@ -131,23 +117,10 @@ async fn main() -> Result<()> {
         pass_fail(text_ok)
     );
 
-    // ────────────────────────────────────────────────────────────────────────
     // Stage 2 — Voice path (mock mode)
-    //   TUI sends StartVoiceSession → Liaison orchestrates mock mic → mock ASR
-    //   → Pilot → VoiceEvent stream (ASR_FINAL + USER_IDENTIFIED + PILOT + SESSION_DONE)
-    //
-    // Event sequence expected:
-    //   KIND_SESSION_STARTED (0)
-    //   KIND_RECORDING_STARTED (1)
-    //   KIND_RECORDING_DONE (2)
-    //   KIND_ASR_FINAL (4)  ← mock transcript
-    //   KIND_USER_IDENTIFIED (5)
-    //   KIND_PILOT (6) × N  ← wrapped PilotEvents from mock_pilot
-    //   KIND_SESSION_DONE (9)
-    // ────────────────────────────────────────────────────────────────────────
     println!("\n[stage-2] ── voice path (mock mic + ASR) ─────────────────────────");
     let mock_text = std::env::var("ROBONIX_LIAISON_VOICE_MOCK_TEXT")
-        .unwrap_or_else(|_| "你好，请介绍一下你自己。".to_string());
+        .unwrap_or_else(|_| "Hello, please introduce yourself.".to_string());
     println!("[stage-2] mock transcript will be: {mock_text:?}");
 
     let voice_session = Uuid::new_v4().to_string();
@@ -155,9 +128,9 @@ async fn main() -> Result<()> {
     let req = StartVoiceSessionRequest {
         session_id: voice_session.clone(),
         client_user_id: voice_user_hint.clone(),
-        record_seconds: 1, // short; mock ignores this value
+        record_seconds: 1,
         language: String::new(),
-        tts_enabled: false, // skip TTS playback in tests
+        tts_enabled: false,
         mic_node_id: String::new(),
         asr_node_id: String::new(),
         voiceprint_node_id: String::new(),
@@ -174,7 +147,6 @@ async fn main() -> Result<()> {
     .context("Liaison.StartVoiceSession RPC failed")?
     .into_inner();
 
-    // Stage-tracking state
     let mut got_session_started = false;
     let mut got_recording_started = false;
     let mut got_recording_done = false;
@@ -244,15 +216,13 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Assertions
     let got_asr = !asr_transcript.trim().is_empty();
     let asr_content_ok = asr_transcript.contains(&mock_text) || !asr_transcript.is_empty();
     let got_user = !identified_user_id.is_empty();
     let got_pilot_response = !pilot_chunks.is_empty() || !pilot_final.is_empty();
-    // mock_pilot echoes: you said "<transcript>" — transcript should appear in final
     let pilot_content_ok = pilot_final.contains(asr_transcript.trim())
         || pilot_chunks.contains(asr_transcript.trim())
-        || got_pilot_response; // lenient: any non-empty pilot reply is OK
+        || got_pilot_response;
     let no_errors = errors.is_empty();
     let voice_ok = got_session_started
         && got_recording_started
@@ -273,15 +243,14 @@ async fn main() -> Result<()> {
         "  asr={got_asr} (transcript={:?})  user={got_user} (id={identified_user_id:?})",
         asr_transcript
     );
-    println!("  pilot_response={got_pilot_response}  content_ok={pilot_content_ok}  session_done={got_session_done}");
+    println!(
+        "  pilot_response={got_pilot_response}  content_ok={pilot_content_ok}  session_done={got_session_done}"
+    );
     if !no_errors {
         println!("  errors: {errors:?}");
     }
     println!("[stage-2] result: {}", pass_fail(voice_ok));
 
-    // ────────────────────────────────────────────────────────────────────────
-    // Summary
-    // ────────────────────────────────────────────────────────────────────────
     println!("\n[pipeline-test] ────────────────────────────────────────────────");
     println!(
         "[pipeline-test]  Stage 1 (text path):  {}",
@@ -294,7 +263,7 @@ async fn main() -> Result<()> {
     println!("[pipeline-test] ────────────────────────────────────────────────");
 
     if text_ok && voice_ok {
-        println!("[pipeline-test] ALL STAGES PASS ✓");
+        println!("[pipeline-test] ALL STAGES PASS");
         Ok(())
     } else {
         bail!("pipeline smoke test failed");
@@ -302,32 +271,40 @@ async fn main() -> Result<()> {
 }
 
 fn pass_fail(ok: bool) -> &'static str {
-    if ok { "PASS ✓" } else { "FAIL ✗" }
+    if ok { "PASS" } else { "FAIL" }
 }
 
 async fn discover(atlas_http: &str, contract_id: &str) -> Result<String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
-        let mut sdk = RobonixClient::connect(atlas_http).await?;
-        let nodes = sdk
-            .query_nodes_opts(robonix_sdk::QueryNodesOpts {
-                contract_id: contract_id.to_string(),
-                ..Default::default()
-            })
+        let mut atlas = AtlasClient::connect(atlas_http).await?;
+        let records = atlas
+            .query_capabilities("", contract_id, atlas_pb::Transport::Grpc)
             .await?;
-        for node in &nodes {
-            for iface in &node.interfaces {
-                let meta: serde_json::Value =
-                    serde_json::from_str(&iface.metadata_json).unwrap_or_default();
-                if let Some(ep) = meta.get("endpoint").and_then(|v| v.as_str()) {
-                    let uri = if ep.starts_with("http") {
-                        ep.to_string()
-                    } else {
-                        format!("http://{ep}")
-                    };
-                    return Ok(uri.replace("localhost", "127.0.0.1"));
-                }
+        for rec in &records {
+            let has_iface = rec.interfaces.iter().any(|i| {
+                i.contract_id == contract_id && i.transport == atlas_pb::Transport::Grpc as i32
+            });
+            if !has_iface {
+                continue;
             }
+            let (_, endpoint, _) = atlas
+                .connect_capability(
+                    "voice_demo_client",
+                    &rec.capability_id,
+                    contract_id,
+                    atlas_pb::Transport::Grpc,
+                )
+                .await?;
+            if endpoint.is_empty() {
+                continue;
+            }
+            let uri = if endpoint.starts_with("http") {
+                endpoint
+            } else {
+                format!("http://{endpoint}")
+            };
+            return Ok(uri.replace("localhost", "127.0.0.1"));
         }
         if std::time::Instant::now() >= deadline {
             bail!("no provider for {contract_id} after 30s");

@@ -60,7 +60,7 @@ export ROBONIX_LIAISON_PORT="$LIAISON_PORT"
 export MOCK_PILOT_PORT="$PILOT_PORT"
 # Enable mock mode: Liaison skips real mic+ASR and uses a canned transcript.
 export ROBONIX_LIAISON_VOICE_MOCK=1
-export ROBONIX_LIAISON_VOICE_MOCK_TEXT="你好，请介绍一下你自己。"
+export ROBONIX_LIAISON_VOICE_MOCK_TEXT="hello, please introduce yourself"
 
 # ── 1. Atlas ─────────────────────────────────────────────────────────────────
 echo ""

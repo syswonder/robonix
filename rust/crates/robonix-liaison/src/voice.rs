@@ -1,61 +1,36 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// voice.rs — voice push-to-talk orchestrator behind SrvLiaison.StartVoiceSession.
+// voice.rs — voice push-to-talk orchestrator behind SystemLiaison.StartVoiceSession.
 //
 // One call drives the full pipeline:
 //
-//   PrmAudioMic.Stream  (record_seconds)
+//   PrimitiveAudioMic.Stream  (record_seconds)
 //       │
 //       ▼
-//   SrvSpeechAsr.Call    → transcript
+//   SystemSpeechAsr.Recognize    → transcript
 //       │
 //       ▼
-//   SrvSpeechVoiceprint.Call → user_id  (graceful: "voice:unknown" on absence)
+//   SystemSpeechVoiceprint.Identify → user_id  (graceful: hint fallback on absence)
 //       │
 //       ▼
 //   Build pilot::Task { source=AUDIO, text=transcript, user_id, … }
 //       │
 //       ▼
-//   SrvPilot.Stream      → forward each PilotEvent as VoiceEvent { kind=PILOT, … }
+//   SystemPilot.SubmitTask      → forward each PilotEvent as VoiceEvent { kind=PILOT, … }
 //       │
 //       ▼
-//   (if tts_enabled)  SrvSpeechTts.Call → PrmAudioSpeaker.Stream(chunks)
+//   (if tts_enabled)  SystemSpeechTts.Synthesize → PrimitiveAudioSpeaker.Stream
 //       │
 //       ▼
 //   VoiceEvent { kind=SESSION_DONE }
 //
-// Resilience: Atlas-side discovery failures (no mic / no asr / no voiceprint
-// / no tts / no speaker) emit a VoiceEvent { kind=ERROR } describing what is
-// missing and surface as a session-terminal `Status::failed_precondition` only
-// when truly fatal (no Pilot). Everything else degrades:
-//
-//   * No mic           → fatal unless ROBONIX_LIAISON_VOICE_MOCK=1
-//   * No ASR           → fatal unless mock mode
-//   * No voiceprint    → user_id falls back to client_user_id (with status note)
-//   * No TTS / speaker → skip playback, still stream Pilot text
-//
-// Mock mode (`ROBONIX_LIAISON_VOICE_MOCK=1` or env var
-// `ROBONIX_LIAISON_VOICE_MOCK_TEXT`): skip mic+ASR, use a canned transcript so
-// the link can be exercised without audio hardware or model weights. This is
-// what the demo script uses by default.
+// Mock mode (`ROBONIX_LIAISON_VOICE_MOCK=1` or `ROBONIX_LIAISON_VOICE_MOCK_TEXT`):
+// skip mic+ASR, use a canned transcript so the link can be exercised without
+// audio hardware. This is what the demo script uses by default.
 
 use anyhow::Result;
 use futures::Stream;
-use robonix_interfaces::{
-    asr,
-    contracts::{
-        prm_audio_mic_client::PrmAudioMicClient,
-        prm_audio_speaker_client::PrmAudioSpeakerClient,
-        srv_pilot_client::SrvPilotClient,
-        srv_speech_asr_client::SrvSpeechAsrClient,
-        srv_speech_tts_client::SrvSpeechTtsClient,
-        srv_speech_voiceprint_client::SrvSpeechVoiceprintClient,
-    },
-    liaison::{StartVoiceSessionRequest, VoiceEvent},
-    pilot::{PilotEvent, Task},
-    robonix_msg::AudioChunk,
-    tts, voiceprint,
-};
-use robonix_sdk::{NodeInfo, QueryNodesOpts, RobonixClient};
+use robonix_atlas::client::AtlasClient;
+use robonix_atlas::pb as atlas_pb;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
@@ -63,7 +38,21 @@ use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Status};
 use uuid::Uuid;
 
-// ── Stable VoiceEvent kinds (mirror lib/liaison/msg/VoiceEvent.msg) ──────────
+use crate::pb::asr;
+use crate::pb::audio::AudioChunk;
+use crate::pb::contracts::{
+    primitive_audio_mic_client::PrimitiveAudioMicClient,
+    primitive_audio_speaker_client::PrimitiveAudioSpeakerClient,
+    system_pilot_client::SystemPilotClient, system_speech_asr_client::SystemSpeechAsrClient,
+    system_speech_tts_client::SystemSpeechTtsClient,
+    system_speech_voiceprint_client::SystemSpeechVoiceprintClient,
+};
+use crate::pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
+use crate::pb::pilot::{PilotEvent, Task};
+use crate::pb::tts;
+use crate::pb::voiceprint;
+
+// ── Stable VoiceEvent kinds (mirror lib/system/liaison/msg/VoiceEvent.msg) ───
 
 pub const KIND_SESSION_STARTED: u32 = 0;
 pub const KIND_RECORDING_STARTED: u32 = 1;
@@ -78,7 +67,7 @@ pub const KIND_TTS_DONE: u32 = 8;
 pub const KIND_SESSION_DONE: u32 = 9;
 pub const KIND_ERROR: u32 = 10;
 
-/// Audio source — the user's `Task.source` enum: TEXT=0 AUDIO=1 API=2.
+/// `Task.source` enum: TEXT=0 AUDIO=1 API=2.
 const INTENT_SOURCE_AUDIO: u32 = 1;
 
 const DEFAULT_RECORD_SECONDS: u32 = 5;
@@ -88,42 +77,45 @@ const DEFAULT_AUDIO_SAMPLE_RATE: u32 = 16_000;
 
 // ── Discovery helpers ────────────────────────────────────────────────────────
 //
-// `Atlas → contract_id → endpoint` resolution. All speech / mic / speaker
-// services advertise `metadata_json = {"endpoint": "host:port"}` (see
-// audio_driver/node.py and speech_service/service.py).
+// Atlas → contract_id → endpoint resolution. Every speech / mic / speaker
+// service registers its gRPC interface with `metadata_json = {"endpoint":
+// "host:port"}` (see audio_driver/node.py and speech_service/service.py).
 
+/// Two-step endpoint resolution: query for caps offering `contract_id`, then
+/// `ConnectCapability` against the chosen one to actually receive the
+/// endpoint string. Atlas hides endpoints from `query_capabilities` on
+/// purpose; consumers must commit a channel before they can dial.
 async fn resolve_endpoint(
-    sdk: &Arc<Mutex<RobonixClient>>,
+    atlas: &Arc<Mutex<AtlasClient>>,
     contract_id: &str,
-    pin_node_id: &str,
+    pin_capability_id: &str,
 ) -> Option<String> {
-    let mut sdk = sdk.lock().await;
-    let nodes = sdk
-        .query_nodes_opts(QueryNodesOpts {
-            contract_id: contract_id.to_string(),
-            ..Default::default()
-        })
+    let mut atlas = atlas.lock().await;
+    let transport = atlas_pb::Transport::Grpc;
+    let records = atlas
+        .query_capabilities("", contract_id, transport)
         .await
         .ok()?;
-    pick_endpoint(&nodes, pin_node_id)
-}
-
-fn pick_endpoint(nodes: &[NodeInfo], pin_node_id: &str) -> Option<String> {
-    let candidates: Vec<&NodeInfo> = if pin_node_id.is_empty() {
-        nodes.iter().collect()
+    let pick: Option<&atlas_pb::CapabilityRecord> = if pin_capability_id.is_empty() {
+        records.iter().find(|r| {
+            r.interfaces
+                .iter()
+                .any(|i| i.contract_id == contract_id && i.transport == transport as i32)
+        })
     } else {
-        nodes.iter().filter(|n| n.node_id == pin_node_id).collect()
+        records
+            .iter()
+            .find(|r| r.capability_id == pin_capability_id || r.namespace == pin_capability_id)
     };
-    for node in candidates {
-        for iface in &node.interfaces {
-            let meta: serde_json::Value =
-                serde_json::from_str(&iface.metadata_json).unwrap_or_default();
-            if let Some(ep) = meta.get("endpoint").and_then(|v| v.as_str()) {
-                return Some(localhost_to_ipv4(ep));
-            }
-        }
+    let cap = pick?;
+    let (_channel_id, endpoint, _params) = atlas
+        .connect_capability("liaison", &cap.capability_id, contract_id, transport)
+        .await
+        .ok()?;
+    if endpoint.is_empty() {
+        return None;
     }
-    None
+    Some(localhost_to_ipv4(&endpoint))
 }
 
 fn localhost_to_ipv4(ep: &str) -> String {
@@ -141,11 +133,10 @@ fn localhost_to_ipv4(ep: &str) -> String {
 /// runs on a spawned task and pushes `VoiceEvent`s as it progresses.
 ///
 /// `pilot_endpoint_default` is the http URL Liaison was configured with at
-/// boot — used when Atlas does not yet know about Pilot (consistent with the
-/// non-voice `LiaisonPipeline` behavior).
+/// boot — used when Atlas does not yet know about Pilot.
 pub async fn start_voice_session(
     req: StartVoiceSessionRequest,
-    sdk: Arc<Mutex<RobonixClient>>,
+    atlas: Arc<Mutex<AtlasClient>>,
     pilot_endpoint_default: String,
 ) -> Result<impl Stream<Item = Result<VoiceEvent, Status>>, Status> {
     let session_id = if req.session_id.is_empty() {
@@ -166,7 +157,6 @@ pub async fn start_voice_session(
 
     let (tx, rx) = mpsc::channel::<Result<VoiceEvent, Status>>(64);
 
-    // Emit SESSION_STARTED synchronously so the client sees the session_id ASAP.
     let _ = tx
         .send(Ok(event_status(
             KIND_SESSION_STARTED,
@@ -174,7 +164,11 @@ pub async fn start_voice_session(
             &format!(
                 "voice session started (record={record_seconds}s, tts={}, lang={})",
                 req.tts_enabled,
-                if language.is_empty() { "auto" } else { &language },
+                if language.is_empty() {
+                    "auto"
+                } else {
+                    &language
+                },
             ),
         )))
         .await;
@@ -186,7 +180,7 @@ pub async fn start_voice_session(
             session_id_for_task.clone(),
             record_seconds,
             language,
-            sdk,
+            atlas,
             pilot_endpoint_default,
             tx.clone(),
         )
@@ -219,13 +213,13 @@ async fn run_session(
     session_id: String,
     record_seconds: u32,
     language: String,
-    sdk: Arc<Mutex<RobonixClient>>,
+    atlas: Arc<Mutex<AtlasClient>>,
     pilot_endpoint_default: String,
     tx: mpsc::Sender<Result<VoiceEvent, Status>>,
 ) -> Result<()> {
     let mock = is_mock_mode();
 
-    // ── 1. Capture audio (mic) or fall back to mock transcript ──────────────
+    // 1. Capture audio (mic) or fall back to mock transcript.
     let (audio_pcm, transcript_override) = if mock {
         let canned = mock_transcript();
         let _ = tx
@@ -244,23 +238,22 @@ async fn run_session(
             .await;
         (Vec::new(), Some(canned))
     } else {
-        let pcm =
-            capture_audio(&sdk, &req.mic_node_id, record_seconds, &session_id, &tx).await?;
+        let pcm = capture_audio(&atlas, &req.mic_node_id, record_seconds, &session_id, &tx).await?;
         (pcm, None)
     };
 
-    // ── 2. ASR ───────────────────────────────────────────────────────────────
+    // 2. ASR.
     let transcript = if let Some(t) = transcript_override {
         t
     } else {
-        let asr_endpoint = resolve_endpoint(&sdk, "robonix/srv/speech/asr", &req.asr_node_id)
+        let asr_endpoint = resolve_endpoint(&atlas, "robonix/system/speech/asr", &req.asr_node_id)
             .await
-            .ok_or_else(|| anyhow::anyhow!("no SrvSpeechAsr provider registered in Atlas"))?;
-        let mut client = SrvSpeechAsrClient::connect(asr_endpoint.clone())
+            .ok_or_else(|| anyhow::anyhow!("no SystemSpeechAsr provider registered in Atlas"))?;
+        let mut client = SystemSpeechAsrClient::connect(asr_endpoint.clone())
             .await
             .map_err(|e| anyhow::anyhow!("connect ASR at {asr_endpoint}: {e}"))?;
         let resp = client
-            .call(Request::new(asr::RecognizeRequest {
+            .recognize(Request::new(asr::RecognizeRequest {
                 audio_data: audio_pcm.clone(),
                 encoding: DEFAULT_AUDIO_ENCODING.to_string(),
                 sample_rate_hz: DEFAULT_AUDIO_SAMPLE_RATE,
@@ -287,8 +280,6 @@ async fn run_session(
         anyhow::bail!("empty transcript — nothing to send to Pilot");
     }
 
-    // For mock mode, still surface the canned transcript as ASR_FINAL so the
-    // TUI can render it as the user message before Pilot streams its reply.
     if mock {
         let _ = tx
             .send(Ok(event_text(
@@ -300,9 +291,9 @@ async fn run_session(
             .await;
     }
 
-    // ── 3. Voiceprint (graceful) ────────────────────────────────────────────
+    // 3. Voiceprint (graceful — fallback to client hint on any failure).
     let user_id = identify_user(
-        &sdk,
+        &atlas,
         &req.voiceprint_node_id,
         &audio_pcm,
         &req.client_user_id,
@@ -311,8 +302,8 @@ async fn run_session(
     )
     .await;
 
-    // ── 4. Build Task and stream Pilot events ───────────────────────────────
-    let pilot_endpoint = resolve_endpoint(&sdk, "robonix/srv/pilot", "")
+    // 4. Build Task and stream Pilot events.
+    let pilot_endpoint = resolve_endpoint(&atlas, "robonix/system/pilot", "")
         .await
         .unwrap_or(pilot_endpoint_default);
 
@@ -327,10 +318,10 @@ async fn run_session(
     let mut accumulated_text = String::new();
 
     let pilot_stream_result = async {
-        let mut client = SrvPilotClient::connect(pilot_endpoint.clone())
+        let mut client = SystemPilotClient::connect(pilot_endpoint.clone())
             .await
             .map_err(|e| tonic::Status::unavailable(e.to_string()))?;
-        let resp = client.stream(Request::new(task)).await?;
+        let resp = client.submit_task(Request::new(task)).await?;
         Ok::<_, tonic::Status>(resp.into_inner())
     }
     .await;
@@ -362,17 +353,17 @@ async fn run_session(
             }
         }
         Err(e) => {
-            log::warn!("Pilot unreachable at {pilot_endpoint}: {e}, using fallback");
-            let fallback = "成功接收信息";
-            accumulated_text = fallback.to_string();
-            emit_fallback_pilot_events(&tx, &session_id, &user_id, fallback).await;
+            // No Pilot online — surface as session ERROR rather than fabricating
+            // a "成功接收信息" reply (callers must see the failure).
+            anyhow::bail!("Pilot unreachable at {pilot_endpoint}: {e}");
         }
     }
 
-    // ── 5. Optional TTS playback ────────────────────────────────────────────
-    if req.tts_enabled && !accumulated_text.trim().is_empty() {
-        if let Err(e) = synthesize_and_play(
-            &sdk,
+    // 5. Optional TTS playback (non-fatal on any error).
+    if req.tts_enabled
+        && !accumulated_text.trim().is_empty()
+        && let Err(e) = synthesize_and_play(
+            &atlas,
             &req.tts_node_id,
             &req.speaker_node_id,
             &language,
@@ -381,17 +372,14 @@ async fn run_session(
             &tx,
         )
         .await
-        {
-            // TTS failure is non-fatal — surface as a status_message error,
-            // not a session-terminal ERROR.
-            let _ = tx
-                .send(Ok(event_status(
-                    KIND_TTS_DONE,
-                    &session_id,
-                    &format!("tts skipped: {e:#}"),
-                )))
-                .await;
-        }
+    {
+        let _ = tx
+            .send(Ok(event_status(
+                KIND_TTS_DONE,
+                &session_id,
+                &format!("tts skipped: {e:#}"),
+            )))
+            .await;
     }
 
     Ok(())
@@ -400,17 +388,17 @@ async fn run_session(
 // ── Mic capture ──────────────────────────────────────────────────────────────
 
 async fn capture_audio(
-    sdk: &Arc<Mutex<RobonixClient>>,
+    atlas: &Arc<Mutex<AtlasClient>>,
     mic_pin: &str,
     record_seconds: u32,
     session_id: &str,
     tx: &mpsc::Sender<Result<VoiceEvent, Status>>,
 ) -> Result<Vec<u8>> {
-    let mic_endpoint = resolve_endpoint(sdk, "robonix/prm/audio/mic", mic_pin)
+    let mic_endpoint = resolve_endpoint(atlas, "robonix/primitive/audio/mic", mic_pin)
         .await
-        .ok_or_else(|| anyhow::anyhow!("no PrmAudioMic provider registered in Atlas"))?;
+        .ok_or_else(|| anyhow::anyhow!("no PrimitiveAudioMic provider registered in Atlas"))?;
 
-    let mut client = PrmAudioMicClient::connect(mic_endpoint.clone())
+    let mut client = PrimitiveAudioMicClient::connect(mic_endpoint.clone())
         .await
         .map_err(|e| anyhow::anyhow!("connect mic at {mic_endpoint}: {e}"))?;
     let _ = tx
@@ -422,14 +410,13 @@ async fn capture_audio(
         .await;
 
     let mut stream = client
-        .stream(Request::new(()))
+        .mic(Request::new(()))
         .await
-        .map_err(|e| anyhow::anyhow!("mic Stream rpc failed: {e}"))?
+        .map_err(|e| anyhow::anyhow!("mic rpc failed: {e}"))?
         .into_inner();
 
-    let mut buf: Vec<u8> = Vec::with_capacity(
-        (DEFAULT_AUDIO_SAMPLE_RATE as usize) * 2 * (record_seconds as usize),
-    );
+    let mut buf: Vec<u8> =
+        Vec::with_capacity((DEFAULT_AUDIO_SAMPLE_RATE as usize) * 2 * (record_seconds as usize));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(record_seconds as u64);
     loop {
         let now = tokio::time::Instant::now();
@@ -462,8 +449,8 @@ async fn capture_audio(
 // ── Voiceprint ───────────────────────────────────────────────────────────────
 
 async fn identify_user(
-    sdk: &Arc<Mutex<RobonixClient>>,
-    pin_node_id: &str,
+    atlas: &Arc<Mutex<AtlasClient>>,
+    pin_capability_id: &str,
     audio_pcm: &[u8],
     fallback_hint: &str,
     session_id: &str,
@@ -477,24 +464,29 @@ async fn identify_user(
         format!("voice:{fallback_hint}")
     };
 
-    let endpoint =
-        match resolve_endpoint(sdk, "robonix/srv/speech/voiceprint", pin_node_id).await {
-            Some(ep) => ep,
-            None => {
-                let _ = tx
-                    .send(Ok(event_user(
-                        KIND_USER_IDENTIFIED,
-                        session_id,
-                        &fallback,
-                        0.0,
-                        "no SrvSpeechVoiceprint provider — using client hint",
-                    )))
-                    .await;
-                return fallback;
-            }
-        };
+    let endpoint = match resolve_endpoint(
+        atlas,
+        "robonix/system/speech/voiceprint",
+        pin_capability_id,
+    )
+    .await
+    {
+        Some(ep) => ep,
+        None => {
+            let _ = tx
+                .send(Ok(event_user(
+                    KIND_USER_IDENTIFIED,
+                    session_id,
+                    &fallback,
+                    0.0,
+                    "no SystemSpeechVoiceprint provider — using client hint",
+                )))
+                .await;
+            return fallback;
+        }
+    };
 
-    let client = match SrvSpeechVoiceprintClient::connect(endpoint.clone()).await {
+    let mut client = match SystemSpeechVoiceprintClient::connect(endpoint.clone()).await {
         Ok(c) => c,
         Err(e) => {
             let _ = tx
@@ -509,9 +501,8 @@ async fn identify_user(
             return fallback;
         }
     };
-    let mut client = client;
     let resp = match client
-        .call(Request::new(voiceprint::IdentifyRequest {
+        .identify(Request::new(voiceprint::IdentifyRequest {
             audio_data: audio_pcm.to_vec(),
             encoding: DEFAULT_AUDIO_ENCODING.to_string(),
             sample_rate_hz: DEFAULT_AUDIO_SAMPLE_RATE,
@@ -550,7 +541,10 @@ async fn identify_user(
     } else if resp.is_known {
         format!("matched {} ({:.2})", resp.user_id, resp.confidence)
     } else {
-        format!("unknown speaker (best={:.2}) — using fallback", resp.confidence)
+        format!(
+            "unknown speaker (best={:.2}) — using fallback",
+            resp.confidence
+        )
     };
     let _ = tx
         .send(Ok(event_user(
@@ -567,7 +561,7 @@ async fn identify_user(
 // ── TTS playback ─────────────────────────────────────────────────────────────
 
 async fn synthesize_and_play(
-    sdk: &Arc<Mutex<RobonixClient>>,
+    atlas: &Arc<Mutex<AtlasClient>>,
     tts_pin: &str,
     speaker_pin: &str,
     language: &str,
@@ -575,26 +569,29 @@ async fn synthesize_and_play(
     session_id: &str,
     tx: &mpsc::Sender<Result<VoiceEvent, Status>>,
 ) -> Result<()> {
-    let tts_endpoint = resolve_endpoint(sdk, "robonix/srv/speech/tts", tts_pin)
+    let tts_endpoint = resolve_endpoint(atlas, "robonix/system/speech/tts", tts_pin)
         .await
-        .ok_or_else(|| anyhow::anyhow!("no SrvSpeechTts provider"))?;
-    let speaker_endpoint = resolve_endpoint(sdk, "robonix/prm/audio/speaker", speaker_pin)
+        .ok_or_else(|| anyhow::anyhow!("no SystemSpeechTts provider"))?;
+    let speaker_endpoint = resolve_endpoint(atlas, "robonix/primitive/audio/speaker", speaker_pin)
         .await
-        .ok_or_else(|| anyhow::anyhow!("no PrmAudioSpeaker provider"))?;
+        .ok_or_else(|| anyhow::anyhow!("no PrimitiveAudioSpeaker provider"))?;
 
     let _ = tx
         .send(Ok(event_status(
             KIND_TTS_STARTED,
             session_id,
-            &format!("synthesising {} chars via {tts_endpoint}", text.chars().count()),
+            &format!(
+                "synthesising {} chars via {tts_endpoint}",
+                text.chars().count()
+            ),
         )))
         .await;
 
-    let mut tts_client = SrvSpeechTtsClient::connect(tts_endpoint.clone())
+    let mut tts_client = SystemSpeechTtsClient::connect(tts_endpoint.clone())
         .await
         .map_err(|e| anyhow::anyhow!("connect tts {tts_endpoint}: {e}"))?;
     let resp = tts_client
-        .call(Request::new(tts::SynthesizeRequest {
+        .synthesize(Request::new(tts::SynthesizeRequest {
             text: text.to_string(),
             language: language.to_string(),
             voice: String::new(),
@@ -610,10 +607,9 @@ async fn synthesize_and_play(
         anyhow::bail!("tts returned empty audio");
     }
 
-    let mut speaker_client = PrmAudioSpeakerClient::connect(speaker_endpoint.clone())
+    let mut speaker_client = PrimitiveAudioSpeakerClient::connect(speaker_endpoint.clone())
         .await
         .map_err(|e| anyhow::anyhow!("connect speaker {speaker_endpoint}: {e}"))?;
-    // Send the buffer in 8 KiB slices so the speaker driver can stream-play.
     const SLICE: usize = 8 * 1024;
     let chunks: Vec<AudioChunk> = resp
         .audio_data
@@ -628,7 +624,7 @@ async fn synthesize_and_play(
         .collect();
     let stream = futures::stream::iter(chunks);
     speaker_client
-        .stream(Request::new(stream))
+        .speaker(Request::new(stream))
         .await
         .map_err(|e| anyhow::anyhow!("speaker rpc failed: {e}"))?;
 
@@ -636,7 +632,10 @@ async fn synthesize_and_play(
         .send(Ok(event_status(
             KIND_TTS_DONE,
             session_id,
-            &format!("played {} bytes via {speaker_endpoint}", resp.audio_data.len()),
+            &format!(
+                "played {} bytes via {speaker_endpoint}",
+                resp.audio_data.len()
+            ),
         )))
         .await;
     Ok(())
@@ -668,7 +667,6 @@ fn build_task(
         audio_data: audio_pcm.to_vec(),
         context_json: ctx.to_string(),
         timestamp_ms: now_ms(),
-        user_id: user_id.to_string(),
     }
 }
 
@@ -677,10 +675,8 @@ fn accumulate_text(ev: &PilotEvent, into: &mut String) {
     const EVT_FINAL_TEXT: u32 = 4;
     match ev.event_kind {
         EVT_TEXT_CHUNK => into.push_str(&ev.text_chunk),
-        EVT_FINAL_TEXT => {
-            if into.trim().is_empty() && !ev.final_text.is_empty() {
-                into.push_str(&ev.final_text);
-            }
+        EVT_FINAL_TEXT if into.trim().is_empty() && !ev.final_text.is_empty() => {
+            into.push_str(&ev.final_text);
         }
         _ => {}
     }
@@ -748,58 +744,6 @@ fn event_error(session_id: &str, error: &str) -> VoiceEvent {
     }
 }
 
-async fn emit_fallback_pilot_events(
-    tx: &mpsc::Sender<Result<VoiceEvent, Status>>,
-    session_id: &str,
-    user_id: &str,
-    text: &str,
-) {
-    let chunk_ev = PilotEvent {
-        event_kind: 0, // EVT_TEXT_CHUNK
-        session_id: session_id.to_string(),
-        text_chunk: text.to_string(),
-        task_graph: None,
-        batch_result: None,
-        status: None,
-        final_text: String::new(),
-    };
-    let _ = tx
-        .send(Ok(VoiceEvent {
-            event_kind: KIND_PILOT,
-            session_id: session_id.to_string(),
-            text: String::new(),
-            user_id: user_id.to_string(),
-            confidence: 0.0,
-            pilot: Some(chunk_ev),
-            error: String::new(),
-            status_message: String::new(),
-            timestamp_ms: now_ms(),
-        }))
-        .await;
-    let final_ev = PilotEvent {
-        event_kind: 4, // EVT_FINAL_TEXT
-        session_id: session_id.to_string(),
-        text_chunk: String::new(),
-        task_graph: None,
-        batch_result: None,
-        status: None,
-        final_text: text.to_string(),
-    };
-    let _ = tx
-        .send(Ok(VoiceEvent {
-            event_kind: KIND_PILOT,
-            session_id: session_id.to_string(),
-            text: String::new(),
-            user_id: user_id.to_string(),
-            confidence: 0.0,
-            pilot: Some(final_ev),
-            error: String::new(),
-            status_message: String::new(),
-            timestamp_ms: now_ms(),
-        }))
-        .await;
-}
-
 fn is_mock_mode() -> bool {
     std::env::var("ROBONIX_LIAISON_VOICE_MOCK")
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
@@ -809,7 +753,7 @@ fn is_mock_mode() -> bool {
 
 fn mock_transcript() -> String {
     std::env::var("ROBONIX_LIAISON_VOICE_MOCK_TEXT")
-        .unwrap_or_else(|_| "你好，请介绍一下你自己。".to_string())
+        .unwrap_or_else(|_| "Hello, please introduce yourself.".to_string())
 }
 
 fn now_ms() -> u64 {
@@ -832,8 +776,6 @@ mod tests {
 
     #[test]
     fn fallback_user_id_normalises_hint() {
-        // The helper logic is inline in identify_user; assert the prefix rule
-        // by mimicking the same branches used there.
         let hint = "liukaile";
         let normalised = if hint.is_empty() {
             "voice:unknown".to_string()
@@ -847,14 +789,7 @@ mod tests {
 
     #[test]
     fn build_task_injects_user_id_into_context() {
-        let task = build_task(
-            "sess-1",
-            "hello",
-            "voice:alice",
-            &[],
-            r#"{"foo":"bar"}"#,
-        );
-        assert_eq!(task.user_id, "voice:alice");
+        let task = build_task("sess-1", "hello", "voice:alice", &[], r#"{"foo":"bar"}"#);
         let v: serde_json::Value = serde_json::from_str(&task.context_json).unwrap();
         assert_eq!(v["user_id"], "voice:alice");
         assert_eq!(v["voice_session"], true);
@@ -869,7 +804,7 @@ mod tests {
                 event_kind: 0,
                 session_id: "s".into(),
                 text_chunk: "hello ".into(),
-                task_graph: None,
+                plan: None,
                 batch_result: None,
                 status: None,
                 final_text: String::new(),
@@ -881,7 +816,7 @@ mod tests {
                 event_kind: 0,
                 session_id: "s".into(),
                 text_chunk: "world".into(),
-                task_graph: None,
+                plan: None,
                 batch_result: None,
                 status: None,
                 final_text: String::new(),

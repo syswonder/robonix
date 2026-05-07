@@ -1,41 +1,36 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// examples/mock_audio.rs — mock PrmAudioMic + PrmAudioSpeaker for TUI testing.
+// examples/mock_audio.rs — mock PrimitiveAudioMic + PrimitiveAudioSpeaker.
 //
 // Replaces real audio hardware with WAV file I/O:
 //
-//   PrmAudioMic:
+//   PrimitiveAudioMic:
 //     Reads PCM from a WAV file (env `MOCK_WAV_INPUT`) or generates 5s of
 //     silence (16 kHz mono s16le). Streams AudioChunks in ~100 ms slices.
 //
-//   PrmAudioSpeaker:
-//     Receives AudioChunks and writes the accumulated PCM to a WAV file
+//   PrimitiveAudioSpeaker:
+//     Receives AudioChunks and writes the accumulated audio to disk
 //     (env `MOCK_WAV_OUTPUT`, default `/tmp/robonix_speaker_output.wav`).
 //
-// Both services register in Atlas under the same node so Liaison discovers
-// them through `query_nodes_opts(contract_id="robonix/prm/audio/mic")` and
-// `query_nodes_opts(contract_id="robonix/prm/audio/speaker")`.
-//
-// Usage:
-//   MOCK_WAV_INPUT=/path/to/input.wav  cargo run --example mock_audio
-//   # or without an input file (generates silence):
-//   cargo run --example mock_audio
+// Both services register in Atlas under one capability so Liaison discovers
+// them through `query_capabilities("", "robonix/primitive/audio/mic", …)` and
+// `query_capabilities("", "robonix/primitive/audio/speaker", …)`.
 
 use anyhow::Result;
-use robonix_interfaces::{
-    contracts::{
-        prm_audio_mic_server::{PrmAudioMic, PrmAudioMicServer},
-        prm_audio_speaker_server::{PrmAudioSpeaker, PrmAudioSpeakerServer},
-    },
-    robonix_msg::AudioChunk,
+use robonix_atlas::client::{self as atlas_client, AtlasClient};
+use robonix_atlas::pb as atlas_pb;
+use robonix_liaison::pb::audio::AudioChunk;
+use robonix_liaison::pb::contracts::{
+    primitive_audio_mic_server::{PrimitiveAudioMic, PrimitiveAudioMicServer},
+    primitive_audio_speaker_server::{PrimitiveAudioSpeaker, PrimitiveAudioSpeakerServer},
 };
-use robonix_sdk::RobonixClient;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-const NODE_ID: &str = "com.robonix.demo.mock_audio";
+const CAPABILITY_ID: &str = "com.robonix.demo.mock_audio";
+const NAMESPACE: &str = "robonix/primitive/audio";
 const SAMPLE_RATE: u32 = 16_000;
 const CHANNELS: u16 = 1;
 const BITS_PER_SAMPLE: u16 = 16;
@@ -43,8 +38,6 @@ const BYTES_PER_SAMPLE: usize = 2;
 const CHUNK_DURATION_MS: u64 = 100;
 const CHUNK_SAMPLES: usize = (SAMPLE_RATE as usize) * (CHUNK_DURATION_MS as usize) / 1000;
 const CHUNK_BYTES: usize = CHUNK_SAMPLES * BYTES_PER_SAMPLE;
-
-// ── WAV helpers ──────────────────────────────────────────────────────────────
 
 fn read_wav_pcm(path: &str) -> Result<Vec<u8>> {
     let data = std::fs::read(path)?;
@@ -54,7 +47,6 @@ fn read_wav_pcm(path: &str) -> Result<Vec<u8>> {
     if &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
         anyhow::bail!("not a valid RIFF/WAVE file");
     }
-    // Walk chunks to find "data"
     let mut pos = 12;
     while pos + 8 <= data.len() {
         let chunk_id = &data[pos..pos + 4];
@@ -69,14 +61,14 @@ fn read_wav_pcm(path: &str) -> Result<Vec<u8>> {
             pos += 1;
         }
     }
-    anyhow::bail!("no 'data' chunk found in WAV file");
+    anyhow::bail!("no 'data' chunk found in WAV file")
 }
 
 fn write_wav(path: &str, pcm: &[u8]) -> Result<()> {
     let data_size = pcm.len() as u32;
     let file_size = 36 + data_size;
     let byte_rate = SAMPLE_RATE * (CHANNELS as u32) * (BITS_PER_SAMPLE as u32) / 8;
-    let block_align = (CHANNELS as u16) * BITS_PER_SAMPLE / 8;
+    let block_align = CHANNELS * BITS_PER_SAMPLE / 8;
 
     let mut buf = Vec::with_capacity(44 + pcm.len());
     buf.extend_from_slice(b"RIFF");
@@ -84,7 +76,7 @@ fn write_wav(path: &str, pcm: &[u8]) -> Result<()> {
     buf.extend_from_slice(b"WAVE");
     buf.extend_from_slice(b"fmt ");
     buf.extend_from_slice(&16u32.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    buf.extend_from_slice(&1u16.to_le_bytes());
     buf.extend_from_slice(&CHANNELS.to_le_bytes());
     buf.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
     buf.extend_from_slice(&byte_rate.to_le_bytes());
@@ -101,17 +93,15 @@ fn generate_silence(seconds: u32) -> Vec<u8> {
     vec![0u8; (SAMPLE_RATE as usize) * BYTES_PER_SAMPLE * (seconds as usize)]
 }
 
-// ── PrmAudioMic ──────────────────────────────────────────────────────────────
-
 struct MockMic {
     pcm_data: Arc<Vec<u8>>,
 }
 
 #[tonic::async_trait]
-impl PrmAudioMic for MockMic {
-    type StreamStream = ReceiverStream<Result<AudioChunk, Status>>;
+impl PrimitiveAudioMic for MockMic {
+    type MicStream = ReceiverStream<Result<AudioChunk, Status>>;
 
-    async fn stream(&self, _request: Request<()>) -> Result<Response<Self::StreamStream>, Status> {
+    async fn mic(&self, _request: Request<()>) -> Result<Response<Self::MicStream>, Status> {
         let pcm = Arc::clone(&self.pcm_data);
         let (tx, rx) = mpsc::channel(64);
 
@@ -126,8 +116,7 @@ impl PrmAudioMic for MockMic {
                     timestamp_ns: now_ns(),
                     data: chunk.to_vec(),
                     sequence: i as u32,
-                    duration_s: chunk.len() as f32
-                        / (SAMPLE_RATE as f32 * BYTES_PER_SAMPLE as f32),
+                    duration_s: chunk.len() as f32 / (SAMPLE_RATE as f32 * BYTES_PER_SAMPLE as f32),
                 };
                 if tx.send(Ok(ac)).await.is_err() {
                     break;
@@ -141,15 +130,13 @@ impl PrmAudioMic for MockMic {
     }
 }
 
-// ── PrmAudioSpeaker ──────────────────────────────────────────────────────────
-
 struct MockSpeaker {
     output_path: String,
 }
 
 #[tonic::async_trait]
-impl PrmAudioSpeaker for MockSpeaker {
-    async fn stream(
+impl PrimitiveAudioSpeaker for MockSpeaker {
+    async fn speaker(
         &self,
         request: Request<Streaming<AudioChunk>>,
     ) -> Result<Response<()>, Status> {
@@ -165,14 +152,13 @@ impl PrmAudioSpeaker for MockSpeaker {
         }
 
         let is_mp3 = pcm_buf.len() >= 3
-            && (pcm_buf[0] == 0xFF && (pcm_buf[1] & 0xE0) == 0xE0   // MPEG sync
-                || &pcm_buf[0..3] == b"ID3");                        // ID3 tag
+            && (pcm_buf[0] == 0xFF && (pcm_buf[1] & 0xE0) == 0xE0 || &pcm_buf[0..3] == b"ID3");
 
         let out_path = if is_mp3 {
             let p = self.output_path.replace(".wav", ".mp3");
             log::info!(
-                "[mock-speaker] received {} bytes MP3, writing to {}",
-                pcm_buf.len(), p
+                "[mock-speaker] received {} bytes MP3, writing to {p}",
+                pcm_buf.len()
             );
             std::fs::write(&p, &pcm_buf)
                 .map_err(|e| Status::internal(format!("write mp3: {e}")))?;
@@ -180,7 +166,8 @@ impl PrmAudioSpeaker for MockSpeaker {
         } else {
             log::info!(
                 "[mock-speaker] received {} bytes PCM, writing WAV to {}",
-                pcm_buf.len(), self.output_path
+                pcm_buf.len(),
+                self.output_path
             );
             write_wav(&self.output_path, &pcm_buf)
                 .map_err(|e| Status::internal(format!("write wav: {e}")))?;
@@ -191,8 +178,6 @@ impl PrmAudioSpeaker for MockSpeaker {
         Ok(Response::new(()))
     }
 }
-
-// ── main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -225,37 +210,60 @@ async fn main() -> Result<()> {
     log::info!("[mock-audio] PCM buffer: {} bytes", pcm_data.len());
     log::info!("[mock-audio] speaker output: {output_path}");
 
-    // Register in Atlas
     log::info!("[mock-audio] connecting to Atlas at {atlas_http}");
-    let mut sdk =
-        RobonixClient::connect_with_retry(&atlas_http, 10, Duration::from_secs(2)).await?;
-    sdk.register_node(NODE_ID, "robonix/prm/audio", "peripheral", "")
+    let mut atlas =
+        AtlasClient::connect_with_retry(&atlas_http, 10, Duration::from_secs(2)).await?;
+    atlas
+        .register_capability(CAPABILITY_ID, NAMESPACE, "")
         .await?;
-    let ep_json = serde_json::json!({ "endpoint": &advertised }).to_string();
-    sdk.declare_interface_full(
-        NODE_ID,
-        "mic",
-        vec!["grpc".to_string()],
-        &ep_json,
-        port as u32,
-        "robonix/prm/audio/mic",
-    )
-    .await?;
-    sdk.declare_interface_full(
-        NODE_ID,
-        "speaker",
-        vec!["grpc".to_string()],
-        &ep_json,
-        port as u32,
-        "robonix/prm/audio/speaker",
-    )
-    .await?;
-    log::info!("[mock-audio] registered '{NODE_ID}', mic+speaker on :{port}");
+    atlas
+        .declare_interface(
+            CAPABILITY_ID,
+            "robonix/primitive/audio/mic",
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/primitive/audio/mic.v1.toml",
+                "robonix.contracts.PrimitiveAudioMic",
+                "/robonix.contracts.PrimitiveAudioMic/Stream",
+            ),
+        )
+        .await?;
+    atlas
+        .declare_interface(
+            CAPABILITY_ID,
+            "robonix/primitive/audio/speaker",
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/primitive/audio/speaker.v1.toml",
+                "robonix.contracts.PrimitiveAudioSpeaker",
+                "/robonix.contracts.PrimitiveAudioSpeaker/Stream",
+            ),
+        )
+        .await?;
+    log::info!("[mock-audio] registered '{CAPABILITY_ID}', mic+speaker on :{port}");
     eprintln!("mock-audio ready on :{port}");
 
+    {
+        let mut hb = atlas.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(20));
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                if let Err(e) = hb.heartbeat(CAPABILITY_ID).await {
+                    log::warn!("heartbeat failed: {e:#}");
+                }
+            }
+        });
+    }
+
     tonic::transport::Server::builder()
-        .add_service(PrmAudioMicServer::new(MockMic { pcm_data }))
-        .add_service(PrmAudioSpeakerServer::new(MockSpeaker { output_path }))
+        .add_service(PrimitiveAudioMicServer::new(MockMic { pcm_data }))
+        .add_service(PrimitiveAudioSpeakerServer::new(MockSpeaker {
+            output_path,
+        }))
         .serve(listen)
         .await?;
     Ok(())

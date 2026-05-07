@@ -26,17 +26,16 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
-use robonix_atlas::client::{self as atlas_client, AtlasClient};
+use robonix_atlas::client::AtlasClient;
+use robonix_atlas::pb as atlas_pb;
 use std::cell::RefCell;
 use std::io;
 use std::rc::Rc;
 use tokio_stream::StreamExt;
-use tonic::transport::Channel;
 use uuid::Uuid;
 
-use crate::pb::contracts::system_pilot_client::SystemPilotClient;
-
 const CONSUMER_ID: &str = "rbnx-cli/chat";
+const LIAISON_CONTRACT_ID: &str = "robonix/system/liaison";
 
 struct ChatMessage {
     role: Role,
@@ -62,7 +61,11 @@ pub async fn execute(server: &str) -> Result<()> {
 
     let liaison_endpoint = if let Ok(ep) = std::env::var("ROBONIX_LIAISON_ENDPOINT") {
         log::info!("using ROBONIX_LIAISON_ENDPOINT={ep}");
-        if ep.starts_with("http") { ep } else { format!("http://{ep}") }
+        if ep.starts_with("http") {
+            ep
+        } else {
+            format!("http://{ep}")
+        }
     } else {
         discover_liaison(&atlas_endpoint).await.unwrap_or_else(|e| {
             log::warn!(
@@ -84,7 +87,6 @@ pub async fn execute(server: &str) -> Result<()> {
 
     terminal::disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
-    let _ = atlas.disconnect_capability(&channel_id).await;
 
     result
 }
@@ -99,7 +101,7 @@ async fn discover_liaison(atlas_endpoint: &str) -> Result<String> {
 
     loop {
         attempt += 1;
-        match try_discover_once(atlas_endpoint, "robonix/srv/liaison").await {
+        match try_discover_once(atlas_endpoint, LIAISON_CONTRACT_ID).await {
             Ok(ep) => return Ok(ep),
             Err(e) => {
                 if std::time::Instant::now() >= deadline {
@@ -115,27 +117,29 @@ async fn discover_liaison(atlas_endpoint: &str) -> Result<String> {
 }
 
 async fn try_discover_once(atlas_endpoint: &str, contract_id: &str) -> Result<String> {
-    let mut sdk = robonix_sdk::RobonixClient::connect(atlas_endpoint).await?;
-    let nodes = sdk
-        .query_nodes_opts(robonix_sdk::QueryNodesOpts {
-            contract_id: contract_id.to_string(),
-            ..Default::default()
-        })
-        .await?;
-
-    for node in &nodes {
-        for iface in &node.interfaces {
-            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&iface.metadata_json)
-                && let Some(ep) = meta.get("endpoint").and_then(|v| v.as_str())
-            {
-                let uri = if ep.starts_with("http") {
-                    ep.to_string()
-                } else {
-                    format!("http://{ep}")
-                };
-                return Ok(localhost_to_ipv4_loopback(&uri));
-            }
+    let mut atlas = AtlasClient::connect(atlas_endpoint).await?;
+    let transport = atlas_pb::Transport::Grpc;
+    let records = atlas.query_capabilities("", contract_id, transport).await?;
+    for rec in &records {
+        let has = rec
+            .interfaces
+            .iter()
+            .any(|i| i.contract_id == contract_id && i.transport == transport as i32);
+        if !has {
+            continue;
         }
+        let (_, endpoint, _) = atlas
+            .connect_capability(CONSUMER_ID, &rec.capability_id, contract_id, transport)
+            .await?;
+        if endpoint.is_empty() {
+            continue;
+        }
+        let uri = if endpoint.starts_with("http") {
+            endpoint
+        } else {
+            format!("http://{endpoint}")
+        };
+        return Ok(localhost_to_ipv4_loopback(&uri));
     }
     anyhow::bail!("no {contract_id} interface found in Atlas registry")
 }
@@ -216,7 +220,8 @@ async fn run_tui(
                         continue;
                     }
                     if msg == "quit" || msg == "exit" {
-                        let _ = notify_session_end(liaison_endpoint, &session_id, &local_user).await;
+                        let _ =
+                            notify_session_end(liaison_endpoint, &session_id, &local_user).await;
                         break;
                     }
                     messages.borrow_mut().push(ChatMessage {
@@ -272,39 +277,38 @@ fn build_text_task(session_id: &str, user_id: &str, text: &str) -> crate::pb::pi
         source: INTENT_SOURCE_TEXT,
         text: text.to_string(),
         audio_data: vec![],
-        context_json: String::new(),
+        context_json: serde_json::json!({"user_id": user_id, "modality": "text"}).to_string(),
         timestamp_ms: now_ms(),
-        user_id: user_id.to_string(),
     }
 }
 
 fn build_control_task(
     session_id: &str,
     user_id: &str,
-    context_json: &str,
+    extra_context_json: &str,
 ) -> crate::pb::pilot::Task {
     use crate::pb::pilot::Task;
     const INTENT_SOURCE_TEXT: u32 = 0;
+    let mut ctx: serde_json::Value =
+        serde_json::from_str(extra_context_json.trim()).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = ctx.as_object_mut() {
+        obj.entry("user_id").or_insert(serde_json::json!(user_id));
+    }
     Task {
         task_id: Uuid::new_v4().to_string(),
         session_id: session_id.to_string(),
         source: INTENT_SOURCE_TEXT,
         text: String::new(),
         audio_data: vec![],
-        context_json: context_json.to_string(),
+        context_json: ctx.to_string(),
         timestamp_ms: now_ms(),
-        user_id: user_id.to_string(),
     }
 }
 
-async fn notify_session_end(
-    liaison_endpoint: &str,
-    session_id: &str,
-    user_id: &str,
-) -> Result<()> {
-    use crate::pb::contracts::srv_liaison_client::SrvLiaisonClient;
+async fn notify_session_end(liaison_endpoint: &str, session_id: &str, user_id: &str) -> Result<()> {
+    use crate::pb::contracts::system_liaison_client::SystemLiaisonClient;
 
-    let mut client = SrvLiaisonClient::connect(liaison_endpoint.to_string())
+    let mut client = SystemLiaisonClient::connect(liaison_endpoint.to_string())
         .await
         .context("failed to connect to Liaison for session_end")?;
 
@@ -319,9 +323,9 @@ async fn notify_session_end(
 }
 
 async fn abort_session(liaison_endpoint: &str, session_id: &str, user_id: &str) -> Result<()> {
-    use crate::pb::contracts::srv_liaison_client::SrvLiaisonClient;
+    use crate::pb::contracts::system_liaison_client::SystemLiaisonClient;
 
-    let mut client = SrvLiaisonClient::connect(liaison_endpoint.to_string())
+    let mut client = SystemLiaisonClient::connect(liaison_endpoint.to_string())
         .await
         .context("failed to connect to Liaison for abort_turn")?;
 
@@ -346,7 +350,7 @@ async fn run_text_intent_with_esc_abort(
     input: &str,
     scroll: &mut u16,
 ) -> Result<()> {
-    use crate::pb::contracts::srv_liaison_client::SrvLiaisonClient;
+    use crate::pb::contracts::system_liaison_client::SystemLiaisonClient;
     use crate::pb::pilot::PilotEvent;
     use tonic::Status;
 
@@ -355,14 +359,14 @@ async fn run_text_intent_with_esc_abort(
     let task = build_text_task(session_id, user_id, user_msg);
 
     let _stream_task = tokio::spawn(async move {
-        let mut client = match SrvLiaisonClient::connect(liaison_ep.clone()).await {
+        let mut client = match SystemLiaisonClient::connect(liaison_ep.clone()).await {
             Ok(c) => c,
             Err(e) => {
                 let _ = tx.send(Err(Status::unavailable(e.to_string()))).await;
                 return;
             }
         };
-        let stream = match client.stream(tonic::Request::new(task)).await {
+        let stream = match client.submit_task(tonic::Request::new(task)).await {
             Ok(r) => r.into_inner(),
             Err(e) => {
                 let _ = tx.send(Err(e)).await;
@@ -439,7 +443,7 @@ async fn run_voice_session_with_esc_abort(
     input: &str,
     scroll: &mut u16,
 ) -> Result<()> {
-    use crate::pb::contracts::srv_liaison_client::SrvLiaisonClient;
+    use crate::pb::contracts::system_liaison_client::SystemLiaisonClient;
     use crate::pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
     use tonic::Status;
 
@@ -461,7 +465,7 @@ async fn run_voice_session_with_esc_abort(
     let liaison_ep = liaison_endpoint.to_string();
 
     let _stream_task = tokio::spawn(async move {
-        let mut client = match SrvLiaisonClient::connect(liaison_ep.clone()).await {
+        let mut client = match SystemLiaisonClient::connect(liaison_ep.clone()).await {
             Ok(c) => c,
             Err(e) => {
                 let _ = tx.send(Err(Status::unavailable(e.to_string()))).await;
@@ -660,7 +664,10 @@ fn apply_voice_event(
             let label = if event.status_message.is_empty() {
                 format!("identified user → {}", event.user_id)
             } else {
-                format!("identified user → {} · {}", event.user_id, event.status_message)
+                format!(
+                    "identified user → {} · {}",
+                    event.user_id, event.status_message
+                )
             };
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Voice,

@@ -574,6 +574,7 @@ pub async fn execute(
                 ("atlas", "robonix-atlas"),
                 ("executor", "robonix-executor"),
                 ("pilot", "robonix-pilot"),
+                ("liaison", "robonix-liaison"),
             ];
             for (name, bin) in bin_map {
                 if !deploy.system.contains_key(*name) {
@@ -946,6 +947,16 @@ fn system_cli_args(
             push_pair(&mut out, "--vlm-api-key", nested_str("vlm", "api_key"));
             push_pair(&mut out, "--vlm-model", nested_str("vlm", "model"));
             push_pair(&mut out, "--vlm-format", nested_str("vlm", "api_format"));
+        }
+        "liaison" => {
+            push_pair(&mut out, "--listen", s("listen"));
+            push_pair(
+                &mut out,
+                "--atlas",
+                s("atlas").or_else(|| atlas_listen.map(str::to_string)),
+            );
+            push_pair(&mut out, "--pilot-endpoint", s("pilot_endpoint"));
+            push_pair(&mut out, "--log", s("log"));
         }
         _ => {}
     }
