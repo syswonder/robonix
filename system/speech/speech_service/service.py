@@ -323,6 +323,8 @@ class FunASRStreamingBackend:
             chunk_size=self.chunk_size,
             encoder_chunk_look_back=4,
             decoder_chunk_look_back=1,
+            disable_pbar=True,
+            disable_log=True,
         )
 
         outputs = []
