@@ -53,8 +53,9 @@ system:
     # asr_batch_size:   4
 
     # ── FunASR (streaming, asr_stream contract) ─────────────────────
-    # `auto` tries CUDA, falls back to CPU on init failure.
-    funasr_device: auto
+    # `cuda` is the production default — see robonix_manifest.yaml.
+    # Set to `auto` for graceful CPU fallback if scene's GPU is full.
+    funasr_device: cuda
     # funasr_model:      paraformer-zh-streaming
     # funasr_chunk_size: [0, 10, 5]
 

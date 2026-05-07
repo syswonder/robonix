@@ -42,10 +42,11 @@ system:
     # ── FunASR (streaming, asr_stream contract) ─────────────────────
     # Handles `robonix/system/speech/asr_stream` — paraformer-zh-stream
     # bidi gRPC, used by liaison voice + rbnx ask. Tiny (~80 MB).
-    # `auto` tries CUDA first and falls back to CPU on init failure
-    # (typically an OOM when scene's YOLO+SAM+CLIP already filled the
-    # card). Force one device with `cuda` or `cpu`.
-    funasr_device: auto
+    # `cuda` is the production default — CPU is fast enough on paper
+    # but the per-chunk decode latency drops words on real hardware.
+    # If scene's YOLO+SAM+CLIP already filled the card, set `auto`
+    # for graceful CPU fallback, or `cpu` to force CPU.
+    funasr_device: cuda
     # funasr_model:      paraformer-zh-streaming
     # funasr_chunk_size: [0, 10, 5]   # [left, current, right]
 
