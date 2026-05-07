@@ -33,7 +33,7 @@ from robonix_py import Capability  # noqa: E402
 
 cap = Capability(id="com.robonix.system.scene", namespace="robonix/system/scene")
 
-import atlas_pb2 as pb  # type: ignore  # noqa: E402  (auto-discover loop uses raw QueryCapabilities)
+import atlas_pb2 as pb  # pyright: ignore[reportMissingImports] (auto-discover loop uses raw QueryCapabilities)
 
 from . import mcp_tools
 from . import web as web_ui
@@ -76,6 +76,7 @@ def _load_config() -> dict:
             cfg = json.loads(text)
         except json.JSONDecodeError:
             import yaml  # PyYAML is in deps
+
             cfg = yaml.safe_load(text) or {}
     except Exception as e:  # noqa: BLE001
         log.warning("failed to read %s: %s; using empty config", path, e)
@@ -139,7 +140,9 @@ def _resolve_pb_transport(name: str) -> int:
     return pb_t
 
 
-def _build_topic_specs(observations: list[dict], atlas_stub, transport: str) -> list[TopicSpec]:
+def _build_topic_specs(
+    observations: list[dict], atlas_stub, transport: str
+) -> list[TopicSpec]:
     """Two paths:
 
       A. Auto-discovery (default — when manifest's `observations[]` is
@@ -171,23 +174,28 @@ def _resolve_auto(atlas_stub, pb_transport: int) -> list[TopicSpec]:
     leaf, then collapse multiple providers per kind by namespace
     preference.
 
-    Why preference matters: `primitive/chassis/pose` (raw chassis or
-    AMCL output) and `service/map/pose` (SLAM-corrected) BOTH have leaf
-    `pose`. If we just took whichever atlas returned first, the world-
+    Why preference matters: `primitive/chassis/odom` (raw wheel encoder
+    integration) and `service/map/odom` (SLAM-corrected) BOTH have leaf
+    `odom`. If we just took whichever atlas returned first, the world-
     frame self-tracker silently ended up reading the chassis stream
-    (drifty / empty when nav stack is down). Same story for
-    `chassis/odom` vs `service/map/odom`. The preference order below
+    (drifty / empty when nav stack is down). The preference order below
     encodes scene's actual intent — for world-frame purposes always
-    prefer the localizer.
+    prefer the localizer. (Pose has a single producer in practice —
+    `service/map/pose` — so this matters most for odom.)
     """
     try:
-        resp = atlas_stub.QueryCapabilities(pb.QueryCapabilitiesRequest(
-            contract_id="",
-            transport=pb_transport,
-        ))
+        resp = atlas_stub.QueryCapabilities(
+            pb.QueryCapabilitiesRequest(
+                contract_id="",
+                transport=pb_transport,
+            )
+        )
     except Exception as e:  # noqa: BLE001
-        log.warning("[scene] atlas QueryCapabilities(*,%s) failed: %s",
-                    _pb_transport_name(pb_transport), e)
+        log.warning(
+            "[scene] atlas QueryCapabilities(*,%s) failed: %s",
+            _pb_transport_name(pb_transport),
+            e,
+        )
         return []
 
     # Per-kind candidate buckets. Each entry is (priority, contract_id, spec).
@@ -201,7 +209,10 @@ def _resolve_auto(atlas_stub, pb_transport: int) -> list[TopicSpec]:
             if spec is None:
                 continue
             if spec.kind in _DEFAULT_DISABLED_KINDS:
-                log.info("[scene] auto-discover: skipping kind=%s (in _DEFAULT_DISABLED_KINDS)", spec.kind)
+                log.info(
+                    "[scene] auto-discover: skipping kind=%s (in _DEFAULT_DISABLED_KINDS)",
+                    spec.kind,
+                )
                 continue
             prio = _provider_priority(spec.kind, iface.contract_id)
             candidates.setdefault(spec.kind, []).append((prio, iface.contract_id, spec))
@@ -213,10 +224,20 @@ def _resolve_auto(atlas_stub, pb_transport: int) -> list[TopicSpec]:
         for losing_prio, losing_id, losing in cands[1:]:
             log.info(
                 "[scene] auto-discover: kind=%s — preferring %s (prio=%d) over %s (prio=%d)",
-                kind, chosen_id, chosen_prio, losing_id, losing_prio,
+                kind,
+                chosen_id,
+                chosen_prio,
+                losing_id,
+                losing_prio,
             )
-        log.info("[scene] auto-discover %r ← atlas: topic=%s msg=%s qos=%s contract=%s",
-                 chosen.kind, chosen.topic, chosen.msg_type, chosen.qos_profile, chosen_id)
+        log.info(
+            "[scene] auto-discover %r ← atlas: topic=%s msg=%s qos=%s contract=%s",
+            chosen.kind,
+            chosen.topic,
+            chosen.msg_type,
+            chosen.qos_profile,
+            chosen_id,
+        )
         out.append(chosen)
     return out
 
@@ -236,28 +257,42 @@ def _provider_priority(kind: str, contract_id: str) -> int:
     return 5
 
 
-def _resolve_explicit(observations: list[dict], atlas_stub, pb_transport: int) -> list[TopicSpec]:
+def _resolve_explicit(
+    observations: list[dict], atlas_stub, pb_transport: int
+) -> list[TopicSpec]:
     """Path B: per-entry contract lookup."""
     out: list[TopicSpec] = []
     for entry in observations:
         kind = str(entry.get("kind", "")).lower()
         contract = str(entry.get("contract", ""))
         if not kind or not contract:
-            log.warning("[scene] observation %r: missing kind/contract; skipping", entry)
+            log.warning(
+                "[scene] observation %r: missing kind/contract; skipping", entry
+            )
             continue
         try:
-            resp = atlas_stub.QueryCapabilities(pb.QueryCapabilitiesRequest(
-                contract_id=contract, transport=pb_transport,
-            ))
+            resp = atlas_stub.QueryCapabilities(
+                pb.QueryCapabilitiesRequest(
+                    contract_id=contract,
+                    transport=pb_transport,
+                )
+            )
         except Exception as e:  # noqa: BLE001
-            log.warning("[scene] %r: atlas query for %s failed: %s — skipping", kind, contract, e)
+            log.warning(
+                "[scene] %r: atlas query for %s failed: %s — skipping",
+                kind,
+                contract,
+                e,
+            )
             continue
         chosen: Optional[TopicSpec] = None
         for rec in resp.records:
             for iface in rec.interfaces:
                 if iface.contract_id != contract or iface.transport != pb_transport:
                     continue
-                chosen = _spec_from_iface(rec, iface, atlas_stub, pb_transport, kind_override=kind)
+                chosen = _spec_from_iface(
+                    rec, iface, atlas_stub, pb_transport, kind_override=kind
+                )
                 if chosen:
                     break
             if chosen:
@@ -266,17 +301,26 @@ def _resolve_explicit(observations: list[dict], atlas_stub, pb_transport: int) -
             log.warning(
                 "[scene] %r: no atlas record for contract=%r over %s — skipping. "
                 "Have a primitive DeclareInterface(transport=%s) for it.",
-                kind, contract, _pb_transport_name(pb_transport), _pb_transport_name(pb_transport),
+                kind,
+                contract,
+                _pb_transport_name(pb_transport),
+                _pb_transport_name(pb_transport),
             )
             continue
-        log.info("[scene] override %r ← atlas: topic=%s msg=%s qos=%s",
-                 chosen.kind, chosen.topic, chosen.msg_type, chosen.qos_profile)
+        log.info(
+            "[scene] override %r ← atlas: topic=%s msg=%s qos=%s",
+            chosen.kind,
+            chosen.topic,
+            chosen.msg_type,
+            chosen.qos_profile,
+        )
         out.append(chosen)
     return out
 
 
-def _spec_from_iface(rec, iface, atlas_stub, pb_transport: int, *,
-                      kind_override: Optional[str] = None) -> Optional[TopicSpec]:
+def _spec_from_iface(
+    rec, iface, atlas_stub, pb_transport: int, *, kind_override: Optional[str] = None
+) -> Optional[TopicSpec]:
     """Build a TopicSpec from one atlas (cap, iface) pair.
 
     Endpoints are NOT exposed by `QueryCapabilities` (atlas hides them
@@ -299,27 +343,37 @@ def _spec_from_iface(rec, iface, atlas_stub, pb_transport: int, *,
     if not msg_type:
         return None
     try:
-        conn = atlas_stub.ConnectCapability(pb.ConnectCapabilityRequest(
-            consumer_id="com.robonix.system.scene",
-            capability_id=rec.capability_id,
-            contract_id=contract,
-            transport=pb_transport,
-        ))
+        conn = atlas_stub.ConnectCapability(
+            pb.ConnectCapabilityRequest(
+                consumer_id="com.robonix.system.scene",
+                capability_id=rec.capability_id,
+                contract_id=contract,
+                transport=pb_transport,
+            )
+        )
     except Exception as e:  # noqa: BLE001
-        log.warning("[scene] ConnectCapability(%s/%s) failed: %s",
-                    rec.capability_id, contract, e)
+        log.warning(
+            "[scene] ConnectCapability(%s/%s) failed: %s",
+            rec.capability_id,
+            contract,
+            e,
+        )
         return None
     endpoint = (conn.endpoint or "").strip()
     if not endpoint:
         return None
     qos_profile = ""
-    if pb_transport == pb.TRANSPORT_ROS2 and conn.params and conn.params.HasField("ros2"):
+    if (
+        pb_transport == pb.TRANSPORT_ROS2
+        and conn.params
+        and conn.params.HasField("ros2")
+    ):
         qos_profile = conn.params.ros2.qos_profile or ""
     kind = kind_override or _CONTRACT_LEAF_TO_KIND.get(leaf, leaf)
     return TopicSpec(
-        kind=kind,
+        kind=kind or "",
         topic=endpoint,
-        msg_type=msg_type,
+        msg_type=msg_type or "",
         qos_profile=qos_profile or "default",
     )
 
@@ -347,7 +401,9 @@ def _msg_type_from_contract(atlas_stub, contract_id: str) -> str:
     if contract_id in _CONTRACT_MSG_CACHE:
         return _CONTRACT_MSG_CACHE[contract_id]
     try:
-        resp = atlas_stub.QueryContract(pb.QueryContractRequest(contract_id=contract_id))
+        resp = atlas_stub.QueryContract(
+            pb.QueryContractRequest(contract_id=contract_id)
+        )
     except Exception as e:  # noqa: BLE001
         log.debug("[scene] atlas QueryContract(%s) failed: %s", contract_id, e)
         _CONTRACT_MSG_CACHE[contract_id] = ""
@@ -370,11 +426,11 @@ def _msg_type_from_contract(atlas_stub, contract_id: str) -> str:
 # ── Self-pose tracker ──────────────────────────────────────────────────────
 class _SelfTracker:
     """Owns the `robot` SceneObject — created on first pose update from
-    the atlas-resolved pose stream (`service/map/pose` preferred,
-    `primitive/chassis/pose` as a fallback), then EMA-updated. Never
-    goes `missing` (we just stop refreshing if the upstream stops
-    responding). Also exposes a sync `latest_xy_yaw` callback that the
-    VLM detector consumes for camera-to-map projection.
+    the atlas-resolved `service/map/pose` stream (the canonical map-
+    frame pose contract), then EMA-updated. Never goes `missing` (we
+    just stop refreshing if the upstream stops responding). Also
+    exposes a sync `latest_xy_yaw` callback that the VLM detector
+    consumes for camera-to-map projection.
     """
 
     def __init__(self, registry: ObjectRegistry) -> None:
@@ -394,7 +450,9 @@ class _SelfTracker:
         self._latest = (x, y, z, yaw)
         wf = self.world_frame_id
         async with self.registry.lock():
-            if self._object_id is None or self._object_id not in self.registry._objects:  # noqa: SLF001
+            if (
+                self._object_id is None or self._object_id not in self.registry._objects
+            ):  # noqa: SLF001
                 obj = self.registry.insert_object(
                     cls="robot",
                     pose=Pose3D(x=x, y=y, z=z, yaw=yaw, frame_id=wf),
@@ -405,7 +463,9 @@ class _SelfTracker:
                     source="self",
                 )
                 self._object_id = obj.object_id
-                log.info("[self] registered self-object %s (frame=%s)", self._object_id, wf)
+                log.info(
+                    "[self] registered self-object %s (frame=%s)", self._object_id, wf
+                )
             else:
                 obj = self.registry.get_object(self._object_id)
                 if obj is not None:
@@ -429,9 +489,9 @@ async def _stale_tick(registry: ObjectRegistry, *, period_s: float = 1.0) -> Non
         await asyncio.sleep(period_s)
 
 
-async def _auto_discover_loop(*, atlas_stub, hub, transport: str,
-                                 explicit: list[dict],
-                                 period_s: float = 5.0) -> None:
+async def _auto_discover_loop(
+    *, atlas_stub, hub, transport: str, explicit: list[dict], period_s: float = 5.0
+) -> None:
     """Background reconciler. Re-runs discovery every `period_s` and
     dynamically adds new (kind, topic) subscriptions as they appear.
     Keeps scene picking up mapping/nav outputs that come online minutes
@@ -494,13 +554,18 @@ async def _start_ros_ingest(
             await asyncio.sleep(2.0)
             specs = _build_topic_specs(explicit, atlas_stub, transport)
             if specs:
-                log.info("[scene] auto-discover: found %d topic(s) on attempt %d",
-                         len(specs), attempt)
+                log.info(
+                    "[scene] auto-discover: found %d topic(s) on attempt %d",
+                    len(specs),
+                    attempt,
+                )
                 break
             if attempt % 5 == 1:
-                log.info("[scene] auto-discover attempt %d: 0 %s topics yet, retrying",
-                         attempt, transport)
-
+                log.info(
+                    "[scene] auto-discover attempt %d: 0 %s topics yet, retrying",
+                    attempt,
+                    transport,
+                )
 
     if not specs:
         log.warning("no observation topics configured — registry will stay empty")
@@ -516,9 +581,11 @@ async def _start_ros_ingest(
     # to keep the registry's robot record fresh without flooding the
     # asyncio loop. Falls back to /odom when /amcl_pose isn't there.
     if hub.has("pose") or hub.has("odom"):
-        bg_tasks.append(asyncio.create_task(
-            _self_pose_loop(hub, self_tracker), name="scene-self-pose"
-        ))
+        bg_tasks.append(
+            asyncio.create_task(
+                _self_pose_loop(hub, self_tracker), name="scene-self-pose"
+            )
+        )
 
     # Perception startup races with camera primitive cap registration:
     # the chassis cap usually shows up first (its `pose`/`odom` topics
@@ -547,6 +614,7 @@ async def _start_ros_ingest(
     # suffer.
     detector: Optional[Any] = None
     if hub.has("rgb") and hub.has("depth"):
+
         def _rgb_msg() -> Optional[Any]:
             msg, stamp, _ = hub.latest("rgb")
             if msg is None or stamp == 0.0:
@@ -590,6 +658,7 @@ async def _start_ros_ingest(
             "VLMObjectDetector. Object positions will be approximate. "
             "Configure a depth topic to get metric-accurate poses."
         )
+
         def _rgb_jpeg() -> Optional[bytes]:
             msg, stamp, _ = hub.latest("rgb")
             if msg is None or stamp == 0.0:
@@ -650,11 +719,19 @@ async def _self_pose_loop(hub: SubscribersHub, self_tracker: "_SelfTracker") -> 
         if hub.has("pose"):
             msg, stamp_unix, _count = hub.latest("pose")
             if msg is not None and stamp_unix > 0:
-                p = msg.pose.pose if hasattr(msg, "pose") and hasattr(msg.pose, "pose") else msg.pose
+                p = (
+                    msg.pose.pose
+                    if hasattr(msg, "pose") and hasattr(msg.pose, "pose")
+                    else msg.pose
+                )
                 q = p.orientation
-                x = float(p.position.x); y = float(p.position.y); z = float(p.position.z)
+                x = float(p.position.x)
+                y = float(p.position.y)
+                z = float(p.position.z)
                 yaw = _quat_to_yaw(float(q.x), float(q.y), float(q.z), float(q.w))
-                frame_id = getattr(getattr(msg, "header", None), "frame_id", None) or None
+                frame_id = (
+                    getattr(getattr(msg, "header", None), "frame_id", None) or None
+                )
 
         # Path B: SLAM odom (smoothly varying — for high-rate trackers).
         if x is None and hub.has("odom"):
@@ -662,9 +739,13 @@ async def _self_pose_loop(hub: SubscribersHub, self_tracker: "_SelfTracker") -> 
             if msg is not None and stamp_unix > 0:
                 p = msg.pose.pose
                 q = p.orientation
-                x = float(p.position.x); y = float(p.position.y); z = float(p.position.z)
+                x = float(p.position.x)
+                y = float(p.position.y)
+                z = float(p.position.z)
                 yaw = _quat_to_yaw(float(q.x), float(q.y), float(q.z), float(q.w))
-                frame_id = getattr(getattr(msg, "header", None), "frame_id", None) or None
+                frame_id = (
+                    getattr(getattr(msg, "header", None), "frame_id", None) or None
+                )
 
         # Path C: tf2 fallback. Only when no pose contract is in atlas.
         if x is None:
@@ -683,12 +764,15 @@ async def _self_pose_loop(hub: SubscribersHub, self_tracker: "_SelfTracker") -> 
         if x is not None:
             if frame_id:
                 self_tracker.world_frame_id = frame_id  # type: ignore[attr-defined]
-            await self_tracker.on_pose(x, y, z, yaw)
+            await self_tracker.on_pose(
+                x, y, z, yaw  # pyright: ignore[reportArgumentType]
+            )
         await asyncio.sleep(0.2)
 
 
 def _quat_to_yaw(x: float, y: float, z: float, w: float) -> float:
     import math
+
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
@@ -700,6 +784,7 @@ def _image_msg_to_jpeg(msg) -> Optional[bytes]:
     try:
         import numpy as np  # noqa: F401
         from PIL import Image as PILImage
+
         h, w = msg.height, msg.width
         if h == 0 or w == 0:
             return None
@@ -723,6 +808,7 @@ def _image_msg_to_jpeg(msg) -> Optional[bytes]:
             log.debug("[scene-vlm] unsupported encoding %r", enc)
             return None
         import io
+
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=80)
         return buf.getvalue()
@@ -733,6 +819,7 @@ def _image_msg_to_jpeg(msg) -> Optional[bytes]:
 
 def _bytes_to_array(data, h: int, w: int, channels: int):
     import numpy as np
+
     arr = np.frombuffer(bytes(data), dtype=np.uint8)
     return arr.reshape(h, w, channels)
 
@@ -741,13 +828,18 @@ async def _ingest_detections(registry: ObjectRegistry, detections):
     """Apply data association on the registry. Imported here to keep the
     top-level imports tidy."""
     from .state.data_assoc import associate
+
     if not detections:
         return
     async with registry.lock():
         matched, new = associate(registry, list(detections))
     if matched or new:
-        log.info("[detect] %d matched, %d new — registry: %s",
-                 len(matched), len(new), registry.stats())
+        log.info(
+            "[detect] %d matched, %d new — registry: %s",
+            len(matched),
+            len(new),
+            registry.stats(),
+        )
 
 
 # ── main ───────────────────────────────────────────────────────────────────
@@ -769,7 +861,9 @@ async def _run() -> None:
     relations = RelationEngine(registry, period_s=1.0)
     await relations.start()
     self_tracker = _SelfTracker(registry)
-    mcp_tools.attach_state(registry=registry, relations=relations, transform_to_map=None)
+    mcp_tools.attach_state(
+        registry=registry, relations=relations, transform_to_map=None
+    )
 
     # Bring up atlas + lifecycle gRPC + MCP HTTP. Non-blocking; scene
     # keeps running its own asyncio event loop after this returns.
@@ -779,19 +873,27 @@ async def _run() -> None:
     # `_robonix_*` attrs stashed by @mcp_contract — re-use them so the
     # description / JSON schema stay in sync with the codegen types.
     for fn in (
-        mcp_tools.get_snapshot, mcp_tools.query, mcp_tools.get_object,
-        mcp_tools.get_semantic_map, mcp_tools.get_safe_goal_near_object,
+        mcp_tools.get_snapshot,
+        mcp_tools.query,
+        mcp_tools.get_object,
+        mcp_tools.get_semantic_map,
+        mcp_tools.get_safe_goal_near_object,
         mcp_tools.get_safety_context,
     ):
         cid = getattr(fn, "_robonix_contract_id", None)
         if cid is None:
-            log.warning("scene tool %s missing _robonix_contract_id; skipping", fn.__name__)
+            log.warning(
+                "scene tool %s missing _robonix_contract_id; skipping", fn.__name__
+            )
             continue
         in_cls = getattr(fn, "_robonix_input_cls", None)
         schema = json.dumps(in_cls.json_schema()) if in_cls else "{}"
-        cap.declare_mcp(cid, cap.mcp_endpoint,
-                        description=(fn.__doc__ or "").strip(),
-                        input_schema_json=schema)
+        cap.declare_mcp(
+            cid,
+            cap.mcp_endpoint,
+            description=(fn.__doc__ or "").strip(),
+            input_schema_json=schema,
+        )
     log.info("scene declared 6 MCP tools at %s", cap.mcp_endpoint)
 
     # ROS2 ingest hub + downstream consumers (self-pose, perception).
@@ -800,14 +902,20 @@ async def _run() -> None:
     # cases that pre-date the Capability API.
     stub = cap._atlas.stub
     hub, perception, ingest_bg = await _start_ros_ingest(
-        atlas_stub=stub, registry=registry, self_tracker=self_tracker, config=config,
+        atlas_stub=stub,
+        registry=registry,
+        self_tracker=self_tracker,
+        config=config,
     )
     # Now that the hub exists, hand it to mcp_tools so safe-goal BFS can
     # read the occupancy grid. (Earlier attach_state call set registry +
     # relations; this one overwrites with the same values plus hub —
     # attach_state is intentionally cheap and idempotent.)
     mcp_tools.attach_state(
-        registry=registry, relations=relations, transform_to_map=None, hub=hub,
+        registry=registry,
+        relations=relations,
+        transform_to_map=None,
+        hub=hub,
     )
     bg_tasks = [
         asyncio.create_task(_stale_tick(registry), name="scene-stale-tick"),
@@ -817,7 +925,8 @@ async def _run() -> None:
         # service that publishes a contract scene knows about).
         asyncio.create_task(
             _auto_discover_loop(
-                atlas_stub=stub, hub=hub,
+                atlas_stub=stub,
+                hub=hub,
                 transport=str(config.get("transport") or "ros2"),
                 explicit=(config.get("observations") or []),
             ),
@@ -831,23 +940,36 @@ async def _run() -> None:
     # of scene so registry reads are local. Set `web_port: 0` in the
     # deploy-manifest scene block to disable. SCENE_WEB_PORT env is
     # the override of last resort.
-    web_port = int(config.get("web_port") if config.get("web_port") is not None
-                   else os.environ.get("SCENE_WEB_PORT", "50107"))
+    web_port = int(
+        int(config.get("web_port") or "0")
+        if config.get("web_port") is not None and config.get("web_port") != ""
+        else int(os.environ.get("SCENE_WEB_PORT", "50107") or "")
+    )
     web_task = None
+    web_server: uvicorn.Server | None = None
     if web_port > 0:
         web_app = web_ui.make_app(
-            registry=registry, relations=relations, hub=hub,
+            registry=registry,
+            relations=relations,
+            hub=hub,
             detector=perception,
         )
         web_uv = uvicorn.Config(
-            app=web_app, host="0.0.0.0", port=web_port, log_level="warning",
+            app=web_app,
+            host="0.0.0.0",
+            port=web_port,
+            log_level="warning",
         )
         web_server = uvicorn.Server(web_uv)
         web_task = asyncio.create_task(web_server.serve(), name="scene-web-http")
         log.info("web UI on http://0.0.0.0:%d", web_port)
 
-    log.info("scene up; cap=%s mcp=%s observations=%d",
-             cap.id, cap.mcp_endpoint, len(config.get("observations", [])))
+    log.info(
+        "scene up; cap=%s mcp=%s observations=%d",
+        cap.id,
+        cap.mcp_endpoint,
+        len(config.get("observations", [])),
+    )
 
     # Wait for SIGTERM/SIGINT.
     stop = asyncio.Event()
@@ -867,7 +989,7 @@ async def _run() -> None:
     await relations.stop()
     for t in bg_tasks:
         t.cancel()
-    if web_task is not None:
+    if web_server is not None:
         web_server.should_exit = True
 
     # Capability owns the gRPC server, MCP HTTP, heartbeat — stop them.

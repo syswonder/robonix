@@ -1,15 +1,10 @@
 # SLAM-corrected map-frame pose. The mapping service exports this so
 # downstream consumers (scene self-tracker, nav, explore) get a
 # loop-closure-corrected pose instead of relying on raw chassis odom
-# (which drifts over time) or on Nav2's /amcl_pose (which only exists
-# when Nav2 is running).
-#
-# Distinct from primitive/chassis/pose: that is the *robot's* native
-# pose stream (e.g. AMCL output on a tiago); this is the *mapping*
-# service's authoritative map-frame pose, regardless of whether AMCL
-# is in the picture or not. On a real robot they often disagree
-# transiently after loop closure — consumers should prefer this one
-# when both are available.
+# (which drifts over time). This is the single canonical map-frame
+# pose contract — chassis primitives only declare odom-frame data
+# (primitive/chassis/odom); world-frame localisation lives here in
+# the mapping service.
 [contract]
 id      = "robonix/service/map/pose"
 version = "1"
