@@ -144,19 +144,26 @@ async def serve_speaker(ws) -> None:
     q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=64)
     out_dev = _state("output_device")
 
+    # Bytearray buffer + lock — sounddevice's callback wants exactly
+    # `len(outdata)` bytes per call (= FRAME_BYTES at our blocksize).
+    # The previous queue-of-opaque-chunks design dropped any bytes
+    # beyond that boundary, so an 8 KiB liaison TTS chunk played
+    # only the first 3.2 KiB and silently discarded the rest — most
+    # of the speech was missing on the wire.
+    buf = bytearray()
+    buf_lock = threading.Lock()
+
     def callback(outdata, frames, time_info, status):
         if status:
             log.debug("output status: %s", status)
-        try:
-            chunk = q.get_nowait()
-        except stdlib_queue.Empty:
-            outdata[:] = b"\x00" * len(outdata)
-            return
-        if len(chunk) >= len(outdata):
-            outdata[: len(outdata)] = chunk[: len(outdata)]
-        else:
-            outdata[: len(chunk)] = chunk
-            outdata[len(chunk):] = b"\x00" * (len(outdata) - len(chunk))
+        n = len(outdata)
+        with buf_lock:
+            avail = min(n, len(buf))
+            if avail:
+                outdata[:avail] = bytes(buf[:avail])
+                del buf[:avail]
+            if avail < n:
+                outdata[avail:] = b"\x00" * (n - avail)
 
     try:
         stream = sd.RawOutputStream(
@@ -177,7 +184,16 @@ async def serve_speaker(ws) -> None:
     try:
         async for msg in ws:
             if isinstance(msg, bytes):
-                await loop.run_in_executor(None, q.put, msg)
+                with buf_lock:
+                    buf.extend(msg)
+        # Hold the stream open after EOF until the buffer drains —
+        # otherwise we close the device while the tail of the utterance
+        # is still queued and the user hears the last word truncated.
+        while True:
+            with buf_lock:
+                if not buf:
+                    break
+            await asyncio.sleep(0.05)
     except websockets.ConnectionClosed:
         log.info("speaker client disconnected")
     finally:
