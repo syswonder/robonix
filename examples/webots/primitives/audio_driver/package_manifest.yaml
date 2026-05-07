@@ -17,12 +17,13 @@ package:
   license: MulanPSL-2.0
 
 # atlas cap_id this package will register at runtime — distinct from
-# `package.name` (which is the deployment identity). Without this rbnx-
-# boot's wait-for-cap loop falls back to substring-match of the package
-# name against cap ids, which fails here because we register
-# `com.robonix.primitive.audio` (the cap) under the package
-# `audio_driver` (the deployment unit).
-capability_id: com.robonix.primitive.audio
+# `package.name` (which is the deployment identity). The `.alsa` suffix
+# distinguishes this from `audio_macos_bridge` so both can co-exist in
+# atlas; the cap_id picker in rbnx chat then has a real choice. Both
+# implementations register the same `robonix/primitive/audio/*`
+# contracts, so consumers (liaison voice path, scene optional audio)
+# don't care which one liaison picked.
+capability_id: com.robonix.primitive.audio.alsa
 
 build: bash scripts/build.sh
 start: bash scripts/start.sh
@@ -31,3 +32,5 @@ capabilities:
   - name: robonix/primitive/audio/mic
   - name: robonix/primitive/audio/speaker
   - name: robonix/primitive/audio/driver
+  - name: robonix/primitive/audio/list_devices
+  - name: robonix/primitive/audio/select_device

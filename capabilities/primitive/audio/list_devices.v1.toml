@@ -1,0 +1,12 @@
+# Enumerate all input + output devices the audio impl can drive.
+# Optional: impls with a single fixed device return UNIMPLEMENTED.
+[contract]
+id      = "robonix/primitive/audio/list_devices"
+version = "1"
+kind    = "primitive"
+
+[io.srv]
+srv = "audio/srv/ListAudioDevices"
+
+[mode]
+type = "rpc"

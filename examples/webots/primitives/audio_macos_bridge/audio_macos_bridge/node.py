@@ -20,6 +20,7 @@ Config (RBNX_CAP_CONFIG_JSON or env fallbacks):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -30,7 +31,7 @@ from queue import Queue
 from robonix_py import Capability
 
 cap = Capability(
-    id="com.robonix.primitive.audio",
+    id="com.robonix.primitive.audio.macos",
     namespace="robonix/primitive/audio",
 )
 log = logging.getLogger("audio-macos-bridge")
@@ -167,6 +168,107 @@ def speaker_stream(request_iterator, context):
         done.wait(timeout=2.0)
         log.info("speaker stream client disconnected")
     return std_msgs_pb2.Empty()
+
+
+# ── device list / select ───────────────────────────────────────────────────
+#
+# Both forward to the macOS daemon's existing /devices and /set_device
+# WebSocket endpoints (one-shot JSON request/response). The daemon already
+# tracks current_input/output_device; the bridge just shape-shifts JSON
+# into the AudioDevice / Select…Response protobuf types so consumers
+# (rbnx chat audio settings page) see the same surface as audio_driver.
+
+def _ws_request(path: str, body: object | None = None, timeout_s: float = 3.0):
+    """Open a one-shot WS to the mac_server, optionally send a JSON body,
+    receive one JSON response, close. Sync wrapper around the asyncio API
+    so the gRPC servicer thread doesn't have to learn asyncio."""
+    async def go():
+        async with websockets.connect(_ws_url(path), open_timeout=timeout_s) as ws:
+            if body is not None:
+                await ws.send(json.dumps(body))
+            msg = await asyncio.wait_for(ws.recv(), timeout=timeout_s)
+            return json.loads(msg) if isinstance(msg, str) else None
+    return asyncio.run(go())
+
+
+@cap.grpc("robonix/primitive/audio/list_devices")
+def list_devices(request, context):
+    if bridge_host is None:
+        context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
+                      "macos bridge not initialized")
+        return audio_pb2.ListAudioDevices_Response()
+    try:
+        payload = _ws_request("/devices")
+    except Exception as e:  # noqa: BLE001
+        context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
+                      f"mac_server /devices unreachable: {e}")
+        return audio_pb2.ListAudioDevices_Response()
+
+    devs = []
+    in_default = payload.get("input_default")
+    out_default = payload.get("output_default")
+    in_cur = payload.get("input_current")
+    out_cur = payload.get("output_current")
+    for d in payload.get("devices", []):
+        in_ch = int(d.get("max_input_channels", 0))
+        out_ch = int(d.get("max_output_channels", 0))
+        if in_ch == 0 and out_ch == 0:
+            continue
+        kind = "duplex" if (in_ch > 0 and out_ch > 0) else "input" if in_ch else "output"
+        is_default = (kind in ("input", "duplex") and d["id"] == in_default) or \
+                     (kind in ("output", "duplex") and d["id"] == out_default)
+        name = d.get("name", "")
+        # macOS BT-HFP devices crash sd.RawInputStream at 16 kHz; flag them
+        # so the picker can warn or auto-skip without re-implementing the
+        # heuristic in every consumer.
+        note = ""
+        low = name.lower()
+        if any(k in low for k in ("airpods", "bluetooth", "iphone", "ipad")):
+            note = "bluetooth"
+        devs.append(audio_pb2.AudioDevice(
+            id=str(d["id"]),
+            name=name,
+            kind=kind,
+            is_default=is_default,
+            channels=max(in_ch, out_ch),
+            note=note,
+        ))
+    return audio_pb2.ListAudioDevices_Response(
+        devices=devs,
+        current_input_id="" if in_cur is None else str(in_cur),
+        current_output_id="" if out_cur is None else str(out_cur),
+    )
+
+
+@cap.grpc("robonix/primitive/audio/select_device")
+def select_device(request, context):
+    if bridge_host is None:
+        context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
+                      "macos bridge not initialized")
+        return audio_pb2.SelectAudioDevice_Response()
+    kind = (request.kind or "").lower()
+    if kind not in ("input", "output"):
+        return audio_pb2.SelectAudioDevice_Response(
+            ok=False, error=f"kind must be 'input' or 'output', got '{kind}'")
+    # mac_server expects integer ids; normalise back from the wire string.
+    raw_id = request.id
+    sent_id: int | str | None
+    if raw_id == "":
+        sent_id = None  # mac_server falls back to OS default
+    else:
+        try:
+            sent_id = int(raw_id)
+        except ValueError:
+            sent_id = raw_id  # forward as string; mac_server will reject if bad
+    body = {kind: sent_id}
+    try:
+        payload = _ws_request("/set_device", body)
+    except Exception as e:  # noqa: BLE001
+        return audio_pb2.SelectAudioDevice_Response(ok=False, error=f"ws: {e}")
+    return audio_pb2.SelectAudioDevice_Response(
+        ok=bool(payload.get("ok", False)),
+        error=payload.get("error", ""),
+    )
 
 
 # ── driver-init lifecycle ──────────────────────────────────────────────────
