@@ -1,0 +1,11 @@
+# Voiceprint identification (one-shot)
+# abstract_interface_id: robonix/system/speech/voiceprint
+uint8[] audio_data
+string  encoding         # e.g. "pcm_s16le"
+uint32  sample_rate_hz   # e.g. 16000
+---
+string  user_id          # enrolled id, or "unknown"
+string  user_name        # human-friendly label, "" if unknown
+float32 confidence       # 0.0 – 1.0
+bool    is_known         # true when matched against an enrolled voiceprint
+string  error            # non-empty on failure

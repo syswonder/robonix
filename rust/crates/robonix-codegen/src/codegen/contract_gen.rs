@@ -19,6 +19,16 @@ struct ContractToml {
     contract: ContractMeta,
     io: IoSpec,
     mode: ModeSpec,
+    #[serde(default)]
+    extra_rpc: Vec<ExtraRpc>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct ExtraRpc {
+    srv: String,
+    #[serde(rename = "type")]
+    mode_type: String,
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +90,17 @@ pub fn collect_referenced_srvs(contracts_dir: &Path) -> Result<BTreeSet<(String,
                 );
             }
         }
+        for extra in &c.extra_rpc {
+            let path = extra.srv.trim();
+            if let Some((pkg, "srv", name)) = parse_ros_path(path) {
+                set.insert((pkg.to_string(), name.to_string()));
+            } else {
+                bail!(
+                    "contract {}: [[extra_rpc]].srv must be pkg/srv/Name, got {path:?}",
+                    c.contract.id
+                );
+            }
+        }
     }
     Ok(set)
 }
@@ -137,9 +158,24 @@ pub fn generate(
     let mut needs_string_wire = false;
 
     let mut proto_types: Vec<(String, ResolvedType, ResolvedType)> = Vec::new();
+    let mut extra_rpcs_resolved: Vec<Vec<(String, String, ResolvedType, ResolvedType)>> =
+        Vec::new();
     for (_, c) in &contracts {
         let (in_t, out_t) = resolve_contract_io(c, resolver, &mut imports, &mut needs_string_wire)?;
         proto_types.push((c.contract.id.clone(), in_t, out_t));
+
+        let mut extras = Vec::new();
+        for extra in &c.extra_rpc {
+            let (ein, eout) = resolve_extra_rpc(
+                extra,
+                &c.contract.id,
+                resolver,
+                &mut imports,
+                &mut needs_string_wire,
+            )?;
+            extras.push((extra.name.clone(), extra.mode_type.clone(), ein, eout));
+        }
+        extra_rpcs_resolved.push(extras);
     }
 
     for imp in &imports {
@@ -160,20 +196,7 @@ pub fn generate(
         writeln!(&mut out)?;
     }
 
-    for ((_, c), (_, in_t, out_t)) in contracts.iter().zip(proto_types.iter()) {
-        // Templates: `{CAP_CLASS}` etc. in the id mark the TOML as a schema
-        // shared across many per-area contracts (drivers). Runtime calls go
-        // through the IDL-level stub (`robonix.lifecycle.Driver` etc.), so
-        // a per-contract service stub here would only be a malformed name.
-        if is_template_id(&c.contract.id) {
-            writeln!(
-                &mut out,
-                "// template contract (id `{}`): per-area instances are concretised at runtime; no per-contract service emitted.",
-                c.contract.id
-            )?;
-            writeln!(&mut out)?;
-            continue;
-        }
+    for (idx, ((_, c), (_, in_t, out_t))) in contracts.iter().zip(proto_types.iter()).enumerate() {
         let mode = c.mode.mode_type.trim();
         let svc = contract_id_to_service_name(&c.contract.id);
         // RPC method name = the .srv leaf the contract points at.
@@ -215,6 +238,12 @@ pub fn generate(
             ),
         };
         writeln!(&mut out, "  {rpc}")?;
+
+        for (name, extra_mode, ein, eout) in &extra_rpcs_resolved[idx] {
+            let extra_rpc = format_named_rpc(name, extra_mode, ein, eout);
+            writeln!(&mut out, "  {extra_rpc}")?;
+        }
+
         writeln!(&mut out, "}}")?;
         writeln!(&mut out)?;
     }
@@ -238,6 +267,56 @@ enum ResolvedType {
     ProtoFqn(String),
     GoogleEmpty,
     StringWire,
+}
+
+fn resolve_extra_rpc(
+    extra: &ExtraRpc,
+    contract_id: &str,
+    resolver: &mut MsgResolver,
+    imports: &mut BTreeSet<String>,
+    needs_string_wire: &mut bool,
+) -> Result<(ResolvedType, ResolvedType)> {
+    let io = IoSrvIo {
+        srv: extra.srv.clone(),
+        stream_request: None,
+        stream_response: None,
+    };
+    match extra.mode_type.trim() {
+        "rpc" => resolve_srv_contract_pair(&io.srv, resolver, imports, needs_string_wire),
+        "rpc_server_stream" => {
+            resolve_srv_server_stream(&io, contract_id, resolver, imports, needs_string_wire)
+        }
+        "rpc_client_stream" => {
+            resolve_srv_client_stream(&io, contract_id, resolver, imports, needs_string_wire)
+        }
+        other => bail!("contract {contract_id}: [[extra_rpc]] unknown type '{other}'"),
+    }
+}
+
+fn format_named_rpc(name: &str, mode: &str, input: &ResolvedType, output: &ResolvedType) -> String {
+    match mode.trim() {
+        "rpc" => format!(
+            "rpc {name}({}) returns ({});",
+            unary_arg(input),
+            unary_return(output)
+        ),
+        "rpc_server_stream" => format!(
+            "rpc {name}({}) returns (stream {});",
+            empty_or_type(input),
+            stream_element(output)
+        ),
+        "rpc_client_stream" => format!(
+            "rpc {name}(stream {}) returns ({});",
+            stream_element(input),
+            unary_return(output)
+        ),
+        "rpc_bidirectional_stream" => format!(
+            "rpc {name}(stream {}) returns (stream {});",
+            stream_element(input),
+            stream_element(output)
+        ),
+        _ => format!("// unknown mode for extra_rpc {name}"),
+    }
 }
 
 fn format_stream_out(method: &str, input: &ResolvedType, output: &ResolvedType) -> String {
@@ -659,12 +738,6 @@ fn proto_file_for_dot_package(pkg: &str) -> String {
         return format!("{}_{}.proto", segs[0], segs[1]);
     }
     format!("{}.proto", pkg.replace('.', "_"))
-}
-
-/// A `{CAP_CLASS}`-style placeholder anywhere in the id makes this a
-/// template TOML — one schema shared across many per-area contracts.
-fn is_template_id(id: &str) -> bool {
-    id.contains('{')
 }
 
 /// Convert an arbitrary identifier to UpperCamelCase. Splits on `_`/`-`/
