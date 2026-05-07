@@ -350,6 +350,39 @@ class MockASRStreamingBackend:
 
 # -- TTS Backend (Edge TTS) --------------------------------------------------
 
+def _mp3_to_pcm_s16le_16k(mp3_bytes: bytes) -> bytes:
+    """Decode an mp3 byte string to raw PCM s16le mono 16 kHz via ffmpeg.
+
+    Why ffmpeg subprocess instead of pydub/audioread: the runtime venv
+    has no native MP3 decoder, and adding torchaudio just to demux MP3
+    is heavier than shelling out to ffmpeg, which is already a hard
+    runtime dep on the box. Returns b'' on empty input.
+    """
+    import subprocess
+
+    if not mp3_bytes:
+        return b""
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner", "-loglevel", "error",
+            "-i", "pipe:0",
+            "-f", "s16le", "-acodec", "pcm_s16le",
+            "-ar", "16000", "-ac", "1",
+            "pipe:1",
+        ],
+        input=mp3_bytes,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg mp3→pcm failed (rc={proc.returncode}): "
+            f"{proc.stderr.decode('utf-8', errors='replace')}"
+        )
+    return proc.stdout
+
+
 class EdgeTTSBackend:
     """TTS backend using Microsoft Edge TTS (free, no API key required).
 
@@ -370,7 +403,12 @@ class EdgeTTSBackend:
         log.info("Edge TTS initialized with voice=%s", self.voice)
 
     async def synthesize(self, text: str, voice: str = "", speed: float = 1.0) -> bytes:
-        """Synthesize text to complete MP3 audio bytes (one-shot).
+        """Synthesize text to PCM s16le mono 16 kHz (one-shot).
+
+        Edge TTS only emits 24 kHz mono mp3 over the wire; the speaker
+        primitive contract expects raw PCM at 16 kHz so the bridge /
+        sounddevice path can play it without a codec. Decode once
+        here via ffmpeg so callers don't need to know the wire format.
 
         Args:
             text: Text to synthesize.
@@ -378,7 +416,7 @@ class EdgeTTSBackend:
             speed: Speed multiplier (1.0 = normal, 2.0 = 2x fast).
 
         Returns:
-            Complete MP3 audio bytes.
+            Raw PCM bytes, signed-16-bit little-endian, mono, 16 kHz.
         """
         import edge_tts
 
@@ -390,13 +428,17 @@ class EdgeTTSBackend:
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
                 chunks.append(chunk["data"])
-        return b"".join(chunks)
+        mp3 = b"".join(chunks)
+        return _mp3_to_pcm_s16le_16k(mp3)
 
     async def synthesize_stream(self, text: str, voice: str = "", speed: float = 1.0):
-        """Async generator that yields MP3 audio chunks as they're generated.
+        """Yields PCM s16le mono 16 kHz chunks (one decode at the end).
 
-        Useful for long text -- the caller can start playback before the
-        full audio is ready.
+        TODO: pipe through ffmpeg incrementally so playback can start
+        before the whole utterance is synthesised. For now we collect
+        all mp3 chunks, decode once, and yield PCM in 4 KiB slices —
+        same wire format as the one-shot synthesize() above so the
+        speaker primitive doesn't see a format jump between modes.
 
         Args:
             text: Text to synthesize.
@@ -404,7 +446,7 @@ class EdgeTTSBackend:
             speed: Speed multiplier.
 
         Yields:
-            bytes -- individual MP3 audio chunks from Edge TTS streaming.
+            bytes -- raw PCM s16le mono 16 kHz, 4 KiB per yield.
         """
         import edge_tts
 
@@ -412,9 +454,13 @@ class EdgeTTSBackend:
         sign = "+" if speed > 1 else "-"
         rate = f"{sign}{int(abs(speed - 1) * 100)}%" if speed != 1.0 else "+0%"
         communicate = edge_tts.Communicate(text, v, rate=rate)
+        mp3_chunks: list[bytes] = []
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
-                yield chunk["data"]
+                mp3_chunks.append(chunk["data"])
+        pcm = _mp3_to_pcm_s16le_16k(b"".join(mp3_chunks))
+        for i in range(0, len(pcm), 4096):
+            yield pcm[i : i + 4096]
 
 
 class MockTTSBackend:
@@ -423,7 +469,9 @@ class MockTTSBackend:
     """
 
     async def synthesize(self, text: str, voice: str = "", speed: float = 1.0) -> bytes:
-        return b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x44\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+        # 100 ms of silence at 16 kHz s16le mono — matches the real backend's
+        # PCM contract so callers never need to sniff the format in CI.
+        return b"\x00\x00" * 1600
 
     async def synthesize_stream(self, text: str, voice: str = "", speed: float = 1.0):
         data = await self.synthesize(text, voice, speed)
