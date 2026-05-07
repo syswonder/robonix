@@ -1,9 +1,0 @@
-# Save the current point cloud map to disk.
-# Request: filename (without extension, saved to configured map directory)
-# Response: success flag and actual path written
-
-string filename
----
-bool success
-string path
-string message

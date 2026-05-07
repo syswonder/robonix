@@ -1,0 +1,13 @@
+# Return every object the scene registry currently believes exists.
+# No filters, no scoping; the LLM filters client-side. Pilot calls
+# this every round to ground its world model.
+[contract]
+id      = "robonix/system/scene/list_objects"
+version = "1"
+kind    = "service"
+
+[io.srv]
+srv = "semantic_map/srv/ListObjects"
+
+[mode]
+type = "rpc"

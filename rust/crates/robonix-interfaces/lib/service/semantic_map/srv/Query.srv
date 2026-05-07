@@ -1,6 +1,0 @@
-# Composable query over the object registry. Filters: class, relation
-# constraints, spatial radius, min confidence. Returns matching objects
-# (current state — see spatial_memory_service for episodic recall).
-QueryConstraints constraints
----
-QueryResults result

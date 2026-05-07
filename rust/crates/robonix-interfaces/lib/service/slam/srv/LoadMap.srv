@@ -1,8 +1,0 @@
-# Load a pre-built point cloud map for relocalization.
-# Request: absolute path to PCD/PLY file
-# Response: success flag
-
-string path
----
-bool success
-string message

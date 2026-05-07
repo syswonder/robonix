@@ -1,6 +1,0 @@
-# Direct lookup by stable object_id. `found=false` when the registry
-# doesn't know the id (or it was never observed); in that case
-# `result.obj.id` echoes the requested id and all other fields zero.
-std_msgs/String object_id
----
-GetObjectResult result
