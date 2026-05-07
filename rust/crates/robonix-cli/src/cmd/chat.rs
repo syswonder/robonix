@@ -1339,7 +1339,12 @@ fn draw(
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Role::Agent => ("Pilot: ", "       ", Style::default().fg(Color::Green)),
+                // "Robonix:" — the user-facing system name. The reply
+                // went through Liaison → Pilot → tools → Liaison → here,
+                // so naming it after one internal crate ("Pilot") leaks
+                // an architectural detail that the user has no reason
+                // to know or care about.
+                Role::Agent => ("Robonix: ", "         ", Style::default().fg(Color::Green)),
                 Role::ToolCall => (">      ", "       ", Style::default().fg(Color::Yellow)),
                 Role::Status => (
                     "",
