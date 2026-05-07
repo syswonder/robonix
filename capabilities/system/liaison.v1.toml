@@ -1,9 +1,9 @@
 # Unified user-facing entry point. Two RPCs share this contract:
-#   * Stream(Task) → stream PilotEvent             — text / API / pre-built Task path
-#   * StartVoiceSession(...) → stream VoiceEvent   — voice push-to-talk path
+#   * SubmitTask(Task) → stream PilotEvent           — text / API / pre-built Task path
+#   * StartVoiceSession(...) → stream VoiceEvent     — voice push-to-talk path
 # Voice path is orchestrated end-to-end inside Liaison (mic → ASR → voiceprint
 # → Pilot → optional TTS → speaker); clients only render VoiceEvents.
-# ROS: `lib/liaison/srv/SubmitTask.srv`, `lib/liaison/srv/StartVoiceSession.srv`.
+# ROS: `lib/system/liaison/srv/SubmitTask.srv`, `lib/system/liaison/srv/StartVoiceSession.srv`.
 [contract]
 id      = "robonix/system/liaison"
 version = "1"

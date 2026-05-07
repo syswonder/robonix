@@ -1612,7 +1612,7 @@ dependencies = [
  "bitflags 2.11.0",
  "libc",
  "plain",
- "redox_syscall 0.7.4",
+ "redox_syscall 0.7.5",
 ]
 
 [[package]]
@@ -2565,9 +2565,9 @@ dependencies = [
 
 [[package]]
 name = "redox_syscall"
-version = "0.7.4"
+version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f450ad9c3b1da563fb6948a8e0fb0fb9269711c9c73d9ea1de5058c79c8d643a"
+checksum = "4666a1a60d8412eab19d94f6d13dcc9cea0a5ef4fdf6a5db306537413c661b1b"
 dependencies = [
  "bitflags 2.11.0",
 ]
@@ -2884,9 +2884,19 @@ dependencies = [
  "log",
  "prost",
  "protoc-bin-vendored",
+ "rmcp",
+ "robonix-atlas",
+ "robonix-codegen",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tokio-stream",
  "tonic",
+ "tonic-build",
  "tonic-prost",
  "tonic-prost-build",
+ "uuid",
 ]
 
 [[package]]
@@ -2894,15 +2904,16 @@ name = "robonix-liaison"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "env_logger",
  "futures",
  "log",
  "prost",
- "robonix-interfaces",
- "robonix-sdk",
+ "protoc-bin-vendored",
+ "robonix-atlas",
+ "robonix-codegen",
  "serde",
  "serde_json",
- "serde_yaml",
  "tokio",
  "tokio-stream",
  "tonic",

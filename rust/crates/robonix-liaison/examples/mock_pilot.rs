@@ -1,34 +1,43 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// examples/mock_pilot.rs — minimal SrvPilot stand-in for the voice demo.
+// examples/mock_pilot.rs — minimal SystemPilot stand-in for the voice demo.
 //
 // Replaces robonix-pilot for tests that only need to verify the
 // Liaison ↔ Pilot wiring (no VLM, no Executor, no skill index).
 //
 // Behaviour:
 //   * Registers as `com.robonix.demo.mock_pilot` in Atlas under
-//     `robonix/srv/pilot` (same contract as the real Pilot, so Liaison
-//     discovers it through `query_nodes_opts(contract_id="robonix/srv/pilot")`).
-//   * Implements SrvPilot.Stream:
+//     `robonix/system/pilot` (same contract as the real Pilot).
+//   * Implements SystemPilot.SubmitTask:
 //       - On `{"abort_turn":true}` / `{"session_end":true}` → close immediately.
 //       - Otherwise → emit one TEXT_CHUNK + one FINAL_TEXT echoing the
 //         incoming Task (text + user_id), so the demo client can verify the
 //         user identity is propagated end-to-end.
 
 use anyhow::Result;
-use robonix_interfaces::{
-    contracts::srv_pilot_server::{SrvPilot, SrvPilotServer},
-    pilot::{PilotEvent, Task},
-};
-use robonix_sdk::RobonixClient;
+use robonix_atlas::client::{self as atlas_client, AtlasClient};
+use robonix_atlas::pb as atlas_pb;
+use robonix_liaison::pb::contracts::system_pilot_server::{SystemPilot, SystemPilotServer};
+use robonix_liaison::pb::pilot::{PilotEvent, Task};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-const NODE_ID: &str = "com.robonix.demo.mock_pilot";
+const CAPABILITY_ID: &str = "com.robonix.demo.mock_pilot";
+const NAMESPACE: &str = "robonix/system/pilot";
+const CONTRACT_ID: &str = "robonix/system/pilot";
 
 const EVT_TEXT_CHUNK: u32 = 0;
 const EVT_FINAL_TEXT: u32 = 4;
+
+fn extract_user_id(task: &Task) -> String {
+    let v: serde_json::Value =
+        serde_json::from_str(task.context_json.trim()).unwrap_or_else(|_| serde_json::json!({}));
+    v.get("user_id")
+        .and_then(|x| x.as_str())
+        .unwrap_or("(none)")
+        .to_string()
+}
 
 fn task_is_control(task: &Task) -> bool {
     let j = task.context_json.trim();
@@ -39,38 +48,49 @@ fn task_is_control(task: &Task) -> bool {
         Ok(v) => v,
         Err(_) => return false,
     };
-    v.get("abort_turn").and_then(|x| x.as_bool()).unwrap_or(false)
-        || v.get("session_end").and_then(|x| x.as_bool()).unwrap_or(false)
+    v.get("abort_turn")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false)
+        || v.get("session_end")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false)
 }
 
 #[derive(Default)]
 struct MockPilot;
 
 #[tonic::async_trait]
-impl SrvPilot for MockPilot {
-    type StreamStream = ReceiverStream<Result<PilotEvent, Status>>;
+impl SystemPilot for MockPilot {
+    type SubmitTaskStream = ReceiverStream<Result<PilotEvent, Status>>;
 
-    async fn stream(&self, request: Request<Task>) -> Result<Response<Self::StreamStream>, Status> {
+    async fn submit_task(
+        &self,
+        request: Request<Task>,
+    ) -> Result<Response<Self::SubmitTaskStream>, Status> {
         let task = request.into_inner();
         let (tx, rx) = mpsc::channel::<Result<PilotEvent, Status>>(8);
 
         if task_is_control(&task) {
-            log::info!("[mock-pilot] control task ({}); closing stream", task.context_json);
+            log::info!(
+                "[mock-pilot] control task ({}); closing stream",
+                task.context_json
+            );
             return Ok(Response::new(ReceiverStream::new(rx)));
         }
 
+        let user_id = extract_user_id(&task);
         let echo = format!(
-            "[mock-pilot] received from user_id='{}' source={} text='{}' ctx={}",
-            task.user_id, task.source, task.text, task.context_json
+            "[mock-pilot] received from user_id='{user_id}' source={} text='{}' ctx={}",
+            task.source, task.text, task.context_json
         );
-        log::info!("{}", echo);
+        log::info!("{echo}");
 
         tokio::spawn(async move {
             let chunk = PilotEvent {
                 event_kind: EVT_TEXT_CHUNK,
                 session_id: task.session_id.clone(),
-                text_chunk: format!("(mock) ack from {} → ", task.user_id),
-                task_graph: None,
+                text_chunk: format!("(mock) ack from {user_id} → "),
+                plan: None,
                 batch_result: None,
                 status: None,
                 final_text: String::new(),
@@ -81,7 +101,7 @@ impl SrvPilot for MockPilot {
                 event_kind: EVT_FINAL_TEXT,
                 session_id: task.session_id.clone(),
                 text_chunk: String::new(),
-                task_graph: None,
+                plan: None,
                 batch_result: None,
                 status: None,
                 final_text: format!("you said \"{}\"", task.text),
@@ -112,24 +132,43 @@ async fn main() -> Result<()> {
     let advertised = format!("127.0.0.1:{port}");
 
     log::info!("[mock-pilot] connecting to Atlas at {atlas_http}");
-    let mut sdk =
-        RobonixClient::connect_with_retry(&atlas_http, 10, Duration::from_secs(2)).await?;
-    sdk.register_node(NODE_ID, "robonix/srv/pilot", "service", "")
+    let mut atlas =
+        AtlasClient::connect_with_retry(&atlas_http, 10, Duration::from_secs(2)).await?;
+    atlas
+        .register_capability(CAPABILITY_ID, NAMESPACE, "")
         .await?;
-    sdk.declare_interface_full(
-        NODE_ID,
-        "pilot",
-        vec!["grpc".to_string()],
-        serde_json::json!({"endpoint": advertised}).to_string(),
-        port as u32,
-        "robonix/srv/pilot",
-    )
-    .await?;
-    log::info!("[mock-pilot] registered as '{NODE_ID}', listening on {advertised}");
+    atlas
+        .declare_interface(
+            CAPABILITY_ID,
+            CONTRACT_ID,
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                "capabilities/system/pilot.v1.toml",
+                "robonix.contracts.SystemPilot",
+                "/robonix.contracts.SystemPilot/SubmitTask",
+            ),
+        )
+        .await?;
+    log::info!("[mock-pilot] registered as '{CAPABILITY_ID}', listening on {advertised}");
     eprintln!("mock-pilot ready on :{port}");
 
+    {
+        let mut hb = atlas.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(20));
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                if let Err(e) = hb.heartbeat(CAPABILITY_ID).await {
+                    log::warn!("heartbeat failed: {e:#}");
+                }
+            }
+        });
+    }
+
     tonic::transport::Server::builder()
-        .add_service(SrvPilotServer::new(MockPilot))
+        .add_service(SystemPilotServer::new(MockPilot))
         .serve(listen)
         .await?;
     Ok(())
