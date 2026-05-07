@@ -861,9 +861,11 @@ async def _run() -> None:
     relations = RelationEngine(registry, period_s=1.0)
     await relations.start()
     self_tracker = _SelfTracker(registry)
-    mcp_tools.attach_state(
-        registry=registry, relations=relations, transform_to_map=None
-    )
+    # mcp_tools v0 only needs the registry + the ROS hub (the latter is
+    # supplied later in _start_ros_ingest); relations engine still runs
+    # internally for ingest/web-UI but isn't exposed in the LLM tool
+    # surface anymore.
+    mcp_tools.attach_state(registry=registry)
 
     # Bring up atlas + lifecycle gRPC + MCP HTTP. Non-blocking; scene
     # keeps running its own asyncio event loop after this returns.
@@ -873,11 +875,8 @@ async def _run() -> None:
     # `_robonix_*` attrs stashed by @mcp_contract — re-use them so the
     # description / JSON schema stay in sync with the codegen types.
     for fn in (
-        mcp_tools.get_snapshot,
-        mcp_tools.query,
-        mcp_tools.get_object,
-        mcp_tools.get_safe_goal_near_object,
-        mcp_tools.get_safety_context,
+        mcp_tools.list_objects,
+        mcp_tools.goal_near,
     ):
         cid = getattr(fn, "_robonix_contract_id", None)
         if cid is None:
@@ -893,7 +892,7 @@ async def _run() -> None:
             description=(fn.__doc__ or "").strip(),
             input_schema_json=schema,
         )
-    log.info("scene declared 5 MCP tools at %s", cap.mcp_endpoint)
+    log.info("scene declared 2 MCP tools at %s", cap.mcp_endpoint)
 
     # ROS2 ingest hub + downstream consumers (self-pose, perception).
     # _start_ros_ingest still wants a raw atlas stub for QueryCapabilities;
@@ -906,16 +905,11 @@ async def _run() -> None:
         self_tracker=self_tracker,
         config=config,
     )
-    # Now that the hub exists, hand it to mcp_tools so safe-goal BFS can
-    # read the occupancy grid. (Earlier attach_state call set registry +
-    # relations; this one overwrites with the same values plus hub —
-    # attach_state is intentionally cheap and idempotent.)
-    mcp_tools.attach_state(
-        registry=registry,
-        relations=relations,
-        transform_to_map=None,
-        hub=hub,
-    )
+    # Now that the hub exists, hand it to mcp_tools so goal_near BFS can
+    # read the occupancy grid. (Earlier attach_state call set registry
+    # only; this one re-binds with the hub — attach_state is intentionally
+    # cheap and idempotent.)
+    mcp_tools.attach_state(registry=registry, hub=hub)
     bg_tasks = [
         asyncio.create_task(_stale_tick(registry), name="scene-stale-tick"),
         # Background reconciler: keeps scene's hub adding subscriptions

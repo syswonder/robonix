@@ -1,8 +1,0 @@
-# Set initial pose hint for relocalization.
-# Request: 6-DoF pose in map frame
-# Response: success flag
-
-geometry_msgs/PoseStamped pose
----
-bool success
-string message

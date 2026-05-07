@@ -1,6 +1,0 @@
-# Filter objects in the semantic map by type and/or label
-string[] types
-string label_filter
----
-Object[] objects
-builtin_interfaces/Time stamp

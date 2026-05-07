@@ -1,5 +1,0 @@
-# Sentinel stub. v1 always returns status="not_implemented" + empty
-# arrays so Pilot can call without exception. Sentinel will fill it.
-std_msgs/String scope
----
-SafetyContext context

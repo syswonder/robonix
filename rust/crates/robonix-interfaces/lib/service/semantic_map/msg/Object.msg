@@ -1,19 +1,11 @@
-# Semantic object node — the canonical record `system/scene` keeps for one
-# tracked thing in the world. v1 extension: confidence + first/last seen +
-# observation count + a `missing` flag flipped after the grace period when
-# data association can no longer find this object in incoming detections
-# (we keep the record around because Pilot may still ask about it).
-#
-# Field-name note: `relations[].target_entity_id` is a legacy spelling kept
-# for codegen continuity; new Python code reads it back as `target_object_id`.
+# One tracked thing in the world. Six fields, all primitives — no
+# nested types, no enums. Position is map-frame xyz; the registry
+# only emits objects it currently believes exist (no missing flag,
+# no observation_count: that's internal telemetry, not API).
+
 string id
 string label
-Relation[] relations
-# string[] registered_skills # deprecated soon
-# string[] registered_primitives # deprecated soon
-FrameMapping[] frame_mapping
-float32 confidence
-builtin_interfaces/Time first_seen
-builtin_interfaces/Time last_seen
-uint32 observation_count
-bool missing
+float64 x
+float64 y
+float64 z
+float64 last_seen_unix

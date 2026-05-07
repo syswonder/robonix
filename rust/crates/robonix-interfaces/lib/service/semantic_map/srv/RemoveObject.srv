@@ -1,5 +1,0 @@
-# Remove an object from the semantic map by ID
-string object_id
----
-bool success
-string message
