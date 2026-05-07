@@ -12,8 +12,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-echo "[sim/stop] killing host-side robonix processes (atlas / pilot / executor / rbnx boot)..."
-pkill -9 -f "rbnx boot|rbnx deploy|robonix-atlas|robonix-pilot|robonix-executor|rbnx start -p" 2>/dev/null || true
+echo "[sim/stop] killing host-side robonix processes (atlas / pilot / executor / liaison / rbnx boot)..."
+# Every binary spawned by `rbnx boot`'s system: block must be listed here,
+# otherwise its TCP port leaks across boot cycles and the next boot fails
+# with `listen address ':50081' is taken`. Add new ones to deploy.rs's
+# system-bin table AND to this regex.
+pkill -9 -f "rbnx boot|rbnx deploy|rbnx start -p|robonix-atlas|robonix-pilot|robonix-executor|robonix-liaison" 2>/dev/null || true
 
 echo "[sim/stop] killing host-side rviz2 wrapper (docker exec into sim)..."
 # sim/start.sh launches `bash sim/start_rviz.sh` in the background;
