@@ -1,0 +1,15 @@
+# Voice push-to-talk turn orchestrated entirely inside Liaison.
+# abstract_interface_id: robonix/system/liaison.start_voice_session
+string  session_id              # empty → server allocates UUID
+string  client_user_id          # hint (e.g. local OS user)
+uint32  record_seconds          # 0 → server default (5s)
+string  language                # BCP-47, "" = auto
+bool    tts_enabled             # play synthesized response
+string  mic_node_id             # "" = auto-discover via Atlas
+string  asr_node_id             # ""
+string  voiceprint_node_id      # ""
+string  tts_node_id             # ""
+string  speaker_node_id         # ""
+string  context_json            # extra fields merged into Task.context_json
+---
+liaison/VoiceEvent event        # streamed

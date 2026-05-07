@@ -1,76 +1,104 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// robonix-liaison — unified user-facing input layer
+// robonix-liaison — unified user-facing entry layer.
 //
-// ── Design ───────────────────────────────────────────────────────────────────
+// Design
+// ──────
+// All input modalities ultimately produce the same `Task` and receive the
+// same `PilotEvent` stream. The Liaison gRPC facade is contract
+// `robonix/system/liaison`, which exposes:
 //
-//  All input modalities ultimately produce the same `Task` and receive the
-//  same `PilotEvent` stream.  The liaison gRPC facade is contract `SrvLiaison`
-//  (`robonix_contracts.proto`); speech is the only modality that needs pre/post processing:
+//   * SubmitTask(Task) → stream PilotEvent
+//       For text / API / pre-built tasks. Liaison normalises `Task.user_id`
+//       (defaulting to `local:<os_user>` when empty) and forwards to Pilot.
 //
+//   * StartVoiceSession(...) → stream VoiceEvent
+//       For push-to-talk voice. Liaison drives mic → ASR → voiceprint →
+//       Pilot → optional TTS → speaker, wrapping every stage as a
+//       VoiceEvent. See `voice.rs`.
 //
-//  Key principle: liaison itself does NOT contain ASR/TTS logic.  ASR and TTS
-//  are Atlas-registered system nodes (robonix/service/speech/asr,
-//  robonix/service/speech/tts) discovered and called via gRPC — the same pattern
-//  as the VLM service in Pilot.  The `Recorder` and `Speaker` traits abstract
-//  platform audio I/O (ALSA, PulseAudio, CoreAudio …) from the service calls.
-//
-// ── Runtime topology ─────────────────────────────────────────────────────────
-//
-//   Always started:  SrvLiaison gRPC server on ROBONIX_LIAISON_PORT
-//   Optional module: SpeechBridge   (set ROBONIX_LIAISON_SPEECH=1)
-//   Fallback stdin:  text loop      (set ROBONIX_LIAISON_SOURCE=text,
-//                                    useful for headless / pipe mode)
+// Liaison itself does NOT contain ASR / TTS / voiceprint logic. Each is an
+// Atlas-registered system capability (robonix/system/speech/asr,
+// robonix/system/speech/tts, robonix/system/speech/voiceprint) discovered
+// and called via gRPC — same pattern as the VLM service in Pilot.
 
-use robonix_interfaces::{contracts, pilot};
+mod pb;
+mod voice;
 
-use anyhow::Result;
-use contracts::srv_liaison_server::{SrvLiaison, SrvLiaisonServer};
-use contracts::srv_pilot_client::SrvPilotClient;
-use pilot::{PilotEvent, Task};
-use robonix_sdk::RobonixClient;
+use anyhow::{Context, Result};
+use clap::Parser;
+use pb::contracts::{
+    system_liaison_server::{SystemLiaison, SystemLiaisonServer},
+    system_pilot_client::SystemPilotClient,
+};
+use pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
+use pb::pilot::{PilotEvent, Task};
+use robonix_atlas::client::{self as atlas_client, AtlasClient};
+use robonix_atlas::pb as atlas_pb;
+use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use std::time::Duration;
+use tokio::sync::{Mutex, mpsc};
+use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-const LIAISON_NODE_ID: &str = "com.robonix.runtime.liaison";
+const LIAISON_CAPABILITY_ID: &str = "com.robonix.runtime.liaison";
+const LIAISON_NAMESPACE: &str = "robonix/system/liaison";
+const LIAISON_CONTRACT_ID: &str = "robonix/system/liaison";
+const LIAISON_CAP_TOML: &str = "capabilities/system/liaison.v1.toml";
 
-/// `lib/pilot/msg/ Task.msg` source: TEXT=0 AUDIO=1 API=2
+/// `lib/system/pilot/msg/Task.msg` source: TEXT=0 AUDIO=1 API=2.
 const INTENT_SOURCE_TEXT: u32 = 0;
-/// `lib/pilot/msg/PilotEvent.msg` event_kind
+
+/// `lib/system/pilot/msg/PilotEvent.msg` event_kind.
 const EVT_TEXT_CHUNK: u32 = 0;
 const EVT_TASK_GRAPH: u32 = 1;
 const EVT_BATCH_RESULT: u32 = 2;
 const EVT_STATUS: u32 = 3;
 const EVT_FINAL_TEXT: u32 = 4;
 
-// ── LiaisonPipeline ───────────────────────────────────────────────────────────
+// ── LiaisonPipeline ─────────────────────────────────────────────────────────
 //
-// Core: forward an Task to Pilot (`SrvPilot.Stream`), return the event channel.
-// Opens a new gRPC channel per call so liaison can start before Pilot and
-// survive Pilot restarts without restarting itself.
+// Forward a `Task` to Pilot (`SystemPilot.SubmitTask`), return the event
+// channel. Opens a new gRPC channel per call so liaison can start before
+// Pilot and survive Pilot restarts without restarting itself. Pilot endpoint
+// is re-resolved through Atlas on every call (so a Pilot restart on a new
+// port is picked up automatically).
 
 pub struct LiaisonPipeline {
-    pilot_endpoint: String,
+    pilot_endpoint_default: String,
+    atlas: Arc<Mutex<AtlasClient>>,
 }
 
 impl LiaisonPipeline {
-    pub fn new(pilot_endpoint: impl Into<String>) -> Self {
+    pub fn new(pilot_endpoint_default: impl Into<String>, atlas: Arc<Mutex<AtlasClient>>) -> Self {
         Self {
-            pilot_endpoint: pilot_endpoint.into(),
+            pilot_endpoint_default: pilot_endpoint_default.into(),
+            atlas,
         }
     }
 
-    /// Forward `task` to Pilot.  Returns a channel that yields `PilotEvent`s.
-    /// A background task pumps the underlying gRPC stream into the channel.
+    /// Forward `task` to Pilot. Returns a channel that yields `PilotEvent`s.
     pub async fn handle_intent(
         &self,
-        task: Task,
+        mut task: Task,
     ) -> Result<mpsc::Receiver<Result<PilotEvent, Status>>> {
-        let mut client = SrvPilotClient::connect(self.pilot_endpoint.clone()).await?;
-        let mut grpc = client.stream(Request::new(task)).await?.into_inner();
+        ensure_user_id(&mut task);
         let (tx, rx) = mpsc::channel(64);
+
+        let pilot_ep = match resolve_pilot_endpoint(&self.atlas).await {
+            Some(ep) => ep,
+            None => self.pilot_endpoint_default.clone(),
+        };
+
+        let mut client = SystemPilotClient::connect(pilot_ep.clone())
+            .await
+            .with_context(|| format!("connect Pilot at {pilot_ep}"))?;
+        let response = client
+            .submit_task(Request::new(task))
+            .await
+            .with_context(|| format!("Pilot SubmitTask at {pilot_ep}"))?;
+        let mut grpc = response.into_inner();
         tokio::spawn(async move {
             while let Some(item) = grpc.next().await {
                 if tx
@@ -86,22 +114,90 @@ impl LiaisonPipeline {
     }
 }
 
-// ── SrvLiaison gRPC impl ─────────────────────────────────────────────
-//
-// All clients — rbnx chat, mobile app, GUI, and the SpeechBridge below — use
-// this contract service.  There is no special-cased input path per modality.
-// Interrupt / turn-cancel is expressed as an `Task` with `context_json` `{"abort_turn":true}`
-// end-to-end (Pilot handles it); there is no separate liaison RPC.
+async fn resolve_pilot_endpoint(atlas: &Arc<Mutex<AtlasClient>>) -> Option<String> {
+    let mut atlas = atlas.lock().await;
+    let transport = atlas_pb::Transport::Grpc;
+    let records = atlas
+        .query_capabilities("", "robonix/system/pilot", transport)
+        .await
+        .ok()?;
+    let cap = records.iter().find(|r| {
+        r.interfaces
+            .iter()
+            .any(|i| i.contract_id == "robonix/system/pilot" && i.transport == transport as i32)
+    })?;
+    let (_channel_id, endpoint, _params) = atlas
+        .connect_capability(
+            LIAISON_CAPABILITY_ID,
+            &cap.capability_id,
+            "robonix/system/pilot",
+            transport,
+        )
+        .await
+        .ok()?;
+    if endpoint.is_empty() {
+        None
+    } else {
+        Some(localhost_to_ipv4(&endpoint))
+    }
+}
+
+fn localhost_to_ipv4(ep: &str) -> String {
+    let with_scheme = if ep.starts_with("http") {
+        ep.to_string()
+    } else {
+        format!("http://{ep}")
+    };
+    with_scheme.replace("localhost", "127.0.0.1")
+}
+
+/// Default the user_id (stored inside `context_json.user_id` since Task itself
+/// has no `user_id` field yet) to `local:<os_user>` and tag the modality so
+/// Pilot can tell text vs voice without inspecting `source`.
+fn ensure_user_id(task: &mut Task) {
+    let mut ctx: serde_json::Value = if task.context_json.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(&task.context_json).unwrap_or_else(|_| serde_json::json!({}))
+    };
+    if let Some(obj) = ctx.as_object_mut() {
+        let has_user = obj
+            .get("user_id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+        if !has_user {
+            obj.insert(
+                "user_id".to_string(),
+                serde_json::json!(format!("local:{}", whoami::username())),
+            );
+        }
+        let modality = match task.source {
+            INTENT_SOURCE_TEXT => "text",
+            1 => "voice",
+            2 => "api",
+            _ => "unknown",
+        };
+        obj.entry("modality").or_insert(serde_json::json!(modality));
+    }
+    task.context_json = ctx.to_string();
+}
+
+// ── SystemLiaison gRPC impl ─────────────────────────────────────────────────
 
 struct LiaisonServiceImpl {
     pipeline: Arc<LiaisonPipeline>,
+    atlas: Arc<Mutex<AtlasClient>>,
+    pilot_endpoint_default: String,
 }
 
 #[tonic::async_trait]
-impl SrvLiaison for LiaisonServiceImpl {
-    type StreamStream = ReceiverStream<Result<PilotEvent, Status>>;
+impl SystemLiaison for LiaisonServiceImpl {
+    type SubmitTaskStream = ReceiverStream<Result<PilotEvent, Status>>;
 
-    async fn stream(&self, request: Request<Task>) -> Result<Response<Self::StreamStream>, Status> {
+    async fn submit_task(
+        &self,
+        request: Request<Task>,
+    ) -> Result<Response<Self::SubmitTaskStream>, Status> {
         let task = request.into_inner();
         let rx = self
             .pipeline
@@ -110,13 +206,27 @@ impl SrvLiaison for LiaisonServiceImpl {
             .map_err(|e| Status::unavailable(format!("Pilot unreachable: {e:#}")))?;
         Ok(Response::new(ReceiverStream::new(rx)))
     }
+
+    type StartVoiceSessionStream =
+        Pin<Box<dyn Stream<Item = Result<VoiceEvent, Status>> + Send + 'static>>;
+
+    async fn start_voice_session(
+        &self,
+        request: Request<StartVoiceSessionRequest>,
+    ) -> Result<Response<Self::StartVoiceSessionStream>, Status> {
+        let req = request.into_inner();
+        let stream = voice::start_voice_session(
+            req,
+            Arc::clone(&self.atlas),
+            self.pilot_endpoint_default.clone(),
+        )
+        .await?;
+        let boxed: Self::StartVoiceSessionStream = Box::pin(stream);
+        Ok(Response::new(boxed))
+    }
 }
 
-// ── Stdin text loop ─────────────────────────────────────────────────────────
-//
-// Convenience fallback for headless / pipe usage.
-// Activated by ROBONIX_LIAISON_SOURCE=text.
-// `rbnx chat` (gRPC TUI) is the preferred interactive interface.
+// ── Stdin text loop (headless fallback) ─────────────────────────────────────
 
 async fn drain_session_end(pipeline: &LiaisonPipeline, session_id: &str) {
     let task = Task {
@@ -201,18 +311,18 @@ async fn run_text_loop(pipeline: Arc<LiaisonPipeline>) -> Result<()> {
                             printing = false;
                         }
                         EVT_TASK_GRAPH => {
-                            if let Some(ref g) = ev.task_graph {
+                            if let Some(ref p) = ev.plan {
                                 if printing {
                                     println!();
                                     printing = false;
                                 }
                                 println!(
                                     "[round {}] dispatching {} call(s)…",
-                                    g.round,
-                                    g.calls.len()
+                                    p.round,
+                                    p.calls.len()
                                 );
-                                for c in &g.calls {
-                                    println!("  · {}", c.tool_name);
+                                for c in &p.calls {
+                                    println!("  · {}", c.contract_id);
                                 }
                             }
                         }
@@ -238,26 +348,60 @@ async fn run_text_loop(pipeline: Arc<LiaisonPipeline>) -> Result<()> {
     Ok(())
 }
 
-// ── main ──────────────────────────────────────────────────────────────────────
+// ── main ────────────────────────────────────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "robonix-liaison",
+    about = "Unified user-facing entry — text + voice → Pilot"
+)]
+struct Args {
+    /// gRPC listen address (host:port). Defaults to 127.0.0.1:50081 or
+    /// $ROBONIX_LIAISON_PORT (port-only).
+    #[arg(long)]
+    listen: Option<String>,
+
+    /// Atlas endpoint. Defaults to $ROBONIX_ATLAS_ENDPOINT, $ROBONIX_ATLAS,
+    /// then 127.0.0.1:50051.
+    #[arg(long)]
+    atlas: Option<String>,
+
+    /// Pilot fallback endpoint when Atlas can't yet resolve SystemPilot.
+    /// Defaults to $ROBONIX_PILOT_ENDPOINT, then 127.0.0.1:50071.
+    #[arg(long = "pilot-endpoint")]
+    pilot_endpoint: Option<String>,
+
+    /// Log filter (env_logger format). Defaults to $RUST_LOG, then "robonix_liaison=info".
+    #[arg(long)]
+    log: Option<String>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("robonix_liaison=info"),
-    )
-    .init();
+    let args = Args::parse();
+    let log_filter = args
+        .log
+        .clone()
+        .or_else(|| std::env::var("RUST_LOG").ok())
+        .unwrap_or_else(|| "robonix_liaison=info".to_string());
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_filter)).init();
 
-    let atlas_endpoint = resolve_endpoint(
-        &["ROBONIX_ATLAS_ENDPOINT", "ROBONIX_ATLAS"],
-        "127.0.0.1:50051",
-    );
+    let atlas_endpoint = args.atlas.clone().unwrap_or_else(|| {
+        env_first(
+            &["ROBONIX_ATLAS_ENDPOINT", "ROBONIX_ATLAS"],
+            "127.0.0.1:50051",
+        )
+    });
     let atlas_http = if atlas_endpoint.starts_with("http") {
         atlas_endpoint.clone()
     } else {
         format!("http://{atlas_endpoint}")
     };
 
-    let pilot_endpoint = resolve_endpoint(&["ROBONIX_PILOT_ENDPOINT"], "127.0.0.1:50071");
+    let pilot_endpoint = args
+        .pilot_endpoint
+        .clone()
+        .unwrap_or_else(|| env_first(&["ROBONIX_PILOT_ENDPOINT"], "127.0.0.1:50071"));
     let pilot_http = {
         let raw = if pilot_endpoint.starts_with("http") {
             pilot_endpoint.clone()
@@ -267,43 +411,68 @@ async fn main() -> Result<()> {
         raw.replace("localhost", "127.0.0.1")
     };
 
-    let listen_port: u16 = std::env::var("ROBONIX_LIAISON_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(50081);
-    let listen_addr: std::net::SocketAddr = format!("0.0.0.0:{listen_port}").parse()?;
+    // --listen accepts host:port. If the manifest passes just a port (or
+    // the user sets ROBONIX_LIAISON_PORT), bind 0.0.0.0:<port>.
+    let listen_addr: std::net::SocketAddr = if let Some(spec) = args.listen.clone() {
+        if spec.contains(':') {
+            spec.parse()
+                .with_context(|| format!("invalid --listen '{spec}'"))?
+        } else {
+            format!("0.0.0.0:{spec}").parse()?
+        }
+    } else {
+        let port: u16 = std::env::var("ROBONIX_LIAISON_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(50081);
+        format!("0.0.0.0:{port}").parse()?
+    };
+    let listen_port = listen_addr.port();
     let advertised = format!("127.0.0.1:{listen_port}");
 
-    // Register with Atlas.
-    log::info!("connecting to Atlas at {atlas_http}");
-    let mut sdk =
-        RobonixClient::connect_with_retry(&atlas_http, 10, std::time::Duration::from_secs(2))
-            .await?;
-    sdk.register_node(LIAISON_NODE_ID, "robonix/service/liaison", "service", "")
-        .await?;
-    sdk.declare_interface_full(
-        LIAISON_NODE_ID,
-        "liaison",
-        vec!["grpc".to_string()],
-        serde_json::json!({ "endpoint": advertised }).to_string(),
-        listen_port as u32,
-        "robonix/service/liaison",
-    )
-    .await?;
-    log::info!("registered as '{LIAISON_NODE_ID}', SrvLiaison gRPC on :{listen_port}");
-    eprintln!("robonix-liaison ready on :{listen_port}  (pilot={pilot_http})");
+    log::info!("connecting to atlas at {atlas_http}");
+    let mut atlas = AtlasClient::connect_with_retry(&atlas_http, 10, Duration::from_secs(2))
+        .await
+        .context("connect to atlas")?;
 
-    let pipeline = Arc::new(LiaisonPipeline::new(pilot_http));
+    atlas
+        .register_capability(LIAISON_CAPABILITY_ID, LIAISON_NAMESPACE, "")
+        .await
+        .context("register liaison capability")?;
+    atlas
+        .declare_interface(
+            LIAISON_CAPABILITY_ID,
+            LIAISON_CONTRACT_ID,
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                LIAISON_CAP_TOML,
+                "robonix.contracts.SystemLiaison",
+                "/robonix.contracts.SystemLiaison/SubmitTask",
+            ),
+        )
+        .await
+        .context("declare liaison gRPC interface")?;
+    log::info!("registered as '{LIAISON_CAPABILITY_ID}', SystemLiaison gRPC on :{listen_port}");
+    eprintln!("robonix-liaison ready on :{listen_port}  (pilot_default={pilot_http})");
 
-    // ── Optional: SpeechBridge ────────────────────────────────────────────────
-    // TODO(speech-owner): uncomment once SpeechBridge is implemented.
-    //
-    // if std::env::var("ROBONIX_LIAISON_SPEECH").as_deref() == Ok("1") {
-    //     let bridge = SpeechBridge { sdk: Arc::new(Mutex::new(sdk)), pipeline: Arc::clone(&pipeline) };
-    //     tokio::spawn(bridge.run());
-    // }
+    {
+        let mut hb = atlas.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(20));
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                if let Err(e) = hb.heartbeat(LIAISON_CAPABILITY_ID).await {
+                    log::warn!("heartbeat failed: {e:#}");
+                }
+            }
+        });
+    }
 
-    // ── Optional: stdin text loop (headless / pipe fallback) ──────────────────
+    let atlas = Arc::new(Mutex::new(atlas));
+    let pipeline = Arc::new(LiaisonPipeline::new(pilot_http.clone(), Arc::clone(&atlas)));
+
     let source = std::env::var("ROBONIX_LIAISON_SOURCE").unwrap_or_default();
     let text_handle: Option<tokio::task::JoinHandle<Result<()>>> = if source == "text" {
         log::info!("activating stdin text loop (headless mode)");
@@ -312,10 +481,13 @@ async fn main() -> Result<()> {
         None
     };
 
-    // ── gRPC server (always running) ──────────────────────────────────────────
-    let svc = LiaisonServiceImpl { pipeline };
+    let svc = LiaisonServiceImpl {
+        pipeline,
+        atlas: Arc::clone(&atlas),
+        pilot_endpoint_default: pilot_http,
+    };
     let server = tonic::transport::Server::builder()
-        .add_service(SrvLiaisonServer::new(svc))
+        .add_service(SystemLiaisonServer::new(svc))
         .serve(listen_addr);
 
     if let Some(handle) = text_handle {
@@ -330,9 +502,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-fn resolve_endpoint(vars: &[&str], default: &str) -> String {
+fn env_first(vars: &[&str], default: &str) -> String {
     for v in vars {
         if let Ok(val) = std::env::var(v)
             && !val.is_empty()
@@ -348,4 +518,45 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_user_id_fills_default_for_text() {
+        let mut t = Task {
+            task_id: "t".into(),
+            session_id: "s".into(),
+            source: 0,
+            text: "hi".into(),
+            audio_data: vec![],
+            context_json: String::new(),
+            timestamp_ms: 0,
+        };
+        ensure_user_id(&mut t);
+        let v: serde_json::Value = serde_json::from_str(&t.context_json).unwrap();
+        let user_id = v["user_id"].as_str().unwrap();
+        assert!(user_id.starts_with("local:"));
+        assert_eq!(v["modality"], "text");
+    }
+
+    #[test]
+    fn ensure_user_id_preserves_caller_value() {
+        let mut t = Task {
+            task_id: "t".into(),
+            session_id: "s".into(),
+            source: 1,
+            text: "hi".into(),
+            audio_data: vec![],
+            context_json: r#"{"foo":"bar","user_id":"voice:alice"}"#.into(),
+            timestamp_ms: 0,
+        };
+        ensure_user_id(&mut t);
+        let v: serde_json::Value = serde_json::from_str(&t.context_json).unwrap();
+        assert_eq!(v["modality"], "voice");
+        assert_eq!(v["user_id"], "voice:alice");
+        assert_eq!(v["foo"], "bar");
+    }
 }
