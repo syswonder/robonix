@@ -70,7 +70,19 @@ pub const KIND_ERROR: u32 = 10;
 /// `Task.source` enum: TEXT=0 AUDIO=1 API=2.
 const INTENT_SOURCE_AUDIO: u32 = 1;
 
-const DEFAULT_RECORD_SECONDS: u32 = 5;
+/// Hard ceiling on a single voice turn. Real end-of-turn comes from
+/// the silence-VAD in the mic pump (see VAD_* below); this just keeps
+/// a stuck mic from monopolizing the session forever.
+const DEFAULT_RECORD_SECONDS: u32 = 30;
+
+/// Silence-VAD parameters. After we've heard a chunk above
+/// `VAD_SPEECH_RMS`, count consecutive sub-threshold chunks; once the
+/// silence lasts `VAD_END_SILENCE_SECS`, treat the utterance as done
+/// and close the ASR request stream so the server flushes its final.
+/// Tuned for 16 kHz mono s16le speech: speech RMS is typically 1k–8k,
+/// background noise sits around 50–300, so 500 is a comfortable gap.
+const VAD_SPEECH_RMS: f32 = 500.0;
+const VAD_END_SILENCE_SECS: f32 = 1.2;
 const DEFAULT_ASR_LANGUAGE: &str = "";
 const DEFAULT_AUDIO_ENCODING: &str = "pcm_s16le";
 const DEFAULT_AUDIO_SAMPLE_RATE: u32 = 16_000;
@@ -162,7 +174,7 @@ pub async fn start_voice_session(
             KIND_SESSION_STARTED,
             &session_id,
             &format!(
-                "voice session started (record={record_seconds}s, tts={}, lang={})",
+                "voice session started (vad, record≤{record_seconds}s, tts={}, lang={})",
                 req.tts_enabled,
                 if language.is_empty() {
                     "auto"
@@ -428,11 +440,16 @@ async fn stream_capture_and_recognize(
     let _language_owned = language.to_string();
 
     // Mic pump — drains the mic gRPC stream into the asr_req sender,
-    // accumulates raw PCM, stops on max_seconds / mic EOF / asr_req
-    // closing (which is what happens once the outer task sees a FINAL
-    // event and drops the receiver).
+    // accumulates raw PCM, runs silence-VAD on each chunk, stops on
+    // (whichever first):
+    //   1. max_seconds hard ceiling
+    //   2. mic stream EOF / error
+    //   3. silence-VAD end-of-utterance (after speech then quiet)
+    //   4. outer task drops asr_req_rx (server already returned FINAL)
     let pump_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(max_seconds as u64);
+        let mut has_spoken = false;
+        let mut silence_secs: f32 = 0.0;
         loop {
             if tokio::time::Instant::now() >= deadline {
                 break;
@@ -440,11 +457,23 @@ async fn stream_capture_and_recognize(
             let remaining = deadline - tokio::time::Instant::now();
             match tokio::time::timeout(remaining, mic_stream.message()).await {
                 Ok(Ok(Some(chunk))) => {
+                    let dur = chunk.duration_s.max(0.0);
+                    let rms = pcm_rms_s16le(&chunk.data);
+                    if rms >= VAD_SPEECH_RMS {
+                        has_spoken = true;
+                        silence_secs = 0.0;
+                    } else if has_spoken {
+                        silence_secs += dur;
+                    }
                     pcm_buf_for_pump.lock().await.extend_from_slice(&chunk.data);
                     let asr_chunk = crate::pb::asr::AsrAudioChunk { chunk: Some(chunk) };
                     if asr_req_tx.send(asr_chunk).await.is_err() {
-                        // outer task closed the request stream — final
-                        // received or session aborted.
+                        break;
+                    }
+                    if has_spoken && silence_secs >= VAD_END_SILENCE_SECS {
+                        // Drops asr_req_tx → server sees stream EOF →
+                        // FunASR emits its is_final flush → outer loop
+                        // collects the final transcript and breaks.
                         break;
                     }
                 }
@@ -873,6 +902,21 @@ fn now_ns() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64
+}
+
+/// RMS amplitude of a 16-bit little-endian PCM buffer. Used by the
+/// silence-VAD in the mic pump. Returns 0.0 on empty / odd-length input.
+fn pcm_rms_s16le(data: &[u8]) -> f32 {
+    let n = data.len() / 2;
+    if n == 0 {
+        return 0.0;
+    }
+    let sum_sq: f64 = data
+        .chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f64)
+        .map(|s| s * s)
+        .sum();
+    (sum_sq / n as f64).sqrt() as f32
 }
 
 #[cfg(test)]

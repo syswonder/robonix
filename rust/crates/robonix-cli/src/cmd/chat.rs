@@ -153,7 +153,7 @@ async fn run_tui(
         role: Role::Status,
         text: format!(
             "Connected to Liaison at {liaison_endpoint} as {local_user}. \
-             Enter = send · Ctrl+V = start voice (5s) · Esc = abort turn · Ctrl+C = quit."
+             Enter = send · Ctrl+V = start voice (auto end on silence) · Esc = abort turn · Ctrl+C = quit."
         ),
     }]));
     let mut input = String::new();
@@ -172,7 +172,7 @@ async fn run_tui(
                 break;
             }
 
-            // Ctrl+V → push-to-talk voice session (5s default).
+            // Ctrl+V → push-to-talk voice session (auto-ends on silence).
             if !busy
                 && key.modifiers.contains(KeyModifiers::CONTROL)
                 && key.code == KeyCode::Char('v')
@@ -781,11 +781,10 @@ fn draw(
             .scroll((auto_scroll, 0));
         f.render_widget(history, chunks[0]);
 
-        let input_widget = Paragraph::new(input.to_string()).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" > Enter = send · Ctrl+V = voice (5s) · Esc = abort · Ctrl+C = quit "),
-        );
+        let input_widget =
+            Paragraph::new(input.to_string()).block(Block::default().borders(Borders::ALL).title(
+                " > Enter = send · Ctrl+V = voice (auto end) · Esc = abort · Ctrl+C = quit ",
+            ));
         f.render_widget(input_widget, chunks[1]);
     })?;
     Ok(())
