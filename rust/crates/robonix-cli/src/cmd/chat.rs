@@ -548,9 +548,9 @@ fn voice_language() -> String {
 }
 
 fn voice_tts_enabled() -> bool {
-    matches!(
+    !matches!(
         std::env::var("ROBONIX_CHAT_VOICE_TTS").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+        Ok("0") | Ok("false") | Ok("no") | Ok("off")
     )
 }
 

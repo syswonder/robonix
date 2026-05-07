@@ -233,12 +233,11 @@ class FunASRStreamingBackend:
 
         model_name = os.environ.get("FUNASR_MODEL", "paraformer-zh-streaming")
         chunk_size_str = os.environ.get("FUNASR_CHUNK_SIZE", "[0,10,5]")
-        # Default CPU. paraformer-zh-streaming is tiny (~80 MB) and fast
-        # enough on a single CPU thread for real-time. CUDA is opt-in
-        # because robonix's GPU is usually shared with scene's YOLO+SAM+
-        # CLIP stack and trying to wedge whisper / FunASR in alongside
-        # produces `CUDA error: out of memory` at the first inference.
-        device = os.environ.get("FUNASR_DEVICE", "cpu")
+        # Try GPU first, fall back to CPU on init failure (typically
+        # `CUDA error: out of memory` because scene's YOLO+SAM+CLIP
+        # already saturated the card). FUNASR_DEVICE pins one device
+        # explicitly and skips the fallback.
+        device_pref = os.environ.get("FUNASR_DEVICE", "auto")
         try:
             self.chunk_size = json.loads(chunk_size_str)
         except json.JSONDecodeError:
@@ -246,14 +245,37 @@ class FunASRStreamingBackend:
 
         self.chunk_stride = self.chunk_size[1] * 960
 
-        log.info("Loading FunASR model %s on %s (chunk_size=%s, stride=%d samples)...",
-                 model_name, device, self.chunk_size, self.chunk_stride)
-        self.model = AutoModel(
-            model=model_name,
-            device=device,
-            hub_kwargs={"local_files_only": True},
+        if device_pref == "auto":
+            try:
+                import torch
+                cuda_available = torch.cuda.is_available()
+            except Exception:
+                cuda_available = False
+            candidates = ["cuda", "cpu"] if cuda_available else ["cpu"]
+        else:
+            candidates = [device_pref]
+
+        last_err = None
+        for device in candidates:
+            log.info(
+                "Loading FunASR model %s on %s (chunk_size=%s, stride=%d samples)...",
+                model_name, device, self.chunk_size, self.chunk_stride,
+            )
+            try:
+                self.model = AutoModel(
+                    model=model_name,
+                    device=device,
+                    hub_kwargs={"local_files_only": True},
+                )
+                self.device = device
+                log.info("FunASR model loaded on %s.", device)
+                return
+            except Exception as e:
+                last_err = e
+                log.warning("FunASR load on %s failed: %s", device, e)
+        raise RuntimeError(
+            f"FunASR failed to load on any of {candidates}: {last_err}"
         )
-        log.info("FunASR model loaded.")
 
     def recognize_chunk(
         self,
