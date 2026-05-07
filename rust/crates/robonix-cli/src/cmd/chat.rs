@@ -125,16 +125,22 @@ pub async fn execute(server: &str) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let chat_cfg = match ensure_audio_devices(&atlas_endpoint, &mut terminal).await {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            terminal::disable_raw_mode()?;
-            terminal.backend_mut().execute(LeaveAlternateScreen)?;
-            return Err(e);
-        }
-    };
+    // ensure_audio_devices is best-effort: if atlas is unreachable, no
+    // audio providers are registered, or the user skips with Esc, we
+    // surface the reason as a warning in the chat history and continue
+    // — text chat works without any audio path. Hard errors here would
+    // mean a single-user typo at audio-pick time kills the whole TUI.
+    let (chat_cfg, audio_warnings) =
+        match ensure_audio_devices(&atlas_endpoint, &mut terminal).await {
+            Ok(v) => v,
+            Err(e) => {
+                terminal::disable_raw_mode()?;
+                terminal.backend_mut().execute(LeaveAlternateScreen)?;
+                return Err(e);
+            }
+        };
 
-    let result = run_tui(&mut terminal, &liaison_endpoint, &chat_cfg).await;
+    let result = run_tui(&mut terminal, &liaison_endpoint, &chat_cfg, &audio_warnings).await;
 
     terminal::disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
@@ -208,62 +214,81 @@ async fn try_discover_once(atlas_endpoint: &str, contract_id: &str) -> Result<St
 // preference (which physical box's audio do I want when sitting at this
 // terminal), not a per-deployment server setting.
 
+/// Best-effort audio device discovery. Anything that goes wrong here
+/// (atlas unreachable, no providers registered, user pressed Esc) is
+/// downgraded to a chat-history warning — text mode keeps working.
+/// Voice attempts via Ctrl+V will then fail at session start with a
+/// clear "no provider" error rather than crashing the whole TUI.
 async fn ensure_audio_devices(
     atlas_endpoint: &str,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-) -> Result<ChatConfig> {
+) -> Result<(ChatConfig, Vec<String>)> {
     let mut cfg = load_chat_config();
+    let mut warnings: Vec<String> = Vec::new();
 
     let env_set = |key: &str| std::env::var(key).ok().filter(|s| !s.is_empty()).is_some();
     let need_mic = !env_set("ROBONIX_CHAT_MIC_NODE") && cfg.mic_cap_id.is_none();
     let need_speaker = !env_set("ROBONIX_CHAT_SPEAKER_NODE") && cfg.speaker_cap_id.is_none();
     if !need_mic && !need_speaker {
-        return Ok(cfg);
+        return Ok((cfg, warnings));
     }
 
-    let mut atlas = AtlasClient::connect(atlas_endpoint)
-        .await
-        .with_context(|| format!("connect to atlas at '{atlas_endpoint}' for audio device pick"))?;
+    let mut atlas = match AtlasClient::connect(atlas_endpoint).await {
+        Ok(c) => c,
+        Err(e) => {
+            warnings.push(format!(
+                "audio device pick skipped — atlas unreachable at {atlas_endpoint}: {e:#}. \
+                 Text mode still works; voice (Ctrl+V) will fail until atlas is up."
+            ));
+            return Ok((cfg, warnings));
+        }
+    };
 
     if need_mic {
-        let providers = atlas
-            .query_capabilities("", MIC_CONTRACT, atlas_pb::Transport::Grpc)
-            .await?;
-        let cap_id = pick_provider(terminal, "mic", MIC_CONTRACT, &providers)?;
-        cfg.mic_cap_id = Some(cap_id);
+        match try_pick(&mut atlas, terminal, "mic", MIC_CONTRACT).await {
+            Ok(Some(cap_id)) => cfg.mic_cap_id = Some(cap_id),
+            Ok(None) => warnings.push(
+                "no mic provider in atlas — voice input disabled (text mode unaffected)".into(),
+            ),
+            Err(e) => warnings.push(format!("mic pick: {e:#}")),
+        }
     }
     if need_speaker {
-        let providers = atlas
-            .query_capabilities("", SPEAKER_CONTRACT, atlas_pb::Transport::Grpc)
-            .await?;
-        let cap_id = pick_provider(terminal, "speaker", SPEAKER_CONTRACT, &providers)?;
-        cfg.speaker_cap_id = Some(cap_id);
+        match try_pick(&mut atlas, terminal, "speaker", SPEAKER_CONTRACT).await {
+            Ok(Some(cap_id)) => cfg.speaker_cap_id = Some(cap_id),
+            Ok(None) => warnings.push(
+                "no speaker provider in atlas — voice playback disabled (text mode unaffected)"
+                    .into(),
+            ),
+            Err(e) => warnings.push(format!("speaker pick: {e:#}")),
+        }
     }
     if let Err(e) = save_chat_config(&cfg) {
         log::warn!("could not save chat config: {e:#}");
     }
-    Ok(cfg)
+    Ok((cfg, warnings))
 }
 
-fn pick_provider(
+/// `Ok(Some(cap_id))` = picked, `Ok(None)` = no providers / cancelled
+/// (caller surfaces a warning instead of bailing).
+async fn try_pick(
+    atlas: &mut AtlasClient,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     label: &str,
     contract: &str,
-    providers: &[atlas_pb::CapabilityRecord],
-) -> Result<String> {
+) -> Result<Option<String>> {
+    let providers = atlas
+        .query_capabilities("", contract, atlas_pb::Transport::Grpc)
+        .await?;
     if providers.is_empty() {
-        anyhow::bail!(
-            "no provider for {contract} ({label}). Is the audio package running? \
-             rbnx boot first, or set ROBONIX_CHAT_{}_NODE explicitly.",
-            label.to_uppercase()
-        );
+        return Ok(None);
     }
     if providers.len() == 1 {
         let cap_id = providers[0].capability_id.clone();
         flash_picker_message(terminal, &format!("auto-selected {label}: {cap_id}"))?;
-        return Ok(cap_id);
+        return Ok(Some(cap_id));
     }
-    pick_tui(terminal, label, contract, providers)
+    pick_tui(terminal, label, contract, &providers)
 }
 
 fn pick_tui(
@@ -271,7 +296,7 @@ fn pick_tui(
     label: &str,
     contract: &str,
     providers: &[atlas_pb::CapabilityRecord],
-) -> Result<String> {
+) -> Result<Option<String>> {
     let mut idx = 0usize;
     loop {
         terminal.draw(|f| {
@@ -302,7 +327,7 @@ fn pick_tui(
                 .collect();
             let body = Paragraph::new(lines)
                 .block(Block::default().borders(Borders::ALL).title(format!(
-                    " choose {label} provider ({contract}) — ↑↓ select · Enter confirm · q quit "
+                    " choose {label} provider ({contract}) — ↑↓ select · Enter confirm · Esc skip "
                 )))
                 .wrap(Wrap { trim: false });
             f.render_widget(body, area);
@@ -315,10 +340,8 @@ fn pick_tui(
                 KeyCode::Down | KeyCode::Char('j') if idx + 1 < providers.len() => {
                     idx += 1;
                 }
-                KeyCode::Enter => return Ok(providers[idx].capability_id.clone()),
-                KeyCode::Char('q') | KeyCode::Esc => {
-                    anyhow::bail!("audio device pick cancelled");
-                }
+                KeyCode::Enter => return Ok(Some(providers[idx].capability_id.clone())),
+                KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
                 _ => {}
             }
         }
@@ -345,15 +368,24 @@ async fn run_tui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     liaison_endpoint: &str,
     chat_cfg: &ChatConfig,
+    audio_warnings: &[String],
 ) -> Result<()> {
     let local_user = format!("local:{}", whoami_username());
-    let messages: Rc<RefCell<Vec<ChatMessage>>> = Rc::new(RefCell::new(vec![ChatMessage {
+    let mut initial: Vec<ChatMessage> = Vec::with_capacity(1 + audio_warnings.len());
+    initial.push(ChatMessage {
         role: Role::Status,
         text: format!(
             "Connected to Liaison at {liaison_endpoint} as {local_user}. \
              Enter = send · Ctrl+V = start voice (auto end on silence) · Esc = abort turn · Ctrl+C = quit."
         ),
-    }]));
+    });
+    for w in audio_warnings {
+        initial.push(ChatMessage {
+            role: Role::Status,
+            text: w.clone(),
+        });
+    }
+    let messages: Rc<RefCell<Vec<ChatMessage>>> = Rc::new(RefCell::new(initial));
     let mut input = String::new();
     let mut scroll: u16 = 0;
     let mut busy = false;
