@@ -499,14 +499,16 @@ async fn stream_capture_and_recognize(
 
     // FunASR's paraformer-zh-streaming emits *incremental* partials —
     // each event carries only the words decoded from the most recent
-    // chunk window, not a cumulative transcript. The server's final
-    // flush (`recognize_chunk(b"", is_final=True)`) often returns an
-    // empty result so we never see an event with `is_final=true`.
+    // chunk window, not a cumulative transcript. The is_final flush
+    // (`recognize_chunk(b"", is_final=True)`) emits the residual
+    // window's text the same way (sometimes empty).
     //
-    // Strategy: prefer the server's FINAL text when we get one; fall
-    // back to concatenated partials otherwise. Either way we hand a
-    // single non-empty transcript to Pilot.
-    let mut transcript = String::new();
+    // Strategy: append every non-empty event text into `accumulated`,
+    // and use the accumulator as the final transcript. The server's
+    // is_final flag only tells us when to stop the loop — it does
+    // NOT mean "this event's text is the whole utterance"; treating
+    // it that way drops every prior partial and leaves the user with
+    // just the last syllable.
     let mut accumulated = String::new();
     let mut last_confidence = 0.0_f32;
     while let Some(ev_or_err) = asr_events.next().await {
@@ -519,35 +521,23 @@ async fn stream_capture_and_recognize(
         if !text.is_empty() {
             accumulated.push_str(&text);
             last_confidence = ev.confidence;
+            if !is_final {
+                let _ = tx
+                    .send(Ok(event_text(
+                        KIND_ASR_PARTIAL,
+                        session_id,
+                        &text,
+                        ev.confidence,
+                    )))
+                    .await;
+            }
         }
         if is_final {
-            transcript = if text.is_empty() {
-                accumulated.clone()
-            } else {
-                text.clone()
-            };
-            let _ = tx
-                .send(Ok(event_text(
-                    KIND_ASR_FINAL,
-                    session_id,
-                    &transcript,
-                    ev.confidence,
-                )))
-                .await;
             break;
-        } else if !text.is_empty() {
-            let _ = tx
-                .send(Ok(event_text(
-                    KIND_ASR_PARTIAL,
-                    session_id,
-                    &text,
-                    ev.confidence,
-                )))
-                .await;
         }
     }
-    if transcript.is_empty() && !accumulated.is_empty() {
-        transcript = accumulated;
+    let transcript = accumulated;
+    if !transcript.is_empty() {
         let _ = tx
             .send(Ok(event_text(
                 KIND_ASR_FINAL,

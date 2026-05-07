@@ -624,6 +624,18 @@ pub async fn execute(
                          refusing to spawn (would shadow the existing process)"
                     );
                 }
+
+                // Required-arg validation before spawn. Without this, an empty
+                // `${VLM_BASE_URL}` (forgot to source the env file) makes pilot
+                // start, register_capability briefly, then die with `missing
+                // required field 'vlm.upstream'`. Boot still printed `[ OK ]`
+                // because we never re-checked. Fail fast at spawn time and tell
+                // the user exactly what's missing.
+                if let Err(e) = require_system_args(name, &args) {
+                    output::boot_fail(name, &e);
+                    anyhow::bail!("system/{name}: {e}");
+                }
+
                 let sp = spawn_system_binary(&log_dir, name, bin, &args).await?;
                 children.push(sp);
                 persist_state(
@@ -926,6 +938,46 @@ fn persist_state(
 /// Render a one-line "what is this binary doing" string for the boot
 /// log. Pulls out the high-signal flags (port, vlm model+host) and
 /// drops noisy ones (--capabilities, --log, raw API keys).
+/// Per-binary required-arg sanity check, run before spawning.
+///
+/// Pilot needs all three VLM fields non-empty. The manifest renders
+/// `${VLM_BASE_URL}` etc. literally when the env var isn't set, which
+/// produces `--vlm-upstream ""` — pilot then registers briefly, dies
+/// with `missing required field 'vlm.upstream'`, and boot reports
+/// `[ OK ]` because the failure happens after spawn-and-register. Catch
+/// it here so the user sees a `[FAIL]` line naming the bad keys.
+fn require_system_args(name: &str, args: &[String]) -> std::result::Result<(), String> {
+    if name != "pilot" {
+        return Ok(());
+    }
+    let need = [
+        ("--vlm-upstream", "vlm.upstream / VLM_BASE_URL"),
+        ("--vlm-api-key", "vlm.api_key / VLM_API_KEY"),
+        ("--vlm-model", "vlm.model / VLM_MODEL"),
+    ];
+    let mut missing: Vec<&str> = Vec::new();
+    for (flag, label) in need {
+        let val = args
+            .iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1));
+        match val {
+            Some(v) if !v.is_empty() => {}
+            _ => missing.push(label),
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "missing required pilot config: {}. Set in manifest under \
+             system: pilot: vlm: {{...}} or via env (source your .zshrc / \
+             inline-prepend VLM_BASE_URL=… VLM_API_KEY=… VLM_MODEL=…)",
+            missing.join(", "),
+        ))
+    }
+}
+
 fn system_boot_detail(name: &str, args: &[String]) -> String {
     let mut listen: Option<&str> = None;
     let mut vlm_upstream: Option<&str> = None;
