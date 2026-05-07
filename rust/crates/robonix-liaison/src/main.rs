@@ -42,7 +42,7 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-const LIAISON_CAPABILITY_ID: &str = "com.robonix.runtime.liaison";
+const LIAISON_CAPABILITY_ID: &str = "com.robonix.system.liaison";
 const LIAISON_NAMESPACE: &str = "robonix/system/liaison";
 const LIAISON_CONTRACT_ID: &str = "robonix/system/liaison";
 const LIAISON_CAP_TOML: &str = "capabilities/system/liaison.v1.toml";
@@ -453,6 +453,16 @@ async fn main() -> Result<()> {
         )
         .await
         .context("declare liaison gRPC interface")?;
+    // Liaison has no Driver(CMD_INIT/CMD_UP) handshake — it's a Rust binary
+    // that's fully ready as soon as the gRPC server is listening. Push the
+    // state explicitly so `rbnx caps` shows ONLINE instead of stopping at the
+    // legacy-fallback INITIALIZED that atlas infers from the first declare.
+    if let Err(e) = atlas
+        .set_capability_state(LIAISON_CAPABILITY_ID, atlas_pb::CapabilityState::StateOnline, "")
+        .await
+    {
+        log::warn!("SetCapabilityState(ONLINE) on {LIAISON_CAPABILITY_ID} failed: {e:#}");
+    }
     log::info!("registered as '{LIAISON_CAPABILITY_ID}', SystemLiaison gRPC on :{listen_port}");
     eprintln!("robonix-liaison ready on :{listen_port}  (pilot_default={pilot_http})");
 

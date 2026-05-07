@@ -489,17 +489,14 @@ pub async fn execute(
         }
     }
 
-    output::action(
-        "Deploying",
-        &format!(
-            "{} (manifest: {})",
-            if deploy.name.is_empty() {
-                "robonix"
-            } else {
-                &deploy.name
-            },
-            manifest_path.display()
-        ),
+    output::boot_banner();
+    output::boot_start(
+        if deploy.name.is_empty() {
+            "robonix"
+        } else {
+            &deploy.name
+        },
+        &manifest_path.display().to_string(),
     );
 
     let mut children: Vec<Spawned> = Vec::new();
@@ -589,6 +586,27 @@ pub async fn execute(
                     args.push("--capabilities".into());
                     args.push(p.clone());
                 }
+                // Refuse to spawn if the listen port is already taken — without
+                // this, the spawned binary silently dies on bind() failure but
+                // boot keeps going against whoever already owns the port (often
+                // a stale debug-build atlas/executor/etc from a prior aborted
+                // run). The fallout is mysterious: register_capability hits an
+                // atlas that doesn't have your takeover/state-push fixes,
+                // endpoints route to dead orphan gRPC servers, …
+                if let Some(listen) = system_listen(name, deploy.system.get(*name))
+                    && let Err(e) = port_is_free(&listen)
+                {
+                    output::boot_fail(
+                        name,
+                        &format!("listen address '{listen}' is taken: {e:#}. \
+                                  Stop the running process (try `bash sim/stop.sh` \
+                                  or `pkill -f robonix-{name}`) and retry."),
+                    );
+                    anyhow::bail!(
+                        "system/{name}: listen address '{listen}' is already in use; \
+                         refusing to spawn (would shadow the existing process)"
+                    );
+                }
                 let sp = spawn_system_binary(&log_dir, name, bin, &args).await?;
                 children.push(sp);
                 persist_state(
@@ -620,7 +638,7 @@ pub async fn execute(
         // and skipped, not fatal — manifests can declare optional services
         // that aren't installed yet (e.g. liaison while it's being ported).
         if !skip_system {
-            let builtin_names: &[&str] = &["atlas", "executor", "pilot"];
+            let builtin_names: &[&str] = &["atlas", "executor", "pilot", "liaison"];
             for (key, value) in &deploy.system {
                 if builtin_names.contains(&key.as_str()) {
                     continue;
@@ -885,6 +903,46 @@ fn system_boot_detail(name: &str, args: &[String]) -> String {
 /// elsewhere). Consumers that don't carry their own `atlas:` field inherit
 /// from this so the manifest doesn't have to repeat the address. An
 /// explicit per-block `atlas:` still wins.
+/// Extract the `host:port` string each system binary will try to bind.
+/// Used by the pre-spawn port-availability check. Returns None for
+/// services we don't gate on (or whose listen field is absent — caller
+/// then doesn't pre-check).
+fn system_listen(name: &str, cfg: Option<&serde_yaml::Value>) -> Option<String> {
+    let map = cfg?.as_mapping()?;
+    let s = map
+        .get(serde_yaml::Value::String("listen".into()))?
+        .as_str()?;
+    let trimmed = s.trim();
+    if trimmed.is_empty() || !matches!(name, "atlas" | "executor" | "pilot" | "liaison") {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Probe a host:port. Returns `Ok(())` when nothing is listening (we can
+/// safely bind), `Err` describing the live owner otherwise. This is a
+/// race-prone pre-check (someone else can grab the port between probe
+/// and spawn) but in practice the failure mode it catches — a stale
+/// previous-boot daemon — has been alive for minutes, not seconds, so
+/// a single connect attempt is enough.
+fn port_is_free(listen: &str) -> std::result::Result<(), anyhow::Error> {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let addrs: Vec<_> = listen
+        .to_socket_addrs()
+        .with_context(|| format!("parse listen='{listen}' as socket addr"))?
+        .collect();
+    for addr in &addrs {
+        // 200 ms is enough for a local connect; if a daemon is alive on
+        // 127.0.0.1 the SYN-ACK is sub-ms.
+        if TcpStream::connect_timeout(addr, std::time::Duration::from_millis(200)).is_ok() {
+            return Err(anyhow::anyhow!(
+                "something is already listening on {addr}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn system_cli_args(
     name: &str,
     cfg: Option<&serde_yaml::Value>,
@@ -998,59 +1056,155 @@ async fn spawn_and_init(
     .await?;
     let pkg_label = sp.name.clone();
 
+    // If the package's manifest declared a `capability_id:`, pass it
+    // through so wait_for_registration can match exactly instead of
+    // substring-fuzzy on the package name. Skip silently when missing
+    // (most packages don't need it; the convention `com.robonix.<comp>.<pkg>`
+    // matches the package name verbatim and the fuzzy path works fine).
+    let pkg_path = match resolve_entry_path(entry, cache_root, manifest_dir) {
+        Ok(p) => p,
+        Err(_) => PathBuf::new(),
+    };
+    let expected_cap_id: Option<String> = if pkg_path.is_dir() {
+        robonix_cli::manifest::detect_and_load(&pkg_path)
+            .ok()
+            .and_then(|d| d.manifest.capability_id)
+    } else {
+        None
+    };
+
+    // Once the wrapper is up, every error path below must SIGKILL the
+    // PGID before bailing — otherwise `?` returns the spawned process to
+    // a dead Spawned (which itself has no killing Drop), the caller's
+    // teardown loop never sees it (`children.push(sp)` only runs after
+    // this fn succeeds), and the orphan keeps holding whatever the
+    // package opened (e.g. memsearch's milvus DB lock, executor's gRPC
+    // port, …). Reaping here keeps boot recoverable: a fresh `rbnx boot`
+    // immediately after a failed one finds a clean process table.
+    let pgid = sp.pgid;
+    let reap = || {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pgid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    };
+
     let (cap_id, driver_contract) =
-        wait_for_registration(atlas, &before, &pkg_label, component).await?;
+        match wait_for_registration(
+            atlas,
+            &before,
+            &pkg_label,
+            component,
+            log_dir,
+            expected_cap_id.as_deref(),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                reap();
+                return Err(e);
+            }
+        };
 
     let Some(driver_contract) = driver_contract else {
-        // Legacy / no-lifecycle package: registration alone is enough.
         output::boot_ok(short_label(&pkg_label, component), &format!("cap={cap_id}"));
         return Ok(sp);
     };
 
     let config_json = serde_json::to_string(&entry.config).unwrap_or_else(|_| "{}".into());
 
-    // Driver(CMD_INIT) — every kind goes through this. Skills stop here
-    // (executor will send CMD_UP just-in-time on the first MCP call);
-    // primitives and services follow with CMD_UP below to reach ONLINE.
-    let init_state = call_driver_cmd(
-        atlas,
-        &cap_id,
-        &driver_contract,
-        component,
-        &pkg_label,
-        CMD_INIT,
-        config_json.clone(),
+    let display_label = short_label(&pkg_label, component);
+    let init_state = match with_spinner(
+        display_label,
+        "driver(INIT)…",
+        call_driver_cmd(
+            atlas,
+            &cap_id,
+            &driver_contract,
+            component,
+            &pkg_label,
+            CMD_INIT,
+            config_json.clone(),
+        ),
     )
-    .await?;
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            reap();
+            return Err(e);
+        }
+    };
 
     if component == "skill" {
         output::boot_ok(
-            short_label(&pkg_label, component),
+            display_label,
             &format!("cap={cap_id}  driver(INIT)={init_state}"),
         );
         return Ok(sp);
     }
 
-    // Primitive / service: auto-promote to ONLINE. Capability framework
-    // treats "no on_up handler" as a no-op success for these kinds, so
-    // existing packages with only an on_init handler keep working — the
-    // CMD_UP just exists to push the lifecycle state past INITIALIZED.
-    let up_state = call_driver_cmd(
-        atlas,
-        &cap_id,
-        &driver_contract,
-        component,
-        &pkg_label,
-        CMD_UP,
-        config_json,
+    let up_state = match with_spinner(
+        display_label,
+        "driver(UP)…",
+        call_driver_cmd(
+            atlas,
+            &cap_id,
+            &driver_contract,
+            component,
+            &pkg_label,
+            CMD_UP,
+            config_json,
+        ),
     )
-    .await?;
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            reap();
+            return Err(e);
+        }
+    };
     output::boot_ok(
-        short_label(&pkg_label, component),
+        display_label,
         &format!("cap={cap_id}  driver(INIT)={init_state}  driver(UP)={up_state}"),
     );
 
     Ok(sp)
+}
+
+/// Run `fut` while animating the boot spinner so the user sees the
+/// `[ ⠙ ] name  msg_prefix N.Ns` line update steadily even when the
+/// underlying RPC takes a while (Driver(CMD_INIT) for sensor-warm-up
+/// packages routinely sits at 30+ seconds). Without this the line goes
+/// silent right after `wait_for_registration` finishes and rbnx looks
+/// hung between OK lines.
+async fn with_spinner<F, T>(label: &str, msg_prefix: &str, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    use std::time::Instant;
+    let started = Instant::now();
+    let mut tick = tokio::time::interval(Duration::from_millis(100));
+    tick.tick().await; // first tick fires immediately; consume so the
+    // first redraw is delayed by 100 ms (no double-frame at t=0).
+    tokio::pin!(fut);
+    let mut frame: usize = 0;
+    loop {
+        tokio::select! {
+            res = &mut fut => return res,
+            _ = tick.tick() => {
+                let elapsed = started.elapsed().as_secs_f32();
+                output::boot_progress(
+                    label,
+                    &format!("{msg_prefix} {elapsed:>4.1}s"),
+                    frame,
+                );
+                frame = frame.wrapping_add(1);
+            }
+        }
+    }
 }
 
 /// Issue one Driver(cmd) RPC against a freshly-connected channel, then
@@ -1182,6 +1336,8 @@ async fn wait_for_registration(
     before: &HashSet<String>,
     pkg_label: &str,
     component: &str,
+    log_dir: &Path,
+    expected_cap_id: Option<&str>,
 ) -> Result<(String, Option<String>)> {
     // Render an in-place spinner so the user can see boot is
     // alive while atlas polls. Spinner ticks at SPINNER_TICK; we
@@ -1191,16 +1347,13 @@ async fn wait_for_registration(
     const SPINNER_TICK: Duration = Duration::from_millis(100);
     const POLLS_PER_TICK: u32 = 2; // poll atlas every 200 ms
     let started = Instant::now();
+    let started_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
     let deadline = started + DRIVER_REGISTER_TIMEOUT;
     let mut frame: usize = 0;
     let display_label = short_label(pkg_label, component);
-    // Heuristic to disambiguate when multiple new caps appear in the
-    // same poll window: prefer caps whose id contains the package's
-    // short name. Without this, an orphan from a previous boot
-    // (e.g. a leaked speech_service polling atlas in the background)
-    // can register against the new atlas and the first new cap we
-    // see is its `com.robonix.system.speech`, not the `memory` we
-    // were waiting on. Symptom: `[ OK ] memory cap=...system.speech`.
     let name_hint = display_label.to_lowercase();
     loop {
         let elapsed_s = started.elapsed().as_secs_f32();
@@ -1214,25 +1367,44 @@ async fn wait_for_registration(
                 .query_capabilities("", "", atlas_pb::Transport::Unspecified)
                 .await
                 .with_context(|| format!("[{component}/{pkg_label}] poll atlas"))?;
-            // First pass: prefer a cap whose id mentions the package
-            // name. Second pass: any cap not in `before` (legacy
-            // behaviour, kept for packages whose cap_id doesn't
-            // include the package name verbatim).
-            let mut name_match: Option<&atlas_pb::CapabilityRecord> = None;
-            let mut any_match: Option<&atlas_pb::CapabilityRecord> = None;
-            for rec in &records {
-                if before.contains(&rec.capability_id) {
-                    continue;
-                }
-                if any_match.is_none() {
-                    any_match = Some(rec);
-                }
-                if rec.capability_id.to_lowercase().contains(&name_hint) {
-                    name_match = Some(rec);
-                    break;
-                }
-            }
-            if let Some(rec) = name_match.or(any_match) {
+            // Match strictly by package name. Earlier code fell back to
+            // "any cap that wasn't in `before`" which silently pointed at
+            // the wrong cap (e.g. system.speech) whenever the spawned
+            // process hadn't registered yet but some other cap's regular
+            // 20-s heartbeat had just bumped its last_heartbeat past
+            // `started_ms`. Result: rbnx would call Driver(CMD_INIT) on
+            // the wrong cap's endpoint and report a successful boot
+            // against `cap=...wrong_id`. Strict name-match is fine — every
+            // robonix package's cap_id follows `com.robonix.<component>.<name>`
+            // by convention, and `wait_for_registration` retries until
+            // the actual registration lands or DRIVER_REGISTER_TIMEOUT
+            // (60 s) fires; the user gets a clean timeout pointing at the
+            // package's log instead of a misleading [ OK ].
+            //
+            // The `is_fresh` heartbeat check below still gates the match,
+            // so an orphan that happens to share the package name (e.g.
+            // a leaked previous `com.robonix.system.scene` that's still
+            // heartbeating to atlas) doesn't claim the slot — the new
+            // spawn's takeover bumps last_heartbeat past started_ms,
+            // which the orphan's stale heartbeat won't.
+            let is_fresh = |rec: &atlas_pb::CapabilityRecord| -> bool {
+                !before.contains(&rec.capability_id)
+                    || rec.last_heartbeat_ms >= started_ms
+            };
+            // Manifest-declared cap_id wins when the package opted in.
+            // Falls back to the package-name substring heuristic for
+            // packages that didn't (i.e. when their cap_id mentions the
+            // package name verbatim, which is the canonical convention).
+            let match_rec = if let Some(want) = expected_cap_id {
+                records
+                    .iter()
+                    .find(|rec| rec.capability_id == want && is_fresh(rec))
+            } else {
+                records.iter().find(|rec| {
+                    is_fresh(rec) && rec.capability_id.to_lowercase().contains(&name_hint)
+                })
+            };
+            if let Some(rec) = match_rec {
                 let driver = rec.interfaces.iter().find(|iface| {
                     iface.transport == atlas_pb::Transport::Grpc as i32
                         && iface.contract_id.ends_with("/driver")
@@ -1244,13 +1416,19 @@ async fn wait_for_registration(
             }
         }
         if Instant::now() >= deadline {
+            let log_file = log_path(log_dir, pkg_label);
             output::boot_fail(
                 display_label,
-                &format!("registration timeout after {:?}", DRIVER_REGISTER_TIMEOUT),
+                &format!(
+                    "registration timeout after {:?} — see {}",
+                    DRIVER_REGISTER_TIMEOUT,
+                    log_file.display()
+                ),
             );
             anyhow::bail!(
-                "[{component}/{pkg_label}] timed out after {:?} — package never registered a cap with atlas. Check its log.",
-                DRIVER_REGISTER_TIMEOUT
+                "[{component}/{pkg_label}] timed out after {:?} — package never registered a cap with atlas. Log: {}",
+                DRIVER_REGISTER_TIMEOUT,
+                log_file.display()
             );
         }
         tokio::time::sleep(SPINNER_TICK).await;

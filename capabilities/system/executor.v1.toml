@@ -2,7 +2,7 @@
 [contract]
 id      = "robonix/system/executor"
 version = "1"
-kind    = "system"
+kind    = "service"
 
 [io.srv]
 srv = "executor/srv/Execute"

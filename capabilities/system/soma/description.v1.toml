@@ -5,7 +5,7 @@
 [contract]
 id      = "robonix/system/soma/description"
 version = "1"
-kind    = "system"
+kind    = "service"
 
 [io.srv]
 srv = "soma/srv/GetDescription"

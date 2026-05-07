@@ -7,7 +7,7 @@
 [contract]
 id      = "robonix/system/liaison"
 version = "1"
-kind    = "system"
+kind    = "service"
 
 [io.srv]
 srv = "liaison/srv/SubmitTask"

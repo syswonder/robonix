@@ -118,10 +118,22 @@ pub async fn execute(
     }
     std::fs::create_dir_all(&proto_staging)?;
 
-    let cargo_bin = if Path::new("/usr/bin/cargo").exists() {
-        "/usr/bin/cargo".to_string()
+    // Prefer the installed `robonix-codegen` binary on PATH (or in the
+    // workspace target dir) — `cargo run -p robonix-codegen` rebuilds /
+    // re-resolves the workspace on every invocation, which adds 100-300 ms
+    // even when nothing changed and floods the boot log with `Compiling…`
+    // lines that don't belong in a per-package codegen step. Falls back
+    // to `cargo run` only if neither binary is available, so a fresh
+    // checkout that hasn't done `cargo install` keeps working.
+    let direct_codegen = locate_codegen_bin(&rust_root);
+    let cargo_bin = if direct_codegen.is_none() {
+        if Path::new("/usr/bin/cargo").exists() {
+            Some("/usr/bin/cargo".to_string())
+        } else {
+            Some(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()))
+        }
     } else {
-        std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
+        None
     };
 
     println!("{} package: {}", "[codegen]".bold(), pkg_root.display());
@@ -136,12 +148,8 @@ pub async fn execute(
     //    <pkg>/capabilities/lib. --contracts: global capabilities tree
     //    (per-package contracts merging through codegen is a follow-up).
     println!("{} robonix-codegen --lang proto ...", "[codegen]".bold());
-    let mut proto_cmd = Command::new(&cargo_bin);
-    proto_cmd
-        .args(["run", "-p", "robonix-codegen", "--manifest-path"])
-        .arg(rust_root.join("Cargo.toml"))
-        .args(["--", "--lang", "proto", "-I"])
-        .arg(&interfaces_lib);
+    let mut proto_cmd = build_codegen_cmd(direct_codegen.as_ref(), cargo_bin.as_deref(), &rust_root);
+    proto_cmd.args(["--lang", "proto", "-I"]).arg(&interfaces_lib);
     if let Some(p) = pkg_caps_lib.as_ref() {
         proto_cmd.arg("-I").arg(p);
     }
@@ -156,12 +164,9 @@ pub async fn execute(
     if mcp {
         println!("{} robonix-codegen --lang mcp ...", "[codegen]".bold());
         std::fs::create_dir_all(&mcp_types).ok();
-        let mut mcp_cmd = Command::new(&cargo_bin);
-        mcp_cmd
-            .args(["run", "-p", "robonix-codegen", "--manifest-path"])
-            .arg(rust_root.join("Cargo.toml"))
-            .args(["--", "--lang", "mcp", "-I"])
-            .arg(&interfaces_lib);
+        let mut mcp_cmd =
+            build_codegen_cmd(direct_codegen.as_ref(), cargo_bin.as_deref(), &rust_root);
+        mcp_cmd.args(["--lang", "mcp", "-I"]).arg(&interfaces_lib);
         // Include per-package <pkg>/capabilities/lib too — same merge
         // semantics as the proto step, so per-pkg srv files (e.g.
         // explore_rbnx's Explore.srv) emit their MCP Request/Response
@@ -232,4 +237,73 @@ pub async fn execute(
         }
     );
     Ok(())
+}
+
+/// Locate a runnable `robonix-codegen` binary without going through cargo.
+/// Search order:
+///   1. `$ROBONIX_CODEGEN_BIN` (override for unusual layouts)
+///   2. `$CARGO_HOME/bin/robonix-codegen` / `~/.cargo/bin/robonix-codegen`
+///      — what `cargo install --path crates/robonix-codegen` puts there
+///   3. `<rust_root>/target/release/robonix-codegen`
+///   4. `<rust_root>/target/debug/robonix-codegen`
+///   5. anything matching `robonix-codegen` on `$PATH`
+///
+/// Returns `None` only when none of those exist; callers fall back to
+/// `cargo run -p robonix-codegen` which keeps a fresh-checkout workflow
+/// alive even before the user has installed any binaries.
+fn locate_codegen_bin(rust_root: &Path) -> Option<PathBuf> {
+    if let Ok(s) = std::env::var("ROBONIX_CODEGEN_BIN")
+        && !s.is_empty()
+    {
+        let p = PathBuf::from(s);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let cargo_home = std::env::var("CARGO_HOME")
+        .map(PathBuf::from)
+        .ok()
+        .or_else(|| dirs::home_dir().map(|h| h.join(".cargo")));
+    if let Some(home) = cargo_home {
+        let p = home.join("bin").join("robonix-codegen");
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    for profile in ["release", "debug"] {
+        let p = rust_root.join("target").join(profile).join("robonix-codegen");
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Ok(path_env) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_env) {
+            let p = dir.join("robonix-codegen");
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Build a fresh `Command` invoking `robonix-codegen` either directly
+/// (preferred — picks up `$ROBONIX_CODEGEN_BIN` / installed bin / target/
+/// in that order) or via `cargo run -p robonix-codegen` as a last
+/// resort. Caller appends the actual `--lang … -I … -o …` args.
+fn build_codegen_cmd(
+    direct: Option<&PathBuf>,
+    cargo: Option<&str>,
+    rust_root: &Path,
+) -> Command {
+    if let Some(bin) = direct {
+        Command::new(bin)
+    } else {
+        let cargo = cargo.expect("either direct codegen bin or cargo bin must be set");
+        let mut cmd = Command::new(cargo);
+        cmd.args(["run", "-p", "robonix-codegen", "--manifest-path"])
+            .arg(rust_root.join("Cargo.toml"))
+            .arg("--");
+        cmd
+    }
 }

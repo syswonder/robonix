@@ -57,14 +57,23 @@ rbnx codegen -p "$PKG" "${FLAGS[@]}"
 export HF_ENDPOINT
 if [[ "${SPEECH_CI_MODE:-}" != "1" && "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
     PY="$VENV/bin/python"
-    echo "[build] downloading ASR model (openai/whisper-large-v3)…"
-    # `local_files_only=False` is the pipeline default; passing it via
-    # model_kwargs collides with the explicit kwarg in newer transformers
-    # (TypeError: got multiple values). `snapshot_download` is more direct
-    # for "just fetch the weights into the HF cache" intent and avoids
-    # spinning up the full pipeline (CPU-side load is wasted at build time).
-    "$PY" -c "from huggingface_hub import snapshot_download; snapshot_download('openai/whisper-large-v3')" \
-        || echo "[build] WARNING: Whisper model download failed; ASR backend will fail at runtime."
+    # Whisper is opt-in: it's a 20+ GB pull (whisper-large-v3) that only
+    # the one-shot `robonix/system/speech/asr` contract uses. The default
+    # streaming path (FunASR paraformer-zh-streaming, ~500 MB) is what
+    # the dialog stack actually invokes. Override with DOWNLOAD_WHISPER=1
+    # if a caller for the one-shot ASR contract is in the picture.
+    if [[ "${DOWNLOAD_WHISPER:-}" == "1" ]]; then
+        echo "[build] downloading ASR model (openai/whisper-large-v3)…"
+        # `local_files_only=False` is the pipeline default; passing it via
+        # model_kwargs collides with the explicit kwarg in newer
+        # transformers (TypeError: got multiple values). `snapshot_download`
+        # is more direct for "just fetch the weights into the HF cache"
+        # intent and avoids spinning up the full pipeline.
+        "$PY" -c "from huggingface_hub import snapshot_download; snapshot_download('openai/whisper-large-v3')" \
+            || echo "[build] WARNING: Whisper model download failed; ASR backend will fail at runtime."
+    else
+        echo "[build] skipping Whisper download (set DOWNLOAD_WHISPER=1 to pull the 20 GB one-shot ASR weights)."
+    fi
     echo "[build] downloading FunASR model (paraformer-zh-streaming)…"
     "$PY" -c "from funasr import AutoModel; AutoModel(model='paraformer-zh-streaming')" \
         || echo "[build] WARNING: FunASR model download failed; streaming ASR backend will fail at runtime."

@@ -148,7 +148,7 @@ pub async fn execute_build(
     if let Some(dir) = candidate_dir {
         let deploy_manifest = dir.join("robonix_manifest.yaml");
         if deploy_manifest.is_file() {
-            return build_deploy_manifest(&deploy_manifest, clean);
+            return build_deploy_manifest(&deploy_manifest, &config, clean);
         }
     }
     let package_root = resolve_package_path(&config, path, global)?;
@@ -167,7 +167,7 @@ pub async fn execute_build(
 /// "fetch → build" be a controlled offline step the user can run
 /// when they have network / time, then `rbnx boot` is a fast,
 /// online-optional bring-up.
-fn build_deploy_manifest(manifest_path: &Path, clean: bool) -> Result<()> {
+fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> Result<()> {
     use serde_yaml::Value;
     let manifest_dir = manifest_path
         .parent()
@@ -227,6 +227,44 @@ fn build_deploy_manifest(manifest_path: &Path, clean: bool) -> Result<()> {
                     ));
                 }
             }
+        }
+    }
+    // `system:` non-builtin entries are real packages too (memory / scene
+    // / speech / nexus / …), they just live under `<robonix_source>/system/<key>/`
+    // instead of being declared with an explicit `path:` / `url:`. The
+    // builtin Rust binaries (atlas / executor / pilot / liaison) are
+    // shipped via `cargo install` and skipped here.
+    const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison"];
+    if let Some(map) = root.get("system").and_then(|v| v.as_mapping()) {
+        let source_root = config.robonix_source_path.as_ref();
+        for (key, _value) in map {
+            let Some(key_str) = key.as_str() else {
+                continue;
+            };
+            if SYSTEM_BUILTINS.contains(&key_str) {
+                continue;
+            }
+            let Some(source_root) = source_root else {
+                output::warning(&format!(
+                    "skipping system/{key_str}: robonix_source_path unset \
+                     (run `rbnx setup` from the repo root once)"
+                ));
+                continue;
+            };
+            let pkg_dir = source_root.join("system").join(key_str);
+            if !pkg_dir.exists() {
+                output::warning(&format!(
+                    "skipping system/{key_str}: not on disk at {}",
+                    pkg_dir.display()
+                ));
+                continue;
+            }
+            entries.push(Resolved {
+                section: "system",
+                name: key_str.to_string(),
+                pkg_dir,
+                url_to_clone: None,
+            });
         }
     }
 

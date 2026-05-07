@@ -8,6 +8,8 @@ package:
   description: Tiago camera driver — RGB + depth head camera over Webots ROS2.
   license: MulanPSL-2.0
 
+capability_id: com.robonix.primitive.tiago_camera
+
 build: bash scripts/build.sh
 start: bash scripts/start.sh
 

@@ -10,6 +10,9 @@ package:
   description: Memsearch MCP server — fact/preference memory for the agent.
   license: MulanPSL-2.0
 
+# Atlas cap_id (matched verbatim by rbnx-boot). Distinct from package.name.
+capability_id: com.robonix.system.memory
+
 build: bash scripts/build.sh
 
 start: |

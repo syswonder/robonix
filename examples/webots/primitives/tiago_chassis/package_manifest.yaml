@@ -22,6 +22,9 @@ package:
   description: Tiago chassis driver — pose readout + velocity control over Webots ROS2.
   license: MulanPSL-2.0
 
+# Atlas cap_id (matched verbatim by rbnx-boot).
+capability_id: com.robonix.primitive.tiago_chassis
+
 # Codegen the proto stubs + MCP dataclasses into rbnx-build/codegen/.
 # scripts/build.sh just wraps `rbnx codegen --mcp`; the venv pattern from
 # system/memory is unnecessary here because the driver runs inside the

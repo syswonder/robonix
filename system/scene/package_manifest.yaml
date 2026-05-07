@@ -21,6 +21,11 @@ package:
   description: Scene — semantic + geometric live map of the environment.
   license: MulanPSL-2.0
 
+# Atlas cap_id (matched verbatim by rbnx-boot). Same value as package.name
+# here because scene's deployment identity and runtime cap line up; the
+# explicit declaration removes any ambiguity for the wait-for-cap loop.
+capability_id: com.robonix.system.scene
+
 build: bash scripts/build.sh
 start: bash scripts/start.sh
 

@@ -3,7 +3,7 @@
 [contract]
 id      = "robonix/system/scene/get_object"
 version = "1"
-kind    = "system"
+kind    = "service"
 
 [io.srv]
 srv = "semantic_map/srv/GetObject"
