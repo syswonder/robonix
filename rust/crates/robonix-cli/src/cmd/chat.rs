@@ -357,24 +357,24 @@ async fn try_pick(
         return Ok(None);
     }
 
-    // Layer A — provider (cap_id). Honour saved choice on FirstRun if
-    // it's still in atlas; otherwise auto-pick (1 provider) or prompt.
+    // Layer A — provider (cap_id). FirstRun honours the saved choice
+    // when it's still in atlas, or auto-picks the lone provider with a
+    // 400 ms flash. Reconfigure (Ctrl+A) ALWAYS shows the TUI even
+    // for a single entry — auto-pick on Ctrl+A looks identical to
+    // "Ctrl+A did nothing", which is what the user just hit.
     let cap_id = match (mode, saved_cap_id) {
         (PickMode::FirstRun, Some(s)) if providers.iter().any(|p| p.capability_id == s) => {
             s.to_string()
         }
-        _ => {
-            if providers.len() == 1 {
-                let id = providers[0].capability_id.clone();
-                flash_picker_message(terminal, &format!("auto-selected {label}: {id}"))?;
-                id
-            } else {
-                match pick_tui(terminal, label, contract, &providers)? {
-                    Some(s) => s,
-                    None => return Ok(None),
-                }
-            }
+        (PickMode::FirstRun, _) if providers.len() == 1 => {
+            let id = providers[0].capability_id.clone();
+            flash_picker_message(terminal, &format!("auto-selected {label}: {id}"))?;
+            id
         }
+        _ => match pick_tui(terminal, label, contract, &providers)? {
+            Some(s) => s,
+            None => return Ok(None),
+        },
     };
 
     // Layer B — device id within the chosen impl. Connect to its
@@ -407,6 +407,11 @@ async fn pick_device_for_cap(
     use crate::pb::contracts::primitive_audio_list_devices_client::PrimitiveAudioListDevicesClient;
 
     const LIST_CONTRACT: &str = "robonix/primitive/audio/list_devices";
+    // Reconfigure mode shows visible feedback for every silent path
+    // below; FirstRun stays quiet so a missing list_devices contract
+    // doesn't litter chat history with a non-actionable message.
+    let reconf = matches!(mode, PickMode::Reconfigure);
+
     let endpoint = match atlas
         .connect_capability(
             CONSUMER_ID,
@@ -423,19 +428,41 @@ async fn pick_device_for_cap(
                 format!("http://{ep}")
             }
         }
-        Err(_) => return Ok(String::new()), // cap doesn't expose list_devices
+        Err(_) => {
+            if reconf {
+                flash_picker_message(
+                    terminal,
+                    &format!(
+                        "{cap_id} doesn't expose list_devices — \
+                         using OS default device. Rebuild the package \
+                         (bash scripts/build.sh) to pick up the new contract."
+                    ),
+                )?;
+            }
+            return Ok(String::new());
+        }
     };
 
     let mut client = match PrimitiveAudioListDevicesClient::connect(endpoint.clone()).await {
         Ok(c) => c,
-        Err(_) => return Ok(String::new()),
+        Err(e) => {
+            if reconf {
+                flash_picker_message(terminal, &format!("connect list_devices on {cap_id}: {e}"))?;
+            }
+            return Ok(String::new());
+        }
     };
     let resp = match client
         .list_audio_devices(crate::pb::audio::ListAudioDevicesRequest {})
         .await
     {
         Ok(r) => r.into_inner(),
-        Err(_) => return Ok(String::new()),
+        Err(e) => {
+            if reconf {
+                flash_picker_message(terminal, &format!("ListAudioDevices on {cap_id}: {e}"))?;
+            }
+            return Ok(String::new());
+        }
     };
 
     let usable: Vec<crate::pb::audio::AudioDevice> = resp
@@ -444,27 +471,43 @@ async fn pick_device_for_cap(
         .filter(|d| d.kind == kind || d.kind == "duplex")
         .collect();
     if usable.is_empty() {
+        if reconf {
+            flash_picker_message(
+                terminal,
+                &format!("{cap_id} reports no {kind} devices — using OS default"),
+            )?;
+        }
         return Ok(String::new());
     }
 
-    // Honour saved device on FirstRun if it's still listed.
-    if matches!(mode, PickMode::FirstRun)
+    // FirstRun: honour saved device when still listed; auto-pick a lone
+    // device with a flash. Reconfigure: always show the TUI so Ctrl+A
+    // gives the user a real page they can interact with.
+    if matches!(mode, PickMode::FirstRun) {
+        if let Some(saved) = saved_device_id
+            && usable.iter().any(|d| d.id == saved)
+        {
+            return Ok(saved.to_string());
+        }
+        if usable.len() == 1 {
+            let id = usable[0].id.clone();
+            flash_picker_message(
+                terminal,
+                &format!("auto-selected {label} device: {}", usable[0].name),
+            )?;
+            return Ok(id);
+        }
+    }
+
+    let chosen = pick_device_tui(terminal, label, &usable)?;
+    // pick_device_tui returns "" on Esc/q — preserve any previously-saved
+    // device id so a Reconfigure-then-skip doesn't accidentally clear it.
+    if chosen.is_empty()
         && let Some(saved) = saved_device_id
-        && usable.iter().any(|d| d.id == saved)
     {
         return Ok(saved.to_string());
     }
-
-    if usable.len() == 1 {
-        let id = usable[0].id.clone();
-        flash_picker_message(
-            terminal,
-            &format!("auto-selected {label} device: {}", usable[0].name),
-        )?;
-        return Ok(id);
-    }
-
-    pick_device_tui(terminal, label, &usable)
+    Ok(chosen)
 }
 
 async fn call_select_device(
@@ -621,19 +664,25 @@ fn pick_tui(
     }
 }
 
+/// Render a single-line status page and pause briefly so the user can
+/// read it before the next picker step (or the chat) takes over the
+/// screen. Long messages now sit for 1.4 s — the previous 400 ms felt
+/// like "the page just flashed and disappeared."
 fn flash_picker_message(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     msg: &str,
 ) -> Result<()> {
     terminal.draw(|f| {
-        let body = Paragraph::new(msg).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" rbnx chat — audio "),
-        );
+        let body = Paragraph::new(msg)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" rbnx chat — audio "),
+            )
+            .wrap(Wrap { trim: false });
         f.render_widget(body, f.area());
     })?;
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    std::thread::sleep(std::time::Duration::from_millis(1400));
     Ok(())
 }
 
