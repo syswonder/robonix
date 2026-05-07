@@ -40,6 +40,11 @@ capability_id: com.robonix.primitive.audio.macos
 build: bash scripts/build.sh
 start: bash scripts/start.sh
 
+# 1 package = 1 cap (capability_id above). The mac_server daemon on the
+# macOS side enumerates CoreAudio devices; we surface them through the
+# optional list_devices/select_device contracts so the user can pick
+# which physical mic/speaker the cap's driver routes to. Those CoreAudio
+# devices are driver-internal — not separate robonix caps.
 capabilities:
   - name: robonix/primitive/audio/mic
   - name: robonix/primitive/audio/speaker

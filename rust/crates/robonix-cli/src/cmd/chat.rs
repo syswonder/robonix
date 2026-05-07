@@ -1032,7 +1032,7 @@ impl AudioSettingsPage {
                 .add_modifier(Modifier::BOLD),
         )]));
         lines.push(section_title(
-            "Provider",
+            "Cap (robonix handle)",
             self.section == AudioSection::MicProvider,
         ));
         if self.mic_providers.is_empty() {
@@ -1052,7 +1052,7 @@ impl AudioSettingsPage {
             }
         }
         lines.push(section_title(
-            "Device",
+            "Driver-internal device",
             self.section == AudioSection::MicDevice,
         ));
         if self.mic_devices.is_empty() {
@@ -1081,7 +1081,7 @@ impl AudioSettingsPage {
                 .add_modifier(Modifier::BOLD),
         )]));
         lines.push(section_title(
-            "Provider",
+            "Cap (robonix handle)",
             self.section == AudioSection::SpeakerProvider,
         ));
         if self.speaker_providers.is_empty() {
@@ -1101,7 +1101,7 @@ impl AudioSettingsPage {
             }
         }
         lines.push(section_title(
-            "Device",
+            "Driver-internal device",
             self.section == AudioSection::SpeakerDevice,
         ));
         if self.speaker_devices.is_empty() {
@@ -1132,11 +1132,9 @@ impl AudioSettingsPage {
         .split(area);
 
         let body = Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Audio Settings — ● selected · ▶ cursor "),
-            )
+            .block(Block::default().borders(Borders::ALL).title(
+                " Audio Settings — Cap = robonix handle · Driver-internal device = optional, multi-device drivers only ",
+            ))
             .wrap(Wrap { trim: false });
         frame.render_widget(body, chunks[0]);
 
