@@ -20,7 +20,7 @@ dependencies = [
     "grpcio-tools",
     "protobuf",
     "uvicorn",
-    "robonix-py",
+    "robonix-api",
 ]
 
 # This package is the service itself; `uv sync` only needs to install
@@ -32,4 +32,4 @@ package = false
 # Resolved through the workspace at the repo root (see /pyproject.toml).
 # No `path = "../../pylib/..."` here — that would break if pylib/ moves.
 [tool.uv.sources]
-robonix-py = { workspace = true }
+robonix-api = { workspace = true }

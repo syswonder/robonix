@@ -135,7 +135,7 @@ impl Config {
             // single, unambiguous base.
             SourcePathKey::InterfacesLib => root.join("capabilities").join("lib"),
             SourcePathKey::RuntimeProto => root.join("rust").join("proto"),
-            SourcePathKey::RobonixPy => root.join("pylib").join("robonix-py"),
+            SourcePathKey::RobonixApi => root.join("pylib").join("robonix-api"),
         };
         if !abs.exists() {
             anyhow::bail!(
@@ -161,10 +161,10 @@ pub enum SourcePathKey {
     InterfacesLib,
     /// `<root>/rust/proto` (runtime / atlas protos).
     RuntimeProto,
-    /// `<root>/pylib/robonix-py` — shared Python helper lib.
+    /// `<root>/pylib/robonix-api` — shared Python helper lib.
     /// Carries `mcp_contract` (codegen IO class → FastMCP tool wrapper).
-    /// Add this dir to PYTHONPATH; `from robonix_py import mcp_contract`.
-    RobonixPy,
+    /// Add this dir to PYTHONPATH; `from robonix_api import mcp_contract`.
+    RobonixApi,
 }
 
 impl std::str::FromStr for SourcePathKey {
@@ -176,9 +176,9 @@ impl std::str::FromStr for SourcePathKey {
             "capabilities" => Ok(Self::Capabilities),
             "interfaces-lib" | "idl" => Ok(Self::InterfacesLib),
             "runtime-proto" => Ok(Self::RuntimeProto),
-            "robonix-py" => Ok(Self::RobonixPy),
+            "robonix-api" => Ok(Self::RobonixApi),
             other => Err(format!(
-                "unknown path key: {other}. Valid: root, rust, capabilities, interfaces-lib, runtime-proto, robonix-py"
+                "unknown path key: {other}. Valid: root, rust, capabilities, interfaces-lib, runtime-proto, robonix-api"
             )),
         }
     }

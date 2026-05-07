@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""robonix-py — Python helpers for writing robonix capabilities.
+"""robonix-api — Python helpers for writing robonix capabilities.
 
 Two layers:
 
@@ -13,7 +13,7 @@ Two layers:
 
 Typical usage:
 
-    from robonix_py import Capability
+    from robonix_api import Capability
 
     cap = Capability(id="com.robonix.ranger.mid360_lidar",
                      namespace="primitive/lidar")

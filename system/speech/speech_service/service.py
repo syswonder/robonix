@@ -873,7 +873,7 @@ class SpeechDialogServicer(contracts_grpc.SystemSpeechDialogServicer):
 # other nodes can discover it. If Atlas is unavailable or the runtime protos
 # are not installed, the service runs in standalone mode.
 
-from robonix_py import Capability  # noqa: E402
+from robonix_api import Capability  # noqa: E402
 
 cap = Capability(id="com.robonix.system.speech", namespace="robonix/system/speech")
 

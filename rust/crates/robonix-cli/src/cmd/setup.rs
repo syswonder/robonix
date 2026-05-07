@@ -85,6 +85,6 @@ pub async fn execute(_config: Config, path: Option<PathBuf>) -> Result<()> {
         "\nOther packages can now resolve paths via `{}`.",
         "rbnx path <key>".bold()
     );
-    println!("Valid keys: root, rust, capabilities, interfaces-lib, runtime-proto, robonix-py");
+    println!("Valid keys: root, rust, capabilities, interfaces-lib, runtime-proto, robonix-api");
     Ok(())
 }

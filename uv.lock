@@ -17,7 +17,7 @@ resolution-markers = [
 [manifest]
 members = [
     "robonix",
-    "robonix-py",
+    "robonix-api",
     "robonix-system-memory",
     "robonix-system-scene",
     "robonix-system-speech",
@@ -4139,9 +4139,9 @@ version = "0.0.0"
 source = { virtual = "." }
 
 [[package]]
-name = "robonix-py"
+name = "robonix-api"
 version = "0.1.0"
-source = { editable = "pylib/robonix-py" }
+source = { editable = "pylib/robonix-api" }
 dependencies = [
     { name = "fastmcp" },
     { name = "mcp" },
@@ -4165,7 +4165,7 @@ dependencies = [
     { name = "memsearch", extra = ["onnx"] },
     { name = "numpy" },
     { name = "protobuf" },
-    { name = "robonix-py" },
+    { name = "robonix-api" },
     { name = "uvicorn" },
 ]
 
@@ -4178,7 +4178,7 @@ requires-dist = [
     { name = "memsearch", extras = ["onnx"] },
     { name = "numpy", specifier = ">=1.26,<2" },
     { name = "protobuf" },
-    { name = "robonix-py", editable = "pylib/robonix-py" },
+    { name = "robonix-api", editable = "pylib/robonix-api" },
     { name = "uvicorn" },
 ]
 
@@ -4197,7 +4197,7 @@ dependencies = [
     { name = "pillow" },
     { name = "protobuf" },
     { name = "pyyaml" },
-    { name = "robonix-py" },
+    { name = "robonix-api" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "uvicorn" },
@@ -4215,7 +4215,7 @@ requires-dist = [
     { name = "pillow" },
     { name = "protobuf" },
     { name = "pyyaml" },
-    { name = "robonix-py", editable = "pylib/robonix-py" },
+    { name = "robonix-api", editable = "pylib/robonix-api" },
     { name = "scipy", specifier = ">=1.11" },
     { name = "uvicorn" },
 ]
@@ -4232,7 +4232,7 @@ dependencies = [
     { name = "numpy" },
     { name = "opencc-python-reimplemented" },
     { name = "protobuf" },
-    { name = "robonix-py" },
+    { name = "robonix-api" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "torch" },
@@ -4249,7 +4249,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.24,<2" },
     { name = "opencc-python-reimplemented", specifier = ">=0.1.7" },
     { name = "protobuf", specifier = ">=4.24" },
-    { name = "robonix-py", editable = "pylib/robonix-py" },
+    { name = "robonix-api", editable = "pylib/robonix-api" },
     { name = "scipy", specifier = ">=1.10" },
     { name = "torch", specifier = ">=2.0" },
     { name = "torchaudio", specifier = ">=2.0" },

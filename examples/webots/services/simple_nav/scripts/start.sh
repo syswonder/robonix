@@ -19,6 +19,6 @@ exec docker exec -i \
         set -eo pipefail
         source /opt/ros/humble/setup.bash
         cd /robonix_pkgs/services/simple_nav
-        export PYTHONPATH="$(pwd):/robonix_pkgs/pylib/robonix-py:$(pwd)/rbnx-build/codegen/proto_gen:$(pwd)/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
+        export PYTHONPATH="$(pwd):/robonix_pkgs/pylib/robonix-api:$(pwd)/rbnx-build/codegen/proto_gen:$(pwd)/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
         exec python3 -m simple_nav.atlas_bridge
     '

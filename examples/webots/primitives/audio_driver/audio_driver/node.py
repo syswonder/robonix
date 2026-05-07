@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import os
 
-from robonix_py import Capability
+from robonix_api import Capability
 
 cap = Capability(id="com.robonix.primitive.audio.alsa", namespace="robonix/primitive/audio")
 log = logging.getLogger("audio-driver")

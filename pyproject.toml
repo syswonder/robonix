@@ -20,9 +20,9 @@
 #   3. Either it matches an existing glob below, or add it to `members`.
 #   4. Reference shared libs in that package's pyproject:
 #         [project]
-#         dependencies = ["robonix-py"]
+#         dependencies = ["robonix-api"]
 #         [tool.uv.sources]
-#         robonix-py = { workspace = true }
+#         robonix-api = { workspace = true }
 #   5. Run `uv sync` (typically via that package's scripts/build.sh).
 
 [project]
@@ -36,6 +36,6 @@ package = false
 
 [tool.uv.workspace]
 members = [
-    "pylib/*",      # shared Python libs (robonix-py, …)
+    "pylib/*",      # shared Python libs (robonix-api, …)
     "system/*",     # system services (memory, speech, …)
 ]

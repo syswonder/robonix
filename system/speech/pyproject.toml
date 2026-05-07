@@ -21,7 +21,7 @@ dependencies = [
     "protobuf>=4.24",
     "scipy>=1.10",
     "numpy>=1.24,<2",
-    "robonix-py",
+    "robonix-api",
 ]
 
 [tool.uv]
@@ -29,4 +29,4 @@ package = false
 
 # Resolved through the workspace at the repo root (see /pyproject.toml).
 [tool.uv.sources]
-robonix-py = { workspace = true }
+robonix-api = { workspace = true }

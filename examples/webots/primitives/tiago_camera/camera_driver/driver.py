@@ -27,7 +27,7 @@ from io import BytesIO
 
 import numpy as np
 
-from robonix_py import Capability
+from robonix_api import Capability
 
 cap = Capability(id="com.robonix.primitive.tiago_camera", namespace="robonix/primitive/camera")
 
@@ -175,7 +175,7 @@ def publish_extrinsics_when_ready(base_frame: str, cam_frame: str, topic: str) -
     from rclpy.duration import Duration  # type: ignore
     from rclpy.time import Time  # type: ignore
     from tf2_ros import Buffer, TransformListener  # type: ignore
-    from robonix_py.ros import RosBackend
+    from robonix_api.ros import RosBackend
     node = RosBackend.get().node
     tf_buf = Buffer()
     TransformListener(tf_buf, node)

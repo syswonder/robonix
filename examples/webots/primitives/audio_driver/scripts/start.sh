@@ -11,6 +11,6 @@ cd "$PKG_ROOT"
 # Codegen output + the runtime venv (`rbnx-build/`) and the package
 # itself need to be on PYTHONPATH so `python3 -m audio_driver.node`
 # finds the generated `audio_pb2` stubs and the package code.
-export PYTHONPATH="$(rbnx path robonix-py):$PKG_ROOT/rbnx-build/codegen/proto_gen:$PKG_ROOT/rbnx-build/codegen/robonix_mcp_types:$PKG_ROOT:${PYTHONPATH:-}"
+export PYTHONPATH="$(rbnx path robonix-api):$PKG_ROOT/rbnx-build/codegen/proto_gen:$PKG_ROOT/rbnx-build/codegen/robonix_mcp_types:$PKG_ROOT:${PYTHONPATH:-}"
 
 exec python3 -m audio_driver.node

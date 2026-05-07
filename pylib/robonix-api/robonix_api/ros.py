@@ -14,7 +14,7 @@ import threading
 import time
 from typing import Any, Callable
 
-log = logging.getLogger("robonix_py.ros")
+log = logging.getLogger("robonix_api.ros")
 
 
 class RosBackend:

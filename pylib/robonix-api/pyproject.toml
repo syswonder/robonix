@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 [project]
-name = "robonix-py"
+name = "robonix-api"
 version = "0.1.0"
 description = "Robonix Python helper library: FastMCP contract decorator aligned with robonix-codegen --lang mcp ROS dataclasses, plus shared Python utilities."
 requires-python = ">=3.10"
@@ -15,4 +15,4 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["robonix_py*"]
+include = ["robonix_api*"]

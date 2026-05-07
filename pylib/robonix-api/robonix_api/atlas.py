@@ -9,7 +9,7 @@ import threading
 import time
 from typing import Any
 
-log = logging.getLogger("robonix_py.atlas")
+log = logging.getLogger("robonix_api.atlas")
 
 
 class AtlasClient:

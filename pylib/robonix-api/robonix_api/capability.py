@@ -37,7 +37,7 @@ from .ros import RosBackend, resolve_msg_type
 from .spawn import SpawnRegistry
 from .tool import mcp_contract
 
-log = logging.getLogger("robonix_py.capability")
+log = logging.getLogger("robonix_api.capability")
 
 
 def _install_simple_logger() -> None:
