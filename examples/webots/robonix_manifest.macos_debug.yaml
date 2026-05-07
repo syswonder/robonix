@@ -43,7 +43,22 @@ system:
     log: info
   speech:
     log: info
+
+    # ── Whisper (one-shot, asr contract) ────────────────────────────
+    # See robonix_manifest.yaml for full key documentation.
     disable_whisper: true
+    # asr_model:        openai/whisper-large-v3
+    # asr_device:       cuda
+    # asr_chunk_length: 30.0
+    # asr_batch_size:   4
+
+    # ── FunASR (streaming, asr_stream contract) ─────────────────────
+    # `auto` tries CUDA, falls back to CPU on init failure.
+    funasr_device: auto
+    # funasr_model:      paraformer-zh-streaming
+    # funasr_chunk_size: [0, 10, 5]
+
+    # ── Edge TTS ────────────────────────────────────────────────────
     tts_voice: zh-CN-XiaoxiaoNeural
   scene:
     log: info
