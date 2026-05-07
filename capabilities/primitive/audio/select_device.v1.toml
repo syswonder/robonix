@@ -1,6 +1,9 @@
-# Pin a specific device by id (from list_devices) for subsequent mic /
-# speaker streams. Empty id = revert to OS default. Optional, paired
-# with list_devices.
+# Pin a specific OS-level audio device (from list_devices) as the one
+# the cap's driver should route subsequent mic / speaker streams to.
+# Empty id = revert to OS default. OPTIONAL, paired with list_devices —
+# only impls that internally multiplex multiple devices behind one cap
+# implement this. See list_devices.v1.toml for the cap-vs-device
+# distinction.
 [contract]
 id      = "robonix/primitive/audio/select_device"
 version = "1"

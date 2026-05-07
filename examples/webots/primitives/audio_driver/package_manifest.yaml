@@ -28,6 +28,11 @@ capability_id: com.robonix.primitive.audio.alsa
 build: bash scripts/build.sh
 start: bash scripts/start.sh
 
+# 1 package = 1 cap (capability_id above). Multi-device routing lives
+# inside the cap via the optional list_devices/select_device contracts —
+# ALSA naturally has many "hw:X,Y" devices behind one driver, so we
+# expose the routing table. These are driver-internal devices, not
+# robonix caps.
 capabilities:
   - name: robonix/primitive/audio/mic
   - name: robonix/primitive/audio/speaker
