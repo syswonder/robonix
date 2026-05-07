@@ -37,6 +37,13 @@ use uuid::Uuid;
 const CONSUMER_ID: &str = "rbnx-cli/chat";
 const LIAISON_CONTRACT_ID: &str = "robonix/system/liaison";
 
+/// Atlas contract ids for the audio primitives that have user-visible
+/// device choices on a multi-provider host (e.g. local ALSA driver vs
+/// the macOS bridge). asr/tts are software backends with one provider
+/// per box, so we don't prompt for them.
+const MIC_CONTRACT: &str = "robonix/primitive/audio/mic";
+const SPEAKER_CONTRACT: &str = "robonix/primitive/audio/speaker";
+
 struct ChatMessage {
     role: Role,
     text: String,
@@ -51,6 +58,41 @@ enum Role {
 }
 
 const DEFAULT_LIAISON_FALLBACK: &str = "http://127.0.0.1:50081";
+
+/// Persisted user choices for `rbnx chat`, written to ~/.robonix/chat.yaml
+/// the first time we have to pick. Each field stores a capability_id, not
+/// an OS-level device id — the macOS-side device picker (mic/speaker on
+/// the bridge daemon) is an entirely separate concern.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct ChatConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mic_cap_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    speaker_cap_id: Option<String>,
+}
+
+fn chat_config_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".robonix").join("chat.yaml"))
+}
+
+fn load_chat_config() -> ChatConfig {
+    let Some(p) = chat_config_path() else {
+        return ChatConfig::default();
+    };
+    let Ok(text) = std::fs::read_to_string(&p) else {
+        return ChatConfig::default();
+    };
+    serde_yaml::from_str(&text).unwrap_or_default()
+}
+
+fn save_chat_config(cfg: &ChatConfig) -> Result<()> {
+    let p = chat_config_path().context("no home dir")?;
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&p, serde_yaml::to_string(cfg)?)?;
+    Ok(())
+}
 
 pub async fn execute(server: &str) -> Result<()> {
     let atlas_endpoint = if server.starts_with("http") {
@@ -83,7 +125,16 @@ pub async fn execute(server: &str) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_tui(&mut terminal, &liaison_endpoint).await;
+    let chat_cfg = match ensure_audio_devices(&atlas_endpoint, &mut terminal).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            terminal::disable_raw_mode()?;
+            terminal.backend_mut().execute(LeaveAlternateScreen)?;
+            return Err(e);
+        }
+    };
+
+    let result = run_tui(&mut terminal, &liaison_endpoint, &chat_cfg).await;
 
     terminal::disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
@@ -144,9 +195,156 @@ async fn try_discover_once(atlas_endpoint: &str, contract_id: &str) -> Result<St
     anyhow::bail!("no {contract_id} interface found in Atlas registry")
 }
 
+// ── Audio-device first-run picker ───────────────────────────────────────────
+//
+// Resolution order for mic/speaker capability_ids when starting a voice
+// session is: ROBONIX_CHAT_*_NODE env (highest, overrides everything) →
+// chat.yaml on disk → first-run TUI picker. The picker only fires when
+// neither env nor config supplies the cap_id; once chosen it's saved
+// to ~/.robonix/chat.yaml so future sessions don't ask again. To
+// re-pick: delete that file (or just edit it), re-run rbnx chat.
+//
+// Why this lives here and not in liaison: the user choice is per-client
+// preference (which physical box's audio do I want when sitting at this
+// terminal), not a per-deployment server setting.
+
+async fn ensure_audio_devices(
+    atlas_endpoint: &str,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<ChatConfig> {
+    let mut cfg = load_chat_config();
+
+    let env_set = |key: &str| std::env::var(key).ok().filter(|s| !s.is_empty()).is_some();
+    let need_mic = !env_set("ROBONIX_CHAT_MIC_NODE") && cfg.mic_cap_id.is_none();
+    let need_speaker = !env_set("ROBONIX_CHAT_SPEAKER_NODE") && cfg.speaker_cap_id.is_none();
+    if !need_mic && !need_speaker {
+        return Ok(cfg);
+    }
+
+    let mut atlas = AtlasClient::connect(atlas_endpoint)
+        .await
+        .with_context(|| format!("connect to atlas at '{atlas_endpoint}' for audio device pick"))?;
+
+    if need_mic {
+        let providers = atlas
+            .query_capabilities("", MIC_CONTRACT, atlas_pb::Transport::Grpc)
+            .await?;
+        let cap_id = pick_provider(terminal, "mic", MIC_CONTRACT, &providers)?;
+        cfg.mic_cap_id = Some(cap_id);
+    }
+    if need_speaker {
+        let providers = atlas
+            .query_capabilities("", SPEAKER_CONTRACT, atlas_pb::Transport::Grpc)
+            .await?;
+        let cap_id = pick_provider(terminal, "speaker", SPEAKER_CONTRACT, &providers)?;
+        cfg.speaker_cap_id = Some(cap_id);
+    }
+    if let Err(e) = save_chat_config(&cfg) {
+        log::warn!("could not save chat config: {e:#}");
+    }
+    Ok(cfg)
+}
+
+fn pick_provider(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    label: &str,
+    contract: &str,
+    providers: &[atlas_pb::CapabilityRecord],
+) -> Result<String> {
+    if providers.is_empty() {
+        anyhow::bail!(
+            "no provider for {contract} ({label}). Is the audio package running? \
+             rbnx boot first, or set ROBONIX_CHAT_{}_NODE explicitly.",
+            label.to_uppercase()
+        );
+    }
+    if providers.len() == 1 {
+        let cap_id = providers[0].capability_id.clone();
+        flash_picker_message(terminal, &format!("auto-selected {label}: {cap_id}"))?;
+        return Ok(cap_id);
+    }
+    pick_tui(terminal, label, contract, providers)
+}
+
+fn pick_tui(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    label: &str,
+    contract: &str,
+    providers: &[atlas_pb::CapabilityRecord],
+) -> Result<String> {
+    let mut idx = 0usize;
+    loop {
+        terminal.draw(|f| {
+            let area = f.area();
+            let lines: Vec<Line> = providers
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let mark = if i == idx { "▶ " } else { "  " };
+                    let style = if i == idx {
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    let detail = if r.state_detail.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  ({})", r.state_detail)
+                    };
+                    Line::from(vec![Span::styled(
+                        format!("{mark}{}{detail}", r.capability_id),
+                        style,
+                    )])
+                })
+                .collect();
+            let body = Paragraph::new(lines)
+                .block(Block::default().borders(Borders::ALL).title(format!(
+                    " choose {label} provider ({contract}) — ↑↓ select · Enter confirm · q quit "
+                )))
+                .wrap(Wrap { trim: false });
+            f.render_widget(body, area);
+        })?;
+        if event::poll(std::time::Duration::from_millis(200))?
+            && let Event::Key(key) = event::read()?
+        {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => idx = idx.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') if idx + 1 < providers.len() => {
+                    idx += 1;
+                }
+                KeyCode::Enter => return Ok(providers[idx].capability_id.clone()),
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    anyhow::bail!("audio device pick cancelled");
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn flash_picker_message(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    msg: &str,
+) -> Result<()> {
+    terminal.draw(|f| {
+        let body = Paragraph::new(msg).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" rbnx chat — audio "),
+        );
+        f.render_widget(body, f.area());
+    })?;
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    Ok(())
+}
+
 async fn run_tui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     liaison_endpoint: &str,
+    chat_cfg: &ChatConfig,
 ) -> Result<()> {
     let local_user = format!("local:{}", whoami_username());
     let messages: Rc<RefCell<Vec<ChatMessage>>> = Rc::new(RefCell::new(vec![ChatMessage {
@@ -191,6 +389,7 @@ async fn run_tui(
                     terminal,
                     &input,
                     &mut scroll,
+                    chat_cfg,
                 )
                 .await
                 {
@@ -442,6 +641,7 @@ async fn run_voice_session_with_esc_abort(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     input: &str,
     scroll: &mut u16,
+    chat_cfg: &ChatConfig,
 ) -> Result<()> {
     use crate::pb::contracts::system_liaison_client::SystemLiaisonClient;
     use crate::pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
@@ -453,11 +653,14 @@ async fn run_voice_session_with_esc_abort(
         record_seconds: voice_record_seconds(),
         language: voice_language(),
         tts_enabled: voice_tts_enabled(),
-        mic_node_id: voice_node("ROBONIX_CHAT_MIC_NODE"),
+        mic_node_id: voice_node_with_cfg("ROBONIX_CHAT_MIC_NODE", chat_cfg.mic_cap_id.as_deref()),
         asr_node_id: voice_node("ROBONIX_CHAT_ASR_NODE"),
         voiceprint_node_id: String::new(),
         tts_node_id: voice_node("ROBONIX_CHAT_TTS_NODE"),
-        speaker_node_id: voice_node("ROBONIX_CHAT_SPEAKER_NODE"),
+        speaker_node_id: voice_node_with_cfg(
+            "ROBONIX_CHAT_SPEAKER_NODE",
+            chat_cfg.speaker_cap_id.as_deref(),
+        ),
         context_json: String::new(),
     };
 
@@ -556,6 +759,18 @@ fn voice_tts_enabled() -> bool {
 
 fn voice_node(env_key: &str) -> String {
     std::env::var(env_key).unwrap_or_default()
+}
+
+/// Same as `voice_node` but falls back to `cfg_value` (from chat.yaml)
+/// when the env var is unset / empty. Empty result still means "let
+/// liaison auto-pick from atlas".
+fn voice_node_with_cfg(env_key: &str, cfg_value: Option<&str>) -> String {
+    if let Ok(v) = std::env::var(env_key)
+        && !v.is_empty()
+    {
+        return v;
+    }
+    cfg_value.unwrap_or("").to_string()
 }
 
 // ── Event → ChatMessage rendering ────────────────────────────────────────────
