@@ -37,13 +37,11 @@ from semantic_map_mcp import (  # type: ignore
     Point3D,
     QueryConstraints,
     QueryResults,
-    Region,
     Relation,
     RelationConstraint as RelationConstraintIDL,
     RelationType,
     SafetyContext,
     SceneSnapshot,
-    SemanticMapSlice,
     SnapshotSpec,
 )
 from geometry_msgs_mcp import PoseStamped, Point, Quaternion  # type: ignore
@@ -81,7 +79,7 @@ def attach_state(
 _REL_NAME_TO_ENUM: dict[str, int] = {
     "child_of": 0,
     "on_top": 1,
-    "on": 1,            # alias used by relations.py
+    "on": 1,  # alias used by relations.py
     "inside": 2,
     "near": 3,
     "custom": 4,
@@ -122,8 +120,8 @@ def _scene_object_to_idl(o: SceneObject) -> Object:
         id=o.object_id,
         label=o.cls,
         relations=rels,
-        registered_skills=[],
-        registered_primitives=[],
+        # registered_skills=[],
+        # registered_primitives=[],
         frame_mapping=[fm],
         confidence=o.confidence,
         first_seen=_unix_to_time(o.first_seen),
@@ -153,8 +151,8 @@ def _scene_surface_to_idl(s: SceneSurface) -> Object:
         id=s.surface_id,
         label="surface",
         relations=[],
-        registered_skills=[],
-        registered_primitives=[],
+        # registered_skills=[],
+        # registered_primitives=[],
         frame_mapping=[fm],
         confidence=1.0,
         first_seen=_unix_to_time(s.last_seen),
@@ -175,7 +173,9 @@ def _flatten_relations_for(object_id: str) -> list[tuple[str, str]]:
 
 
 def _make_relation_idl(r: RelationTriple) -> Relation:
-    return Relation(relation_type=_enum_for(r.predicate), target_entity_id=r.target_object_id)
+    return Relation(
+        relation_type=_enum_for(r.predicate), target_entity_id=r.target_object_id
+    )
 
 
 def _empty_object(id_echo: str = "") -> Object:
@@ -186,8 +186,8 @@ def _empty_object(id_echo: str = "") -> Object:
         id=id_echo,
         label="",
         relations=[],
-        registered_skills=[],
-        registered_primitives=[],
+        # registered_skills=[],
+        # registered_primitives=[],
         frame_mapping=[],
         confidence=0.0,
         first_seen=_unix_to_time(0.0),
@@ -214,7 +214,11 @@ async def get_snapshot(spec: SnapshotSpec) -> SceneSnapshot:
     scope = validate_scope(
         layers=list(spec.layers) if spec.layers else None,
         region_frame=spec.region_frame,
-        region_center_xyz=(spec.region_center_x, spec.region_center_y, spec.region_center_z),
+        region_center_xyz=(
+            spec.region_center_x,
+            spec.region_center_y,
+            spec.region_center_z,
+        ),
         region_radius_m=spec.region_radius_m,
         freshness_s=spec.freshness_s if spec.freshness_s > 0 else 30.0,
         include_stale=spec.include_stale,
@@ -227,7 +231,11 @@ async def get_snapshot(spec: SnapshotSpec) -> SceneSnapshot:
     rels = _RELATIONS.current()
     now = time.time()
     sc_objs, sc_rels, sc_surfs = scope_snapshot(
-        scope, objects=objs, surfaces=surfs, relations=rels, now=now,
+        scope,
+        objects=objs,
+        surfaces=surfs,
+        relations=rels,
+        now=now,
     )
     return SceneSnapshot(
         objects=[_scene_object_to_idl(o) for o in sc_objs],
@@ -256,13 +264,16 @@ async def query(constraints: QueryConstraints) -> QueryResults:
         candidates = [o for o in candidates if o.cls.lower() in wanted]
 
     if constraints.min_confidence > 0:
-        candidates = [o for o in candidates if o.confidence >= constraints.min_confidence]
+        candidates = [
+            o for o in candidates if o.confidence >= constraints.min_confidence
+        ]
 
     if constraints.pose_radius_m and constraints.pose_radius_m > 0:
         cx, cy = constraints.pose_center_x, constraints.pose_center_y
         r = constraints.pose_radius_m
         candidates = [
-            o for o in candidates
+            o
+            for o in candidates
             if (o.pose.x - cx) ** 2 + (o.pose.y - cy) ** 2 <= r * r
         ]
 
@@ -277,19 +288,26 @@ async def query(constraints: QueryConstraints) -> QueryResults:
                     ok = False
                     break
                 hits = [
-                    r for r in relations
+                    r
+                    for r in relations
                     if r.subject_object_id == o.object_id and r.predicate == pred
                 ]
                 if not hits:
                     ok = False
                     break
                 if rc.target_object_id:
-                    hits = [r for r in hits if r.target_object_id == rc.target_object_id]
+                    hits = [
+                        r for r in hits if r.target_object_id == rc.target_object_id
+                    ]
                 if rc.target_cls:
                     target_cls = rc.target_cls.lower()
                     hits = [
-                        r for r in hits
-                        if (r.target_object_id in objs and objs[r.target_object_id].cls.lower() == target_cls)
+                        r
+                        for r in hits
+                        if (
+                            r.target_object_id in objs
+                            and objs[r.target_object_id].cls.lower() == target_cls
+                        )
                     ]
                 if not hits:
                     ok = False
@@ -316,33 +334,10 @@ async def get_object(object_id: String) -> GetObjectResult:
     return GetObjectResult(obj=_scene_object_to_idl(o), found=True)
 
 
-@mcp_contract(mcp, contract_id="robonix/system/scene/get_semantic_map")
-async def get_semantic_map(region: Region) -> SemanticMapSlice:
-    """Region-scoped surfaces + a reference to Nav2's 2D occupancy
-    grid (we don't ship voxel data through MCP). When mapping isn't
-    running, occupancy_grid_topic is empty; consumers should still
-    handle the surfaces list.
-    Contract: robonix/system/scene/get_semantic_map."""
-    if _REGISTRY is None:
-        raise RuntimeError("scene mcp_tools.attach_state was never called")
-    objs, surfs = await _REGISTRY.snapshot()
-    cx, cy = region.center_x, region.center_y
-    r = region.radius_m if region.radius_m > 0 else 5.0
-    in_region = [
-        s for s in surfs.values()
-        if (s.pose.x - cx) ** 2 + (s.pose.y - cy) ** 2 <= r * r
-    ]
-    import os
-    return SemanticMapSlice(
-        surfaces=[_scene_surface_to_idl(s) for s in in_region],
-        occupancy_grid_topic=os.environ.get("ROBONIX_SCENE_OCCUPANCY_TOPIC", ""),
-        occupancy_grid_frame=os.environ.get("ROBONIX_SCENE_OCCUPANCY_FRAME", "map"),
-        stamp_unix=time.time(),
-    )
-
-
 @mcp_contract(mcp, contract_id="robonix/system/scene/get_safe_goal_near_object")
-async def get_safe_goal_near_object(req: GetSafeGoalNearObject_Request) -> GetSafeGoalNearObject_Response:
+async def get_safe_goal_near_object(
+    req: GetSafeGoalNearObject_Request,
+) -> GetSafeGoalNearObject_Response:
     """Find a navigation-safe approach pose near a registered scene object.
     Returns a PoseStamped in the map frame, facing back toward the object
     centre. Use this instead of guessing map coordinates and feed the result
@@ -362,16 +357,19 @@ async def get_safe_goal_near_object(req: GetSafeGoalNearObject_Request) -> GetSa
 
     Contract: robonix/system/scene/get_safe_goal_near_object."""
     import math
+
     if _REGISTRY is None:
         return GetSafeGoalNearObject_Response(
-            reachable=False, pose=PoseStamped(),
+            reachable=False,
+            pose=PoseStamped(),
             reason="scene mcp_tools.attach_state was never called",
         )
     objs, _ = await _REGISTRY.snapshot()
     o = objs.get(req.object_id.data)
     if o is None:
         return GetSafeGoalNearObject_Response(
-            reachable=False, pose=PoseStamped(),
+            reachable=False,
+            pose=PoseStamped(),
             reason=f"unknown object_id {req.object_id.data!r}",
         )
 
@@ -405,6 +403,7 @@ async def get_safe_goal_near_object(req: GetSafeGoalNearObject_Request) -> GetSa
     if _HUB is not None and _HUB.has("occupancy_grid"):
         try:
             import numpy as np
+
             msg, _stamp, count = _HUB.latest("occupancy_grid")
             if msg is not None and count > 0 and msg.info.width and msg.info.height:
                 info = msg.info
@@ -423,12 +422,17 @@ async def get_safe_goal_near_object(req: GetSafeGoalNearObject_Request) -> GetSa
                 infl = max(1, int(math.ceil((robot_radius + clearance) / res)))
 
                 def is_safe(gx: int, gy: int) -> bool:
-                    if (gx - infl < 0 or gy - infl < 0
-                            or gx + infl >= w or gy + infl >= h):
+                    if (
+                        gx - infl < 0
+                        or gy - infl < 0
+                        or gx + infl >= w
+                        or gy + infl >= h
+                    ):
                         return False
                     return not bool(
-                        blocked[gy - infl: gy + infl + 1,
-                                gx - infl: gx + infl + 1].any()
+                        blocked[
+                            gy - infl : gy + infl + 1, gx - infl : gx + infl + 1
+                        ].any()
                     )
 
                 # Sweep: rings of radius standoff..standoff+search_r at
@@ -462,26 +466,35 @@ async def get_safe_goal_near_object(req: GetSafeGoalNearObject_Request) -> GetSa
                     pose.header.frame_id = "map"
                     pose.pose.position = Point(x=float(bx), y=float(by), z=0.0)
                     pose.pose.orientation = Quaternion(
-                        x=0.0, y=0.0,
+                        x=0.0,
+                        y=0.0,
                         z=float(math.sin(yaw / 2.0)),
                         w=float(math.cos(yaw / 2.0)),
                     )
                     return GetSafeGoalNearObject_Response(
-                        reachable=True, pose=pose,
-                        reason=(f"occupancy grid: r={br:.2f}m "
-                                f"Δθ={math.degrees(bdth):+.0f}° "
-                                f"inflate={infl}cells({(infl*res):.2f}m)"),
+                        reachable=True,
+                        pose=pose,
+                        reason=(
+                            f"occupancy grid: r={br:.2f}m "
+                            f"Δθ={math.degrees(bdth):+.0f}° "
+                            f"inflate={infl}cells({(infl*res):.2f}m)"
+                        ),
                     )
                 # Map exists but found no free goal — explicit failure rather
                 # than returning a bbox guess that lands in a wall.
                 return GetSafeGoalNearObject_Response(
-                    reachable=False, pose=PoseStamped(),
-                    reason=(f"occupancy grid had no free cell within "
-                            f"{search_r:.1f}m of {req.object_id.data} "
-                            f"at standoff={standoff:.2f}m, inflate={infl}cells"),
+                    reachable=False,
+                    pose=PoseStamped(),
+                    reason=(
+                        f"occupancy grid had no free cell within "
+                        f"{search_r:.1f}m of {req.object_id.data} "
+                        f"at standoff={standoff:.2f}m, inflate={infl}cells"
+                    ),
                 )
         except Exception as e:  # noqa: BLE001
-            log.warning("[safe_goal] occupancy BFS errored, falling back to bbox: %s", e)
+            log.warning(
+                "[safe_goal] occupancy BFS errored, falling back to bbox: %s", e
+            )
 
     # ── 2. bbox fallback (no map yet) ──────────────────────────────────
     ax = cx - appr_dx * standoff
@@ -491,14 +504,18 @@ async def get_safe_goal_near_object(req: GetSafeGoalNearObject_Request) -> GetSa
     pose.header.frame_id = "map"
     pose.pose.position = Point(x=float(ax), y=float(ay), z=0.0)
     pose.pose.orientation = Quaternion(
-        x=0.0, y=0.0,
+        x=0.0,
+        y=0.0,
         z=float(math.sin(yaw / 2.0)),
         w=float(math.cos(yaw / 2.0)),
     )
     return GetSafeGoalNearObject_Response(
-        reachable=True, pose=pose,
-        reason=(f"no occupancy_grid yet; bbox-derived "
-                f"standoff={standoff:.2f}m from {req.object_id.data}"),
+        reachable=True,
+        pose=pose,
+        reason=(
+            f"no occupancy_grid yet; bbox-derived "
+            f"standoff={standoff:.2f}m from {req.object_id.data}"
+        ),
     )
 
 
@@ -521,7 +538,6 @@ __all__ = [
     "get_snapshot",
     "query",
     "get_object",
-    "get_semantic_map",
     "get_safe_goal_near_object",
     "get_safety_context",
 ]

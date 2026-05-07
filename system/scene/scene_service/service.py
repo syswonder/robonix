@@ -876,7 +876,6 @@ async def _run() -> None:
         mcp_tools.get_snapshot,
         mcp_tools.query,
         mcp_tools.get_object,
-        mcp_tools.get_semantic_map,
         mcp_tools.get_safe_goal_near_object,
         mcp_tools.get_safety_context,
     ):
@@ -894,7 +893,7 @@ async def _run() -> None:
             description=(fn.__doc__ or "").strip(),
             input_schema_json=schema,
         )
-    log.info("scene declared 6 MCP tools at %s", cap.mcp_endpoint)
+    log.info("scene declared 5 MCP tools at %s", cap.mcp_endpoint)
 
     # ROS2 ingest hub + downstream consumers (self-pose, perception).
     # _start_ros_ingest still wants a raw atlas stub for QueryCapabilities;

@@ -1,6 +1,0 @@
-# Geometry layer: surfaces in region + a reference (not the data) to
-# Nav2's 2D occupancy grid. v1 ships zero voxel data through MCP — Pilot
-# can read the grid directly via the named topic if it actually needs to.
-Region region
----
-SemanticMapSlice slice

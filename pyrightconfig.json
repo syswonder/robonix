@@ -1,0 +1,5 @@
+{
+  "extraPaths": [
+    "pylib/robonix-py",
+  ]
+}
