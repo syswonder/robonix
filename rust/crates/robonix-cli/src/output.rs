@@ -123,10 +123,7 @@ pub fn boot_banner() {
     for line in &lines {
         println!("{}", line.cyan().bold());
     }
-    println!(
-        "{}",
-        "        Embodied AI Operating System".dimmed(),
-    );
+    println!("{}", "        Embodied AI Operating System".dimmed(),);
     println!();
     // Body block. Bullet-aligned, dimmed value column — readable but
     // visually distinct from the per-component boot lines below.
@@ -157,11 +154,7 @@ pub fn boot_start(deploy_name: &str, manifest_path: &str) {
         boot_now().cyan(),
         deploy_name.bold().green(),
     );
-    println!(
-        "{} manifest {}",
-        boot_now().cyan(),
-        manifest_path.dimmed(),
-    );
+    println!("{} manifest {}", boot_now().cyan(), manifest_path.dimmed(),);
 }
 
 /// `[  ssss.mmm] [ OK ] name              detail` — component came up.
@@ -270,11 +263,7 @@ pub fn boot_summary(ok: usize, total: usize, hint: &str) {
     };
     println!();
     println!(
-        "{} robonix up — {}/{} components in {:.3}s   {}",
-        format!("[ {badge} ]"),
-        ok,
-        total,
-        elapsed,
+        "[ {badge} ] robonix up — {ok}/{total} components in {elapsed:.3}s   {}",
         hint.dimmed()
     );
 }

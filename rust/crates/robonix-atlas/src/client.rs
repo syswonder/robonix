@@ -195,9 +195,7 @@ impl AtlasClient {
                 detail: detail.to_string(),
             })
             .await
-            .with_context(|| {
-                format!("SetCapabilityState '{capability_id}' -> {new_state:?}")
-            })?;
+            .with_context(|| format!("SetCapabilityState '{capability_id}' -> {new_state:?}"))?;
         Ok(())
     }
 

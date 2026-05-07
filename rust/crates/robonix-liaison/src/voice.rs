@@ -416,8 +416,7 @@ async fn stream_capture_and_recognize(
 
     // Buffered hand-off: mic-pump task drops AsrAudioChunks onto the
     // mpsc; tonic forwards them up the bidi as the request stream.
-    let (asr_req_tx, asr_req_rx) =
-        mpsc::channel::<crate::pb::asr::AsrAudioChunk>(64);
+    let (asr_req_tx, asr_req_rx) = mpsc::channel::<crate::pb::asr::AsrAudioChunk>(64);
     let asr_req_stream = ReceiverStream::new(asr_req_rx);
 
     // Accumulator the mic-pump writes into; the outer task reads it
@@ -442,9 +441,7 @@ async fn stream_capture_and_recognize(
             match tokio::time::timeout(remaining, mic_stream.message()).await {
                 Ok(Ok(Some(chunk))) => {
                     pcm_buf_for_pump.lock().await.extend_from_slice(&chunk.data);
-                    let asr_chunk = crate::pb::asr::AsrAudioChunk {
-                        chunk: Some(chunk),
-                    };
+                    let asr_chunk = crate::pb::asr::AsrAudioChunk { chunk: Some(chunk) };
                     if asr_req_tx.send(asr_chunk).await.is_err() {
                         // outer task closed the request stream — final
                         // received or session aborted.

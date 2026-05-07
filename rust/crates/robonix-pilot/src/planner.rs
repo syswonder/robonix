@@ -61,7 +61,11 @@ fn task_modality(task: &Task) -> Option<String> {
     }
     serde_json::from_str::<serde_json::Value>(j)
         .ok()
-        .and_then(|v| v.get("modality").and_then(|x| x.as_str()).map(str::to_string))
+        .and_then(|v| {
+            v.get("modality")
+                .and_then(|x| x.as_str())
+                .map(str::to_string)
+        })
 }
 
 /// Skip vector memory prefetch for trivial chit-chat (saves latency and noise).
