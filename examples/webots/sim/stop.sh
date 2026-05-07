@@ -19,6 +19,30 @@ echo "[sim/stop] killing host-side robonix processes (atlas / pilot / executor /
 # system-bin table AND to this regex.
 pkill -9 -f "rbnx boot|rbnx deploy|rbnx start -p|robonix-atlas|robonix-pilot|robonix-executor|robonix-liaison" 2>/dev/null || true
 
+echo "[sim/stop] killing host-side python service zombies (speech / memsearch / scene / audio drivers / nav bridges)..."
+# Host-side packages spawn long-lived Python processes in their own
+# rbnx-build/venv. `rbnx shutdown` SIGTERMs the rbnx-cli wrapper, but if
+# the wrapper dies first (or boot races), the Python child outlives it
+# and keeps its GPU memory + gRPC port. Speech_service is the worst
+# offender: every leaked instance pins ~1 GiB of CUDA on the FunASR
+# model and a stale TCP port that the next boot can't rebind.
+pkill -9 -f "speech_service\\.service" 2>/dev/null || true
+pkill -9 -f "memsearch_service\\.service" 2>/dev/null || true
+pkill -9 -f "scene_service\\.service" 2>/dev/null || true
+pkill -9 -f "audio_driver\\.node" 2>/dev/null || true
+pkill -9 -f "audio_macos_bridge\\.node" 2>/dev/null || true
+pkill -9 -f "simple_nav\\.atlas_bridge" 2>/dev/null || true
+pkill -9 -f "mapping_service\\.service" 2>/dev/null || true
+
+# Quick GPU memory check — visible signal that the kills actually
+# released CUDA. nvidia-smi may be absent on non-GPU hosts; that's fine.
+if command -v nvidia-smi >/dev/null 2>&1; then
+    used_free=$(nvidia-smi --query-gpu=memory.used,memory.free --format=csv,noheader 2>/dev/null | head -1 || true)
+    if [ -n "${used_free:-}" ]; then
+        echo "[sim/stop] GPU after host-side cleanup: ${used_free}"
+    fi
+fi
+
 echo "[sim/stop] killing host-side rviz2 wrapper (docker exec into sim)..."
 # sim/start.sh launches `bash sim/start_rviz.sh` in the background;
 # that script does `docker exec robonix_tiago_sim ... rviz2`. Kill the
