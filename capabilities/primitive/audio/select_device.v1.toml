@@ -1,0 +1,13 @@
+# Pin a specific device by id (from list_devices) for subsequent mic /
+# speaker streams. Empty id = revert to OS default. Optional, paired
+# with list_devices.
+[contract]
+id      = "robonix/primitive/audio/select_device"
+version = "1"
+kind    = "primitive"
+
+[io.srv]
+srv = "audio/srv/SelectAudioDevice"
+
+[mode]
+type = "rpc"

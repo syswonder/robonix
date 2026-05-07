@@ -6,7 +6,10 @@
 set -euo pipefail
 
 PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-FLAGS=()
+# Match scripts/start.sh's PYTHONPATH: <pkg>/rbnx-build/codegen/proto_gen.
+# rbnx-codegen's default places proto_gen/ at <pkg>/proto_gen/, which the
+# runtime never reads — pin it here.
+FLAGS=(--out-dir "$PKG/rbnx-build/codegen")
 [[ "${RBNX_BUILD_CLEAN:-}" == "1" ]] && FLAGS+=(--clean)
 
 rbnx codegen -p "$PKG" "${FLAGS[@]}"

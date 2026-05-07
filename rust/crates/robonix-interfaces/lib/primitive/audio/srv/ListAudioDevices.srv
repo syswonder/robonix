@@ -1,0 +1,11 @@
+# robonix/primitive/audio/list_devices — enumerate every input + output
+# device the audio impl can drive. Implementations that wrap a single
+# fixed device (e.g. an embedded board with one mic and one speaker)
+# may return UNIMPLEMENTED; consumers must treat that as "the cap_id is
+# the device".
+---
+audio/msg/AudioDevice[] devices
+string current_input_id     # id currently in use for input streams,
+                            # "" if the OS default is in effect
+string current_output_id    # id currently in use for output streams,
+                            # "" if the OS default is in effect

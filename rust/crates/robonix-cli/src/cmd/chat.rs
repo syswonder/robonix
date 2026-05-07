@@ -59,16 +59,25 @@ enum Role {
 
 const DEFAULT_LIAISON_FALLBACK: &str = "http://127.0.0.1:50081";
 
-/// Persisted user choices for `rbnx chat`, written to ~/.robonix/chat.yaml
-/// the first time we have to pick. Each field stores a capability_id, not
-/// an OS-level device id — the macOS-side device picker (mic/speaker on
-/// the bridge daemon) is an entirely separate concern.
+/// Persisted user choices for `rbnx chat`, written to ~/.robonix/chat.yaml.
+///
+/// Two layers per audio side:
+///   *_cap_id      → which audio impl provider in atlas (e.g. .alsa vs .macos)
+///   *_device_id   → which OS-level device that impl should drive (impl-
+///                   specific id from ListAudioDevices; "" = OS default)
+///
+/// Hot-swap-able: Ctrl+A in chat re-runs the picker. Initial run reads
+/// this file; missing fields trigger a picker prompt.
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct ChatConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mic_cap_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    mic_device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     speaker_cap_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    speaker_device_id: Option<String>,
 }
 
 fn chat_config_path() -> Option<std::path::PathBuf> {
@@ -140,7 +149,14 @@ pub async fn execute(server: &str) -> Result<()> {
             }
         };
 
-    let result = run_tui(&mut terminal, &liaison_endpoint, &chat_cfg, &audio_warnings).await;
+    let result = run_tui(
+        &mut terminal,
+        &atlas_endpoint,
+        &liaison_endpoint,
+        chat_cfg,
+        &audio_warnings,
+    )
+    .await;
 
     terminal::disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
@@ -214,21 +230,40 @@ async fn try_discover_once(atlas_endpoint: &str, contract_id: &str) -> Result<St
 // preference (which physical box's audio do I want when sitting at this
 // terminal), not a per-deployment server setting.
 
+/// Pick mode controls when the picker prompts vs. silently honours
+/// what's already in chat.yaml.
+#[derive(Clone, Copy)]
+enum PickMode {
+    /// First-run path called from `execute()`: prompt for missing
+    /// fields only, leave already-saved choices alone.
+    FirstRun,
+    /// Ctrl+A path: re-prompt every layer regardless of saved values.
+    Reconfigure,
+}
+
 /// Best-effort audio device discovery. Anything that goes wrong here
 /// (atlas unreachable, no providers registered, user pressed Esc) is
 /// downgraded to a chat-history warning — text mode keeps working.
-/// Voice attempts via Ctrl+V will then fail at session start with a
-/// clear "no provider" error rather than crashing the whole TUI.
 async fn ensure_audio_devices(
     atlas_endpoint: &str,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<(ChatConfig, Vec<String>)> {
+    pick_audio_settings(atlas_endpoint, terminal, PickMode::FirstRun).await
+}
+
+async fn pick_audio_settings(
+    atlas_endpoint: &str,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    mode: PickMode,
 ) -> Result<(ChatConfig, Vec<String>)> {
     let mut cfg = load_chat_config();
     let mut warnings: Vec<String> = Vec::new();
 
     let env_set = |key: &str| std::env::var(key).ok().filter(|s| !s.is_empty()).is_some();
-    let need_mic = !env_set("ROBONIX_CHAT_MIC_NODE") && cfg.mic_cap_id.is_none();
-    let need_speaker = !env_set("ROBONIX_CHAT_SPEAKER_NODE") && cfg.speaker_cap_id.is_none();
+    let always = matches!(mode, PickMode::Reconfigure);
+    let need_mic = always || (!env_set("ROBONIX_CHAT_MIC_NODE") && cfg.mic_cap_id.is_none());
+    let need_speaker =
+        always || (!env_set("ROBONIX_CHAT_SPEAKER_NODE") && cfg.speaker_cap_id.is_none());
     if !need_mic && !need_speaker {
         return Ok((cfg, warnings));
     }
@@ -245,8 +280,24 @@ async fn ensure_audio_devices(
     };
 
     if need_mic {
-        match try_pick(&mut atlas, terminal, "mic", MIC_CONTRACT).await {
-            Ok(Some(cap_id)) => cfg.mic_cap_id = Some(cap_id),
+        let saved_cap = cfg.mic_cap_id.clone();
+        let saved_dev = cfg.mic_device_id.clone();
+        match try_pick(
+            &mut atlas,
+            terminal,
+            "mic",
+            MIC_CONTRACT,
+            "input",
+            saved_cap.as_deref(),
+            saved_dev.as_deref(),
+            mode,
+        )
+        .await
+        {
+            Ok(Some((cap_id, device_id))) => {
+                cfg.mic_cap_id = Some(cap_id);
+                cfg.mic_device_id = Some(device_id);
+            }
             Ok(None) => warnings.push(
                 "no mic provider in atlas — voice input disabled (text mode unaffected)".into(),
             ),
@@ -254,8 +305,24 @@ async fn ensure_audio_devices(
         }
     }
     if need_speaker {
-        match try_pick(&mut atlas, terminal, "speaker", SPEAKER_CONTRACT).await {
-            Ok(Some(cap_id)) => cfg.speaker_cap_id = Some(cap_id),
+        let saved_cap = cfg.speaker_cap_id.clone();
+        let saved_dev = cfg.speaker_device_id.clone();
+        match try_pick(
+            &mut atlas,
+            terminal,
+            "speaker",
+            SPEAKER_CONTRACT,
+            "output",
+            saved_cap.as_deref(),
+            saved_dev.as_deref(),
+            mode,
+        )
+        .await
+        {
+            Ok(Some((cap_id, device_id))) => {
+                cfg.speaker_cap_id = Some(cap_id);
+                cfg.speaker_device_id = Some(device_id);
+            }
             Ok(None) => warnings.push(
                 "no speaker provider in atlas — voice playback disabled (text mode unaffected)"
                     .into(),
@@ -269,26 +336,232 @@ async fn ensure_audio_devices(
     Ok((cfg, warnings))
 }
 
-/// `Ok(Some(cap_id))` = picked, `Ok(None)` = no providers / cancelled
-/// (caller surfaces a warning instead of bailing).
+/// `Ok(Some((cap_id, device_id)))` = picked both layers; device_id may be ""
+/// when the impl returned UNIMPLEMENTED on list_devices.
+/// `Ok(None)` = no providers in atlas.
+#[allow(clippy::too_many_arguments)]
 async fn try_pick(
     atlas: &mut AtlasClient,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     label: &str,
     contract: &str,
-) -> Result<Option<String>> {
+    kind: &str,
+    saved_cap_id: Option<&str>,
+    saved_device_id: Option<&str>,
+    mode: PickMode,
+) -> Result<Option<(String, String)>> {
     let providers = atlas
         .query_capabilities("", contract, atlas_pb::Transport::Grpc)
         .await?;
     if providers.is_empty() {
         return Ok(None);
     }
-    if providers.len() == 1 {
-        let cap_id = providers[0].capability_id.clone();
-        flash_picker_message(terminal, &format!("auto-selected {label}: {cap_id}"))?;
-        return Ok(Some(cap_id));
+
+    // Layer A — provider (cap_id). Honour saved choice on FirstRun if
+    // it's still in atlas; otherwise auto-pick (1 provider) or prompt.
+    let cap_id = match (mode, saved_cap_id) {
+        (PickMode::FirstRun, Some(s)) if providers.iter().any(|p| p.capability_id == s) => {
+            s.to_string()
+        }
+        _ => {
+            if providers.len() == 1 {
+                let id = providers[0].capability_id.clone();
+                flash_picker_message(terminal, &format!("auto-selected {label}: {id}"))?;
+                id
+            } else {
+                match pick_tui(terminal, label, contract, &providers)? {
+                    Some(s) => s,
+                    None => return Ok(None),
+                }
+            }
+        }
+    };
+
+    // Layer B — device id within the chosen impl. Connect to its
+    // list_devices contract (UNIMPLEMENTED is OK — fall through with "").
+    let device_id =
+        pick_device_for_cap(atlas, terminal, &cap_id, label, kind, saved_device_id, mode).await?;
+
+    // Tell the impl which device to use. Best-effort; ignore failures.
+    if !device_id.is_empty()
+        && let Err(e) = call_select_device(atlas, &cap_id, kind, &device_id).await
+    {
+        log::warn!("SelectAudioDevice on {cap_id} ({kind}={device_id}) failed: {e:#}");
     }
-    pick_tui(terminal, label, contract, &providers)
+
+    Ok(Some((cap_id, device_id)))
+}
+
+/// Connect to `cap_id`'s list_devices interface, ask for the device
+/// list, run a picker on the entries that match `kind` (input/output)
+/// + duplex. Returns "" when the impl doesn't expose the contract.
+async fn pick_device_for_cap(
+    atlas: &mut AtlasClient,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    cap_id: &str,
+    label: &str,
+    kind: &str,
+    saved_device_id: Option<&str>,
+    mode: PickMode,
+) -> Result<String> {
+    use crate::pb::contracts::primitive_audio_list_devices_client::PrimitiveAudioListDevicesClient;
+
+    const LIST_CONTRACT: &str = "robonix/primitive/audio/list_devices";
+    let endpoint = match atlas
+        .connect_capability(
+            CONSUMER_ID,
+            cap_id,
+            LIST_CONTRACT,
+            atlas_pb::Transport::Grpc,
+        )
+        .await
+    {
+        Ok((_, ep, _)) => {
+            if ep.starts_with("http") {
+                ep
+            } else {
+                format!("http://{ep}")
+            }
+        }
+        Err(_) => return Ok(String::new()), // cap doesn't expose list_devices
+    };
+
+    let mut client = match PrimitiveAudioListDevicesClient::connect(endpoint.clone()).await {
+        Ok(c) => c,
+        Err(_) => return Ok(String::new()),
+    };
+    let resp = match client
+        .list_audio_devices(crate::pb::audio::ListAudioDevicesRequest {})
+        .await
+    {
+        Ok(r) => r.into_inner(),
+        Err(_) => return Ok(String::new()),
+    };
+
+    let usable: Vec<crate::pb::audio::AudioDevice> = resp
+        .devices
+        .into_iter()
+        .filter(|d| d.kind == kind || d.kind == "duplex")
+        .collect();
+    if usable.is_empty() {
+        return Ok(String::new());
+    }
+
+    // Honour saved device on FirstRun if it's still listed.
+    if matches!(mode, PickMode::FirstRun)
+        && let Some(saved) = saved_device_id
+        && usable.iter().any(|d| d.id == saved)
+    {
+        return Ok(saved.to_string());
+    }
+
+    if usable.len() == 1 {
+        let id = usable[0].id.clone();
+        flash_picker_message(
+            terminal,
+            &format!("auto-selected {label} device: {}", usable[0].name),
+        )?;
+        return Ok(id);
+    }
+
+    pick_device_tui(terminal, label, &usable)
+}
+
+async fn call_select_device(
+    atlas: &mut AtlasClient,
+    cap_id: &str,
+    kind: &str,
+    device_id: &str,
+) -> Result<()> {
+    use crate::pb::contracts::primitive_audio_select_device_client::PrimitiveAudioSelectDeviceClient;
+    const SELECT_CONTRACT: &str = "robonix/primitive/audio/select_device";
+
+    let (_, ep, _) = atlas
+        .connect_capability(
+            CONSUMER_ID,
+            cap_id,
+            SELECT_CONTRACT,
+            atlas_pb::Transport::Grpc,
+        )
+        .await?;
+    let endpoint = if ep.starts_with("http") {
+        ep
+    } else {
+        format!("http://{ep}")
+    };
+    let mut client = PrimitiveAudioSelectDeviceClient::connect(endpoint).await?;
+    let resp = client
+        .select_audio_device(crate::pb::audio::SelectAudioDeviceRequest {
+            kind: kind.to_string(),
+            id: device_id.to_string(),
+        })
+        .await?
+        .into_inner();
+    if !resp.ok {
+        anyhow::bail!("impl rejected: {}", resp.error);
+    }
+    Ok(())
+}
+
+fn pick_device_tui(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    label: &str,
+    devices: &[crate::pb::audio::AudioDevice],
+) -> Result<String> {
+    let mut idx = 0usize;
+    loop {
+        terminal.draw(|f| {
+            let area = f.area();
+            let lines: Vec<Line> = devices
+                .iter()
+                .enumerate()
+                .map(|(i, d)| {
+                    let mark = if i == idx { "▶ " } else { "  " };
+                    let style = if i == idx {
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    let mut tags = Vec::new();
+                    if d.is_default {
+                        tags.push("default".to_string());
+                    }
+                    if !d.note.is_empty() {
+                        tags.push(format!("⚠ {}", d.note));
+                    }
+                    let suffix = if tags.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  ({})", tags.join(", "))
+                    };
+                    Line::from(vec![Span::styled(
+                        format!("{mark}#{} {}{}", d.id, d.name, suffix),
+                        style,
+                    )])
+                })
+                .collect();
+            let body = Paragraph::new(lines)
+                .block(Block::default().borders(Borders::ALL).title(format!(
+                    " choose {label} device — ↑↓ select · Enter confirm · Esc skip "
+                )))
+                .wrap(Wrap { trim: false });
+            f.render_widget(body, area);
+        })?;
+        if event::poll(std::time::Duration::from_millis(200))?
+            && let Event::Key(key) = event::read()?
+        {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => idx = idx.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') if idx + 1 < devices.len() => idx += 1,
+                KeyCode::Enter => return Ok(devices[idx].id.clone()),
+                KeyCode::Char('q') | KeyCode::Esc => return Ok(String::new()),
+                _ => {}
+            }
+        }
+    }
 }
 
 fn pick_tui(
@@ -366,8 +639,9 @@ fn flash_picker_message(
 
 async fn run_tui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    atlas_endpoint: &str,
     liaison_endpoint: &str,
-    chat_cfg: &ChatConfig,
+    mut chat_cfg: ChatConfig,
     audio_warnings: &[String],
 ) -> Result<()> {
     let local_user = format!("local:{}", whoami_username());
@@ -376,7 +650,7 @@ async fn run_tui(
         role: Role::Status,
         text: format!(
             "Connected to Liaison at {liaison_endpoint} as {local_user}. \
-             Enter = send · Ctrl+V = start voice (auto end on silence) · Esc = abort turn · Ctrl+C = quit."
+             Enter = send · Ctrl+V = voice (auto end on silence) · Ctrl+A = audio settings · Esc = abort turn · Ctrl+C = quit."
         ),
     });
     for w in audio_warnings {
@@ -402,6 +676,41 @@ async fn run_tui(
                 break;
             }
 
+            // Ctrl+A → re-run the audio device picker (provider + device
+            // for both mic and speaker). Reload chat_cfg from the picker
+            // result so the next Ctrl+V uses the new selections.
+            if !busy
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.code == KeyCode::Char('a')
+            {
+                match pick_audio_settings(atlas_endpoint, terminal, PickMode::Reconfigure).await {
+                    Ok((new_cfg, warnings)) => {
+                        chat_cfg = new_cfg;
+                        messages.borrow_mut().push(ChatMessage {
+                            role: Role::Status,
+                            text: format!(
+                                "audio settings updated: mic={}/{} · speaker={}/{}",
+                                chat_cfg.mic_cap_id.as_deref().unwrap_or("(unset)"),
+                                chat_cfg.mic_device_id.as_deref().unwrap_or("default"),
+                                chat_cfg.speaker_cap_id.as_deref().unwrap_or("(unset)"),
+                                chat_cfg.speaker_device_id.as_deref().unwrap_or("default"),
+                            ),
+                        });
+                        for w in warnings {
+                            messages.borrow_mut().push(ChatMessage {
+                                role: Role::Status,
+                                text: w,
+                            });
+                        }
+                    }
+                    Err(e) => messages.borrow_mut().push(ChatMessage {
+                        role: Role::Status,
+                        text: format!("audio settings: {e:#}"),
+                    }),
+                }
+                continue;
+            }
+
             // Ctrl+V → push-to-talk voice session (auto-ends on silence).
             if !busy
                 && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -421,7 +730,7 @@ async fn run_tui(
                     terminal,
                     &input,
                     &mut scroll,
-                    chat_cfg,
+                    &chat_cfg,
                 )
                 .await
                 {

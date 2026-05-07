@@ -253,6 +253,45 @@ async def serve_health(ws) -> None:
     await ws.send(json.dumps(payload))
 
 
+# ── /devices ──────────────────────────────────────────────────────────────
+# Same JSON shape as server_web.py's /devices so the bridge's gRPC
+# ListAudioDevices handler doesn't have to branch on which mac_server
+# variant is running. Headless server can't change the active device
+# at runtime (it's pinned to --input-device/--output-device CLI flags),
+# so /set_device returns ok=false with a hint.
+async def serve_devices(ws, input_dev, output_dev) -> None:
+    devs = sd.query_devices()
+    payload = {
+        "input_default": sd.default.device[0],
+        "output_default": sd.default.device[1],
+        "input_current": input_dev,
+        "output_current": output_dev,
+        "devices": [
+            {
+                "id": i,
+                "name": d["name"],
+                "max_input_channels": d["max_input_channels"],
+                "max_output_channels": d["max_output_channels"],
+            }
+            for i, d in enumerate(devs)
+        ],
+    }
+    await ws.send(json.dumps(payload))
+
+
+async def serve_set_device(ws) -> None:
+    try:
+        await ws.recv()  # consume the request body but ignore it
+    except Exception:  # noqa: BLE001
+        pass
+    await ws.send(json.dumps({
+        "ok": False,
+        "error": "headless server.py does not support runtime device changes; "
+                 "restart with --input-device / --output-device or use "
+                 "server_web.py for live switching",
+    }))
+
+
 # ── dispatch ───────────────────────────────────────────────────────────────
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
@@ -289,6 +328,10 @@ async def main() -> int:
             await serve_speaker(ws, output_dev)
         elif path == "/health":
             await serve_health(ws)
+        elif path == "/devices":
+            await serve_devices(ws, input_dev, output_dev)
+        elif path == "/set_device":
+            await serve_set_device(ws)
         else:
             await ws.close(code=1008, reason=f"unknown path {path!r}")
 
