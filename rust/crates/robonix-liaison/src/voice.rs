@@ -38,12 +38,12 @@ use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Status};
 use uuid::Uuid;
 
-use crate::pb::asr;
 use crate::pb::audio::AudioChunk;
 use crate::pb::contracts::{
     primitive_audio_mic_client::PrimitiveAudioMicClient,
     primitive_audio_speaker_client::PrimitiveAudioSpeakerClient,
-    system_pilot_client::SystemPilotClient, system_speech_asr_client::SystemSpeechAsrClient,
+    system_pilot_client::SystemPilotClient,
+    system_speech_asr_stream_client::SystemSpeechAsrStreamClient,
     system_speech_tts_client::SystemSpeechTtsClient,
     system_speech_voiceprint_client::SystemSpeechVoiceprintClient,
 };
@@ -218,9 +218,18 @@ async fn run_session(
     tx: mpsc::Sender<Result<VoiceEvent, Status>>,
 ) -> Result<()> {
     let mock = is_mock_mode();
+    // `record_seconds` is now a hard-stop ceiling on streaming capture
+    // (FunASR's VAD ends the turn under most conditions; this just
+    // protects against a sensor that never goes silent). 0 / unset →
+    // 30 s default. Whisper's old "record-then-recognize" pattern is
+    // gone; voice goes through `asr_stream` end-to-end.
+    let max_seconds: u32 = if record_seconds == 0 {
+        30
+    } else {
+        record_seconds.max(5)
+    };
 
-    // 1. Capture audio (mic) or fall back to mock transcript.
-    let (audio_pcm, transcript_override) = if mock {
+    let (audio_pcm, transcript) = if mock {
         let canned = mock_transcript();
         let _ = tx
             .send(Ok(event_status(
@@ -236,59 +245,30 @@ async fn run_session(
                 &format!("mock transcript ready ({} bytes)", canned.len()),
             )))
             .await;
-        (Vec::new(), Some(canned))
-    } else {
-        let pcm = capture_audio(&atlas, &req.mic_node_id, record_seconds, &session_id, &tx).await?;
-        (pcm, None)
-    };
-
-    // 2. ASR.
-    let transcript = if let Some(t) = transcript_override {
-        t
-    } else {
-        let asr_endpoint = resolve_endpoint(&atlas, "robonix/system/speech/asr", &req.asr_node_id)
-            .await
-            .ok_or_else(|| anyhow::anyhow!("no SystemSpeechAsr provider registered in Atlas"))?;
-        let mut client = SystemSpeechAsrClient::connect(asr_endpoint.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!("connect ASR at {asr_endpoint}: {e}"))?;
-        let resp = client
-            .recognize(Request::new(asr::RecognizeRequest {
-                audio_data: audio_pcm.clone(),
-                encoding: DEFAULT_AUDIO_ENCODING.to_string(),
-                sample_rate_hz: DEFAULT_AUDIO_SAMPLE_RATE,
-                language: language.clone(),
-            }))
-            .await
-            .map_err(|e| anyhow::anyhow!("ASR rpc failed: {e}"))?
-            .into_inner();
-        if !resp.error.is_empty() {
-            anyhow::bail!("ASR error: {}", resp.error);
-        }
         let _ = tx
-            .send(Ok(event_text(
-                KIND_ASR_FINAL,
-                &session_id,
-                &resp.text,
-                resp.confidence,
-            )))
+            .send(Ok(event_text(KIND_ASR_FINAL, &session_id, &canned, 1.0)))
             .await;
-        resp.text
+        (Vec::new(), canned)
+    } else {
+        // Mic → AsrAudioChunk pump + asr_stream.RecognizeStream both
+        // run inside `stream_capture_and_recognize`. It returns once
+        // FunASR emits is_final, the user hits max_seconds, or the
+        // mic stream drops. Voiceprint still gets the accumulated PCM
+        // for downstream identification (currently fallback-only).
+        stream_capture_and_recognize(
+            &atlas,
+            &req.mic_node_id,
+            &req.asr_node_id,
+            &language,
+            max_seconds,
+            &session_id,
+            &tx,
+        )
+        .await?
     };
 
     if transcript.trim().is_empty() {
         anyhow::bail!("empty transcript — nothing to send to Pilot");
-    }
-
-    if mock {
-        let _ = tx
-            .send(Ok(event_text(
-                KIND_ASR_FINAL,
-                &session_id,
-                &transcript,
-                1.0,
-            )))
-            .await;
     }
 
     // 3. Voiceprint (graceful — fallback to client hint on any failure).
@@ -385,65 +365,193 @@ async fn run_session(
     Ok(())
 }
 
-// ── Mic capture ──────────────────────────────────────────────────────────────
+// ── Mic capture + streaming ASR ─────────────────────────────────────────────
+//
+// Open the mic primitive AND `robonix/system/speech/asr_stream` (FunASR
+// paraformer-zh-streaming bidi) at the same time. Mic AudioChunks get
+// wrapped as AsrAudioChunk and pumped up the request side; the response
+// side yields RecognizeStreamEvents (PARTIAL → … → FINAL). On FINAL,
+// stop both streams and return `(accumulated_pcm, final_text)`.
+//
+// `max_seconds` is a hard ceiling — FunASR's VAD usually ends the turn
+// well before that, but we don't want to hang on a stuck mic.
 
-async fn capture_audio(
+#[allow(clippy::too_many_arguments)]
+async fn stream_capture_and_recognize(
     atlas: &Arc<Mutex<AtlasClient>>,
     mic_pin: &str,
-    record_seconds: u32,
+    asr_pin: &str,
+    language: &str,
+    max_seconds: u32,
     session_id: &str,
     tx: &mpsc::Sender<Result<VoiceEvent, Status>>,
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, String)> {
     let mic_endpoint = resolve_endpoint(atlas, "robonix/primitive/audio/mic", mic_pin)
         .await
         .ok_or_else(|| anyhow::anyhow!("no PrimitiveAudioMic provider registered in Atlas"))?;
+    let asr_endpoint = resolve_endpoint(atlas, "robonix/system/speech/asr_stream", asr_pin)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("no SystemSpeechAsrStream provider registered in Atlas"))?;
 
-    let mut client = PrimitiveAudioMicClient::connect(mic_endpoint.clone())
+    let mut mic_client = PrimitiveAudioMicClient::connect(mic_endpoint.clone())
         .await
         .map_err(|e| anyhow::anyhow!("connect mic at {mic_endpoint}: {e}"))?;
+    let mut asr_client = SystemSpeechAsrStreamClient::connect(asr_endpoint.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("connect asr_stream at {asr_endpoint}: {e}"))?;
+
     let _ = tx
         .send(Ok(event_status(
             KIND_RECORDING_STARTED,
             session_id,
-            &format!("recording {record_seconds}s from {mic_endpoint}"),
+            &format!("streaming mic {mic_endpoint} → asr_stream {asr_endpoint}"),
         )))
         .await;
 
-    let mut stream = client
+    let mut mic_stream = mic_client
         .mic(Request::new(()))
         .await
         .map_err(|e| anyhow::anyhow!("mic rpc failed: {e}"))?
         .into_inner();
 
-    let mut buf: Vec<u8> =
-        Vec::with_capacity((DEFAULT_AUDIO_SAMPLE_RATE as usize) * 2 * (record_seconds as usize));
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(record_seconds as u64);
-    loop {
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            break;
+    // Buffered hand-off: mic-pump task drops AsrAudioChunks onto the
+    // mpsc; tonic forwards them up the bidi as the request stream.
+    let (asr_req_tx, asr_req_rx) =
+        mpsc::channel::<crate::pb::asr::AsrAudioChunk>(64);
+    let asr_req_stream = ReceiverStream::new(asr_req_rx);
+
+    // Accumulator the mic-pump writes into; the outer task reads it
+    // back at the end so we can hand the raw PCM to identify_user.
+    let pcm_buf = Arc::new(Mutex::new(Vec::<u8>::with_capacity(
+        (DEFAULT_AUDIO_SAMPLE_RATE as usize) * 2 * (max_seconds as usize),
+    )));
+    let pcm_buf_for_pump = Arc::clone(&pcm_buf);
+    let _language_owned = language.to_string();
+
+    // Mic pump — drains the mic gRPC stream into the asr_req sender,
+    // accumulates raw PCM, stops on max_seconds / mic EOF / asr_req
+    // closing (which is what happens once the outer task sees a FINAL
+    // event and drops the receiver).
+    let pump_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(max_seconds as u64);
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            let remaining = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(remaining, mic_stream.message()).await {
+                Ok(Ok(Some(chunk))) => {
+                    pcm_buf_for_pump.lock().await.extend_from_slice(&chunk.data);
+                    let asr_chunk = crate::pb::asr::AsrAudioChunk {
+                        chunk: Some(chunk),
+                    };
+                    if asr_req_tx.send(asr_chunk).await.is_err() {
+                        // outer task closed the request stream — final
+                        // received or session aborted.
+                        break;
+                    }
+                }
+                Ok(Ok(None)) => break,
+                Ok(Err(_)) => break,
+                Err(_) => break,
+            }
         }
-        let remaining = deadline - now;
-        match tokio::time::timeout(remaining, stream.message()).await {
-            Ok(Ok(Some(chunk))) => buf.extend_from_slice(&chunk.data),
-            Ok(Ok(None)) => break,
-            Ok(Err(e)) => anyhow::bail!("mic stream error: {e}"),
-            Err(_) => break,
+    });
+
+    // FunASR docs: AsrAudioChunk + ASR backend reads its own audio_config
+    // defaults (16 kHz mono pcm_s16le); language hint is on the bidi
+    // request metadata, not the per-chunk message. Tonic-codegen
+    // doesn't surface a separate header field here, so we just rely on
+    // FunASR's auto-detection — paraformer-zh-streaming is zh-only so
+    // this is fine. If a multi-lingual backend is ever wired in, the
+    // contract needs an extra preamble message.
+    let asr_resp = asr_client
+        .recognize_stream(Request::new(asr_req_stream))
+        .await
+        .map_err(|e| anyhow::anyhow!("asr_stream rpc failed: {e}"))?;
+    let mut asr_events = asr_resp.into_inner();
+
+    // FunASR's paraformer-zh-streaming emits *incremental* partials —
+    // each event carries only the words decoded from the most recent
+    // chunk window, not a cumulative transcript. The server's final
+    // flush (`recognize_chunk(b"", is_final=True)`) often returns an
+    // empty result so we never see an event with `is_final=true`.
+    //
+    // Strategy: prefer the server's FINAL text when we get one; fall
+    // back to concatenated partials otherwise. Either way we hand a
+    // single non-empty transcript to Pilot.
+    let mut transcript = String::new();
+    let mut accumulated = String::new();
+    let mut last_confidence = 0.0_f32;
+    while let Some(ev_or_err) = asr_events.next().await {
+        let ev = ev_or_err.map_err(|e| anyhow::anyhow!("asr_stream recv: {e}"))?;
+        if !ev.error.is_empty() {
+            anyhow::bail!("asr error: {}", ev.error);
+        }
+        let is_final = ev.is_final || ev.event_type == 1;
+        let text = ev.text.clone();
+        if !text.is_empty() {
+            accumulated.push_str(&text);
+            last_confidence = ev.confidence;
+        }
+        if is_final {
+            transcript = if text.is_empty() {
+                accumulated.clone()
+            } else {
+                text.clone()
+            };
+            let _ = tx
+                .send(Ok(event_text(
+                    KIND_ASR_FINAL,
+                    session_id,
+                    &transcript,
+                    ev.confidence,
+                )))
+                .await;
+            break;
+        } else if !text.is_empty() {
+            let _ = tx
+                .send(Ok(event_text(
+                    KIND_ASR_PARTIAL,
+                    session_id,
+                    &text,
+                    ev.confidence,
+                )))
+                .await;
         }
     }
+    if transcript.is_empty() && !accumulated.is_empty() {
+        transcript = accumulated;
+        let _ = tx
+            .send(Ok(event_text(
+                KIND_ASR_FINAL,
+                session_id,
+                &transcript,
+                last_confidence,
+            )))
+            .await;
+    }
 
+    // Stop the mic pump (the outer task already dropped asr_req_rx by
+    // returning from the `while let` loop above, which closes the
+    // request stream).
+    pump_handle.abort();
+    let _ = pump_handle.await;
+
+    let pcm = std::mem::take(&mut *pcm_buf.lock().await);
     let _ = tx
         .send(Ok(event_status(
             KIND_RECORDING_DONE,
             session_id,
             &format!(
-                "captured {} bytes (~{:.2}s @ 16kHz mono s16le)",
-                buf.len(),
-                buf.len() as f32 / (DEFAULT_AUDIO_SAMPLE_RATE as f32 * 2.0),
+                "captured {} bytes (~{:.2}s @ 16kHz mono s16le); transcript={:?}",
+                pcm.len(),
+                pcm.len() as f32 / (DEFAULT_AUDIO_SAMPLE_RATE as f32 * 2.0),
+                transcript,
             ),
         )))
         .await;
-    Ok(buf)
+    Ok((pcm, transcript))
 }
 
 // ── Voiceprint ───────────────────────────────────────────────────────────────

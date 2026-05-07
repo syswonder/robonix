@@ -52,6 +52,18 @@ fn task_is_session_end(task: &Task) -> bool {
         .unwrap_or(false)
 }
 
+/// `context_json.modality` — set by liaison to "text" / "voice" / "api".
+/// `None` when the field is missing or context_json is empty/malformed.
+fn task_modality(task: &Task) -> Option<String> {
+    let j = task.context_json.trim();
+    if j.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(j)
+        .ok()
+        .and_then(|v| v.get("modality").and_then(|x| x.as_str()).map(str::to_string))
+}
+
 /// Skip vector memory prefetch for trivial chit-chat (saves latency and noise).
 fn skip_memory_prefetch(user_text: &str) -> bool {
     let t = user_text.trim();
@@ -160,6 +172,24 @@ pub async fn run_turn(
             ));
         }
         system_prompt.push_str(&block);
+    }
+
+    // Voice-mode brevity hint. Liaison stamps `context_json.modality =
+    // "voice"` for every voice-path Task; in that case we ask the VLM
+    // for a short reply because the user is going to *hear* it via TTS,
+    // not read a Markdown wall. Threshold is intentionally tight (~30
+    // Chinese chars / ~50 English words) — barge-in matters more than
+    // exhaustive coverage and the user can always ask follow-ups.
+    if task_modality(task).as_deref() == Some("voice") {
+        system_prompt.push_str(
+            "\n\n## Voice mode\n\n\
+             The user is interacting via voice; this reply will be\n\
+             spoken back through TTS. Keep the response short (≤ ~30\n\
+             characters Chinese / ~50 words English), no markdown\n\
+             lists, no headings, no code blocks, plain conversational\n\
+             tone. If the answer genuinely needs structure, summarise\n\
+             out loud and offer to elaborate when asked.\n",
+        );
     }
     let system_prompt = system_prompt;
 
