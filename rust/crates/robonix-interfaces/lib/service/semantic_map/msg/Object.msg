@@ -9,8 +9,8 @@
 string id
 string label
 Relation[] relations
-string[] registered_skills
-string[] registered_primitives
+# string[] registered_skills # deprecated soon
+# string[] registered_primitives # deprecated soon
 FrameMapping[] frame_mapping
 float32 confidence
 builtin_interfaces/Time first_seen

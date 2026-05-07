@@ -33,6 +33,5 @@ capabilities:
   - name: robonix/system/scene/get_snapshot
   - name: robonix/system/scene/query
   - name: robonix/system/scene/get_object
-  - name: robonix/system/scene/get_semantic_map
   - name: robonix/system/scene/get_safe_goal_near_object
   - name: robonix/system/scene/get_safety_context

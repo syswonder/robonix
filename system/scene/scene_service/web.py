@@ -948,7 +948,7 @@ _INDEX_3D_HTML = r"""<!doctype html>
     #panel { position: absolute; top: 8px; right: 8px; z-index: 5;
              padding: 6px 10px; background: rgba(10,12,16,0.85);
              border: 1px solid #303542; border-radius: 4px;
-             max-width: 280px; font-size: 12px; line-height: 1.5; }
+             font-size: 12px; line-height: 1.5; overflow-wrap: break-word; }
     #panel.empty { padding: 3px 8px; font-size: 10px;
                    color: #6a6f7a; font-style: italic; }
     #panel:not(.empty) { min-width: 200px; }

@@ -53,10 +53,12 @@ def _install_simple_logger() -> None:
     for h in list(root.handlers):
         root.removeHandler(h)
     handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter(
-        fmt="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    ))
+    handler.setFormatter(
+        logging.Formatter(
+            fmt="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    )
     root.addHandler(handler)
     if root.level == logging.NOTSET or root.level > logging.INFO:
         root.setLevel(logging.INFO)
@@ -67,9 +69,9 @@ _install_simple_logger()
 
 # ── transport-ENUM ↔ contract.mode compatibility matrix ──────────────────────
 _MODE_TRANSPORT_OK = {
-    "rpc":       {"grpc", "mcp"},
-    "topic_in":  {"ros2"},
-    "topic_out": {"ros2", "grpc"},  # gRPC server-streaming is allowed in spec
+    "rpc": {"grpc", "mcp", "ros2"},
+    "topic_in": {"ros2", "grpc"},
+    "topic_out": {"ros2", "grpc"},
 }
 
 
@@ -83,10 +85,6 @@ class Capability:
         pkg_root:  package root dir; default is auto-detected via the caller's
                    __file__ walking up to a directory with `package_manifest.yaml`.
         atlas_endpoint:  defaults to env ROBONIX_ATLAS or "127.0.0.1:50051".
-        driver_port:     gRPC port for the lifecycle interface. Default env
-                         ROBONIX_DRIVER_PORT or 50230.
-        mcp_port:        FastMCP HTTP port (only used if any @cap.mcp tool
-                         is registered). Default env ROBONIX_MCP_PORT or 50130.
     """
 
     def __init__(
@@ -157,7 +155,9 @@ class Capability:
         self._mcp_app = None  # FastMCP app, lazy
         self._mcp_handlers: list[Callable] = []  # decorated funcs
         self._grpc_handlers: list[tuple[str, Callable]] = []  # (contract_id, fn)
-        self._grpc_servicers: list[tuple[str, Any]] = []  # (contract_id, servicer instance)
+        self._grpc_servicers: list[tuple[str, Any]] = (
+            []
+        )  # (contract_id, servicer instance)
         self._publishers: dict[str, Any] = {}  # contract_id → rclpy publisher
 
         self._driver_server = None
@@ -195,9 +195,13 @@ class Capability:
             return
         prev = self._state
         self._state = new_state
-        log.info("[%s] state %s → %s%s",
-                 self.id, prev, new_state,
-                 f" ({detail})" if detail else "")
+        log.info(
+            "[%s] state %s → %s%s",
+            self.id,
+            prev,
+            new_state,
+            f" ({detail})" if detail else "",
+        )
         try:
             self._atlas.set_capability_state(self.id, new_state, detail)
         except Exception:  # noqa: BLE001
@@ -216,32 +220,57 @@ class Capability:
         return {"ok": False, "state": "deferred", "error": reason}
 
     # ── Layer 1: raw atlas declares ──────────────────────────────────────
-    def declare_ros2(self, contract_id: str, topic: str,
-                     qos_profile: str = "best_effort") -> None:
+    def declare_ros2(
+        self, contract_id: str, topic: str, qos_profile: str = "best_effort"
+    ) -> None:
         self._check_mode("ros2", contract_id)
         self._atlas.declare_ros2(self.id, _full_id(contract_id), topic, qos_profile)
 
-    def declare_grpc(self, contract_id: str, endpoint: str,
-                     service_name: str, method: str,
-                     proto_file: str = "robonix_contracts.proto") -> None:
+    def declare_grpc(
+        self,
+        contract_id: str,
+        endpoint: str,
+        service_name: str,
+        method: str,
+        proto_file: str = "robonix_contracts.proto",
+    ) -> None:
         self._check_mode("grpc", contract_id)
-        self._atlas.declare_grpc(self.id, _full_id(contract_id), endpoint,
-                                 service_name, method, proto_file=proto_file)
+        self._atlas.declare_grpc(
+            self.id,
+            _full_id(contract_id),
+            endpoint,
+            service_name,
+            method,
+            proto_file=proto_file,
+        )
 
-    def declare_mcp(self, contract_id: str, endpoint: str,
-                    description: str = "", input_schema_json: str = "{}") -> None:
+    def declare_mcp(
+        self,
+        contract_id: str,
+        endpoint: str,
+        description: str = "",
+        input_schema_json: str = "{}",
+    ) -> None:
         self._check_mode("mcp", contract_id)
-        self._atlas.declare_mcp(self.id, _full_id(contract_id), endpoint,
-                                description, input_schema_json)
+        self._atlas.declare_mcp(
+            self.id, _full_id(contract_id), endpoint, description, input_schema_json
+        )
 
     # ── Layer 1: query upstream via atlas ────────────────────────────────
     def query(self, contract_id: str, transport: str = "ros2") -> str | None:
-        return self._atlas.query_endpoint(_full_id(contract_id), transport,
-                                          consumer_id=self.id)
+        return self._atlas.query_endpoint(
+            _full_id(contract_id), transport, consumer_id=self.id
+        )
 
     # ── Layer 1: subprocess + ROS sentinel ───────────────────────────────
-    def spawn(self, argv, *, env: dict | None = None,
-              log: str | Path | None = None, cwd: Path | None = None):
+    def spawn(
+        self,
+        argv,
+        *,
+        env: dict | None = None,
+        log: str | Path | None = None,
+        cwd: Path | None = None,
+    ):
         log_path: Path | None
         if log is None:
             log_path = None
@@ -251,8 +280,9 @@ class Capability:
             log_path = self.pkg_root / "rbnx-build" / "data" / str(log)
         return self._spawn.spawn(argv, env=env, log_path=log_path, cwd=cwd)
 
-    def wait_for_topic(self, topic: str, msg_type: str | type,
-                       timeout_s: float = 30.0) -> bool:
+    def wait_for_topic(
+        self, topic: str, msg_type: str | type, timeout_s: float = 30.0
+    ) -> bool:
         cls = msg_type if isinstance(msg_type, type) else resolve_msg_type(msg_type)
         return RosBackend.get().wait_for_topic(topic, cls, timeout_s)
 
@@ -260,10 +290,14 @@ class Capability:
         """`ip route get <target>` → src field. Used by drivers (e.g. mid360)
         that need to bake the host's IP into a vendor config file."""
         import subprocess
+
         try:
             out = subprocess.run(
                 ["ip", "-4", "route", "get", target_ip],
-                capture_output=True, text=True, timeout=2, check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
             )
         except FileNotFoundError:
             return None
@@ -275,34 +309,51 @@ class Capability:
         return None
 
     # ── Layer 2: ROS publisher / subscriber ──────────────────────────────
-    def create_publisher(self, contract_id: str, *, topic: str,
-                         msg_type: type | str, qos: str | int = "best_effort",
-                         declare: bool = True):
+    def create_publisher(
+        self,
+        contract_id: str,
+        *,
+        topic: str,
+        msg_type: type | str,
+        qos: str | int = "best_effort",
+        declare: bool = True,
+    ):
         """Create an rclpy publisher AND (optionally) atlas-declare it.
         Returns the rclpy publisher; user calls `.publish(msg)` directly OR
         via `cap.emit(contract_id, msg)`."""
         cls = msg_type if isinstance(msg_type, type) else resolve_msg_type(msg_type)
-        pub = RosBackend.get().create_publisher(cls, topic, qos)
+        pub = RosBackend.get().create_publisher(
+            cls, topic, qos if isinstance(qos, int) else 0
+        )
         self._publishers[_full_id(contract_id)] = pub
         if declare:
-            self.declare_ros2(contract_id, topic,
-                              qos if isinstance(qos, str) else "reliable")
+            self.declare_ros2(
+                contract_id, topic, qos if isinstance(qos, str) else "reliable"
+            )
         return pub
 
-    def create_subscription(self, contract_id: str, *, topic: str,
-                            msg_type: type | str,
-                            callback: Callable[[Any], None],
-                            qos: str | int = "best_effort",
-                            declare: bool = True):
+    def create_subscription(
+        self,
+        contract_id: str,
+        *,
+        topic: str,
+        msg_type: type | str,
+        callback: Callable[[Any], None],
+        qos: str | int = "best_effort",
+        declare: bool = True,
+    ):
         """Create an rclpy subscription. If `declare=True` we also tell atlas
         we consume this contract over ROS2 (atlas tracks consumer-side
         bindings too — useful for `rbnx channels` audits)."""
         cls = msg_type if isinstance(msg_type, type) else resolve_msg_type(msg_type)
-        sub = RosBackend.get().create_subscription(cls, topic, callback, qos)
+        sub = RosBackend.get().create_subscription(
+            cls, topic, callback, qos if isinstance(qos, int) else 0
+        )
         if declare:
             try:
-                self.declare_ros2(contract_id, topic,
-                                  qos if isinstance(qos, str) else "reliable")
+                self.declare_ros2(
+                    contract_id, topic, qos if isinstance(qos, str) else "reliable"
+                )
             except Exception:  # noqa: BLE001
                 # Consumer-side declare is optional; don't fail if atlas refuses.
                 pass
@@ -328,15 +379,23 @@ class Capability:
         self._ensure_mcp_app()
 
         def decorator(fn):
-            mcp_contract(self._mcp_app, contract_id=full, name=name)(fn)
+            mcp_contract(
+                self._mcp_app,  # pyright: ignore[reportArgumentType]
+                contract_id=full,
+                name=name,
+            )(
+                fn
+            )  # pyright: ignore[reportArgumentType]
             self._mcp_handlers.append(fn)
             return fn
+
         return decorator
 
     def _ensure_mcp_app(self) -> None:
         if self._mcp_app is not None:
             return
         from mcp.server.fastmcp import FastMCP
+
         self._mcp_app = FastMCP(self.id)
 
     def use_mcp_app(self, app) -> None:
@@ -387,6 +446,7 @@ class Capability:
         def decorator(fn):
             self._grpc_handlers.append((full, fn))
             return fn
+
         return decorator
 
     # ── mode/transport compatibility check (best-effort) ─────────────────
@@ -412,22 +472,22 @@ class Capability:
 
     def run(self) -> None:
         """Block. Order:
-          1. RegisterCapability
-          2. build the gRPC server (driver lifecycle + every @cap.grpc handler
-             share one server on driver_port — atlas declares each contract
-             with its own service_name+method; consumers multiplex by service)
-          3. atlas-declare every gRPC interface
-          4. start FastMCP uvicorn (only if any @cap.mcp tool)
-          5. start heartbeat
-          6. install SIGTERM/SIGINT handlers
-          7. signal.pause() until SIGTERM/SIGINT
-          8. teardown: SIGTERM all spawn'd subprocesses, stop servers
+        1. RegisterCapability
+        2. build the gRPC server (driver lifecycle + every @cap.grpc handler
+           share one server on driver_port — atlas declares each contract
+           with its own service_name+method; consumers multiplex by service)
+        3. atlas-declare every gRPC interface
+        4. start FastMCP uvicorn (only if any @cap.mcp tool)
+        5. start heartbeat
+        6. install SIGTERM/SIGINT handlers
+        7. signal.pause() until SIGTERM/SIGINT
+        8. teardown: SIGTERM all spawn'd subprocesses, stop servers
         """
         self._do_bootstrap()
 
         # 6. signals
         signal.signal(signal.SIGTERM, lambda *_: self._teardown_and_exit())
-        signal.signal(signal.SIGINT,  lambda *_: self._teardown_and_exit())
+        signal.signal(signal.SIGINT, lambda *_: self._teardown_and_exit())
 
         log.info("ready — awaiting Driver(CMD_INIT)")
         try:
@@ -440,10 +500,12 @@ class Capability:
         # 1. atlas register
         registered_ok = False
         try:
-            new = self._atlas.register_capability(self.id, self.namespace,
-                                                  self._md_path or "")
-            log.info("registered cap %s%s", self.id,
-                     "" if new else " (already existed)")
+            new = self._atlas.register_capability(
+                self.id, self.namespace, self._md_path or ""
+            )
+            log.info(
+                "registered cap %s%s", self.id, "" if new else " (already existed)"
+            )
             registered_ok = True
         except Exception as e:  # noqa: BLE001
             log.warning("RegisterCapability failed: %s", e)
@@ -469,7 +531,9 @@ class Capability:
         # init phase, so rbnx-boot doesn't need a Driver(CMD_INIT) target.
         driver_decl: tuple[str, str] | None = None  # (service_name, method)
         lifecycle_info = build_lifecycle_servicer(
-            self.namespace, contracts_grpc, lifecycle_pb2.Driver_Response,
+            self.namespace,
+            contracts_grpc,
+            lifecycle_pb2.Driver_Response,
             on_init=self._on_init,
             on_up=self._on_up,
             on_down=self._on_down,
@@ -478,18 +542,23 @@ class Capability:
             log_tag=self.id,
         )
         if lifecycle_info is not None:
-            lifecycle_inst, lifecycle_add_fn, driver_base, driver_method = lifecycle_info
+            lifecycle_inst, lifecycle_add_fn, driver_base, driver_method = (
+                lifecycle_info
+            )
             lifecycle_add_fn(lifecycle_inst, server)
             driver_decl = (driver_base, driver_method)
 
         # 2b. user @cap.grpc handlers
-        user_grpc_decls: list[tuple[str, str, str]] = []  # (contract_id, service_name, method)
+        user_grpc_decls: list[tuple[str, str, str]] = (
+            []
+        )  # (contract_id, service_name, method)
         for contract_id, fn in self._grpc_handlers:
             info = resolve_servicer(contract_id, contracts_grpc)
             if info is None:
                 log.warning(
                     "@cap.grpc(%r): no generated Servicer found in robonix_contracts_pb2_grpc "
-                    "(did codegen run for this contract?). Skipping.", contract_id,
+                    "(did codegen run for this contract?). Skipping.",
+                    contract_id,
                 )
                 continue
             servicer_cls, method_name, add_fn, base = info
@@ -513,12 +582,15 @@ class Capability:
                 log.warning(
                     "attach_grpc_servicer(%r): servicer %r is not a %s; "
                     "atlas declare may still work but the server won't dispatch.",
-                    contract_id, type(servicer).__name__, servicer_cls.__name__,
+                    contract_id,
+                    type(servicer).__name__,
+                    servicer_cls.__name__,
                 )
             add_fn(servicer, server)
             user_grpc_decls.append((contract_id, base, method_name))
-            log.info("attached gRPC servicer for %s → %s.%s",
-                     contract_id, base, method_name)
+            log.info(
+                "attached gRPC servicer for %s → %s.%s", contract_id, base, method_name
+            )
 
         # 2c. bind on port 0 — OS picks a free port; grpc returns it.
         # Atlas DeclareInterface below carries the actual port out, so
@@ -582,17 +654,22 @@ class Capability:
         # binds within a few ms. Same trick used by pytest-asyncio etc.
         import socket
         import uvicorn
+
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.bind(("0.0.0.0", 0))
         self._mcp_port = s.getsockname()[1]
         s.close()
         cfg = uvicorn.Config(
-            self._mcp_app.streamable_http_app(),
-            host="0.0.0.0", port=self._mcp_port, log_level="warning",
+            self._mcp_app.streamable_http_app(),  # pyright: ignore[reportOptionalMemberAccess]
+            host="0.0.0.0",
+            port=self._mcp_port,
+            log_level="warning",
         )
         server = uvicorn.Server(cfg)
         thread = threading.Thread(
-            target=server.run, name="robonix-mcp", daemon=True,
+            target=server.run,
+            name="robonix-mcp",
+            daemon=True,
         )
         thread.start()
         self._mcp_server_thread = thread
@@ -607,13 +684,17 @@ class Capability:
             description = (fn.__doc__ or "").strip()
             input_cls = getattr(fn, "_robonix_input_cls", None)
             schema_json = json.dumps(
-                input_cls.json_schema() if input_cls is not None
+                input_cls.json_schema()
+                if input_cls is not None
                 else {"type": "object", "properties": {}, "required": []}
             )
             try:
                 self._atlas.declare_mcp(
-                    self.id, cid, endpoint,
-                    description=description, input_schema_json=schema_json,
+                    self.id,
+                    cid,
+                    endpoint,
+                    description=description,
+                    input_schema_json=schema_json,
                 )
             except Exception as e:  # noqa: BLE001
                 log.warning("declare mcp %s failed: %s", cid, e)
