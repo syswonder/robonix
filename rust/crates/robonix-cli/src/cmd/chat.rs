@@ -230,14 +230,14 @@ async fn try_discover_once(atlas_endpoint: &str, contract_id: &str) -> Result<St
 // preference (which physical box's audio do I want when sitting at this
 // terminal), not a per-deployment server setting.
 
-/// Pick mode controls when the picker prompts vs. silently honours
-/// what's already in chat.yaml.
+/// Pick mode for the legacy modal picker chain (FirstRun only — the
+/// Ctrl+A path now uses the dashboard via `run_audio_settings_page`).
+/// `Reconfigure` is kept so the older code paths that still take a
+/// PickMode parameter compile cleanly even though nothing constructs it.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 enum PickMode {
-    /// First-run path called from `execute()`: prompt for missing
-    /// fields only, leave already-saved choices alone.
     FirstRun,
-    /// Ctrl+A path: re-prompt every layer regardless of saved values.
     Reconfigure,
 }
 
@@ -664,6 +664,540 @@ fn pick_tui(
     }
 }
 
+// ── Audio settings dashboard (btop-style, single page) ─────────────────────
+//
+// Replacement for the old sequential modal pickers. One screen, four
+// sections (mic provider / mic device / speaker provider / speaker
+// device), Tab cycles section, ↑↓ moves cursor within section, Enter
+// picks the highlighted item (and reloads device list when picking a
+// new provider, or calls SelectAudioDevice when picking a device),
+// Esc / Ctrl+A / q saves and closes.
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AudioSection {
+    MicProvider,
+    MicDevice,
+    SpeakerProvider,
+    SpeakerDevice,
+}
+
+struct AudioSettingsPage {
+    mic_providers: Vec<atlas_pb::CapabilityRecord>,
+    speaker_providers: Vec<atlas_pb::CapabilityRecord>,
+    mic_devices: Vec<crate::pb::audio::AudioDevice>,
+    speaker_devices: Vec<crate::pb::audio::AudioDevice>,
+
+    mic_cap_id: String,
+    mic_device_id: String,
+    speaker_cap_id: String,
+    speaker_device_id: String,
+
+    section: AudioSection,
+    cursor_mp: usize,
+    cursor_md: usize,
+    cursor_sp: usize,
+    cursor_sd: usize,
+
+    status: String,
+}
+
+async fn fetch_devices_filtered(
+    atlas: &mut AtlasClient,
+    cap_id: &str,
+    kind: &str,
+) -> Vec<crate::pb::audio::AudioDevice> {
+    use crate::pb::contracts::primitive_audio_list_devices_client::PrimitiveAudioListDevicesClient;
+    const LIST_CONTRACT: &str = "robonix/primitive/audio/list_devices";
+    if cap_id.is_empty() {
+        return Vec::new();
+    }
+    let endpoint = match atlas
+        .connect_capability(
+            CONSUMER_ID,
+            cap_id,
+            LIST_CONTRACT,
+            atlas_pb::Transport::Grpc,
+        )
+        .await
+    {
+        Ok((_, ep, _)) if ep.starts_with("http") => ep,
+        Ok((_, ep, _)) => format!("http://{ep}"),
+        Err(_) => return Vec::new(),
+    };
+    let mut client = match PrimitiveAudioListDevicesClient::connect(endpoint).await {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let resp = match client
+        .list_audio_devices(crate::pb::audio::ListAudioDevicesRequest {})
+        .await
+    {
+        Ok(r) => r.into_inner(),
+        Err(_) => return Vec::new(),
+    };
+    resp.devices
+        .into_iter()
+        .filter(|d| d.kind == kind || d.kind == "duplex")
+        .collect()
+}
+
+impl AudioSettingsPage {
+    async fn load(atlas: &mut AtlasClient, cfg: &ChatConfig) -> Self {
+        let mic_providers = atlas
+            .query_capabilities("", MIC_CONTRACT, atlas_pb::Transport::Grpc)
+            .await
+            .unwrap_or_default();
+        let speaker_providers = atlas
+            .query_capabilities("", SPEAKER_CONTRACT, atlas_pb::Transport::Grpc)
+            .await
+            .unwrap_or_default();
+
+        let mic_cap_id = cfg.mic_cap_id.clone().unwrap_or_else(|| {
+            mic_providers
+                .first()
+                .map(|p| p.capability_id.clone())
+                .unwrap_or_default()
+        });
+        let speaker_cap_id = cfg.speaker_cap_id.clone().unwrap_or_else(|| {
+            speaker_providers
+                .first()
+                .map(|p| p.capability_id.clone())
+                .unwrap_or_default()
+        });
+
+        let mic_devices = fetch_devices_filtered(atlas, &mic_cap_id, "input").await;
+        let speaker_devices = fetch_devices_filtered(atlas, &speaker_cap_id, "output").await;
+
+        let mic_device_id = cfg.mic_device_id.clone().unwrap_or_default();
+        let speaker_device_id = cfg.speaker_device_id.clone().unwrap_or_default();
+
+        // Position cursors at the currently-selected entry so the user
+        // sees what's active rather than always landing at row 0.
+        let cursor_mp = mic_providers
+            .iter()
+            .position(|p| p.capability_id == mic_cap_id)
+            .unwrap_or(0);
+        let cursor_sp = speaker_providers
+            .iter()
+            .position(|p| p.capability_id == speaker_cap_id)
+            .unwrap_or(0);
+        let cursor_md = mic_devices
+            .iter()
+            .position(|d| d.id == mic_device_id)
+            .unwrap_or(0);
+        let cursor_sd = speaker_devices
+            .iter()
+            .position(|d| d.id == speaker_device_id)
+            .unwrap_or(0);
+
+        let mut status = String::new();
+        if mic_providers.is_empty() && speaker_providers.is_empty() {
+            status.push_str("no audio providers in atlas — boot the audio package first");
+        }
+
+        Self {
+            mic_providers,
+            speaker_providers,
+            mic_devices,
+            speaker_devices,
+            mic_cap_id,
+            mic_device_id,
+            speaker_cap_id,
+            speaker_device_id,
+            section: AudioSection::MicProvider,
+            cursor_mp,
+            cursor_md,
+            cursor_sp,
+            cursor_sd,
+            status,
+        }
+    }
+
+    fn current_len(&self) -> usize {
+        match self.section {
+            AudioSection::MicProvider => self.mic_providers.len(),
+            AudioSection::MicDevice => self.mic_devices.len(),
+            AudioSection::SpeakerProvider => self.speaker_providers.len(),
+            AudioSection::SpeakerDevice => self.speaker_devices.len(),
+        }
+    }
+    fn current_cursor(&self) -> usize {
+        match self.section {
+            AudioSection::MicProvider => self.cursor_mp,
+            AudioSection::MicDevice => self.cursor_md,
+            AudioSection::SpeakerProvider => self.cursor_sp,
+            AudioSection::SpeakerDevice => self.cursor_sd,
+        }
+    }
+    fn current_cursor_mut(&mut self) -> &mut usize {
+        match self.section {
+            AudioSection::MicProvider => &mut self.cursor_mp,
+            AudioSection::MicDevice => &mut self.cursor_md,
+            AudioSection::SpeakerProvider => &mut self.cursor_sp,
+            AudioSection::SpeakerDevice => &mut self.cursor_sd,
+        }
+    }
+    fn cursor_up(&mut self) {
+        let c = self.current_cursor_mut();
+        if *c > 0 {
+            *c -= 1;
+        }
+    }
+    fn cursor_down(&mut self) {
+        let n = self.current_len();
+        let c = self.current_cursor_mut();
+        if *c + 1 < n {
+            *c += 1;
+        }
+    }
+    fn next_section(&mut self) {
+        self.section = match self.section {
+            AudioSection::MicProvider => AudioSection::MicDevice,
+            AudioSection::MicDevice => AudioSection::SpeakerProvider,
+            AudioSection::SpeakerProvider => AudioSection::SpeakerDevice,
+            AudioSection::SpeakerDevice => AudioSection::MicProvider,
+        };
+    }
+    fn prev_section(&mut self) {
+        self.section = match self.section {
+            AudioSection::MicProvider => AudioSection::SpeakerDevice,
+            AudioSection::MicDevice => AudioSection::MicProvider,
+            AudioSection::SpeakerProvider => AudioSection::MicDevice,
+            AudioSection::SpeakerDevice => AudioSection::SpeakerProvider,
+        };
+    }
+
+    async fn enter(&mut self, atlas: &mut AtlasClient) {
+        let i = self.current_cursor();
+        match self.section {
+            AudioSection::MicProvider => {
+                if let Some(p) = self.mic_providers.get(i) {
+                    let new_cap = p.capability_id.clone();
+                    if new_cap != self.mic_cap_id {
+                        self.mic_cap_id = new_cap.clone();
+                        self.mic_devices = fetch_devices_filtered(atlas, &new_cap, "input").await;
+                        self.mic_device_id.clear();
+                        self.cursor_md = 0;
+                    }
+                    self.status = format!("mic provider → {new_cap}");
+                }
+            }
+            AudioSection::MicDevice => {
+                if let Some(d) = self.mic_devices.get(i) {
+                    let id = d.id.clone();
+                    let name = d.name.clone();
+                    self.mic_device_id = id.clone();
+                    match call_select_device(atlas, &self.mic_cap_id, "input", &id).await {
+                        Ok(()) => self.status = format!("mic device → {name} ({id})"),
+                        Err(e) => self.status = format!("mic device → {id} (warn: {e:#})"),
+                    }
+                }
+            }
+            AudioSection::SpeakerProvider => {
+                if let Some(p) = self.speaker_providers.get(i) {
+                    let new_cap = p.capability_id.clone();
+                    if new_cap != self.speaker_cap_id {
+                        self.speaker_cap_id = new_cap.clone();
+                        self.speaker_devices =
+                            fetch_devices_filtered(atlas, &new_cap, "output").await;
+                        self.speaker_device_id.clear();
+                        self.cursor_sd = 0;
+                    }
+                    self.status = format!("speaker provider → {new_cap}");
+                }
+            }
+            AudioSection::SpeakerDevice => {
+                if let Some(d) = self.speaker_devices.get(i) {
+                    let id = d.id.clone();
+                    let name = d.name.clone();
+                    self.speaker_device_id = id.clone();
+                    match call_select_device(atlas, &self.speaker_cap_id, "output", &id).await {
+                        Ok(()) => self.status = format!("speaker device → {name} ({id})"),
+                        Err(e) => self.status = format!("speaker device → {id} (warn: {e:#})"),
+                    }
+                }
+            }
+        }
+    }
+
+    async fn refresh(&mut self, atlas: &mut AtlasClient) {
+        *self = Self::load(
+            atlas,
+            &ChatConfig {
+                mic_cap_id: (!self.mic_cap_id.is_empty()).then(|| self.mic_cap_id.clone()),
+                mic_device_id: (!self.mic_device_id.is_empty()).then(|| self.mic_device_id.clone()),
+                speaker_cap_id: (!self.speaker_cap_id.is_empty())
+                    .then(|| self.speaker_cap_id.clone()),
+                speaker_device_id: (!self.speaker_device_id.is_empty())
+                    .then(|| self.speaker_device_id.clone()),
+            },
+        )
+        .await;
+        self.status = "refreshed".into();
+    }
+
+    fn draw(&self, frame: &mut ratatui::Frame) {
+        let mut lines: Vec<Line> = Vec::with_capacity(64);
+        let dim = Style::default().fg(Color::DarkGray);
+        let normal = Style::default();
+        let selected_style = Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD);
+        let cursor_style = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+
+        let render_provider_row = |i: usize,
+                                   p: &atlas_pb::CapabilityRecord,
+                                   sel: &str,
+                                   in_section: bool,
+                                   cursor: usize|
+         -> Line {
+            let is_cursor = in_section && i == cursor;
+            let is_selected = p.capability_id == sel;
+            let mark_left = if is_cursor { "▶" } else { " " };
+            let bullet = if is_selected { "●" } else { "○" };
+            let prefix = format!(" {mark_left} {bullet} ");
+            let style = if is_cursor {
+                cursor_style
+            } else if is_selected {
+                selected_style
+            } else {
+                normal
+            };
+            Line::from(vec![Span::styled(
+                format!("{prefix}{}", p.capability_id),
+                style,
+            )])
+        };
+
+        let render_device_row = |i: usize,
+                                 d: &crate::pb::audio::AudioDevice,
+                                 sel: &str,
+                                 in_section: bool,
+                                 cursor: usize|
+         -> Line {
+            let is_cursor = in_section && i == cursor;
+            let is_selected = d.id == sel;
+            let mark_left = if is_cursor { "▶" } else { " " };
+            let bullet = if is_selected { "●" } else { "○" };
+            let mut tags: Vec<String> = Vec::new();
+            if d.is_default {
+                tags.push("default".into());
+            }
+            if !d.note.is_empty() {
+                tags.push(format!("⚠ {}", d.note));
+            }
+            let suffix = if tags.is_empty() {
+                String::new()
+            } else {
+                format!("   [{}]", tags.join(", "))
+            };
+            let body = format!(" {mark_left} {bullet} {:<10}  {}{}", d.id, d.name, suffix);
+            let style = if is_cursor {
+                cursor_style
+            } else if is_selected {
+                selected_style
+            } else {
+                normal
+            };
+            Line::from(vec![Span::styled(body, style)])
+        };
+
+        let section_title = |title: &str, active: bool| -> Line {
+            let bar = "━".repeat(8);
+            let prefix = if active { "▼" } else { " " };
+            let style = if active {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD)
+            };
+            Line::from(vec![Span::styled(
+                format!("{prefix} {bar} {title} {bar}"),
+                style,
+            )])
+        };
+
+        // ─── MICROPHONE ───
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            "  MICROPHONE",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        lines.push(section_title(
+            "Provider",
+            self.section == AudioSection::MicProvider,
+        ));
+        if self.mic_providers.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                "    (no providers — rbnx boot first)",
+                dim,
+            )]));
+        } else {
+            for (i, p) in self.mic_providers.iter().enumerate() {
+                lines.push(render_provider_row(
+                    i,
+                    p,
+                    &self.mic_cap_id,
+                    self.section == AudioSection::MicProvider,
+                    self.cursor_mp,
+                ));
+            }
+        }
+        lines.push(section_title(
+            "Device",
+            self.section == AudioSection::MicDevice,
+        ));
+        if self.mic_devices.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                "    (no devices — impl missing list_devices, or rebuild package)",
+                dim,
+            )]));
+        } else {
+            for (i, d) in self.mic_devices.iter().enumerate() {
+                lines.push(render_device_row(
+                    i,
+                    d,
+                    &self.mic_device_id,
+                    self.section == AudioSection::MicDevice,
+                    self.cursor_md,
+                ));
+            }
+        }
+
+        // ─── SPEAKER ───
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            "  SPEAKER",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        lines.push(section_title(
+            "Provider",
+            self.section == AudioSection::SpeakerProvider,
+        ));
+        if self.speaker_providers.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                "    (no providers — rbnx boot first)",
+                dim,
+            )]));
+        } else {
+            for (i, p) in self.speaker_providers.iter().enumerate() {
+                lines.push(render_provider_row(
+                    i,
+                    p,
+                    &self.speaker_cap_id,
+                    self.section == AudioSection::SpeakerProvider,
+                    self.cursor_sp,
+                ));
+            }
+        }
+        lines.push(section_title(
+            "Device",
+            self.section == AudioSection::SpeakerDevice,
+        ));
+        if self.speaker_devices.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                "    (no devices — impl missing list_devices, or rebuild package)",
+                dim,
+            )]));
+        } else {
+            for (i, d) in self.speaker_devices.iter().enumerate() {
+                lines.push(render_device_row(
+                    i,
+                    d,
+                    &self.speaker_device_id,
+                    self.section == AudioSection::SpeakerDevice,
+                    self.cursor_sd,
+                ));
+            }
+        }
+
+        lines.push(Line::from(""));
+
+        let area = frame.area();
+        let chunks = Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+        let body = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Audio Settings — ● selected · ▶ cursor "),
+            )
+            .wrap(Wrap { trim: false });
+        frame.render_widget(body, chunks[0]);
+
+        let status_line = if self.status.is_empty() {
+            String::from(" ")
+        } else {
+            format!(" {}", self.status)
+        };
+        let status = Paragraph::new(status_line).style(Style::default().fg(Color::Cyan));
+        frame.render_widget(status, chunks[1]);
+
+        let help = Paragraph::new(
+            " Tab/Shift+Tab: section · ↑↓ jk: item · Enter/Space: pick · r: refresh · Esc/Ctrl+A: close",
+        )
+        .style(dim);
+        frame.render_widget(help, chunks[2]);
+    }
+}
+
+async fn run_audio_settings_page(
+    atlas_endpoint: &str,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    cfg: ChatConfig,
+) -> Result<ChatConfig> {
+    let mut atlas = AtlasClient::connect(atlas_endpoint)
+        .await
+        .with_context(|| format!("connect to atlas at '{atlas_endpoint}' for audio settings"))?;
+    let mut page = AudioSettingsPage::load(&mut atlas, &cfg).await;
+
+    loop {
+        terminal.draw(|f| page.draw(f))?;
+        if event::poll(std::time::Duration::from_millis(150))?
+            && let Event::Key(key) = event::read()?
+        {
+            match (key.modifiers, key.code) {
+                (_, KeyCode::Tab) => page.next_section(),
+                (_, KeyCode::BackTab) => page.prev_section(),
+                (_, KeyCode::Up) | (_, KeyCode::Char('k')) => page.cursor_up(),
+                (_, KeyCode::Down) | (_, KeyCode::Char('j')) => page.cursor_down(),
+                (_, KeyCode::Enter) | (_, KeyCode::Char(' ')) => page.enter(&mut atlas).await,
+                (_, KeyCode::Char('r')) => page.refresh(&mut atlas).await,
+                (KeyModifiers::CONTROL, KeyCode::Char('a'))
+                | (_, KeyCode::Esc)
+                | (_, KeyCode::Char('q')) => break,
+                _ => {}
+            }
+        }
+    }
+
+    let new_cfg = ChatConfig {
+        mic_cap_id: (!page.mic_cap_id.is_empty()).then_some(page.mic_cap_id),
+        mic_device_id: (!page.mic_device_id.is_empty()).then_some(page.mic_device_id),
+        speaker_cap_id: (!page.speaker_cap_id.is_empty()).then_some(page.speaker_cap_id),
+        speaker_device_id: (!page.speaker_device_id.is_empty()).then_some(page.speaker_device_id),
+    };
+    if let Err(e) = save_chat_config(&new_cfg) {
+        log::warn!("could not save chat config: {e:#}");
+    }
+    Ok(new_cfg)
+}
+
 /// Render a single-line status page and pause briefly so the user can
 /// read it before the next picker step (or the chat) takes over the
 /// screen. Long messages now sit for 1.4 s — the previous 400 ms felt
@@ -725,15 +1259,16 @@ async fn run_tui(
                 break;
             }
 
-            // Ctrl+A → re-run the audio device picker (provider + device
-            // for both mic and speaker). Reload chat_cfg from the picker
-            // result so the next Ctrl+V uses the new selections.
+            // Ctrl+A → btop-style single-page audio settings dashboard.
+            // All four sections (mic provider, mic device, speaker
+            // provider, speaker device) visible at once, Tab to cycle,
+            // ↑↓ to move within a section, Enter to pick. Esc to close.
             if !busy
                 && key.modifiers.contains(KeyModifiers::CONTROL)
                 && key.code == KeyCode::Char('a')
             {
-                match pick_audio_settings(atlas_endpoint, terminal, PickMode::Reconfigure).await {
-                    Ok((new_cfg, warnings)) => {
+                match run_audio_settings_page(atlas_endpoint, terminal, chat_cfg.clone()).await {
+                    Ok(new_cfg) => {
                         chat_cfg = new_cfg;
                         messages.borrow_mut().push(ChatMessage {
                             role: Role::Status,
@@ -745,12 +1280,6 @@ async fn run_tui(
                                 chat_cfg.speaker_device_id.as_deref().unwrap_or("default"),
                             ),
                         });
-                        for w in warnings {
-                            messages.borrow_mut().push(ChatMessage {
-                                role: Role::Status,
-                                text: w,
-                            });
-                        }
                     }
                     Err(e) => messages.borrow_mut().push(ChatMessage {
                         role: Role::Status,
