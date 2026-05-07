@@ -22,6 +22,11 @@ package:
   description: Voice interaction service (ASR + TTS + Dialog) under robonix/system/speech.
   license: MulanPSL-2.0
 
+# Atlas runtime cap_id — `rbnx boot`'s wait-for-cap loop matches this
+# verbatim against the cap registered by speech_service.service. Distinct
+# from `package.name` (the deployment identity).
+capability_id: com.robonix.system.speech
+
 build: bash scripts/build.sh
 
 start: |

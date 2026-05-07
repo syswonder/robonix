@@ -1,7 +1,7 @@
 [contract]
 id      = "robonix/system/memory/compact"
 version = "1"
-kind    = "system"
+kind    = "service"
 
 
 [io.srv]

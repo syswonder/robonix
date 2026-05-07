@@ -255,8 +255,26 @@ impl AtlasRegistry {
         Ok(v)
     }
 
-    /// Register a new capability instance. Empty `cap_id` triggers Atlas-
-    /// assigned ephemeral id. Returns the resolved id.
+    /// Register a new capability instance, OR take over an existing
+    /// cap_id slot whose previous owner is gone. Empty `cap_id` triggers
+    /// Atlas-assigned ephemeral id. Returns the resolved id.
+    ///
+    /// Takeover semantics — a re-Register on an existing cap_id is NOT
+    /// an error. We assume the old process is dead (or about to be), so
+    /// we drop its endpoints + state and reset last_heartbeat to now.
+    /// The caller is then expected to redeclare interfaces with its own
+    /// fresh endpoints. Without this, an orphan cap (heartbeat eviction
+    /// hasn't fired yet — 60s default) blocks every subsequent boot of
+    /// the same package: rbnx waits for a "new" cap to appear in atlas,
+    /// the python framework only retries register once and then quietly
+    /// keeps going, and atlas keeps pointing consumers at the dead
+    /// process's endpoints. The previous "ALREADY_EXISTS" failure mode
+    /// caught accidental dual deployments but the cure was worse than
+    /// the disease — silent boot failures are nearly impossible to
+    /// diagnose. If two live processes claim the same id, both will
+    /// heartbeat into the same record and the latest declare wins; that
+    /// case shows up as scattered/mysterious endpoint flips, which is
+    /// at least visible.
     pub async fn register(
         &self,
         cap_id: &str,
@@ -270,10 +288,23 @@ impl AtlasRegistry {
         };
         let namespace = Self::require("namespace", namespace)?.to_string();
         let mut state = self.inner.write().await;
-        if state.caps.contains_key(&cap_id) {
-            return Err(Status::already_exists(format!(
-                "capability_id '{cap_id}' already registered; Unregister first"
-            )));
+        if let Some(existing) = state.caps.get_mut(&cap_id) {
+            // Take over the slot. Drop the previous owner's endpoints
+            // and pushed state; the caller will redeclare what it owns.
+            // Heartbeat moves to `now` so wait_for_registration spotters
+            // can tell this register call from the dead-cap residue.
+            let prev_iface_count = existing.endpoints.len();
+            existing.namespace = namespace;
+            existing.capability_md_path = capability_md_path.trim().to_string();
+            existing.last_heartbeat_ms = Self::now_ms();
+            existing.endpoints.clear();
+            existing.pushed_state = None;
+            existing.state_detail.clear();
+            info!(
+                "[atlas] register {cap_id} (takeover; dropped {prev_iface_count} \
+                 stale interfaces)"
+            );
+            return Ok(cap_id);
         }
         state.caps.insert(
             cap_id.clone(),

@@ -91,6 +91,20 @@ async fn main() -> Result<()> {
         .await?;
     info!("declared SystemPilot gRPC at {advertised}");
 
+    // Pilot has no Driver lifecycle handshake — it's ready as soon as the
+    // gRPC server is up. Push ONLINE so `rbnx caps` doesn't show the
+    // legacy-fallback INITIALIZED forever.
+    if let Err(e) = atlas
+        .set_capability_state(
+            &cfg.capability_id,
+            atlas_pb::CapabilityState::StateOnline,
+            "",
+        )
+        .await
+    {
+        log::warn!("SetCapabilityState(ONLINE) failed: {e:#}");
+    }
+
     let vlm = vlm::VlmClient::new(&cfg.vlm);
     info!(
         "VLM upstream='{}' model='{}'",

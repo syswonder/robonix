@@ -5,6 +5,30 @@
 
 use colored::*;
 use std::io::{self, Write};
+use std::sync::OnceLock;
+use std::time::Instant;
+
+/// Monotonic origin for `[ssss.mmm]` boot-line timestamps. Initialised on
+/// the first call to `boot_now()` (i.e. when the user actually starts a
+/// boot run); subsequent calls measure from that origin so the log reads
+/// like a kernel ring buffer / dmesg trace.
+static BOOT_T0: OnceLock<Instant> = OnceLock::new();
+
+/// Formatted `[ssss.mmm]` prefix relative to BOOT_T0. Width is fixed at
+/// 12 chars (`[1234.567]`) — five-digit boots are unrealistic and we'd
+/// rather wrap than re-jitter the column on long deploys.
+fn boot_now() -> String {
+    let t0 = BOOT_T0.get_or_init(Instant::now);
+    let elapsed = t0.elapsed().as_secs_f64();
+    format!("[{elapsed:>8.3}]")
+}
+
+/// Force-init BOOT_T0 to "now" so subsequent boot lines time from this
+/// instant. Call once at the top of a deploy/boot run, before any
+/// `boot_*` line, otherwise the first such call lazily wins.
+pub fn boot_reset_clock() {
+    let _ = BOOT_T0.set(Instant::now());
+}
 
 /// Print a main action header (e.g., "Installing", "Registering")
 pub fn action(action: &str, target: &str) {
@@ -56,31 +80,97 @@ pub fn summary(message: &str) {
     println!("\n{}", message.dimmed());
 }
 
-// ── Boot-log helpers (init-system style) ────────────────────────────
+// ── Boot-log helpers (FreeBSD / dmesg style) ────────────────────────
 //
-// All boot/start lines route through these so the boot output reads
-// like a systemd / SysV bring-up (`[ OK ] component  detail`) instead
-// of the previous indented free-form `sub_step("[system] foo -> long
-// path...")` lines that buried the salient info.
+// Each boot line carries a monotonic `[ssss.mmm]` timestamp prefix and
+// a fixed-width status badge — same layout the BSD/Linux kernels print
+// at boot, so a robonix bring-up reads like a real OS init log instead
+// of a generic "deploying ..." trace.
 //
 // IMPORTANT: rust's `{:<N}` formatter pads to N BYTES, not visible
 // chars. `colored` returns strings with ANSI escape sequences embedded
 // (`"[ OK ]".green()` is ~13 bytes for 6 visible chars), so a naive
 // `{:<7}` against a colored string produces no padding (already past
-// 7 bytes). Fix: emit the colored badge as a fixed-width unpadded
-// fragment, the padding lives between the (uncolored) name and the
-// detail. Every badge below is exactly 6 visible chars (`[ OK ]`,
+// 7 bytes). Every badge below is exactly 6 visible chars (`[ OK ]`,
 // `[FAIL]`, `[SKIP]`, `[ →  ]`, `[ ⠙ ]`, …) so no badge-side
-// alignment is needed; two spaces separate it from the name.
+// alignment is needed; two spaces separate it from the name, and the
+// padding lives between the (uncolored) name and the detail.
 
 const W_NAME: usize = 18;
 
-/// `[ OK ]  name              detail` — a component came up.
+/// Print the ASCII banner at the very top of a boot run. Called once
+/// from `rbnx boot` before any `[ ssss.mmm ]` line. Layout mimics the
+/// kernel's "Linux version ..." splash: name + version + git sha,
+/// builder, build time, compiler, target. All facts come from build.rs
+/// via compile-time env vars; missing values gracefully render as
+/// "unknown" so a tarball / sandboxed build still prints a banner.
+pub fn boot_banner() {
+    let version = env!("CARGO_PKG_VERSION");
+    let sha = option_env!("ROBONIX_GIT_SHA").unwrap_or("dev");
+    let builder = option_env!("ROBONIX_BUILDER").unwrap_or("unknown");
+    let build_time = option_env!("ROBONIX_BUILD_TIME").unwrap_or("unknown");
+    let rustc = option_env!("ROBONIX_RUSTC").unwrap_or("rustc unknown");
+    let target = option_env!("ROBONIX_TARGET").unwrap_or("unknown");
+
+    let lines = [
+        "    ____        __                 _      ",
+        "   / __ \\____  / /_  ____  ____  (_)  __ ",
+        "  / /_/ / __ \\/ __ \\/ __ \\/ __ \\/ / |/_/",
+        " / _, _/ /_/ / /_/ / /_/ / / / / />  <   ",
+        "/_/ |_|\\____/_.___/\\____/_/ /_/_/_/|_|   ",
+    ];
+    println!();
+    for line in &lines {
+        println!("{}", line.cyan().bold());
+    }
+    println!(
+        "{}",
+        "        Embodied AI Operating System".dimmed(),
+    );
+    println!();
+    // Body block. Bullet-aligned, dimmed value column — readable but
+    // visually distinct from the per-component boot lines below.
+    let label_w = 9;
+    let row = |k: &str, v: &str| {
+        println!(
+            "  {:label_w$} {}",
+            format!("{k}:").bold(),
+            v.dimmed(),
+            label_w = label_w
+        );
+    };
+    row("version", &format!("v{version} ({sha})"));
+    row("built", &format!("{build_time} on {builder}"));
+    row("compiler", rustc);
+    row("target", target);
+    println!();
+}
+
+/// Single-line "we are now booting X" announcement, the dmesg-style
+/// banner that follows `boot_banner` and precedes the per-component
+/// `[ ssss.mmm ]` log. Resets the boot clock so timestamps below count
+/// from this point.
+pub fn boot_start(deploy_name: &str, manifest_path: &str) {
+    boot_reset_clock();
+    println!(
+        "{} booting {}",
+        boot_now().cyan(),
+        deploy_name.bold().green(),
+    );
+    println!(
+        "{} manifest {}",
+        boot_now().cyan(),
+        manifest_path.dimmed(),
+    );
+}
+
+/// `[  ssss.mmm] [ OK ] name              detail` — component came up.
 /// Leading `\r\x1b[K` clears any in-place spinner line so the final
 /// result lands cleanly without a trailing fragment of "registering…".
 pub fn boot_ok(name: &str, detail: &str) {
     println!(
-        "\r\x1b[K{}  {:<width$}  {}",
+        "\r\x1b[K{} {}  {:<width$}  {}",
+        boot_now().cyan(),
         "[ OK ]".green().bold(),
         name,
         detail.dimmed(),
@@ -88,10 +178,11 @@ pub fn boot_ok(name: &str, detail: &str) {
     );
 }
 
-/// `[FAIL]  name              detail` — a component failed to come up.
+/// `[  ssss.mmm] [FAIL] name              detail` — failed to come up.
 pub fn boot_fail(name: &str, detail: &str) {
     eprintln!(
-        "\r\x1b[K{}  {:<width$}  {}",
+        "\r\x1b[K{} {}  {:<width$}  {}",
+        boot_now().cyan(),
         "[FAIL]".red().bold(),
         name,
         detail.red(),
@@ -99,11 +190,12 @@ pub fn boot_fail(name: &str, detail: &str) {
     );
 }
 
-/// `[SKIP]  name              detail` — declared in manifest but
-/// skipped (not installed / disabled / out-of-scope on this host).
+/// `[  ssss.mmm] [SKIP] name              detail` — declared in manifest
+/// but skipped (not installed / disabled / out-of-scope on this host).
 pub fn boot_skip(name: &str, detail: &str) {
     println!(
-        "{}  {:<width$}  {}",
+        "{} {}  {:<width$}  {}",
+        boot_now().cyan(),
         "[SKIP]".yellow(),
         name,
         detail.dimmed(),
@@ -111,12 +203,12 @@ pub fn boot_skip(name: &str, detail: &str) {
     );
 }
 
-/// `[ →  ]  name              detail` — informational note (cache
-/// hit, fetched a remote package, …). Uses an arrow rather than a
-/// status badge since it's neither "up" nor "skipped".
+/// `[  ssss.mmm] [ →  ] name              detail` — informational note
+/// (cache hit, fetched a remote package, …). Neither up nor skipped.
 pub fn boot_note(name: &str, detail: &str) {
     println!(
-        "{}  {:<width$}  {}",
+        "{} {}  {:<width$}  {}",
+        boot_now().cyan(),
         "[ →  ]".cyan(),
         name,
         detail.dimmed(),
@@ -124,11 +216,11 @@ pub fn boot_note(name: &str, detail: &str) {
     );
 }
 
-/// `[....]  name              detail` — component is starting.
-/// Caller should follow up with boot_ok / boot_fail.
+/// `[  ssss.mmm] [....] name              detail` — component is starting.
 pub fn boot_wait(name: &str, detail: &str) {
     println!(
-        "{}  {:<width$}  {}",
+        "{} {}  {:<width$}  {}",
+        boot_now().cyan(),
         "[....]".cyan(),
         name,
         detail.dimmed(),
@@ -136,21 +228,28 @@ pub fn boot_wait(name: &str, detail: &str) {
     );
 }
 
-/// `== section ==` — group header above a run of boot lines.
+/// Group header above a run of boot lines. FreeBSD-rc-style ":: stage ::".
 pub fn boot_section(label: &str) {
-    println!("\n{} {} {}", "==".dimmed(), label.bold(), "==".dimmed());
+    println!(
+        "\n{} {} {} {}",
+        boot_now().cyan(),
+        "::".dimmed(),
+        label.bold().yellow(),
+        "::".dimmed(),
+    );
 }
 
-/// In-place spinner frame. Renders to stdout with `\r` (no newline)
-/// and flushes; caller is expected to overwrite or boot_ok /
-/// boot_fail to finalize. Frames cycle through Braille dots — the
-/// systemd-look spinner most users recognise from Linux init logs.
+/// In-place spinner frame. Renders to stdout with `\r` (no newline) and
+/// flushes; caller overwrites with boot_ok / boot_fail to finalize.
+/// Frames cycle through Braille dots — the systemd spinner most users
+/// recognise from Linux init logs.
 pub fn boot_progress(name: &str, detail: &str, frame: usize) {
     const GLYPHS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     let g = GLYPHS[frame % GLYPHS.len()];
     print!(
-        "\r\x1b[K{}  {:<width$}  {}",
-        format!("[ {} ]", g).cyan(),
+        "\r\x1b[K{} {}  {:<width$}  {}",
+        boot_now().cyan(),
+        format!("[ {g} ]").cyan(),
         name,
         detail.dimmed(),
         width = W_NAME,
@@ -158,18 +257,24 @@ pub fn boot_progress(name: &str, detail: &str, frame: usize) {
     let _ = io::stdout().flush();
 }
 
-/// Final boot summary line.
+/// Final boot summary line — total elapsed + component tally.
 pub fn boot_summary(ok: usize, total: usize, hint: &str) {
+    let elapsed = BOOT_T0
+        .get()
+        .map(|t| t.elapsed().as_secs_f64())
+        .unwrap_or(0.0);
     let badge = if ok == total {
-        "✓".green().bold()
+        "OK".green().bold()
     } else {
-        "⚠".yellow().bold()
+        "DEGRADED".yellow().bold()
     };
+    println!();
     println!(
-        "\n{} {}/{} components up — {}",
-        badge,
+        "{} robonix up — {}/{} components in {:.3}s   {}",
+        format!("[ {badge} ]"),
         ok,
         total,
+        elapsed,
         hint.dimmed()
     );
 }

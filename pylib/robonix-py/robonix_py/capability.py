@@ -564,6 +564,17 @@ class Capability:
         # 5. heartbeat
         self._heartbeat_thread = self._atlas.start_heartbeat(self.id)
 
+        # 6. State promotion. Caps WITH a Driver(CMD_INIT/CMD_UP) handshake
+        # rely on rbnx-boot to drive them through INITIALIZED → ONLINE via
+        # the lifecycle servicer's on_state_change callback (wired above).
+        # Caps WITHOUT a driver contract (system services like memory /
+        # scene that only expose MCP tools or one-shot gRPC RPCs) are fully
+        # ready as soon as gRPC + MCP are listening — promote to ONLINE
+        # here so `rbnx caps` shows them online instead of stranded at
+        # INITIALIZED forever.
+        if driver_decl is None and registered_ok:
+            self._set_state("online")
+
     def _start_mcp_server(self) -> None:
         # Pre-claim a free port via socket(0) → close → hand to uvicorn.
         # Tiny race window (someone could grab it between close and bind),

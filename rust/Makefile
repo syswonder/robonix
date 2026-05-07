@@ -59,14 +59,13 @@ check:
 	cargo fmt --all -- --check
 	cargo clippy --workspace -- -D warnings
 
-install: install-atlas
+install:
 	cargo install --path crates/robonix-codegen  --bin robonix-codegen  $(CARGO_FLAGS)
+	cargo install --path crates/robonix-atlas    --bin robonix-atlas    $(CARGO_FLAGS)
 	cargo install --path crates/robonix-pilot    --bin robonix-pilot    $(CARGO_FLAGS)
 	cargo install --path crates/robonix-executor --bin robonix-executor $(CARGO_FLAGS)
+	cargo install --path crates/robonix-liaison  --bin robonix-liaison  $(CARGO_FLAGS)
 	cargo install --path crates/robonix-cli      --bin rbnx             $(CARGO_FLAGS)
-	@# robonix-liaison still references the deleted robonix-sdk crate;
-	@# uncomment once it migrates to robonix-atlas::client.
-	@# cargo install --path crates/robonix-liaison  --bin robonix-liaison   $(CARGO_FLAGS)
 	@# Register this clone as the robonix source tree so packages anywhere
 	@# on disk can resolve capabilities/IDL via `rbnx path`. This updates
 	@# ~/.robonix/config.yaml robonix_source_path = <repo-root> (the parent of rust/).
@@ -80,20 +79,6 @@ install: install-atlas
 
 RUST_ABS := $(shell cd $(RUST_DIR) && pwd)
 BUILD_SUBDIR := $(if $(filter release,$(BUILD_MODE)),release,debug)
-
-install-atlas: build-atlas
-	@mkdir -p ~/.cargo/bin; \
-	printf '%s\n' \
-		'#!/usr/bin/env bash' \
-		'set -euo pipefail' \
-		'RUST_DIR="$(RUST_ABS)"' \
-		'export ROBONIX_META_GRPC_ADDR="$${ROBONIX_META_GRPC_ADDR:-0.0.0.0:50051}"' \
-		'export ROBONIX_META_GRPC_ENDPOINT="$${ROBONIX_META_GRPC_ENDPOINT:-127.0.0.1:50051}"' \
-		'export RUST_LOG="$${RUST_LOG:-robonix_atlas=info}"' \
-		'exec "$$RUST_DIR/target/$(BUILD_SUBDIR)/robonix-atlas" "$$@"' \
-		> ~/.cargo/bin/robonix-atlas; \
-	chmod +x ~/.cargo/bin/robonix-atlas; \
-	echo "Installed robonix-atlas wrapper to ~/.cargo/bin"
 
 pyrightconfig:
 	@cd $(RUST_DIR)/.. && python3 rust/tools/gen_pyrightconfig.py

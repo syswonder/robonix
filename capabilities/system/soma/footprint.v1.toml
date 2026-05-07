@@ -7,7 +7,7 @@
 [contract]
 id      = "robonix/system/soma/footprint"
 version = "1"
-kind    = "system"
+kind    = "service"
 
 [io.srv]
 srv = "soma/srv/GetFootprint"

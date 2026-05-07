@@ -40,7 +40,7 @@ export VLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
 export VLM_API_KEY=sk-...
 export VLM_MODEL=gpt-5.4-mini
 cd examples/webots
-rbnx build 
+rbnx build # might take a while since scene and speech needs some model weights and docker containers downloaded while building
 rbnx boot
 ```
 

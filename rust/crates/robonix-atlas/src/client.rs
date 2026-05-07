@@ -178,6 +178,29 @@ impl AtlasClient {
         Ok(())
     }
 
+    /// Push a lifecycle state transition. Atlas does NOT validate the
+    /// transition graph — the cap is the source of truth. `detail` is a
+    /// free-form human-readable note (e.g. "missing /opt/models/...") that
+    /// `rbnx caps` surfaces verbatim; pass empty when there's nothing to add.
+    pub async fn set_capability_state(
+        &mut self,
+        capability_id: &str,
+        new_state: pb::CapabilityState,
+        detail: &str,
+    ) -> Result<()> {
+        self.inner
+            .set_capability_state(pb::SetCapabilityStateRequest {
+                capability_id: capability_id.to_string(),
+                state: new_state as i32,
+                detail: detail.to_string(),
+            })
+            .await
+            .with_context(|| {
+                format!("SetCapabilityState '{capability_id}' -> {new_state:?}")
+            })?;
+        Ok(())
+    }
+
     /// Open a channel to one cap's interface. Atlas records the
     /// consumer→provider edge and returns the binding. Caller dials the
     /// returned `endpoint` themselves using whatever transport-appropriate

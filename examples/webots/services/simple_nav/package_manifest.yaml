@@ -16,6 +16,8 @@ package:
   description: Lightweight goto-with-avoidance nav service for webots tiago.
   license: MulanPSL-2.0
 
+capability_id: com.robonix.example.simple_nav
+
 build: bash scripts/build.sh
 start: bash scripts/start.sh
 
