@@ -40,6 +40,7 @@ import logging
 import platform
 import queue as stdlib_queue
 import sys
+import threading
 
 import sounddevice as sd       # type: ignore
 import websockets              # type: ignore
@@ -167,30 +168,31 @@ async def serve_speaker(ws, output_device: int | None) -> None:
     jitter doesn't underrun the audio output."""
     log.info("speaker client connected from %s", ws.remote_address)
     loop = asyncio.get_event_loop()
-    q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=64)
 
-    # Diagnostics: every N output callbacks, log what we're feeding the
-    # device. Catches "stream opened on the wrong device" + "queue
-    # always empty so we play silence" without needing the user to
-    # describe the failure mode.
+    # Bytearray buffer + lock — the previous queue-of-opaque-chunks
+    # design dropped any bytes beyond `len(outdata)` per callback,
+    # so an 8 KiB liaison TTS chunk played only the first 3.2 KiB
+    # and silently discarded the rest of the utterance.
+    buf = bytearray()
+    buf_lock = threading.Lock()
+
     counters = {"cb": 0, "data": 0, "underrun": 0}
 
     def callback(outdata, frames, time_info, status):
         counters["cb"] += 1
         if status:
             log.debug("output status: %s", status)
-        try:
-            chunk = q.get_nowait()
-            counters["data"] += 1
-        except stdlib_queue.Empty:
-            counters["underrun"] += 1
-            outdata[:] = b"\x00" * len(outdata)
-            return
-        if len(chunk) >= len(outdata):
-            outdata[: len(outdata)] = chunk[: len(outdata)]
-        else:
-            outdata[: len(chunk)] = chunk
-            outdata[len(chunk):] = b"\x00" * (len(outdata) - len(chunk))
+        n = len(outdata)
+        with buf_lock:
+            avail = min(n, len(buf))
+            if avail:
+                outdata[:avail] = bytes(buf[:avail])
+                del buf[:avail]
+                counters["data"] += 1
+            else:
+                counters["underrun"] += 1
+            if avail < n:
+                outdata[avail:] = b"\x00" * (n - avail)
 
     # Resolve the actual device id sounddevice will use, so the log
     # tells us *which* speaker is being driven (NoMachine / virtual
@@ -218,7 +220,15 @@ async def serve_speaker(ws, output_device: int | None) -> None:
     try:
         async for msg in ws:
             if isinstance(msg, bytes):
-                await loop.run_in_executor(None, q.put, msg)
+                with buf_lock:
+                    buf.extend(msg)
+        # Hold the device open until the buffer drains, otherwise the
+        # tail of the utterance gets cut off when the WS closes.
+        while True:
+            with buf_lock:
+                if not buf:
+                    break
+            await asyncio.sleep(0.05)
     except websockets.ConnectionClosed:
         log.info("speaker client disconnected")
     finally:
