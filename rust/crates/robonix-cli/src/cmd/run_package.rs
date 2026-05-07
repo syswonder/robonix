@@ -367,6 +367,18 @@ pub async fn execute_start(
 
     let mut env = std::collections::HashMap::new();
     env.insert("ROBONIX_ATLAS".to_string(), endpoint.clone());
+    // Force unbuffered stdout/stderr in any Python child the package's
+    // start body launches. Without this, Python block-buffers stdout
+    // when it's a pipe (which `rbnx boot` always makes it), and a
+    // primitive whose driver is still alive never flushes its
+    // `Driver(cmd=0) received` line until the buffer fills or the
+    // process exits — so a 60-second boot full of "what is happening"
+    // looks like the package wedged at "ready - awaiting Driver".
+    // See `examples/webots/rbnx-boot/logs/primitive_tiago_camera.log`
+    // for the diagnostic this turned up. Override with PYTHONUNBUFFERED=
+    // (empty) in the manifest if a package really wants buffered output.
+    env.entry("PYTHONUNBUFFERED".to_string())
+        .or_insert_with(|| "1".to_string());
 
     if !manifest.build.trim().is_empty() && !build::build_stamp_path(&package_root).exists() {
         output::sub_step("No rbnx-build/.rbnx-built — running package build first");

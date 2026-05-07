@@ -472,6 +472,21 @@ pub async fn execute(
     }
 
     let log_dir = log_dir.unwrap_or_else(|| manifest_dir.join("rbnx-boot").join("logs"));
+    // Wipe stale per-component logs from prior runs — without this you
+    // can't tell whether `system_speech.log` is from THIS boot or one
+    // ten `rbnx boot` retries ago. Only `*.log` files at the top level
+    // get removed; nested directories (if a future package wants its
+    // own subdir) are left alone.
+    if log_dir.is_dir()
+        && let Ok(entries) = std::fs::read_dir(&log_dir)
+    {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|s| s.to_str()) == Some("log") {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
     let cache_root = manifest_dir.join("rbnx-boot").join("cache");
@@ -521,7 +536,7 @@ pub async fn execute(
     // stuck on a fresh clone.
     check_prerequisites(&deploy, &cache_root, &manifest_dir)?;
 
-    let outcome: Result<()> = async {
+    let outcome: Result<Vec<(String, String, String)>> = async {
         if !skip_system {
             output::boot_section("system");
             // System Rust binaries: launched in atlas → executor → pilot order.
@@ -637,6 +652,18 @@ pub async fn execute(
         // here. A key whose package directory is missing on disk is warned
         // and skipped, not fatal — manifests can declare optional services
         // that aren't installed yet (e.g. liaison while it's being ported).
+        // Best-effort boot: a failure on any non-system-builtin package is
+        // recorded but does NOT bail the whole bring-up. Goal is to get
+        // atlas + executor + pilot + liaison up so `rbnx chat` can still
+        // be poked at even when scene / memory / mapping is broken — the
+        // alternative (the previous fail-fast model) means a single
+        // package's milvus lock or sensor-init quirk gates every other
+        // component the operator wants to test.
+        //
+        // System builtins (atlas/executor/pilot/liaison) are still
+        // bail-on-error: nothing else makes sense without those.
+        let mut failures: Vec<(String, String, String)> = Vec::new(); // (component, name, err)
+
         if !skip_system {
             let builtin_names: &[&str] = &["atlas", "executor", "pilot", "liaison"];
             for (key, value) in &deploy.system {
@@ -664,7 +691,7 @@ pub async fn execute(
                     branch: None,
                     config: value.clone(),
                 };
-                let sp = spawn_and_init(
+                match spawn_and_init(
                     "system",
                     &entry,
                     &log_dir,
@@ -673,15 +700,22 @@ pub async fn execute(
                     &manifest_dir,
                     &mut atlas,
                 )
-                .await?;
-                children.push(sp);
-                persist_state(
-                    &state_path,
-                    &manifest_path,
-                    &atlas_endpoint,
-                    started_at_ms,
-                    &children,
-                );
+                .await
+                {
+                    Ok(sp) => {
+                        children.push(sp);
+                        persist_state(
+                            &state_path,
+                            &manifest_path,
+                            &atlas_endpoint,
+                            started_at_ms,
+                            &children,
+                        );
+                    }
+                    Err(e) => {
+                        failures.push(("system".to_string(), key.clone(), format!("{e:#}")));
+                    }
+                }
             }
         }
 
@@ -689,7 +723,7 @@ pub async fn execute(
             output::boot_section("primitive");
         }
         for e in &deploy.primitive {
-            let sp = spawn_and_init(
+            match spawn_and_init(
                 "primitive",
                 e,
                 &log_dir,
@@ -698,21 +732,28 @@ pub async fn execute(
                 &manifest_dir,
                 &mut atlas,
             )
-            .await?;
-            children.push(sp);
-            persist_state(
-                &state_path,
-                &manifest_path,
-                &atlas_endpoint,
-                started_at_ms,
-                &children,
-            );
+            .await
+            {
+                Ok(sp) => {
+                    children.push(sp);
+                    persist_state(
+                        &state_path,
+                        &manifest_path,
+                        &atlas_endpoint,
+                        started_at_ms,
+                        &children,
+                    );
+                }
+                Err(err) => {
+                    failures.push(("primitive".to_string(), e.name.clone(), format!("{err:#}")));
+                }
+            }
         }
         if !deploy.service.is_empty() {
             output::boot_section("service");
         }
         for e in &deploy.service {
-            let sp = spawn_and_init(
+            match spawn_and_init(
                 "service",
                 e,
                 &log_dir,
@@ -721,15 +762,22 @@ pub async fn execute(
                 &manifest_dir,
                 &mut atlas,
             )
-            .await?;
-            children.push(sp);
-            persist_state(
-                &state_path,
-                &manifest_path,
-                &atlas_endpoint,
-                started_at_ms,
-                &children,
-            );
+            .await
+            {
+                Ok(sp) => {
+                    children.push(sp);
+                    persist_state(
+                        &state_path,
+                        &manifest_path,
+                        &atlas_endpoint,
+                        started_at_ms,
+                        &children,
+                    );
+                }
+                Err(err) => {
+                    failures.push(("service".to_string(), e.name.clone(), format!("{err:#}")));
+                }
+            }
         }
         // Skills are spawned at deploy time, same as services. The
         // semantic distinction (skill = atomic intent invokable by
@@ -746,7 +794,7 @@ pub async fn execute(
             output::boot_section("skill");
         }
         for e in &deploy.skill {
-            let sp = spawn_and_init(
+            match spawn_and_init(
                 "skill",
                 e,
                 &log_dir,
@@ -755,8 +803,34 @@ pub async fn execute(
                 &manifest_dir,
                 &mut atlas,
             )
-            .await?;
-            children.push(sp);
+            .await
+            {
+                Ok(sp) => {
+                    children.push(sp);
+                    persist_state(
+                        &state_path,
+                        &manifest_path,
+                        &atlas_endpoint,
+                        started_at_ms,
+                        &children,
+                    );
+                }
+                Err(err) => {
+                    failures.push(("skill".to_string(), e.name.clone(), format!("{err:#}")));
+                }
+            }
+        }
+        Ok(failures)
+    }
+    .await;
+
+    let failures = match outcome {
+        Ok(failures) => failures,
+        Err(e) => {
+            output::action("Boot failed", &format!("{e:#}"));
+            // System-builtin failure is still terminal — no point
+            // pretending the deploy is usable when atlas itself didn't come
+            // up. Reap whatever we did spawn before bailing.
             persist_state(
                 &state_path,
                 &manifest_path,
@@ -764,27 +838,28 @@ pub async fn execute(
                 started_at_ms,
                 &children,
             );
+            let records = component_records(&children);
+            teardown::teardown(&records).await;
+            let _ = std::fs::remove_file(&state_path);
+            return Err(e);
         }
-        Ok(())
-    }
-    .await;
+    };
 
-    if let Err(e) = outcome {
-        output::action("Boot failed", &format!("{e:#}"));
-        // Make sure shutdown.rs can still reach what we did spawn, then
-        // immediately tear it down ourselves so the user doesn't have to
-        // type `rbnx shutdown` after every aborted bring-up.
-        persist_state(
-            &state_path,
-            &manifest_path,
-            &atlas_endpoint,
-            started_at_ms,
-            &children,
+    if !failures.is_empty() {
+        output::boot_section("failures");
+        for (component, name, err) in &failures {
+            // Trim the err to a single line — the full stack already lives
+            // in the per-package log file we listed in the FAIL line.
+            let one_line = err.lines().next().unwrap_or(err.as_str());
+            output::boot_fail(name, &format!("[{component}] {one_line}"));
+        }
+        eprintln!();
+        eprintln!(
+            "  {} of {} packages failed to start; the rest are running. \
+             `rbnx caps` to inspect, `rbnx shutdown` to tear down.",
+            failures.len(),
+            failures.len() + children.len(),
         );
-        let records = component_records(&children);
-        teardown::teardown(&records).await;
-        let _ = std::fs::remove_file(&state_path);
-        return Err(e);
     }
 
     output::success(&format!(
