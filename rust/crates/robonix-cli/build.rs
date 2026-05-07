@@ -81,7 +81,13 @@ fn emit_build_metadata(repo_root: &std::path::Path) {
             return None;
         }
         Command::new("git")
-            .args(["-C", repo_root.to_str().unwrap_or(""), "rev-parse", "--short=7", "HEAD"])
+            .args([
+                "-C",
+                repo_root.to_str().unwrap_or(""),
+                "rev-parse",
+                "--short=7",
+                "HEAD",
+            ])
             .output()
             .ok()
             .filter(|o| o.status.success())
@@ -95,7 +101,12 @@ fn emit_build_metadata(repo_root: &std::path::Path) {
     // changes, mirroring `git describe --dirty` and the kernel's "+"
     // suffix on "make rpm-pkg" of a dirty tree.
     let dirty = Command::new("git")
-        .args(["-C", repo_root.to_str().unwrap_or(""), "status", "--porcelain"])
+        .args([
+            "-C",
+            repo_root.to_str().unwrap_or(""),
+            "status",
+            "--porcelain",
+        ])
         .output()
         .ok()
         .filter(|o| o.status.success())

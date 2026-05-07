@@ -458,7 +458,11 @@ async fn main() -> Result<()> {
     // state explicitly so `rbnx caps` shows ONLINE instead of stopping at the
     // legacy-fallback INITIALIZED that atlas infers from the first declare.
     if let Err(e) = atlas
-        .set_capability_state(LIAISON_CAPABILITY_ID, atlas_pb::CapabilityState::StateOnline, "")
+        .set_capability_state(
+            LIAISON_CAPABILITY_ID,
+            atlas_pb::CapabilityState::StateOnline,
+            "",
+        )
         .await
     {
         log::warn!("SetCapabilityState(ONLINE) on {LIAISON_CAPABILITY_ID} failed: {e:#}");

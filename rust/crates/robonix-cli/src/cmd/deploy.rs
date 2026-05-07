@@ -613,9 +613,11 @@ pub async fn execute(
                 {
                     output::boot_fail(
                         name,
-                        &format!("listen address '{listen}' is taken: {e:#}. \
+                        &format!(
+                            "listen address '{listen}' is taken: {e:#}. \
                                   Stop the running process (try `bash sim/stop.sh` \
-                                  or `pkill -f robonix-{name}`) and retry."),
+                                  or `pkill -f robonix-{name}`) and retry."
+                        ),
                     );
                     anyhow::bail!(
                         "system/{name}: listen address '{listen}' is already in use; \
@@ -1010,9 +1012,7 @@ fn port_is_free(listen: &str) -> std::result::Result<(), anyhow::Error> {
         // 200 ms is enough for a local connect; if a daemon is alive on
         // 127.0.0.1 the SYN-ACK is sub-ms.
         if TcpStream::connect_timeout(addr, std::time::Duration::from_millis(200)).is_ok() {
-            return Err(anyhow::anyhow!(
-                "something is already listening on {addr}"
-            ));
+            return Err(anyhow::anyhow!("something is already listening on {addr}"));
         }
     }
     Ok(())
@@ -1164,23 +1164,22 @@ async fn spawn_and_init(
         );
     };
 
-    let (cap_id, driver_contract) =
-        match wait_for_registration(
-            atlas,
-            &before,
-            &pkg_label,
-            component,
-            log_dir,
-            expected_cap_id.as_deref(),
-        )
-        .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                reap();
-                return Err(e);
-            }
-        };
+    let (cap_id, driver_contract) = match wait_for_registration(
+        atlas,
+        &before,
+        &pkg_label,
+        component,
+        log_dir,
+        expected_cap_id.as_deref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            reap();
+            return Err(e);
+        }
+    };
 
     let Some(driver_contract) = driver_contract else {
         output::boot_ok(short_label(&pkg_label, component), &format!("cap={cap_id}"));
@@ -1463,8 +1462,7 @@ async fn wait_for_registration(
             // spawn's takeover bumps last_heartbeat past started_ms,
             // which the orphan's stale heartbeat won't.
             let is_fresh = |rec: &atlas_pb::CapabilityRecord| -> bool {
-                !before.contains(&rec.capability_id)
-                    || rec.last_heartbeat_ms >= started_ms
+                !before.contains(&rec.capability_id) || rec.last_heartbeat_ms >= started_ms
             };
             // Manifest-declared cap_id wins when the package opted in.
             // Falls back to the package-name substring heuristic for

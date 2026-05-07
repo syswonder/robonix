@@ -148,8 +148,11 @@ pub async fn execute(
     //    <pkg>/capabilities/lib. --contracts: global capabilities tree
     //    (per-package contracts merging through codegen is a follow-up).
     println!("{} robonix-codegen --lang proto ...", "[codegen]".bold());
-    let mut proto_cmd = build_codegen_cmd(direct_codegen.as_ref(), cargo_bin.as_deref(), &rust_root);
-    proto_cmd.args(["--lang", "proto", "-I"]).arg(&interfaces_lib);
+    let mut proto_cmd =
+        build_codegen_cmd(direct_codegen.as_ref(), cargo_bin.as_deref(), &rust_root);
+    proto_cmd
+        .args(["--lang", "proto", "-I"])
+        .arg(&interfaces_lib);
     if let Some(p) = pkg_caps_lib.as_ref() {
         proto_cmd.arg("-I").arg(p);
     }
@@ -271,7 +274,10 @@ fn locate_codegen_bin(rust_root: &Path) -> Option<PathBuf> {
         }
     }
     for profile in ["release", "debug"] {
-        let p = rust_root.join("target").join(profile).join("robonix-codegen");
+        let p = rust_root
+            .join("target")
+            .join(profile)
+            .join("robonix-codegen");
         if p.is_file() {
             return Some(p);
         }
@@ -291,11 +297,7 @@ fn locate_codegen_bin(rust_root: &Path) -> Option<PathBuf> {
 /// (preferred — picks up `$ROBONIX_CODEGEN_BIN` / installed bin / target/
 /// in that order) or via `cargo run -p robonix-codegen` as a last
 /// resort. Caller appends the actual `--lang … -I … -o …` args.
-fn build_codegen_cmd(
-    direct: Option<&PathBuf>,
-    cargo: Option<&str>,
-    rust_root: &Path,
-) -> Command {
+fn build_codegen_cmd(direct: Option<&PathBuf>, cargo: Option<&str>, rust_root: &Path) -> Command {
     if let Some(bin) = direct {
         Command::new(bin)
     } else {
