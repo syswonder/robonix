@@ -43,7 +43,12 @@ def resolve_inputs(deadline_s: float = 30.0) -> dict[str, str]:
         "scan_topic":  "robonix/primitive/lidar/lidar",
         "cmd_topic":   "robonix/primitive/chassis/twist_in",
         "map_topic":   "robonix/service/map/occupancy_grid",
-        "pose_topic":  "robonix/primitive/chassis/pose",
+        # SLAM-corrected map-frame pose for A* start point. Optional:
+        # without it nav runs in odom-only degraded mode (drifts across
+        # episodes but still lands short goals). World-frame localisation
+        # lives in the mapping service — chassis primitives only emit
+        # odom-frame data.
+        "pose_topic":  "robonix/service/map/pose",
         # Optional: depth image for the second-line forward e-stop.
         # Lidar at chassis height passes through tall thin obstacles
         # (potted plants, table legs); depth catches them.
