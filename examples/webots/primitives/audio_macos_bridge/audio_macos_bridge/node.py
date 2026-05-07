@@ -28,7 +28,7 @@ import time
 from queue import Empty as QueueEmpty
 from queue import Queue
 
-from robonix_py import Capability
+from robonix_api import Capability
 
 cap = Capability(
     id="com.robonix.primitive.audio.macos",
@@ -66,7 +66,7 @@ def mic_stream(request, context):
     A dedicated asyncio loop runs in a worker thread and shoves binary
     frames into a thread-safe queue; the gRPC handler (sync, called by
     tonic-derived Python servicer) drains the queue. This is necessary
-    because robonix-py's gRPC server doesn't expose an async dispatch
+    because robonix-api's gRPC server doesn't expose an async dispatch
     path yet, so the websockets library — which is asyncio-only — has
     to live behind a thread boundary."""
     if bridge_host is None:

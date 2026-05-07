@@ -29,7 +29,7 @@ import uvicorn  # used for the web debug UI; cap owns the MCP HTTP server
 faulthandler.enable(all_threads=True)
 
 
-from robonix_py import Capability  # noqa: E402
+from robonix_api import Capability  # noqa: E402
 
 cap = Capability(id="com.robonix.system.scene", namespace="robonix/system/scene")
 

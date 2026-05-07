@@ -134,7 +134,7 @@ SCENE_CAMERA_FRAME=my_camera_optical bash scripts/start.sh
 | `robonix/system/scene/list_objects`            | `list_objects`   | Flat list of every currently-tracked object (id, label, x,y,z, last_seen). LLM filters client-side. |
 | `robonix/system/scene/goal_near`               | `goal_near`      | Map-frame approach pose near a registered object (id → reachable + x + y + yaw + reason). Pass to `navigation/navigate`. |
 
-Both are MCP-only (transport=mcp). Schemas auto-derive from the IDL via `robonix-py`'s `@mcp_contract`. Example:
+Both are MCP-only (transport=mcp). Schemas auto-derive from the IDL via `robonix-api`'s `@mcp_contract`. Example:
 
 ```bash
 curl -s http://127.0.0.1:50106/mcp/ -H "Content-Type: application/json" \

@@ -19,7 +19,7 @@ import time
 import uuid
 from typing import Optional
 
-from robonix_py import Capability
+from robonix_api import Capability
 
 from .nav_node import Goal, NavNode
 

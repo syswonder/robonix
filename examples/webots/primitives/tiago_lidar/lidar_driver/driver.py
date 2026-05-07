@@ -15,7 +15,7 @@ import os
 import threading
 import time
 
-from robonix_py import Capability
+from robonix_api import Capability
 
 cap = Capability(id="com.robonix.primitive.tiago_lidar", namespace="robonix/primitive/lidar")
 

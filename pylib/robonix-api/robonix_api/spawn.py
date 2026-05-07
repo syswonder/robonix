@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Sequence
 
-log = logging.getLogger("robonix_py.spawn")
+log = logging.getLogger("robonix_api.spawn")
 
 
 class SpawnRegistry:

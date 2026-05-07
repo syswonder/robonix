@@ -62,6 +62,6 @@ exec docker run --rm \
     -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
     -v "$(pwd)":/scene \
-    -v "$(rbnx path robonix-py)":/robonix-py:ro \
+    -v "$(rbnx path robonix-api)":/robonix-api:ro \
     "${EXTRA_MOUNTS[@]}" \
     "$IMG"

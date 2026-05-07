@@ -1,9 +1,9 @@
 [workspace]
 members = ["crates/*"]
-# robonix-py is a Python-only library (no Cargo.toml) — exclude from the Rust workspace.
+# robonix-api is a Python-only library (no Cargo.toml) — exclude from the Rust workspace.
 # robonix-interfaces hosts the shared IDL tree, not a buildable cargo crate.
 exclude = [
-    "crates/robonix-py",
+    "crates/robonix-api",
     "crates/robonix-interfaces",
 ]
 resolver = "2"

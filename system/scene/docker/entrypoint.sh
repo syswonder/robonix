@@ -30,9 +30,9 @@ cd /scene
 # it on the host before this container runs; we just inject onto path.
 export PYTHONPATH="/scene/rbnx-build/codegen/proto_gen:/scene/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
 
-# robonix-py lives in the workspace pylib dir, also bind-mounted.
-if [ -d /robonix-py ]; then
-    export PYTHONPATH="/robonix-py:${PYTHONPATH}"
+# robonix-api lives in the workspace pylib dir, also bind-mounted.
+if [ -d /robonix-api ]; then
+    export PYTHONPATH="/robonix-api:${PYTHONPATH}"
 fi
 
 mkdir -p /scene/rbnx-build/data

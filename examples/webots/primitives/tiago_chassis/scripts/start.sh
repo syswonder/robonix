@@ -25,7 +25,7 @@ trap cleanup EXIT INT TERM
 docker exec -i \
   -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
   -e ROBONIX_PKG_HOST_DIR="$(cd "$(dirname "$0")/.." && pwd)" \
-  -e PYTHONPATH="/robonix_pkgs/pylib/robonix-py:/robonix_pkgs/primitives/tiago_chassis/rbnx-build/codegen/proto_gen:/robonix_pkgs/primitives/tiago_chassis/rbnx-build/codegen/robonix_mcp_types" \
+  -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api:/robonix_pkgs/primitives/tiago_chassis/rbnx-build/codegen/proto_gen:/robonix_pkgs/primitives/tiago_chassis/rbnx-build/codegen/robonix_mcp_types" \
   robonix_tiago_sim \
   bash -lc 'source /opt/ros/humble/setup.bash && \
             cd /robonix_pkgs/primitives/tiago_chassis && \

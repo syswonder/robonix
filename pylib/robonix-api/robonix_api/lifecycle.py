@@ -21,7 +21,7 @@ import inspect
 import logging
 from typing import Any, Callable
 
-log = logging.getLogger("robonix_py.lifecycle")
+log = logging.getLogger("robonix_api.lifecycle")
 
 # Driver.srv command codes.
 CMD_INIT     = 0
@@ -106,7 +106,7 @@ def build_lifecycle_servicer(
     *,
     on_init=None, on_up=None, on_down=None, on_shutdown=None,
     on_state_change=None,
-    log_tag: str = "robonix_py",
+    log_tag: str = "robonix_api",
 ):
     """Build (without starting a server) the lifecycle Servicer instance.
 

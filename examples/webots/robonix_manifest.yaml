@@ -26,34 +26,18 @@ system:
   memory:
     backend: sqlite
     log: info
-  speech:
-    log: info
-
-    # ── Whisper (one-shot, asr contract) ────────────────────────────
-    # `robonix/system/speech/asr` takes a whole utterance and returns
-    # one transcript. Costs 6 GB of weights. Disabled by default since
-    # rbnx chat / dialog use the streaming path below.
-    disable_whisper: true
-    # asr_model:        openai/whisper-large-v3
-    # asr_device:       cuda          # cuda | cpu
-    # asr_chunk_length: 30.0          # long-form chunk seconds
-    # asr_batch_size:   4
-
-    # ── FunASR (streaming, asr_stream contract) ─────────────────────
-    # Handles `robonix/system/speech/asr_stream` — paraformer-zh-stream
-    # bidi gRPC, used by liaison voice + rbnx ask. Tiny (~80 MB).
-    # `cuda` is the production default — CPU is fast enough on paper
-    # but the per-chunk decode latency drops words on real hardware.
-    # If scene's YOLO+SAM+CLIP already filled the card, set `auto`
-    # for graceful CPU fallback, or `cpu` to force CPU.
-    funasr_device: cuda
-    # funasr_model:      paraformer-zh-streaming
-    # funasr_chunk_size: [0, 10, 5]   # [left, current, right]
-
-    # ── Edge TTS (synthesize / synthesize_stream contracts) ─────────
-    tts_voice: zh-CN-XiaoxiaoNeural
   scene:
     log: info
+  # `speech` is intentionally omitted from this minimal deploy — it
+  # pulls 6 GB of model weights and locks the GPU on first boot, which
+  # makes it the worst part of the new-developer experience. Add it
+  # back when you actually need ASR/TTS:
+  #
+  # speech:
+  #   log: info
+  #   disable_whisper: true
+  #   funasr_device: auto       # cuda | cpu | auto (try cuda then fall back)
+  #   tts_voice: zh-CN-XiaoxiaoNeural
 
 # the robonix boot "device tree"
 # if any primitive/service/skill failed to start, it should return "DERERED" 

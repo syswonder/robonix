@@ -25,7 +25,7 @@ import math
 import os
 import time
 
-from robonix_py import Capability
+from robonix_api import Capability
 
 cap = Capability(id="com.robonix.primitive.tiago_chassis", namespace="robonix/primitive/chassis")
 

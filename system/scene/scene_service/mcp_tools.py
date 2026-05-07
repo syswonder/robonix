@@ -29,7 +29,7 @@ from semantic_map_mcp import (  # type: ignore
 )
 
 from mcp.server.fastmcp import FastMCP
-from robonix_py import mcp_contract
+from robonix_api import mcp_contract
 
 log = logging.getLogger(__name__)
 
