@@ -199,30 +199,32 @@ message InterfaceMetadata {
 //   STATE_REGISTERED  — process up, atlas knows about the cap, but
 //                       Driver(CMD_INIT) hasn't completed (in flight, or
 //                       not yet called by `rbnx boot`).
-//   STATE_INITIALIZED — Driver(CMD_INIT) returned ok=true. Resources
-//                       parsed/validated but not yet "hot". Skills sit
-//                       here until the executor sends CMD_UP. Primitives
-//                       and services pass through this state immediately
-//                       and rbnx auto-sends CMD_UP next.
-//   STATE_ONLINE      — Driver(CMD_UP) returned ok=true. The cap is
-//                       actively serving requests / holding hot resources.
-//                       Primitives and services normally stay here for
-//                       the lifetime of the boot.
-//   STATE_OFFLINE     — Driver(CMD_DOWN) returned ok=true. Skill-only:
-//                       skill keeps the gRPC server up + the contract
-//                       in atlas, but heavy resources are released. The
-//                       executor can re-send CMD_UP later (and a future
-//                       eviction policy will drive that).
-//   STATE_ERROR       — terminal failure of the last Driver(CMD_*) call.
-//                       Cap remains visible so debug tooling can find it,
-//                       but consumers must not call its data interfaces.
+//   STATE_INITIALIZED — Driver(CMD_INIT) returned ok=true. Config parsed,
+//                       atlas dependencies resolved, soft validation done,
+//                       no hot runtime resources held yet. Skills sit
+//                       here until the executor sends CMD_ACTIVATE.
+//                       Primitives and services pass through this state
+//                       immediately and rbnx auto-sends CMD_ACTIVATE next.
+//   STATE_RUNNABLE    — Driver(CMD_ACTIVATE) returned ok=true. The cap
+//                       holds hot runtime resources and serves requests.
+//                       Consumers MUST gate on `state == RUNNABLE` before
+//                       calling data interfaces. Primitives and services
+//                       normally stay here for the boot's lifetime.
+//   STATE_ERROR       — last Driver(CMD_*) call returned ok=false or
+//                       raised. Cap remains visible so debug tooling can
+//                       find it, but consumers must NOT call data
+//                       interfaces. Recoverable only via CMD_DEACTIVATE
+//                       (best-effort) or CMD_SHUTDOWN.
+//   STATE_TERMINATED  — on_shutdown ran (or process exited / heartbeat
+//                       lapsed). Atlas keeps the record briefly for
+//                       post-mortem then GCs.
 enum CapabilityState {
   STATE_UNSPECIFIED = 0;
   STATE_REGISTERED  = 1;
   STATE_INITIALIZED = 2;
-  STATE_ONLINE      = 3;
-  STATE_OFFLINE     = 4;
-  STATE_ERROR       = 5;
+  STATE_RUNNABLE    = 3;
+  STATE_ERROR       = 4;
+  STATE_TERMINATED  = 5;
 }
 
 // Push a state transition. Caps call this after their on_init / on_up /
@@ -276,6 +278,11 @@ message QueryCapabilitiesRequest {
   // interfaces, not on the instance itself). TRANSPORT_UNSPECIFIED =
   // no filter.
   Transport transport = 3;
+  // Filter on the cap's `namespace` field. Empty matches everything;
+  // otherwise returns only caps whose namespace starts with this prefix.
+  // Useful for "every webots/* cap" or "every robonix/primitive/* cap"
+  // without enumerating contract_ids.
+  string namespace_prefix = 4;
 }
 message QueryCapabilitiesResponse { repeated CapabilityRecord records = 1; }
 
