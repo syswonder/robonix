@@ -2,7 +2,7 @@
 id      = "robonix/system/memory/search"
 version = "1"
 kind    = "service"
-idl     = "system/memory/srv/Search.srv"
+idl     = "memory/srv/Search.srv"
 
 [mode]
 type = "rpc"

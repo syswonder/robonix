@@ -8,7 +8,7 @@
 id      = "robonix/primitive/audio/select_device"
 version = "1"
 kind    = "primitive"
-idl     = "primitive/audio/srv/SelectAudioDevice.srv"
+idl     = "audio/srv/SelectAudioDevice.srv"
 
 [mode]
 type = "rpc"

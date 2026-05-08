@@ -6,7 +6,7 @@
 id      = "robonix/system/speech/voiceprint"
 version = "1"
 kind    = "service"
-idl     = "system/voiceprint/srv/Identify.srv"
+idl     = "voiceprint/srv/Identify.srv"
 
 [mode]
 type = "rpc"

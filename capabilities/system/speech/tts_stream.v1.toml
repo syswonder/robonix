@@ -4,7 +4,7 @@
 id      = "robonix/system/speech/tts_stream"
 version = "1"
 kind    = "service"
-idl     = "system/speech/tts/srv/SynthesizeStream.srv"
+idl     = "tts/srv/SynthesizeStream.srv"
 
 [mode]
 type = "rpc_server_stream"

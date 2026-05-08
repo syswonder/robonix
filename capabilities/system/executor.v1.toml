@@ -3,7 +3,7 @@
 id      = "robonix/system/executor"
 version = "1"
 kind    = "service"
-idl     = "system/executor/srv/Execute.srv"
+idl     = "executor/srv/Execute.srv"
 
 [mode]
 type = "rpc_server_stream"

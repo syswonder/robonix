@@ -9,7 +9,7 @@
 id      = "robonix/system/soma/sensor_extrinsics"
 version = "1"
 kind    = "service"
-idl     = "system/soma/srv/GetSensorExtrinsics.srv"
+idl     = "soma/srv/GetSensorExtrinsics.srv"
 
 [mode]
 type = "rpc"

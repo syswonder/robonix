@@ -2,7 +2,7 @@
 id      = "robonix/service/navigation/cancel"
 version = "1"
 kind    = "service"
-idl     = "service/navigation/srv/CancelNavigation.srv"
+idl     = "navigation/srv/CancelNavigation.srv"
 
 [mode]
 type = "rpc"
