@@ -42,19 +42,10 @@ struct ContractMeta {
     kind: String,
     /// IDL reference: full path under one of the merged lib roots
     /// (`<robonix>/capabilities/lib/` or `<pkg>/capabilities/lib/`),
-    /// without the `.srv` / `.msg` extension. The second-to-last path
-    /// segment must be `srv` or `msg`. Examples:
-    ///   `system/pilot/srv/SubmitTask`           → lib/.../srv/SubmitTask.srv
-    ///   `common_interfaces/sensor_msgs/msg/Image` → lib/.../msg/Image.msg
+    /// with the `.srv` / `.msg` extension. Examples:
+    ///   `system/pilot/srv/SubmitTask.srv`        → lib/.../srv/SubmitTask.srv
+    ///   `common_interfaces/sensor_msgs/msg/Image.msg` → lib/.../msg/Image.msg
     idl: String,
-    /// For `rpc_bidirectional_stream` mode, the client→server stream
-    /// element type (lib-relative path to a `.msg`). Required for bidi.
-    #[serde(default)]
-    stream_request: Option<String>,
-    /// For bidi (and historically server-stream) modes, the server→client
-    /// stream element type (lib-relative path to a `.msg`).
-    #[serde(default)]
-    stream_response: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,16 +54,12 @@ struct ModeSpec {
     mode_type: String,
 }
 
-/// Internal IDL-reference triple after parsing `<lib-relative path>` and
-/// optional bidi-stream element types. Constructed in resolve_contract_io
-/// from the new `[contract].idl` schema; passed to the per-mode resolvers.
+/// Internal IDL-reference triple after parsing `<lib-relative path>`.
+/// Constructed in resolve_contract_io from the `[contract].idl` schema;
+/// passed to the per-mode resolvers.
 struct IdlRef<'a> {
     /// Original path string from the toml field, kept for error messages.
     path: &'a str,
-    /// Bidi `stream_request` field, if any.
-    stream_request: Option<&'a str>,
-    /// Bidi / historical `stream_response` field, if any.
-    stream_response: Option<&'a str>,
 }
 
 /// `(ROS package, srv interface name)` pairs from every contract's
@@ -298,8 +285,6 @@ fn resolve_extra_rpc(
 ) -> Result<(ResolvedType, ResolvedType)> {
     let idl = IdlRef {
         path: extra.idl.trim(),
-        stream_request: None,
-        stream_response: None,
     };
     match extra.mode_type.trim() {
         "rpc" => resolve_srv_contract_pair(idl.path, resolver, imports, needs_string_wire),
@@ -439,11 +424,7 @@ fn resolve_contract_io(
         );
     }
 
-    let idl = IdlRef {
-        path: idl_path,
-        stream_request: c.contract.stream_request.as_deref(),
-        stream_response: c.contract.stream_response.as_deref(),
-    };
+    let idl = IdlRef { path: idl_path };
 
     match (mode, kind) {
         ("rpc", "srv") => resolve_srv_contract_pair(idl.path, resolver, imports, needs_string_wire),
@@ -614,29 +595,61 @@ fn resolve_srv_client_stream(
     Ok((in_t, out_t))
 }
 
-/// Bidirectional stream: uses `stream_request` and `stream_response` from the
-/// `[contract]` table (siblings of `idl`) as stream element types. Both
-/// values are lib-relative paths to `.msg` files (same form as `idl`).
+/// Bidirectional stream: the `.srv` Request and Response sections are the
+/// per-message stream element types (each must have exactly one field, same
+/// rule as server-stream / client-stream). Mirrors gRPC bidi shape:
+/// `rpc M(stream RequestType) returns (stream ResponseType)`.
 fn resolve_srv_bidi_stream(
     idl: &IdlRef,
     contract_id: &str,
-    _resolver: &mut MsgResolver,
+    resolver: &mut MsgResolver,
     imports: &mut BTreeSet<String>,
-    _needs_string_wire: &mut bool,
+    needs_string_wire: &mut bool,
 ) -> Result<(ResolvedType, ResolvedType)> {
-    let in_ref = idl
-        .stream_request
-        .ok_or_else(|| anyhow::anyhow!(
-            "contract {contract_id}: [mode] rpc_bidirectional_stream requires [contract].stream_request"
-        ))?;
-    let out_ref = idl
-        .stream_response
-        .ok_or_else(|| anyhow::anyhow!(
-            "contract {contract_id}: [mode] rpc_bidirectional_stream requires [contract].stream_response"
-        ))?;
+    let p = idl.path;
+    let Some((pkg, "srv", name)) = parse_idl_path(p) else {
+        bail!("[contract].idl must end with /srv/Name for rpc modes, got {p:?}");
+    };
+    resolver
+        .resolve_srv(pkg, name)
+        .with_context(|| format!("resolve srv {p}"))?;
+    let spec = resolver
+        .srv_spec(pkg, name)
+        .ok_or_else(|| anyhow::anyhow!("internal: srv {p} not cached"))?
+        .clone();
 
-    let in_t = resolve_io(in_ref, _resolver, imports, _needs_string_wire)?;
-    let out_t = resolve_io(out_ref, _resolver, imports, _needs_string_wire)?;
+    let req = &spec.request;
+    let res = &spec.response;
+    if req.fields.len() != 1 {
+        bail!(
+            "contract {contract_id}: [mode] rpc_bidirectional_stream requires the .srv request section to have exactly one field (client→server stream element type), got {} in {p}",
+            req.fields.len()
+        );
+    }
+    if res.fields.len() != 1 {
+        bail!(
+            "contract {contract_id}: [mode] rpc_bidirectional_stream requires the .srv response section to have exactly one field (server→client stream element type), got {} in {p}",
+            res.fields.len()
+        );
+    }
+    let in_t = srv_stream_field_to_resolved(
+        contract_id,
+        p,
+        "request",
+        &req.fields[0],
+        resolver,
+        imports,
+        needs_string_wire,
+    )?;
+    let out_t = srv_stream_field_to_resolved(
+        contract_id,
+        p,
+        "response",
+        &res.fields[0],
+        resolver,
+        imports,
+        needs_string_wire,
+    )?;
     Ok((in_t, out_t))
 }
 
