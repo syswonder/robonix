@@ -12,9 +12,52 @@ use anyhow::{Context, Result};
 use robonix_cli::config::Config;
 use robonix_cli::output;
 use serde_yaml::Value;
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use super::run_package;
+
+/// Ask the user (y/N) whether to retry the failed paths with `sudo rm -rf`.
+/// Returns Ok(()) if the retry succeeded or the user opted out cleanly.
+/// Returns Err if sudo failed or the user declined and we want to surface
+/// that as a non-zero exit.
+fn prompt_sudo_retry(failed: Vec<(PathBuf, std::io::Error)>) -> Result<()> {
+    if failed.is_empty() {
+        return Ok(());
+    }
+    eprintln!();
+    eprintln!("These paths could not be removed (likely docker-build root-owned files):");
+    for (p, e) in &failed {
+        eprintln!("  ✗ {} : {}", p.display(), e);
+    }
+    eprintln!();
+    eprint!(
+        "Retry with `sudo rm -rf` for the {} path(s) above? [y/N] ",
+        failed.len()
+    );
+    io::stderr().flush().ok();
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line)?;
+    let yes = matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+    if !yes {
+        anyhow::bail!(
+            "{} path(s) skipped (run `sudo rm -rf <path>` manually if needed)",
+            failed.len()
+        );
+    }
+    let mut cmd = std::process::Command::new("sudo");
+    cmd.arg("rm").arg("-rf");
+    for (p, _) in &failed {
+        cmd.arg(p);
+    }
+    let status = cmd
+        .status()
+        .context("failed to spawn sudo (is it installed?)")?;
+    if !status.success() {
+        anyhow::bail!("sudo rm exited with {:?}", status.code());
+    }
+    Ok(())
+}
 
 pub async fn execute(
     config: Config,
@@ -50,13 +93,10 @@ fn clean_package(pkg: &Path) -> Result<()> {
     }
     output::action("Cleaning", &build.display().to_string());
     if let Err(e) = std::fs::remove_dir_all(&build) {
-        // Common case: a docker-build container left root-owned files
-        // inside rbnx-build/. Surface clearly instead of bailing.
-        anyhow::bail!(
-            "rm -rf {} failed: {}\nhint: a docker build may have left root-owned files; try `sudo rm -rf {0:?}`",
-            build.display(),
-            e
-        );
+        // Common case: docker-build left root-owned files. Ask the user
+        // whether to retry with sudo rather than bailing or silently
+        // running sudo on their behalf.
+        return prompt_sudo_retry(vec![(build, e)]);
     }
     Ok(())
 }
@@ -155,15 +195,5 @@ fn clean_deploy(config: &Config, manifest_path: &Path, also_cache: bool) -> Resu
         }
     }
 
-    if !failed.is_empty() {
-        eprintln!();
-        for (p, e) in &failed {
-            eprintln!("  ✗ {} : {}", p.display(), e);
-        }
-        anyhow::bail!(
-            "{} path(s) could not be removed (likely docker-build root-owned files; try `sudo rm -rf <path>`)",
-            failed.len()
-        );
-    }
-    Ok(())
+    prompt_sudo_retry(failed)
 }
