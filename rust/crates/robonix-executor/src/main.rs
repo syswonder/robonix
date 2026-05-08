@@ -105,17 +105,17 @@ async fn main() -> Result<()> {
     );
 
     // Executor has no Driver lifecycle handshake — it's ready as soon as
-    // the gRPC server is up. Push ONLINE so `rbnx caps` doesn't show the
+    // the gRPC server is up. Push RUNNING so `rbnx caps` doesn't show the
     // legacy-fallback INITIALIZED forever.
     if let Err(e) = atlas
         .set_capability_state(
             &cfg.capability_id,
-            atlas_pb::CapabilityState::StateOnline,
+            atlas_pb::CapabilityState::StateRunning,
             "",
         )
         .await
     {
-        log::warn!("SetCapabilityState(ONLINE) failed: {e:#}");
+        log::warn!("SetCapabilityState(RUNNING) failed: {e:#}");
     }
 
     // Atlas evicts caps after ~60s without a heartbeat. Send one every

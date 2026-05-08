@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import os
 
-from robonix_api import Capability
+from robonix_api import Capability, Ok, Err, Deferred
 
 cap = Capability(id="audio_driver", namespace="robonix/primitive/audio")
 log = logging.getLogger("audio-driver")
@@ -231,7 +231,7 @@ def init(cfg):
             spk_dev_id = None
 
     if mic_dev_id is None and spk_dev_id is None:
-        return cap.error("no ALSA capture or playback device available")
+        return Err("no ALSA capture or playback device available")
 
     if mic_dev_id is not None:
         mic_driver = MicDriver(
@@ -251,7 +251,7 @@ def init(cfg):
             bits_per_sample=int(os.environ.get("AUDIO_SPEAKER_BITS", "16")),
         )
         current_output_id = spk_dev_id
-    return cap.ready()
+    return Ok()
 
 
 def main() -> int:

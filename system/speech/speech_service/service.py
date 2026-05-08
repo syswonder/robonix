@@ -873,7 +873,7 @@ class SpeechDialogServicer(contracts_grpc.SystemSpeechDialogServicer):
 # other nodes can discover it. If Atlas is unavailable or the runtime protos
 # are not installed, the service runs in standalone mode.
 
-from robonix_api import Capability  # noqa: E402
+from robonix_api import Capability, Ok, Err, Deferred  # noqa: E402
 
 cap = Capability(id="speech", namespace="robonix/system/speech")
 
@@ -965,11 +965,11 @@ def init(cfg):
              "OK" if tts else "UNAVAILABLE")
 
     if not any([asr, asr_stream, tts]):
-        return cap.error(
+        return Err(
             "all backends failed; set SPEECH_CI_MODE=1 for mocks or fix "
             "model / network issues (see backend errors above)"
         )
-    return cap.ready()
+    return Ok()
 
 
 def main() -> int:

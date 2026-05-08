@@ -28,7 +28,7 @@ import time
 from queue import Empty as QueueEmpty
 from queue import Queue
 
-from robonix_api import Capability
+from robonix_api import Capability, Ok, Err, Deferred
 
 cap = Capability(
     id="audio_macos_bridge",
@@ -295,12 +295,12 @@ def init(cfg):
 
     result = asyncio.run(probe())
     if result is None or (isinstance(result, str) and result.startswith("error:")):
-        return cap.error(
+        return Err(
             f"macos bridge unreachable at ws://{bridge_host}:{bridge_port}/health "
             f"({result}). Start `mac_server/server.py` on the macOS host first."
         )
     log.info("bridge healthy: %s", result)
-    return cap.ready()
+    return Ok()
 
 
 def main() -> int:

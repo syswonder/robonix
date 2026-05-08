@@ -146,10 +146,10 @@ impl From<&CapRecord> for pb::CapabilityRecord {
 
 impl CapRecord {
     /// Lifecycle state. The cap pushes via SetCapabilityState whenever its
-    /// on_init / on_up / on_down handler returns; that pushed value wins.
-    /// For legacy caps that never push, fall back to "any non-driver
-    /// interface declared → INITIALIZED" (preserves behaviour for code
-    /// still on the old register-then-declare-only flow).
+    /// on_init / on_activate / on_deactivate handler returns; that pushed
+    /// value wins. For legacy caps that never push, fall back to "any
+    /// non-driver interface declared → INITIALIZED" (preserves behaviour
+    /// for code still on the old register-then-declare-only flow).
     fn state(&self) -> pb::CapabilityState {
         if let Some(s) = self.pushed_state {
             return s;
@@ -163,6 +163,26 @@ impl CapRecord {
         } else {
             pb::CapabilityState::StateRegistered
         }
+    }
+}
+
+/// Whether `prev → next` matches the v0.1 lifecycle FSM (see
+/// `docs/src/architecture/cap-lifecycle.md`). `Unspecified` as `prev`
+/// means "fresh cap, never pushed state" — accept any first transition.
+fn is_legal_transition(prev: pb::CapabilityState, next: pb::CapabilityState) -> bool {
+    use pb::CapabilityState::*;
+    if next == StateError || next == StateTerminated {
+        return true; // any state may fail or shut down
+    }
+    match (prev, next) {
+        (StateUnspecified, _) => true,
+        (StateRegistered, StateInitialized) => true,
+        (StateInitialized, StateRunning) => true,
+        (StateRunning, StateInitialized) => true,
+        (StateError, StateInitialized) => true,
+        // self-transitions are no-ops, accept silently
+        (a, b) if a == b => true,
+        _ => false,
     }
 }
 
@@ -341,9 +361,11 @@ impl AtlasRegistry {
 
     /// Update the cap's lifecycle state. Returns the previous value (or
     /// the inferred fallback when nothing's been pushed yet) so callers
-    /// can log "X went INITIALIZED → ONLINE" without a separate query.
-    /// Atlas does NOT validate the transition — capability-side code is
-    /// the source of truth for what state ordering makes sense.
+    /// can log "X went INITIALIZED → RUNNING" without a separate query.
+    /// Validation is **soft** in v0.1: illegal transitions log a warn
+    /// but the new state is still stored. Strict validation will land
+    /// in v0.2 once telemetry confirms there are no spurious illegal
+    /// transitions during atlas/cap startup-race conditions.
     pub async fn set_capability_state(
         &self,
         cap_id: &str,
@@ -362,6 +384,12 @@ impl AtlasRegistry {
             .get_mut(cap_id)
             .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
         let prev = rec.state();
+        if !is_legal_transition(prev, new_state) {
+            warn!(
+                "[atlas] illegal transition {cap_id}: {:?} -> {:?} (storing anyway, soft-validation v0.1)",
+                prev, new_state
+            );
+        }
         rec.pushed_state = Some(new_state);
         rec.state_detail = detail.trim().to_string();
         info!(
@@ -452,8 +480,19 @@ impl AtlasRegistry {
         contract: &str,
         transport: Transport,
     ) -> Vec<pb::CapabilityRecord> {
+        self.query_with_prefix(cap_id, contract, "", transport).await
+    }
+
+    pub async fn query_with_prefix(
+        &self,
+        cap_id: &str,
+        contract: &str,
+        namespace_prefix: &str,
+        transport: Transport,
+    ) -> Vec<pb::CapabilityRecord> {
         let f_cap_id = cap_id.trim();
         let f_contract = contract.trim();
+        let f_ns_prefix = namespace_prefix.trim();
         let f_transport = if transport == Transport::Unspecified {
             None
         } else {
@@ -464,6 +503,9 @@ impl AtlasRegistry {
         let mut out = Vec::new();
         for rec in state.caps.values() {
             if !f_cap_id.is_empty() && rec.capability_id != f_cap_id {
+                continue;
+            }
+            if !f_ns_prefix.is_empty() && !rec.namespace.starts_with(f_ns_prefix) {
                 continue;
             }
             if !f_contract.is_empty() && !rec.endpoints.iter().any(|e| e.contract_id == f_contract)
@@ -862,7 +904,7 @@ impl pb::atlas_server::Atlas for AtlasService {
         let transport = Transport::try_from(r.transport).unwrap_or(Transport::Unspecified);
         let records = self
             .registry
-            .query(&r.capability_id, &r.contract_id, transport)
+            .query_with_prefix(&r.capability_id, &r.contract_id, &r.namespace_prefix, transport)
             .await;
         Ok(Response::new(pb::QueryCapabilitiesResponse { records }))
     }
@@ -947,8 +989,9 @@ impl pb::atlas_server::Atlas for AtlasService {
     }
 }
 
-const DEFAULT_EVICTION_INTERVAL_MS: u64 = 10_000; // check every 10s
-const DEFAULT_HEARTBEAT_TIMEOUT_MS: u64 = 60_000; // while checking we found some cap dead for 60s then we evict it :(
+const DEFAULT_EVICTION_INTERVAL_MS: u64 = 10_000;     // check every 10s
+const DEFAULT_HEARTBEAT_TIMEOUT_MS: u64 = 90_000;     // mark TERMINATED after 90s
+const DEFAULT_GC_AFTER_TERMINATED_MS: u64 = 600_000;  // drop record 10 min after TERMINATED
 
 fn read_env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
@@ -957,30 +1000,69 @@ fn read_env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-async fn eviction_loop(registry: Arc<AtlasRegistry>, timeout_ms: u64, interval_ms: u64) {
+/// Two-phase eviction:
+///   1. heartbeat lapsed > `timeout_ms` AND state is not yet TERMINATED →
+///      transition to TERMINATED, drop the cap's channels (so consumers
+///      stop dialing a corpse).
+///   2. state is TERMINATED AND last_heartbeat older than `gc_after_ms` →
+///      remove the record entirely.
+/// Phase 1 keeps a debug-friendly "yes that cap died, here's why" view in
+/// `rbnx caps` for `gc_after_ms` after the lapse; phase 2 frees memory.
+async fn eviction_loop(
+    registry: Arc<AtlasRegistry>,
+    timeout_ms: u64,
+    gc_after_ms: u64,
+    interval_ms: u64,
+) {
     if timeout_ms == 0 {
         info!("[atlas] heartbeat eviction disabled (timeout=0)");
         return;
     }
-    info!("[atlas] heartbeat eviction: timeout={timeout_ms}ms interval={interval_ms}ms");
+    info!(
+        "[atlas] heartbeat eviction: terminate-after={timeout_ms}ms \
+         gc-after-terminated={gc_after_ms}ms interval={interval_ms}ms"
+    );
     let interval = std::time::Duration::from_millis(interval_ms);
     loop {
         tokio::time::sleep(interval).await;
         let now = AtlasRegistry::now_ms();
         let mut state = registry.inner.write().await;
-        let evicted: Vec<String> = state
+
+        // Phase 1: lapsed → TERMINATED.
+        let lapsed: Vec<String> = state
             .caps
             .iter()
-            .filter(|(_, rec)| now.saturating_sub(rec.last_heartbeat_ms) > timeout_ms)
+            .filter(|(_, rec)| {
+                now.saturating_sub(rec.last_heartbeat_ms) > timeout_ms
+                    && rec.state() != pb::CapabilityState::StateTerminated
+            })
             .map(|(id, _)| id.clone())
             .collect();
-        for id in &evicted {
-            state.caps.remove(id);
+        for id in &lapsed {
+            if let Some(rec) = state.caps.get_mut(id) {
+                rec.pushed_state = Some(pb::CapabilityState::StateTerminated);
+                rec.state_detail = format!("heartbeat lapsed > {timeout_ms}ms");
+            }
             let dropped = state.drop_channels_of(id);
             warn!(
-                "[atlas] evicted '{id}' (heartbeat lapsed > {timeout_ms}ms, \
+                "[atlas] '{id}' → TERMINATED (heartbeat lapsed > {timeout_ms}ms, \
                  channels_dropped={dropped})"
             );
+        }
+
+        // Phase 2: TERMINATED long enough → drop the record.
+        let stale: Vec<String> = state
+            .caps
+            .iter()
+            .filter(|(_, rec)| {
+                rec.state() == pb::CapabilityState::StateTerminated
+                    && now.saturating_sub(rec.last_heartbeat_ms) > timeout_ms + gc_after_ms
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &stale {
+            state.caps.remove(id);
+            warn!("[atlas] '{id}' GC'd from registry (TERMINATED > {gc_after_ms}ms)");
         }
     }
 }
@@ -994,6 +1076,10 @@ pub async fn serve_atlas(registry: Arc<AtlasRegistry>, listen: SocketAddr) -> Re
         "ROBONIX_ATLAS_HEARTBEAT_TIMEOUT_MS",
         DEFAULT_HEARTBEAT_TIMEOUT_MS,
     );
+    let gc_after_ms = read_env_u64(
+        "ROBONIX_ATLAS_GC_AFTER_TERMINATED_MS",
+        DEFAULT_GC_AFTER_TERMINATED_MS,
+    );
     let interval_ms = read_env_u64(
         "ROBONIX_ATLAS_EVICTION_INTERVAL_MS",
         DEFAULT_EVICTION_INTERVAL_MS,
@@ -1001,6 +1087,7 @@ pub async fn serve_atlas(registry: Arc<AtlasRegistry>, listen: SocketAddr) -> Re
     let _eviction_task = tokio::spawn(eviction_loop(
         Arc::clone(&registry),
         timeout_ms,
+        gc_after_ms,
         interval_ms,
     ));
 

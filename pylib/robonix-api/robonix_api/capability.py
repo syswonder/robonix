@@ -3,8 +3,9 @@
 
 A Capability talks to atlas (RegisterCapability + DeclareInterface +
 QueryCapabilities + Heartbeat), serves the lifecycle gRPC interface
-(Driver(CMD_INIT/UP/DOWN/SHUTDOWN)), and provides a thin layer of
-helpers over rclpy / grpcio / FastMCP for the most common patterns.
+(Driver(CMD_INIT/ACTIVATE/DEACTIVATE/SHUTDOWN)), and provides a thin
+layer of helpers over rclpy / grpcio / FastMCP for the most common
+patterns.
 
 The conscious design split:
   - Layer 1 (always available): atlas declare/query, lifecycle, subprocess
@@ -27,6 +28,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .atlas import AtlasClient
+from .atlas_types import (
+    CapabilityRecord,
+    CapabilityState,
+    Channel,
+    Transport,
+)
 from .codegen import ensure_proto_gen, find_pkg_root
 from .lifecycle import (
     bind_user_handler,
@@ -140,16 +147,21 @@ class Capability:
 
         # User-registered handlers (filled by decorators).
         self._on_init: Callable | None = None
-        self._on_up: Callable | None = None
-        self._on_down: Callable | None = None
+        self._on_activate: Callable | None = None
+        self._on_deactivate: Callable | None = None
+        self._on_shutdown: Callable | None = None
 
         # Lifecycle state. Source of truth on the cap side; pushed to
         # atlas via SetCapabilityState whenever it transitions (see
         # _set_state below). Initial value is REGISTERED — it flips to
-        # INITIALIZED on Driver(CMD_INIT) success, ONLINE on CMD_UP,
-        # OFFLINE on CMD_DOWN. Atlas-side fallback infers state from
-        # interface declares for legacy caps that never push.
+        # INITIALIZED on Driver(CMD_INIT) success, RUNNING on
+        # CMD_ACTIVATE, back to INITIALIZED on CMD_DEACTIVATE,
+        # TERMINATED on CMD_SHUTDOWN.
         self._state: str = "registered"
+
+        # Channels we opened via cap.connect(); force-closed on teardown
+        # so atlas doesn't accumulate dangling consumer→provider edges.
+        self._channels: list[Channel] = []
 
         # Layer 2 registries (populated by decorators / methods).
         self._mcp_app = None  # FastMCP app, lazy
@@ -167,30 +179,57 @@ class Capability:
 
     # ── lifecycle decorators ─────────────────────────────────────────────
     def on_init(self, fn: Callable[[dict], Any]) -> Callable[[dict], Any]:
+        """REGISTERED → INITIALIZED. Parse config, validate dependencies,
+        bind logical device. NO hot runtime resources yet."""
         if self._on_init is not None:
             raise RuntimeError("on_init handler already registered")
         self._on_init = fn
         return fn
 
-    def on_up(self, fn: Callable[[dict], Any]) -> Callable[[dict], Any]:
-        self._on_up = fn
+    def on_activate(self, fn: Callable[[dict], Any]) -> Callable[[dict], Any]:
+        """INITIALIZED → RUNNING. Acquire hot runtime resources
+        (threads, models, ROS subs, hardware fds). After this returns
+        ok, atlas marks the cap RUNNING and consumers may call its
+        data interfaces. Optional for primitives/services (framework
+        auto-promotes); REQUIRED for skills."""
+        self._on_activate = fn
         return fn
 
-    def on_down(self, fn: Callable[[], Any]) -> Callable[[], Any]:
-        self._on_down = fn
+    def on_deactivate(self, fn: Callable[[], Any]) -> Callable[[], Any]:
+        """RUNNING → INITIALIZED. Release hot resources but keep
+        config / atlas registration. Optional for primitives/services;
+        executor calls this on skills via its eviction policy."""
+        self._on_deactivate = fn
+        return fn
+
+    def on_shutdown(self, fn: Callable[[], Any]) -> Callable[[], Any]:
+        """any → TERMINATED. Last-chance cleanup before process exit
+        (close ports, flush logs). Return value ignored."""
+        self._on_shutdown = fn
         return fn
 
     # ── lifecycle state ──────────────────────────────────────────────────
     @property
     def state(self) -> str:
         """Current lifecycle state — one of registered / initialized /
-        online / offline / error. The framework drives this off Driver
-        cmd transitions; users typically don't write to it directly."""
+        running / error / terminated. The framework drives this off
+        Driver cmd transitions; users typically don't write to it
+        directly."""
         return self._state
 
-    def _set_state(self, new_state: str, detail: str = "") -> None:
-        """Update local state + push to atlas. Idempotent on no-change."""
-        new_state = (new_state or "").lower()
+    def _set_state(self, new_state: str | None, detail: str = "") -> None:
+        """Update local state + push to atlas. Idempotent on no-change.
+        `new_state=None` updates only state_detail without changing the
+        state itself (used for Deferred — cap stays where it is, but
+        state_detail explains why)."""
+        if new_state is None:
+            # Detail-only push; keep current state.
+            try:
+                self._atlas.set_capability_state(self.id, self._state, detail)
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        new_state = new_state.lower()
         if new_state == self._state:
             return
         prev = self._state
@@ -208,16 +247,6 @@ class Capability:
             # set_capability_state already logs at debug; swallow to keep
             # the cap usable even if atlas is briefly unreachable.
             pass
-
-    # ── Driver_Response helpers ──────────────────────────────────────────
-    def ready(self, state: str = "ready") -> dict:
-        return {"ok": True, "state": state, "error": ""}
-
-    def error(self, msg: str) -> dict:
-        return {"ok": False, "state": "error", "error": msg}
-
-    def deferred(self, reason: str) -> dict:
-        return {"ok": False, "state": "deferred", "error": reason}
 
     # ── Layer 1: raw atlas declares ──────────────────────────────────────
     def declare_ros2(
@@ -256,11 +285,60 @@ class Capability:
             self.id, _full_id(contract_id), endpoint, description, input_schema_json
         )
 
-    # ── Layer 1: query upstream via atlas ────────────────────────────────
-    def query(self, contract_id: str, transport: str = "ros2") -> str | None:
-        return self._atlas.query_endpoint(
-            _full_id(contract_id), transport, consumer_id=self.id
+    # ── Layer 1: discovery + connect ─────────────────────────────────────
+    def find(
+        self,
+        *,
+        contract_id: str = "",
+        capability_id: str = "",
+        namespace_prefix: str = "",
+        transport: Transport | str | int = Transport.UNSPECIFIED,
+    ) -> list[CapabilityRecord]:
+        """Structured atlas discovery. Filters AND together; empty =
+        no filter. Returns dataclass `CapabilityRecord`s — `cap_id`,
+        `state`, `interfaces`, etc. Convention: `cap_id` IS the device
+        id for primitives, so `find(cap_id="webots_tiago_camera_front")`
+        gives every interface of that physical camera."""
+        full_contract = _full_id(contract_id) if contract_id else ""
+        return self._atlas.find(
+            capability_id=capability_id,
+            contract_id=full_contract,
+            namespace_prefix=namespace_prefix,
+            transport=transport,
         )
+
+    def find_one(self, **filters) -> CapabilityRecord | None:
+        recs = self.find(**filters)
+        return recs[0] if recs else None
+
+    def connect(
+        self,
+        *,
+        contract_id: str,
+        transport: Transport | str | int,
+        capability_id: str = "",
+    ) -> Channel:
+        """Open a consumer→provider channel. When `capability_id` is
+        empty, picks the first matching provider via `find_one`. The
+        returned `Channel` is a context manager; auto-closes on
+        teardown if the caller doesn't `with`-block it explicitly."""
+        full_contract = _full_id(contract_id)
+        cap_id = capability_id
+        if not cap_id:
+            rec = self.find_one(contract_id=full_contract, transport=transport)
+            if rec is None:
+                raise RuntimeError(
+                    f"connect({contract_id!r}): no provider in atlas"
+                )
+            cap_id = rec.capability_id
+        ch = self._atlas.connect(
+            consumer_id=self.id,
+            capability_id=cap_id,
+            contract_id=full_contract,
+            transport=transport,
+        )
+        self._channels.append(ch)
+        return ch
 
     # ── Layer 1: subprocess + ROS sentinel ───────────────────────────────
     def spawn(
@@ -358,6 +436,29 @@ class Capability:
                 # Consumer-side declare is optional; don't fail if atlas refuses.
                 pass
         return sub
+
+    def create_subscription_from_channel(
+        self,
+        channel: Channel,
+        *,
+        msg_type: type | str,
+        callback: Callable[[Any], None],
+    ):
+        """Create an rclpy subscription using the topic + qos atlas
+        resolved via `cap.connect(...)`. Skips the `topic=` / `qos=`
+        ceremony — those come from the channel.
+
+        v0.1 still requires `msg_type` as a Python class (or a string
+        like 'sensor_msgs/Image' resolved via rosidl). v0.2 will pull
+        the message type from the contract's IDL automatically."""
+        cls = msg_type if isinstance(msg_type, type) else resolve_msg_type(msg_type)
+        from .atlas_types import Ros2Params
+
+        qos = 0
+        if isinstance(channel.params, Ros2Params) and channel.params.qos_profile:
+            qos = channel.params.qos_profile  # rclpy resolves the named profile
+            qos = qos if isinstance(qos, int) else 0
+        return RosBackend.get().create_subscription(cls, channel.endpoint, callback, qos)
 
     def emit(self, contract_id: str, msg: Any) -> None:
         """Publish `msg` on the rclpy publisher created via create_publisher."""
@@ -535,9 +636,9 @@ class Capability:
             contracts_grpc,
             lifecycle_pb2.Driver_Response,
             on_init=self._on_init,
-            on_up=self._on_up,
-            on_down=self._on_down,
-            on_shutdown=self._teardown,
+            on_activate=self._on_activate,
+            on_deactivate=self._on_deactivate,
+            on_shutdown=self._user_shutdown_then_teardown,
             on_state_change=self._set_state,
             log_tag=self.id,
         )
@@ -636,16 +737,17 @@ class Capability:
         # 5. heartbeat
         self._heartbeat_thread = self._atlas.start_heartbeat(self.id)
 
-        # 6. State promotion. Caps WITH a Driver(CMD_INIT/CMD_UP) handshake
-        # rely on rbnx-boot to drive them through INITIALIZED → ONLINE via
-        # the lifecycle servicer's on_state_change callback (wired above).
-        # Caps WITHOUT a driver contract (system services like memory /
-        # scene that only expose MCP tools or one-shot gRPC RPCs) are fully
-        # ready as soon as gRPC + MCP are listening — promote to ONLINE
-        # here so `rbnx caps` shows them online instead of stranded at
+        # 6. State promotion. Caps WITH a Driver(CMD_INIT/CMD_ACTIVATE)
+        # handshake rely on rbnx boot to drive them through
+        # INITIALIZED → RUNNING via the lifecycle servicer's
+        # on_state_change callback (wired above). Caps WITHOUT a driver
+        # contract (system services like memory / scene that only expose
+        # MCP tools or one-shot gRPC RPCs) are fully ready as soon as
+        # gRPC + MCP are listening — promote to RUNNING here so
+        # `rbnx caps` shows them online instead of stranded at
         # INITIALIZED forever.
         if driver_decl is None and registered_ok:
-            self._set_state("online")
+            self._set_state("running")
 
     def _start_mcp_server(self) -> None:
         # Pre-claim a free port via socket(0) → close → hand to uvicorn.
@@ -699,7 +801,23 @@ class Capability:
             except Exception as e:  # noqa: BLE001
                 log.warning("declare mcp %s failed: %s", cid, e)
 
+    def _user_shutdown_then_teardown(self) -> None:
+        """Called by Driver(CMD_SHUTDOWN). Run user's @cap.on_shutdown
+        first (last chance for state to flush), then framework teardown."""
+        if self._on_shutdown is not None:
+            try:
+                self._on_shutdown()
+            except Exception:  # noqa: BLE001
+                log.exception("[%s] on_shutdown raised", self.id)
+        self._teardown()
+
     def _teardown(self) -> None:
+        # Close any consumer→provider channels we opened so atlas drops
+        # the bookkeeping (provider eviction also handles this, but
+        # explicit close is cheaper + immediate).
+        for ch in self._channels:
+            ch.close()
+        self._channels.clear()
         self._spawn.shutdown_all()
         if self._driver_server is not None:
             try:
@@ -709,6 +827,17 @@ class Capability:
 
     def _teardown_and_exit(self) -> None:
         self._stopping.set()
+        # Best-effort terminal state push so atlas reflects the shutdown
+        # in the brief window before heartbeat eviction would catch it.
+        if self._on_shutdown is not None:
+            try:
+                self._on_shutdown()
+            except Exception:  # noqa: BLE001
+                log.exception("[%s] on_shutdown raised", self.id)
+        try:
+            self._set_state("terminated", "process signal teardown")
+        except Exception:  # noqa: BLE001
+            pass
         self._teardown()
         # Let signal.pause loop exit naturally; don't sys.exit here so atexit
         # hooks can run.
