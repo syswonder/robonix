@@ -19,7 +19,7 @@ import time
 import uuid
 from typing import Optional
 
-from robonix_api import Capability
+from robonix_api import Capability, Ok, Err, Deferred
 
 from .nav_node import Goal, NavNode
 
@@ -164,7 +164,7 @@ def init(cfg):
     missing = [k for k in ("odom_topic", "scan_topic", "cmd_topic", "map_topic")
                if k not in inputs]
     if missing:
-        return cap.error(
+        return Err(
             f"missing required atlas resolutions: {missing} (chassis + lidar + mapping "
             f"all online before simple_nav?)"
         )
@@ -183,7 +183,7 @@ def init(cfg):
         inputs["scan_topic"], inputs["odom_topic"], inputs["cmd_topic"],
         inputs["map_topic"], inputs.get("pose_topic"),
         inputs.get("depth_topic", "(none)"))
-    return cap.ready()
+    return Ok()
 
 
 def main() -> int:

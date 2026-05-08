@@ -205,11 +205,15 @@ message InterfaceMetadata {
 //                       here until the executor sends CMD_ACTIVATE.
 //                       Primitives and services pass through this state
 //                       immediately and rbnx auto-sends CMD_ACTIVATE next.
-//   STATE_RUNNABLE    — Driver(CMD_ACTIVATE) returned ok=true. The cap
+//   STATE_RUNNING     — Driver(CMD_ACTIVATE) returned ok=true. The cap
 //                       holds hot runtime resources and serves requests.
-//                       Consumers MUST gate on `state == RUNNABLE` before
+//                       Consumers MUST gate on `state == RUNNING` before
 //                       calling data interfaces. Primitives and services
 //                       normally stay here for the boot's lifetime.
+//                       (Naming follows systemd active(running) / k8s
+//                       Running / docker running — not Linux thread
+//                       TASK_RUNNABLE which means "schedulable but not
+//                       running yet".)
 //   STATE_ERROR       — last Driver(CMD_*) call returned ok=false or
 //                       raised. Cap remains visible so debug tooling can
 //                       find it, but consumers must NOT call data
@@ -222,7 +226,12 @@ enum CapabilityState {
   STATE_UNSPECIFIED = 0;
   STATE_REGISTERED  = 1;
   STATE_INITIALIZED = 2;
-  STATE_RUNNABLE    = 3;
+  // RUNNING — process up, hot resources allocated, serving requests.
+  // Naming matches the canonical OS surfaces (systemd active(running),
+  // k8s pod Running, docker container running). "RUNNABLE" of older
+  // drafts was a Linux-thread-state borrowing that implied "could run
+  // if scheduled" — wrong mental model for a service.
+  STATE_RUNNING     = 3;
   STATE_ERROR       = 4;
   STATE_TERMINATED  = 5;
 }

@@ -55,7 +55,7 @@ def _resolve_state(s: CapabilityState | str | int) -> CapabilityState:
     return {
         "registered":  CapabilityState.REGISTERED,
         "initialized": CapabilityState.INITIALIZED,
-        "runnable":    CapabilityState.RUNNABLE,
+        "running":     CapabilityState.RUNNING,
         "error":       CapabilityState.ERROR,
         "terminated":  CapabilityState.TERMINATED,
     }.get(name, CapabilityState.UNSPECIFIED)
@@ -314,7 +314,7 @@ class AtlasClient:
     ) -> None:
         """Push a lifecycle state transition. `state` accepts the new
         CapabilityState enum, an int, or a lower-case string
-        (registered/initialized/runnable/error/terminated).
+        (registered/initialized/running/error/terminated).
         Atlas-side validation is soft in v0.1 — illegal transitions log a
         warn but are still accepted, so this call won't raise."""
         self._ensure_stub()

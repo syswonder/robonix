@@ -21,6 +21,8 @@ import inspect
 import logging
 from typing import Any, Callable
 
+from .result import Deferred, Err, Ok, Result
+
 log = logging.getLogger("robonix_api.lifecycle")
 
 # Driver.srv command codes (mirrors lib/lifecycle/srv/Driver.srv).
@@ -119,7 +121,7 @@ def build_lifecycle_servicer(
 
     `on_state_change(state, detail)` is invoked AFTER each handler returns
     ok=true and is the framework's hook for pushing state transitions to
-    atlas. State strings: "initialized" / "runnable" / "error". Capability
+    atlas. State strings: "initialized" / "running" / "error". Capability
     layer wires this; lower-level callers can leave it None.
     """
     base = driver_pascal_for_namespace(namespace)
@@ -135,79 +137,136 @@ def build_lifecycle_servicer(
 
     is_skill = _is_skill_namespace(namespace)
 
-    def _emit_state(target: str, detail: str = "") -> None:
+    def _emit_state(target: str | None, detail: str = "") -> None:
+        """Push state transition to the Capability layer. `target=None`
+        means "don't transition; just update detail" (used for Deferred
+        so the cap stays in its current atlas-side state but
+        rbnx caps/state_detail explains why)."""
         if on_state_change is not None:
             try:
                 on_state_change(target, detail)
             except Exception:  # noqa: BLE001
                 log.exception("[%s] on_state_change(%s) raised", log_tag, target)
 
-    def _post_handler_state(cmd: int, resp) -> None:
-        # Only transition on success. Driver_Response carries `ok` + `state`
-        # + `error` — we treat ok=true as the trigger, regardless of the
-        # nominal `state` string the handler chose to attach.
-        if not getattr(resp, "ok", False):
-            _emit_state("error", getattr(resp, "error", "") or getattr(resp, "state", ""))
+    def _post_handler_state(cmd: int, result: Result) -> None:
+        """Drive the atlas state machine based on the handler's Result.
+        Ok → advance to next state. Err → ERROR. Deferred → no transition
+        (cap stays in current state); the framework / operator decides
+        whether to retry."""
+        if isinstance(result, Err):
+            _emit_state("error", result.message)
             return
+        if isinstance(result, Deferred):
+            # Don't transition; keep current state. Push the reason as
+            # state_detail so `rbnx caps` shows why we're stuck.
+            _emit_state(None, result.reason)  # type: ignore[arg-type]
+            return
+        # Ok: advance per command kind.
         if cmd == CMD_INIT:
             _emit_state("initialized")
         elif cmd == CMD_ACTIVATE:
-            _emit_state("runnable")
+            _emit_state("running")
         elif cmd == CMD_DEACTIVATE:
             _emit_state("initialized")
+        elif cmd == CMD_SHUTDOWN:
+            _emit_state("terminated")
+
+    def _run_handler(handler, what: str, *args) -> Result:
+        """Call user handler, normalise return into Result. Only on_init
+        receives cfg; on_activate/on_deactivate/on_shutdown take no args."""
+        try:
+            ret = handler(*args)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "[%s] %s raised — handlers should return Err(...) instead "
+                "of raising. Caught: %s: %s",
+                log_tag, what, type(e).__name__, e,
+            )
+            return Err(f"{type(e).__name__}: {e}")
+        if isinstance(ret, (Ok, Err, Deferred)):
+            return ret
+        raise TypeError(
+            f"[{log_tag}] {what} must return Ok / Err / Deferred, "
+            f"got {type(ret).__name__}"
+        )
+
+    def _to_response(cmd: int, result: Result):
+        """Pack Result into the proto Driver_Response shape."""
+        if isinstance(result, Ok):
+            target = {
+                CMD_INIT: "initialized",
+                CMD_ACTIVATE: "running",
+                CMD_DEACTIVATE: "initialized",
+                CMD_SHUTDOWN: "terminated",
+            }.get(cmd, "ok")
+            return response_cls(ok=True, state=target, error="")
+        if isinstance(result, Err):
+            return response_cls(ok=False, state="error", error=result.message)
+        if isinstance(result, Deferred):
+            return response_cls(ok=False, state="deferred", error=result.reason)
+        # Unreachable — _run_handler has already enforced the type.
+        return response_cls(ok=False, state="error",
+                            error=f"unknown Result variant: {type(result).__name__}")
 
     def Driver(self, request, context):  # noqa: N802 — matches generated stub
         cmd = int(request.command)
         log.info("[%s] Driver(cmd=%d) received", log_tag, cmd)
-        try:
-            if cmd == CMD_INIT:
-                if on_init is None:
-                    return response_cls(ok=False, state="error", error="no on_init handler")
-                resp = coerce_response(response_cls, on_init(parse_cfg(request)))
-                _post_handler_state(cmd, resp)
-                return resp
-            if cmd == CMD_ACTIVATE:
-                if on_activate is None:
-                    # Primitives + services don't need a separate activate
-                    # phase (their on_init does all the work). Treat the
-                    # implicit "INITIALIZED → RUNNABLE" transition as a
-                    # no-op success so rbnx boot's auto-CMD_ACTIVATE after
-                    # CMD_INIT succeeds. Skills MUST define on_activate —
-                    # that's where they allocate hot resources; missing it
-                    # is a real bug.
-                    if is_skill:
-                        return response_cls(ok=False, state="error",
-                                            error="skill is missing @cap.on_activate handler")
-                    resp = response_cls(ok=True, state="ready", error="")
-                    _post_handler_state(cmd, resp)
-                    return resp
-                resp = coerce_response(response_cls, on_activate(parse_cfg(request)))
-                _post_handler_state(cmd, resp)
-                return resp
-            if cmd == CMD_DEACTIVATE:
-                if on_deactivate is None:
-                    # Same argument as CMD_ACTIVATE: prim/svc don't have a
-                    # teardown phase distinct from process exit. Treat as
-                    # no-op success for them; require explicit handler for
-                    # skills (executor's eviction policy depends on it).
-                    if is_skill:
-                        return response_cls(ok=False, state="error",
-                                            error="skill is missing @cap.on_deactivate handler")
-                    resp = response_cls(ok=True, state="initialized", error="")
-                    _post_handler_state(cmd, resp)
-                    return resp
-                resp = coerce_response(response_cls, on_deactivate())
-                _post_handler_state(cmd, resp)
-                return resp
-            if cmd == CMD_SHUTDOWN:
-                if on_shutdown is not None:
-                    on_shutdown()
-                _emit_state("terminated")
-                return response_cls(ok=True, state="terminated", error="")
-            return response_cls(ok=False, state="error", error=f"unknown command {cmd}")
-        except Exception as e:  # noqa: BLE001
-            log.exception("[%s] Driver(cmd=%d) raised", log_tag, cmd)
-            return response_cls(ok=False, state="error", error=f"{type(e).__name__}: {e}")
+        cfg = parse_cfg(request)
+
+        # CMD_INIT must have a handler — that's where the cap parses
+        # its config + validates dependencies. No reasonable default.
+        if cmd == CMD_INIT:
+            if on_init is None:
+                err = Err("no on_init handler defined")
+                _post_handler_state(cmd, err)
+                return _to_response(cmd, err)
+            result = _run_handler(on_init, "on_init", cfg)
+            _post_handler_state(cmd, result)
+            return _to_response(cmd, result)
+
+        # CMD_ACTIVATE / CMD_DEACTIVATE: optional for primitives /
+        # services (framework returns Ok no-op so rbnx boot's auto-
+        # ACTIVATE succeeds), required for skills (that's where they
+        # allocate / release hot resources — executor eviction depends
+        # on it). Handlers take no args — only on_init receives config.
+        if cmd == CMD_ACTIVATE:
+            if on_activate is None:
+                if is_skill:
+                    err = Err("skill is missing @cap.on_activate handler")
+                    _post_handler_state(cmd, err)
+                    return _to_response(cmd, err)
+                _post_handler_state(cmd, Ok())
+                return _to_response(cmd, Ok())
+            result = _run_handler(on_activate, "on_activate")
+            _post_handler_state(cmd, result)
+            return _to_response(cmd, result)
+
+        if cmd == CMD_DEACTIVATE:
+            if on_deactivate is None:
+                if is_skill:
+                    err = Err("skill is missing @cap.on_deactivate handler")
+                    _post_handler_state(cmd, err)
+                    return _to_response(cmd, err)
+                _post_handler_state(cmd, Ok())
+                return _to_response(cmd, Ok())
+            result = _run_handler(on_deactivate, "on_deactivate")
+            _post_handler_state(cmd, result)
+            return _to_response(cmd, result)
+
+        # CMD_SHUTDOWN: optional handler. Cap is going away regardless;
+        # Result is logged but doesn't change termination.
+        if cmd == CMD_SHUTDOWN:
+            if on_shutdown is not None:
+                result = _run_handler(on_shutdown, "on_shutdown")
+            else:
+                result = Ok()
+            _post_handler_state(cmd, result)
+            return _to_response(cmd, result)
+
+        # Unknown command — proto evolved newer than the cap.
+        err = Err(f"unknown command code {cmd}")
+        _post_handler_state(cmd, err)
+        return _to_response(cmd, err)
 
     DynServicer = type("RobonixLifecycleServicer", (servicer_cls,), {"Driver": Driver})
     return DynServicer(), add_fn, base, "Driver"
