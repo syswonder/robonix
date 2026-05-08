@@ -295,17 +295,52 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
     }
 
     // Phase 2: build. Run build.sh for each resolved pkg.
-    let mut built = 0usize;
-    let mut skipped = 0usize;
+    struct Row {
+        section: &'static str,
+        name: String,
+        pkg_name: String, // reverse-domain `package.name` from package_manifest.yaml
+        version: String,
+        location: String, // path relative to manifest_dir, or absolute when outside
+        source: Option<(String, Option<String>)>, // (git url, branch) for url-fetched
+    }
+    let mut built: Vec<Row> = Vec::new();
+    let mut skipped: Vec<(&'static str, String, String)> = Vec::new(); // (section, name, reason)
+    let mut failed: Vec<(&'static str, String, anyhow::Error)> = Vec::new();
+
+    fn read_pkg_meta(pkg_dir: &Path) -> (String, String) {
+        // Best-effort: parse package.name + package.version from manifest.
+        let manifest = pkg_dir.join("package_manifest.yaml");
+        let raw = match std::fs::read_to_string(&manifest) {
+            Ok(s) => s,
+            Err(_) => return (String::new(), String::new()),
+        };
+        let v: serde_yaml::Value = match serde_yaml::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => return (String::new(), String::new()),
+        };
+        let pkg = v.get("package");
+        let name = pkg
+            .and_then(|p| p.get("name").and_then(|n| n.as_str()))
+            .unwrap_or("")
+            .to_string();
+        let ver = pkg
+            .and_then(|p| p.get("version").and_then(|n| n.as_str()))
+            .unwrap_or("")
+            .to_string();
+        (name, ver)
+    }
+
+    fn rel_to(_base: &Path, p: &Path) -> String {
+        // Always show absolute (realpath) so the user can copy-paste straight
+        // into a shell. The pkg_dir we get is already canonicalize()'d below.
+        p.display().to_string()
+    }
+
     for r in &entries {
         if !r.pkg_dir.join("package_manifest.yaml").is_file() {
-            output::warning(&format!(
-                "skipping {}/{}: no package_manifest.yaml at {}",
-                r.section,
-                r.name,
-                r.pkg_dir.display()
-            ));
-            skipped += 1;
+            let reason = format!("no package_manifest.yaml at {}", r.pkg_dir.display());
+            output::warning(&format!("skipping {}/{}: {}", r.section, r.name, reason));
+            skipped.push((r.section, r.name.clone(), reason));
             continue;
         }
         let canon = r
@@ -313,18 +348,124 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
             .canonicalize()
             .with_context(|| format!("canonicalize {}", r.pkg_dir.display()))?;
         output::step(r.section, &r.name);
-        build::build_local_package(&canon, clean)?;
-        built += 1;
+        let (pkg_name, version) = read_pkg_meta(&canon);
+        let location = rel_to(&manifest_dir, &canon);
+        match build::build_local_package(&canon, clean) {
+            Ok(()) => built.push(Row {
+                section: r.section,
+                name: r.name.clone(),
+                pkg_name,
+                version,
+                location,
+                source: r.url_to_clone.clone(),
+            }),
+            Err(e) => failed.push((r.section, r.name.clone(), e)),
+        }
     }
-    output::success(&format!(
-        "fetched {} / built {built} / skipped {skipped} / total {} from {}",
+
+    // ── Summary ─────────────────────────────────────────────────────────────
+    let manifest_label = manifest_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("manifest");
+    let term_w = crossterm::terminal::size()
+        .map(|(c, _)| c as usize)
+        .unwrap_or(120);
+
+    fn center_title(width: usize, title: &str) -> String {
+        let t = format!(" {title} ");
+        if width <= t.len() {
+            return "═".repeat(width);
+        }
+        let left = (width - t.len()) / 2;
+        let right = width - t.len() - left;
+        format!("{}{t}{}", "═".repeat(left), "═".repeat(right))
+    }
+
+    let h_status = "";
+    let h_sec = "section";
+    let h_name = "name";
+    let h_pkg = "package.name";
+    let h_ver = "version";
+    let h_loc = "location";
+    let w_status = 1;
+    let w_sec = built.iter().map(|r| r.section.len()).max().unwrap_or(0).max(h_sec.len());
+    let w_name = built.iter().map(|r| r.name.len()).max().unwrap_or(0).max(h_name.len());
+    let w_pkg = built.iter().map(|r| r.pkg_name.len()).max().unwrap_or(0).max(h_pkg.len());
+    let w_ver = built.iter().map(|r| r.version.len()).max().unwrap_or(0).max(h_ver.len());
+    // Location: take its natural width so realpaths don't get truncated. The
+    // table simply ends up wider than the terminal — better that the user can
+    // copy-paste a full path than read a half-truncated one.
+    let nat_loc = built.iter().map(|r| r.location.len()).max().unwrap_or(0).max(h_loc.len());
+    let w_loc = nat_loc;
+    let table_w = if built.is_empty() {
+        term_w
+    } else {
+        2 + w_status + 2 + w_sec + 2 + w_name + 2 + w_pkg + 2 + w_ver + 2 + w_loc
+    };
+    let bar_w = table_w.max(term_w);
+    let bar = "═".repeat(bar_w);
+
+    println!();
+    println!("{}", center_title(bar_w, "Build summary"));
+    println!("  Manifest: {}", manifest_path.display());
+    println!(
+        "  Built: {}   Fetched: {}   Skipped: {}   Failed: {}   Total: {}",
+        built.len(),
         to_clone.len(),
-        entries.len(),
-        manifest_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("manifest")
-    ));
+        skipped.len(),
+        failed.len(),
+        entries.len()
+    );
+
+    if !built.is_empty() {
+        println!();
+        println!(
+            "  {:<ws$}  {:<wsec$}  {:<wn$}  {:<wp$}  {:<wv$}  {:<wl$}",
+            h_status, h_sec, h_name, h_pkg, h_ver, h_loc,
+            ws=w_status, wsec=w_sec, wn=w_name, wp=w_pkg, wv=w_ver, wl=w_loc,
+        );
+        let rule = |w: usize| "─".repeat(w);
+        println!(
+            "  {}  {}  {}  {}  {}  {}",
+            rule(w_status), rule(w_sec), rule(w_name), rule(w_pkg), rule(w_ver), rule(w_loc),
+        );
+        let cont_indent = 2 + w_status + 2 + w_sec + 2 + w_name + 2 + w_pkg + 2 + w_ver + 2;
+        for r in &built {
+            println!(
+                "  {:<ws$}  {:<wsec$}  {:<wn$}  {:<wp$}  {:<wv$}  {}",
+                "✓", r.section, r.name, r.pkg_name, r.version, r.location,
+                ws=w_status, wsec=w_sec, wn=w_name, wp=w_pkg, wv=w_ver,
+            );
+            if let Some((url, branch)) = &r.source {
+                let suffix = match branch {
+                    Some(b) => format!("↳ {url} (branch={b})"),
+                    None => format!("↳ {url}"),
+                };
+                println!("{}{suffix}", " ".repeat(cont_indent));
+            }
+        }
+    }
+    if !skipped.is_empty() {
+        println!();
+        for (section, name, reason) in &skipped {
+            println!("  - {section}/{name}: {reason}");
+        }
+    }
+    if !failed.is_empty() {
+        println!();
+        for (section, name, e) in &failed {
+            println!("  ✗ {section}/{name}: {e:#}");
+        }
+    }
+    println!("{bar}");
+
+    if !failed.is_empty() {
+        anyhow::bail!(
+            "{} package(s) failed to build from {manifest_label}",
+            failed.len()
+        );
+    }
     Ok(())
 }
 
