@@ -21,10 +21,6 @@ path = "examples/mock_pilot.rs"
 name = "mock_audio"
 path = "examples/mock_audio.rs"
 
-[[example]]
-name = "voice_demo_client"
-path = "examples/voice_demo_client.rs"
-
 [dependencies]
 tokio.workspace = true
 tokio-stream = "0.1"

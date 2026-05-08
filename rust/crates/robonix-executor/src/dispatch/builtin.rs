@@ -333,7 +333,7 @@ mod tests {
     fn call(call_id: &str, op: &str, args_json: &str) -> CapabilityCall {
         CapabilityCall {
             call_id: call_id.to_string(),
-            cap_id: "com.robonix.system.executor".to_string(),
+            cap_id: "executor".to_string(),
             contract_id: format!("robonix/system/executor/builtin/{op}"),
             args_json: args_json.to_string(),
         }

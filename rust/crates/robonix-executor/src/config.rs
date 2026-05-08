@@ -9,7 +9,7 @@ use clap::Parser;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_EXECUTOR_CAPABILITY_ID: &str = "com.robonix.system.executor";
+pub const DEFAULT_EXECUTOR_CAPABILITY_ID: &str = "executor";
 pub const EXECUTOR_NAMESPACE: &str = "robonix/system/executor";
 pub const DEFAULT_ATLAS_ENDPOINT: &str = "127.0.0.1:50051";
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:50061";
