@@ -15,7 +15,7 @@ import os
 import threading
 import time
 
-from robonix_api import Capability
+from robonix_api import Capability, Ok, Err, Deferred
 
 cap = Capability(id="tiago_lidar", namespace="robonix/primitive/lidar")
 
@@ -91,9 +91,9 @@ def init(cfg):
         declare=False,  # we declare topic_out below (we own this contract)
     )
     if not cap.wait_for_topic(topic, "LaserScan", float(cfg.get("sentinel_timeout_s", 15.0))):
-        return cap.error(f"no LaserScan received on {topic} within timeout")
+        return Err(f"no LaserScan received on {topic} within timeout")
     cap.declare_ros2("robonix/primitive/lidar/lidar", topic, qos_profile="best_effort")
-    return cap.ready()
+    return Ok()
 
 
 if __name__ == "__main__":

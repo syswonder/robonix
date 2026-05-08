@@ -10,12 +10,13 @@
 //      MCP call to the returned endpoint → DisconnectCapability.
 //
 // Skills sit at INITIALIZED after `rbnx boot`. Right before dispatching
-// to one, the executor sends Driver(CMD_UP) on its `*/driver` interface
-// to flip it to ONLINE — that's where the skill actually allocates its
-// hot resources (frontier loop / nav subscribers / VLA worker / …).
-// We track which skill cap_ids we've already up'd in this executor
-// process; subsequent calls skip the CMD_UP RPC to keep latency flat
-// (sticky policy). A future eviction algorithm will drive CMD_DOWN.
+// to one, the executor sends Driver(CMD_ACTIVATE) on its `*/driver`
+// interface to flip it to RUNNING — that's where the skill actually
+// allocates its hot resources (frontier loop / nav subscribers / VLA
+// worker / …). We track which skill cap_ids we've already activated in
+// this executor process; subsequent calls skip the CMD_ACTIVATE RPC to
+// keep latency flat (sticky policy). A future eviction algorithm
+// (EXECUTOR_EVICTION_POLICY=deactivate) will drive CMD_DEACTIVATE.
 //
 // The grpc dispatch helper exists for future non-MCP contracts but is not
 // on the LLM-callable path today.
@@ -37,20 +38,20 @@ use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 
-const CMD_UP: u32 = 2;
-const DRIVER_UP_TIMEOUT: Duration = Duration::from_secs(60);
-const DEPLOY_CONSUMER_ID: &str = "com.robonix.executor.skill_up";
+const CMD_ACTIVATE: u32 = 1;
+const DRIVER_ACTIVATE_TIMEOUT: Duration = Duration::from_secs(60);
+const DEPLOY_CONSUMER_ID: &str = "com.robonix.executor.skill_activate";
 
-static UP_DONE: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+static ACTIVATED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
-fn mark_up(cap_id: &str) -> bool {
-    let mut g = UP_DONE.lock().expect("UP_DONE poisoned");
+fn mark_activated(cap_id: &str) -> bool {
+    let mut g = ACTIVATED.lock().expect("ACTIVATED poisoned");
     let set = g.get_or_insert_with(HashSet::new);
     set.insert(cap_id.to_string())
 }
 
-fn already_up(cap_id: &str) -> bool {
-    let g = UP_DONE.lock().expect("UP_DONE poisoned");
+fn already_activated(cap_id: &str) -> bool {
+    let g = ACTIVATED.lock().expect("ACTIVATED poisoned");
     g.as_ref().is_some_and(|s| s.contains(cap_id))
 }
 
@@ -77,8 +78,8 @@ pub async fn dispatch(
         return builtin::execute(call).await;
     }
 
-    if let Err(e) = ensure_skill_online(atlas, &call.cap_id).await {
-        return error_result(call, format!("Driver(CMD_UP) failed: {e:#}"));
+    if let Err(e) = ensure_skill_runnable(atlas, &call.cap_id).await {
+        return error_result(call, format!("Driver(CMD_ACTIVATE) failed: {e:#}"));
     }
 
     let (channel_id, endpoint, _params) = match atlas
@@ -102,12 +103,13 @@ pub async fn dispatch(
     result
 }
 
-/// If `cap_id` is a skill that hasn't been up'd in this process yet,
-/// resolve its `*/driver` interface and send Driver(CMD_UP). No-op for
-/// primitives, services, system caps, and skills already in ONLINE.
-async fn ensure_skill_online(atlas: &mut AtlasClient, cap_id: &str) -> Result<()> {
-    if already_up(cap_id) {
-        log::debug!("[skill-up] {cap_id}: already up, skipping CMD_UP");
+/// If `cap_id` is a skill that hasn't been activated in this process
+/// yet, resolve its `*/driver` interface and send Driver(CMD_ACTIVATE).
+/// No-op for primitives, services, system caps, and skills already in
+/// RUNNING.
+async fn ensure_skill_runnable(atlas: &mut AtlasClient, cap_id: &str) -> Result<()> {
+    if already_activated(cap_id) {
+        log::debug!("[skill-activate] {cap_id}: already activated, skipping CMD_ACTIVATE");
         return Ok(());
     }
     let recs = atlas
@@ -116,24 +118,24 @@ async fn ensure_skill_online(atlas: &mut AtlasClient, cap_id: &str) -> Result<()
         .with_context(|| format!("query_capabilities({cap_id})"))?;
     let Some(rec) = recs.into_iter().next() else {
         log::info!(
-            "[skill-up] {cap_id}: not in atlas, letting connect_capability surface the error"
+            "[skill-activate] {cap_id}: not in atlas, letting connect_capability surface the error"
         );
         return Ok(());
     };
     if !is_skill_namespace(&rec.namespace) {
         log::debug!(
-            "[skill-up] {cap_id} (ns={}): not a skill, no CMD_UP",
+            "[skill-activate] {cap_id} (ns={}): not a skill, no CMD_ACTIVATE",
             rec.namespace
         );
         return Ok(());
     }
-    if rec.state == atlas_pb::CapabilityState::StateOnline as i32 {
-        log::info!("[skill-up] {cap_id}: already ONLINE per atlas, marking sticky");
-        mark_up(cap_id);
+    if rec.state == atlas_pb::CapabilityState::StateRunning as i32 {
+        log::info!("[skill-activate] {cap_id}: already RUNNING per atlas, marking sticky");
+        mark_activated(cap_id);
         return Ok(());
     }
     log::info!(
-        "[skill-up] {cap_id} (ns={}, state={}): sending Driver(CMD_UP)",
+        "[skill-activate] {cap_id} (ns={}, state={}): sending Driver(CMD_ACTIVATE)",
         rec.namespace,
         rec.state
     );
@@ -172,10 +174,10 @@ async fn ensure_skill_online(atlas: &mut AtlasClient, cap_id: &str) -> Result<()
         grpc.ready().await.with_context(|| "gRPC ready")?;
         let codec: tonic_prost::ProstCodec<DriverRequest, DriverResponse> = Default::default();
         let resp = tokio::time::timeout(
-            DRIVER_UP_TIMEOUT,
+            DRIVER_ACTIVATE_TIMEOUT,
             grpc.unary(
                 Request::new(DriverRequest {
-                    command: CMD_UP,
+                    command: CMD_ACTIVATE,
                     config_json: String::new(),
                 }),
                 path,
@@ -183,8 +185,10 @@ async fn ensure_skill_online(atlas: &mut AtlasClient, cap_id: &str) -> Result<()
             ),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("Driver(CMD_UP) timed out after {DRIVER_UP_TIMEOUT:?}"))?
-        .with_context(|| "Driver(CMD_UP) RPC failed")?;
+        .map_err(|_| {
+            anyhow::anyhow!("Driver(CMD_ACTIVATE) timed out after {DRIVER_ACTIVATE_TIMEOUT:?}")
+        })?
+        .with_context(|| "Driver(CMD_ACTIVATE) RPC failed")?;
         Ok::<_, anyhow::Error>(resp.into_inner())
     }
     .await;
@@ -192,12 +196,12 @@ async fn ensure_skill_online(atlas: &mut AtlasClient, cap_id: &str) -> Result<()
     let r = result?;
     if !r.ok {
         anyhow::bail!(
-            "Driver(CMD_UP) returned ok=false (state={}, error={})",
+            "Driver(CMD_ACTIVATE) returned ok=false (state={}, error={})",
             r.state,
             r.error
         );
     }
-    mark_up(cap_id);
+    mark_activated(cap_id);
     Ok(())
 }
 

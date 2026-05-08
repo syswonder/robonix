@@ -30,10 +30,9 @@ faulthandler.enable(all_threads=True)
 
 
 from robonix_api import Capability  # noqa: E402
+from robonix_api.atlas_types import Ros2Params, Transport  # noqa: E402
 
 cap = Capability(id="scene", namespace="robonix/system/scene")
-
-import atlas_pb2 as pb  # pyright: ignore[reportMissingImports] (auto-discover loop uses raw QueryCapabilities)
 
 from . import mcp_tools
 from . import web as web_ui
@@ -119,18 +118,18 @@ _DEFAULT_DISABLED_KINDS: frozenset[str] = frozenset()
 # transport-agnostic — `mode = "topic_out"` says "this is a
 # unidirectional output stream" and a primitive may serve it over
 # ROS2 OR gRPC. Scene picks the transport its ingest understands.
-_PB_TRANSPORTS: dict[str, int] = {
-    "ros2": pb.TRANSPORT_ROS2,
-    "grpc": pb.TRANSPORT_GRPC,
+_TRANSPORTS: dict[str, Transport] = {
+    "ros2": Transport.ROS2,
+    "grpc": Transport.GRPC,
 }
 
 
 def _resolve_pb_transport(name: str) -> int:
-    pb_t = _PB_TRANSPORTS.get(name.lower())
-    if pb_t is None:
+    t = _TRANSPORTS.get(name.lower())
+    if t is None:
         log.warning("[scene] unknown transport %r in config — defaulting to ros2", name)
-        return pb.TRANSPORT_ROS2
-    return pb_t
+        return int(Transport.ROS2)
+    return int(t)
 
 
 def _build_topic_specs(
@@ -158,83 +157,63 @@ def _build_topic_specs(
     return _resolve_auto(atlas_stub, pb_t)
 
 
-def _resolve_auto(atlas_stub, pb_transport: int) -> list[TopicSpec]:
-    """Walk `_SCENE_CONTRACTS` and ask atlas which of those contract ids
-    is currently being declared by some cap over `pb_transport`. For
-    each match: ConnectCapability to get the topic name (atlas hands out
-    the resolved endpoint), build a TopicSpec, return it.
+def _resolve_auto(_unused, pb_transport: int) -> list[TopicSpec]:
+    """Walk `_SCENE_CONTRACTS` and use `cap.find_one` + `cap.connect`
+    to resolve each contract. atlas hands out the endpoint via
+    ConnectCapability; the cap framework also tracks the channel for
+    teardown so we don't leak edges in atlas.
 
     Skipped contracts (no provider yet) come back via the reconciler
     every `period_s` — scene tolerates services that come up after it.
+
+    `_unused` keeps the call signature stable for callers built around
+    the old raw atlas_pb stub; the actual lookup goes through `cap`.
     """
+    transport = Transport(pb_transport)
     out: list[TopicSpec] = []
     for kind, contract_id, msg_type in _SCENE_CONTRACTS:
         if kind in _DEFAULT_DISABLED_KINDS:
             continue
-        spec = _resolve_one_contract(
-            atlas_stub, pb_transport, kind, contract_id, msg_type
-        )
+        spec = _resolve_one_contract(transport, kind, contract_id, msg_type)
         if spec is not None:
             out.append(spec)
     return out
 
 
 def _resolve_one_contract(
-    atlas_stub,
-    pb_transport: int,
+    transport: Transport,
     kind: str,
     contract_id: str,
     msg_type: str,
 ) -> Optional[TopicSpec]:
-    """Ask atlas for any cap declaring `contract_id` over `pb_transport`,
-    pick the first, ConnectCapability to get the topic, return spec."""
-    try:
-        resp = atlas_stub.QueryCapabilities(
-            pb.QueryCapabilitiesRequest(
-                contract_id=contract_id,
-                transport=pb_transport,
-            )
-        )
-    except Exception as e:  # noqa: BLE001
-        log.debug("[scene] atlas QueryCapabilities(%s) failed: %s", contract_id, e)
-        return None
-    cap_id = ""
-    for rec in resp.records:
-        for iface in rec.interfaces:
-            if iface.contract_id == contract_id and iface.transport == pb_transport:
-                cap_id = rec.capability_id
-                break
-        if cap_id:
-            break
-    if not cap_id:
+    """find_one(contract) → connect → endpoint. Returns None when no
+    cap currently advertises the contract over this transport."""
+    rec = cap.find_one(contract_id=contract_id, transport=transport)
+    if rec is None:
         return None
     try:
-        conn = atlas_stub.ConnectCapability(
-            pb.ConnectCapabilityRequest(
-                consumer_id="scene",
-                capability_id=cap_id,
-                contract_id=contract_id,
-                transport=pb_transport,
-            )
+        ch = cap.connect(
+            contract_id=contract_id,
+            transport=transport,
+            capability_id=rec.capability_id,
         )
     except Exception as e:  # noqa: BLE001
         log.warning(
-            "[scene] ConnectCapability(%s/%s) failed: %s", cap_id, contract_id, e
+            "[scene] cap.connect(%s/%s) failed: %s",
+            rec.capability_id, contract_id, e,
         )
         return None
-    endpoint = (conn.endpoint or "").strip()
+    endpoint = (ch.endpoint or "").strip()
     if not endpoint:
+        ch.close()
         return None
     qos_profile = ""
-    if (
-        pb_transport == pb.TRANSPORT_ROS2
-        and conn.params
-        and conn.params.HasField("ros2")
-    ):
-        qos_profile = conn.params.ros2.qos_profile or ""
+    if isinstance(ch.params, Ros2Params):
+        qos_profile = ch.params.qos_profile or ""
     log.info(
         "[scene] %r ← atlas: topic=%s msg=%s qos=%s contract=%s cap=%s",
-        kind, endpoint, msg_type, qos_profile or "default", contract_id, cap_id,
+        kind, endpoint, msg_type, qos_profile or "default",
+        contract_id, rec.capability_id,
     )
     return TopicSpec(
         kind=kind,
@@ -272,7 +251,7 @@ def _resolve_explicit(
                 "or to _SCENE_CONTRACTS in service.py", entry
             )
             continue
-        spec = _resolve_one_contract(atlas_stub, pb_transport, kind, contract, msg_type)
+        spec = _resolve_one_contract(Transport(pb_transport), kind, contract, msg_type)
         if spec is not None:
             out.append(spec)
     return out

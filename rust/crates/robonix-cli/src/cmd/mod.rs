@@ -57,6 +57,20 @@ pub enum Commands {
         /// Registry endpoint (default: 127.0.0.1:50051)
         #[arg(long)]
         endpoint: Option<String>,
+        /// Per-instance config file (JSON or YAML). Materialized into
+        /// `RBNX_CONFIG_FILE` for the start body. Same shape as the per-
+        /// package `config:` block under a deploy `robonix_manifest.yaml`
+        /// — `rbnx boot` writes one of these per package and re-execs
+        /// `rbnx start --config <file>` internally.
+        #[arg(short = 'c', long)]
+        config: Option<PathBuf>,
+        /// Inline config overrides. Repeatable, dotted-path keys, e.g.
+        /// `--set sensors.lidar2d=true --set algo=rtabmap`. Layered on
+        /// top of `--config` (sets win). Values are JSON-parsed when
+        /// possible (so `--set max_speed=0.5` is a number, `--set on=true`
+        /// is a bool); fall back to a string when JSON parsing fails.
+        #[arg(short = 's', long = "set", value_name = "KEY=VALUE")]
+        set: Vec<String>,
     },
     /// Boot the whole stack from a top-level `robonix_manifest.yaml` — system
     /// services (atlas/executor/pilot/liaison/memory/vlm) plus every package
@@ -289,8 +303,20 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             global,
             clean,
         } => run_package::execute_build(config, path, global, clean).await,
-        Commands::Start { package, endpoint } => {
-            run_package::execute_start(&config, package.as_deref(), endpoint.as_deref()).await
+        Commands::Start {
+            package,
+            endpoint,
+            config: cfg_file,
+            set,
+        } => {
+            run_package::execute_start(
+                &config,
+                package.as_deref(),
+                endpoint.as_deref(),
+                cfg_file.as_deref(),
+                &set,
+            )
+            .await
         }
         Commands::Boot {
             file,

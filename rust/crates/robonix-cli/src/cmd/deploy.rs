@@ -11,10 +11,9 @@
 //     interface on atlas → call Driver(CMD_INIT, config_json) → wait for
 //     `ok=true`. Only after every primitive's driver returns ok do we move
 //     on to `service:` (which can depend on primitive data being ready).
-//     The package's `config:` block is JSON-encoded and ALSO handed to
-//     the start body via `RBNX_CONFIG_FILE`; whether the init logic reads
-//     it from the env file or from the Driver call's `config_json` arg
-//     is the package's choice.
+//     The package's `config:` block is JSON-encoded and delivered ONLY via
+//     Driver(CMD_INIT)'s config_json field. The cap process never sees a
+//     config file or env var — that's the v0.1 layering invariant.
 //   - `skill:` entries are spawned identically to `service:` — they
 //     need a long-lived process for their MCP tools to be registered
 //     on atlas. The semantic difference (skill = atomic intent
@@ -47,10 +46,11 @@ use super::teardown;
 
 // Driver.srv command discriminators (mirrors lifecycle/srv/Driver.srv).
 const CMD_INIT: u32 = 0;
+const CMD_ACTIVATE: u32 = 1;
 #[allow(dead_code)]
-const CMD_SHUTDOWN: u32 = 1;
-const CMD_UP: u32 = 2;
-const CMD_DOWN: u32 = 3;
+const CMD_DEACTIVATE: u32 = 2;
+#[allow(dead_code)]
+const CMD_SHUTDOWN: u32 = 3;
 // How long to wait for a freshly spawned package to register its driver
 // interface with atlas before giving up.
 const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
@@ -380,11 +380,12 @@ async fn spawn_package(
     };
     let log_name = format!("{component}_{name}");
 
-    // Write this instance's config to a per-instance JSON file. Passing a
-    // file path (rather than the JSON itself) in an env var sidesteps
-    // three env-var landmines: bash escaping of quotes/newlines, ARG_MAX
-    // blowing up on large configs, and `printenv`-only debugging. The
-    // package's start body just does `jq ... < "$RBNX_CONFIG_FILE"`.
+    // Write this instance's config to disk for boot's own bookkeeping
+    // (debugging via `cat <instances>/<name>.json`, post-mortem
+    // inspection). Boot itself reads `entry.config` in-memory and
+    // pushes it via Driver(CMD_INIT, config_json) — see call_driver_cmd
+    // below. The cap process MUST NOT see this path; we do not export
+    // it as an env var to the spawned `rbnx start`.
     let cfg_json = serde_json::to_value(&entry.config).unwrap_or(serde_json::Value::Null);
     let cfg_pretty = serde_json::to_string_pretty(&cfg_json).unwrap_or_else(|_| "{}".into());
     let cfg_file = instances_dir.join(format!("{name}.json"));
@@ -400,11 +401,18 @@ async fn spawn_package(
     // need a cargo workspace on disk and version-skew is impossible.
     let rbnx_bin = std::env::current_exe()
         .context("could not resolve current rbnx binary path for `start` re-exec")?;
+    // Per v0.1 layering: do NOT pass the config file path to the
+    // spawned `rbnx start` (which would propagate to the cap process
+    // env). rbnx boot itself drives Driver(CMD_INIT, config_json) over
+    // gRPC after the cap registers (see `call_driver_cmd` below). The
+    // cfg_file on disk is for boot's own use — we read it back via
+    // `entry.config` higher in this module — and atlas-side bookkeeping;
+    // the cap never sees it.
+    let _ = &cfg_file; // kept for debug / inspection; not exported
     let mut cmd = Command::new(&rbnx_bin);
     cmd.arg("start")
         .arg("-p")
         .arg(pkg_path.as_os_str())
-        .env("RBNX_CONFIG_FILE", &cfg_file)
         .env("RBNX_INSTANCE_NAME", &name)
         .env("RBNX_INVOCATION_CWD", manifest_dir)
         .stdin(Stdio::null())
@@ -1271,16 +1279,16 @@ async fn spawn_and_init(
         return Ok(sp);
     }
 
-    let up_state = match with_spinner(
+    let activate_state = match with_spinner(
         display_label,
-        "driver(UP)…",
+        "driver(ACTIVATE)…",
         call_driver_cmd(
             atlas,
             &cap_id,
             &driver_contract,
             component,
             &pkg_label,
-            CMD_UP,
+            CMD_ACTIVATE,
             config_json,
         ),
     )
@@ -1294,7 +1302,7 @@ async fn spawn_and_init(
     };
     output::boot_ok(
         display_label,
-        &format!("cap={cap_id}  driver(INIT)={init_state}  driver(UP)={up_state}"),
+        &format!("cap={cap_id}  driver(INIT)={init_state}  driver(ACTIVATE)={activate_state}"),
     );
 
     Ok(sp)
@@ -1336,7 +1344,7 @@ where
 /// Issue one Driver(cmd) RPC against a freshly-connected channel, then
 /// release the channel. Returns the response's `state` string on success;
 /// bail-errors when ok=false or the RPC itself fails. Used by the boot
-/// path for both CMD_INIT and CMD_UP, with identical timeout / channel
+/// path for both CMD_INIT and CMD_ACTIVATE, with identical timeout / channel
 /// hygiene.
 async fn call_driver_cmd(
     atlas: &mut AtlasClient,
@@ -1349,8 +1357,9 @@ async fn call_driver_cmd(
 ) -> Result<String> {
     let cmd_name = match cmd {
         CMD_INIT => "INIT",
-        CMD_UP => "UP",
-        CMD_DOWN => "DOWN",
+        CMD_ACTIVATE => "ACTIVATE",
+        CMD_DEACTIVATE => "DEACTIVATE",
+        CMD_SHUTDOWN => "SHUTDOWN",
         _ => "?",
     };
     let (channel_id, endpoint, _params) = atlas

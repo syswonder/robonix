@@ -27,7 +27,7 @@ from io import BytesIO
 
 import numpy as np
 
-from robonix_api import Capability
+from robonix_api import Capability, Ok, Err, Deferred
 
 cap = Capability(id="tiago_camera", namespace="robonix/primitive/camera")
 
@@ -235,12 +235,12 @@ def init(cfg):
 
     # gate INIT on first RGB arriving — same generosity as before.
     if not cap.wait_for_topic(rgb_topic, "Image", sentinel_timeout):
-        return cap.error(f"no RGB on {rgb_topic} within {sentinel_timeout:.1f}s")
+        return Err(f"no RGB on {rgb_topic} within {sentinel_timeout:.1f}s")
 
     # data interfaces are ready — declare them on atlas
     cap.declare_ros2("robonix/primitive/camera/rgb",   rgb_topic,   qos_profile="best_effort")
     cap.declare_ros2("robonix/primitive/camera/depth", depth_topic, qos_profile="best_effort")
-    return cap.ready()
+    return Ok()
 
 
 if __name__ == "__main__":

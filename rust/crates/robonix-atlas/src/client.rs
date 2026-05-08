@@ -138,18 +138,31 @@ impl AtlasClient {
         contract_id: &str,
         transport: pb::Transport,
     ) -> Result<Vec<pb::CapabilityRecord>> {
+        self.find(capability_id, contract_id, "", transport).await
+    }
+
+    /// Structured discovery — filters AND together. Empty strings = no
+    /// filter. Mirrors `QueryCapabilitiesRequest` 1:1.
+    pub async fn find(
+        &mut self,
+        capability_id: &str,
+        contract_id: &str,
+        namespace_prefix: &str,
+        transport: pb::Transport,
+    ) -> Result<Vec<pb::CapabilityRecord>> {
         let resp = self
             .inner
             .query_capabilities(pb::QueryCapabilitiesRequest {
                 capability_id: capability_id.to_string(),
                 contract_id: contract_id.to_string(),
                 transport: transport as i32,
+                namespace_prefix: namespace_prefix.to_string(),
             })
             .await
             .with_context(|| {
                 format!(
                     "QueryCapabilities cap='{capability_id}' contract='{contract_id}' \
-                     transport={transport:?}"
+                     ns_prefix='{namespace_prefix}' transport={transport:?}"
                 )
             })?;
         Ok(resp.into_inner().records)
@@ -255,6 +268,39 @@ impl AtlasClient {
             .await
             .with_context(|| format!("UnregisterCapability '{capability_id}'"))?;
         Ok(resp.into_inner().was_present)
+    }
+
+    /// Look up one contract by id. Returns `None` when atlas hasn't
+    /// loaded it (id is not in `<robonix>/capabilities/**/*.toml`).
+    pub async fn query_contract(
+        &mut self,
+        contract_id: &str,
+    ) -> Result<Option<pb::ContractDescriptor>> {
+        let resp = self
+            .inner
+            .query_contract(pb::QueryContractRequest {
+                contract_id: contract_id.to_string(),
+            })
+            .await
+            .with_context(|| format!("QueryContract '{contract_id}'"))?;
+        let inner = resp.into_inner();
+        Ok(if inner.found { inner.contract } else { None })
+    }
+
+    /// List atlas's loaded contract registry. Empty `prefix` returns
+    /// every contract; otherwise filters by id prefix.
+    pub async fn list_contracts(
+        &mut self,
+        namespace_prefix: &str,
+    ) -> Result<Vec<pb::ContractDescriptor>> {
+        let resp = self
+            .inner
+            .list_contracts(pb::ListContractsRequest {
+                namespace_prefix: namespace_prefix.to_string(),
+            })
+            .await
+            .with_context(|| format!("ListContracts prefix='{namespace_prefix}'"))?;
+        Ok(resp.into_inner().contracts)
     }
 }
 

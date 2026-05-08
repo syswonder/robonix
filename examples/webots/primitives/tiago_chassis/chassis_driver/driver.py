@@ -25,7 +25,7 @@ import math
 import os
 import time
 
-from robonix_api import Capability
+from robonix_api import Capability, Ok, Err, Deferred
 
 cap = Capability(id="tiago_chassis", namespace="robonix/primitive/chassis")
 
@@ -116,7 +116,7 @@ def init(cfg):
     )
     cap.declare_ros2("robonix/primitive/chassis/twist_in", twist_in_topic, qos_profile="reliable")
     cap.declare_ros2("robonix/primitive/chassis/odom",     odom_topic,     qos_profile="reliable")
-    return cap.ready()
+    return Ok()
 
 
 if __name__ == "__main__":
