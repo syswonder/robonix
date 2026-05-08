@@ -8,7 +8,9 @@ if command -v rbnx >/dev/null 2>&1; then
     # land under rbnx-build/ (which is gitignored). Without it the
     # codegen default drops them straight at $PKG, polluting the
     # package root with hundreds of generated *.py files.
-    FLAGS=(--out-dir "$PKG/rbnx-build/codegen")
+    # `--mcp` so robonix_mcp_types/<ns>_mcp.py gets generated; simple_nav
+    # uses `@cap.mcp(...)` so the MCP-typed dataclasses are required.
+    FLAGS=(--mcp --out-dir "$PKG/rbnx-build/codegen")
     [[ "${RBNX_BUILD_CLEAN:-}" == "1" ]] && FLAGS+=(--clean)
     rbnx codegen -p "$PKG" "${FLAGS[@]}"
 fi

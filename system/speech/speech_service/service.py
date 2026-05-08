@@ -87,7 +87,7 @@ import grpc
 import asr_pb2
 import tts_pb2
 import speech_pb2
-import robonix_msg_pb2
+import audio_pb2  # for AudioChunk (lib/primitive/audio/msg/AudioChunk.msg)
 import robonix_contracts_pb2_grpc as contracts_grpc
 
 # -- CI mock mode ------------------------------------------------------------
@@ -621,7 +621,7 @@ class SpeechAsrStreamServicer(contracts_grpc.SystemSpeechAsrStreamServicer):
     def RecognizeStream(self, request_iterator, context):
         """Handle streaming ASR: receive audio chunks, yield partial/final results.
 
-        Input: asr_pb2.AsrAudioChunk (has .chunk with .data field from robonix_msg.AudioChunk)
+        Input: asr_pb2.AsrAudioChunk (has .chunk with .data field from audio_pb2.AudioChunk)
         Output: asr_pb2.RecognizeStreamEvent
 
         Since the stream has no AudioConfig, we use defaults: 16kHz mono pcm_s16le.
@@ -772,7 +772,7 @@ class SpeechTtsStreamServicer(contracts_grpc.SystemSpeechTtsStreamServicer):
             speed       -- speed multiplier
             audio_config -- AudioConfig (reserved, not used by Edge TTS)
 
-        Yields tts_pb2.SynthesizeAudioChunk (wrapping robonix_msg.AudioChunk).
+        Yields tts_pb2.SynthesizeAudioChunk (wrapping audio_pb2.AudioChunk).
         """
         if self.tts_backend is None:
             context.set_code(grpc.StatusCode.UNAVAILABLE)
@@ -794,7 +794,7 @@ class SpeechTtsStreamServicer(contracts_grpc.SystemSpeechTtsStreamServicer):
                 try:
                     chunk_data = loop.run_until_complete(async_gen.__anext__())
                     yield tts_pb2.SynthesizeAudioChunk(
-                        chunk=robonix_msg_pb2.AudioChunk(
+                        chunk=audio_pb2.AudioChunk(
                             data=chunk_data,
                             sequence=seq,
                         ),
@@ -805,7 +805,7 @@ class SpeechTtsStreamServicer(contracts_grpc.SystemSpeechTtsStreamServicer):
                     seq += 1
                 except StopAsyncIteration:
                     yield tts_pb2.SynthesizeAudioChunk(
-                        chunk=robonix_msg_pb2.AudioChunk(data=b""),
+                        chunk=audio_pb2.AudioChunk(data=b""),
                         encoding="mp3",
                         sample_rate_hz=24000,
                         is_final=True,
@@ -840,7 +840,7 @@ class SpeechDialogServicer(contracts_grpc.SystemSpeechDialogServicer):
             enable_vad  -- enable voice activity detection
             audio_config -- AudioConfig for the session
 
-        Yields speech_pb2.StartDialog_Response wrapping robonix_msg.DialogEvent.
+        Yields speech_pb2.StartDialog_Response wrapping speech_pb2.DialogEvent.
         """
         language = request.language or "zh-CN"
         enable_vad = request.enable_vad if hasattr(request, "enable_vad") else True
@@ -848,7 +848,7 @@ class SpeechDialogServicer(contracts_grpc.SystemSpeechDialogServicer):
         session = self.dialog_manager.create_session(language, enable_vad)
 
         yield speech_pb2.StartDialog_Response(
-            event=robonix_msg_pb2.DialogEvent(
+            event=speech_pb2.DialogEvent(
                 session_id=session.session_id,
                 event_type=DialogSession.STATE_MAP["IDLE"],
                 text="",
