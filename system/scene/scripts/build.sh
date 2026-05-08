@@ -17,7 +17,6 @@ PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$PKG"
 
 BUILD="rbnx-build"
-GEN="$BUILD/codegen"
 CLEAN="${RBNX_BUILD_CLEAN:-}"
 IMG="${ROBONIX_SCENE_IMAGE:-robonix-scene}"
 
@@ -28,7 +27,7 @@ fi
 mkdir -p "$BUILD/data"
 
 # ── 1. Codegen (.proto + grpc stubs + MCP dataclasses → rbnx-build/codegen/) ─
-FLAGS=(--mcp --out-dir "$GEN")
+FLAGS=(--mcp)
 [[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
 echo "[build] rbnx codegen ${FLAGS[*]}"
 rbnx codegen -p "$PKG" "${FLAGS[@]}"

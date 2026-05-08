@@ -22,6 +22,12 @@ services:
       context: ./
       dockerfile: bridge/Dockerfile
     network_mode: host
+    # ipc_mode=host is load-bearing for FastRTPS data transfer:
+    # FastRTPS keys SHM transport by /dev/shm. Other robonix containers
+    # (scene, mapping) also pass --ipc=host; without matching here sim's
+    # publishers and their subscribers live in disjoint /dev/shm
+    # namespaces and topics never propagate.
+    ipc: host
     # Critical for Webots/Qt: avoid 64MB default shm (MIT-SHM / IPC).
     shm_size: "2gb"
     # Keep the container alive after entrypoint's `wait` so `docker exec`
