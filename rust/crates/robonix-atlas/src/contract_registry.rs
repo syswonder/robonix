@@ -41,6 +41,12 @@ struct ContractSection {
     version: Option<String>,
     #[serde(default)]
     kind: Option<String>,
+    /// Lib-relative IDL path (with extension), e.g. `sensor_msgs/msg/Image.msg`
+    /// or `pilot/srv/SubmitTask.srv`. Source of truth in the post-migration
+    /// schema; `[io.msg]` / `[io.srv]` are legacy and only honoured when
+    /// `idl` is absent so old TOMLs keep loading until they're rewritten.
+    #[serde(default)]
+    idl: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -194,6 +200,72 @@ impl ContractRegistry {
     }
 }
 
+/// Derive (io_msg_type, io_srv_type) from a parsed contract toml. New
+/// schema: `[contract].idl = "<pkg>/(msg|srv)/<Name>.<ext>"`. Old
+/// schema (pre-migration): `[io.msg].msg = "..."` / `[io.srv].srv = "..."`.
+/// `idl` wins when both are present; old form is the fallback so TOMLs
+/// that haven't been rewritten still load.
+fn io_types_from_parsed(parsed: &RawContract) -> (String, String) {
+    if let Some(idl_raw) = parsed.contract.idl.as_deref() {
+        let idl = idl_raw.trim();
+        if !idl.is_empty()
+            && let Some((pkg, kind, name)) = parse_idl_path(idl)
+        {
+            let composed = format!("{pkg}/{kind}/{name}");
+            return match kind {
+                "msg" => (composed, String::new()),
+                "srv" => (String::new(), composed),
+                _ => (String::new(), String::new()),
+            };
+        }
+    }
+    match &parsed.io {
+        Some(io) => {
+            let msg = io
+                .msg
+                .as_ref()
+                .and_then(|m| m.msg.as_deref())
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            let srv = io
+                .srv
+                .as_ref()
+                .and_then(|s| s.srv.as_deref())
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            (msg, srv)
+        }
+        None => (String::new(), String::new()),
+    }
+}
+
+/// Parse a lib-relative IDL path like `sensor_msgs/msg/Image.msg`
+/// into (pkg, kind, name). Mirrors the codegen-side parser
+/// (`robonix-codegen::contract_gen::parse_idl_path`) but lives here so
+/// atlas doesn't need a build-dep on the full codegen crate just for one
+/// six-line helper.
+fn parse_idl_path(s: &str) -> Option<(&str, &'static str, &str)> {
+    let (stem, kind): (&str, &'static str) = if let Some(rest) = s.strip_suffix(".srv") {
+        (rest, "srv")
+    } else if let Some(rest) = s.strip_suffix(".msg") {
+        (rest, "msg")
+    } else {
+        return None;
+    };
+    let parts: Vec<&str> = stem.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let n = parts.len();
+    let name = parts[n - 1];
+    let pkg = if n >= 3 && (parts[n - 2] == "srv" || parts[n - 2] == "msg") {
+        parts[n - 3]
+    } else {
+        ""
+    };
+    Some((pkg, kind, name))
+}
+
 fn load_one(path: &Path) -> anyhow::Result<pb::ContractDescriptor> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("read contract toml: {}", path.display()))?;
@@ -203,6 +275,7 @@ fn load_one(path: &Path) -> anyhow::Result<pb::ContractDescriptor> {
     if id.is_empty() {
         anyhow::bail!("[contract].id is empty");
     }
+    let (io_msg_type, io_srv_type) = io_types_from_parsed(&parsed);
     let version = parsed
         .contract
         .version
@@ -218,22 +291,6 @@ fn load_one(path: &Path) -> anyhow::Result<pb::ContractDescriptor> {
         .and_then(|m| m.ty)
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
-    let (io_msg_type, io_srv_type) = match parsed.io {
-        Some(io) => {
-            let msg = io
-                .msg
-                .and_then(|m| m.msg)
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default();
-            let srv = io
-                .srv
-                .and_then(|s| s.srv)
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default();
-            (msg, srv)
-        }
-        None => (String::new(), String::new()),
-    };
     Ok(pb::ContractDescriptor {
         id,
         version,

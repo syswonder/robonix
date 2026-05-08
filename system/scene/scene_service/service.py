@@ -86,33 +86,26 @@ def _load_config() -> dict:
     return cfg
 
 
-# Map of (contract leaf → logical scene kind). Primitives DeclareInterface
-# their ROS2 topics with contract IDs like `robonix/primitive/camera/rgb`;
-# scene auto-classifies by leaf so the manifest doesn't have to enumerate.
-# A leaf not in this table is still subscribed (`kind = leaf`) — scene
-# just doesn't have specialised consumers for it yet.
-_CONTRACT_LEAF_TO_KIND: dict[str, str] = {
-    "rgb": "rgb",
-    "depth": "depth",
-    "depth_registered": "depth",
-    # `lidar/lidar` is the canonical 2D LaserScan contract; `lidar2d`
-    # is also accepted in case a soma uses the explicit name.
-    "lidar": "lidar2d",
-    "lidar2d": "lidar2d",
-    "scan": "lidar2d",
-    "lidar3d": "lidar3d",
-    "pointcloud": "lidar3d",
-    "pose": "pose",
-    "amcl_pose": "pose",
-    "odom": "odom",
-    # primitive/camera/extrinsics — static base_link → camera_optical
-    # transform. Goes through atlas, not tf2, so the dependency is
-    # auditable via `rbnx caps`/`rbnx channels`.
-    "extrinsics": "camera_extrinsics",
-    # mapping outputs (declared by mapping_rbnx as ROS2 topic_out
-    # endpoints under robonix/service/map/*).
-    "occupancy_grid": "occupancy_grid",
-}
+# scene's input set is fixed: it knows exactly which contracts it consumes.
+# Each tuple is (kind, contract_id, msg_type). At startup we ask atlas which
+# of these any registered cap is currently providing over ROS2 and subscribe
+# only to those. No leaf-based inference, no QueryContract round-trip — the
+# contract id is the API and msg_type is the contract's wire shape promise.
+#
+# Adding a new sensor type to scene = appending one row here and writing the
+# matching consumer. Third-party primitives don't get auto-picked-up under
+# foreign namespaces; if you want scene to consume your data, declare it
+# under one of these contract ids (which is the whole point of contracts).
+_SCENE_CONTRACTS: list[tuple[str, str, str]] = [
+    ("rgb",               "robonix/primitive/camera/rgb",        "Image"),
+    ("depth",             "robonix/primitive/camera/depth",      "Image"),
+    ("lidar2d",           "robonix/primitive/lidar/lidar",       "LaserScan"),
+    ("lidar3d",           "robonix/primitive/lidar/pointcloud",  "PointCloud2"),
+    ("camera_extrinsics", "robonix/primitive/camera/extrinsics", "TransformStamped"),
+    ("pose",              "robonix/service/map/pose",            "PoseWithCovarianceStamped"),
+    ("odom",              "robonix/service/map/odom",            "Odometry"),
+    ("occupancy_grid",    "robonix/service/map/occupancy_grid",  "OccupancyGrid"),
+]
 
 # Optional manifest opt-out: kinds listed here are dropped even if atlas
 # advertises them. Useful when a deployment doesn't want scene burning
@@ -146,22 +139,18 @@ def _build_topic_specs(
     """Two paths:
 
       A. Auto-discovery (default — when manifest's `observations[]` is
-         empty / absent). Scene queries atlas for every cap, filters
-         by `transport`, classifies each interface by its contract
-         leaf via `_CONTRACT_LEAF_TO_KIND`, asks atlas for the
-         endpoint via ConnectCapability, and subscribes.
+         empty / absent). Scene walks `_SCENE_CONTRACTS` and for each
+         entry asks atlas which cap (if any) is declaring it over
+         `transport`. msg_type comes from the same table — no
+         QueryContract round-trip.
 
       B. Explicit overrides (when manifest provides `observations[]`).
-         Each entry is `{kind, contract}`; scene picks any cap that
-         has declared that contract over `transport`.
+         Each entry is `{kind, contract[, msg_type]}`. msg_type is
+         taken from the entry, or from `_SCENE_CONTRACTS` if the
+         contract is one scene already knows.
 
-    `transport` is `"ros2"` (today's wired ingest) or `"grpc"`
-    (future). msg_type is resolved through atlas's QueryContract — no
-    on-disk TOML reads.
-
-    Errors at any step skip that one entry but never fail bring-up:
-    a partially-resolvable scene config is still useful (RGB works
-    even if lidar2d primitive isn't running yet).
+    `transport` is `"ros2"` (today's wired ingest) or `"grpc"` (future).
+    Errors at any step skip that one entry but never fail bring-up.
     """
     pb_t = _resolve_pb_transport(transport)
     if observations:
@@ -170,193 +159,67 @@ def _build_topic_specs(
 
 
 def _resolve_auto(atlas_stub, pb_transport: int) -> list[TopicSpec]:
-    """Path A: scan every cap atlas knows about, classify by contract
-    leaf, then collapse multiple providers per kind by namespace
-    preference.
+    """Walk `_SCENE_CONTRACTS` and ask atlas which of those contract ids
+    is currently being declared by some cap over `pb_transport`. For
+    each match: ConnectCapability to get the topic name (atlas hands out
+    the resolved endpoint), build a TopicSpec, return it.
 
-    Why preference matters: `primitive/chassis/odom` (raw wheel encoder
-    integration) and `service/map/odom` (SLAM-corrected) BOTH have leaf
-    `odom`. If we just took whichever atlas returned first, the world-
-    frame self-tracker silently ended up reading the chassis stream
-    (drifty / empty when nav stack is down). The preference order below
-    encodes scene's actual intent — for world-frame purposes always
-    prefer the localizer. (Pose has a single producer in practice —
-    `service/map/pose` — so this matters most for odom.)
+    Skipped contracts (no provider yet) come back via the reconciler
+    every `period_s` — scene tolerates services that come up after it.
     """
+    out: list[TopicSpec] = []
+    for kind, contract_id, msg_type in _SCENE_CONTRACTS:
+        if kind in _DEFAULT_DISABLED_KINDS:
+            continue
+        spec = _resolve_one_contract(
+            atlas_stub, pb_transport, kind, contract_id, msg_type
+        )
+        if spec is not None:
+            out.append(spec)
+    return out
+
+
+def _resolve_one_contract(
+    atlas_stub,
+    pb_transport: int,
+    kind: str,
+    contract_id: str,
+    msg_type: str,
+) -> Optional[TopicSpec]:
+    """Ask atlas for any cap declaring `contract_id` over `pb_transport`,
+    pick the first, ConnectCapability to get the topic, return spec."""
     try:
         resp = atlas_stub.QueryCapabilities(
             pb.QueryCapabilitiesRequest(
-                contract_id="",
+                contract_id=contract_id,
                 transport=pb_transport,
             )
         )
     except Exception as e:  # noqa: BLE001
-        log.warning(
-            "[scene] atlas QueryCapabilities(*,%s) failed: %s",
-            _pb_transport_name(pb_transport),
-            e,
-        )
-        return []
-
-    # Per-kind candidate buckets. Each entry is (priority, contract_id, spec).
-    # Lower priority number wins.
-    candidates: dict[str, list[tuple[int, str, TopicSpec]]] = {}
+        log.debug("[scene] atlas QueryCapabilities(%s) failed: %s", contract_id, e)
+        return None
+    cap_id = ""
     for rec in resp.records:
         for iface in rec.interfaces:
-            if iface.transport != pb_transport:
-                continue
-            spec = _spec_from_iface(rec, iface, atlas_stub, pb_transport)
-            if spec is None:
-                continue
-            if spec.kind in _DEFAULT_DISABLED_KINDS:
-                log.info(
-                    "[scene] auto-discover: skipping kind=%s (in _DEFAULT_DISABLED_KINDS)",
-                    spec.kind,
-                )
-                continue
-            prio = _provider_priority(spec.kind, iface.contract_id)
-            candidates.setdefault(spec.kind, []).append((prio, iface.contract_id, spec))
-
-    out: list[TopicSpec] = []
-    for kind, cands in candidates.items():
-        cands.sort(key=lambda t: t[0])
-        chosen_prio, chosen_id, chosen = cands[0]
-        for losing_prio, losing_id, losing in cands[1:]:
-            log.info(
-                "[scene] auto-discover: kind=%s — preferring %s (prio=%d) over %s (prio=%d)",
-                kind,
-                chosen_id,
-                chosen_prio,
-                losing_id,
-                losing_prio,
-            )
-        log.info(
-            "[scene] auto-discover %r ← atlas: topic=%s msg=%s qos=%s contract=%s",
-            chosen.kind,
-            chosen.topic,
-            chosen.msg_type,
-            chosen.qos_profile,
-            chosen_id,
-        )
-        out.append(chosen)
-    return out
-
-
-def _provider_priority(kind: str, contract_id: str) -> int:
-    """Lower wins. For pose/odom prefer SLAM-corrected (`service/map/*`)
-    over raw chassis output (`primitive/chassis/*`). All other kinds
-    have a single producer in practice; ties default to insertion order
-    (which atlas already serialises deterministically).
-    """
-    cid = contract_id.lower()
-    if kind in ("pose", "odom"):
-        if cid.startswith("robonix/service/map/"):
-            return 0
-        if cid.startswith("robonix/primitive/chassis/"):
-            return 10
-    return 5
-
-
-def _resolve_explicit(
-    observations: list[dict], atlas_stub, pb_transport: int
-) -> list[TopicSpec]:
-    """Path B: per-entry contract lookup."""
-    out: list[TopicSpec] = []
-    for entry in observations:
-        kind = str(entry.get("kind", "")).lower()
-        contract = str(entry.get("contract", ""))
-        if not kind or not contract:
-            log.warning(
-                "[scene] observation %r: missing kind/contract; skipping", entry
-            )
-            continue
-        try:
-            resp = atlas_stub.QueryCapabilities(
-                pb.QueryCapabilitiesRequest(
-                    contract_id=contract,
-                    transport=pb_transport,
-                )
-            )
-        except Exception as e:  # noqa: BLE001
-            log.warning(
-                "[scene] %r: atlas query for %s failed: %s — skipping",
-                kind,
-                contract,
-                e,
-            )
-            continue
-        chosen: Optional[TopicSpec] = None
-        for rec in resp.records:
-            for iface in rec.interfaces:
-                if iface.contract_id != contract or iface.transport != pb_transport:
-                    continue
-                chosen = _spec_from_iface(
-                    rec, iface, atlas_stub, pb_transport, kind_override=kind
-                )
-                if chosen:
-                    break
-            if chosen:
+            if iface.contract_id == contract_id and iface.transport == pb_transport:
+                cap_id = rec.capability_id
                 break
-        if chosen is None:
-            log.warning(
-                "[scene] %r: no atlas record for contract=%r over %s — skipping. "
-                "Have a primitive DeclareInterface(transport=%s) for it.",
-                kind,
-                contract,
-                _pb_transport_name(pb_transport),
-                _pb_transport_name(pb_transport),
-            )
-            continue
-        log.info(
-            "[scene] override %r ← atlas: topic=%s msg=%s qos=%s",
-            chosen.kind,
-            chosen.topic,
-            chosen.msg_type,
-            chosen.qos_profile,
-        )
-        out.append(chosen)
-    return out
-
-
-def _spec_from_iface(
-    rec, iface, atlas_stub, pb_transport: int, *, kind_override: Optional[str] = None
-) -> Optional[TopicSpec]:
-    """Build a TopicSpec from one atlas (cap, iface) pair.
-
-    Endpoints are NOT exposed by `QueryCapabilities` (atlas hides them
-    until consumer→provider is recorded). We `ConnectCapability` to
-    open the edge and read the authoritative endpoint string. For
-    ROS2 that string is the topic; for gRPC it would be `host:port`
-    (gRPC ingest path is not yet wired).
-
-    `msg_type` is resolved through atlas's QueryContract. Returns
-    None when the interface is unusable (RPC-only contract, missing
-    endpoint, atlas doesn't know the contract, etc.).
-    """
-    contract = iface.contract_id
-    leaf = contract.rsplit("/", 1)[-1].lower()
-    if leaf not in _CONTRACT_LEAF_TO_KIND and kind_override is None:
-        # Skip contracts scene has no consumer for. Saves us a
-        # ConnectCapability round-trip per uninteresting iface.
-        return None
-    msg_type = _msg_type_from_contract(atlas_stub, contract)
-    if not msg_type:
+        if cap_id:
+            break
+    if not cap_id:
         return None
     try:
         conn = atlas_stub.ConnectCapability(
             pb.ConnectCapabilityRequest(
                 consumer_id="scene",
-                capability_id=rec.capability_id,
-                contract_id=contract,
+                capability_id=cap_id,
+                contract_id=contract_id,
                 transport=pb_transport,
             )
         )
     except Exception as e:  # noqa: BLE001
         log.warning(
-            "[scene] ConnectCapability(%s/%s) failed: %s",
-            rec.capability_id,
-            contract,
-            e,
+            "[scene] ConnectCapability(%s/%s) failed: %s", cap_id, contract_id, e
         )
         return None
     endpoint = (conn.endpoint or "").strip()
@@ -369,58 +232,50 @@ def _spec_from_iface(
         and conn.params.HasField("ros2")
     ):
         qos_profile = conn.params.ros2.qos_profile or ""
-    kind = kind_override or _CONTRACT_LEAF_TO_KIND.get(leaf, leaf)
+    log.info(
+        "[scene] %r ← atlas: topic=%s msg=%s qos=%s contract=%s cap=%s",
+        kind, endpoint, msg_type, qos_profile or "default", contract_id, cap_id,
+    )
     return TopicSpec(
-        kind=kind or "",
+        kind=kind,
         topic=endpoint,
-        msg_type=msg_type or "",
+        msg_type=msg_type,
         qos_profile=qos_profile or "default",
     )
 
 
-def _pb_transport_name(t: int) -> str:
-    for name, val in _PB_TRANSPORTS.items():
-        if val == t:
-            return name
-    return f"transport({t})"
-
-
-# Lazy-cached reverse map: contract_id → "Image" / "LaserScan" / …
-_CONTRACT_MSG_CACHE: dict[str, str] = {}
-
-
-def _msg_type_from_contract(atlas_stub, contract_id: str) -> str:
-    """Resolve `[io.msg].msg` for `contract_id` by calling atlas's
-    `QueryContract` and returning just the Python class name. Returns
-    "" when atlas doesn't know the contract, the contract is RPC-only
-    (no `[io.msg]`), or the call fails.
-
-    Cached because every observation triggers this at startup and the
-    contract registry is loaded once at atlas boot — no churn.
+def _resolve_explicit(
+    observations: list[dict], atlas_stub, pb_transport: int
+) -> list[TopicSpec]:
+    """Manifest-driven override path. Each entry pairs a logical kind
+    with a contract id; we go through the same single-contract resolver
+    used by the auto path so behaviour is identical. msg_type comes
+    from `_SCENE_CONTRACTS` (or the entry's own `msg_type` field if
+    it's a brand-new kind not in the default list).
     """
-    if contract_id in _CONTRACT_MSG_CACHE:
-        return _CONTRACT_MSG_CACHE[contract_id]
-    try:
-        resp = atlas_stub.QueryContract(
-            pb.QueryContractRequest(contract_id=contract_id)
-        )
-    except Exception as e:  # noqa: BLE001
-        log.debug("[scene] atlas QueryContract(%s) failed: %s", contract_id, e)
-        _CONTRACT_MSG_CACHE[contract_id] = ""
-        return ""
-    if not resp.found:
-        log.debug("[scene] atlas: contract %s not loaded (found=false)", contract_id)
-        _CONTRACT_MSG_CACHE[contract_id] = ""
-        return ""
-    io_msg = resp.contract.io_msg_type or ""
-    if not io_msg:
-        # rpc-only contract (uses io_srv_type instead).
-        _CONTRACT_MSG_CACHE[contract_id] = ""
-        return ""
-    # "sensor_msgs/msg/Image" → "Image"
-    leaf = io_msg.rsplit("/", 1)[-1]
-    _CONTRACT_MSG_CACHE[contract_id] = leaf
-    return leaf
+    by_contract: dict[str, tuple[str, str]] = {
+        cid: (k, mt) for (k, cid, mt) in _SCENE_CONTRACTS
+    }
+    out: list[TopicSpec] = []
+    for entry in observations:
+        kind = str(entry.get("kind", "")).lower()
+        contract = str(entry.get("contract", ""))
+        if not kind or not contract:
+            log.warning(
+                "[scene] observation %r: missing kind/contract; skipping", entry
+            )
+            continue
+        msg_type = str(entry.get("msg_type", "")) or by_contract.get(contract, (kind, ""))[1]
+        if not msg_type:
+            log.warning(
+                "[scene] observation %r: no msg_type — add it to the entry "
+                "or to _SCENE_CONTRACTS in service.py", entry
+            )
+            continue
+        spec = _resolve_one_contract(atlas_stub, pb_transport, kind, contract, msg_type)
+        if spec is not None:
+            out.append(spec)
+    return out
 
 
 # ── Self-pose tracker ──────────────────────────────────────────────────────

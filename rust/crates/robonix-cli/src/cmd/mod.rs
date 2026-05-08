@@ -185,6 +185,23 @@ pub enum Commands {
         #[arg(short = 'v', long)]
         verbose: bool,
     },
+    /// List atlas's loaded contract registry (every `<root>/capabilities/**/*.toml`
+    /// atlas parsed at startup). Pass -v for field-level schemas + source paths,
+    /// -p / --prefix to filter by namespace prefix.
+    Contracts {
+        /// robonix-atlas endpoint
+        #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
+        server: String,
+        /// Filter by id prefix (e.g. `robonix/primitive/camera/`)
+        #[arg(short = 'p', long)]
+        prefix: Option<String>,
+        /// Output as JSON (forces full detail)
+        #[arg(long)]
+        json: bool,
+        /// Expand each contract's field schema + source toml path
+        #[arg(short = 'v', long)]
+        verbose: bool,
+    },
     /// Show CAPABILITY.md for registered caps (all, or one with --cap)
     Describe {
         /// robonix-atlas endpoint
@@ -307,6 +324,12 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             json,
             verbose,
         } => inspect::caps(&server, json, verbose).await,
+        Commands::Contracts {
+            server,
+            prefix,
+            json,
+            verbose,
+        } => inspect::contracts(&server, prefix.as_deref(), json, verbose).await,
         Commands::Describe { server, cap, json } => {
             inspect::describe(&server, cap.as_deref(), json).await
         }
