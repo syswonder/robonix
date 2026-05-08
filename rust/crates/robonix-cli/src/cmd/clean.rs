@@ -187,26 +187,38 @@ fn clean_deploy(config: &Config, manifest_path: &Path, also_cache: bool) -> Resu
         }
     }
 
-    // Deploy-level cleanup.
-    let logs = manifest_dir.join("rbnx-boot").join("logs");
-    let state = manifest_dir.join("rbnx-boot").join("state.json");
-    if logs.exists() {
-        output::sub_step(&format!("rm -rf {}", logs.display()));
-        if let Err(e) = std::fs::remove_dir_all(&logs) {
-            failed.push((logs, e));
+    // Deploy-level cleanup. Walk every entry under <manifest>/rbnx-boot/
+    // and remove it. Skip cache/ unless `--cache` was given (re-cloning
+    // url-fetched packages is expensive).
+    let rbnx_boot = manifest_dir.join("rbnx-boot");
+    if rbnx_boot.exists() {
+        if let Ok(entries) = std::fs::read_dir(&rbnx_boot) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name();
+                let is_cache = name == "cache";
+                if is_cache && !also_cache {
+                    output::sub_step(&format!("keep {} (use --cache to wipe)", path.display()));
+                    continue;
+                }
+                let label = if is_cache { " (cache)" } else { "" };
+                let kind = entry.file_type().ok();
+                if kind.map(|k| k.is_dir()).unwrap_or(false) {
+                    output::sub_step(&format!("rm -rf {}{}", path.display(), label));
+                    if let Err(e) = std::fs::remove_dir_all(&path) {
+                        failed.push((path, e));
+                    }
+                } else {
+                    output::sub_step(&format!("rm {}{}", path.display(), label));
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        failed.push((path, e));
+                    }
+                }
+            }
         }
-    }
-    if state.exists() {
-        output::sub_step(&format!("rm {}", state.display()));
-        if let Err(e) = std::fs::remove_file(&state) {
-            failed.push((state, e));
-        }
-    }
-    if also_cache && cache_root.exists() {
-        output::sub_step(&format!("rm -rf {} (cache)", cache_root.display()));
-        if let Err(e) = std::fs::remove_dir_all(&cache_root) {
-            failed.push((cache_root, e));
-        }
+        // If rbnx-boot/ is empty (or only cache/ left when !also_cache),
+        // try to rmdir it too. Best-effort — no failure surface.
+        let _ = std::fs::remove_dir(&rbnx_boot);
     }
 
     prompt_sudo_retry(failed)
