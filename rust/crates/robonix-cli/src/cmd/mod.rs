@@ -12,6 +12,7 @@ use robonix_cli::Config;
 mod ask;
 mod build;
 mod chat;
+mod clean;
 mod codegen;
 mod config;
 mod deploy;
@@ -83,6 +84,25 @@ pub enum Commands {
         /// Path to the deployment manifest (default: `./robonix_manifest.yaml`).
         #[arg(short = 'f', long, default_value = "robonix_manifest.yaml")]
         file: PathBuf,
+    },
+    /// Drop build artifacts. Per-package: `rbnx clean -p <pkg>` removes
+    /// `<pkg>/rbnx-build/`. Per-deploy: `rbnx clean -f <manifest>` recurses
+    /// over every package the manifest references (path: + url: + system/*),
+    /// wipes each one's `rbnx-build/`, and clears the deploy's
+    /// `rbnx-boot/{logs,state.json}`. Pass `--cache` to also wipe
+    /// `rbnx-boot/cache/` (forces re-clone of url:-fetched packages on next
+    /// boot). Defaults to the package containing the current directory when
+    /// neither `-p` nor `-f` is given.
+    Clean {
+        /// Package path (defaults to walking up from cwd).
+        #[arg(short = 'p', long)]
+        package: Option<PathBuf>,
+        /// Deploy manifest path. When set, recurses over the manifest.
+        #[arg(short = 'f', long)]
+        file: Option<PathBuf>,
+        /// With `-f`, also wipe `rbnx-boot/cache/` (force re-clone).
+        #[arg(long)]
+        cache: bool,
     },
     /// Install a package from GitHub or local path
     Install {
@@ -261,6 +281,11 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             skip_system,
         } => deploy::execute(config, file, log_dir, skip_system).await,
         Commands::Shutdown { file } => shutdown::execute(file).await,
+        Commands::Clean {
+            package,
+            file,
+            cache,
+        } => clean::execute(config, package, file, cache).await,
         Commands::Install { github, path } => install::execute(config, github, path).await,
         Commands::List => list::execute(config).await,
         Commands::Info { name } => info::execute(config, &name).await,

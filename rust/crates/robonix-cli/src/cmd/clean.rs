@@ -1,0 +1,169 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// `rbnx clean` — drop build artifacts.
+//
+//   rbnx clean [-p <pkg>]      remove <pkg>/rbnx-build/. Defaults to the
+//                              package containing the current directory.
+//   rbnx clean -f <manifest>   recursively clean every package the manifest
+//                              references (path: + url: + system/*) plus the
+//                              deploy's rbnx-boot/{logs,state.json}.
+//   rbnx clean -f <m> --cache  also wipe rbnx-boot/cache/ (force re-clone).
+
+use anyhow::{Context, Result};
+use robonix_cli::config::Config;
+use robonix_cli::output;
+use serde_yaml::Value;
+use std::path::{Path, PathBuf};
+
+use super::run_package;
+
+pub async fn execute(
+    config: Config,
+    package: Option<PathBuf>,
+    file: Option<PathBuf>,
+    cache: bool,
+) -> Result<()> {
+    match (package, file) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("pass one of -p / -f, not both")
+        }
+        (Some(pkg), None) => clean_package(&pkg),
+        (None, Some(f)) => clean_deploy(&config, &f, cache),
+        (None, None) => {
+            // Walk up from cwd to find the enclosing package.
+            let pkg = run_package::find_package_from_cwd()?;
+            clean_package(&pkg)
+        }
+    }
+}
+
+fn clean_package(pkg: &Path) -> Result<()> {
+    let pkg = pkg
+        .canonicalize()
+        .with_context(|| format!("not a directory: {}", pkg.display()))?;
+    let build = pkg.join("rbnx-build");
+    if !build.exists() {
+        output::sub_step(&format!(
+            "nothing to clean: {} (no rbnx-build/)",
+            pkg.display()
+        ));
+        return Ok(());
+    }
+    output::action("Cleaning", &build.display().to_string());
+    if let Err(e) = std::fs::remove_dir_all(&build) {
+        // Common case: a docker-build container left root-owned files
+        // inside rbnx-build/. Surface clearly instead of bailing.
+        anyhow::bail!(
+            "rm -rf {} failed: {}\nhint: a docker build may have left root-owned files; try `sudo rm -rf {0:?}`",
+            build.display(),
+            e
+        );
+    }
+    Ok(())
+}
+
+fn clean_deploy(config: &Config, manifest_path: &Path, also_cache: bool) -> Result<()> {
+    let manifest_path = manifest_path
+        .canonicalize()
+        .with_context(|| format!("manifest not found: {}", manifest_path.display()))?;
+    let manifest_dir = manifest_path
+        .parent()
+        .context("deploy manifest has no parent directory")?
+        .to_path_buf();
+    let raw = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("read {}", manifest_path.display()))?;
+    let root: Value = serde_yaml::from_str(&raw)
+        .with_context(|| format!("parse {}", manifest_path.display()))?;
+    let cache_root = manifest_dir.join("rbnx-boot").join("cache");
+
+    output::action("Cleaning deploy", &manifest_path.display().to_string());
+
+    // Collect every package directory referenced by the manifest.
+    let mut pkgs: Vec<PathBuf> = Vec::new();
+    for section in &["primitive", "service", "skill"] {
+        let Some(seq) = root.get(*section).and_then(|v| v.as_sequence()) else {
+            continue;
+        };
+        for entry in seq {
+            let name = entry
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unnamed)")
+                .to_string();
+            let local = entry.get("path").and_then(|v| v.as_str());
+            let url = entry.get("url").and_then(|v| v.as_str());
+            match (local, url) {
+                (Some(p), _) => pkgs.push(manifest_dir.join(p)),
+                (None, Some(_)) => pkgs.push(cache_root.join(&name)),
+                _ => {}
+            }
+        }
+    }
+    // system: section — non-builtin entries are real packages under
+    // `<robonix_source>/system/<key>/` (memory/scene/speech/…).
+    const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison"];
+    if let Some(map) = root.get("system").and_then(|v| v.as_mapping()) {
+        if let Some(source_root) = config.robonix_source_path.as_ref() {
+            for (key, _) in map {
+                let Some(k) = key.as_str() else { continue };
+                if SYSTEM_BUILTINS.contains(&k) {
+                    continue;
+                }
+                let pkg = source_root.join("system").join(k);
+                if pkg.exists() {
+                    pkgs.push(pkg);
+                }
+            }
+        }
+    }
+
+    // Per-package cleanup. Tolerate per-package failures (docker-build
+    // packages often leave root-owned rbnx-build/ that requires sudo).
+    output::step("packages", &format!("{} to inspect", pkgs.len()));
+    let mut failed: Vec<(PathBuf, std::io::Error)> = Vec::new();
+    for p in &pkgs {
+        if !p.exists() {
+            continue;
+        }
+        let build = p.join("rbnx-build");
+        if build.exists() {
+            output::sub_step(&format!("rm -rf {}", build.display()));
+            if let Err(e) = std::fs::remove_dir_all(&build) {
+                failed.push((build, e));
+            }
+        }
+    }
+
+    // Deploy-level cleanup.
+    let logs = manifest_dir.join("rbnx-boot").join("logs");
+    let state = manifest_dir.join("rbnx-boot").join("state.json");
+    if logs.exists() {
+        output::sub_step(&format!("rm -rf {}", logs.display()));
+        if let Err(e) = std::fs::remove_dir_all(&logs) {
+            failed.push((logs, e));
+        }
+    }
+    if state.exists() {
+        output::sub_step(&format!("rm {}", state.display()));
+        if let Err(e) = std::fs::remove_file(&state) {
+            failed.push((state, e));
+        }
+    }
+    if also_cache && cache_root.exists() {
+        output::sub_step(&format!("rm -rf {} (cache)", cache_root.display()));
+        if let Err(e) = std::fs::remove_dir_all(&cache_root) {
+            failed.push((cache_root, e));
+        }
+    }
+
+    if !failed.is_empty() {
+        eprintln!();
+        for (p, e) in &failed {
+            eprintln!("  ✗ {} : {}", p.display(), e);
+        }
+        anyhow::bail!(
+            "{} path(s) could not be removed (likely docker-build root-owned files; try `sudo rm -rf <path>`)",
+            failed.len()
+        );
+    }
+    Ok(())
+}
