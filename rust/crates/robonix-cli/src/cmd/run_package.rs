@@ -762,11 +762,12 @@ async fn call_driver_init(
     Ok(r.state)
 }
 
-/// `robonix/primitive/chassis/move` → `PrimitiveChassisMove`.
+/// `robonix/primitive/chassis/move` → `RobonixPrimitiveChassisMove`.
+/// `mycomp/a/b/c`                   → `MycompABC`.
+/// Uniform PascalCase per `/`-segment; no prefix stripping.
 fn contract_id_to_service_name(contract_id: &str) -> String {
-    let trimmed = contract_id.strip_prefix("robonix/").unwrap_or(contract_id);
     let mut out = String::new();
-    for seg in trimmed.split('/').filter(|s| !s.is_empty()) {
+    for seg in contract_id.split('/').filter(|s| !s.is_empty()) {
         for part in seg.split('_').filter(|s| !s.is_empty()) {
             let mut ch = part.chars();
             if let Some(c) = ch.next() {

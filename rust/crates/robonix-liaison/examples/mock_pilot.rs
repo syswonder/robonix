@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// examples/mock_pilot.rs — minimal SystemPilot stand-in for the voice demo.
+// examples/mock_pilot.rs — minimal RobonixSystemPilot stand-in for the voice demo.
 //
 // Replaces robonix-pilot for tests that only need to verify the
 // Liaison ↔ Pilot wiring (no VLM, no Executor, no skill index).
@@ -7,7 +7,7 @@
 // Behaviour:
 //   * Registers as `com.robonix.demo.mock_pilot` in Atlas under
 //     `robonix/system/pilot` (same contract as the real Pilot).
-//   * Implements SystemPilot.SubmitTask:
+//   * Implements RobonixSystemPilot.SubmitTask:
 //       - On `{"abort_turn":true}` / `{"session_end":true}` → close immediately.
 //       - Otherwise → emit one TEXT_CHUNK + one FINAL_TEXT echoing the
 //         incoming Task (text + user_id), so the demo client can verify the
@@ -16,7 +16,7 @@
 use anyhow::Result;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
-use robonix_liaison::pb::contracts::system_pilot_server::{SystemPilot, SystemPilotServer};
+use robonix_liaison::pb::contracts::robonix_system_pilot_server::{RobonixSystemPilot, RobonixSystemPilotServer};
 use robonix_liaison::pb::pilot::{PilotEvent, Task};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -60,7 +60,7 @@ fn task_is_control(task: &Task) -> bool {
 struct MockPilot;
 
 #[tonic::async_trait]
-impl SystemPilot for MockPilot {
+impl RobonixSystemPilot for MockPilot {
     type SubmitTaskStream = ReceiverStream<Result<PilotEvent, Status>>;
 
     async fn submit_task(
@@ -145,8 +145,8 @@ async fn main() -> Result<()> {
             &advertised,
             atlas_client::grpc_params(
                 "capabilities/system/pilot.v1.toml",
-                "robonix.contracts.SystemPilot",
-                "/robonix.contracts.SystemPilot/SubmitTask",
+                "robonix.contracts.RobonixSystemPilot",
+                "/robonix.contracts.RobonixSystemPilot/SubmitTask",
             ),
         )
         .await?;
@@ -168,7 +168,7 @@ async fn main() -> Result<()> {
     }
 
     tonic::transport::Server::builder()
-        .add_service(SystemPilotServer::new(MockPilot))
+        .add_service(RobonixSystemPilotServer::new(MockPilot))
         .serve(listen)
         .await?;
     Ok(())

@@ -1428,14 +1428,11 @@ async fn call_driver_cmd(
 }
 
 /// Mirrors `robonix_codegen::contract_gen::contract_id_to_service_name`.
-/// Strips the `robonix/` prefix and concatenates the remaining path
-/// segments in UpperCamelCase: `robonix/primitive/chassis/driver` →
-/// `PrimitiveChassisDriver`. The full gRPC service path is then
-/// `/robonix.contracts.<this>/Driver`, matching what the per-area driver
-/// TOMLs codegen emits in `robonix_contracts.proto`.
+/// Uniform PascalCase: `robonix/primitive/chassis/driver` →
+/// `RobonixPrimitiveChassisDriver`. No prefix stripping. Full gRPC
+/// service path: `/robonix.contracts.<this>/Driver`.
 fn contract_id_to_service_name(id: &str) -> String {
-    let body = id.strip_prefix("robonix/").unwrap_or(id);
-    body.split('/')
+    id.split('/')
         .filter(|x| !x.is_empty())
         .map(|seg| {
             seg.split('_')

@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// examples/mock_audio.rs — mock PrimitiveAudioMic + PrimitiveAudioSpeaker.
+// examples/mock_audio.rs — mock RobonixPrimitiveAudioMic + RobonixPrimitiveAudioSpeaker.
 //
 // Replaces real audio hardware with WAV file I/O:
 //
-//   PrimitiveAudioMic:
+//   RobonixPrimitiveAudioMic:
 //     Reads PCM from a WAV file (env `MOCK_WAV_INPUT`) or generates 5s of
 //     silence (16 kHz mono s16le). Streams AudioChunks in ~100 ms slices.
 //
-//   PrimitiveAudioSpeaker:
+//   RobonixPrimitiveAudioSpeaker:
 //     Receives AudioChunks and writes the accumulated audio to disk
 //     (env `MOCK_WAV_OUTPUT`, default `/tmp/robonix_speaker_output.wav`).
 //
@@ -20,8 +20,8 @@ use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
 use robonix_liaison::pb::audio::AudioChunk;
 use robonix_liaison::pb::contracts::{
-    primitive_audio_mic_server::{PrimitiveAudioMic, PrimitiveAudioMicServer},
-    primitive_audio_speaker_server::{PrimitiveAudioSpeaker, PrimitiveAudioSpeakerServer},
+    robonix_primitive_audio_mic_server::{RobonixPrimitiveAudioMic, RobonixPrimitiveAudioMicServer},
+    robonix_primitive_audio_speaker_server::{RobonixPrimitiveAudioSpeaker, RobonixPrimitiveAudioSpeakerServer},
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -98,7 +98,7 @@ struct MockMic {
 }
 
 #[tonic::async_trait]
-impl PrimitiveAudioMic for MockMic {
+impl RobonixPrimitiveAudioMic for MockMic {
     type MicStream = ReceiverStream<Result<AudioChunk, Status>>;
 
     async fn mic(&self, _request: Request<()>) -> Result<Response<Self::MicStream>, Status> {
@@ -135,7 +135,7 @@ struct MockSpeaker {
 }
 
 #[tonic::async_trait]
-impl PrimitiveAudioSpeaker for MockSpeaker {
+impl RobonixPrimitiveAudioSpeaker for MockSpeaker {
     async fn speaker(
         &self,
         request: Request<Streaming<AudioChunk>>,
@@ -224,8 +224,8 @@ async fn main() -> Result<()> {
             &advertised,
             atlas_client::grpc_params(
                 "capabilities/primitive/audio/mic.v1.toml",
-                "robonix.contracts.PrimitiveAudioMic",
-                "/robonix.contracts.PrimitiveAudioMic/Stream",
+                "robonix.contracts.RobonixPrimitiveAudioMic",
+                "/robonix.contracts.RobonixPrimitiveAudioMic/Stream",
             ),
         )
         .await?;
@@ -237,8 +237,8 @@ async fn main() -> Result<()> {
             &advertised,
             atlas_client::grpc_params(
                 "capabilities/primitive/audio/speaker.v1.toml",
-                "robonix.contracts.PrimitiveAudioSpeaker",
-                "/robonix.contracts.PrimitiveAudioSpeaker/Stream",
+                "robonix.contracts.RobonixPrimitiveAudioSpeaker",
+                "/robonix.contracts.RobonixPrimitiveAudioSpeaker/Stream",
             ),
         )
         .await?;
@@ -260,8 +260,8 @@ async fn main() -> Result<()> {
     }
 
     tonic::transport::Server::builder()
-        .add_service(PrimitiveAudioMicServer::new(MockMic { pcm_data }))
-        .add_service(PrimitiveAudioSpeakerServer::new(MockSpeaker {
+        .add_service(RobonixPrimitiveAudioMicServer::new(MockMic { pcm_data }))
+        .add_service(RobonixPrimitiveAudioSpeakerServer::new(MockSpeaker {
             output_path,
         }))
         .serve(listen)

@@ -34,12 +34,12 @@ CMD_SHUTDOWN   = 3
 
 def contract_id_to_pascal(contract_id: str) -> str:
     """Mirror of `robonix_codegen::contract_id_to_service_name`.
-    `robonix/primitive/chassis/twist_in` → `PrimitiveChassisTwistIn`."""
-    cid = contract_id.strip()
-    if cid.startswith("robonix/"):
-        cid = cid[len("robonix/"):]
+    Uniform PascalCase, no prefix stripping.
+    `robonix/primitive/chassis/twist_in` → `RobonixPrimitiveChassisTwistIn`.
+    `mycomp/a/b/c`                       → `MycompABC`.
+    """
     out = []
-    for seg in cid.strip("/").split("/"):
+    for seg in contract_id.strip("/").split("/"):
         if not seg:
             continue
         # snake_case within a segment becomes CamelCase too.

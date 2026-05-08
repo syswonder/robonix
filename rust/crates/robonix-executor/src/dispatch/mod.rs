@@ -206,10 +206,10 @@ async fn ensure_skill_runnable(atlas: &mut AtlasClient, cap_id: &str) -> Result<
 }
 
 /// Mirrors robonix_codegen::contract_gen::contract_id_to_service_name.
-/// `robonix/skill/explore/driver` → `SkillExploreDriver`.
+/// `robonix/skill/explore/driver` → `RobonixSkillExploreDriver`. Uniform
+/// PascalCase per `/`-segment, no prefix stripping.
 fn contract_id_to_service_name(id: &str) -> String {
-    let body = id.strip_prefix("robonix/").unwrap_or(id);
-    body.split('/')
+    id.split('/')
         .filter(|x| !x.is_empty())
         .map(|seg| {
             seg.split('_')

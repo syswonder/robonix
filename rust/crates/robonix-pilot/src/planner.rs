@@ -4,7 +4,7 @@
 use crate::discovery::{self, llm_name};
 use crate::history;
 use crate::memory;
-use crate::pb::contracts::system_executor_client::SystemExecutorClient;
+use crate::pb::contracts::robonix_system_executor_client::RobonixSystemExecutorClient;
 use crate::pb::pilot::{
     BatchResult, CapabilityCall, CapabilityCallResult, PilotEvent, Plan, SessionStatusEvent, Task,
 };
@@ -24,7 +24,7 @@ use uuid::Uuid;
 /// gRPC client for executor's plan-dispatch contract. Pilot only ever calls
 /// `Execute(Plan)` — discovery happens directly against atlas now.
 pub struct ExecutorConn {
-    pub graph: SystemExecutorClient<Channel>,
+    pub graph: RobonixSystemExecutorClient<Channel>,
 }
 
 fn max_tool_rounds() -> usize {

@@ -4,8 +4,8 @@
 // package, ordered so prost `super::sibling` references resolve.
 //
 // Used here:
-//   pb::contracts::system_executor_server          — Stream RPC handler
-//   pb::contracts::system_executor_list_tools_server — Call RPC handler
+//   pb::contracts::robonix_system_executor_server          — Stream RPC handler
+//   pb::contracts::robonix_system_executor_list_tools_server — Call RPC handler
 //   pb::executor                                   — CapabilityCallEvent / ListTools_*
 //   pb::pilot                                      — Plan / CapabilityCall / CapabilityCallResult / ToolRouting
 #![allow(

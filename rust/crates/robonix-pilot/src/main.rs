@@ -16,7 +16,7 @@
 //   1. Connects to atlas, registers its capability, declares the
 //      `robonix/system/pilot` gRPC interface.
 //   2. Constructs an embedded LLM client from the resolved VLM config.
-//   3. Serves SystemPilot on `listen`. Executor address is discovered
+//   3. Serves RobonixSystemPilot on `listen`. Executor address is discovered
 //      through atlas at every Stream RPC, not configured statically.
 
 mod config;
@@ -32,7 +32,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use config::{Args, PILOT_NAMESPACE, PilotConfig};
 use log::info;
-use pb::contracts::system_pilot_server::SystemPilotServer;
+use pb::contracts::robonix_system_pilot_server::RobonixSystemPilotServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
 use service::PilotServiceImpl;
@@ -84,12 +84,12 @@ async fn main() -> Result<()> {
             &advertised,
             atlas_client::grpc_params(
                 "capabilities/system/pilot.v1.toml",
-                "robonix.contracts.SystemPilot",
-                "/robonix.contracts.SystemPilot/SubmitTask",
+                "robonix.contracts.RobonixSystemPilot",
+                "/robonix.contracts.RobonixSystemPilot/SubmitTask",
             ),
         )
         .await?;
-    info!("declared SystemPilot gRPC at {advertised}");
+    info!("declared RobonixSystemPilot gRPC at {advertised}");
 
     // Pilot has no Driver lifecycle handshake — it's ready as soon as the
     // gRPC server is up. Push RUNNING so `rbnx caps` doesn't show the
@@ -130,11 +130,11 @@ async fn main() -> Result<()> {
 
     let svc = PilotServiceImpl::new(atlas, cfg.capability_id.clone(), vlm);
 
-    info!("SystemPilot gRPC on {listen_addr}");
+    info!("RobonixSystemPilot gRPC on {listen_addr}");
     eprintln!("robonix-pilot ready on {listen_addr}");
 
     tonic::transport::Server::builder()
-        .add_service(SystemPilotServer::new(svc))
+        .add_service(RobonixSystemPilotServer::new(svc))
         .serve(listen_addr)
         .await
         .context("pilot gRPC server failed")?;

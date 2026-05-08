@@ -27,9 +27,9 @@ mod voice;
 use anyhow::{Context, Result};
 use clap::Parser;
 use pb::contracts::{
-    system_liaison_submit_server::{SystemLiaisonSubmit, SystemLiaisonSubmitServer},
-    system_liaison_voice_server::{SystemLiaisonVoice, SystemLiaisonVoiceServer},
-    system_pilot_client::SystemPilotClient,
+    robonix_system_liaison_submit_server::{RobonixSystemLiaisonSubmit, RobonixSystemLiaisonSubmitServer},
+    robonix_system_liaison_voice_server::{RobonixSystemLiaisonVoice, RobonixSystemLiaisonVoiceServer},
+    robonix_system_pilot_client::RobonixSystemPilotClient,
 };
 use pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
 use pb::pilot::{PilotEvent, Task};
@@ -62,7 +62,7 @@ const EVT_FINAL_TEXT: u32 = 4;
 
 // ── LiaisonPipeline ─────────────────────────────────────────────────────────
 //
-// Forward a `Task` to Pilot (`SystemPilot.SubmitTask`), return the event
+// Forward a `Task` to Pilot (`RobonixSystemPilot.SubmitTask`), return the event
 // channel. Opens a new gRPC channel per call so liaison can start before
 // Pilot and survive Pilot restarts without restarting itself. Pilot endpoint
 // is re-resolved through Atlas on every call (so a Pilot restart on a new
@@ -94,7 +94,7 @@ impl LiaisonPipeline {
             None => self.pilot_endpoint_default.clone(),
         };
 
-        let mut client = SystemPilotClient::connect(pilot_ep.clone())
+        let mut client = RobonixSystemPilotClient::connect(pilot_ep.clone())
             .await
             .with_context(|| format!("connect Pilot at {pilot_ep}"))?;
         let response = client
@@ -194,7 +194,7 @@ struct LiaisonServiceImpl {
 }
 
 #[tonic::async_trait]
-impl SystemLiaisonSubmit for LiaisonServiceImpl {
+impl RobonixSystemLiaisonSubmit for LiaisonServiceImpl {
     type SubmitTaskStream = ReceiverStream<Result<PilotEvent, Status>>;
 
     async fn submit_task(
@@ -212,7 +212,7 @@ impl SystemLiaisonSubmit for LiaisonServiceImpl {
 }
 
 #[tonic::async_trait]
-impl SystemLiaisonVoice for LiaisonServiceImpl {
+impl RobonixSystemLiaisonVoice for LiaisonServiceImpl {
     type StartVoiceSessionStream =
         Pin<Box<dyn Stream<Item = Result<VoiceEvent, Status>> + Send + 'static>>;
 
@@ -372,7 +372,7 @@ struct Args {
     #[arg(long)]
     atlas: Option<String>,
 
-    /// Pilot fallback endpoint when Atlas can't yet resolve SystemPilot.
+    /// Pilot fallback endpoint when Atlas can't yet resolve RobonixSystemPilot.
     /// Defaults to $ROBONIX_PILOT_ENDPOINT, then 127.0.0.1:50071.
     #[arg(long = "pilot-endpoint")]
     pilot_endpoint: Option<String>,
@@ -453,8 +453,8 @@ async fn main() -> Result<()> {
             &advertised,
             atlas_client::grpc_params(
                 LIAISON_SUBMIT_TOML,
-                "robonix.contracts.SystemLiaisonSubmit",
-                "/robonix.contracts.SystemLiaisonSubmit/SubmitTask",
+                "robonix.contracts.RobonixSystemLiaisonSubmit",
+                "/robonix.contracts.RobonixSystemLiaisonSubmit/SubmitTask",
             ),
         )
         .await
@@ -467,8 +467,8 @@ async fn main() -> Result<()> {
             &advertised,
             atlas_client::grpc_params(
                 LIAISON_VOICE_TOML,
-                "robonix.contracts.SystemLiaisonVoice",
-                "/robonix.contracts.SystemLiaisonVoice/StartVoiceSession",
+                "robonix.contracts.RobonixSystemLiaisonVoice",
+                "/robonix.contracts.RobonixSystemLiaisonVoice/StartVoiceSession",
             ),
         )
         .await
@@ -521,8 +521,8 @@ async fn main() -> Result<()> {
         pilot_endpoint_default: pilot_http,
     });
     let server = tonic::transport::Server::builder()
-        .add_service(SystemLiaisonSubmitServer::from_arc(Arc::clone(&svc)))
-        .add_service(SystemLiaisonVoiceServer::from_arc(svc))
+        .add_service(RobonixSystemLiaisonSubmitServer::from_arc(Arc::clone(&svc)))
+        .add_service(RobonixSystemLiaisonVoiceServer::from_arc(svc))
         .serve(listen_addr);
 
     if let Some(handle) = text_handle {

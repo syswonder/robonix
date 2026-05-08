@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Author: wheatfox <wheatfox17@icloud.com>
 //
-// gRPC contract handler: SystemExecutor.Execute(Plan) → stream CapabilityCallEvent.
+// gRPC contract handler: RobonixSystemExecutor.Execute(Plan) → stream CapabilityCallEvent.
 
 use crate::dispatch;
 use crate::exec_wire;
-use crate::pb::contracts::system_executor_server::SystemExecutor;
+use crate::pb::contracts::robonix_system_executor_server::RobonixSystemExecutor;
 use crate::pb::executor::CapabilityCallEvent;
 use crate::pb::pilot::Plan;
 use robonix_atlas::client::AtlasClient;
@@ -33,7 +33,7 @@ impl ExecutorServiceImpl {
 }
 
 #[tonic::async_trait]
-impl SystemExecutor for ExecutorServiceImpl {
+impl RobonixSystemExecutor for ExecutorServiceImpl {
     type ExecuteStream = ReceiverStream<Result<CapabilityCallEvent, Status>>;
 
     async fn execute(
