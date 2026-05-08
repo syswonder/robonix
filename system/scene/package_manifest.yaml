@@ -15,7 +15,7 @@
 manifestVersion: 1
 
 package:
-  name: scene
+  name: com.robonix.system.scene
   version: 0.1.0
   vendor: robonix
   description: Scene — semantic + geometric live map of the environment.

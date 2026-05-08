@@ -19,7 +19,7 @@ use clap::Parser;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_PILOT_CAPABILITY_ID: &str = "com.robonix.system.pilot";
+pub const DEFAULT_PILOT_CAPABILITY_ID: &str = "pilot";
 pub const PILOT_NAMESPACE: &str = "robonix/system/pilot";
 pub const DEFAULT_ATLAS_ENDPOINT: &str = "127.0.0.1:50051";
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:50071";

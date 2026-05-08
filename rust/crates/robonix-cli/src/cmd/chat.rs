@@ -35,7 +35,10 @@ use tokio_stream::StreamExt;
 use uuid::Uuid;
 
 const CONSUMER_ID: &str = "rbnx-cli/chat";
-const LIAISON_CONTRACT_ID: &str = "robonix/system/liaison";
+// Liaison was split into two contracts (submit + voice). chat only needs
+// to find one of them in atlas to know liaison is up; submit is the
+// always-present one (voice is optional / mode-gated), so wait on it.
+const LIAISON_CONTRACT_ID: &str = "robonix/system/liaison/submit";
 
 /// Atlas contract ids for the audio primitives that have user-visible
 /// device choices on a multi-provider host (e.g. local ALSA driver vs
@@ -1375,6 +1378,16 @@ async fn run_tui(
                 }
                 KeyCode::PageUp => scroll = scroll.saturating_add(5),
                 KeyCode::PageDown => scroll = scroll.saturating_sub(5),
+                KeyCode::Esc => {
+                    // Idle Esc: clear the draft input. During a turn,
+                    // run_text_intent_with_esc_abort handles Esc differently
+                    // (sends abort_turn). The header line says "Esc = abort
+                    // turn" which is true mid-turn; idle Esc is a vim-style
+                    // "clear what I typed" affordance.
+                    if !input.is_empty() {
+                        input.clear();
+                    }
+                }
                 _ => {}
             }
         }
