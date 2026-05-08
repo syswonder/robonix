@@ -21,7 +21,7 @@ use tokio_stream::StreamExt;
 use tonic::Request;
 use uuid::Uuid;
 
-use crate::pb::contracts::system_pilot_client::SystemPilotClient;
+use crate::pb::contracts::robonix_system_pilot_client::RobonixSystemPilotClient;
 use crate::pb::pilot::Task;
 
 // PilotEvent.event_kind discriminants — must mirror service.rs / .msg.
@@ -45,7 +45,7 @@ pub async fn execute(server: &str, prompt: &str, json: bool) -> Result<()> {
     if !json {
         eprintln!("[ask] connected to pilot '{pilot_cap_id}' (channel {channel_id})");
     }
-    let mut client = SystemPilotClient::new(channel);
+    let mut client = RobonixSystemPilotClient::new(channel);
 
     let session_id = Uuid::new_v4().to_string();
     let task = Task {

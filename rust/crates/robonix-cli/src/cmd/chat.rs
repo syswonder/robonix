@@ -407,7 +407,7 @@ async fn pick_device_for_cap(
     saved_device_id: Option<&str>,
     mode: PickMode,
 ) -> Result<String> {
-    use crate::pb::contracts::primitive_audio_list_devices_client::PrimitiveAudioListDevicesClient;
+    use crate::pb::contracts::robonix_primitive_audio_list_devices_client::RobonixPrimitiveAudioListDevicesClient;
 
     const LIST_CONTRACT: &str = "robonix/primitive/audio/list_devices";
     // Reconfigure mode shows visible feedback for every silent path
@@ -446,7 +446,7 @@ async fn pick_device_for_cap(
         }
     };
 
-    let mut client = match PrimitiveAudioListDevicesClient::connect(endpoint.clone()).await {
+    let mut client = match RobonixPrimitiveAudioListDevicesClient::connect(endpoint.clone()).await {
         Ok(c) => c,
         Err(e) => {
             if reconf {
@@ -519,7 +519,7 @@ async fn call_select_device(
     kind: &str,
     device_id: &str,
 ) -> Result<()> {
-    use crate::pb::contracts::primitive_audio_select_device_client::PrimitiveAudioSelectDeviceClient;
+    use crate::pb::contracts::robonix_primitive_audio_select_device_client::RobonixPrimitiveAudioSelectDeviceClient;
     const SELECT_CONTRACT: &str = "robonix/primitive/audio/select_device";
 
     let (_, ep, _) = atlas
@@ -535,7 +535,7 @@ async fn call_select_device(
     } else {
         format!("http://{ep}")
     };
-    let mut client = PrimitiveAudioSelectDeviceClient::connect(endpoint).await?;
+    let mut client = RobonixPrimitiveAudioSelectDeviceClient::connect(endpoint).await?;
     let resp = client
         .select_audio_device(crate::pb::audio::SelectAudioDeviceRequest {
             kind: kind.to_string(),
@@ -709,7 +709,7 @@ async fn fetch_devices_filtered(
     cap_id: &str,
     kind: &str,
 ) -> Vec<crate::pb::audio::AudioDevice> {
-    use crate::pb::contracts::primitive_audio_list_devices_client::PrimitiveAudioListDevicesClient;
+    use crate::pb::contracts::robonix_primitive_audio_list_devices_client::RobonixPrimitiveAudioListDevicesClient;
     const LIST_CONTRACT: &str = "robonix/primitive/audio/list_devices";
     if cap_id.is_empty() {
         return Vec::new();
@@ -727,7 +727,7 @@ async fn fetch_devices_filtered(
         Ok((_, ep, _)) => format!("http://{ep}"),
         Err(_) => return Vec::new(),
     };
-    let mut client = match PrimitiveAudioListDevicesClient::connect(endpoint).await {
+    let mut client = match RobonixPrimitiveAudioListDevicesClient::connect(endpoint).await {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
@@ -1435,9 +1435,9 @@ fn build_control_task(
 }
 
 async fn notify_session_end(liaison_endpoint: &str, session_id: &str, user_id: &str) -> Result<()> {
-    use crate::pb::contracts::system_liaison_submit_client::SystemLiaisonSubmitClient;
+    use crate::pb::contracts::robonix_system_liaison_submit_client::RobonixSystemLiaisonSubmitClient;
 
-    let mut client = SystemLiaisonSubmitClient::connect(liaison_endpoint.to_string())
+    let mut client = RobonixSystemLiaisonSubmitClient::connect(liaison_endpoint.to_string())
         .await
         .context("failed to connect to Liaison for session_end")?;
 
@@ -1452,9 +1452,9 @@ async fn notify_session_end(liaison_endpoint: &str, session_id: &str, user_id: &
 }
 
 async fn abort_session(liaison_endpoint: &str, session_id: &str, user_id: &str) -> Result<()> {
-    use crate::pb::contracts::system_liaison_submit_client::SystemLiaisonSubmitClient;
+    use crate::pb::contracts::robonix_system_liaison_submit_client::RobonixSystemLiaisonSubmitClient;
 
-    let mut client = SystemLiaisonSubmitClient::connect(liaison_endpoint.to_string())
+    let mut client = RobonixSystemLiaisonSubmitClient::connect(liaison_endpoint.to_string())
         .await
         .context("failed to connect to Liaison for abort_turn")?;
 
@@ -1479,7 +1479,7 @@ async fn run_text_intent_with_esc_abort(
     input: &str,
     scroll: &mut u16,
 ) -> Result<()> {
-    use crate::pb::contracts::system_liaison_submit_client::SystemLiaisonSubmitClient;
+    use crate::pb::contracts::robonix_system_liaison_submit_client::RobonixSystemLiaisonSubmitClient;
     use crate::pb::pilot::PilotEvent;
     use tonic::Status;
 
@@ -1488,7 +1488,7 @@ async fn run_text_intent_with_esc_abort(
     let task = build_text_task(session_id, user_id, user_msg);
 
     let _stream_task = tokio::spawn(async move {
-        let mut client = match SystemLiaisonSubmitClient::connect(liaison_ep.clone()).await {
+        let mut client = match RobonixSystemLiaisonSubmitClient::connect(liaison_ep.clone()).await {
             Ok(c) => c,
             Err(e) => {
                 let _ = tx.send(Err(Status::unavailable(e.to_string()))).await;
@@ -1573,7 +1573,7 @@ async fn run_voice_session_with_esc_abort(
     scroll: &mut u16,
     chat_cfg: &ChatConfig,
 ) -> Result<()> {
-    use crate::pb::contracts::system_liaison_voice_client::SystemLiaisonVoiceClient;
+    use crate::pb::contracts::robonix_system_liaison_voice_client::RobonixSystemLiaisonVoiceClient;
     use crate::pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
     use tonic::Status;
 
@@ -1598,7 +1598,7 @@ async fn run_voice_session_with_esc_abort(
     let liaison_ep = liaison_endpoint.to_string();
 
     let _stream_task = tokio::spawn(async move {
-        let mut client = match SystemLiaisonVoiceClient::connect(liaison_ep.clone()).await {
+        let mut client = match RobonixSystemLiaisonVoiceClient::connect(liaison_ep.clone()).await {
             Ok(c) => c,
             Err(e) => {
                 let _ = tx.send(Err(Status::unavailable(e.to_string()))).await;

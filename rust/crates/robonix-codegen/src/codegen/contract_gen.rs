@@ -752,9 +752,11 @@ fn upper_camel(s: &str) -> String {
     out
 }
 
+/// Uniform PascalCase per `/`-segment. No prefix stripping.
+/// `robonix/primitive/chassis/move` → `RobonixPrimitiveChassisMove`.
+/// `mycomp/a/b/c`                   → `MycompABC`.
 fn contract_id_to_service_name(id: &str) -> String {
-    let body = id.strip_prefix("robonix/").unwrap_or(id);
-    body.split('/')
+    id.split('/')
         .filter(|x| !x.is_empty())
         .map(|seg| {
             seg.split('_')

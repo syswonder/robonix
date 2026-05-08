@@ -23,7 +23,7 @@ use clap::Parser;
 use config::{Args, EXECUTOR_NAMESPACE, ExecutorConfig};
 use dispatch::builtin::BUILTINS;
 use log::info;
-use pb::contracts::system_executor_server::SystemExecutorServer;
+use pb::contracts::robonix_system_executor_server::RobonixSystemExecutorServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
 use service::ExecutorServiceImpl;
@@ -75,8 +75,8 @@ async fn main() -> Result<()> {
             &advertised,
             atlas_client::grpc_params(
                 "capabilities/system/executor.v1.toml",
-                "robonix.contracts.SystemExecutor",
-                "/robonix.contracts.SystemExecutor/Execute",
+                "robonix.contracts.RobonixSystemExecutor",
+                "/robonix.contracts.RobonixSystemExecutor/Execute",
             ),
         )
         .await?;
@@ -100,7 +100,7 @@ async fn main() -> Result<()> {
             .with_context(|| format!("declare builtin '{}'", contract_id))?;
     }
     info!(
-        "declared SystemExecutor + {} builtin capabilities at {advertised}",
+        "declared RobonixSystemExecutor + {} builtin capabilities at {advertised}",
         BUILTINS.len()
     );
 
@@ -136,11 +136,11 @@ async fn main() -> Result<()> {
     }
 
     let svc = ExecutorServiceImpl::new(atlas, cfg.capability_id.clone());
-    info!("SystemExecutor gRPC on {listen_addr}");
+    info!("RobonixSystemExecutor gRPC on {listen_addr}");
     eprintln!("robonix-executor ready on {listen_addr}");
 
     tonic::transport::Server::builder()
-        .add_service(SystemExecutorServer::new(svc))
+        .add_service(RobonixSystemExecutorServer::new(svc))
         .serve(listen_addr)
         .await
         .context("executor gRPC server failed")?;

@@ -3,22 +3,22 @@
 //
 // One call drives the full pipeline:
 //
-//   PrimitiveAudioMic.Stream  (record_seconds)
+//   RobonixPrimitiveAudioMic.Stream  (record_seconds)
 //       │
 //       ▼
 //   SystemSpeechAsr.Recognize    → transcript
 //       │
 //       ▼
-//   SystemSpeechVoiceprint.Identify → user_id  (graceful: hint fallback on absence)
+//   RobonixSystemSpeechVoiceprint.Identify → user_id  (graceful: hint fallback on absence)
 //       │
 //       ▼
 //   Build pilot::Task { source=AUDIO, text=transcript, user_id, … }
 //       │
 //       ▼
-//   SystemPilot.SubmitTask      → forward each PilotEvent as VoiceEvent { kind=PILOT, … }
+//   RobonixSystemPilot.SubmitTask      → forward each PilotEvent as VoiceEvent { kind=PILOT, … }
 //       │
 //       ▼
-//   (if tts_enabled)  SystemSpeechTts.Synthesize → PrimitiveAudioSpeaker.Stream
+//   (if tts_enabled)  RobonixSystemSpeechTts.Synthesize → RobonixPrimitiveAudioSpeaker.Stream
 //       │
 //       ▼
 //   VoiceEvent { kind=SESSION_DONE }
@@ -40,12 +40,12 @@ use uuid::Uuid;
 
 use crate::pb::audio::AudioChunk;
 use crate::pb::contracts::{
-    primitive_audio_mic_client::PrimitiveAudioMicClient,
-    primitive_audio_speaker_client::PrimitiveAudioSpeakerClient,
-    system_pilot_client::SystemPilotClient,
-    system_speech_asr_stream_client::SystemSpeechAsrStreamClient,
-    system_speech_tts_client::SystemSpeechTtsClient,
-    system_speech_voiceprint_client::SystemSpeechVoiceprintClient,
+    robonix_primitive_audio_mic_client::RobonixPrimitiveAudioMicClient,
+    robonix_primitive_audio_speaker_client::RobonixPrimitiveAudioSpeakerClient,
+    robonix_system_pilot_client::RobonixSystemPilotClient,
+    robonix_system_speech_asr_stream_client::RobonixSystemSpeechAsrStreamClient,
+    robonix_system_speech_tts_client::RobonixSystemSpeechTtsClient,
+    robonix_system_speech_voiceprint_client::RobonixSystemSpeechVoiceprintClient,
 };
 use crate::pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
 use crate::pb::pilot::{PilotEvent, Task};
@@ -310,7 +310,7 @@ async fn run_session(
     let mut accumulated_text = String::new();
 
     let pilot_stream_result = async {
-        let mut client = SystemPilotClient::connect(pilot_endpoint.clone())
+        let mut client = RobonixSystemPilotClient::connect(pilot_endpoint.clone())
             .await
             .map_err(|e| tonic::Status::unavailable(e.to_string()))?;
         let resp = client.submit_task(Request::new(task)).await?;
@@ -400,15 +400,15 @@ async fn stream_capture_and_recognize(
 ) -> Result<(Vec<u8>, String)> {
     let mic_endpoint = resolve_endpoint(atlas, "robonix/primitive/audio/mic", mic_pin)
         .await
-        .ok_or_else(|| anyhow::anyhow!("no PrimitiveAudioMic provider registered in Atlas"))?;
+        .ok_or_else(|| anyhow::anyhow!("no RobonixPrimitiveAudioMic provider registered in Atlas"))?;
     let asr_endpoint = resolve_endpoint(atlas, "robonix/system/speech/asr_stream", asr_pin)
         .await
-        .ok_or_else(|| anyhow::anyhow!("no SystemSpeechAsrStream provider registered in Atlas"))?;
+        .ok_or_else(|| anyhow::anyhow!("no RobonixSystemSpeechAsrStream provider registered in Atlas"))?;
 
-    let mut mic_client = PrimitiveAudioMicClient::connect(mic_endpoint.clone())
+    let mut mic_client = RobonixPrimitiveAudioMicClient::connect(mic_endpoint.clone())
         .await
         .map_err(|e| anyhow::anyhow!("connect mic at {mic_endpoint}: {e}"))?;
-    let mut asr_client = SystemSpeechAsrStreamClient::connect(asr_endpoint.clone())
+    let mut asr_client = RobonixSystemSpeechAsrStreamClient::connect(asr_endpoint.clone())
         .await
         .map_err(|e| anyhow::anyhow!("connect asr_stream at {asr_endpoint}: {e}"))?;
 
@@ -603,14 +603,14 @@ async fn identify_user(
                     session_id,
                     &fallback,
                     0.0,
-                    "no SystemSpeechVoiceprint provider — using client hint",
+                    "no RobonixSystemSpeechVoiceprint provider — using client hint",
                 )))
                 .await;
             return fallback;
         }
     };
 
-    let mut client = match SystemSpeechVoiceprintClient::connect(endpoint.clone()).await {
+    let mut client = match RobonixSystemSpeechVoiceprintClient::connect(endpoint.clone()).await {
         Ok(c) => c,
         Err(e) => {
             let _ = tx
@@ -695,10 +695,10 @@ async fn synthesize_and_play(
 ) -> Result<()> {
     let tts_endpoint = resolve_endpoint(atlas, "robonix/system/speech/tts", tts_pin)
         .await
-        .ok_or_else(|| anyhow::anyhow!("no SystemSpeechTts provider"))?;
+        .ok_or_else(|| anyhow::anyhow!("no RobonixSystemSpeechTts provider"))?;
     let speaker_endpoint = resolve_endpoint(atlas, "robonix/primitive/audio/speaker", speaker_pin)
         .await
-        .ok_or_else(|| anyhow::anyhow!("no PrimitiveAudioSpeaker provider"))?;
+        .ok_or_else(|| anyhow::anyhow!("no RobonixPrimitiveAudioSpeaker provider"))?;
 
     let _ = tx
         .send(Ok(event_status(
@@ -711,7 +711,7 @@ async fn synthesize_and_play(
         )))
         .await;
 
-    let mut tts_client = SystemSpeechTtsClient::connect(tts_endpoint.clone())
+    let mut tts_client = RobonixSystemSpeechTtsClient::connect(tts_endpoint.clone())
         .await
         .map_err(|e| anyhow::anyhow!("connect tts {tts_endpoint}: {e}"))?;
     let resp = tts_client
@@ -731,7 +731,7 @@ async fn synthesize_and_play(
         anyhow::bail!("tts returned empty audio");
     }
 
-    let mut speaker_client = PrimitiveAudioSpeakerClient::connect(speaker_endpoint.clone())
+    let mut speaker_client = RobonixPrimitiveAudioSpeakerClient::connect(speaker_endpoint.clone())
         .await
         .map_err(|e| anyhow::anyhow!("connect speaker {speaker_endpoint}: {e}"))?;
     const SLICE: usize = 8 * 1024;

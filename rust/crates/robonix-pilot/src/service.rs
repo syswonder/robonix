@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Author: wheatfox <wheatfox17@icloud.com>
 //
-// `SystemPilot` gRPC handler (contract `robonix/system/pilot`).
+// `RobonixSystemPilot` gRPC handler (contract `robonix/system/pilot`).
 
 use crate::pb::contracts::{
-    system_executor_client::SystemExecutorClient, system_pilot_server::SystemPilot,
+    robonix_system_executor_client::RobonixSystemExecutorClient, robonix_system_pilot_server::RobonixSystemPilot,
 };
 use crate::pb::pilot::{BatchResult, PilotEvent, Plan, SessionStatusEvent, Task};
 use crate::planner::{self, ExecutorConn};
@@ -125,7 +125,7 @@ fn task_is_abort_turn(task: &Task) -> bool {
 }
 
 #[tonic::async_trait]
-impl SystemPilot for PilotServiceImpl {
+impl RobonixSystemPilot for PilotServiceImpl {
     type SubmitTaskStream = ReceiverStream<Result<PilotEvent, Status>>;
 
     async fn submit_task(
@@ -227,7 +227,7 @@ async fn build_executor_conn(
             .await
             .context("connect_to_capability robonix/system/executor")?;
     Ok(ExecutorConn {
-        graph: SystemExecutorClient::new(exec_ch),
+        graph: RobonixSystemExecutorClient::new(exec_ch),
     })
 }
 
