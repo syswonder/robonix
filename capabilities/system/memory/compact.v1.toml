@@ -2,10 +2,7 @@
 id      = "robonix/system/memory/compact"
 version = "1"
 kind    = "service"
-
-
-[io.srv]
-srv = "memory/srv/Compact"
+idl     = "system/memory/srv/Compact.srv"
 
 [mode]
 type = "rpc"

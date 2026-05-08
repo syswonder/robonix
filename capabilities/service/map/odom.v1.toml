@@ -14,9 +14,7 @@
 id      = "robonix/service/map/odom"
 version = "1"
 kind    = "service"
-
-[io.msg]
-msg = "nav_msgs/msg/Odometry"
+idl     = "common_interfaces/nav_msgs/msg/Odometry.msg"
 
 [mode]
 type = "topic_out"

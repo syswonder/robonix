@@ -17,7 +17,7 @@ import time
 
 from robonix_api import Capability
 
-cap = Capability(id="com.robonix.primitive.tiago_lidar", namespace="robonix/primitive/lidar")
+cap = Capability(id="tiago_lidar", namespace="robonix/primitive/lidar")
 
 # ── shared state — the latest rclpy LaserScan we've seen ────────────────────
 state_lock = threading.Lock()

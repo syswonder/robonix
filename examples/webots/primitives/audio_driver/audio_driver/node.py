@@ -30,7 +30,7 @@ import os
 
 from robonix_api import Capability
 
-cap = Capability(id="com.robonix.primitive.audio.alsa", namespace="robonix/primitive/audio")
+cap = Capability(id="audio_driver", namespace="robonix/primitive/audio")
 log = logging.getLogger("audio-driver")
 
 import audio_pb2          # type: ignore  # noqa: E402  (codegen)

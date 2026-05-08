@@ -35,7 +35,7 @@ package:
 # `robonix/primitive/audio/*` contract surface as audio_driver, so
 # consumers (liaison voice path, scene optional audio) don't care
 # which backend is loaded.
-capability_id: com.robonix.primitive.audio.macos
+capability_id: audio_macos_bridge
 
 build: bash scripts/build.sh
 start: bash scripts/start.sh

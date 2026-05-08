@@ -30,9 +30,7 @@
 id      = "robonix/primitive/camera/extrinsics"
 version = "1"
 kind    = "primitive"
-
-[io.msg]
-msg = "geometry_msgs/msg/TransformStamped"
+idl     = "common_interfaces/geometry_msgs/msg/TransformStamped.msg"
 
 [mode]
 type = "topic_out"

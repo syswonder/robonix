@@ -3,9 +3,7 @@
 id      = "robonix/system/pilot"
 version = "1"
 kind    = "service"
-
-[io.srv]
-srv = "pilot/srv/SubmitTask"
+idl     = "system/pilot/srv/SubmitTask.srv"
 
 [mode]
 type = "rpc_server_stream"

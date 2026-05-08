@@ -29,7 +29,7 @@ import numpy as np
 
 from robonix_api import Capability
 
-cap = Capability(id="com.robonix.primitive.tiago_camera", namespace="robonix/primitive/camera")
+cap = Capability(id="tiago_camera", namespace="robonix/primitive/camera")
 
 # ── shared state ─────────────────────────────────────────────────────────────
 state_lock = threading.Lock()

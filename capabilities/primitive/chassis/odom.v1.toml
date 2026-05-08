@@ -3,11 +3,7 @@
 id      = "robonix/primitive/chassis/odom"
 version = "1"
 kind    = "primitive"
-
-
-[io.msg]
-msg = "nav_msgs/msg/Odometry"
+idl     = "common_interfaces/nav_msgs/msg/Odometry.msg"
 
 [mode]
 type = "topic_out"
-

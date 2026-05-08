@@ -31,7 +31,7 @@ faulthandler.enable(all_threads=True)
 
 from robonix_api import Capability  # noqa: E402
 
-cap = Capability(id="com.robonix.system.scene", namespace="robonix/system/scene")
+cap = Capability(id="scene", namespace="robonix/system/scene")
 
 import atlas_pb2 as pb  # pyright: ignore[reportMissingImports] (auto-discover loop uses raw QueryCapabilities)
 
@@ -345,7 +345,7 @@ def _spec_from_iface(
     try:
         conn = atlas_stub.ConnectCapability(
             pb.ConnectCapabilityRequest(
-                consumer_id="com.robonix.system.scene",
+                consumer_id="scene",
                 capability_id=rec.capability_id,
                 contract_id=contract,
                 transport=pb_transport,

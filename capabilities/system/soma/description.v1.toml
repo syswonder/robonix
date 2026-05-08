@@ -6,9 +6,7 @@
 id      = "robonix/system/soma/description"
 version = "1"
 kind    = "service"
-
-[io.srv]
-srv = "soma/srv/GetDescription"
+idl     = "system/soma/srv/GetDescription.srv"
 
 [mode]
 type = "rpc"

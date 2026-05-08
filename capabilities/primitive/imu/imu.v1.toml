@@ -3,11 +3,7 @@
 id      = "robonix/primitive/imu/imu"
 version = "1"
 kind    = "primitive"
-
-
-[io.msg]
-msg = "sensor_msgs/msg/Imu"
+idl     = "common_interfaces/sensor_msgs/msg/Imu.msg"
 
 [mode]
 type = "topic_out"
-

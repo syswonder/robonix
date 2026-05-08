@@ -23,7 +23,7 @@ package:
 # implementations register the same `robonix/primitive/audio/*`
 # contracts, so consumers (liaison voice path, scene optional audio)
 # don't care which one liaison picked.
-capability_id: com.robonix.primitive.audio.alsa
+capability_id: audio_driver
 
 build: bash scripts/build.sh
 start: bash scripts/start.sh

@@ -2,7 +2,7 @@
 """simple_nav — minimal goto-with-avoidance navigation service for webots tiago.
 
 Bundles three layers:
-  - atlas_bridge: registers `com.robonix.example.simple_nav` with atlas,
+  - atlas_bridge: registers `simple_nav` with atlas,
     declares the three navigation MCP capabilities, runs the rclpy node
     + FastMCP server.
   - nav_node: rclpy subscriptions to /odom (pose), /scanner (lidar

@@ -875,7 +875,7 @@ class SpeechDialogServicer(contracts_grpc.SystemSpeechDialogServicer):
 
 from robonix_api import Capability  # noqa: E402
 
-cap = Capability(id="com.robonix.system.speech", namespace="robonix/system/speech")
+cap = Capability(id="speech", namespace="robonix/system/speech")
 
 
 def _try_backend(name: str, factory):

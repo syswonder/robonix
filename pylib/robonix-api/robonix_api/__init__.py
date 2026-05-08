@@ -15,18 +15,15 @@ Typical usage:
 
     from robonix_api import Capability
 
-    cap = Capability(id="com.robonix.ranger.mid360_lidar",
-                     namespace="primitive/lidar")
+    cap = Capability(id="mid360_lidar",
+                     namespace="robonix/primitive/lidar")
 
     @cap.on_init
     def init(cfg):
-        cap.spawn(["ros2", "launch", "livox_ros_driver2",
-                   "msg_MID360_launch.py"], log="livox.log")
         topic = cfg.get("lidar_topic", "/scanner/cloud")
         if not cap.wait_for_topic(topic, "PointCloud2", 30.0):
-            return cap.error(f"no PointCloud2 on {topic}")
-        cap.declare_ros2("primitive/lidar/lidar3d", topic)
-        return cap.ready()
+            raise RuntimeError(f"no PointCloud2 on {topic}")
+        cap.declare_ros2("robonix/primitive/lidar/lidar3d", topic)
 
     if __name__ == "__main__":
         cap.run()

@@ -4,10 +4,7 @@
 id      = "robonix/service/map/occupancy_grid"
 version = "1"
 kind    = "service"
-
-[io.msg]
-msg = "nav_msgs/msg/OccupancyGrid"
+idl     = "common_interfaces/nav_msgs/msg/OccupancyGrid.msg"
 
 [mode]
 type = "topic_out"
-
