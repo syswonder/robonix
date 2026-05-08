@@ -285,6 +285,118 @@ pub async fn channels(endpoint: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn contracts(
+    endpoint: &str,
+    prefix: Option<&str>,
+    json: bool,
+    verbose: bool,
+) -> Result<()> {
+    let atlas = connect(endpoint).await?;
+    let resp = atlas
+        .inner()
+        .list_contracts(atlas_pb::ListContractsRequest {
+            namespace_prefix: prefix.unwrap_or("").to_string(),
+        })
+        .await
+        .context("ListContracts RPC")?
+        .into_inner();
+    if json {
+        let arr: Vec<Value> = resp
+            .contracts
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id,
+                    "version": c.version,
+                    "kind": c.kind,
+                    "mode": c.mode,
+                    "io_msg_type": c.io_msg_type,
+                    "io_srv_type": c.io_srv_type,
+                    "source_toml_path": c.source_toml_path,
+                    "msg_fields": c.msg_fields.iter().map(|f| serde_json::json!({
+                        "name": f.name, "type_name": f.type_name,
+                        "is_primitive": f.is_primitive, "is_array": f.is_array,
+                        "array_size": f.array_size,
+                    })).collect::<Vec<_>>(),
+                    "srv_request_fields": c.srv_request_fields.iter().map(|f| serde_json::json!({
+                        "name": f.name, "type_name": f.type_name,
+                        "is_primitive": f.is_primitive, "is_array": f.is_array,
+                        "array_size": f.array_size,
+                    })).collect::<Vec<_>>(),
+                    "srv_response_fields": c.srv_response_fields.iter().map(|f| serde_json::json!({
+                        "name": f.name, "type_name": f.type_name,
+                        "is_primitive": f.is_primitive, "is_array": f.is_array,
+                        "array_size": f.array_size,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&arr)?);
+        return Ok(());
+    }
+    if resp.contracts.is_empty() {
+        let label = match prefix {
+            Some(p) if !p.is_empty() => format!(" with prefix '{p}'"),
+            _ => String::new(),
+        };
+        println!("{} no contracts loaded{label}", "[contracts]".yellow().bold());
+        return Ok(());
+    }
+    for c in &resp.contracts {
+        let io = if !c.io_msg_type.is_empty() {
+            c.io_msg_type.clone()
+        } else if !c.io_srv_type.is_empty() {
+            c.io_srv_type.clone()
+        } else {
+            "(none)".dimmed().to_string()
+        };
+        println!(
+            "● {}  {} {} {}",
+            c.id.bold(),
+            format!("[{}]", c.kind).dimmed(),
+            format!("mode={}", c.mode).cyan(),
+            format!("idl={io}").dimmed(),
+        );
+        if verbose {
+            if !c.msg_fields.is_empty() {
+                for f in &c.msg_fields {
+                    let arr = if f.is_array {
+                        if f.array_size == 0 {
+                            "[]".to_string()
+                        } else {
+                            format!("[{}]", f.array_size)
+                        }
+                    } else {
+                        String::new()
+                    };
+                    println!("    {} : {}{arr}", f.name, f.type_name);
+                }
+            }
+            if !c.srv_request_fields.is_empty() || !c.srv_response_fields.is_empty() {
+                println!("    {}", "request:".dimmed());
+                for f in &c.srv_request_fields {
+                    println!("      {} : {}", f.name, f.type_name);
+                }
+                println!("    {}", "response:".dimmed());
+                for f in &c.srv_response_fields {
+                    println!("      {} : {}", f.name, f.type_name);
+                }
+            }
+            if !c.source_toml_path.is_empty() {
+                println!("    {} {}", "src:".dimmed(), c.source_toml_path.dimmed());
+            }
+        }
+    }
+    if !verbose {
+        println!(
+            "\n{} {} contract(s); pass -v for field schemas + source paths",
+            "[contracts]".green().bold(),
+            resp.contracts.len()
+        );
+    }
+    Ok(())
+}
+
 pub async fn inspect(endpoint: &str) -> Result<()> {
     let atlas = connect(endpoint).await?;
     let raw = atlas
