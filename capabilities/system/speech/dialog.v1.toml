@@ -1,13 +1,11 @@
 # Voice dialog session manager.
 # Orchestrates mic → ASR → intent → TTS → speaker pipeline.
 # Manages VAD, dialog state machine, and language switching.
-# ROS: `lib/speech/srv/StartDialog.srv`. Stream element: `speech/msg/DialogEvent`.
 [contract]
-id              = "robonix/system/speech/dialog"
-version         = "1"
-kind            = "service"
-idl             = "system/speech/srv/StartDialog.srv"
-stream_response = "system/speech/msg/DialogEvent.msg"
+id      = "robonix/system/speech/dialog"
+version = "1"
+kind    = "service"
+idl     = "system/speech/srv/StartDialog.srv"
 
 [mode]
 type = "rpc_server_stream"
