@@ -345,10 +345,12 @@ pub async fn execute_start(
         .map(String::from)
         .unwrap_or_else(|| "127.0.0.1:50051".to_string());
 
-    let run_root = package_root
-        .parent()
-        .context("Package root has no parent")?;
-    let log_dir = run_root.join("rbnx-boot").join("logs");
+    // Per-package run logs live under <pkg>/rbnx-build/logs (gitignored,
+    // owned by the package itself). Earlier code put them in the parent
+    // dir's rbnx-boot/logs, which created stray empty `rbnx-boot/`
+    // directories sibling to the package whenever `rbnx start` ran from
+    // outside.
+    let log_dir = package_root.join("rbnx-build").join("logs");
     let process_manager = ProcessManager::new(log_dir)?;
 
     output::action("Running", &manifest.package.name);
