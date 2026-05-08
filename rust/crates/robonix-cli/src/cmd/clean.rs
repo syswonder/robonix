@@ -72,9 +72,23 @@ pub async fn execute(
         (Some(pkg), None) => clean_package(&pkg),
         (None, Some(f)) => clean_deploy(&config, &f, cache),
         (None, None) => {
-            // Walk up from cwd to find the enclosing package.
-            let pkg = run_package::find_package_from_cwd()?;
-            clean_package(&pkg)
+            // Default-mode resolution. cwd-local hints in priority order:
+            //   1. ./robonix_manifest.yaml   → deploy clean (sibling of `rbnx boot -f`)
+            //   2. ./package_manifest.yaml or ancestor → package clean
+            //   3. neither → bail with both options surfaced
+            let cwd = std::env::current_dir().context("get cwd")?;
+            let deploy = cwd.join("robonix_manifest.yaml");
+            if deploy.is_file() {
+                return clean_deploy(&config, &deploy, cache);
+            }
+            match run_package::find_package_from_cwd() {
+                Ok(pkg) => clean_package(&pkg),
+                Err(_) => anyhow::bail!(
+                    "no robonix_manifest.yaml in {} and no package_manifest.yaml in any parent. \
+                     Pass `-f <manifest>` (deploy) or `-p <pkg>` (package).",
+                    cwd.display()
+                ),
+            }
         }
     }
 }
