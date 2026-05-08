@@ -71,8 +71,8 @@ fn clean_deploy(config: &Config, manifest_path: &Path, also_cache: bool) -> Resu
         .to_path_buf();
     let raw = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("read {}", manifest_path.display()))?;
-    let root: Value = serde_yaml::from_str(&raw)
-        .with_context(|| format!("parse {}", manifest_path.display()))?;
+    let root: Value =
+        serde_yaml::from_str(&raw).with_context(|| format!("parse {}", manifest_path.display()))?;
     let cache_root = manifest_dir.join("rbnx-boot").join("cache");
 
     output::action("Cleaning deploy", &manifest_path.display().to_string());
@@ -101,17 +101,17 @@ fn clean_deploy(config: &Config, manifest_path: &Path, also_cache: bool) -> Resu
     // system: section — non-builtin entries are real packages under
     // `<robonix_source>/system/<key>/` (memory/scene/speech/…).
     const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison"];
-    if let Some(map) = root.get("system").and_then(|v| v.as_mapping()) {
-        if let Some(source_root) = config.robonix_source_path.as_ref() {
-            for (key, _) in map {
-                let Some(k) = key.as_str() else { continue };
-                if SYSTEM_BUILTINS.contains(&k) {
-                    continue;
-                }
-                let pkg = source_root.join("system").join(k);
-                if pkg.exists() {
-                    pkgs.push(pkg);
-                }
+    if let Some(map) = root.get("system").and_then(|v| v.as_mapping())
+        && let Some(source_root) = config.robonix_source_path.as_ref()
+    {
+        for (key, _) in map {
+            let Some(k) = key.as_str() else { continue };
+            if SYSTEM_BUILTINS.contains(&k) {
+                continue;
+            }
+            let pkg = source_root.join("system").join(k);
+            if pkg.exists() {
+                pkgs.push(pkg);
             }
         }
     }
