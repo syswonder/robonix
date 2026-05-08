@@ -1,15 +1,64 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 """Thin wrapper over the generated atlas_pb2 stubs. Lazy-import (the stubs
 live in each package's rbnx-build/codegen/proto_gen/, only on sys.path after
-ensure_proto_gen() runs)."""
+ensure_proto_gen() runs).
+
+Returns dataclasses from `robonix_api.atlas_types` so callers never see raw
+protobuf messages — keeps the consumer-side API stable across proto edits.
+"""
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
 from typing import Any
 
+from .atlas_types import (
+    CapabilityRecord,
+    CapabilityState,
+    Channel,
+    ContractDescriptor,
+    GrpcParams,
+    McpParams,
+    Ros2Params,
+    Transport,
+    from_pb_contract,
+    from_pb_record,
+)
+
 log = logging.getLogger("robonix_api.atlas")
+
+
+def _resolve_transport(t: Transport | str | int) -> Transport:
+    if isinstance(t, Transport):
+        return t
+    if isinstance(t, int):
+        return Transport(t)
+    name = str(t).strip().lower()
+    return {
+        "ros2": Transport.ROS2,
+        "ros":  Transport.ROS2,
+        "grpc": Transport.GRPC,
+        "mcp":  Transport.MCP,
+        "":     Transport.UNSPECIFIED,
+        "unspecified": Transport.UNSPECIFIED,
+    }.get(name, Transport.UNSPECIFIED)
+
+
+def _resolve_state(s: CapabilityState | str | int) -> CapabilityState:
+    if isinstance(s, CapabilityState):
+        return s
+    if isinstance(s, int):
+        return CapabilityState(s)
+    name = str(s).strip().lower()
+    return {
+        "registered":  CapabilityState.REGISTERED,
+        "initialized": CapabilityState.INITIALIZED,
+        "runnable":    CapabilityState.RUNNABLE,
+        "error":       CapabilityState.ERROR,
+        "terminated":  CapabilityState.TERMINATED,
+    }.get(name, CapabilityState.UNSPECIFIED)
 
 
 class AtlasClient:
@@ -18,18 +67,15 @@ class AtlasClient:
         self._channel: Any = None
         self._stub: Any = None
         self._pb: Any = None  # atlas_pb2 module
-        self._pb_grpc: Any = None  # atlas_pb2_grpc
 
     def _ensure_stub(self) -> None:
         if self._stub is not None:
             return
-        import grpc  # noqa: F401
+        import grpc
         import atlas_pb2  # type: ignore
         import atlas_pb2_grpc  # type: ignore
         self._pb = atlas_pb2
-        self._pb_grpc = atlas_pb2_grpc
-        import grpc as _grpc
-        self._channel = _grpc.insecure_channel(self._endpoint)
+        self._channel = grpc.insecure_channel(self._endpoint)
         self._stub = atlas_pb2_grpc.AtlasStub(self._channel)
 
     @property
@@ -42,27 +88,23 @@ class AtlasClient:
         self._ensure_stub()
         return self._stub
 
-    # ── transport name ↔ enum ────────────────────────────────────────────
-    _TRANSPORT_MAP = {
-        "ros2":         "TRANSPORT_ROS2",
-        "ros":          "TRANSPORT_ROS2",
-        "grpc":         "TRANSPORT_GRPC",
-        "mcp":          "TRANSPORT_MCP",
-        "unspecified":  "TRANSPORT_UNSPECIFIED",
-    }
-
-    def transport_enum(self, name: str):
-        key = name.lower()
-        attr = self._TRANSPORT_MAP.get(key)
-        if attr is None:
-            raise ValueError(f"unknown transport {name!r}; expected one of {list(self._TRANSPORT_MAP)}")
+    def transport_enum(self, name: Transport | str | int):
+        """Translate a Transport / string / int to the protobuf enum value
+        the generated stubs expect."""
+        t = _resolve_transport(name)
+        attr = {
+            Transport.ROS2:        "TRANSPORT_ROS2",
+            Transport.GRPC:        "TRANSPORT_GRPC",
+            Transport.MCP:         "TRANSPORT_MCP",
+            Transport.UNSPECIFIED: "TRANSPORT_UNSPECIFIED",
+        }[t]
         return getattr(self.pb, attr)
 
-    # ── high-level operations ────────────────────────────────────────────
+    # ── registration ─────────────────────────────────────────────────────
     def register_capability(
         self, capability_id: str, namespace: str, capability_md_path: str = "",
     ) -> bool:
-        """True if newly registered, False if already exists (idempotent on re-deploy)."""
+        """True if newly registered, False if already exists (idempotent re-deploy)."""
         import grpc
         try:
             self.stub.RegisterCapability(self.pb.RegisterCapabilityRequest(
@@ -76,120 +118,222 @@ class AtlasClient:
                 return False
             raise
 
+    def unregister_capability(self, capability_id: str) -> bool:
+        try:
+            resp = self.stub.UnregisterCapability(
+                self.pb.UnregisterCapabilityRequest(capability_id=capability_id)
+            )
+            return bool(resp.was_present)
+        except Exception as e:  # noqa: BLE001
+            log.debug("UnregisterCapability(%s): %s", capability_id, e)
+            return False
+
+    # ── interface declares ───────────────────────────────────────────────
     def declare_ros2(
         self, capability_id: str, contract_id: str, topic: str,
         qos_profile: str = "best_effort",
-    ) -> None:
-        self._declare(capability_id, contract_id, "ros2", endpoint=topic,
-                      params=self.pb.TransportParams(
-                          ros2=self.pb.Ros2Params(qos_profile=qos_profile),
-                      ))
+    ) -> str:
+        return self._declare(capability_id, contract_id, Transport.ROS2, endpoint=topic,
+                             params=self.pb.TransportParams(
+                                 ros2=self.pb.Ros2Params(qos_profile=qos_profile),
+                             ))
 
     def declare_grpc(
         self, capability_id: str, contract_id: str, endpoint: str,
         service_name: str, method: str, proto_file: str = "robonix_contracts.proto",
-    ) -> None:
-        self._declare(capability_id, contract_id, "grpc", endpoint=endpoint,
-                      params=self.pb.TransportParams(
-                          grpc=self.pb.GrpcParams(
-                              proto_file=proto_file,
-                              service_name=service_name,
-                              method=method,
-                          ),
-                      ))
+    ) -> str:
+        return self._declare(capability_id, contract_id, Transport.GRPC, endpoint=endpoint,
+                             params=self.pb.TransportParams(
+                                 grpc=self.pb.GrpcParams(
+                                     proto_file=proto_file,
+                                     service_name=service_name,
+                                     method=method,
+                                 ),
+                             ))
 
     def declare_mcp(
         self, capability_id: str, contract_id: str, endpoint: str,
         description: str = "", input_schema_json: str = "{}",
-    ) -> None:
-        self._declare(capability_id, contract_id, "mcp", endpoint=endpoint,
-                      params=self.pb.TransportParams(
-                          mcp=self.pb.McpParams(
-                              description=description,
-                              input_schema_json=input_schema_json,
-                          ),
-                      ))
+    ) -> str:
+        return self._declare(capability_id, contract_id, Transport.MCP, endpoint=endpoint,
+                             params=self.pb.TransportParams(
+                                 mcp=self.pb.McpParams(
+                                     description=description,
+                                     input_schema_json=input_schema_json,
+                                 ),
+                             ))
 
     def _declare(
-        self, capability_id: str, contract_id: str, transport: str,
+        self, capability_id: str, contract_id: str, transport: Transport,
         endpoint: str, params,
-    ) -> None:
+    ) -> str:
         import grpc
         try:
-            self.stub.DeclareInterface(self.pb.DeclareInterfaceRequest(
+            resp = self.stub.DeclareInterface(self.pb.DeclareInterfaceRequest(
                 capability_id=capability_id,
                 contract_id=contract_id,
                 transport=self.transport_enum(transport),
                 endpoint=endpoint,
                 params=params,
             ))
+            return resp.endpoint or endpoint
         except grpc.RpcError as e:
             if e.code() == grpc.StatusCode.ALREADY_EXISTS:
                 log.debug("declare %s/%s/%s already exists; ok",
-                          capability_id, contract_id, transport)
-                return
+                          capability_id, contract_id, transport.name)
+                return endpoint
             raise
 
-    def query_endpoint(
-        self, contract_id: str, transport: str, *, consumer_id: str | None = None,
-    ) -> str | None:
-        """QueryCapabilities + ConnectCapability for the first matching record.
-        Atlas only discloses endpoints after Connect; we send Connect when the
-        caller passes consumer_id so the channel is recorded."""
+    # ── discovery (new) ──────────────────────────────────────────────────
+    def find(
+        self,
+        *,
+        capability_id: str = "",
+        contract_id: str = "",
+        namespace_prefix: str = "",
+        transport: Transport | str | int = Transport.UNSPECIFIED,
+    ) -> list[CapabilityRecord]:
+        """Structured discovery — filters AND together. Empty strings = no
+        filter. Returns a list of `CapabilityRecord` dataclasses."""
         import grpc
         t = self.transport_enum(transport)
         try:
             resp = self.stub.QueryCapabilities(self.pb.QueryCapabilitiesRequest(
-                contract_id=contract_id, transport=t,
+                capability_id=capability_id,
+                contract_id=contract_id,
+                namespace_prefix=namespace_prefix,
+                transport=t,
             ))
         except grpc.RpcError as e:
-            log.warning("QueryCapabilities(%s) failed: %s", contract_id, e)
-            return None
-        for rec in resp.records:
-            for iface in rec.interfaces:
-                if iface.contract_id != contract_id or iface.transport != t:
-                    continue
-                if consumer_id:
-                    try:
-                        conn = self.stub.ConnectCapability(self.pb.ConnectCapabilityRequest(
-                            consumer_id=consumer_id,
-                            capability_id=rec.capability_id,
-                            contract_id=contract_id,
-                            transport=t,
-                        ))
-                        if conn.endpoint:
-                            return conn.endpoint
-                    except grpc.RpcError as e:
-                        log.warning("ConnectCapability(%s) failed: %s", contract_id, e)
-                else:
-                    if iface.endpoint:
-                        return iface.endpoint
-        return None
+            log.warning(
+                "QueryCapabilities(cap=%r, contract=%r, ns_prefix=%r): %s",
+                capability_id, contract_id, namespace_prefix, e,
+            )
+            return []
+        return [from_pb_record(r) for r in resp.records]
 
+    def find_one(self, **filters) -> CapabilityRecord | None:
+        recs = self.find(**filters)
+        return recs[0] if recs else None
+
+    def query_md(self, capability_id: str) -> str:
+        try:
+            resp = self.stub.QueryCapabilityMd(
+                self.pb.QueryCapabilityMdRequest(capability_id=capability_id)
+            )
+            return resp.capability_md
+        except Exception as e:  # noqa: BLE001
+            log.debug("QueryCapabilityMd(%s): %s", capability_id, e)
+            return ""
+
+    def get_contract(self, contract_id: str) -> ContractDescriptor | None:
+        import grpc
+        try:
+            resp = self.stub.QueryContract(
+                self.pb.QueryContractRequest(contract_id=contract_id)
+            )
+        except grpc.RpcError as e:
+            log.debug("QueryContract(%s): %s", contract_id, e)
+            return None
+        if not resp.found:
+            return None
+        return from_pb_contract(resp.contract)
+
+    def list_contracts(self, namespace_prefix: str = "") -> list[ContractDescriptor]:
+        import grpc
+        try:
+            resp = self.stub.ListContracts(
+                self.pb.ListContractsRequest(namespace_prefix=namespace_prefix)
+            )
+        except grpc.RpcError as e:
+            log.warning("ListContracts(prefix=%r): %s", namespace_prefix, e)
+            return []
+        return [from_pb_contract(c) for c in resp.contracts]
+
+    def inspect(self) -> dict:
+        try:
+            resp = self.stub.InspectAtlas(self.pb.InspectAtlasRequest())
+            return json.loads(resp.json) if resp.json else {}
+        except Exception as e:  # noqa: BLE001
+            log.debug("InspectAtlas: %s", e)
+            return {}
+
+    # ── channels ─────────────────────────────────────────────────────────
+    def connect(
+        self,
+        *,
+        consumer_id: str,
+        capability_id: str,
+        contract_id: str,
+        transport: Transport | str | int,
+    ) -> Channel:
+        """Open a consumer→provider edge. Returns a `Channel` context
+        manager — `with atlas.connect(...) as ch: ...` auto-disconnects."""
+        t = self.transport_enum(transport)
+        resp = self.stub.ConnectCapability(self.pb.ConnectCapabilityRequest(
+            consumer_id=consumer_id,
+            capability_id=capability_id,
+            contract_id=contract_id,
+            transport=t,
+        ))
+        # Translate pb params → dataclass params (re-use the iface helper).
+        from .atlas_types import from_pb_params
+        params = from_pb_params(_resolve_transport(transport), resp.params) if resp.HasField("params") else None
+        return Channel(
+            cap_id=capability_id,
+            contract_id=contract_id,
+            transport=_resolve_transport(transport),
+            endpoint=resp.endpoint,
+            channel_id=resp.channel_id,
+            params=params,
+            _closer=self._disconnect,
+        )
+
+    def _disconnect(self, channel_id: str) -> bool:
+        try:
+            resp = self.stub.DisconnectCapability(
+                self.pb.DisconnectCapabilityRequest(channel_id=channel_id)
+            )
+            return bool(resp.was_open)
+        except Exception as e:  # noqa: BLE001
+            log.debug("DisconnectCapability(%s): %s", channel_id, e)
+            return False
+
+    # ── lifecycle / heartbeat ────────────────────────────────────────────
     def heartbeat(self, capability_id: str) -> None:
         try:
             self.stub.Heartbeat(self.pb.HeartbeatRequest(capability_id=capability_id))
         except Exception as e:  # noqa: BLE001
             log.debug("heartbeat: %s", e)
 
-    def set_capability_state(self, capability_id: str, state: str, detail: str = "") -> None:
-        """Push a lifecycle-state transition to atlas. `state` is a string
-        from `LIFECYCLE_STATES` (REGISTERED/INITIALIZED/ONLINE/OFFLINE/ERROR).
-        Best-effort — atlas downtime should not crash a healthy cap."""
+    def set_capability_state(
+        self,
+        capability_id: str,
+        state: CapabilityState | str | int,
+        detail: str = "",
+    ) -> None:
+        """Push a lifecycle state transition. `state` accepts the new
+        CapabilityState enum, an int, or a lower-case string
+        (registered/initialized/runnable/error/terminated).
+        Atlas-side validation is soft in v0.1 — illegal transitions log a
+        warn but are still accepted, so this call won't raise."""
         self._ensure_stub()
-        enum_name = "STATE_" + state.upper()
-        enum_val = getattr(self.pb.CapabilityState, enum_name, None)
-        if enum_val is None:
+        cs = _resolve_state(state)
+        if cs == CapabilityState.UNSPECIFIED:
             log.warning("set_capability_state: unknown state %r", state)
             return
         try:
             self.stub.SetCapabilityState(self.pb.SetCapabilityStateRequest(
-                capability_id=capability_id, state=enum_val, detail=detail,
+                capability_id=capability_id,
+                state=int(cs),
+                detail=detail,
             ))
         except Exception as e:  # noqa: BLE001
-            log.debug("SetCapabilityState(%s, %s): %s", capability_id, state, e)
+            log.debug("SetCapabilityState(%s, %s): %s", capability_id, cs.name, e)
 
-    def start_heartbeat(self, capability_id: str, period_s: float = 15.0) -> threading.Thread:
+    def start_heartbeat(
+        self, capability_id: str, period_s: float = 10.0,
+    ) -> threading.Thread:
         def _loop():
             while True:
                 time.sleep(period_s)
