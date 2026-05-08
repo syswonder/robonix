@@ -5,7 +5,7 @@
 id      = "robonix/system/speech/dialog"
 version = "1"
 kind    = "service"
-idl     = "system/speech/srv/StartDialog.srv"
+idl     = "speech/srv/StartDialog.srv"
 
 [mode]
 type = "rpc_server_stream"

@@ -2,7 +2,7 @@
 id      = "robonix/system/memory/save"
 version = "1"
 kind    = "service"
-idl     = "system/memory/srv/Save.srv"
+idl     = "memory/srv/Save.srv"
 
 [mode]
 type = "rpc"

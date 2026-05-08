@@ -3,7 +3,7 @@
 id      = "robonix/primitive/audio/speaker"
 version = "1"
 kind    = "primitive"
-idl     = "primitive/audio/msg/AudioChunk.msg"
+idl     = "audio/msg/AudioChunk.msg"
 
 [mode]
 type = "topic_in"

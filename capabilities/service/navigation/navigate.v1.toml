@@ -4,7 +4,7 @@
 id      = "robonix/service/navigation/navigate"
 version = "1"
 kind    = "service"
-idl     = "service/navigation/srv/Navigate.srv"
+idl     = "navigation/srv/Navigate.srv"
 
 [mode]
 type = "rpc"

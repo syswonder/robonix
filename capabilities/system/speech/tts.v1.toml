@@ -5,7 +5,7 @@
 id      = "robonix/system/speech/tts"
 version = "1"
 kind    = "service"
-idl     = "system/speech/tts/srv/Synthesize.srv"
+idl     = "tts/srv/Synthesize.srv"
 
 [mode]
 type = "rpc"

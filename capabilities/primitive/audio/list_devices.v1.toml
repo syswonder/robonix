@@ -19,7 +19,7 @@
 id      = "robonix/primitive/audio/list_devices"
 version = "1"
 kind    = "primitive"
-idl     = "primitive/audio/srv/ListAudioDevices.srv"
+idl     = "audio/srv/ListAudioDevices.srv"
 
 [mode]
 type = "rpc"

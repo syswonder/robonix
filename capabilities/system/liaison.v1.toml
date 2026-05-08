@@ -8,13 +8,13 @@
 id      = "robonix/system/liaison"
 version = "1"
 kind    = "service"
-idl     = "system/liaison/srv/SubmitTask.srv"
+idl     = "liaison/srv/SubmitTask.srv"
 
 [mode]
 type = "rpc_server_stream"
 
 [[extra_rpc]]
-idl  = "system/liaison/srv/StartVoiceSession.srv"
+idl  = "liaison/srv/StartVoiceSession.srv"
 type = "rpc_server_stream"
 name = "StartVoiceSession"
 

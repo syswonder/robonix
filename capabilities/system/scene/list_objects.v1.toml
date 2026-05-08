@@ -5,7 +5,7 @@
 id      = "robonix/system/scene/list_objects"
 version = "1"
 kind    = "service"
-idl     = "service/semantic_map/srv/ListObjects.srv"
+idl     = "semantic_map/srv/ListObjects.srv"
 
 [mode]
 type = "rpc"

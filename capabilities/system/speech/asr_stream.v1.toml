@@ -4,7 +4,7 @@
 id      = "robonix/system/speech/asr_stream"
 version = "1"
 kind    = "service"
-idl     = "system/speech/asr/srv/RecognizeStream.srv"
+idl     = "asr/srv/RecognizeStream.srv"
 
 [mode]
 type = "rpc_bidirectional_stream"

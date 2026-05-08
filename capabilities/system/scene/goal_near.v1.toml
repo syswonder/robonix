@@ -4,7 +4,7 @@
 id      = "robonix/system/scene/goal_near"
 version = "1"
 kind    = "service"
-idl     = "service/semantic_map/srv/GoalNear.srv"
+idl     = "semantic_map/srv/GoalNear.srv"
 
 [mode]
 type = "rpc"
