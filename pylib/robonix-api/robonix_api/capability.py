@@ -186,25 +186,29 @@ class Capability:
         self._on_init = fn
         return fn
 
-    def on_activate(self, fn: Callable[[dict], Any]) -> Callable[[dict], Any]:
+    def on_activate(self, fn: Callable[[], Any]) -> Callable[[], Any]:
         """INITIALIZED → RUNNING. Acquire hot runtime resources
         (threads, models, ROS subs, hardware fds). After this returns
-        ok, atlas marks the cap RUNNING and consumers may call its
+        Ok(), atlas marks the cap RUNNING and consumers may call its
         data interfaces. Optional for primitives/services (framework
-        auto-promotes); REQUIRED for skills."""
+        auto-promotes); REQUIRED for skills.
+        Takes no args — only on_init receives cfg."""
         self._on_activate = fn
         return fn
 
     def on_deactivate(self, fn: Callable[[], Any]) -> Callable[[], Any]:
         """RUNNING → INITIALIZED. Release hot resources but keep
         config / atlas registration. Optional for primitives/services;
-        executor calls this on skills via its eviction policy."""
+        executor calls this on skills via its eviction policy.
+        Takes no args."""
         self._on_deactivate = fn
         return fn
 
     def on_shutdown(self, fn: Callable[[], Any]) -> Callable[[], Any]:
         """any → TERMINATED. Last-chance cleanup before process exit
-        (close ports, flush logs). Return value ignored."""
+        (close ports, flush logs). Must return a Result like the other
+        handlers (the value doesn't drive state — cap goes TERMINATED
+        regardless — but the dispatcher still type-checks it)."""
         self._on_shutdown = fn
         return fn
 
