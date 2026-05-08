@@ -17,7 +17,7 @@ os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
 os.environ.setdefault("GLOG_minloglevel", "2")
 logging.getLogger("absl").setLevel(logging.ERROR)
 
-from robonix_api import Capability  # noqa: E402
+from robonix_api import Capability, Ok, Err, Deferred  # noqa: E402
 from std_msgs_mcp import Empty, String  # noqa: E402
 from memsearch import MemSearch  # noqa: E402
 
@@ -97,7 +97,7 @@ def init(cfg):
         asyncio.run(mem.index())
     except Exception as e:
         logging.warning("[memsearch] initial index failed (empty corpus?): %s", e)
-    return cap.ready()
+    return Ok()
 
 
 def main() -> int:

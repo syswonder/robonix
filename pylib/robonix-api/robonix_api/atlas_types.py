@@ -26,7 +26,7 @@ class CapabilityState(IntEnum):
     UNSPECIFIED = 0
     REGISTERED  = 1
     INITIALIZED = 2
-    RUNNABLE    = 3
+    RUNNING     = 3
     ERROR       = 4
     TERMINATED  = 5
 

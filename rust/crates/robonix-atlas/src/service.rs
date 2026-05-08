@@ -177,8 +177,8 @@ fn is_legal_transition(prev: pb::CapabilityState, next: pb::CapabilityState) -> 
     match (prev, next) {
         (StateUnspecified, _) => true,
         (StateRegistered, StateInitialized) => true,
-        (StateInitialized, StateRunnable) => true,
-        (StateRunnable, StateInitialized) => true,
+        (StateInitialized, StateRunning) => true,
+        (StateRunning, StateInitialized) => true,
         (StateError, StateInitialized) => true,
         // self-transitions are no-ops, accept silently
         (a, b) if a == b => true,
@@ -361,7 +361,7 @@ impl AtlasRegistry {
 
     /// Update the cap's lifecycle state. Returns the previous value (or
     /// the inferred fallback when nothing's been pushed yet) so callers
-    /// can log "X went INITIALIZED → RUNNABLE" without a separate query.
+    /// can log "X went INITIALIZED → RUNNING" without a separate query.
     /// Validation is **soft** in v0.1: illegal transitions log a warn
     /// but the new state is still stored. Strict validation will land
     /// in v0.2 once telemetry confirms there are no spurious illegal

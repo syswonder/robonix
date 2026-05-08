@@ -154,7 +154,7 @@ class Capability:
         # Lifecycle state. Source of truth on the cap side; pushed to
         # atlas via SetCapabilityState whenever it transitions (see
         # _set_state below). Initial value is REGISTERED — it flips to
-        # INITIALIZED on Driver(CMD_INIT) success, RUNNABLE on
+        # INITIALIZED on Driver(CMD_INIT) success, RUNNING on
         # CMD_ACTIVATE, back to INITIALIZED on CMD_DEACTIVATE,
         # TERMINATED on CMD_SHUTDOWN.
         self._state: str = "registered"
@@ -187,16 +187,16 @@ class Capability:
         return fn
 
     def on_activate(self, fn: Callable[[dict], Any]) -> Callable[[dict], Any]:
-        """INITIALIZED → RUNNABLE. Acquire hot runtime resources
+        """INITIALIZED → RUNNING. Acquire hot runtime resources
         (threads, models, ROS subs, hardware fds). After this returns
-        ok, atlas marks the cap RUNNABLE and consumers may call its
+        ok, atlas marks the cap RUNNING and consumers may call its
         data interfaces. Optional for primitives/services (framework
         auto-promotes); REQUIRED for skills."""
         self._on_activate = fn
         return fn
 
     def on_deactivate(self, fn: Callable[[], Any]) -> Callable[[], Any]:
-        """RUNNABLE → INITIALIZED. Release hot resources but keep
+        """RUNNING → INITIALIZED. Release hot resources but keep
         config / atlas registration. Optional for primitives/services;
         executor calls this on skills via its eviction policy."""
         self._on_deactivate = fn
@@ -212,14 +212,24 @@ class Capability:
     @property
     def state(self) -> str:
         """Current lifecycle state — one of registered / initialized /
-        runnable / error / terminated. The framework drives this off
+        running / error / terminated. The framework drives this off
         Driver cmd transitions; users typically don't write to it
         directly."""
         return self._state
 
-    def _set_state(self, new_state: str, detail: str = "") -> None:
-        """Update local state + push to atlas. Idempotent on no-change."""
-        new_state = (new_state or "").lower()
+    def _set_state(self, new_state: str | None, detail: str = "") -> None:
+        """Update local state + push to atlas. Idempotent on no-change.
+        `new_state=None` updates only state_detail without changing the
+        state itself (used for Deferred — cap stays where it is, but
+        state_detail explains why)."""
+        if new_state is None:
+            # Detail-only push; keep current state.
+            try:
+                self._atlas.set_capability_state(self.id, self._state, detail)
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        new_state = new_state.lower()
         if new_state == self._state:
             return
         prev = self._state
@@ -237,16 +247,6 @@ class Capability:
             # set_capability_state already logs at debug; swallow to keep
             # the cap usable even if atlas is briefly unreachable.
             pass
-
-    # ── Driver_Response helpers ──────────────────────────────────────────
-    def ready(self, state: str = "ready") -> dict:
-        return {"ok": True, "state": state, "error": ""}
-
-    def error(self, msg: str) -> dict:
-        return {"ok": False, "state": "error", "error": msg}
-
-    def deferred(self, reason: str) -> dict:
-        return {"ok": False, "state": "deferred", "error": reason}
 
     # ── Layer 1: raw atlas declares ──────────────────────────────────────
     def declare_ros2(
@@ -739,15 +739,15 @@ class Capability:
 
         # 6. State promotion. Caps WITH a Driver(CMD_INIT/CMD_ACTIVATE)
         # handshake rely on rbnx boot to drive them through
-        # INITIALIZED → RUNNABLE via the lifecycle servicer's
+        # INITIALIZED → RUNNING via the lifecycle servicer's
         # on_state_change callback (wired above). Caps WITHOUT a driver
         # contract (system services like memory / scene that only expose
         # MCP tools or one-shot gRPC RPCs) are fully ready as soon as
-        # gRPC + MCP are listening — promote to RUNNABLE here so
+        # gRPC + MCP are listening — promote to RUNNING here so
         # `rbnx caps` shows them online instead of stranded at
         # INITIALIZED forever.
         if driver_decl is None and registered_ok:
-            self._set_state("runnable")
+            self._set_state("running")
 
     def _start_mcp_server(self) -> None:
         # Pre-claim a free port via socket(0) → close → hand to uvicorn.
