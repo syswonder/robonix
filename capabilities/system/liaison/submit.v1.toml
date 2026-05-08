@@ -1,0 +1,9 @@
+# Liaison's text/API entry — submit a Task, stream PilotEvent back.
+[contract]
+id      = "robonix/system/liaison/submit"
+version = "1"
+kind    = "system"
+idl     = "liaison/srv/SubmitTask.srv"
+
+[mode]
+type = "rpc_server_stream"

@@ -18,19 +18,6 @@ use super::proto_gen::proto_package_name;
 struct ContractToml {
     contract: ContractMeta,
     mode: ModeSpec,
-    #[serde(default)]
-    extra_rpc: Vec<ExtraRpc>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-struct ExtraRpc {
-    /// IDL reference: lib-relative path without extension. Same form as
-    /// `[contract].idl` — codegen finds `<lib-root>/<idl>.{srv,msg}` in
-    /// the merged lib roots.
-    idl: String,
-    #[serde(rename = "type")]
-    mode_type: String,
-    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,9 +50,8 @@ struct IdlRef<'a> {
 }
 
 /// `(ROS package, srv interface name)` pairs from every contract's
-/// `[contract].idl` (and per-extra_rpc `idl`) when it points at a `.srv`.
-/// Used by proto generation: only these `.srv` files get
-/// `*_Request` / `*_Response` messages; per-package `service` RPCs are not emitted.
+/// `[contract].idl` when it points at a `.srv`. Used by proto generation:
+/// only these `.srv` files get `*_Request` / `*_Response` messages.
 pub fn collect_referenced_srvs(contracts_dir: &Path) -> Result<BTreeSet<(String, String)>> {
     let paths = collect_tomls(contracts_dir)?;
     let mut set = BTreeSet::new();
@@ -86,18 +72,6 @@ pub fn collect_referenced_srvs(contracts_dir: &Path) -> Result<BTreeSet<(String,
                 "contract {}: [contract].idl must be a lib-relative file path ending in .srv or .msg, got {idl:?}",
                 c.contract.id
             ),
-        }
-        for extra in &c.extra_rpc {
-            let p = extra.idl.trim();
-            match parse_idl_path(p) {
-                Some((pkg, "srv", name)) => {
-                    set.insert((pkg.to_string(), name.to_string()));
-                }
-                _ => bail!(
-                    "contract {}: [[extra_rpc]].idl must point to a .srv file, got {p:?}",
-                    c.contract.id
-                ),
-            }
         }
     }
     Ok(set)
@@ -156,24 +130,9 @@ pub fn generate(
     let mut needs_string_wire = false;
 
     let mut proto_types: Vec<(String, ResolvedType, ResolvedType)> = Vec::new();
-    let mut extra_rpcs_resolved: Vec<Vec<(String, String, ResolvedType, ResolvedType)>> =
-        Vec::new();
     for (_, c) in &contracts {
         let (in_t, out_t) = resolve_contract_io(c, resolver, &mut imports, &mut needs_string_wire)?;
         proto_types.push((c.contract.id.clone(), in_t, out_t));
-
-        let mut extras = Vec::new();
-        for extra in &c.extra_rpc {
-            let (ein, eout) = resolve_extra_rpc(
-                extra,
-                &c.contract.id,
-                resolver,
-                &mut imports,
-                &mut needs_string_wire,
-            )?;
-            extras.push((extra.name.clone(), extra.mode_type.clone(), ein, eout));
-        }
-        extra_rpcs_resolved.push(extras);
     }
 
     for imp in &imports {
@@ -194,7 +153,7 @@ pub fn generate(
         writeln!(&mut out)?;
     }
 
-    for (idx, ((_, c), (_, in_t, out_t))) in contracts.iter().zip(proto_types.iter()).enumerate() {
+    for ((_, c), (_, in_t, out_t)) in contracts.iter().zip(proto_types.iter()) {
         let mode = c.mode.mode_type.trim();
         let svc = contract_id_to_service_name(&c.contract.id);
         // RPC method name:
@@ -242,11 +201,6 @@ pub fn generate(
         };
         writeln!(&mut out, "  {rpc}")?;
 
-        for (name, extra_mode, ein, eout) in &extra_rpcs_resolved[idx] {
-            let extra_rpc = format_named_rpc(name, extra_mode, ein, eout);
-            writeln!(&mut out, "  {extra_rpc}")?;
-        }
-
         writeln!(&mut out, "}}")?;
         writeln!(&mut out)?;
     }
@@ -274,54 +228,6 @@ enum ResolvedType {
     /// for the rare case it's needed.
     #[allow(dead_code)]
     StringWire,
-}
-
-fn resolve_extra_rpc(
-    extra: &ExtraRpc,
-    contract_id: &str,
-    resolver: &mut MsgResolver,
-    imports: &mut BTreeSet<String>,
-    needs_string_wire: &mut bool,
-) -> Result<(ResolvedType, ResolvedType)> {
-    let idl = IdlRef {
-        path: extra.idl.trim(),
-    };
-    match extra.mode_type.trim() {
-        "rpc" => resolve_srv_contract_pair(idl.path, resolver, imports, needs_string_wire),
-        "rpc_server_stream" => {
-            resolve_srv_server_stream(&idl, contract_id, resolver, imports, needs_string_wire)
-        }
-        "rpc_client_stream" => {
-            resolve_srv_client_stream(&idl, contract_id, resolver, imports, needs_string_wire)
-        }
-        other => bail!("contract {contract_id}: [[extra_rpc]] unknown type '{other}'"),
-    }
-}
-
-fn format_named_rpc(name: &str, mode: &str, input: &ResolvedType, output: &ResolvedType) -> String {
-    match mode.trim() {
-        "rpc" => format!(
-            "rpc {name}({}) returns ({});",
-            unary_arg(input),
-            unary_return(output)
-        ),
-        "rpc_server_stream" => format!(
-            "rpc {name}({}) returns (stream {});",
-            empty_or_type(input),
-            stream_element(output)
-        ),
-        "rpc_client_stream" => format!(
-            "rpc {name}(stream {}) returns ({});",
-            stream_element(input),
-            unary_return(output)
-        ),
-        "rpc_bidirectional_stream" => format!(
-            "rpc {name}(stream {}) returns (stream {});",
-            stream_element(input),
-            stream_element(output)
-        ),
-        _ => format!("// unknown mode for extra_rpc {name}"),
-    }
 }
 
 fn format_stream_out(method: &str, input: &ResolvedType, output: &ResolvedType) -> String {
