@@ -47,10 +47,11 @@ use super::teardown;
 
 // Driver.srv command discriminators (mirrors lifecycle/srv/Driver.srv).
 const CMD_INIT: u32 = 0;
+const CMD_ACTIVATE: u32 = 1;
 #[allow(dead_code)]
-const CMD_SHUTDOWN: u32 = 1;
-const CMD_UP: u32 = 2;
-const CMD_DOWN: u32 = 3;
+const CMD_DEACTIVATE: u32 = 2;
+#[allow(dead_code)]
+const CMD_SHUTDOWN: u32 = 3;
 // How long to wait for a freshly spawned package to register its driver
 // interface with atlas before giving up.
 const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
@@ -1271,16 +1272,16 @@ async fn spawn_and_init(
         return Ok(sp);
     }
 
-    let up_state = match with_spinner(
+    let activate_state = match with_spinner(
         display_label,
-        "driver(UP)…",
+        "driver(ACTIVATE)…",
         call_driver_cmd(
             atlas,
             &cap_id,
             &driver_contract,
             component,
             &pkg_label,
-            CMD_UP,
+            CMD_ACTIVATE,
             config_json,
         ),
     )
@@ -1294,7 +1295,7 @@ async fn spawn_and_init(
     };
     output::boot_ok(
         display_label,
-        &format!("cap={cap_id}  driver(INIT)={init_state}  driver(UP)={up_state}"),
+        &format!("cap={cap_id}  driver(INIT)={init_state}  driver(ACTIVATE)={activate_state}"),
     );
 
     Ok(sp)
@@ -1336,7 +1337,7 @@ where
 /// Issue one Driver(cmd) RPC against a freshly-connected channel, then
 /// release the channel. Returns the response's `state` string on success;
 /// bail-errors when ok=false or the RPC itself fails. Used by the boot
-/// path for both CMD_INIT and CMD_UP, with identical timeout / channel
+/// path for both CMD_INIT and CMD_ACTIVATE, with identical timeout / channel
 /// hygiene.
 async fn call_driver_cmd(
     atlas: &mut AtlasClient,
@@ -1349,8 +1350,9 @@ async fn call_driver_cmd(
 ) -> Result<String> {
     let cmd_name = match cmd {
         CMD_INIT => "INIT",
-        CMD_UP => "UP",
-        CMD_DOWN => "DOWN",
+        CMD_ACTIVATE => "ACTIVATE",
+        CMD_DEACTIVATE => "DEACTIVATE",
+        CMD_SHUTDOWN => "SHUTDOWN",
         _ => "?",
     };
     let (channel_id, endpoint, _params) = atlas

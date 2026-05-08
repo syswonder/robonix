@@ -473,19 +473,19 @@ async fn main() -> Result<()> {
         )
         .await
         .context("declare liaison voice gRPC interface")?;
-    // Liaison has no Driver(CMD_INIT/CMD_UP) handshake — it's a Rust binary
+    // Liaison has no Driver(CMD_INIT/CMD_ACTIVATE) handshake — it's a Rust binary
     // that's fully ready as soon as the gRPC server is listening. Push the
-    // state explicitly so `rbnx caps` shows ONLINE instead of stopping at the
-    // legacy-fallback INITIALIZED that atlas infers from the first declare.
+    // state explicitly so `rbnx caps` shows RUNNABLE instead of stopping at
+    // the legacy-fallback INITIALIZED that atlas infers from the first declare.
     if let Err(e) = atlas
         .set_capability_state(
             LIAISON_CAPABILITY_ID,
-            atlas_pb::CapabilityState::StateOnline,
+            atlas_pb::CapabilityState::StateRunnable,
             "",
         )
         .await
     {
-        log::warn!("SetCapabilityState(ONLINE) on {LIAISON_CAPABILITY_ID} failed: {e:#}");
+        log::warn!("SetCapabilityState(RUNNABLE) on {LIAISON_CAPABILITY_ID} failed: {e:#}");
     }
     log::info!("registered as '{LIAISON_CAPABILITY_ID}', SystemLiaison gRPC on :{listen_port}");
     eprintln!("robonix-liaison ready on :{listen_port}  (pilot_default={pilot_http})");
