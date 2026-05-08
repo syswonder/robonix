@@ -27,7 +27,8 @@ mod voice;
 use anyhow::{Context, Result};
 use clap::Parser;
 use pb::contracts::{
-    system_liaison_server::{SystemLiaison, SystemLiaisonServer},
+    system_liaison_submit_server::{SystemLiaisonSubmit, SystemLiaisonSubmitServer},
+    system_liaison_voice_server::{SystemLiaisonVoice, SystemLiaisonVoiceServer},
     system_pilot_client::SystemPilotClient,
 };
 use pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
@@ -42,10 +43,12 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-const LIAISON_CAPABILITY_ID: &str = "com.robonix.system.liaison";
+const LIAISON_CAPABILITY_ID: &str = "liaison";
 const LIAISON_NAMESPACE: &str = "robonix/system/liaison";
-const LIAISON_CONTRACT_ID: &str = "robonix/system/liaison";
-const LIAISON_CAP_TOML: &str = "capabilities/system/liaison.v1.toml";
+const LIAISON_SUBMIT_CONTRACT: &str = "robonix/system/liaison/submit";
+const LIAISON_VOICE_CONTRACT: &str = "robonix/system/liaison/voice";
+const LIAISON_SUBMIT_TOML: &str = "capabilities/system/liaison/submit.v1.toml";
+const LIAISON_VOICE_TOML: &str = "capabilities/system/liaison/voice.v1.toml";
 
 /// `lib/system/pilot/msg/Task.msg` source: TEXT=0 AUDIO=1 API=2.
 const INTENT_SOURCE_TEXT: u32 = 0;
@@ -191,7 +194,7 @@ struct LiaisonServiceImpl {
 }
 
 #[tonic::async_trait]
-impl SystemLiaison for LiaisonServiceImpl {
+impl SystemLiaisonSubmit for LiaisonServiceImpl {
     type SubmitTaskStream = ReceiverStream<Result<PilotEvent, Status>>;
 
     async fn submit_task(
@@ -206,7 +209,10 @@ impl SystemLiaison for LiaisonServiceImpl {
             .map_err(|e| Status::unavailable(format!("Pilot unreachable: {e:#}")))?;
         Ok(Response::new(ReceiverStream::new(rx)))
     }
+}
 
+#[tonic::async_trait]
+impl SystemLiaisonVoice for LiaisonServiceImpl {
     type StartVoiceSessionStream =
         Pin<Box<dyn Stream<Item = Result<VoiceEvent, Status>> + Send + 'static>>;
 
@@ -442,17 +448,31 @@ async fn main() -> Result<()> {
     atlas
         .declare_interface(
             LIAISON_CAPABILITY_ID,
-            LIAISON_CONTRACT_ID,
+            LIAISON_SUBMIT_CONTRACT,
             atlas_pb::Transport::Grpc,
             &advertised,
             atlas_client::grpc_params(
-                LIAISON_CAP_TOML,
-                "robonix.contracts.SystemLiaison",
-                "/robonix.contracts.SystemLiaison/SubmitTask",
+                LIAISON_SUBMIT_TOML,
+                "robonix.contracts.SystemLiaisonSubmit",
+                "/robonix.contracts.SystemLiaisonSubmit/SubmitTask",
             ),
         )
         .await
-        .context("declare liaison gRPC interface")?;
+        .context("declare liaison submit gRPC interface")?;
+    atlas
+        .declare_interface(
+            LIAISON_CAPABILITY_ID,
+            LIAISON_VOICE_CONTRACT,
+            atlas_pb::Transport::Grpc,
+            &advertised,
+            atlas_client::grpc_params(
+                LIAISON_VOICE_TOML,
+                "robonix.contracts.SystemLiaisonVoice",
+                "/robonix.contracts.SystemLiaisonVoice/StartVoiceSession",
+            ),
+        )
+        .await
+        .context("declare liaison voice gRPC interface")?;
     // Liaison has no Driver(CMD_INIT/CMD_UP) handshake — it's a Rust binary
     // that's fully ready as soon as the gRPC server is listening. Push the
     // state explicitly so `rbnx caps` shows ONLINE instead of stopping at the
@@ -495,13 +515,14 @@ async fn main() -> Result<()> {
         None
     };
 
-    let svc = LiaisonServiceImpl {
+    let svc = Arc::new(LiaisonServiceImpl {
         pipeline,
         atlas: Arc::clone(&atlas),
         pilot_endpoint_default: pilot_http,
-    };
+    });
     let server = tonic::transport::Server::builder()
-        .add_service(SystemLiaisonServer::new(svc))
+        .add_service(SystemLiaisonSubmitServer::from_arc(Arc::clone(&svc)))
+        .add_service(SystemLiaisonVoiceServer::from_arc(svc))
         .serve(listen_addr);
 
     if let Some(handle) = text_handle {

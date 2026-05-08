@@ -1422,9 +1422,9 @@ fn build_control_task(
 }
 
 async fn notify_session_end(liaison_endpoint: &str, session_id: &str, user_id: &str) -> Result<()> {
-    use crate::pb::contracts::system_liaison_client::SystemLiaisonClient;
+    use crate::pb::contracts::system_liaison_submit_client::SystemLiaisonSubmitClient;
 
-    let mut client = SystemLiaisonClient::connect(liaison_endpoint.to_string())
+    let mut client = SystemLiaisonSubmitClient::connect(liaison_endpoint.to_string())
         .await
         .context("failed to connect to Liaison for session_end")?;
 
@@ -1439,9 +1439,9 @@ async fn notify_session_end(liaison_endpoint: &str, session_id: &str, user_id: &
 }
 
 async fn abort_session(liaison_endpoint: &str, session_id: &str, user_id: &str) -> Result<()> {
-    use crate::pb::contracts::system_liaison_client::SystemLiaisonClient;
+    use crate::pb::contracts::system_liaison_submit_client::SystemLiaisonSubmitClient;
 
-    let mut client = SystemLiaisonClient::connect(liaison_endpoint.to_string())
+    let mut client = SystemLiaisonSubmitClient::connect(liaison_endpoint.to_string())
         .await
         .context("failed to connect to Liaison for abort_turn")?;
 
@@ -1466,7 +1466,7 @@ async fn run_text_intent_with_esc_abort(
     input: &str,
     scroll: &mut u16,
 ) -> Result<()> {
-    use crate::pb::contracts::system_liaison_client::SystemLiaisonClient;
+    use crate::pb::contracts::system_liaison_submit_client::SystemLiaisonSubmitClient;
     use crate::pb::pilot::PilotEvent;
     use tonic::Status;
 
@@ -1475,7 +1475,7 @@ async fn run_text_intent_with_esc_abort(
     let task = build_text_task(session_id, user_id, user_msg);
 
     let _stream_task = tokio::spawn(async move {
-        let mut client = match SystemLiaisonClient::connect(liaison_ep.clone()).await {
+        let mut client = match SystemLiaisonSubmitClient::connect(liaison_ep.clone()).await {
             Ok(c) => c,
             Err(e) => {
                 let _ = tx.send(Err(Status::unavailable(e.to_string()))).await;
@@ -1560,7 +1560,7 @@ async fn run_voice_session_with_esc_abort(
     scroll: &mut u16,
     chat_cfg: &ChatConfig,
 ) -> Result<()> {
-    use crate::pb::contracts::system_liaison_client::SystemLiaisonClient;
+    use crate::pb::contracts::system_liaison_voice_client::SystemLiaisonVoiceClient;
     use crate::pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
     use tonic::Status;
 
@@ -1585,7 +1585,7 @@ async fn run_voice_session_with_esc_abort(
     let liaison_ep = liaison_endpoint.to_string();
 
     let _stream_task = tokio::spawn(async move {
-        let mut client = match SystemLiaisonClient::connect(liaison_ep.clone()).await {
+        let mut client = match SystemLiaisonVoiceClient::connect(liaison_ep.clone()).await {
             Ok(c) => c,
             Err(e) => {
                 let _ = tx.send(Err(Status::unavailable(e.to_string()))).await;
