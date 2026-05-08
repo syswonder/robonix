@@ -31,7 +31,7 @@ from queue import Queue
 from robonix_api import Capability
 
 cap = Capability(
-    id="com.robonix.primitive.audio.macos",
+    id="audio_macos_bridge",
     namespace="robonix/primitive/audio",
 )
 log = logging.getLogger("audio-macos-bridge")

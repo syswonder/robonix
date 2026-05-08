@@ -9,9 +9,7 @@
 id      = "robonix/service/map/pose"
 version = "1"
 kind    = "service"
-
-[io.msg]
-msg = "geometry_msgs/msg/PoseWithCovarianceStamped"
+idl     = "common_interfaces/geometry_msgs/msg/PoseWithCovarianceStamped.msg"
 
 [mode]
 type = "topic_out"

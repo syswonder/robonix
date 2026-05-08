@@ -2,10 +2,7 @@
 id      = "robonix/primitive/lidar/lidar"
 version = "1"
 kind    = "primitive"
-
-[io.msg]
-msg = "sensor_msgs/msg/LaserScan"
+idl     = "common_interfaces/sensor_msgs/msg/LaserScan.msg"
 
 [mode]
 type = "topic_out"
-

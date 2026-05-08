@@ -7,9 +7,7 @@
 id      = "robonix/primitive/chassis/move"
 version = "1"
 kind    = "primitive"
-
-[io.srv]
-srv = "chassis/srv/ExecuteMoveCommand"
+idl     = "primitive/chassis/srv/ExecuteMoveCommand.srv"
 
 [mode]
 type = "rpc"

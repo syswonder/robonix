@@ -2,10 +2,7 @@
 id      = "robonix/primitive/lidar/lidar3d"
 version = "1"
 kind    = "primitive"
-
-[io.msg]
-msg = "sensor_msgs/msg/PointCloud2"
+idl     = "common_interfaces/sensor_msgs/msg/PointCloud2.msg"
 
 [mode]
 type = "topic_out"
-

@@ -15,7 +15,7 @@
 manifestVersion: 1
 
 package:
-  name: com.robonix.system.scene
+  name: scene
   version: 0.1.0
   vendor: robonix
   description: Scene — semantic + geometric live map of the environment.
@@ -24,7 +24,7 @@ package:
 # Atlas cap_id (matched verbatim by rbnx-boot). Same value as package.name
 # here because scene's deployment identity and runtime cap line up; the
 # explicit declaration removes any ambiguity for the wait-for-cap loop.
-capability_id: com.robonix.system.scene
+capability_id: scene
 
 build: bash scripts/build.sh
 start: bash scripts/start.sh

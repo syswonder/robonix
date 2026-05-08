@@ -3,11 +3,7 @@
 id      = "robonix/primitive/camera/rgb"
 version = "1"
 kind    = "primitive"
-
-
-[io.msg]
-msg = "sensor_msgs/msg/Image"
+idl     = "common_interfaces/sensor_msgs/msg/Image.msg"
 
 [mode]
 type = "topic_out"
-

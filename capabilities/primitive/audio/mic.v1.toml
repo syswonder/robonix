@@ -3,10 +3,7 @@
 id      = "robonix/primitive/audio/mic"
 version = "1"
 kind    = "primitive"
-
-[io.msg]
-msg = "audio/msg/AudioChunk"
+idl     = "primitive/audio/msg/AudioChunk.msg"
 
 [mode]
 type = "topic_out"
-

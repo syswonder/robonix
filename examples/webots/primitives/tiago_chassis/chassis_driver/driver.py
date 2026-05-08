@@ -27,7 +27,7 @@ import time
 
 from robonix_api import Capability
 
-cap = Capability(id="com.robonix.primitive.tiago_chassis", namespace="robonix/primitive/chassis")
+cap = Capability(id="tiago_chassis", namespace="robonix/primitive/chassis")
 
 cmd_vel_pub = None  # rclpy publisher to /cmd_vel; created in init()
 

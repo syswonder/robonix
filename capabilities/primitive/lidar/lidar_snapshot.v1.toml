@@ -2,9 +2,7 @@
 id      = "robonix/primitive/lidar/snapshot"
 version = "1"
 kind    = "primitive"
-
-[io.srv]
-srv = "lidar/srv/GetLaserScan"
+idl     = "primitive/lidar/srv/GetLaserScan.srv"
 
 [mode]
 type = "rpc"

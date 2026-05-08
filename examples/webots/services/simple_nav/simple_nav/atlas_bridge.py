@@ -25,7 +25,7 @@ from .nav_node import Goal, NavNode
 
 log = logging.getLogger("simple_nav")
 
-cap = Capability(id="com.robonix.example.simple_nav", namespace="robonix/service/navigation")
+cap = Capability(id="simple_nav", namespace="robonix/service/navigation")
 
 nav: NavNode | None = None
 # We pack our internal goal_id + tolerance_m through the contract by

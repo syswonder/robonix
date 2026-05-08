@@ -5,10 +5,7 @@
 id      = "robonix/system/speech/asr"
 version = "1"
 kind    = "service"
-
-[io.srv]
-srv = "asr/srv/Recognize"
+idl     = "system/speech/asr/srv/Recognize.srv"
 
 [mode]
 type = "rpc"
-

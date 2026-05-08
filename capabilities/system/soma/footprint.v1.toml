@@ -8,9 +8,7 @@
 id      = "robonix/system/soma/footprint"
 version = "1"
 kind    = "service"
-
-[io.srv]
-srv = "soma/srv/GetFootprint"
+idl     = "system/soma/srv/GetFootprint.srv"
 
 [mode]
 type = "rpc"

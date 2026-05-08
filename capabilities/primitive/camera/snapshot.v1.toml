@@ -4,11 +4,7 @@
 id      = "robonix/primitive/camera/snapshot"
 version = "1"
 kind    = "primitive"
-
-
-[io.srv]
-srv = "camera/srv/GetCameraImage"
+idl     = "primitive/camera/srv/GetCameraImage.srv"
 
 [mode]
 type = "rpc"
-

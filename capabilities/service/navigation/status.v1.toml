@@ -4,10 +4,7 @@
 id      = "robonix/service/navigation/status"
 version = "1"
 kind    = "service"
-
-
-[io.srv]
-srv = "navigation/srv/GetNavigationStatus"
+idl     = "service/navigation/srv/GetNavigationStatus.srv"
 
 [mode]
 type = "rpc"

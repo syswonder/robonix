@@ -7,9 +7,7 @@
 id      = "robonix/system/speech/driver"
 version = "1"
 kind    = "service"
-
-[io.srv]
-srv = "lifecycle/srv/Driver"
+idl     = "lifecycle/srv/Driver.srv"
 
 [mode]
 type = "rpc"

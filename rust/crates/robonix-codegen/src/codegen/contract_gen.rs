@@ -17,7 +17,6 @@ use super::proto_gen::proto_package_name;
 #[derive(Debug, Deserialize)]
 struct ContractToml {
     contract: ContractMeta,
-    io: IoSpec,
     mode: ModeSpec,
     #[serde(default)]
     extra_rpc: Vec<ExtraRpc>,
@@ -25,7 +24,10 @@ struct ContractToml {
 
 #[derive(Debug, Deserialize, Clone)]
 struct ExtraRpc {
-    srv: String,
+    /// IDL reference: lib-relative path without extension. Same form as
+    /// `[contract].idl` — codegen finds `<lib-root>/<idl>.{srv,msg}` in
+    /// the merged lib roots.
+    idl: String,
     #[serde(rename = "type")]
     mode_type: String,
     name: String,
@@ -38,27 +40,19 @@ struct ContractMeta {
     version: String,
     #[allow(dead_code)]
     kind: String,
-}
-
-/// Exactly **one** of `[io.msg]` (`msg = …`) or `[io.srv]` (`srv = …`).
-#[derive(Debug, Deserialize, Default)]
-struct IoSpec {
-    #[serde(default)]
-    msg: Option<IoMsgIo>,
-    #[serde(default)]
-    srv: Option<IoSrvIo>,
-}
-
-#[derive(Debug, Deserialize)]
-struct IoMsgIo {
-    msg: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct IoSrvIo {
-    srv: String,
+    /// IDL reference: full path under one of the merged lib roots
+    /// (`<robonix>/capabilities/lib/` or `<pkg>/capabilities/lib/`),
+    /// without the `.srv` / `.msg` extension. The second-to-last path
+    /// segment must be `srv` or `msg`. Examples:
+    ///   `system/pilot/srv/SubmitTask`           → lib/.../srv/SubmitTask.srv
+    ///   `common_interfaces/sensor_msgs/msg/Image` → lib/.../msg/Image.msg
+    idl: String,
+    /// For `rpc_bidirectional_stream` mode, the client→server stream
+    /// element type (lib-relative path to a `.msg`). Required for bidi.
     #[serde(default)]
     stream_request: Option<String>,
+    /// For bidi (and historically server-stream) modes, the server→client
+    /// stream element type (lib-relative path to a `.msg`).
     #[serde(default)]
     stream_response: Option<String>,
 }
@@ -69,8 +63,22 @@ struct ModeSpec {
     mode_type: String,
 }
 
-/// `(ROS package, srv interface name)` pairs from every contract `[io.srv].srv` path.
-/// Used by proto generation: only these `.srv` files get `*_Request` / `*_Response` messages; per-package `service` RPCs are not emitted.
+/// Internal IDL-reference triple after parsing `<lib-relative path>` and
+/// optional bidi-stream element types. Constructed in resolve_contract_io
+/// from the new `[contract].idl` schema; passed to the per-mode resolvers.
+struct IdlRef<'a> {
+    /// Original path string from the toml field, kept for error messages.
+    path: &'a str,
+    /// Bidi `stream_request` field, if any.
+    stream_request: Option<&'a str>,
+    /// Bidi / historical `stream_response` field, if any.
+    stream_response: Option<&'a str>,
+}
+
+/// `(ROS package, srv interface name)` pairs from every contract's
+/// `[contract].idl` (and per-extra_rpc `idl`) when it points at a `.srv`.
+/// Used by proto generation: only these `.srv` files get
+/// `*_Request` / `*_Response` messages; per-package `service` RPCs are not emitted.
 pub fn collect_referenced_srvs(contracts_dir: &Path) -> Result<BTreeSet<(String, String)>> {
     let paths = collect_tomls(contracts_dir)?;
     let mut set = BTreeSet::new();
@@ -79,26 +87,29 @@ pub fn collect_referenced_srvs(contracts_dir: &Path) -> Result<BTreeSet<(String,
             fs::read_to_string(&p).with_context(|| format!("read contract {}", p.display()))?;
         let c: ContractToml =
             toml::from_str(&raw).with_context(|| format!("parse TOML {}", p.display()))?;
-        if let Some(ref io_srv) = c.io.srv {
-            let path = io_srv.srv.trim();
-            if let Some((pkg, "srv", name)) = parse_ros_path(path) {
+        let idl = c.contract.idl.trim();
+        match parse_idl_path(idl) {
+            Some((pkg, "srv", name)) => {
                 set.insert((pkg.to_string(), name.to_string()));
-            } else {
-                bail!(
-                    "contract {}: [io.srv].srv must be pkg/srv/Name, got {path:?}",
-                    c.contract.id
-                );
             }
+            Some((_, "msg", _)) => {
+                // `idl` points at a `.msg` (topic mode); not a srv reference.
+            }
+            _ => bail!(
+                "contract {}: [contract].idl must be a lib-relative file path ending in .srv or .msg, got {idl:?}",
+                c.contract.id
+            ),
         }
         for extra in &c.extra_rpc {
-            let path = extra.srv.trim();
-            if let Some((pkg, "srv", name)) = parse_ros_path(path) {
-                set.insert((pkg.to_string(), name.to_string()));
-            } else {
-                bail!(
-                    "contract {}: [[extra_rpc]].srv must be pkg/srv/Name, got {path:?}",
+            let p = extra.idl.trim();
+            match parse_idl_path(p) {
+                Some((pkg, "srv", name)) => {
+                    set.insert((pkg.to_string(), name.to_string()));
+                }
+                _ => bail!(
+                    "contract {}: [[extra_rpc]].idl must point to a .srv file, got {p:?}",
                     c.contract.id
-                );
+                ),
             }
         }
     }
@@ -199,22 +210,27 @@ pub fn generate(
     for (idx, ((_, c), (_, in_t, out_t))) in contracts.iter().zip(proto_types.iter()).enumerate() {
         let mode = c.mode.mode_type.trim();
         let svc = contract_id_to_service_name(&c.contract.id);
-        // RPC method name = the .srv leaf the contract points at.
-        // `[io.srv].srv = "pilot/srv/SubmitTask"` → method `SubmitTask`.
-        // For the (rare) topic_out / topic_in / msg-only contracts the
-        // method name falls back to the contract id leaf.
-        let method_raw =
-            c.io.srv
-                .as_ref()
-                .and_then(|io| parse_ros_path(io.srv.trim()))
+        // RPC method name:
+        //   - srv-backed contracts (rpc / rpc_*_stream): use the .srv
+        //     filename basename (canonical PascalCase). Existing
+        //     consumers across the codebase expect this.
+        //   - msg-backed contracts (topic_in / topic_out): use the
+        //     contract_id leaf (e.g. `robonix/primitive/audio/mic` →
+        //     `mic` → CamelCased to `Mic`). Don't use the .msg basename
+        //     (`AudioChunk` etc.) — that would change the wire-level
+        //     gRPC method name and break existing client code.
+        let idl_kind = parse_idl_path(c.contract.idl.trim()).map(|(_, kind, _)| kind);
+        let method_raw = if idl_kind == Some("srv") {
+            parse_idl_path(c.contract.idl.trim())
                 .map(|(_, _, name)| name.to_string())
-                .unwrap_or_else(|| {
-                    c.contract
-                        .id
-                        .rsplit_once('/')
-                        .map(|(_, leaf)| leaf.to_string())
-                        .unwrap_or_else(|| c.contract.id.clone())
-                });
+                .unwrap_or_else(|| c.contract.id.clone())
+        } else {
+            c.contract
+                .id
+                .rsplit_once('/')
+                .map(|(_, leaf)| leaf.to_string())
+                .unwrap_or_else(|| c.contract.id.clone())
+        };
         // RPC method names must be UpperCamelCase. `.srv` filenames are
         // already CamelCase by ROS convention so this is identity for
         // them; the fallback (contract id leaf, e.g. `scan_2d` for
@@ -266,6 +282,10 @@ pub fn generate(
 enum ResolvedType {
     ProtoFqn(String),
     GoogleEmpty,
+    /// Reserved escape hatch for raw string-typed contracts. Currently
+    /// unused (no contract opts in); kept so the plumbing is in place
+    /// for the rare case it's needed.
+    #[allow(dead_code)]
     StringWire,
 }
 
@@ -276,18 +296,18 @@ fn resolve_extra_rpc(
     imports: &mut BTreeSet<String>,
     needs_string_wire: &mut bool,
 ) -> Result<(ResolvedType, ResolvedType)> {
-    let io = IoSrvIo {
-        srv: extra.srv.clone(),
+    let idl = IdlRef {
+        path: extra.idl.trim(),
         stream_request: None,
         stream_response: None,
     };
     match extra.mode_type.trim() {
-        "rpc" => resolve_srv_contract_pair(&io.srv, resolver, imports, needs_string_wire),
+        "rpc" => resolve_srv_contract_pair(idl.path, resolver, imports, needs_string_wire),
         "rpc_server_stream" => {
-            resolve_srv_server_stream(&io, contract_id, resolver, imports, needs_string_wire)
+            resolve_srv_server_stream(&idl, contract_id, resolver, imports, needs_string_wire)
         }
         "rpc_client_stream" => {
-            resolve_srv_client_stream(&io, contract_id, resolver, imports, needs_string_wire)
+            resolve_srv_client_stream(&idl, contract_id, resolver, imports, needs_string_wire)
         }
         other => bail!("contract {contract_id}: [[extra_rpc]] unknown type '{other}'"),
     }
@@ -398,94 +418,134 @@ fn resolve_contract_io(
     imports: &mut BTreeSet<String>,
     needs_string_wire: &mut bool,
 ) -> Result<(ResolvedType, ResolvedType)> {
-    let n_msg = c.io.msg.is_some() as u8;
-    let n_srv = c.io.srv.is_some() as u8;
-    if n_msg + n_srv != 1 {
-        bail!(
-            "contract {}: set exactly one of [io.msg] or [io.srv]",
+    let mode = c.mode.mode_type.trim();
+    let idl_path = c.contract.idl.trim();
+    let (_, kind, _) = parse_idl_path(idl_path).ok_or_else(|| {
+        anyhow::anyhow!(
+            "contract {}: [contract].idl must be a lib-relative file path ending in .srv or .msg, got {idl_path:?}",
             c.contract.id
+        )
+    })?;
+
+    // Verify the file actually exists at this path under at least one
+    // configured lib root. The `idl` field is interpreted as the literal
+    // lib-relative file path (with extension); codegen joins each
+    // lib_root with this path and checks file existence.
+    if !idl_path_exists(idl_path, resolver) {
+        bail!(
+            "contract {}: idl path {idl_path:?} doesn't resolve to a file under any lib root ({})",
+            c.contract.id,
+            resolver.include_paths.len()
         );
     }
 
-    let mode = c.mode.mode_type.trim();
-    let s = c.io.srv.as_ref();
-    let m = c.io.msg.as_ref();
+    let idl = IdlRef {
+        path: idl_path,
+        stream_request: c.contract.stream_request.as_deref(),
+        stream_response: c.contract.stream_response.as_deref(),
+    };
 
-    match mode {
-        "rpc" => {
-            let s = s.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "contract {}: [mode].type = \"rpc\" requires [io.srv]",
-                    c.contract.id
-                )
-            })?;
-            resolve_srv_contract_pair(&s.srv, resolver, imports, needs_string_wire)
+    match (mode, kind) {
+        ("rpc", "srv") => resolve_srv_contract_pair(idl.path, resolver, imports, needs_string_wire),
+        ("rpc_server_stream", "srv") => {
+            resolve_srv_server_stream(&idl, &c.contract.id, resolver, imports, needs_string_wire)
         }
-        "rpc_server_stream" => {
-            let s = s.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "contract {}: [mode].type = \"rpc_server_stream\" requires [io.srv]",
-                    c.contract.id
-                )
-            })?;
-            resolve_srv_server_stream(s, &c.contract.id, resolver, imports, needs_string_wire)
+        ("rpc_client_stream", "srv") => {
+            resolve_srv_client_stream(&idl, &c.contract.id, resolver, imports, needs_string_wire)
         }
-        "rpc_client_stream" => {
-            let s = s.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "contract {}: [mode].type = \"rpc_client_stream\" requires [io.srv]",
-                    c.contract.id
-                )
-            })?;
-            resolve_srv_client_stream(s, &c.contract.id, resolver, imports, needs_string_wire)
+        ("rpc_bidirectional_stream", "srv") => {
+            resolve_srv_bidi_stream(&idl, &c.contract.id, resolver, imports, needs_string_wire)
         }
-        "rpc_bidirectional_stream" => {
-            let s = s.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "contract {}: [mode].type = \"rpc_bidirectional_stream\" requires [io.srv]",
-                    c.contract.id
-                )
-            })?;
-            resolve_srv_bidi_stream(s, &c.contract.id, resolver, imports, needs_string_wire)
-        }
-        "topic_out" => {
-            let m = m.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "contract {}: [mode].type = \"topic_out\" requires [io.msg] with `msg`",
-                    c.contract.id
-                )
-            })?;
-            let elem = resolve_io(&m.msg, resolver, imports, needs_string_wire)?;
+        ("topic_out", "msg") => {
+            let elem = resolve_io(idl.path, resolver, imports, needs_string_wire)?;
             Ok((ResolvedType::GoogleEmpty, elem))
         }
-        "topic_in" => {
-            let m = m.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "contract {}: [mode].type = \"topic_in\" requires [io.msg] with `msg`",
-                    c.contract.id
-                )
-            })?;
-            let elem = resolve_io(&m.msg, resolver, imports, needs_string_wire)?;
+        ("topic_in", "msg") => {
+            let elem = resolve_io(idl.path, resolver, imports, needs_string_wire)?;
             Ok((elem, ResolvedType::GoogleEmpty))
         }
-        other => bail!(
-            "unknown [mode].type '{}' in contract {}",
-            other,
+        ("rpc" | "rpc_server_stream" | "rpc_client_stream" | "rpc_bidirectional_stream", "msg") => {
+            bail!(
+                "contract {}: mode={mode:?} requires a `.srv` IDL but [contract].idl points at a `.msg` ({idl_path:?})",
+                c.contract.id
+            )
+        }
+        ("topic_out" | "topic_in", "srv") => {
+            bail!(
+                "contract {}: mode={mode:?} requires a `.msg` IDL but [contract].idl points at a `.srv` ({idl_path:?})",
+                c.contract.id
+            )
+        }
+        (other, _) => bail!(
+            "unknown [mode].type {other:?} in contract {}",
             c.contract.id
         ),
     }
 }
 
+/// Parse the user-written `idl` path. The path includes the file extension
+/// (`.srv` / `.msg`) and is interpreted as the literal lib-relative file
+/// path — codegen will look it up at `<lib_root>/<idl>` for each lib root.
+///
+/// Returns `(pkg, kind, name)` where:
+///   - `kind` is derived from the file extension (`"srv"` / `"msg"`)
+///   - `name` is the file basename without extension (e.g. `SubmitTask`)
+///   - `pkg` is the directory immediately above `srv/` / `msg/` when
+///     the path follows the conventional `<...>/<pkg>/{srv,msg}/<Name>`
+///     layout — needed by the downstream MsgResolver lookup. For flat
+///     layouts (no `/srv/` or `/msg/` subdir), `pkg` is empty: the
+///     existing resolver doesn't index those, and the caller will get
+///     a clear "not indexed" error from the resolver itself.
+fn parse_idl_path(
+    s: &str,
+) -> Option<(
+    &str,         /* pkg */
+    &'static str, /* kind */
+    &str,         /* name */
+)> {
+    let (stem, kind): (&str, &'static str) = if let Some(rest) = s.strip_suffix(".srv") {
+        (rest, "srv")
+    } else if let Some(rest) = s.strip_suffix(".msg") {
+        (rest, "msg")
+    } else {
+        return None;
+    };
+    let parts: Vec<&str> = stem.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let n = parts.len();
+    let name = parts[n - 1];
+    let pkg = if n >= 3 && (parts[n - 2] == "srv" || parts[n - 2] == "msg") {
+        parts[n - 3]
+    } else {
+        ""
+    };
+    Some((pkg, kind, name))
+}
+
+/// Verify the user-written idl path resolves to an actual file under
+/// at least one of the resolver's include_paths. The path is the literal
+/// file path — codegen joins it directly with each lib root.
+fn idl_path_exists(idl: &str, resolver: &MsgResolver) -> bool {
+    for root in &resolver.include_paths {
+        if root.join(idl).is_file() {
+            return true;
+        }
+    }
+    false
+}
+
 fn resolve_srv_server_stream(
-    io: &IoSrvIo,
+    idl: &IdlRef,
     contract_id: &str,
     resolver: &mut MsgResolver,
     imports: &mut BTreeSet<String>,
     needs_string_wire: &mut bool,
 ) -> Result<(ResolvedType, ResolvedType)> {
-    let p = io.srv.trim();
-    let Some((pkg, "srv", name)) = parse_ros_path(p) else {
-        bail!("[io.srv].srv must be pkg/srv/Name, got {p:?}");
+    let p = idl.path;
+    let Some((pkg, "srv", name)) = parse_idl_path(p) else {
+        bail!("[contract].idl must end with /srv/Name for rpc modes, got {p:?}");
     };
     resolver
         .resolve_srv(pkg, name)
@@ -516,15 +576,15 @@ fn resolve_srv_server_stream(
 }
 
 fn resolve_srv_client_stream(
-    io: &IoSrvIo,
+    idl: &IdlRef,
     contract_id: &str,
     resolver: &mut MsgResolver,
     imports: &mut BTreeSet<String>,
     needs_string_wire: &mut bool,
 ) -> Result<(ResolvedType, ResolvedType)> {
-    let p = io.srv.trim();
-    let Some((pkg, "srv", name)) = parse_ros_path(p) else {
-        bail!("[io.srv].srv must be pkg/srv/Name, got {p:?}");
+    let p = idl.path;
+    let Some((pkg, "srv", name)) = parse_idl_path(p) else {
+        bail!("[contract].idl must end with /srv/Name for rpc modes, got {p:?}");
     };
     resolver
         .resolve_srv(pkg, name)
@@ -555,26 +615,24 @@ fn resolve_srv_client_stream(
 }
 
 /// Bidirectional stream: uses `stream_request` and `stream_response` from the
-/// contract TOML as stream element types. Falls back to deriving from the .srv
-/// fields if those hints are absent.
+/// `[contract]` table (siblings of `idl`) as stream element types. Both
+/// values are lib-relative paths to `.msg` files (same form as `idl`).
 fn resolve_srv_bidi_stream(
-    io: &IoSrvIo,
+    idl: &IdlRef,
     contract_id: &str,
     _resolver: &mut MsgResolver,
     imports: &mut BTreeSet<String>,
     _needs_string_wire: &mut bool,
 ) -> Result<(ResolvedType, ResolvedType)> {
-    let in_ref = io
+    let in_ref = idl
         .stream_request
-        .as_deref()
         .ok_or_else(|| anyhow::anyhow!(
-            "contract {contract_id}: [mode] rpc_bidirectional_stream requires [io.srv].stream_request"
+            "contract {contract_id}: [mode] rpc_bidirectional_stream requires [contract].stream_request"
         ))?;
-    let out_ref = io
+    let out_ref = idl
         .stream_response
-        .as_deref()
         .ok_or_else(|| anyhow::anyhow!(
-            "contract {contract_id}: [mode] rpc_bidirectional_stream requires [io.srv].stream_response"
+            "contract {contract_id}: [mode] rpc_bidirectional_stream requires [contract].stream_response"
         ))?;
 
     let in_t = resolve_io(in_ref, _resolver, imports, _needs_string_wire)?;
@@ -631,7 +689,7 @@ fn resolve_srv_contract_pair(
     _needs_string_wire: &mut bool,
 ) -> Result<(ResolvedType, ResolvedType)> {
     let p = path.trim();
-    if let Some((pkg, "srv", name)) = parse_ros_path(p) {
+    if let Some((pkg, "srv", name)) = parse_idl_path(p) {
         resolver
             .resolve_srv(pkg, name)
             .with_context(|| format!("resolve srv {p}"))?;
@@ -643,7 +701,7 @@ fn resolve_srv_contract_pair(
             ResolvedType::ProtoFqn(format!("{}.{}", proto_package_name(pkg), res)),
         ));
     }
-    bail!("[io.srv].srv must be pkg/srv/Name, got {p:?}");
+    bail!("[contract].idl must end with /srv/Name for rpc modes, got {p:?}");
 }
 
 fn field_to_resolved_type(
@@ -666,78 +724,92 @@ fn field_to_resolved_type(
     }
 }
 
+/// Resolve a nested ROS-style type reference from inside a .srv/.msg
+/// file (3-segment `pkg/msg/Name` or `pkg/srv/Name`). Different from
+/// the user-facing top-level `idl` field, which uses the new
+/// extension-bearing path format and is resolved via `parse_idl_path`.
 fn resolve_io(
     spec: &str,
     resolver: &mut MsgResolver,
     imports: &mut BTreeSet<String>,
-    needs_string_wire: &mut bool,
+    _needs_string_wire: &mut bool,
 ) -> Result<ResolvedType> {
     let s = spec.trim();
-    if s == "primitive/string" {
-        *needs_string_wire = true;
-        return Ok(ResolvedType::StringWire);
+    // First try the new extension-bearing path format (used when this
+    // function is called from topic_out / topic_in / bidi resolvers
+    // with the user's `idl` field value).
+    if (s.ends_with(".srv") || s.ends_with(".msg"))
+        && let Some((pkg, kind, name)) = parse_idl_path(s)
+    {
+        return match kind {
+            "msg" => {
+                resolver
+                    .resolve_named_type(pkg, name, None)
+                    .with_context(|| {
+                        format!("resolve msg {pkg}/{name} referenced from contract")
+                    })?;
+                imports.insert(format!("{pkg}.proto"));
+                Ok(ResolvedType::ProtoFqn(format!(
+                    "{}.{}",
+                    proto_package_name(pkg),
+                    name
+                )))
+            }
+            "srv" => {
+                resolver.resolve_srv(pkg, name).with_context(|| {
+                    format!("resolve srv {pkg}/{name} referenced from contract")
+                })?;
+                imports.insert(format!("{pkg}.proto"));
+                let req = format!("{}_Request", name);
+                Ok(ResolvedType::ProtoFqn(format!(
+                    "{}.{}",
+                    proto_package_name(pkg),
+                    req
+                )))
+            }
+            _ => unreachable!(),
+        };
     }
-    if let Some(rest) = s.strip_prefix("protobuf://") {
-        let (pkg, typ) = split_proto_fqn(rest)?;
-        imports.insert(proto_file_for_dot_package(pkg));
-        return Ok(ResolvedType::ProtoFqn(format!("{}.{}", pkg, typ)));
+    // Otherwise: nested ROS-style reference inside an IDL file
+    // (`pkg/msg/Name` / `pkg/Name` for same-pkg refs handled by parser).
+    let parts: Vec<&str> = s.split('/').collect();
+    match parts.as_slice() {
+        [pkg, "msg", name] => {
+            resolver
+                .resolve_named_type(pkg, name, None)
+                .with_context(|| format!("resolve msg {pkg}/{name} referenced from contract"))?;
+            imports.insert(format!("{pkg}.proto"));
+            Ok(ResolvedType::ProtoFqn(format!(
+                "{}.{}",
+                proto_package_name(pkg),
+                name
+            )))
+        }
+        [pkg, "srv", name] => {
+            resolver
+                .resolve_srv(pkg, name)
+                .with_context(|| format!("resolve srv {pkg}/{name} referenced from contract"))?;
+            imports.insert(format!("{pkg}.proto"));
+            let req = format!("{}_Request", name);
+            Ok(ResolvedType::ProtoFqn(format!(
+                "{}.{}",
+                proto_package_name(pkg),
+                req
+            )))
+        }
+        _ => bail!(
+            "unsupported IDL reference {s:?} (expected `<pkg>/msg/<Name>` or `<pkg>/srv/<Name>` for nested refs, or a lib-relative path ending in .srv/.msg for top-level idl)"
+        ),
     }
-    if s == "std_msgs/msg/Empty" {
-        return Ok(ResolvedType::GoogleEmpty);
-    }
-    if let Some((pkg, "msg", name)) = parse_ros_path(s) {
-        resolver
-            .resolve_named_type(pkg, name, None)
-            .with_context(|| format!("resolve msg {pkg}/{name} referenced from contract"))?;
-        imports.insert(format!("{pkg}.proto"));
-        return Ok(ResolvedType::ProtoFqn(format!(
-            "{}.{}",
-            proto_package_name(pkg),
-            name
-        )));
-    }
-    if let Some((pkg, "srv", name)) = parse_ros_path(s) {
-        resolver
-            .resolve_srv(pkg, name)
-            .with_context(|| format!("resolve srv {pkg}/{name} referenced from contract"))?;
-        imports.insert(format!("{pkg}.proto"));
-        let req = format!("{}_Request", name);
-        return Ok(ResolvedType::ProtoFqn(format!(
-            "{}.{}",
-            proto_package_name(pkg),
-            req
-        )));
-    }
-    bail!(
-        "unsupported [io] reference '{s}' (expected pkg/msg/Name, pkg/srv/Name, protobuf://..., or primitive/string)"
-    )
 }
 
+#[allow(dead_code)]
 fn parse_ros_path(s: &str) -> Option<(&str, &str, &str)> {
     let parts: Vec<&str> = s.split('/').collect();
     if parts.len() != 3 {
         return None;
     }
     Some((parts[0], parts[1], parts[2]))
-}
-
-fn split_proto_fqn(s: &str) -> Result<(&str, &str)> {
-    let s = s.trim();
-    let (pkg, typ) = s
-        .rsplit_once('/')
-        .ok_or_else(|| anyhow::anyhow!("protobuf:// expects Package/Type, got {s}"))?;
-    if pkg.is_empty() || typ.is_empty() {
-        bail!("invalid protobuf ref {s}");
-    }
-    Ok((pkg, typ))
-}
-
-fn proto_file_for_dot_package(pkg: &str) -> String {
-    let segs: Vec<&str> = pkg.split('.').collect();
-    if segs.len() >= 2 {
-        return format!("{}_{}.proto", segs[0], segs[1]);
-    }
-    format!("{}.proto", pkg.replace('.', "_"))
 }
 
 /// Convert an arbitrary identifier to UpperCamelCase. Splits on `_`/`-`/

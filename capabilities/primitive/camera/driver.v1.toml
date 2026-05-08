@@ -5,9 +5,7 @@
 id      = "robonix/primitive/camera/driver"
 version = "1"
 kind    = "primitive"
-
-[io.srv]
-srv = "lifecycle/srv/Driver"
+idl     = "lifecycle/srv/Driver.srv"
 
 [mode]
 type = "rpc"
