@@ -20,7 +20,6 @@ cd "$PKG"
 
 BUILD="rbnx-build"
 VENV="$BUILD/venv"
-GEN="$BUILD/codegen"
 CLEAN="${RBNX_BUILD_CLEAN:-}"
 
 if [[ "$CLEAN" == "1" ]]; then
@@ -44,7 +43,7 @@ echo "[build] uv sync (pyproject.toml → $VENV)"
 VIRTUAL_ENV="$PKG/$VENV" uv sync --active --no-managed-python
 
 # ── 3. Codegen (.proto + grpc stubs → rbnx-build/codegen/) ──────────────────
-FLAGS=(--out-dir "$GEN")
+FLAGS=()
 [[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
 echo "[build] rbnx codegen ${FLAGS[*]}"
 rbnx codegen -p "$PKG" "${FLAGS[@]}"

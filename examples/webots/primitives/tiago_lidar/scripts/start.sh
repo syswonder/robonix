@@ -31,7 +31,7 @@ docker exec -i \
   -e ROBONIX_PKG_HOST_DIR="$(cd "$(dirname "$0")/.." && pwd)" \
   -e TIAGO_SCAN_TOPIC="$OUT_TOPIC" \
   -e TIAGO_SCAN_RAW_TOPIC="$RAW_TOPIC" \
-  -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api:/robonix_pkgs/primitives/tiago_lidar/rbnx-build/codegen/proto_gen:/robonix_pkgs/primitives/tiago_lidar/rbnx-build/codegen/robonix_mcp_types" \
+  -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api" \
   robonix_tiago_sim \
   bash -lc "
     set -eo pipefail

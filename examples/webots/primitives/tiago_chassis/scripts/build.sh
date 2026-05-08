@@ -9,7 +9,7 @@ set -euo pipefail
 PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 
 CLEAN="${RBNX_BUILD_CLEAN:-}"
-FLAGS=(--mcp --out-dir "$PKG/rbnx-build/codegen")
+FLAGS=(--mcp)
 [[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
 
 echo "[tiago_chassis/build] rbnx codegen ${FLAGS[*]}"

@@ -95,16 +95,20 @@ pub async fn execute(
     // at the registry level — this keeps codegen consistent).
     let pkg_caps_root: Option<PathBuf> = pkg_caps.is_dir().then_some(pkg_caps);
 
-    // Where to place proto_gen/ and robonix_mcp_types/. Defaults to package root;
-    // override for packages that want them inside a sub-dir (e.g. tiago_bridge/).
+    // Codegen output convention: every package gets
+    // `<pkg>/rbnx-build/codegen/{proto_gen, robonix_mcp_types}`. Both robonix_api
+    // and rbnx-cli rely on this exact layout, so packages don't need to plumb
+    // paths anywhere — `rbnx codegen -p $PKG` is the whole story. The
+    // `--out-dir` flag stays as an escape hatch for unusual layouts but
+    // defaults to the convention.
+    let rbnx_build = pkg_root.join("rbnx-build");
     let out_root = match out_dir {
         Some(d) if d.is_absolute() => d,
         Some(d) => pkg_root.join(d),
-        None => pkg_root.clone(),
+        None => rbnx_build.join("codegen"),
     };
     let proto_gen = out_root.join("proto_gen");
     let mcp_types = out_root.join("robonix_mcp_types");
-    let rbnx_build = pkg_root.join("rbnx-build");
     // Per-invocation staging for the system-wide .proto files. No commits;
     // grpc_tools.protoc reads from here in step 3.
     let proto_staging = rbnx_build.join("proto-staging");
@@ -182,6 +186,16 @@ pub async fn execute(
     }
 
     // 3. Package-local Python stubs via grpc_tools.protoc.
+    //
+    // We shell out to the active python3's `grpcio-tools` package because
+    // generating Python `_pb2.py` + `_pb2_grpc.py` from `.proto` is what
+    // the standard protoc-with-grpc-python-plugin combo is designed to
+    // do, and there's no maintained Rust crate that emits Python stubs.
+    // Probe for both python3 and the module up front — the historical
+    // silent-ignore on failure left packages with "0 generated Servicers"
+    // at runtime and a debug session per missing dep.
+    probe_python_grpc_tools()?;
+
     println!(
         "{} grpc_tools.protoc → {}",
         "[codegen]".bold(),
@@ -205,8 +219,15 @@ pub async fn execute(
     for f in &proto_files {
         protoc.arg(f);
     }
-    // Treat as best-effort — some transitive imports may fail, that's OK.
-    let _ = protoc.status();
+    let status = protoc
+        .status()
+        .with_context(|| "failed to spawn python3 -m grpc_tools.protoc")?;
+    if !status.success() {
+        anyhow::bail!(
+            "python3 -m grpc_tools.protoc failed with {status}. \
+             Re-run with -v / RUST_LOG=debug to see protoc output."
+        );
+    }
 
     // 4. Write PYTHONPATH setup stub so `rbnx start` sees all the right paths.
     let ws_install = rbnx_build.join("ws").join("install");
@@ -291,6 +312,41 @@ fn locate_codegen_bin(rust_root: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Probe the active python3 for `grpc_tools.protoc`. Bails with a single,
+/// copy-pasteable install instruction if either is missing — this is the
+/// only Python dep `rbnx codegen` reaches for, so making it explicit up
+/// front is the entire UX cost of not vendoring protoc + grpc_python_plugin.
+fn probe_python_grpc_tools() -> Result<()> {
+    let py = Command::new("python3").arg("--version").output();
+    if py.is_err() || !py.as_ref().unwrap().status.success() {
+        anyhow::bail!(
+            "python3 not found on PATH. `rbnx codegen` shells out to \
+             `python3 -m grpc_tools.protoc` to emit Python gRPC stubs. \
+             Install python3 (>=3.10) and re-run."
+        );
+    }
+    let mod_probe = Command::new("python3")
+        .args(["-c", "import grpc_tools.protoc"])
+        .output()
+        .with_context(|| "failed to spawn python3 for grpc_tools probe")?;
+    if !mod_probe.status.success() {
+        let py_path = Command::new("python3")
+            .args(["-c", "import sys; print(sys.executable)"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "python3".to_string());
+        anyhow::bail!(
+            "Python module 'grpc_tools' not importable from {py_path}.\n\
+             `rbnx codegen` needs grpcio-tools to emit Python `_pb2.py` + `_pb2_grpc.py`.\n\
+             Install into the python3 above:\n\
+             \n    python3 -m pip install --user grpcio-tools\n"
+        );
+    }
+    Ok(())
 }
 
 /// Build a fresh `Command` invoking `robonix-codegen` either directly
