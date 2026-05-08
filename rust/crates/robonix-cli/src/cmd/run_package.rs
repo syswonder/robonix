@@ -8,11 +8,18 @@
 
 use super::build;
 use anyhow::{Context, Result};
+use robonix_atlas::client::AtlasClient;
+use robonix_atlas::pb as atlas_pb;
 use robonix_cli::Config;
 use robonix_cli::manifest;
 use robonix_cli::output;
 use robonix_cli::process::ProcessManager;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+use tonic::Request;
+use tonic::transport::Endpoint;
+
+use crate::pb::lifecycle::{DriverRequest, DriverResponse};
 
 /// Directory against which relative `-p` is resolved: **the pwd of the command invocation**.
 /// When `cargo run` runs from `robonix/rust`, the process cwd is not the user's shell cwd — wrappers
@@ -488,12 +495,13 @@ pub async fn execute_start(
         .map(String::from)
         .unwrap_or_else(|| "127.0.0.1:50051".to_string());
 
-    // Materialize per-instance config from --config + --set overrides.
-    // Same RBNX_CONFIG_FILE shape rbnx boot writes per package, just
-    // sourced from the user's CLI invocation instead of a deploy
-    // manifest. Empty inputs → no RBNX_CONFIG_FILE export at all
-    // (start body falls back to defaults / env-only).
-    let materialized_cfg = build_start_config(&package_root, config_file, set_overrides)?;
+    // Materialize per-instance config from --config + --set overrides
+    // entirely in memory. The cap process never sees the file — config
+    // is delivered via Driver(CMD_INIT, config_json) only (post-spawn
+    // task below). Empty inputs → no CMD_INIT push (start body still
+    // gets a default Driver(CMD_INIT, "{}") call so it can advance to
+    // INITIALIZED, just with an empty config dict).
+    let materialized_cfg_json = build_start_config_json(config_file, set_overrides)?;
 
     // Per-package run logs live under <pkg>/rbnx-build/logs (gitignored,
     // owned by the package itself). Earlier code put them in the parent
@@ -519,12 +527,8 @@ pub async fn execute_start(
 
     let mut env = std::collections::HashMap::new();
     env.insert("ROBONIX_ATLAS".to_string(), endpoint.clone());
-    if let Some(cfg_path) = &materialized_cfg {
-        env.insert(
-            "RBNX_CONFIG_FILE".to_string(),
-            cfg_path.display().to_string(),
-        );
-        output::sub_step(&format!("Config: {}", cfg_path.display()));
+    if materialized_cfg_json.is_some() {
+        output::sub_step("Config: will deliver via Driver(CMD_INIT) post-register");
     }
     // Force unbuffered stdout/stderr in any Python child the package's
     // start body launches. Without this, Python block-buffers stdout
@@ -570,6 +574,25 @@ pub async fn execute_start(
         format!("{}; {start_body}", prefix_parts.join("; "))
     };
 
+    // Post-spawn task: wait for the cap to register with atlas, then
+    // send Driver(CMD_INIT, config_json=<materialized>). The cap
+    // process never sees the JSON anywhere — atlas + this gRPC call
+    // is the only delivery path. Skipped when no --config / --set was
+    // given (rbnx start without config = run package as-is, init with
+    // default empty config).
+    let init_task = if let Some(json) = materialized_cfg_json {
+        let cap_id_hint = manifest
+            .capability_id
+            .clone()
+            .unwrap_or_else(|| manifest.package.name.clone());
+        let endpoint_for_task = endpoint.clone();
+        Some(tokio::spawn(async move {
+            drive_cmd_init_after_register(&endpoint_for_task, &cap_id_hint, json).await
+        }))
+    } else {
+        None
+    };
+
     let result = process_manager
         .start_process(
             &manifest.package.name,
@@ -579,6 +602,10 @@ pub async fn execute_start(
             &start_command,
         )
         .await?;
+
+    if let Some(handle) = init_task {
+        handle.abort(); // package exited; no point still polling
+    }
     output::check(&format!(
         "{} exited (PID {})",
         manifest.package.name, result.pid
@@ -588,20 +615,182 @@ pub async fn execute_start(
     Ok(())
 }
 
-/// Materialize a per-instance config file from `--config <file>` plus
-/// repeatable `--set k.v=val` overrides. Returns the path the start
-/// body should read via `RBNX_CONFIG_FILE`, or `None` when neither
-/// input was provided (start body falls back to its own defaults).
+const CMD_INIT_DELIVERY: u32 = 0;
+const CAP_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Wait for `cap_id_hint` to appear in atlas with a `*/driver` gRPC
+/// interface, then call Driver(CMD_INIT, config_json). Logs and gives
+/// up after 60s — `rbnx start` continues running the package even if
+/// init delivery fails (the user can manually re-trigger via another
+/// rbnx command).
+async fn drive_cmd_init_after_register(
+    atlas_endpoint: &str,
+    cap_id_hint: &str,
+    config_json: String,
+) {
+    let normalized = if atlas_endpoint.starts_with("http") {
+        atlas_endpoint.to_string()
+    } else {
+        format!("http://{atlas_endpoint}")
+    };
+    let mut atlas = match AtlasClient::connect(&normalized).await {
+        Ok(c) => c,
+        Err(e) => {
+            output::warning(&format!("CMD_INIT delivery: connect atlas failed: {e:#}"));
+            return;
+        }
+    };
+    let started = Instant::now();
+    let hint_lower = cap_id_hint.to_lowercase();
+    loop {
+        if started.elapsed() > CAP_REGISTER_TIMEOUT {
+            output::warning(&format!(
+                "CMD_INIT delivery: cap matching '{cap_id_hint}' did not register \
+                 within {:?}; config not delivered",
+                CAP_REGISTER_TIMEOUT
+            ));
+            return;
+        }
+        let recs = match atlas
+            .query_capabilities("", "", atlas_pb::Transport::Unspecified)
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => {
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue;
+            }
+        };
+        let match_rec = recs.iter().find(|r| {
+            r.capability_id == cap_id_hint
+                || r.capability_id.to_lowercase().contains(&hint_lower)
+        });
+        let Some(rec) = match_rec else {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            continue;
+        };
+        let driver_iface = rec.interfaces.iter().find(|i| {
+            i.transport == atlas_pb::Transport::Grpc as i32
+                && i.contract_id.ends_with("/driver")
+        });
+        let Some(driver) = driver_iface else {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            continue;
+        };
+        let driver_contract = driver.contract_id.clone();
+        let cap_id = rec.capability_id.clone();
+        match call_driver_init(&mut atlas, &cap_id, &driver_contract, config_json.clone()).await {
+            Ok(state) => {
+                output::sub_step(&format!(
+                    "Driver(CMD_INIT) → {cap_id} ok (state={state})"
+                ));
+            }
+            Err(e) => {
+                output::warning(&format!(
+                    "Driver(CMD_INIT) → {cap_id} failed: {e:#}"
+                ));
+            }
+        }
+        return;
+    }
+}
+
+/// Send Driver(CMD_INIT, config_json) to a known cap's `*/driver`
+/// gRPC interface. Mirrors deploy.rs's call_driver_cmd but inlined to
+/// keep run_package.rs free of cross-module coupling.
+async fn call_driver_init(
+    atlas: &mut AtlasClient,
+    cap_id: &str,
+    driver_contract: &str,
+    config_json: String,
+) -> Result<String> {
+    let (channel_id, endpoint, _params) = atlas
+        .connect_capability(
+            "rbnx-cli/start",
+            cap_id,
+            driver_contract,
+            atlas_pb::Transport::Grpc,
+        )
+        .await
+        .with_context(|| format!("ConnectCapability({driver_contract})"))?;
+    let normalized = if endpoint.starts_with("http") {
+        endpoint
+    } else {
+        format!("http://{endpoint}")
+    };
+    let result = async {
+        let channel = Endpoint::new(normalized.clone())
+            .with_context(|| format!("invalid driver endpoint '{normalized}'"))?
+            .connect()
+            .await
+            .with_context(|| format!("dial driver at '{normalized}'"))?;
+        let svc = contract_id_to_service_name(driver_contract);
+        let path: tonic::codegen::http::uri::PathAndQuery =
+            format!("/robonix.contracts.{svc}/Driver")
+                .parse()
+                .with_context(|| format!("build gRPC path for '{driver_contract}'"))?;
+        let mut grpc = tonic::client::Grpc::new(channel);
+        grpc.ready().await.context("gRPC ready")?;
+        let codec: tonic_prost::ProstCodec<DriverRequest, DriverResponse> = Default::default();
+        let resp = tokio::time::timeout(
+            Duration::from_secs(90),
+            grpc.unary(
+                Request::new(DriverRequest {
+                    command: CMD_INIT_DELIVERY,
+                    config_json,
+                }),
+                path,
+                codec,
+            ),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Driver(CMD_INIT) timed out after 90s"))?
+        .context("Driver(CMD_INIT) RPC failed")?;
+        Ok::<_, anyhow::Error>(resp.into_inner())
+    }
+    .await;
+    let _ = atlas.disconnect_capability(&channel_id).await;
+    let r = result?;
+    if !r.ok {
+        anyhow::bail!(
+            "Driver(CMD_INIT) returned ok=false (state={}, error={})",
+            r.state,
+            r.error
+        );
+    }
+    Ok(r.state)
+}
+
+/// `robonix/primitive/chassis/move` → `PrimitiveChassisMove`.
+fn contract_id_to_service_name(contract_id: &str) -> String {
+    let trimmed = contract_id.strip_prefix("robonix/").unwrap_or(contract_id);
+    let mut out = String::new();
+    for seg in trimmed.split('/').filter(|s| !s.is_empty()) {
+        for part in seg.split('_').filter(|s| !s.is_empty()) {
+            let mut ch = part.chars();
+            if let Some(c) = ch.next() {
+                out.push(c.to_ascii_uppercase());
+                out.extend(ch);
+            }
+        }
+    }
+    out
+}
+
+/// Materialize a per-instance config from `--config <file>` plus
+/// repeatable `--set k.v=val` overrides. Returns the merged JSON
+/// string, or `None` when neither input was provided.
 ///
-/// Order of operations: load file (json or yaml) → overlay each
-/// `--set` on the resulting tree → write JSON to
-/// `<pkg>/rbnx-build/instances/cli.json`. Same shape `rbnx boot`
-/// already writes per package, just sourced from CLI flags.
-fn build_start_config(
-    pkg_root: &Path,
+/// Layering: load file (json or yaml) → overlay each `--set` on the
+/// tree → serialise to a single JSON string. The string is delivered
+/// to the cap exclusively via Driver(CMD_INIT, config_json). The cap
+/// process MUST NOT read this through env / disk — that's the v0.1
+/// invariant `rbnx start` and `rbnx boot` both honour.
+fn build_start_config_json(
     config_file: Option<&Path>,
     sets: &[String],
-) -> Result<Option<PathBuf>> {
+) -> Result<Option<String>> {
     if config_file.is_none() && sets.is_empty() {
         return Ok(None);
     }
@@ -628,22 +817,12 @@ fn build_start_config(
         let (key, raw_val) = s
             .split_once('=')
             .with_context(|| format!("--set {s:?}: expected KEY=VALUE"))?;
-        // Try JSON parse for typed values (`true` / `42` / `"x"` / `[1,2]`);
-        // fall back to a bare string when that fails so `--set algo=rtabmap`
-        // does the obvious thing without quoting.
-        let parsed: serde_json::Value =
-            serde_json::from_str(raw_val).unwrap_or_else(|_| serde_json::Value::String(raw_val.into()));
+        let parsed: serde_json::Value = serde_json::from_str(raw_val)
+            .unwrap_or_else(|_| serde_json::Value::String(raw_val.into()));
         merge_dotted(&mut value, key, parsed)?;
     }
 
-    let out_dir = pkg_root.join("rbnx-build").join("instances");
-    std::fs::create_dir_all(&out_dir)
-        .with_context(|| format!("create {}", out_dir.display()))?;
-    let out_path = out_dir.join("cli.json");
-    let pretty = serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into());
-    std::fs::write(&out_path, &pretty)
-        .with_context(|| format!("write {}", out_path.display()))?;
-    Ok(Some(out_path))
+    Ok(Some(serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())))
 }
 
 /// Set `obj[a][b][c] = v` for a dotted key like `"a.b.c"`. Creates
