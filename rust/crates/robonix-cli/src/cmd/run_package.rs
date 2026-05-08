@@ -473,6 +473,8 @@ pub async fn execute_start(
     config: &Config,
     spec: Option<&str>,
     registry_endpoint: Option<&str>,
+    config_file: Option<&Path>,
+    set_overrides: &[String],
 ) -> Result<()> {
     let package_root = match spec {
         Some(s) => resolve_package_path_for_start(config, s)?,
@@ -485,6 +487,13 @@ pub async fn execute_start(
     let endpoint = registry_endpoint
         .map(String::from)
         .unwrap_or_else(|| "127.0.0.1:50051".to_string());
+
+    // Materialize per-instance config from --config + --set overrides.
+    // Same RBNX_CONFIG_FILE shape rbnx boot writes per package, just
+    // sourced from the user's CLI invocation instead of a deploy
+    // manifest. Empty inputs → no RBNX_CONFIG_FILE export at all
+    // (start body falls back to defaults / env-only).
+    let materialized_cfg = build_start_config(&package_root, config_file, set_overrides)?;
 
     // Per-package run logs live under <pkg>/rbnx-build/logs (gitignored,
     // owned by the package itself). Earlier code put them in the parent
@@ -510,6 +519,13 @@ pub async fn execute_start(
 
     let mut env = std::collections::HashMap::new();
     env.insert("ROBONIX_ATLAS".to_string(), endpoint.clone());
+    if let Some(cfg_path) = &materialized_cfg {
+        env.insert(
+            "RBNX_CONFIG_FILE".to_string(),
+            cfg_path.display().to_string(),
+        );
+        output::sub_step(&format!("Config: {}", cfg_path.display()));
+    }
     // Force unbuffered stdout/stderr in any Python child the package's
     // start body launches. Without this, Python block-buffers stdout
     // when it's a pipe (which `rbnx boot` always makes it), and a
@@ -569,5 +585,93 @@ pub async fn execute_start(
     ));
 
     output::success(&format!("Package {} finished", manifest.package.name));
+    Ok(())
+}
+
+/// Materialize a per-instance config file from `--config <file>` plus
+/// repeatable `--set k.v=val` overrides. Returns the path the start
+/// body should read via `RBNX_CONFIG_FILE`, or `None` when neither
+/// input was provided (start body falls back to its own defaults).
+///
+/// Order of operations: load file (json or yaml) → overlay each
+/// `--set` on the resulting tree → write JSON to
+/// `<pkg>/rbnx-build/instances/cli.json`. Same shape `rbnx boot`
+/// already writes per package, just sourced from CLI flags.
+fn build_start_config(
+    pkg_root: &Path,
+    config_file: Option<&Path>,
+    sets: &[String],
+) -> Result<Option<PathBuf>> {
+    if config_file.is_none() && sets.is_empty() {
+        return Ok(None);
+    }
+
+    let mut value: serde_json::Value = match config_file {
+        Some(p) => {
+            let raw = std::fs::read_to_string(p)
+                .with_context(|| format!("read config file {}", p.display()))?;
+            // Try JSON first; fall through to YAML.
+            match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(v) => v,
+                Err(_) => {
+                    let y: serde_yaml::Value = serde_yaml::from_str(&raw)
+                        .with_context(|| format!("parse config {} as JSON or YAML", p.display()))?;
+                    serde_json::to_value(y)
+                        .with_context(|| format!("convert {} YAML→JSON", p.display()))?
+                }
+            }
+        }
+        None => serde_json::Value::Object(serde_json::Map::new()),
+    };
+
+    for s in sets {
+        let (key, raw_val) = s
+            .split_once('=')
+            .with_context(|| format!("--set {s:?}: expected KEY=VALUE"))?;
+        // Try JSON parse for typed values (`true` / `42` / `"x"` / `[1,2]`);
+        // fall back to a bare string when that fails so `--set algo=rtabmap`
+        // does the obvious thing without quoting.
+        let parsed: serde_json::Value =
+            serde_json::from_str(raw_val).unwrap_or_else(|_| serde_json::Value::String(raw_val.into()));
+        merge_dotted(&mut value, key, parsed)?;
+    }
+
+    let out_dir = pkg_root.join("rbnx-build").join("instances");
+    std::fs::create_dir_all(&out_dir)
+        .with_context(|| format!("create {}", out_dir.display()))?;
+    let out_path = out_dir.join("cli.json");
+    let pretty = serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into());
+    std::fs::write(&out_path, &pretty)
+        .with_context(|| format!("write {}", out_path.display()))?;
+    Ok(Some(out_path))
+}
+
+/// Set `obj[a][b][c] = v` for a dotted key like `"a.b.c"`. Creates
+/// intermediate objects as needed; bails on a non-object collision.
+fn merge_dotted(root: &mut serde_json::Value, key: &str, v: serde_json::Value) -> Result<()> {
+    let parts: Vec<&str> = key.split('.').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        anyhow::bail!("--set: empty key");
+    }
+    if !root.is_object() {
+        *root = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let mut cur = root;
+    for p in &parts[..parts.len() - 1] {
+        let map = cur.as_object_mut().ok_or_else(|| {
+            anyhow::anyhow!("--set {key}: cannot descend into non-object at '{p}'")
+        })?;
+        let entry = map
+            .entry((*p).to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !entry.is_object() {
+            *entry = serde_json::Value::Object(serde_json::Map::new());
+        }
+        cur = entry;
+    }
+    let last = parts[parts.len() - 1];
+    cur.as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("--set {key}: parent is not an object"))?
+        .insert(last.to_string(), v);
     Ok(())
 }
