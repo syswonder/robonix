@@ -20,8 +20,17 @@ pub struct ToolResultHistory {
     pub followup_messages: Vec<Message>,
 }
 
-/// Decode the executor's tool result JSON and produce LLM history messages.
+/// Build history messages from one executor tool result.
+///
+/// Normal path: a single `Message` with `role: "tool"` and `tool_call_id = call_id`,
+/// carrying `output` (or a short placeholder) in `content`.
+///
+/// Image path: OpenAI-compatible APIs do not accept image payloads on `tool` messages.
+/// We still emit a `tool` line with a text placeholder, then add a synthetic `user`
+/// message with `image_base64` so `build_openai_messages` can attach a vision part.
 pub fn tool_result_to_messages(call_id: &str, output: &str) -> ToolResultHistory {
+    // One `tool` message in the typical case; image-shaped results add follow-up `user`
+    // vision messages (see doc above).
     let Ok(v) = serde_json::from_str::<serde_json::Value>(output) else {
         return ToolResultHistory {
             tool_messages: vec![Message::tool_result(call_id, output)],

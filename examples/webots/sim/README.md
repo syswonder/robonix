@@ -30,7 +30,12 @@ is `robonix_tiago_sim` (referenced by every driver package's
 - Docker + Docker Compose v2.
 - Host X11 — `DISPLAY` set in the launching shell, plus
   `xhost +local:docker` once per session (`start.sh` does this for you
-  when xhost is available).
+  when xhost is available). **SSH / MobaXterm (MoTTY) forwarding**
+  (`DISPLAY=localhost:10.0` etc.) also needs a valid X11 cookie: use
+  `ssh -Y` (trusted forwarding) so the server creates/updates
+  `~/.Xauthority`, or set `XAUTHORITY` to your host cookie path before
+  `start.sh`. The sim compose file bind-mounts that file into the
+  container as `/root/.Xauthority`.
 - For NVIDIA GPU: `nvidia-container-toolkit` installed on the host.
 
 ## Layout

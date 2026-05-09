@@ -60,12 +60,12 @@ check:
 	cargo clippy --workspace -- -D warnings
 
 install:
-	cargo install --path crates/robonix-codegen  --bin robonix-codegen  $(CARGO_FLAGS)
-	cargo install --path crates/robonix-atlas    --bin robonix-atlas    $(CARGO_FLAGS)
-	cargo install --path crates/robonix-pilot    --bin robonix-pilot    $(CARGO_FLAGS)
-	cargo install --path crates/robonix-executor --bin robonix-executor $(CARGO_FLAGS)
-	cargo install --path crates/robonix-liaison  --bin robonix-liaison  $(CARGO_FLAGS)
-	cargo install --path crates/robonix-cli      --bin rbnx             $(CARGO_FLAGS)
+	cargo install --force --path crates/robonix-codegen  --bin robonix-codegen  $(CARGO_FLAGS)
+	cargo install --force --path crates/robonix-atlas    --bin robonix-atlas    $(CARGO_FLAGS)
+	cargo install --force --path crates/robonix-pilot    --bin robonix-pilot    $(CARGO_FLAGS)
+	cargo install --force --path crates/robonix-executor --bin robonix-executor $(CARGO_FLAGS)
+	cargo install --force --path crates/robonix-liaison  --bin robonix-liaison  $(CARGO_FLAGS)
+	cargo install --force --path crates/robonix-cli      --bin rbnx             $(CARGO_FLAGS)
 	@# Register this clone as the robonix source tree so packages anywhere
 	@# on disk can resolve capabilities/IDL via `rbnx path`. This updates
 	@# ~/.robonix/config.yaml robonix_source_path = <repo-root> (the parent of rust/).
