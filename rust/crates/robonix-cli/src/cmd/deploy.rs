@@ -1242,7 +1242,10 @@ async fn spawn_and_init(
     };
 
     let Some(driver_contract) = driver_contract else {
-        output::boot_ok(short_label(&pkg_label, component), &format!("cap={cap_id}"));
+        // No driver contract — system caps auto-promote to ACTIVE on
+        // their own once gRPC + MCP are listening. We don't drive INIT
+        // / ACTIVATE for them.
+        output::boot_ok(short_label(&pkg_label, component), "ACTIVE  (no driver)");
         return Ok(sp);
     };
 
@@ -1272,9 +1275,11 @@ async fn spawn_and_init(
     };
 
     if component == "skill" {
+        // Skills stop at INACTIVE post-INIT; the executor sends
+        // CMD_ACTIVATE on first MCP call (lazy-activate).
         output::boot_ok(
             display_label,
-            &format!("cap={cap_id}  driver(INIT)={init_state}"),
+            &format!("{}  (skill — awaits executor activate)", init_state.to_uppercase()),
         );
         return Ok(sp);
     }
@@ -1300,9 +1305,14 @@ async fn spawn_and_init(
             return Err(e);
         }
     };
+    // Boot succeeded: cap walked REGISTERED → INACTIVE → ACTIVE. Show
+    // only the final state — the two intermediate driver calls already
+    // got their own spinner lines and OK ticks above. cap_id is the
+    // leftmost label so we don't repeat it here.
+    let _ = init_state;  // intermediate, only kept for the assertion below
     output::boot_ok(
         display_label,
-        &format!("cap={cap_id}  driver(INIT)={init_state}  driver(ACTIVATE)={activate_state}"),
+        &activate_state.to_uppercase(),
     );
 
     Ok(sp)
