@@ -114,8 +114,8 @@ def init(cfg):
         topic=twist_in_topic, msg_type=Twist, qos="reliable",
         declare=False,
     )
-    cap.declare_ros2("robonix/primitive/chassis/twist_in", twist_in_topic, qos="reliable")
-    cap.declare_ros2("robonix/primitive/chassis/odom",     odom_topic,     qos="reliable")
+    cap.declare_ros2_topic("robonix/primitive/chassis/twist_in", twist_in_topic, qos="reliable")
+    cap.declare_ros2_topic("robonix/primitive/chassis/odom",     odom_topic,     qos="reliable")
     return Ok()
 
 

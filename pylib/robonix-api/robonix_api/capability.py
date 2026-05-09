@@ -253,11 +253,22 @@ class Capability:
             pass
 
     # ── Layer 1: raw atlas declares ──────────────────────────────────────
-    def declare_ros2(
-        self, contract_id: str, topic: str, qos: str = "best_effort"
+    def declare_ros2_topic(
+        self, contract_id: str, topic: str, *, qos: str = "best_effort"
     ) -> None:
+        """Declare a ROS 2 topic endpoint for a topic_in / topic_out contract.
+        `qos` is one of the QoS preset strings (see dev guide §10.8)."""
         self._check_mode("ros2", contract_id)
         self._atlas.declare_ros2(self.id, _full_id(contract_id), topic, qos)
+
+    def declare_ros2_service(
+        self, contract_id: str, service: str
+    ) -> None:
+        """Declare a ROS 2 service endpoint for an rpc contract over
+        the ROS 2 transport. ROS 2 service QoS is fixed (reliable,
+        depth 10) — no `qos` param."""
+        self._check_mode("ros2", contract_id)
+        self._atlas.declare_ros2(self.id, _full_id(contract_id), service, "")
 
     def declare_grpc(
         self,
