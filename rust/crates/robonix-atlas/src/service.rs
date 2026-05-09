@@ -1012,6 +1012,7 @@ fn read_env_u64(name: &str, default: u64) -> u64 {
 ///      stop dialing a corpse).
 ///   2. state is TERMINATED AND last_heartbeat older than `gc_after_ms` →
 ///      remove the record entirely.
+///
 /// Phase 1 keeps a debug-friendly "yes that cap died, here's why" view in
 /// `rbnx caps` for `gc_after_ms` after the lapse; phase 2 frees memory.
 async fn eviction_loop(
