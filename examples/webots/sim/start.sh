@@ -41,6 +41,15 @@ if [[ -z "${DISPLAY:-}" ]]; then
     : "${DISPLAY:=:0}"; export DISPLAY
 fi
 
+# X11 cookie file for Docker bind-mount (SSH/Moba MoTTY forwarding uses
+# localhost:N and requires MIT-MAGIC-COOKIE in the container). compose.yaml
+# mounts this path to /root/.Xauthority.
+export ROBONIX_HOST_XAUTH="${ROBONIX_HOST_XAUTH:-${XAUTHORITY:-$HOME/.Xauthority}}"
+if [[ ! -f "$ROBONIX_HOST_XAUTH" ]]; then
+    echo "[sim/start] warning: X11 auth file missing: $ROBONIX_HOST_XAUTH"
+    echo "[sim/start] For SSH forwarding use: ssh -Y user@host (or trusted -X). For local :0, log in to a desktop session once so ~/.Xauthority exists."
+fi
+
 CF=(-f compose.yaml)
 if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]] && command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
   CF+=(-f compose.gpu.yaml)

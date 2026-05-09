@@ -22,6 +22,7 @@ docker cp "$RVIZ_CFG_HOST" "$SIM_CT":"$RVIZ_CFG_CT" >/dev/null
 # container DDS lines up with mapping/scene.
 docker exec -i \
     -e DISPLAY="${DISPLAY:-:0}" \
+    -e XAUTHORITY=/root/.Xauthority \
     -e QT_X11_NO_MITSHM=1 \
     "$SIM_CT" bash -lc "
         set -eo pipefail

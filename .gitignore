@@ -54,3 +54,5 @@ target
 .cursor/
 .claude/
 rbnx-boot
+env.sh
+uv.lock

@@ -119,7 +119,7 @@ async fn main() -> Result<()> {
     }
 
     // Atlas evicts caps after ~60s without a heartbeat. Send one every
-    // 20s so we stay registered for the lifetime of the process.
+    // 20s so we stay registered for the lifetime of the executor process.
     {
         let mut hb = atlas.clone();
         let cap_id = cfg.capability_id.clone();

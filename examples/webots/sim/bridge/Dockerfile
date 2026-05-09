@@ -9,6 +9,7 @@ FROM osrf/ros:humble-desktop-full
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libxcb-cursor0 \
     python3-pip \
     python3-colcon-common-extensions \
     ros-humble-nav2-msgs \
