@@ -3,7 +3,7 @@
 """Audio bridge daemon — runs on the macOS host that physically owns
 the mic + speakers, exposes both as WebSocket endpoints over LAN to
 the Linux side of the robonix stack (see
-`../audio_macos_bridge/node.py`).
+`../audio_macos_bridge/main.py`).
 
 Three endpoints, all `ws://0.0.0.0:60000/...`:
 

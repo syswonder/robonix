@@ -70,13 +70,13 @@ bash scripts/build.sh
 ```bash
 # Normal mode (auto-scan devices + Atlas registration)
 export PYTHONPATH=$(pwd)/proto_gen:${PYTHONPATH:-}
-python -m audio_driver.node
+python -m audio_driver.main
 
 # Standalone mode (skip Atlas registration)
-AUDIO_DRIVER_STANDALONE=1 python -m audio_driver.node
+AUDIO_DRIVER_STANDALONE=1 python -m audio_driver.main
 
 # Specify devices (override auto-detection)
-AUDIO_MIC_DEVICE=hw:1,0 AUDIO_SPEAKER_DEVICE=hw:0,0 python -m audio_driver.node
+AUDIO_MIC_DEVICE=hw:1,0 AUDIO_SPEAKER_DEVICE=hw:0,0 python -m audio_driver.main
 ```
 
 ### 4. Launch via Robonix

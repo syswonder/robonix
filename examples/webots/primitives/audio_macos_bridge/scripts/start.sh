@@ -10,4 +10,4 @@ cd "$PKG_ROOT"
 
 export PYTHONPATH="$(rbnx path robonix-api):$PKG_ROOT:${PYTHONPATH:-}"
 
-exec python3 -m audio_macos_bridge.node
+exec python3 -m audio_macos_bridge.main
