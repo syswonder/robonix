@@ -23,35 +23,35 @@ system:
     log: info
   nexus:
     log: info
-  memory:
-    backend: sqlite
-    log: info
-  speech:
-    log: info
+  # memory:
+  #   backend: sqlite
+  #   log: info
+  # speech:
+  #   log: info
 
-    # ── Whisper (one-shot, asr contract) ────────────────────────────
-    # `robonix/system/speech/asr` takes a whole utterance and returns
-    # one transcript. Costs 6 GB of weights. Disabled by default since
-    # rbnx chat / dialog use the streaming path below.
-    disable_whisper: true
-    # asr_model:        openai/whisper-large-v3
-    # asr_device:       cuda          # cuda | cpu
-    # asr_chunk_length: 30.0          # long-form chunk seconds
-    # asr_batch_size:   4
+  #   # ── Whisper (one-shot, asr contract) ────────────────────────────
+  #   # `robonix/system/speech/asr` takes a whole utterance and returns
+  #   # one transcript. Costs 6 GB of weights. Disabled by default since
+  #   # rbnx chat / dialog use the streaming path below.
+  #   disable_whisper: true
+  #   # asr_model:        openai/whisper-large-v3
+  #   # asr_device:       cuda          # cuda | cpu
+  #   # asr_chunk_length: 30.0          # long-form chunk seconds
+  #   # asr_batch_size:   4
 
-    # ── FunASR (streaming, asr_stream contract) ─────────────────────
-    # Handles `robonix/system/speech/asr_stream` — paraformer-zh-stream
-    # bidi gRPC, used by liaison voice + rbnx ask. Tiny (~80 MB).
-    # `cuda` is the production default — CPU is fast enough on paper
-    # but the per-chunk decode latency drops words on real hardware.
-    # If scene's YOLO+SAM+CLIP already filled the card, set `auto`
-    # for graceful CPU fallback, or `cpu` to force CPU.
-    funasr_device: cuda
-    # funasr_model:      paraformer-zh-streaming
-    # funasr_chunk_size: [0, 10, 5]   # [left, current, right]
+  #   # ── FunASR (streaming, asr_stream contract) ─────────────────────
+  #   # Handles `robonix/system/speech/asr_stream` — paraformer-zh-stream
+  #   # bidi gRPC, used by liaison voice + rbnx ask. Tiny (~80 MB).
+  #   # `cuda` is the production default — CPU is fast enough on paper
+  #   # but the per-chunk decode latency drops words on real hardware.
+  #   # If scene's YOLO+SAM+CLIP already filled the card, set `auto`
+  #   # for graceful CPU fallback, or `cpu` to force CPU.
+  #   funasr_device: cuda
+  #   # funasr_model:      paraformer-zh-streaming
+  #   # funasr_chunk_size: [0, 10, 5]   # [left, current, right]
 
-    # ── Edge TTS (synthesize / synthesize_stream contracts) ─────────
-    tts_voice: zh-CN-XiaoxiaoNeural
+  #   # ── Edge TTS (synthesize / synthesize_stream contracts) ─────────
+  #   tts_voice: zh-CN-XiaoxiaoNeural
   scene:
     log: info
 
@@ -111,21 +111,21 @@ service:
   # /cmd_vel. Re-validates the cached path on every /map update and
   # auto-replans if a waypoint becomes blocked. 360° lidar emergency
   # stop. Target_yaw align phase.
-  - name: simple_nav
-    path: ./services/simple_nav
-    config:
-      # just examples place holders, we passthrough it to the service when calling INIT
-      robot_radius: 0.25
-      follower_hz: 20
-      max_linear: 0.5
-      max_angular: 1.0
-      pid_linear: [ 0.8, 0.0, 0.1 ]
-      pid_angular: [ 1.5, 0.0, 0.2 ]
-      goal_tolerance: 0.3
-      goal_yaw_tolerance: 0.2
-      timeout: 120
-      planner_diagonal: true
-      planner_max_iters: 500000
+  # - name: simple_nav
+  #   path: ./services/simple_nav
+  #   config:
+  #     # just examples place holders, we passthrough it to the service when calling INIT
+  #     robot_radius: 0.25
+  #     follower_hz: 20
+  #     max_linear: 0.5
+  #     max_angular: 1.0
+  #     pid_linear: [ 0.8, 0.0, 0.1 ]
+  #     pid_angular: [ 1.5, 0.0, 0.2 ]
+  #     goal_tolerance: 0.3
+  #     goal_yaw_tolerance: 0.2
+  #     timeout: 120
+  #     planner_diagonal: true
+  #     planner_max_iters: 500000
 
 skill:
   # explore_rbnx — autonomous frontier exploration.

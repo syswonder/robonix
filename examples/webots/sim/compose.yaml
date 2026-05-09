@@ -32,6 +32,9 @@ services:
       # Webots checks USER/USERNAME for its IPC path (/tmp/webots/$USER/...).
       USER: "root"
       DISPLAY: "${DISPLAY:-:0}"
+      # SSH/Moba X11 forwarding (DISPLAY=localhost:N) needs the host cookie
+      # inside the container; bind-mount via ROBONIX_HOST_XAUTH (set in start.sh).
+      XAUTHORITY: /root/.Xauthority
       QT_X11_NO_MITSHM: "1"
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
       WEBOTS_WARMUP_SEC: "${WEBOTS_WARMUP_SEC:-25}"
@@ -50,6 +53,8 @@ services:
       no_proxy: "${no_proxy:-localhost,127.0.0.1}"
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # X11 auth cookie (required for ssh -Y / MoTTY etc.; optional for some :0 setups)
+      - ${ROBONIX_HOST_XAUTH:-${XAUTHORITY:-${HOME}/.Xauthority}}:/root/.Xauthority:ro
       # Intel/AMD Mesa DRI (same as docker/run.sh -v /dev/dri)
       - /dev/dri:/dev/dri:rw
       # Persist Webots asset cache (proto + textures) across container re-creates.
