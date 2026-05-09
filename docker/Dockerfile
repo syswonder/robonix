@@ -78,7 +78,9 @@ RUN pip3 install --no-cache-dir \
     libero
 
 RUN GRPCURL_VERSION=1.9.3 && \
-    curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz" \
+    GH_BASE=https://ghfast.top/https://github.com && \
+    (curl -fsSL "${GH_BASE}/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz" \
+       || curl -fsSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz") \
     | tar -xz -C /usr/local/bin grpcurl
 
 # RUN apt update && apt install -y curl && \
