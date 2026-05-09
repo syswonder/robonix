@@ -61,7 +61,7 @@ def resolve_inputs(deadline_s: float = 30.0) -> dict[str, str]:
         for key, contract in wanted.items():
             if key in resolved:
                 continue
-            recs = atlas.find(contract_id=contract, transport="ros2")
+            recs = atlas.find(contract, transport="ros2")
             if not recs:
                 continue
             try:

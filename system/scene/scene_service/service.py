@@ -194,7 +194,7 @@ def _resolve_one_contract(
 ) -> Optional[TopicSpec]:
     """atlas.find(contract) → cap.connect → endpoint. Returns None when no
     cap currently advertises the contract over this transport."""
-    recs = atlas.find(contract_id=contract_id, transport=transport)
+    recs = atlas.find(contract_id, transport=transport)
     if not recs:
         return None
     rec = recs[0]
