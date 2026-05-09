@@ -54,3 +54,6 @@ target
 .cursor/
 .claude/
 rbnx-boot
+
+# generated PDFs (developer guide etc.) — keep .md only
+*.pdf
