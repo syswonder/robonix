@@ -76,7 +76,14 @@ RUN apt-get update \
 # slow for YOLO-World/MobileSAM. Jetson AGX builds will swap this for
 # NVIDIA's torch fork wheel; the rest of the deps in requirements.txt
 # stay identical because they're CPU-side or torch-only consumers.
-RUN pip install --index-url https://download.pytorch.org/whl/cu124 \
+# Try Aliyun pytorch-wheels mirror first (much faster from CN; carries
+# both x86_64 and aarch64 cu124 wheels), fall back to upstream
+# download.pytorch.org on failure. TUNA mirror skipped: doesn't
+# carry aarch64 cu124 wheels.
+ARG TORCH_INDEX_URL=https://mirrors.aliyun.com/pytorch-wheels/cu124
+RUN pip install --index-url "${TORCH_INDEX_URL}" \
+        torch==2.5.1 torchvision==0.20.1 \
+ || pip install --index-url https://download.pytorch.org/whl/cu124 \
         torch==2.5.1 torchvision==0.20.1
 
 # Generic scene deps + concept-graphs perception stack (no
