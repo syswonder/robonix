@@ -339,7 +339,10 @@ pub async fn contracts(
             Some(p) if !p.is_empty() => format!(" with prefix '{p}'"),
             _ => String::new(),
         };
-        println!("{} no contracts loaded{label}", "[contracts]".yellow().bold());
+        println!(
+            "{} no contracts loaded{label}",
+            "[contracts]".yellow().bold()
+        );
         return Ok(());
     }
     for c in &resp.contracts {

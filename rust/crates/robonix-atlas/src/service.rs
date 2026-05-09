@@ -480,7 +480,8 @@ impl AtlasRegistry {
         contract: &str,
         transport: Transport,
     ) -> Vec<pb::CapabilityRecord> {
-        self.query_with_prefix(cap_id, contract, "", transport).await
+        self.query_with_prefix(cap_id, contract, "", transport)
+            .await
     }
 
     pub async fn query_with_prefix(
@@ -904,7 +905,12 @@ impl pb::atlas_server::Atlas for AtlasService {
         let transport = Transport::try_from(r.transport).unwrap_or(Transport::Unspecified);
         let records = self
             .registry
-            .query_with_prefix(&r.capability_id, &r.contract_id, &r.namespace_prefix, transport)
+            .query_with_prefix(
+                &r.capability_id,
+                &r.contract_id,
+                &r.namespace_prefix,
+                transport,
+            )
             .await;
         Ok(Response::new(pb::QueryCapabilitiesResponse { records }))
     }
@@ -989,9 +995,9 @@ impl pb::atlas_server::Atlas for AtlasService {
     }
 }
 
-const DEFAULT_EVICTION_INTERVAL_MS: u64 = 10_000;     // check every 10s
-const DEFAULT_HEARTBEAT_TIMEOUT_MS: u64 = 90_000;     // mark TERMINATED after 90s
-const DEFAULT_GC_AFTER_TERMINATED_MS: u64 = 600_000;  // drop record 10 min after TERMINATED
+const DEFAULT_EVICTION_INTERVAL_MS: u64 = 10_000; // check every 10s
+const DEFAULT_HEARTBEAT_TIMEOUT_MS: u64 = 90_000; // mark TERMINATED after 90s
+const DEFAULT_GC_AFTER_TERMINATED_MS: u64 = 600_000; // drop record 10 min after TERMINATED
 
 fn read_env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)

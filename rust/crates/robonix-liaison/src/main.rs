@@ -27,8 +27,12 @@ mod voice;
 use anyhow::{Context, Result};
 use clap::Parser;
 use pb::contracts::{
-    robonix_system_liaison_submit_server::{RobonixSystemLiaisonSubmit, RobonixSystemLiaisonSubmitServer},
-    robonix_system_liaison_voice_server::{RobonixSystemLiaisonVoice, RobonixSystemLiaisonVoiceServer},
+    robonix_system_liaison_submit_server::{
+        RobonixSystemLiaisonSubmit, RobonixSystemLiaisonSubmitServer,
+    },
+    robonix_system_liaison_voice_server::{
+        RobonixSystemLiaisonVoice, RobonixSystemLiaisonVoiceServer,
+    },
     robonix_system_pilot_client::RobonixSystemPilotClient,
 };
 use pb::liaison::{StartVoiceSessionRequest, VoiceEvent};

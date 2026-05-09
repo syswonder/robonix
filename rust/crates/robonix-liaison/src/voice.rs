@@ -400,10 +400,14 @@ async fn stream_capture_and_recognize(
 ) -> Result<(Vec<u8>, String)> {
     let mic_endpoint = resolve_endpoint(atlas, "robonix/primitive/audio/mic", mic_pin)
         .await
-        .ok_or_else(|| anyhow::anyhow!("no RobonixPrimitiveAudioMic provider registered in Atlas"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("no RobonixPrimitiveAudioMic provider registered in Atlas")
+        })?;
     let asr_endpoint = resolve_endpoint(atlas, "robonix/system/speech/asr_stream", asr_pin)
         .await
-        .ok_or_else(|| anyhow::anyhow!("no RobonixSystemSpeechAsrStream provider registered in Atlas"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("no RobonixSystemSpeechAsrStream provider registered in Atlas")
+        })?;
 
     let mut mic_client = RobonixPrimitiveAudioMicClient::connect(mic_endpoint.clone())
         .await

@@ -20,8 +20,12 @@ use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
 use robonix_liaison::pb::audio::AudioChunk;
 use robonix_liaison::pb::contracts::{
-    robonix_primitive_audio_mic_server::{RobonixPrimitiveAudioMic, RobonixPrimitiveAudioMicServer},
-    robonix_primitive_audio_speaker_server::{RobonixPrimitiveAudioSpeaker, RobonixPrimitiveAudioSpeakerServer},
+    robonix_primitive_audio_mic_server::{
+        RobonixPrimitiveAudioMic, RobonixPrimitiveAudioMicServer,
+    },
+    robonix_primitive_audio_speaker_server::{
+        RobonixPrimitiveAudioSpeaker, RobonixPrimitiveAudioSpeakerServer,
+    },
 };
 use std::sync::Arc;
 use std::time::Duration;
