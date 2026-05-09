@@ -392,8 +392,8 @@ class Capability:
         )
         self._publishers[_full_id(contract_id)] = pub
         if declare:
-            self.declare_ros2(
-                contract_id, topic, qos if isinstance(qos, str) else "reliable"
+            self.declare_ros2_topic(
+                contract_id, topic, qos=qos if isinstance(qos, str) else "reliable"
             )
         return pub
 
@@ -416,8 +416,8 @@ class Capability:
         )
         if declare:
             try:
-                self.declare_ros2(
-                    contract_id, topic, qos if isinstance(qos, str) else "reliable"
+                self.declare_ros2_topic(
+                    contract_id, topic, qos=qos if isinstance(qos, str) else "reliable"
                 )
             except Exception:  # noqa: BLE001
                 # Consumer-side declare is optional; don't fail if atlas refuses.
