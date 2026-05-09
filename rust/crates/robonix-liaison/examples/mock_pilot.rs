@@ -16,7 +16,9 @@
 use anyhow::Result;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
-use robonix_liaison::pb::contracts::robonix_system_pilot_server::{RobonixSystemPilot, RobonixSystemPilotServer};
+use robonix_liaison::pb::contracts::robonix_system_pilot_server::{
+    RobonixSystemPilot, RobonixSystemPilotServer,
+};
 use robonix_liaison::pb::pilot::{PilotEvent, Task};
 use std::time::Duration;
 use tokio::sync::mpsc;

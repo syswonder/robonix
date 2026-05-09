@@ -396,14 +396,39 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
     let h_ver = "version";
     let h_loc = "location";
     let w_status = 1;
-    let w_sec = built.iter().map(|r| r.section.len()).max().unwrap_or(0).max(h_sec.len());
-    let w_name = built.iter().map(|r| r.name.len()).max().unwrap_or(0).max(h_name.len());
-    let w_pkg = built.iter().map(|r| r.pkg_name.len()).max().unwrap_or(0).max(h_pkg.len());
-    let w_ver = built.iter().map(|r| r.version.len()).max().unwrap_or(0).max(h_ver.len());
+    let w_sec = built
+        .iter()
+        .map(|r| r.section.len())
+        .max()
+        .unwrap_or(0)
+        .max(h_sec.len());
+    let w_name = built
+        .iter()
+        .map(|r| r.name.len())
+        .max()
+        .unwrap_or(0)
+        .max(h_name.len());
+    let w_pkg = built
+        .iter()
+        .map(|r| r.pkg_name.len())
+        .max()
+        .unwrap_or(0)
+        .max(h_pkg.len());
+    let w_ver = built
+        .iter()
+        .map(|r| r.version.len())
+        .max()
+        .unwrap_or(0)
+        .max(h_ver.len());
     // Location: take its natural width so realpaths don't get truncated. The
     // table simply ends up wider than the terminal — better that the user can
     // copy-paste a full path than read a half-truncated one.
-    let nat_loc = built.iter().map(|r| r.location.len()).max().unwrap_or(0).max(h_loc.len());
+    let nat_loc = built
+        .iter()
+        .map(|r| r.location.len())
+        .max()
+        .unwrap_or(0)
+        .max(h_loc.len());
     let w_loc = nat_loc;
     let table_w = if built.is_empty() {
         term_w
@@ -429,20 +454,44 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
         println!();
         println!(
             "  {:<ws$}  {:<wsec$}  {:<wn$}  {:<wp$}  {:<wv$}  {:<wl$}",
-            h_status, h_sec, h_name, h_pkg, h_ver, h_loc,
-            ws=w_status, wsec=w_sec, wn=w_name, wp=w_pkg, wv=w_ver, wl=w_loc,
+            h_status,
+            h_sec,
+            h_name,
+            h_pkg,
+            h_ver,
+            h_loc,
+            ws = w_status,
+            wsec = w_sec,
+            wn = w_name,
+            wp = w_pkg,
+            wv = w_ver,
+            wl = w_loc,
         );
         let rule = |w: usize| "─".repeat(w);
         println!(
             "  {}  {}  {}  {}  {}  {}",
-            rule(w_status), rule(w_sec), rule(w_name), rule(w_pkg), rule(w_ver), rule(w_loc),
+            rule(w_status),
+            rule(w_sec),
+            rule(w_name),
+            rule(w_pkg),
+            rule(w_ver),
+            rule(w_loc),
         );
         let cont_indent = 2 + w_status + 2 + w_sec + 2 + w_name + 2 + w_pkg + 2 + w_ver + 2;
         for r in &built {
             println!(
                 "  {:<ws$}  {:<wsec$}  {:<wn$}  {:<wp$}  {:<wv$}  {}",
-                "✓", r.section, r.name, r.pkg_name, r.version, r.location,
-                ws=w_status, wsec=w_sec, wn=w_name, wp=w_pkg, wv=w_ver,
+                "✓",
+                r.section,
+                r.name,
+                r.pkg_name,
+                r.version,
+                r.location,
+                ws = w_status,
+                wsec = w_sec,
+                wn = w_name,
+                wp = w_pkg,
+                wv = w_ver,
             );
             if let Some((url, branch)) = &r.source {
                 let suffix = match branch {
@@ -663,16 +712,14 @@ async fn drive_cmd_init_after_register(
             }
         };
         let match_rec = recs.iter().find(|r| {
-            r.capability_id == cap_id_hint
-                || r.capability_id.to_lowercase().contains(&hint_lower)
+            r.capability_id == cap_id_hint || r.capability_id.to_lowercase().contains(&hint_lower)
         });
         let Some(rec) = match_rec else {
             tokio::time::sleep(POLL_INTERVAL).await;
             continue;
         };
         let driver_iface = rec.interfaces.iter().find(|i| {
-            i.transport == atlas_pb::Transport::Grpc as i32
-                && i.contract_id.ends_with("/driver")
+            i.transport == atlas_pb::Transport::Grpc as i32 && i.contract_id.ends_with("/driver")
         });
         let Some(driver) = driver_iface else {
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -682,14 +729,10 @@ async fn drive_cmd_init_after_register(
         let cap_id = rec.capability_id.clone();
         match call_driver_init(&mut atlas, &cap_id, &driver_contract, config_json.clone()).await {
             Ok(state) => {
-                output::sub_step(&format!(
-                    "Driver(CMD_INIT) → {cap_id} ok (state={state})"
-                ));
+                output::sub_step(&format!("Driver(CMD_INIT) → {cap_id} ok (state={state})"));
             }
             Err(e) => {
-                output::warning(&format!(
-                    "Driver(CMD_INIT) → {cap_id} failed: {e:#}"
-                ));
+                output::warning(&format!("Driver(CMD_INIT) → {cap_id} failed: {e:#}"));
             }
         }
         return;
@@ -788,10 +831,7 @@ fn contract_id_to_service_name(contract_id: &str) -> String {
 /// to the cap exclusively via Driver(CMD_INIT, config_json). The cap
 /// process MUST NOT read this through env / disk — that's the v0.1
 /// invariant `rbnx start` and `rbnx boot` both honour.
-fn build_start_config_json(
-    config_file: Option<&Path>,
-    sets: &[String],
-) -> Result<Option<String>> {
+fn build_start_config_json(config_file: Option<&Path>, sets: &[String]) -> Result<Option<String>> {
     if config_file.is_none() && sets.is_empty() {
         return Ok(None);
     }
@@ -823,7 +863,9 @@ fn build_start_config_json(
         merge_dotted(&mut value, key, parsed)?;
     }
 
-    Ok(Some(serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())))
+    Ok(Some(
+        serde_json::to_string(&value).unwrap_or_else(|_| "{}".into()),
+    ))
 }
 
 /// Set `obj[a][b][c] = v` for a dotted key like `"a.b.c"`. Creates

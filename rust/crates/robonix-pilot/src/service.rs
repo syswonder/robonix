@@ -4,7 +4,8 @@
 // `RobonixSystemPilot` gRPC handler (contract `robonix/system/pilot`).
 
 use crate::pb::contracts::{
-    robonix_system_executor_client::RobonixSystemExecutorClient, robonix_system_pilot_server::RobonixSystemPilot,
+    robonix_system_executor_client::RobonixSystemExecutorClient,
+    robonix_system_pilot_server::RobonixSystemPilot,
 };
 use crate::pb::pilot::{BatchResult, PilotEvent, Plan, SessionStatusEvent, Task};
 use crate::planner::{self, ExecutorConn};
