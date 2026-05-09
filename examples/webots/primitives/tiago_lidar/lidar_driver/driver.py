@@ -92,7 +92,7 @@ def init(cfg):
     )
     if not cap.wait_for_topic(topic, "LaserScan", float(cfg.get("sentinel_timeout_s", 15.0))):
         return Err(f"no LaserScan received on {topic} within timeout")
-    cap.declare_ros2("robonix/primitive/lidar/lidar", topic, qos_profile="best_effort")
+    cap.declare_ros2("robonix/primitive/lidar/lidar", topic, qos="best_effort")
     return Ok()
 
 
