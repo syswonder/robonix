@@ -1,4 +1,24 @@
 FROM osrf/ros:humble-desktop
+
+# ── TUNA mirrors for GFW-bound networks ─────────────────────────────
+# Swap apt + pip + HuggingFace to mirrors.tuna.tsinghua.edu.cn (apt /
+# pypi) and hf-mirror.com (HF). Touched once here so every robonix
+# Dockerfile is build-able from China. Drop these RUN/ENV lines if
+# the build host already has direct access (they're idempotent).
+RUN set -eux; \
+    if [ -f /etc/apt/sources.list.d/ros2.list ]; then \
+        sed -i 's|http://packages.ros.org/ros2/ubuntu|https://mirrors.tuna.tsinghua.edu.cn/ros2/ubuntu|g' \
+            /etc/apt/sources.list.d/ros2.list; \
+    fi; \
+    if [ -f /etc/apt/sources.list ]; then \
+        sed -i \
+            -e 's|http://archive.ubuntu.com/ubuntu/\?|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' \
+            -e 's|http://security.ubuntu.com/ubuntu/\?|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' \
+            -e 's|http://ports.ubuntu.com/ubuntu-ports/\?|https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/|g' \
+            /etc/apt/sources.list; \
+    fi
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    HF_ENDPOINT=https://hf-mirror.com
     
 ENV ROS_DOMAIN_ID=0
 ENV ROS_LOCALHOST_ONLY=0
