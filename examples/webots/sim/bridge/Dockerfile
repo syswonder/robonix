@@ -6,6 +6,22 @@
 # on the host and is bind-mounted in by compose.yaml under /robonix_pkgs.
 # Build context = the directory containing this Dockerfile (sim/bridge/).
 FROM osrf/ros:humble-desktop-full
+
+# ── TUNA mirrors for GFW-bound networks ─────────────────────────────
+RUN set -eux; \
+    if [ -f /etc/apt/sources.list.d/ros2.list ]; then \
+        sed -i 's|http://packages.ros.org/ros2/ubuntu|https://mirrors.tuna.tsinghua.edu.cn/ros2/ubuntu|g' \
+            /etc/apt/sources.list.d/ros2.list; \
+    fi; \
+    if [ -f /etc/apt/sources.list ]; then \
+        sed -i \
+            -e 's|http://archive.ubuntu.com/ubuntu/\?|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' \
+            -e 's|http://security.ubuntu.com/ubuntu/\?|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' \
+            -e 's|http://ports.ubuntu.com/ubuntu-ports/\?|https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/|g' \
+            /etc/apt/sources.list; \
+    fi
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    HF_ENDPOINT=https://hf-mirror.com
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

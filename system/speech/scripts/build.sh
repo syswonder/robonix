@@ -15,6 +15,10 @@
 #   rbnx-build/ws/install/setup.bash   rbnx-cli's PYTHONPATH stub (existing)
 
 set -euo pipefail
+# Use TUNA mirror for pip / uv when GFW-bound. Override via env.
+: "${UV_INDEX_URL:=https://pypi.tuna.tsinghua.edu.cn/simple}"
+: "${PIP_INDEX_URL:=https://pypi.tuna.tsinghua.edu.cn/simple}"
+export UV_INDEX_URL PIP_INDEX_URL
 PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$PKG"
 
