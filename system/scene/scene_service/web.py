@@ -213,16 +213,26 @@ def _shorten_id(object_id: str) -> str:
     return object_id.split(".", 2)[-1]
 
 
+# Cache the rendered PNG keyed by the hub's monotonically-increasing
+# message count. mapping publishes /map at ~1 Hz; with 3 page pollers
+# at 2-4 Hz each we'd otherwise re-encode the whole grid 6-12×/sec —
+# pure waste. With this cache, re-encode is gated to "once per new
+# message", so steady-state /api/state cost drops to a dict lookup.
+_OCCUPANCY_CACHE: dict[str, Any] = {"count": -1, "payload": None}
+
+
 def _occupancy_payload(hub: Any) -> Optional[dict]:
     """Encode the latest OccupancyGrid (from /map via hub) as a small
-    PNG + metadata. Cached on the hub side; re-encode each tick is OK
-    at slam_toolbox's ~1 Hz publish rate. Returns None when no map is
-    available yet or rendering fails (e.g. numpy missing)."""
+    PNG + metadata. Cached by hub message count — only re-encodes when
+    a fresh /map arrives. Returns None when no map is available yet
+    or rendering fails (e.g. numpy missing)."""
     if hub is None or not hub.has("occupancy_grid"):
         return None
     msg, stamp_unix, count = hub.latest("occupancy_grid")
     if msg is None or count == 0:
         return None
+    if _OCCUPANCY_CACHE["count"] == count:
+        return _OCCUPANCY_CACHE["payload"]
     try:
         import numpy as np
         from PIL import Image as PILImage
@@ -244,7 +254,7 @@ def _occupancy_payload(hub: Any) -> Optional[dict]:
     out = np.flipud(out)
     buf = io.BytesIO()
     PILImage.fromarray(out, mode="L").save(buf, format="PNG", optimize=False)
-    return {
+    payload = {
         "width": w,
         "height": h,
         "resolution": float(info.resolution),
@@ -253,6 +263,9 @@ def _occupancy_payload(hub: Any) -> Optional[dict]:
         "stamp_ms": int(stamp_unix * 1000),
         "png_b64": base64.b64encode(buf.getvalue()).decode("ascii"),
     }
+    _OCCUPANCY_CACHE["count"] = count
+    _OCCUPANCY_CACHE["payload"] = payload
+    return payload
 
 
 def _image_to_png_b64(msg: Any, *, kind: str) -> Optional[dict]:
@@ -1270,7 +1283,9 @@ _INDEX_3D_HTML = r"""<!doctype html>
         } catch (e) {}
     }
     pollRobot();
-    setInterval(pollRobot, 250);  // 4 Hz — robot pose moves fast
+    setInterval(pollRobot, 500);  // 2 Hz — same as the 2D map / panel
+                                  // pollers; matches /map publish rate
+                                  // and avoids redundant /api/state hits
 
     // ── Color palette (deterministic per class) ────────────────────────
     function classColor(cls) {
