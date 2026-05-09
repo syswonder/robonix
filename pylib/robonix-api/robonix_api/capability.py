@@ -254,10 +254,10 @@ class Capability:
 
     # ── Layer 1: raw atlas declares ──────────────────────────────────────
     def declare_ros2(
-        self, contract_id: str, topic: str, qos_profile: str = "best_effort"
+        self, contract_id: str, topic: str, qos: str = "best_effort"
     ) -> None:
         self._check_mode("ros2", contract_id)
-        self._atlas.declare_ros2(self.id, _full_id(contract_id), topic, qos_profile)
+        self._atlas.declare_ros2(self.id, _full_id(contract_id), topic, qos)
 
     def declare_grpc(
         self,

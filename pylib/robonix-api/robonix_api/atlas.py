@@ -192,18 +192,17 @@ class AtlasClient:
 
     def find(
         self,
+        contract_id: str,
         *,
-        contract_id: str | None = None,
-        namespace_prefix: str | None = None,
         transport: Transport | str | int = Transport.UNSPECIFIED,
     ) -> list[CapabilityRecord]:
-        """Search for capabilities by contract / namespace / transport.
-        Filters AND together; missing = no filter. Always a list (possibly
-        empty). For exactly-one-expected pattern, prefer Python tuple-unpack:
-        `[rec] = atlas.find(...)` raises ValueError on 0 or >1 matches."""
+        """Find capabilities providing `contract_id`. Optional `transport`
+        narrows to caps whose implementation of that contract uses the
+        given transport (otherwise any transport). Always a list (possibly
+        empty). For exactly-one-expected pattern, prefer tuple-unpack:
+        `[rec] = atlas.find("X")` raises ValueError on 0 or >1 matches."""
         return self._query(
-            contract_id=contract_id or "",
-            namespace_prefix=namespace_prefix or "",
+            contract_id=contract_id,
             transport=transport,
         )
 
@@ -212,7 +211,6 @@ class AtlasClient:
         *,
         capability_id: str = "",
         contract_id: str = "",
-        namespace_prefix: str = "",
         transport: Transport | str | int = Transport.UNSPECIFIED,
     ) -> list[CapabilityRecord]:
         import grpc
@@ -221,13 +219,12 @@ class AtlasClient:
             resp = self.stub.QueryCapabilities(self.pb.QueryCapabilitiesRequest(
                 capability_id=capability_id,
                 contract_id=contract_id,
-                namespace_prefix=namespace_prefix,
                 transport=t,
             ))
         except grpc.RpcError as e:
             log.warning(
-                "QueryCapabilities(cap=%r, contract=%r, ns_prefix=%r): %s",
-                capability_id, contract_id, namespace_prefix, e,
+                "QueryCapabilities(cap=%r, contract=%r): %s",
+                capability_id, contract_id, e,
             )
             return []
         return [from_pb_record(r) for r in resp.records]
@@ -383,14 +380,12 @@ class _AtlasFacade:
 
     def find(
         self,
+        contract_id: str,
         *,
-        contract_id: str | None = None,
-        namespace_prefix: str | None = None,
         transport: Transport | str | int = Transport.UNSPECIFIED,
     ) -> list[CapabilityRecord]:
         return self._resolve().find(
-            contract_id=contract_id,
-            namespace_prefix=namespace_prefix,
+            contract_id,
             transport=transport,
         )
 
