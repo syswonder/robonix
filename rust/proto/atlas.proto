@@ -199,21 +199,21 @@ message InterfaceMetadata {
 //   STATE_REGISTERED  — process up, atlas knows about the cap, but
 //                       Driver(CMD_INIT) hasn't completed (in flight, or
 //                       not yet called by `rbnx boot`).
-//   STATE_INITIALIZED — Driver(CMD_INIT) returned ok=true. Config parsed,
+//   STATE_INACTIVE    — Driver(CMD_INIT) returned ok=true. Config parsed,
 //                       atlas dependencies resolved, soft validation done,
 //                       no hot runtime resources held yet. Skills sit
 //                       here until the executor sends CMD_ACTIVATE.
 //                       Primitives and services pass through this state
 //                       immediately and rbnx auto-sends CMD_ACTIVATE next.
-//   STATE_RUNNING     — Driver(CMD_ACTIVATE) returned ok=true. The cap
+//   STATE_ACTIVE      — Driver(CMD_ACTIVATE) returned ok=true. The cap
 //                       holds hot runtime resources and serves requests.
-//                       Consumers MUST gate on `state == RUNNING` before
+//                       Consumers MUST gate on `state == ACTIVE` before
 //                       calling data interfaces. Primitives and services
 //                       normally stay here for the boot's lifetime.
-//                       (Naming follows systemd active(running) / k8s
-//                       Running / docker running — not Linux thread
-//                       TASK_RUNNABLE which means "schedulable but not
-//                       running yet".)
+//                       (Naming follows systemd ActiveState; INACTIVE
+//                       here corresponds to systemd `active (exited)`,
+//                       not the empty `inactive` — it means "loaded but
+//                       not serving".)
 //   STATE_ERROR       — last Driver(CMD_*) call returned ok=false or
 //                       raised. Cap remains visible so debug tooling can
 //                       find it, but consumers must NOT call data
@@ -225,13 +225,8 @@ message InterfaceMetadata {
 enum CapabilityState {
   STATE_UNSPECIFIED = 0;
   STATE_REGISTERED  = 1;
-  STATE_INITIALIZED = 2;
-  // RUNNING — process up, hot resources allocated, serving requests.
-  // Naming matches the canonical OS surfaces (systemd active(running),
-  // k8s pod Running, docker container running). "RUNNABLE" of older
-  // drafts was a Linux-thread-state borrowing that implied "could run
-  // if scheduled" — wrong mental model for a service.
-  STATE_RUNNING     = 3;
+  STATE_INACTIVE    = 2;
+  STATE_ACTIVE      = 3;
   STATE_ERROR       = 4;
   STATE_TERMINATED  = 5;
 }

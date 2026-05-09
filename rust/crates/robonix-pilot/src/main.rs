@@ -92,17 +92,17 @@ async fn main() -> Result<()> {
     info!("declared RobonixSystemPilot gRPC at {advertised}");
 
     // Pilot has no Driver lifecycle handshake — it's ready as soon as the
-    // gRPC server is up. Push RUNNING so `rbnx caps` doesn't show the
-    // legacy-fallback INITIALIZED forever.
+    // gRPC server is up. Push ACTIVE so `rbnx caps` doesn't show the
+    // legacy-fallback INACTIVE forever.
     if let Err(e) = atlas
         .set_capability_state(
             &cfg.capability_id,
-            atlas_pb::CapabilityState::StateRunning,
+            atlas_pb::CapabilityState::StateActive,
             "",
         )
         .await
     {
-        log::warn!("SetCapabilityState(RUNNING) failed: {e:#}");
+        log::warn!("SetCapabilityState(ACTIVE) failed: {e:#}");
     }
 
     let vlm = vlm::VlmClient::new(&cfg.vlm);

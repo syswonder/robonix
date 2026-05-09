@@ -24,8 +24,8 @@ fn state_name(s: i32) -> &'static str {
         .unwrap_or(atlas_pb::CapabilityState::StateUnspecified)
     {
         atlas_pb::CapabilityState::StateRegistered => "REGISTERED",
-        atlas_pb::CapabilityState::StateInitialized => "INITIALIZED",
-        atlas_pb::CapabilityState::StateRunning => "RUNNING",
+        atlas_pb::CapabilityState::StateInactive => "INACTIVE",
+        atlas_pb::CapabilityState::StateActive => "ACTIVE",
         atlas_pb::CapabilityState::StateError => "ERROR",
         atlas_pb::CapabilityState::StateTerminated => "TERMINATED",
         atlas_pb::CapabilityState::StateUnspecified => "?",
@@ -40,8 +40,8 @@ fn state_tag(s: i32) -> colored::ColoredString {
     match atlas_pb::CapabilityState::try_from(s)
         .unwrap_or(atlas_pb::CapabilityState::StateUnspecified)
     {
-        atlas_pb::CapabilityState::StateRunning => label.green().bold(),
-        atlas_pb::CapabilityState::StateInitialized => label.yellow(),
+        atlas_pb::CapabilityState::StateActive => label.green().bold(),
+        atlas_pb::CapabilityState::StateInactive => label.yellow(),
         atlas_pb::CapabilityState::StateRegistered => label.blue(),
         atlas_pb::CapabilityState::StateTerminated => label.dimmed(),
         atlas_pb::CapabilityState::StateError => label.red().bold(),

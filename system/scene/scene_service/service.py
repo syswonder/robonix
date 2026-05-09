@@ -29,7 +29,7 @@ import uvicorn  # used for the web debug UI; cap owns the MCP HTTP server
 faulthandler.enable(all_threads=True)
 
 
-from robonix_api import Capability  # noqa: E402
+from robonix_api import Capability, atlas  # noqa: E402
 from robonix_api.atlas_types import Ros2Params, Transport  # noqa: E402
 
 cap = Capability(id="scene", namespace="robonix/system/scene")
@@ -164,7 +164,7 @@ def _build_topic_specs(
 
 
 def _resolve_auto(_unused, pb_transport: int) -> list[TopicSpec]:
-    """Walk `_SCENE_CONTRACTS` and use `cap.find_one` + `cap.connect`
+    """Walk `_SCENE_CONTRACTS` and use `atlas.find` + `cap.connect`
     to resolve each contract. atlas hands out the endpoint via
     ConnectCapability; the cap framework also tracks the channel for
     teardown so we don't leak edges in atlas.
@@ -173,7 +173,7 @@ def _resolve_auto(_unused, pb_transport: int) -> list[TopicSpec]:
     every `period_s` — scene tolerates services that come up after it.
 
     `_unused` keeps the call signature stable for callers built around
-    the old raw atlas_pb stub; the actual lookup goes through `cap`.
+    the old raw atlas_pb stub; the actual lookup goes through `atlas`.
     """
     transport = Transport(pb_transport)
     out: list[TopicSpec] = []
@@ -192,17 +192,14 @@ def _resolve_one_contract(
     contract_id: str,
     msg_type: str,
 ) -> Optional[TopicSpec]:
-    """find_one(contract) → connect → endpoint. Returns None when no
+    """atlas.find(contract) → cap.connect → endpoint. Returns None when no
     cap currently advertises the contract over this transport."""
-    rec = cap.find_one(contract_id=contract_id, transport=transport)
-    if rec is None:
+    recs = atlas.find(contract_id=contract_id, transport=transport)
+    if not recs:
         return None
+    rec = recs[0]
     try:
-        ch = cap.connect(
-            contract_id=contract_id,
-            transport=transport,
-            capability_id=rec.capability_id,
-        )
+        ch = cap.connect(provider=rec, contract_id=contract_id, transport=transport)
     except Exception as e:  # noqa: BLE001
         log.warning(
             "[scene] cap.connect(%s/%s) failed: %s",

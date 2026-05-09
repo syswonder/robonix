@@ -154,8 +154,8 @@ class Capability:
         # Lifecycle state. Source of truth on the cap side; pushed to
         # atlas via SetCapabilityState whenever it transitions (see
         # _set_state below). Initial value is REGISTERED — it flips to
-        # INITIALIZED on Driver(CMD_INIT) success, RUNNING on
-        # CMD_ACTIVATE, back to INITIALIZED on CMD_DEACTIVATE,
+        # INACTIVE on Driver(CMD_INIT) success, ACTIVE on
+        # CMD_ACTIVATE, back to INACTIVE on CMD_DEACTIVATE,
         # TERMINATED on CMD_SHUTDOWN.
         self._state: str = "registered"
 
@@ -179,7 +179,7 @@ class Capability:
 
     # ── lifecycle decorators ─────────────────────────────────────────────
     def on_init(self, fn: Callable[[dict], Any]) -> Callable[[dict], Any]:
-        """REGISTERED → INITIALIZED. Parse config, validate dependencies,
+        """REGISTERED → INACTIVE. Parse config, validate dependencies,
         bind logical device. NO hot runtime resources yet."""
         if self._on_init is not None:
             raise RuntimeError("on_init handler already registered")
@@ -187,9 +187,9 @@ class Capability:
         return fn
 
     def on_activate(self, fn: Callable[[], Any]) -> Callable[[], Any]:
-        """INITIALIZED → RUNNING. Acquire hot runtime resources
+        """INACTIVE → ACTIVE. Acquire hot runtime resources
         (threads, models, ROS subs, hardware fds). After this returns
-        Ok(), atlas marks the cap RUNNING and consumers may call its
+        Ok(), atlas marks the cap ACTIVE and consumers may call its
         data interfaces. Optional for primitives/services (framework
         auto-promotes); REQUIRED for skills.
         Takes no args — only on_init receives cfg."""
@@ -197,7 +197,7 @@ class Capability:
         return fn
 
     def on_deactivate(self, fn: Callable[[], Any]) -> Callable[[], Any]:
-        """RUNNING → INITIALIZED. Release hot resources but keep
+        """ACTIVE → INACTIVE. Release hot resources but keep
         config / atlas registration. Optional for primitives/services;
         executor calls this on skills via its eviction policy.
         Takes no args."""
@@ -215,8 +215,8 @@ class Capability:
     # ── lifecycle state ──────────────────────────────────────────────────
     @property
     def state(self) -> str:
-        """Current lifecycle state — one of registered / initialized /
-        running / error / terminated. The framework drives this off
+        """Current lifecycle state — one of registered / inactive /
+        active / error / terminated. The framework drives this off
         Driver cmd transitions; users typically don't write to it
         directly."""
         return self._state
@@ -289,55 +289,27 @@ class Capability:
             self.id, _full_id(contract_id), endpoint, description, input_schema_json
         )
 
-    # ── Layer 1: discovery + connect ─────────────────────────────────────
-    def find(
-        self,
-        *,
-        contract_id: str = "",
-        capability_id: str = "",
-        namespace_prefix: str = "",
-        transport: Transport | str | int = Transport.UNSPECIFIED,
-    ) -> list[CapabilityRecord]:
-        """Structured atlas discovery. Filters AND together; empty =
-        no filter. Returns dataclass `CapabilityRecord`s — `cap_id`,
-        `state`, `interfaces`, etc. Convention: `cap_id` IS the device
-        id for primitives, so `find(cap_id="webots_tiago_camera_front")`
-        gives every interface of that physical camera."""
-        full_contract = _full_id(contract_id) if contract_id else ""
-        return self._atlas.find(
-            capability_id=capability_id,
-            contract_id=full_contract,
-            namespace_prefix=namespace_prefix,
-            transport=transport,
-        )
-
-    def find_one(self, **filters) -> CapabilityRecord | None:
-        recs = self.find(**filters)
-        return recs[0] if recs else None
-
+    # ── Layer 1: connect (discovery is on the atlas singleton — `from
+    # robonix_api import atlas; atlas.get(...) / atlas.find(...)`) ─────
     def connect(
         self,
-        *,
+        provider: CapabilityRecord,
         contract_id: str,
         transport: Transport | str | int,
-        capability_id: str = "",
     ) -> Channel:
-        """Open a consumer→provider channel. When `capability_id` is
-        empty, picks the first matching provider via `find_one`. The
-        returned `Channel` is a context manager; auto-closes on
-        teardown if the caller doesn't `with`-block it explicitly."""
+        """Open a consumer→provider channel given a resolved provider
+        record (from `atlas.get(id)` or `atlas.find(...)`). The returned
+        `Channel` is a context manager; auto-closes on teardown if not
+        explicitly `with`-blocked."""
+        if not isinstance(provider, CapabilityRecord):
+            raise TypeError(
+                "cap.connect(provider, ...) requires a CapabilityRecord; "
+                "use atlas.get(id) or atlas.find(...) to resolve one"
+            )
         full_contract = _full_id(contract_id)
-        cap_id = capability_id
-        if not cap_id:
-            rec = self.find_one(contract_id=full_contract, transport=transport)
-            if rec is None:
-                raise RuntimeError(
-                    f"connect({contract_id!r}): no provider in atlas"
-                )
-            cap_id = rec.capability_id
         ch = self._atlas.connect(
             consumer_id=self.id,
-            capability_id=cap_id,
+            capability_id=provider.capability_id,
             contract_id=full_contract,
             transport=transport,
         )
@@ -743,15 +715,15 @@ class Capability:
 
         # 6. State promotion. Caps WITH a Driver(CMD_INIT/CMD_ACTIVATE)
         # handshake rely on rbnx boot to drive them through
-        # INITIALIZED → RUNNING via the lifecycle servicer's
+        # INACTIVE → ACTIVE via the lifecycle servicer's
         # on_state_change callback (wired above). Caps WITHOUT a driver
         # contract (system services like memory / scene that only expose
         # MCP tools or one-shot gRPC RPCs) are fully ready as soon as
-        # gRPC + MCP are listening — promote to RUNNING here so
+        # gRPC + MCP are listening — promote to ACTIVE here so
         # `rbnx caps` shows them online instead of stranded at
-        # INITIALIZED forever.
+        # INACTIVE forever.
         if driver_decl is None and registered_ok:
-            self._set_state("running")
+            self._set_state("active")
 
     def _start_mcp_server(self) -> None:
         # Pre-claim a free port via socket(0) → close → hand to uvicorn.

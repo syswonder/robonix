@@ -53,11 +53,11 @@ def _resolve_state(s: CapabilityState | str | int) -> CapabilityState:
         return CapabilityState(s)
     name = str(s).strip().lower()
     return {
-        "registered":  CapabilityState.REGISTERED,
-        "initialized": CapabilityState.INITIALIZED,
-        "running":     CapabilityState.RUNNING,
-        "error":       CapabilityState.ERROR,
-        "terminated":  CapabilityState.TERMINATED,
+        "registered": CapabilityState.REGISTERED,
+        "inactive":   CapabilityState.INACTIVE,
+        "active":     CapabilityState.ACTIVE,
+        "error":      CapabilityState.ERROR,
+        "terminated": CapabilityState.TERMINATED,
     }.get(name, CapabilityState.UNSPECIFIED)
 
 
@@ -184,8 +184,30 @@ class AtlasClient:
                 return endpoint
             raise
 
-    # ── discovery (new) ──────────────────────────────────────────────────
+    # ── discovery ────────────────────────────────────────────────────────
+    def get(self, capability_id: str) -> CapabilityRecord | None:
+        """Look up a capability by its id. Returns None if not registered."""
+        recs = self._query(capability_id=capability_id)
+        return recs[0] if recs else None
+
     def find(
+        self,
+        *,
+        contract_id: str | None = None,
+        namespace_prefix: str | None = None,
+        transport: Transport | str | int = Transport.UNSPECIFIED,
+    ) -> list[CapabilityRecord]:
+        """Search for capabilities by contract / namespace / transport.
+        Filters AND together; missing = no filter. Always a list (possibly
+        empty). For exactly-one-expected pattern, prefer Python tuple-unpack:
+        `[rec] = atlas.find(...)` raises ValueError on 0 or >1 matches."""
+        return self._query(
+            contract_id=contract_id or "",
+            namespace_prefix=namespace_prefix or "",
+            transport=transport,
+        )
+
+    def _query(
         self,
         *,
         capability_id: str = "",
@@ -193,8 +215,6 @@ class AtlasClient:
         namespace_prefix: str = "",
         transport: Transport | str | int = Transport.UNSPECIFIED,
     ) -> list[CapabilityRecord]:
-        """Structured discovery — filters AND together. Empty strings = no
-        filter. Returns a list of `CapabilityRecord` dataclasses."""
         import grpc
         t = self.transport_enum(transport)
         try:
@@ -211,10 +231,6 @@ class AtlasClient:
             )
             return []
         return [from_pb_record(r) for r in resp.records]
-
-    def find_one(self, **filters) -> CapabilityRecord | None:
-        recs = self.find(**filters)
-        return recs[0] if recs else None
 
     def query_md(self, capability_id: str) -> str:
         try:
@@ -341,3 +357,42 @@ class AtlasClient:
         t = threading.Thread(target=_loop, name=f"robonix-hb-{capability_id}", daemon=True)
         t.start()
         return t
+
+
+# ── module-level singleton facade ────────────────────────────────────────
+# `from robonix_api import atlas` → public discovery API only (`get` / `find`).
+# Internal RPCs (declares, heartbeat, set_state, connect) stay on AtlasClient
+# instances owned by Capability. The singleton resolves its endpoint lazily
+# from $ROBONIX_ATLAS (default 127.0.0.1:50051) on first use.
+
+class _AtlasFacade:
+    """Public v1 atlas API. Shared lazy singleton — `atlas.get(...)` and
+    `atlas.find(...)`. Capability internals reach into AtlasClient directly,
+    so this stays minimal."""
+    _client: AtlasClient | None = None
+
+    def _resolve(self) -> AtlasClient:
+        if self._client is None:
+            import os
+            ep = os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
+            self._client = AtlasClient(ep)
+        return self._client
+
+    def get(self, capability_id: str) -> CapabilityRecord | None:
+        return self._resolve().get(capability_id)
+
+    def find(
+        self,
+        *,
+        contract_id: str | None = None,
+        namespace_prefix: str | None = None,
+        transport: Transport | str | int = Transport.UNSPECIFIED,
+    ) -> list[CapabilityRecord]:
+        return self._resolve().find(
+            contract_id=contract_id,
+            namespace_prefix=namespace_prefix,
+            transport=transport,
+        )
+
+
+atlas = _AtlasFacade()
