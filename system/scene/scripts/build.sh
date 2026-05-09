@@ -37,8 +37,13 @@ rbnx codegen -p "$PKG" "${FLAGS[@]}"
 # drop mid-stream on multi-hundred-MB transfers; an out-of-band download
 # with curl --retry-all-errors is much more robust, and the resulting
 # files become a cache-key-stable COPY into the image.
+#
+# RBNX_GH_MIRROR: prefix prepended to github.com URLs (default ghfast.top
+# for GFW-bound networks; set to empty string to disable and hit github
+# directly). If the mirror download fails, we fall back to direct.
 WEIGHTS_DIR="$PKG/docker/_weights"
 mkdir -p "$WEIGHTS_DIR"
+GH_MIRROR="${RBNX_GH_MIRROR-https://ghfast.top/}"
 fetch_weight() {
     local url="$1"
     local dest="$2"
@@ -46,13 +51,26 @@ fetch_weight() {
         echo "[build] weight already present: $(basename "$dest")"
         return 0
     fi
-    echo "[build] downloading $(basename "$dest") from $url"
-    curl -fL --connect-timeout 30 --retry 5 --retry-all-errors --retry-delay 5 \
-        -o "$dest" "$url" || {
-        echo "[build] error: failed to download $url" >&2
+    local primary="$url"
+    if [[ -n "$GH_MIRROR" ]]; then
+        primary="${GH_MIRROR%/}/$url"
+    fi
+    echo "[build] downloading $(basename "$dest") from $primary"
+    if curl -fL --connect-timeout 30 --retry 5 --retry-all-errors --retry-delay 5 \
+            -o "$dest" "$primary"; then
+        return 0
+    fi
+    rm -f "$dest"
+    if [[ "$primary" != "$url" ]]; then
+        echo "[build] mirror failed; falling back to direct: $url" >&2
+        if curl -fL --connect-timeout 30 --retry 5 --retry-all-errors --retry-delay 5 \
+                -o "$dest" "$url"; then
+            return 0
+        fi
         rm -f "$dest"
-        exit 1
-    }
+    fi
+    echo "[build] error: failed to download $url" >&2
+    exit 1
 }
 fetch_weight \
     "https://github.com/ultralytics/assets/releases/download/v8.1.0/yolov8l-world.pt" \
