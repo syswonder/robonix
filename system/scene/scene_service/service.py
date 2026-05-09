@@ -426,12 +426,15 @@ async def _start_ros_ingest(
     # callbacks fire ~10 Hz on /amcl_pose, so 5 Hz consumer is enough
     # to keep the registry's robot record fresh without flooding the
     # asyncio loop. Falls back to /odom when /amcl_pose isn't there.
-    if hub.has("pose") or hub.has("odom"):
-        bg_tasks.append(
-            asyncio.create_task(
-                _self_pose_loop(hub, self_tracker), name="scene-self-pose"
-            )
+    #
+    # ALWAYS start this task — the loop itself probes hub.has(...) on
+    # every tick, so it tolerates pose/odom showing up later (mapping
+    # boots after scene; without this we'd skip task creation forever).
+    bg_tasks.append(
+        asyncio.create_task(
+            _self_pose_loop(hub, self_tracker), name="scene-self-pose"
         )
+    )
 
     # Perception startup races with camera primitive cap registration:
     # the chassis cap usually shows up first (its `pose`/`odom` topics

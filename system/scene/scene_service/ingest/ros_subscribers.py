@@ -284,9 +284,16 @@ class SubscribersHub:
             )
 
         slot = self._slots[spec.kind]
+        _kind = spec.kind  # closure capture
 
-        def _cb(msg: Any, _slot: _LatestSlot = slot) -> None:
+        def _cb(msg: Any, _slot: _LatestSlot = slot, _k: str = _kind) -> None:
             _slot.write(msg)
+            # First arrival debug — proves the subscription wiring is alive
+            # end-to-end. Skipped after count > 1 so we don't spam. Critical
+            # for diagnosing the "subscribed but no msg arrives" class of bug
+            # (e.g. DDS GUID mismatch after a republisher restart).
+            if _slot._count == 1:
+                log.info("[scene-ros] FIRST msg on %s (kind=%s)", spec.topic, _k)
 
         self._node.create_subscription(msg_cls, spec.topic, _cb, qos)
         log.info("[scene-ros] subscribed: %s on %s (%s, qos=%s)",
