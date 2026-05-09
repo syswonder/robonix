@@ -238,8 +238,8 @@ def init(cfg):
         return Err(f"no RGB on {rgb_topic} within {sentinel_timeout:.1f}s")
 
     # data interfaces are ready — declare them on atlas
-    cap.declare_ros2("robonix/primitive/camera/rgb",   rgb_topic,   qos="best_effort")
-    cap.declare_ros2("robonix/primitive/camera/depth", depth_topic, qos="best_effort")
+    cap.declare_ros2_topic("robonix/primitive/camera/rgb",   rgb_topic,   qos="best_effort")
+    cap.declare_ros2_topic("robonix/primitive/camera/depth", depth_topic, qos="best_effort")
     return Ok()
 
 
