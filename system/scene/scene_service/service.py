@@ -132,6 +132,12 @@ def _resolve_pb_transport(name: str) -> int:
     return int(t)
 
 
+# Memo: dedup the "[scene] %r ← atlas: topic=..." log line so the
+# 5-second auto-rediscover loop only logs when an endpoint actually
+# changes. Keyed on (transport, contract_id) → resolution-signature.
+_LAST_RESOLVED: dict[tuple, tuple] = {}
+
+
 def _build_topic_specs(
     observations: list[dict], atlas_stub, transport: str
 ) -> list[TopicSpec]:
@@ -210,11 +216,17 @@ def _resolve_one_contract(
     qos_profile = ""
     if isinstance(ch.params, Ros2Params):
         qos_profile = ch.params.qos_profile or ""
-    log.info(
-        "[scene] %r ← atlas: topic=%s msg=%s qos=%s contract=%s cap=%s",
-        kind, endpoint, msg_type, qos_profile or "default",
-        contract_id, rec.capability_id,
-    )
+    # Only log on first resolution / change. The auto-discover loop
+    # re-resolves every ~5s; spamming the same line every cycle is noise.
+    sig = (endpoint, msg_type, qos_profile or "default", rec.capability_id)
+    prev = _LAST_RESOLVED.get((transport, contract_id))
+    if prev != sig:
+        log.info(
+            "[scene] %r ← atlas: topic=%s msg=%s qos=%s contract=%s cap=%s",
+            kind, endpoint, msg_type, qos_profile or "default",
+            contract_id, rec.capability_id,
+        )
+        _LAST_RESOLVED[(transport, contract_id)] = sig
     return TopicSpec(
         kind=kind,
         topic=endpoint,
