@@ -14,4 +14,4 @@ cd "$PKG_ROOT"
 # robonix_mcp_types}` itself — packages don't manage codegen paths.
 export PYTHONPATH="$(rbnx path robonix-api):$PKG_ROOT:${PYTHONPATH:-}"
 
-exec python3 -m audio_driver.node
+exec python3 -m audio_driver.main

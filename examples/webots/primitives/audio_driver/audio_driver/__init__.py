@@ -12,4 +12,4 @@
 #   mic_driver.py    — Microphone capture via arecord subprocess
 #   speaker_driver.py — Speaker playback via aplay subprocess
 #
-# Entry point: python -m audio_driver.node
+# Entry point: python -m audio_driver.main

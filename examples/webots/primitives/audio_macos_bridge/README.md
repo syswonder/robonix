@@ -17,7 +17,7 @@ robonix install, no codegen.
 ```
 audio_macos_bridge/
 ├── package_manifest.yaml          # cap_id = com.robonix.primitive.audio
-├── audio_macos_bridge/node.py     # Linux side: gRPC servicer ↔ WebSocket client
+├── audio_macos_bridge/main.py     # Linux side: gRPC servicer ↔ WebSocket client
 ├── mac_server/server.py           # macOS side: headless WebSocket server
 ├── mac_server/server_web.py       # macOS side: same protocol + browser debug UI
 ├── mac_server/requirements.txt    # sounddevice + websockets
