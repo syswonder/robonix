@@ -982,10 +982,19 @@ class ConceptGraphsDetector:
                     agg_sim=agg_sim,
                 )
                 added = len(self._map_objects) - pre_n
-                log.info(
-                    "[scene-cg] tick: %d dets, %d new, %d total objects",
-                    len(det_list), added, len(self._map_objects),
-                )
+                # Per-frame log is too noisy. Only log when (a) something
+                # changed (new/total delta) or (b) every Nth tick as a
+                # heartbeat. Otherwise INFO once for the first tick is
+                # enough so the dev sees ingest is alive.
+                self._tick_seq = getattr(self, "_tick_seq", 0) + 1
+                prev_total = getattr(self, "_last_logged_total", -1)
+                changed = added != 0 or len(self._map_objects) != prev_total
+                if changed or self._tick_seq == 1 or self._tick_seq % 100 == 0:
+                    log.info(
+                        "[scene-cg] tick %d: %d dets, %d new, %d total objects",
+                        self._tick_seq, len(det_list), added, len(self._map_objects),
+                    )
+                    self._last_logged_total = len(self._map_objects)
             except Exception as e:  # noqa: BLE001
                 # First few failures: dump the full traceback so we can
                 # tell whether it was compute_spatial_similarities,
@@ -1094,7 +1103,8 @@ class ConceptGraphsDetector:
                     obj_min_detections=self.cfg["obj_min_detections"],
                     objects=self._map_objects,
                 )
-                log.info("[scene-cg] cleanup denoise+filter: %d → %d", pre, len(self._map_objects))
+                if len(self._map_objects) != pre:
+                    log.info("[scene-cg] cleanup denoise+filter: %d → %d", pre, len(self._map_objects))
                 ran_any = True
             except Exception as e:  # noqa: BLE001
                 log.warning("denoise/filter failed: %s", e)
@@ -1141,7 +1151,8 @@ class ConceptGraphsDetector:
                     device=self._device,
                 )
                 self._map_objects = merged_objs
-                log.info("[scene-cg] cleanup merge_overlap: %d → %d", pre, len(self._map_objects))
+                if len(self._map_objects) != pre:
+                    log.info("[scene-cg] cleanup merge_overlap: %d → %d", pre, len(self._map_objects))
                 ran_any = True
             except Exception as e:  # noqa: BLE001
                 log.warning("merge_overlap_objects failed: %s", e)
