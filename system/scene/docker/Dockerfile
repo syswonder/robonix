@@ -101,10 +101,17 @@ RUN pip install -r /tmp/requirements.txt \
 # (depth backproject + per-object pcd + DBSCAN-based merge). Install
 # editable so we can edit-and-test from inside the container without
 # rebuilding when iterating on their helpers.
-RUN git clone --depth 1 --branch ali-dev \
-        https://github.com/concept-graphs/concept-graphs.git \
+# git clone goes through ghfast.top mirror with fallback to direct.
+# --no-deps because concept-graphs's setup.py declares pytorch3d as
+# an install_requires which we explicitly skip on aarch64
+# (see requirements.txt).
+RUN ( git clone --depth 1 --branch ali-dev \
+        https://ghfast.top/https://github.com/concept-graphs/concept-graphs.git \
         /opt/concept-graphs \
- && pip install -e /opt/concept-graphs \
+   || git clone --depth 1 --branch ali-dev \
+        https://github.com/concept-graphs/concept-graphs.git \
+        /opt/concept-graphs ) \
+ && pip install --no-deps -e /opt/concept-graphs \
  || (echo "concept-graphs install failed — see comment in Dockerfile" \
      && exit 1)
 
