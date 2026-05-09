@@ -31,6 +31,7 @@ Typical usage:
 """
 from __future__ import annotations
 
+from .atlas import atlas
 from .atlas_types import (
     CapabilityRecord,
     CapabilityState,
@@ -83,9 +84,11 @@ del _bootstrap_codegen_paths_from_caller
 
 __all__ = [
     "Capability",
+    # Module-level atlas singleton — `atlas.get(id)` / `atlas.find(...)`.
+    "atlas",
     # Lifecycle return type — every @cap.on_* handler returns one of these.
     "Ok", "Err", "Deferred", "Result",
-    # Atlas dataclass mirrors — return values of cap.find / find_one / connect.
+    # Atlas dataclass mirrors — return values of atlas.get / atlas.find / cap.connect.
     "Transport", "CapabilityState",
     "InterfaceMetadata", "CapabilityRecord", "ContractDescriptor", "Channel",
     # MCP decorator (standalone form — `@cap.mcp` is sugar over this).

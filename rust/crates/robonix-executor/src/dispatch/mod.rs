@@ -9,9 +9,9 @@
 //   2. else → ConnectCapability(cap_id, contract_id, MCP) on atlas →
 //      MCP call to the returned endpoint → DisconnectCapability.
 //
-// Skills sit at INITIALIZED after `rbnx boot`. Right before dispatching
+// Skills sit at INACTIVE after `rbnx boot`. Right before dispatching
 // to one, the executor sends Driver(CMD_ACTIVATE) on its `*/driver`
-// interface to flip it to RUNNING — that's where the skill actually
+// interface to flip it to ACTIVE — that's where the skill actually
 // allocates its hot resources (frontier loop / nav subscribers / VLA
 // worker / …). We track which skill cap_ids we've already activated in
 // this executor process; subsequent calls skip the CMD_ACTIVATE RPC to
@@ -106,7 +106,7 @@ pub async fn dispatch(
 /// If `cap_id` is a skill that hasn't been activated in this process
 /// yet, resolve its `*/driver` interface and send Driver(CMD_ACTIVATE).
 /// No-op for primitives, services, system caps, and skills already in
-/// RUNNING.
+/// ACTIVE.
 async fn ensure_skill_runnable(atlas: &mut AtlasClient, cap_id: &str) -> Result<()> {
     if already_activated(cap_id) {
         log::debug!("[skill-activate] {cap_id}: already activated, skipping CMD_ACTIVATE");
@@ -129,8 +129,8 @@ async fn ensure_skill_runnable(atlas: &mut AtlasClient, cap_id: &str) -> Result<
         );
         return Ok(());
     }
-    if rec.state == atlas_pb::CapabilityState::StateRunning as i32 {
-        log::info!("[skill-activate] {cap_id}: already RUNNING per atlas, marking sticky");
+    if rec.state == atlas_pb::CapabilityState::StateActive as i32 {
+        log::info!("[skill-activate] {cap_id}: already ACTIVE per atlas, marking sticky");
         mark_activated(cap_id);
         return Ok(());
     }

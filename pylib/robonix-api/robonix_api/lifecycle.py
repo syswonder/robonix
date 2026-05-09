@@ -121,7 +121,7 @@ def build_lifecycle_servicer(
 
     `on_state_change(state, detail)` is invoked AFTER each handler returns
     ok=true and is the framework's hook for pushing state transitions to
-    atlas. State strings: "initialized" / "running" / "error". Capability
+    atlas. State strings: "inactive" / "active" / "error". Capability
     layer wires this; lower-level callers can leave it None.
     """
     base = driver_pascal_for_namespace(namespace)
@@ -163,11 +163,11 @@ def build_lifecycle_servicer(
             return
         # Ok: advance per command kind.
         if cmd == CMD_INIT:
-            _emit_state("initialized")
+            _emit_state("inactive")
         elif cmd == CMD_ACTIVATE:
-            _emit_state("running")
+            _emit_state("active")
         elif cmd == CMD_DEACTIVATE:
-            _emit_state("initialized")
+            _emit_state("inactive")
         elif cmd == CMD_SHUTDOWN:
             _emit_state("terminated")
 
@@ -194,9 +194,9 @@ def build_lifecycle_servicer(
         """Pack Result into the proto Driver_Response shape."""
         if isinstance(result, Ok):
             target = {
-                CMD_INIT: "initialized",
-                CMD_ACTIVATE: "running",
-                CMD_DEACTIVATE: "initialized",
+                CMD_INIT: "inactive",
+                CMD_ACTIVATE: "active",
+                CMD_DEACTIVATE: "inactive",
                 CMD_SHUTDOWN: "terminated",
             }.get(cmd, "ok")
             return response_cls(ok=True, state=target, error="")

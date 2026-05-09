@@ -549,7 +549,7 @@ pub async fn execute_start(
     // is delivered via Driver(CMD_INIT, config_json) only (post-spawn
     // task below). Empty inputs → no CMD_INIT push (start body still
     // gets a default Driver(CMD_INIT, "{}") call so it can advance to
-    // INITIALIZED, just with an empty config dict).
+    // INACTIVE, just with an empty config dict).
     let materialized_cfg_json = build_start_config_json(config_file, set_overrides)?;
 
     // Per-package run logs live under <pkg>/rbnx-build/logs (gitignored,

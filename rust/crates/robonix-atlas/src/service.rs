@@ -124,7 +124,7 @@ struct CapRecord {
     endpoints: Vec<EndpointRec>,
     /// Last value reported by SetCapabilityState. None for legacy caps
     /// that never push, in which case `state()` falls back to the old
-    /// "first non-driver interface declare → INITIALIZED" inference.
+    /// "first non-driver interface declare → INACTIVE" inference.
     #[serde(serialize_with = "serialize_pushed_state")]
     pushed_state: Option<pb::CapabilityState>,
     state_detail: String,
@@ -148,7 +148,7 @@ impl CapRecord {
     /// Lifecycle state. The cap pushes via SetCapabilityState whenever its
     /// on_init / on_activate / on_deactivate handler returns; that pushed
     /// value wins. For legacy caps that never push, fall back to "any
-    /// non-driver interface declared → INITIALIZED" (preserves behaviour
+    /// non-driver interface declared → INACTIVE" (preserves behaviour
     /// for code still on the old register-then-declare-only flow).
     fn state(&self) -> pb::CapabilityState {
         if let Some(s) = self.pushed_state {
@@ -159,7 +159,7 @@ impl CapRecord {
             .iter()
             .any(|e| !is_driver_contract(&e.contract_id));
         if any_non_driver {
-            pb::CapabilityState::StateInitialized
+            pb::CapabilityState::StateInactive
         } else {
             pb::CapabilityState::StateRegistered
         }
@@ -176,10 +176,10 @@ fn is_legal_transition(prev: pb::CapabilityState, next: pb::CapabilityState) -> 
     }
     match (prev, next) {
         (StateUnspecified, _) => true,
-        (StateRegistered, StateInitialized) => true,
-        (StateInitialized, StateRunning) => true,
-        (StateRunning, StateInitialized) => true,
-        (StateError, StateInitialized) => true,
+        (StateRegistered, StateInactive) => true,
+        (StateInactive, StateActive) => true,
+        (StateActive, StateInactive) => true,
+        (StateError, StateInactive) => true,
         // self-transitions are no-ops, accept silently
         (a, b) if a == b => true,
         _ => false,
@@ -361,7 +361,7 @@ impl AtlasRegistry {
 
     /// Update the cap's lifecycle state. Returns the previous value (or
     /// the inferred fallback when nothing's been pushed yet) so callers
-    /// can log "X went INITIALIZED → RUNNING" without a separate query.
+    /// can log "X went INACTIVE → ACTIVE" without a separate query.
     /// Validation is **soft** in v0.1: illegal transitions log a warn
     /// but the new state is still stored. Strict validation will land
     /// in v0.2 once telemetry confirms there are no spurious illegal

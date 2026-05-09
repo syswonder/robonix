@@ -19,7 +19,7 @@ import time
 import uuid
 from typing import Optional
 
-from robonix_api import Capability, Ok, Err, Deferred
+from robonix_api import Capability, Ok, Err, Deferred, atlas
 
 from .nav_node import Goal, NavNode
 
@@ -61,8 +61,11 @@ def resolve_inputs(deadline_s: float = 30.0) -> dict[str, str]:
         for key, contract in wanted.items():
             if key in resolved:
                 continue
+            recs = atlas.find(contract_id=contract, transport="ros2")
+            if not recs:
+                continue
             try:
-                ch = cap.connect(contract_id=contract, transport="ros2")
+                ch = cap.connect(provider=recs[0], contract_id=contract, transport="ros2")
             except Exception:  # noqa: BLE001
                 continue
             ep = ch.endpoint

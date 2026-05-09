@@ -25,8 +25,8 @@ class Transport(IntEnum):
 class CapabilityState(IntEnum):
     UNSPECIFIED = 0
     REGISTERED  = 1
-    INITIALIZED = 2
-    RUNNING     = 3
+    INACTIVE    = 2
+    ACTIVE      = 3
     ERROR       = 4
     TERMINATED  = 5
 
