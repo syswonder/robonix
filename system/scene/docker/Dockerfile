@@ -44,13 +44,22 @@ ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
     UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
     HF_ENDPOINT=https://hf-mirror.com
 
+# Optional: pass from host via `docker build --build-arg` (see scripts/build.sh).
+# Use e.g. http://host.docker.internal:7890 — not 127.0.0.1 (that is the build container).
+# ARG HTTP_PROXY
+# ARG HTTPS_PROXY
+# ARG NO_PROXY
+# ENV HTTP_PROXY=${HTTP_PROXY} \
+#     HTTPS_PROXY=${HTTPS_PROXY} \
+#     NO_PROXY=${NO_PROXY} \
+#     http_proxy=${HTTP_PROXY} \
+#     https_proxy=${HTTPS_PROXY} \
+#     no_proxy=${NO_PROXY}
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/ \
-    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
-    HF_ENDPOINT=https://hf-mirror.com
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # System packages we need at runtime:
 #   python3-pip          — install scene deps
