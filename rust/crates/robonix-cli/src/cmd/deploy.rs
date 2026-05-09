@@ -1279,7 +1279,10 @@ async fn spawn_and_init(
         // CMD_ACTIVATE on first MCP call (lazy-activate).
         output::boot_ok(
             display_label,
-            &format!("{}  (skill — awaits executor activate)", init_state.to_uppercase()),
+            &format!(
+                "{}  (skill — awaits executor activate)",
+                init_state.to_uppercase()
+            ),
         );
         return Ok(sp);
     }
@@ -1309,11 +1312,8 @@ async fn spawn_and_init(
     // only the final state — the two intermediate driver calls already
     // got their own spinner lines and OK ticks above. cap_id is the
     // leftmost label so we don't repeat it here.
-    let _ = init_state;  // intermediate, only kept for the assertion below
-    output::boot_ok(
-        display_label,
-        &activate_state.to_uppercase(),
-    );
+    let _ = init_state; // intermediate, only kept for the assertion below
+    output::boot_ok(display_label, &activate_state.to_uppercase());
 
     Ok(sp)
 }
