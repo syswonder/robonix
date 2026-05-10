@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""scene_service.state — object registry, data association, relations,
-snapshot scoping. All shared mutable state lives here behind a single
-asyncio.Lock owned by ObjectRegistry."""
+"""scene_service.state — object registry, data association, relations.
+All shared mutable state lives here behind a single asyncio.Lock owned
+by ObjectRegistry."""
 
 from .object_registry import (
     SceneObject,
@@ -13,7 +13,6 @@ from .object_registry import (
 )
 from .data_assoc import Detection, associate
 from .relations import RelationEngine, RELATION_PREDICATES
-from .snapshot import scope_snapshot
 
 __all__ = [
     "SceneObject",
@@ -26,5 +25,4 @@ __all__ = [
     "associate",
     "RelationEngine",
     "RELATION_PREDICATES",
-    "scope_snapshot",
 ]
