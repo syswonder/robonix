@@ -12,6 +12,7 @@ mod pb;
 
 #[derive(Parser)]
 #[command(name = "rbnx")]
+#[command(version)]
 #[command(about = "Robonix helper CLI for package validation, build, and local orchestration", long_about = None)]
 struct Cli {
     #[command(subcommand)]

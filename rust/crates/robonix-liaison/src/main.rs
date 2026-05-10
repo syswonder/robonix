@@ -54,8 +54,9 @@ const LIAISON_VOICE_CONTRACT: &str = "robonix/system/liaison/voice";
 const LIAISON_SUBMIT_TOML: &str = "capabilities/system/liaison/submit.v1.toml";
 const LIAISON_VOICE_TOML: &str = "capabilities/system/liaison/voice.v1.toml";
 
-/// `lib/system/pilot/msg/Task.msg` source: TEXT=0 AUDIO=1 API=2.
+/// `lib/system/pilot/msg/Task.msg` source: TEXT=0 AUDIO=1
 const INTENT_SOURCE_TEXT: u32 = 0;
+const INTENT_SOURCE_AUDIO: u32 = 1;
 
 /// `lib/system/pilot/msg/PilotEvent.msg` event_kind.
 const EVT_TEXT_CHUNK: u32 = 0;
@@ -180,8 +181,7 @@ fn ensure_user_id(task: &mut Task) {
         }
         let modality = match task.source {
             INTENT_SOURCE_TEXT => "text",
-            1 => "voice",
-            2 => "api",
+            INTENT_SOURCE_AUDIO => "audio",
             _ => "unknown",
         };
         obj.entry("modality").or_insert(serde_json::json!(modality));

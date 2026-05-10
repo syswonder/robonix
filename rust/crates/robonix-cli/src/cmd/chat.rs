@@ -264,12 +264,9 @@ async fn pick_audio_settings(
 
     let env_set = |key: &str| std::env::var(key).ok().filter(|s| !s.is_empty()).is_some();
     let always = matches!(mode, PickMode::Reconfigure);
-    let need_mic = always || (!env_set("ROBONIX_CHAT_MIC_NODE") && cfg.mic_cap_id.is_none());
-    let need_speaker =
+    let mut need_mic = always || (!env_set("ROBONIX_CHAT_MIC_NODE") && cfg.mic_cap_id.is_none());
+    let mut need_speaker =
         always || (!env_set("ROBONIX_CHAT_SPEAKER_NODE") && cfg.speaker_cap_id.is_none());
-    if !need_mic && !need_speaker {
-        return Ok((cfg, warnings));
-    }
 
     let mut atlas = match AtlasClient::connect(atlas_endpoint).await {
         Ok(c) => c,
@@ -281,6 +278,36 @@ async fn pick_audio_settings(
             return Ok((cfg, warnings));
         }
     };
+
+    // Validate stored pins against current atlas state. A pin pointing at a
+    // cap that's not in this deploy (e.g. config saved from an earlier
+    // deploy where the audio cap was named differently) would silently break
+    // voice — re-prompt instead.
+    if !need_mic
+        && let Some(pin) = cfg.mic_cap_id.as_deref()
+        && !pin_exists_in_atlas(&mut atlas, pin, MIC_CONTRACT).await
+    {
+        warnings.push(format!(
+            "mic pin '{pin}' not in atlas (stale config) — re-prompting"
+        ));
+        cfg.mic_cap_id = None;
+        cfg.mic_device_id = None;
+        need_mic = true;
+    }
+    if !need_speaker
+        && let Some(pin) = cfg.speaker_cap_id.as_deref()
+        && !pin_exists_in_atlas(&mut atlas, pin, SPEAKER_CONTRACT).await
+    {
+        warnings.push(format!(
+            "speaker pin '{pin}' not in atlas (stale config) — re-prompting"
+        ));
+        cfg.speaker_cap_id = None;
+        cfg.speaker_device_id = None;
+        need_speaker = true;
+    }
+    if !need_mic && !need_speaker {
+        return Ok((cfg, warnings));
+    }
 
     if need_mic {
         let saved_cap = cfg.mic_cap_id.clone();
@@ -337,6 +364,25 @@ async fn pick_audio_settings(
         log::warn!("could not save chat config: {e:#}");
     }
     Ok((cfg, warnings))
+}
+
+/// True iff atlas currently has a cap whose id (or namespace) matches the
+/// pin AND it provides `contract` over GRPC. Used at chat startup to detect
+/// stale pins from a prior deploy whose audio cap has since been renamed
+/// or removed — caller drops the pin and re-prompts the picker instead of
+/// silently letting voice fail with "no provider".
+async fn pin_exists_in_atlas(atlas: &mut AtlasClient, pin: &str, contract: &str) -> bool {
+    let Ok(records) = atlas
+        .query_capabilities("", contract, atlas_pb::Transport::Grpc)
+        .await
+    else {
+        // Atlas unreachable — don't drop the pin on a transient failure;
+        // the outer caller already warned and degraded.
+        return true;
+    };
+    records
+        .iter()
+        .any(|r| r.capability_id == pin || r.namespace == pin)
 }
 
 /// `Ok(Some((cap_id, device_id)))` = picked both layers; device_id may be ""

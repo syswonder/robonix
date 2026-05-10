@@ -387,9 +387,7 @@ class Capability:
         Returns the rclpy publisher; user calls `.publish(msg)` directly OR
         via `cap.emit(contract_id, msg)`."""
         cls = msg_type if isinstance(msg_type, type) else resolve_msg_type(msg_type)
-        pub = RosBackend.get().create_publisher(
-            cls, topic, qos if isinstance(qos, int) else 0
-        )
+        pub = RosBackend.get().create_publisher(cls, topic, qos)
         self._publishers[_full_id(contract_id)] = pub
         if declare:
             self.declare_ros2_topic(
@@ -411,9 +409,7 @@ class Capability:
         we consume this contract over ROS2 (atlas tracks consumer-side
         bindings too — useful for `rbnx channels` audits)."""
         cls = msg_type if isinstance(msg_type, type) else resolve_msg_type(msg_type)
-        sub = RosBackend.get().create_subscription(
-            cls, topic, callback, qos if isinstance(qos, int) else 0
-        )
+        sub = RosBackend.get().create_subscription(cls, topic, callback, qos)
         if declare:
             try:
                 self.declare_ros2_topic(

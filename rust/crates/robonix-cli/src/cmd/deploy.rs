@@ -1191,22 +1191,8 @@ async fn spawn_and_init(
     .await?;
     let pkg_label = sp.name.clone();
 
-    // If the package's manifest declared a `capability_id:`, pass it
-    // through so wait_for_registration can match exactly instead of
-    // substring-fuzzy on the package name. Skip silently when missing
-    // (most packages don't need it; the convention `com.robonix.<comp>.<pkg>`
-    // matches the package name verbatim and the fuzzy path works fine).
-    let pkg_path = match resolve_entry_path(entry, cache_root, manifest_dir) {
-        Ok(p) => p,
-        Err(_) => PathBuf::new(),
-    };
-    let expected_cap_id: Option<String> = if pkg_path.is_dir() {
-        robonix_cli::manifest::detect_and_load(&pkg_path)
-            .ok()
-            .and_then(|d| d.manifest.capability_id)
-    } else {
-        None
-    };
+    // One package = one cap. After spawn, the new cap_id is whatever
+    // atlas saw register that wasn't in `before`.
 
     // Once the wrapper is up, every error path below must SIGKILL the
     // PGID before bailing — otherwise `?` returns the spawned process to
@@ -1230,7 +1216,6 @@ async fn spawn_and_init(
         &pkg_label,
         component,
         log_dir,
-        expected_cap_id.as_deref(),
     )
     .await
     {
@@ -1240,6 +1225,31 @@ async fn spawn_and_init(
             return Err(e);
         }
     };
+
+    // Spec: the cap_id this process registers (Python's
+    // `Capability(id=...)`) MUST equal robonix_manifest.yaml's `name:`
+    // for this entry. Mismatch is a deploy bug — surfacing it here
+    // beats letting downstream consumers fail with cryptic
+    // "no provider for X" errors.
+    if cap_id != entry.name {
+        let log_file = log_path(log_dir, &pkg_label);
+        output::boot_fail(
+            short_label(&pkg_label, component),
+            &format!(
+                "cap_id mismatch: manifest says name='{}' but Capability(id='{}') registered. \
+                 Fix python source to match manifest. Log: {}",
+                entry.name,
+                cap_id,
+                log_file.display()
+            ),
+        );
+        reap();
+        anyhow::bail!(
+            "[{component}/{pkg_label}] cap_id mismatch: manifest name='{}' vs Capability(id='{}')",
+            entry.name,
+            cap_id,
+        );
+    }
 
     let Some(driver_contract) = driver_contract else {
         // No driver contract — system caps auto-promote to ACTIVE on
@@ -1479,24 +1489,17 @@ async fn wait_for_registration(
     pkg_label: &str,
     component: &str,
     log_dir: &Path,
-    expected_cap_id: Option<&str>,
 ) -> Result<(String, Option<String>)> {
-    // Render an in-place spinner so the user can see boot is
-    // alive while atlas polls. Spinner ticks at SPINNER_TICK; we
-    // poll atlas only every N ticks so the RPC rate stays the
-    // same (200 ms vs the previous 500 ms is fine — query is
-    // cheap, atlas-local).
+    // One package = one cap. Find the cap that wasn't in `before`.
+    // Multiple new caps = deploy bug, fail loud. No heartbeat-based
+    // freshness fallback — every existing ACTIVE cap heartbeats
+    // periodically and would falsely match.
     const SPINNER_TICK: Duration = Duration::from_millis(100);
     const POLLS_PER_TICK: u32 = 2; // poll atlas every 200 ms
     let started = Instant::now();
-    let started_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
     let deadline = started + DRIVER_REGISTER_TIMEOUT;
     let mut frame: usize = 0;
     let display_label = short_label(pkg_label, component);
-    let name_hint = display_label.to_lowercase();
     loop {
         let elapsed_s = started.elapsed().as_secs_f32();
         output::boot_progress(
@@ -1509,43 +1512,31 @@ async fn wait_for_registration(
                 .query_capabilities("", "", atlas_pb::Transport::Unspecified)
                 .await
                 .with_context(|| format!("[{component}/{pkg_label}] poll atlas"))?;
-            // Match strictly by package name. Earlier code fell back to
-            // "any cap that wasn't in `before`" which silently pointed at
-            // the wrong cap (e.g. system.speech) whenever the spawned
-            // process hadn't registered yet but some other cap's regular
-            // 20-s heartbeat had just bumped its last_heartbeat past
-            // `started_ms`. Result: rbnx would call Driver(CMD_INIT) on
-            // the wrong cap's endpoint and report a successful boot
-            // against `cap=...wrong_id`. Strict name-match is fine — every
-            // robonix package's cap_id follows `com.robonix.<component>.<name>`
-            // by convention, and `wait_for_registration` retries until
-            // the actual registration lands or DRIVER_REGISTER_TIMEOUT
-            // (60 s) fires; the user gets a clean timeout pointing at the
-            // package's log instead of a misleading [ OK ].
-            //
-            // The `is_fresh` heartbeat check below still gates the match,
-            // so an orphan that happens to share the package name (e.g.
-            // a leaked previous `com.robonix.system.scene` that's still
-            // heartbeating to atlas) doesn't claim the slot — the new
-            // spawn's takeover bumps last_heartbeat past started_ms,
-            // which the orphan's stale heartbeat won't.
-            let is_fresh = |rec: &atlas_pb::CapabilityRecord| -> bool {
-                !before.contains(&rec.capability_id) || rec.last_heartbeat_ms >= started_ms
-            };
-            // Manifest-declared cap_id wins when the package opted in.
-            // Falls back to the package-name substring heuristic for
-            // packages that didn't (i.e. when their cap_id mentions the
-            // package name verbatim, which is the canonical convention).
-            let match_rec = if let Some(want) = expected_cap_id {
-                records
-                    .iter()
-                    .find(|rec| rec.capability_id == want && is_fresh(rec))
-            } else {
-                records.iter().find(|rec| {
-                    is_fresh(rec) && rec.capability_id.to_lowercase().contains(&name_hint)
-                })
-            };
-            if let Some(rec) = match_rec {
+            let matches: Vec<&atlas_pb::CapabilityRecord> = records
+                .iter()
+                .filter(|rec| !before.contains(&rec.capability_id))
+                .collect();
+            if matches.len() > 1 {
+                let log_file = log_path(log_dir, pkg_label);
+                let cap_ids: Vec<&str> =
+                    matches.iter().map(|r| r.capability_id.as_str()).collect();
+                output::boot_fail(
+                    display_label,
+                    &format!(
+                        "multiple new caps appeared from one spawn ({}) — \
+                         package start must register exactly one Capability. Log: {}",
+                        cap_ids.join(", "),
+                        log_file.display()
+                    ),
+                );
+                anyhow::bail!(
+                    "[{component}/{pkg_label}] multiple new caps from one spawn: {} \
+                     — spec is one package start = one Capability(id=...). Log: {}",
+                    cap_ids.join(", "),
+                    log_file.display()
+                );
+            }
+            if let Some(rec) = matches.first() {
                 let driver = rec.interfaces.iter().find(|iface| {
                     iface.transport == atlas_pb::Transport::Grpc as i32
                         && iface.contract_id.ends_with("/driver")
