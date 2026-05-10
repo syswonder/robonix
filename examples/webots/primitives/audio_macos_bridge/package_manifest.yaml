@@ -35,12 +35,11 @@ package:
 # `robonix/primitive/audio/*` contract surface as audio_driver, so
 # consumers (liaison voice path, scene optional audio) don't care
 # which backend is loaded.
-capability_id: audio_macos_bridge
 
 build: bash scripts/build.sh
 start: bash scripts/start.sh
 
-# 1 package = 1 cap (capability_id above). The mac_server daemon on the
+# 1 package = 1 cap. The mac_server daemon on the
 # macOS side enumerates CoreAudio devices; we surface them through the
 # optional list_devices/select_device contracts so the user can pick
 # which physical mic/speaker the cap's driver routes to. Those CoreAudio

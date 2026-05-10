@@ -8,8 +8,3 @@ idl     = "liaison/srv/StartVoiceSession.srv"
 
 [mode]
 type = "rpc_server_stream"
-
-[semantics]
-unified_entry = true
-interruptible = true
-multimodal    = true

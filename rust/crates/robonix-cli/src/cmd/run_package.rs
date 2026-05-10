@@ -14,6 +14,7 @@ use robonix_cli::Config;
 use robonix_cli::manifest;
 use robonix_cli::output;
 use robonix_cli::process::ProcessManager;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tonic::Request;
@@ -630,13 +631,19 @@ pub async fn execute_start(
     // given (rbnx start without config = run package as-is, init with
     // default empty config).
     let init_task = if let Some(json) = materialized_cfg_json {
-        let cap_id_hint = manifest
-            .capability_id
-            .clone()
-            .unwrap_or_else(|| manifest.package.name.clone());
+        // One package = one cap. Snapshot atlas, then post-spawn diff
+        // gives the new cap_id.
         let endpoint_for_task = endpoint.clone();
+        let before_snapshot = match AtlasClient::connect(&endpoint).await {
+            Ok(mut a) => a
+                .query_capabilities("", "", atlas_pb::Transport::Unspecified)
+                .await
+                .map(|recs| recs.into_iter().map(|r| r.capability_id).collect::<HashSet<_>>())
+                .unwrap_or_default(),
+            Err(_) => HashSet::new(),
+        };
         Some(tokio::spawn(async move {
-            drive_cmd_init_after_register(&endpoint_for_task, &cap_id_hint, json).await
+            drive_cmd_init_after_register(&endpoint_for_task, &before_snapshot, json).await
         }))
     } else {
         None
@@ -668,14 +675,13 @@ const CMD_INIT_DELIVERY: u32 = 0;
 const CAP_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Wait for `cap_id_hint` to appear in atlas with a `*/driver` gRPC
-/// interface, then call Driver(CMD_INIT, config_json). Logs and gives
-/// up after 60s — `rbnx start` continues running the package even if
-/// init delivery fails (the user can manually re-trigger via another
-/// rbnx command).
+/// Wait for the new cap (any cap not in `before`) to appear in atlas with a
+/// `*/driver` gRPC interface, then call Driver(CMD_INIT, config_json). One
+/// package = one cap. Gives up after 60s; `rbnx start` keeps the package
+/// running regardless.
 async fn drive_cmd_init_after_register(
     atlas_endpoint: &str,
-    cap_id_hint: &str,
+    before: &HashSet<String>,
     config_json: String,
 ) {
     let normalized = if atlas_endpoint.starts_with("http") {
@@ -691,12 +697,10 @@ async fn drive_cmd_init_after_register(
         }
     };
     let started = Instant::now();
-    let hint_lower = cap_id_hint.to_lowercase();
     loop {
         if started.elapsed() > CAP_REGISTER_TIMEOUT {
             output::warning(&format!(
-                "CMD_INIT delivery: cap matching '{cap_id_hint}' did not register \
-                 within {:?}; config not delivered",
+                "CMD_INIT delivery: no new cap registered within {:?}; config not delivered",
                 CAP_REGISTER_TIMEOUT
             ));
             return;
@@ -711,9 +715,7 @@ async fn drive_cmd_init_after_register(
                 continue;
             }
         };
-        let match_rec = recs.iter().find(|r| {
-            r.capability_id == cap_id_hint || r.capability_id.to_lowercase().contains(&hint_lower)
-        });
+        let match_rec = recs.iter().find(|r| !before.contains(&r.capability_id));
         let Some(rec) = match_rec else {
             tokio::time::sleep(POLL_INTERVAL).await;
             continue;

@@ -10,7 +10,6 @@ package:
   description: Tiago lidar driver — 2D scan snapshot over Webots ROS2.
   license: MulanPSL-2.0
 
-capability_id: tiago_lidar
 
 build: bash scripts/build.sh
 start: bash scripts/start.sh

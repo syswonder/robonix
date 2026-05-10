@@ -23,12 +23,11 @@ package:
 # implementations register the same `robonix/primitive/audio/*`
 # contracts, so consumers (liaison voice path, scene optional audio)
 # don't care which one liaison picked.
-capability_id: audio_driver
 
 build: bash scripts/build.sh
 start: bash scripts/start.sh
 
-# 1 package = 1 cap (capability_id above). Multi-device routing lives
+# 1 package = 1 cap. Multi-device routing lives
 # inside the cap via the optional list_devices/select_device contracts —
 # ALSA naturally has many "hw:X,Y" devices behind one driver, so we
 # expose the routing table. These are driver-internal devices, not

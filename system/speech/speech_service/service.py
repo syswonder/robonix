@@ -543,7 +543,7 @@ class DialogManager:
 # Note: the codegen service methods are named Call / Stream (not Recognize
 # or Synthesize) because the contract RPC is always called "Call" or "Stream".
 
-class SpeechAsrServicer(contracts_grpc.SystemSpeechAsrServicer):
+class SpeechAsrServicer(contracts_grpc.RobonixSystemSpeechAsrServicer):
     """ASR gRPC servicer -- handles the Call RPC for one-shot speech recognition.
 
     Delegates to WhisperASRBackend for transcription.
@@ -601,7 +601,7 @@ class SpeechAsrServicer(contracts_grpc.SystemSpeechAsrServicer):
             return asr_pb2.Recognize_Response(text="", confidence=0.0, error=str(e))
 
 
-class SpeechAsrStreamServicer(contracts_grpc.SystemSpeechAsrStreamServicer):
+class SpeechAsrStreamServicer(contracts_grpc.RobonixSystemSpeechAsrStreamServicer):
     """Streaming ASR gRPC servicer -- handles the Stream RPC for chunk-by-chunk
     speech recognition.
 
@@ -695,7 +695,7 @@ class SpeechAsrStreamServicer(contracts_grpc.SystemSpeechAsrStreamServicer):
             yield asr_pb2.RecognizeStreamEvent(event_type=2, error=str(e))
 
 
-class SpeechTtsServicer(contracts_grpc.SystemSpeechTtsServicer):
+class SpeechTtsServicer(contracts_grpc.RobonixSystemSpeechTtsServicer):
     """TTS gRPC servicer -- handles the Call RPC for one-shot text-to-speech.
 
     Delegates to EdgeTTSBackend for audio generation.
@@ -745,7 +745,7 @@ class SpeechTtsServicer(contracts_grpc.SystemSpeechTtsServicer):
             return tts_pb2.Synthesize_Response(audio_data=b"", error=str(e))
 
 
-class SpeechTtsStreamServicer(contracts_grpc.SystemSpeechTtsStreamServicer):
+class SpeechTtsStreamServicer(contracts_grpc.RobonixSystemSpeechTtsStreamServicer):
     """Streaming TTS gRPC servicer -- handles the Stream RPC for chunk-by-chunk
     text-to-speech synthesis.
 
@@ -818,7 +818,7 @@ class SpeechTtsStreamServicer(contracts_grpc.SystemSpeechTtsStreamServicer):
             context.set_details(str(e))
 
 
-class SpeechDialogServicer(contracts_grpc.SystemSpeechDialogServicer):
+class SpeechDialogServicer(contracts_grpc.RobonixSystemSpeechDialogServicer):
     """Dialog gRPC servicer -- handles the Stream RPC for voice dialog sessions.
 
     Creates a DialogSession and streams DialogEvent updates to the client.

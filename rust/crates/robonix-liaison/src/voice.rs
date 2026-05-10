@@ -67,9 +67,6 @@ pub const KIND_TTS_DONE: u32 = 8;
 pub const KIND_SESSION_DONE: u32 = 9;
 pub const KIND_ERROR: u32 = 10;
 
-/// `Task.source` enum: TEXT=0 AUDIO=1 API=2.
-const INTENT_SOURCE_AUDIO: u32 = 1;
-
 /// Hard ceiling on a single voice turn. Real end-of-turn comes from
 /// the silence-VAD in the mic pump (see VAD_* below); this just keeps
 /// a stuck mic from monopolizing the session forever.
@@ -108,17 +105,42 @@ async fn resolve_endpoint(
         .query_capabilities("", contract_id, transport)
         .await
         .ok()?;
-    let pick: Option<&atlas_pb::CapabilityRecord> = if pin_capability_id.is_empty() {
+
+    // Auto-pick path: any cap providing this contract over the right transport.
+    let auto_pick = || -> Option<&atlas_pb::CapabilityRecord> {
         records.iter().find(|r| {
             r.interfaces
                 .iter()
                 .any(|i| i.contract_id == contract_id && i.transport == transport as i32)
         })
+    };
+
+    let pick: Option<&atlas_pb::CapabilityRecord> = if pin_capability_id.is_empty() {
+        auto_pick()
     } else {
-        records
+        // Try the pinned cap first; if it isn't in atlas anymore (stale chat
+        // config / pin pointed at a cap that's not in this deploy), fall back
+        // to auto-pick rather than failing hard. The pin is a hint, not a
+        // hard requirement.
+        match records
             .iter()
             .find(|r| r.capability_id == pin_capability_id || r.namespace == pin_capability_id)
+        {
+            Some(rec) => Some(rec),
+            None => {
+                log::warn!(
+                    "[voice] pinned cap '{pin_capability_id}' for {contract_id} not in atlas; \
+                     falling back to auto-pick. Available providers: {:?}",
+                    records
+                        .iter()
+                        .map(|r| r.capability_id.as_str())
+                        .collect::<Vec<_>>()
+                );
+                auto_pick()
+            }
+        }
     };
+
     let cap = pick?;
     let (_channel_id, endpoint, _params) = atlas
         .connect_capability("liaison", &cap.capability_id, contract_id, transport)
@@ -784,13 +806,17 @@ fn build_task(
         serde_json::from_str(extra_context_json).unwrap_or_else(|_| serde_json::json!({}))
     };
     if let Some(obj) = ctx.as_object_mut() {
+        // Pilot reads `modality` to decide brevity / no-markdown rules
+        // for voice-mode replies (planner.rs:181). Don't rename without
+        // updating pilot in lockstep.
+        obj.insert("modality".to_string(), serde_json::json!("voice"));
         obj.insert("voice_session".to_string(), serde_json::json!(true));
         obj.insert("user_id".to_string(), serde_json::json!(user_id));
     }
     Task {
         task_id: Uuid::new_v4().to_string(),
         session_id: session_id.to_string(),
-        source: INTENT_SOURCE_AUDIO,
+        source: crate::INTENT_SOURCE_AUDIO,
         text: transcript.to_string(),
         audio_data: audio_pcm.to_vec(),
         context_json: ctx.to_string(),

@@ -51,16 +51,6 @@ pub struct Manifest {
     /// True iff the manifest was parsed from legacy fields (id/nodes/build.script).
     /// `rbnx` prints a deprecation warning in this case.
     pub is_legacy: bool,
-    /// Atlas `capability_id` this package will register at runtime, when
-    /// the manifest declared it explicitly via the top-level
-    /// `capability_id:` field. Distinct from `package.id` (the package
-    /// identity for distribution / dep tracking). Optional — packages
-    /// that don't declare it fall back to rbnx-boot's name-based fuzzy
-    /// match against `<pkg>` substring in the cap_id, which only works
-    /// when `Capability(id="...{pkg_name}...")` happens to mention the
-    /// package name (broken for e.g. `audio_driver` registering
-    /// `com.robonix.primitive.audio`).
-    pub capability_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -134,9 +124,11 @@ struct RawManifest {
     capabilities: Vec<CapabilityRef>,
     #[serde(default)]
     depends: Vec<DependsRef>,
-    /// Atlas cap_id this package's `Capability(id=...)` will register.
-    /// Distinct from `package.id` (which is the package identity).
+    /// Legacy `capability_id:` field. Removed from spec — accepted by serde but
+    /// ignored. rbnx-boot now discovers the cap_id by polling atlas for any cap
+    /// that registered after `start.sh` spawned. Future warning: emit deprecation.
     #[serde(default)]
+    #[allow(dead_code)]
     capability_id: Option<String>,
 }
 
@@ -192,12 +184,6 @@ fn normalize(raw: RawManifest, manifest_path: &Path) -> Manifest {
         .and_then(|n| n.to_str())
         .map(|s| s == LEGACY_MANIFEST_FILE)
         .unwrap_or(false);
-
-    let capability_id: Option<String> = raw
-        .capability_id
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
 
     // package.name fallback to package.id (legacy used id as canonical name).
     let mut package = raw.package;
@@ -255,7 +241,6 @@ fn normalize(raw: RawManifest, manifest_path: &Path) -> Manifest {
         capabilities: raw.capabilities,
         depends: raw.depends,
         is_legacy,
-        capability_id,
     }
 }
 

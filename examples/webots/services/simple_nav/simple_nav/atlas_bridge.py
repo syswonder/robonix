@@ -140,10 +140,12 @@ def status(req: GetNavigationStatus_Request) -> GetNavigationStatus_Response:
     s = nav.goal_status(req.goal_id or None)
     if s is None:
         return GetNavigationStatus_Response(known=False, status="no active goal", terminal=True)
+    state = str(s.get("state", "unknown"))
+    detail = str(s.get("detail", ""))
     return GetNavigationStatus_Response(
         known=True,
-        status=str(s.get("state", "unknown")),
-        terminal=bool(s.get("terminal", False)),
+        status=f"{state}: {detail}" if detail else state,
+        terminal=state in ("succeeded", "aborted", "cancelled"),
     )
 
 
