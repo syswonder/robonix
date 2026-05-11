@@ -3,12 +3,24 @@ name: robonix-webots-example-deploy
 
 env:
 
+# boot in sequence: system -> soma+scene -> execution -> interaction
 system:
+  # basic layer
   atlas:
     listen: 127.0.0.1:50051
     log: info
+  nexus:
+    log: info
+  # soma+scene layer
+  scene:
+    log: info
+  # execution layer
   executor:
     listen: 127.0.0.1:50061
+    log: info
+  # interaction layer
+  memory: # used by pilot now
+    backend: sqlite
     log: info
   pilot:
     listen: 127.0.0.1:50071
@@ -21,27 +33,9 @@ system:
   liaison:
     listen: 127.0.0.1:50081
     log: info
-  # nexus:
-  #   log: info
-  memory:
-    backend: sqlite
-    log: info
-  scene:
-    log: info
-  # `speech` is intentionally omitted from this minimal deploy — it
-  # pulls 6 GB of model weights and locks the GPU on first boot, which
-  # makes it the worst part of the new-developer experience. Add it
-  # back when you actually need ASR/TTS:
-  #
-  # speech:
-  #   log: info
-  #   disable_whisper: true
-  #   funasr_device: auto       # cuda | cpu | auto (try cuda then fall back)
-  #   tts_voice: zh-CN-XiaoxiaoNeural
 
+# after booted all the system components, start the devices (primitives)
 # the robonix boot "device tree"
-# if any primitive/service/skill failed to start, it should return "DERERED" 
-# and rbnx will put it into defered queue and retry it later
 primitive:
   - name: tiago_chassis
     path: ./primitives/tiago_chassis
@@ -69,6 +63,7 @@ primitive:
     path: ./primitives/audio_driver
     config: {}
 
+# after booted all the primitives, start the services
 service:
   # mapping_rbnx — SLAM service. Listed FIRST because simple_nav
   # depends on `service/map/occupancy_grid` and rbnx-cli currently
@@ -103,14 +98,15 @@ service:
       follower_hz: 20
       max_linear: 0.5
       max_angular: 1.0
-      pid_linear: [ 0.8, 0.0, 0.1 ]
-      pid_angular: [ 1.5, 0.0, 0.2 ]
+      pid_linear: [0.8, 0.0, 0.1]
+      pid_angular: [1.5, 0.0, 0.2]
       goal_tolerance: 0.3
       goal_yaw_tolerance: 0.2
       timeout: 120
       planner_diagonal: true
       planner_max_iters: 500000
 
+# after booted all the services, register the skills (but don't activate them now)
 skill:
   # explore_rbnx — autonomous frontier exploration.
   - name: explore

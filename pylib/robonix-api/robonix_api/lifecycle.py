@@ -91,6 +91,7 @@ def bind_user_handler(servicer_cls: type, method_name: str, fn: Callable) -> typ
     return type(f"Robonix{servicer_cls.__name__}Impl", (servicer_cls,), {method_name: impl})
 
 
+# TODO: this is just a hack since we don't restrict the namespace - wheatfox, 2026.5
 def _is_skill_namespace(ns: str) -> bool:
     parts = [p for p in ns.strip("/").split("/") if p]
     if not parts:
