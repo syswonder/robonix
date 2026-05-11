@@ -638,7 +638,11 @@ pub async fn execute_start(
             Ok(mut a) => a
                 .query_capabilities("", "", atlas_pb::Transport::Unspecified)
                 .await
-                .map(|recs| recs.into_iter().map(|r| r.capability_id).collect::<HashSet<_>>())
+                .map(|recs| {
+                    recs.into_iter()
+                        .map(|r| r.capability_id)
+                        .collect::<HashSet<_>>()
+                })
                 .unwrap_or_default(),
             Err(_) => HashSet::new(),
         };

@@ -1210,21 +1210,14 @@ async fn spawn_and_init(
         );
     };
 
-    let (cap_id, driver_contract) = match wait_for_registration(
-        atlas,
-        &before,
-        &pkg_label,
-        component,
-        log_dir,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            reap();
-            return Err(e);
-        }
-    };
+    let (cap_id, driver_contract) =
+        match wait_for_registration(atlas, &before, &pkg_label, component, log_dir).await {
+            Ok(v) => v,
+            Err(e) => {
+                reap();
+                return Err(e);
+            }
+        };
 
     // Spec: the cap_id this process registers (Python's
     // `Capability(id=...)`) MUST equal robonix_manifest.yaml's `name:`
@@ -1518,8 +1511,7 @@ async fn wait_for_registration(
                 .collect();
             if matches.len() > 1 {
                 let log_file = log_path(log_dir, pkg_label);
-                let cap_ids: Vec<&str> =
-                    matches.iter().map(|r| r.capability_id.as_str()).collect();
+                let cap_ids: Vec<&str> = matches.iter().map(|r| r.capability_id.as_str()).collect();
                 output::boot_fail(
                     display_label,
                     &format!(
