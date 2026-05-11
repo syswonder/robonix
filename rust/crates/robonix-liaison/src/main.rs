@@ -594,7 +594,7 @@ mod tests {
         };
         ensure_user_id(&mut t);
         let v: serde_json::Value = serde_json::from_str(&t.context_json).unwrap();
-        assert_eq!(v["modality"], "voice");
+        assert_eq!(v["modality"], "audio");
         assert_eq!(v["user_id"], "voice:alice");
         assert_eq!(v["foo"], "bar");
     }
