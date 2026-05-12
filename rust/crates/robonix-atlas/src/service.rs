@@ -159,9 +159,9 @@ impl From<&CapabilityProviderState> for pb::CapabilityProvider {
 }
 
 impl CapabilityProviderState {
-    /// Lifecycle state. The cap pushes via SetCapabilityState whenever its
+    /// Lifecycle state. The provider pushes via SetCapabilityState whenever its
     /// on_init / on_activate / on_deactivate handler returns; that pushed
-    /// value wins. For legacy caps that never push, fall back to "any
+    /// value wins. For legacy providers that never push, fall back to "any
     /// non-driver capability declared → INACTIVE" (preserves behaviour
     /// for code still on the old register-then-declare-only flow).
     fn state(&self) -> pb::LifecycleState {
@@ -181,8 +181,8 @@ impl CapabilityProviderState {
 }
 
 /// Whether `prev → next` matches the v0.1 lifecycle FSM (see
-/// `docs/src/architecture/cap-lifecycle.md`). `Unspecified` as `prev`
-/// means "fresh cap, never pushed state" — accept any first transition.
+/// `docs/src/architecture/provider-lifecycle.md`). `Unspecified` as `prev`
+/// means "fresh provider, never pushed state" — accept any first transition.
 fn is_legal_transition(prev: pb::LifecycleState, next: pb::LifecycleState) -> bool {
     use pb::LifecycleState::*;
     if next == StateError || next == StateTerminated {
@@ -204,7 +204,7 @@ fn is_driver_contract(contract_id: &str) -> bool {
     // Per-area lifecycle drivers: `robonix/primitive/<area>/driver`,
     // `robonix/service/<area>/driver`. The `{CAP_CLASS}/driver` template in
     // `capabilities/{primitive,service}/driver.v1.toml` is concretised by
-    // the cap to its area at DeclareCapability time.
+    // the provider to its area at DeclareCapability time.
     contract_id.ends_with("/driver")
 }
 
@@ -225,7 +225,7 @@ struct OpenChannel {
 
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct State {
-    caps: HashMap<String, CapabilityProviderState>,
+    providers: HashMap<String, CapabilityProviderState>,
     channels: HashMap<String, OpenChannel>,
 }
 
@@ -298,9 +298,9 @@ impl AtlasRegistry {
     /// an error. We assume the old process is dead (or about to be), so
     /// we drop its endpoints + state and reset last_heartbeat to now.
     /// The caller is then expected to redeclare capabilities with its own
-    /// fresh endpoints. Without this, an orphan cap (heartbeat eviction
+    /// fresh endpoints. Without this, an orphan provider (heartbeat eviction
     /// hasn't fired yet — 60s default) blocks every subsequent boot of
-    /// the same package: rbnx waits for a "new" cap to appear in atlas,
+    /// the same package: rbnx waits for a "new" provider to appear in atlas,
     /// the python framework only retries register once and then quietly
     /// keeps going, and atlas keeps pointing consumers at the dead
     /// process's endpoints. The previous "ALREADY_EXISTS" failure mode
@@ -324,7 +324,7 @@ impl AtlasRegistry {
         };
         let namespace = Self::require("namespace", namespace)?.to_string();
         let mut state = self.inner.write().await;
-        if let Some(existing) = state.caps.get_mut(&provider_id) {
+        if let Some(existing) = state.providers.get_mut(&provider_id) {
             // Cross-kind collision is rejected per proto contract.
             if existing.kind != kind {
                 return Err(Status::already_exists(format!(
@@ -349,7 +349,7 @@ impl AtlasRegistry {
             );
             return Ok(provider_id);
         }
-        state.caps.insert(
+        state.providers.insert(
             provider_id.clone(),
             CapabilityProviderState {
                 id: provider_id.clone(),
@@ -367,7 +367,7 @@ impl AtlasRegistry {
     }
 
     /// Idempotent: returns `true` if a record was removed, `false` if the id
-    /// was unknown. Also drops any channels where this cap was the provider —
+    /// was unknown. Also drops any channels where this provider was the provider —
     /// consumers will get NOT_FOUND on their next call and can re-discover.
     pub async fn unregister(&self, provider_id: &str) -> bool {
         let provider_id = provider_id.trim();
@@ -375,7 +375,7 @@ impl AtlasRegistry {
             return false;
         }
         let mut state = self.inner.write().await;
-        let was_present = state.caps.remove(provider_id).is_some();
+        let was_present = state.providers.remove(provider_id).is_some();
         let dropped = state.drop_channels_of(provider_id);
         info!(
             "[atlas] unregister {provider_id} (was_present={was_present}, channels_dropped={dropped})"
@@ -383,7 +383,7 @@ impl AtlasRegistry {
         was_present
     }
 
-    /// Update the cap's lifecycle state. Returns the previous value (or
+    /// Update the provider's lifecycle state. Returns the previous value (or
     /// the inferred fallback when nothing's been pushed yet) so callers
     /// can log "X went INACTIVE → ACTIVE" without a separate query.
     /// Validation is **soft**: illegal transitions log a warn but the
@@ -404,7 +404,7 @@ impl AtlasRegistry {
         }
         let mut state = self.inner.write().await;
         let provider = state
-            .caps
+            .providers
             .get_mut(provider_id)
             .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_id}")))?;
         let prev = provider.state();
@@ -435,14 +435,14 @@ impl AtlasRegistry {
         let now = Self::now_ms();
         let mut state = self.inner.write().await;
         let provider = state
-            .caps
+            .providers
             .get_mut(provider_id)
             .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_id}")))?;
         provider.last_heartbeat_ms = now;
         Ok(now)
     }
 
-    /// Declare ONE transport for ONE contract on a registered cap. Returns
+    /// Declare ONE transport for ONE contract on a registered provider. Returns
     /// the authoritative endpoint string (may differ from `proposed` when
     /// Atlas rewrote it to disambiguate on a mintable transport).
     pub async fn declare(
@@ -461,7 +461,7 @@ impl AtlasRegistry {
 
         let mut state = self.inner.write().await;
         let provider = state
-            .caps
+            .providers
             .get(provider_id)
             .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_id}")))?;
         if !contract_id.starts_with(&provider.namespace) {
@@ -482,7 +482,7 @@ impl AtlasRegistry {
 
         let endpoint = resolve_endpoint(&state, transport, &proposed, &contract_id, provider_id)?;
         let provider = state
-            .caps
+            .providers
             .get_mut(provider_id)
             .ok_or_else(|| Status::internal("capability vanished mid-declare"))?;
         provider.endpoints.push(DeclaredEndpoint {
@@ -536,7 +536,7 @@ impl AtlasRegistry {
 
         let state = self.inner.read().await;
         let mut out = Vec::new();
-        for provider in state.caps.values() {
+        for provider in state.providers.values() {
             if !f_cap_id.is_empty() && provider.id != f_cap_id {
                 continue;
             }
@@ -579,7 +579,7 @@ impl AtlasRegistry {
         out
     }
 
-    /// Open a channel to one (provider cap, contract, transport). Atlas
+    /// Open a channel to one (provider provider, contract, transport). Atlas
     /// only providers the edge — the consumer dials the returned endpoint
     /// itself (each transport has its own connect protocol; atlas can't
     /// dial generically). Returns the allocated channel handle and the
@@ -602,7 +602,7 @@ impl AtlasRegistry {
 
         let mut state = self.inner.write().await;
         let provider = state
-            .caps
+            .providers
             .get(&provider_cap_id)
             .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_cap_id}")))?;
         let ep = provider
@@ -611,7 +611,7 @@ impl AtlasRegistry {
             .find(|e| e.contract_id == contract_id && e.transport == transport)
             .ok_or_else(|| {
                 Status::not_found(format!(
-                    "cap '{provider_cap_id}' has not declared ({contract_id}, {transport:?})"
+                    "provider '{provider_cap_id}' has not declared ({contract_id}, {transport:?})"
                 ))
             })?;
         let endpoint = ep.endpoint.clone();
@@ -651,14 +651,14 @@ impl AtlasRegistry {
         was_open
     }
 
-    /// Read the cap's CAPABILITY.md content. Returns "" when the cap
+    /// Read the provider's CAPABILITY.md content. Returns "" when the provider
     /// registered without a path.
     pub async fn capability_md(&self, provider_id: &str) -> Result<String, Status> {
         let provider_id = Self::require("provider_id", provider_id)?;
         let path = {
             let state = self.inner.read().await;
             let provider = state
-                .caps
+                .providers
                 .get(provider_id)
                 .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_id}")))?;
             provider.capability_md_path.clone()
@@ -754,11 +754,11 @@ fn parse_transport(t: i32) -> Result<Transport, Status> {
 
 /// Pick a globally-unique endpoint per the rules on `DeclareCapabilityRequest`.
 ///
-/// "Globally unique" here means: no *other* cap may already own this
-/// `(transport, endpoint)` pair. The cap itself is allowed to expose multiple
+/// "Globally unique" here means: no *other* provider may already own this
+/// `(transport, endpoint)` pair. The provider itself is allowed to expose multiple
 /// contracts on the same endpoint — that's the dominant pattern for MCP
 /// (one MCP server URL hosts many tools) and a legitimate one for gRPC
-/// (one tonic Server with multiple services). The per-cap
+/// (one tonic Server with multiple services). The per-provider
 /// `(contract_id, transport)` uniqueness check happens earlier in `declare`.
 fn resolve_endpoint(
     state: &State,
@@ -769,7 +769,7 @@ fn resolve_endpoint(
 ) -> Result<String, Status> {
     let mintable = atlas_can_mint(transport);
     let collides = |s: &str| -> bool {
-        state.caps.iter().any(|(other_id, provider)| {
+        state.providers.iter().any(|(other_id, provider)| {
             other_id != own_cap_id
                 && provider
                     .endpoints
@@ -802,8 +802,8 @@ fn resolve_endpoint(
         }
         return Err(Status::internal(format!(
             "could not mint unique endpoint for ({transport:?}, {contract_id}) \
-             after {MINT_ATTEMPTS} attempts (existing caps: {})",
-            state.caps.len()
+             after {MINT_ATTEMPTS} attempts (existing providers: {})",
+            state.providers.len()
         )));
     }
 
@@ -824,8 +824,8 @@ fn resolve_endpoint(
     }
     Err(Status::internal(format!(
         "could not disambiguate '{proposed}' on transport '{transport:?}' \
-         after {MINT_ATTEMPTS} attempts (existing caps: {})",
-        state.caps.len()
+         after {MINT_ATTEMPTS} attempts (existing providers: {})",
+        state.providers.len()
     )))
 }
 
@@ -1039,12 +1039,12 @@ fn read_env_u64(name: &str, default: u64) -> u64 {
 
 /// Two-phase eviction:
 ///   1. heartbeat lapsed > `timeout_ms` AND state is not yet TERMINATED →
-///      transition to TERMINATED, drop the cap's channels (so consumers
+///      transition to TERMINATED, drop the provider's channels (so consumers
 ///      stop dialing a corpse).
 ///   2. state is TERMINATED AND last_heartbeat older than `gc_after_ms` →
 ///      remove the record entirely.
 ///
-/// Phase 1 keeps a debug-friendly "yes that cap died, here's why" view in
+/// Phase 1 keeps a debug-friendly "yes that provider died, here's why" view in
 /// `rbnx caps` for `gc_after_ms` after the lapse; phase 2 frees memory.
 async fn eviction_loop(
     registry: Arc<AtlasRegistry>,
@@ -1068,7 +1068,7 @@ async fn eviction_loop(
 
         // Phase 1: lapsed → TERMINATED.
         let lapsed: Vec<String> = state
-            .caps
+            .providers
             .iter()
             .filter(|(_, provider)| {
                 now.saturating_sub(provider.last_heartbeat_ms) > timeout_ms
@@ -1077,7 +1077,7 @@ async fn eviction_loop(
             .map(|(id, _)| id.clone())
             .collect();
         for id in &lapsed {
-            if let Some(provider) = state.caps.get_mut(id) {
+            if let Some(provider) = state.providers.get_mut(id) {
                 provider.pushed_state = Some(pb::LifecycleState::StateTerminated);
                 provider.state_detail = format!("heartbeat lapsed > {timeout_ms}ms");
             }
@@ -1090,7 +1090,7 @@ async fn eviction_loop(
 
         // Phase 2: TERMINATED long enough → drop the record.
         let stale: Vec<String> = state
-            .caps
+            .providers
             .iter()
             .filter(|(_, provider)| {
                 provider.state() == pb::LifecycleState::StateTerminated
@@ -1099,7 +1099,7 @@ async fn eviction_loop(
             .map(|(id, _)| id.clone())
             .collect();
         for id in &stale {
-            state.caps.remove(id);
+            state.providers.remove(id);
             warn!("[atlas] '{id}' GC'd from registry (TERMINATED > {gc_after_ms}ms)");
         }
     }

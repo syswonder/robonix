@@ -12,7 +12,7 @@
 //     `ok=true`. Only after every primitive's driver returns ok do we move
 //     on to `service:` (which can depend on primitive data being ready).
 //     The package's `config:` block is JSON-encoded and delivered ONLY via
-//     Driver(CMD_INIT)'s config_json field. The cap process never sees a
+//     Driver(CMD_INIT)'s config_json field. The provider process never sees a
 //     config file or env var — that's the v0.1 layering invariant.
 //   - `skill:` entries are spawned identically to `service:` — they
 //     need a long-lived process for their MCP tools to be registered
@@ -384,7 +384,7 @@ async fn spawn_package(
     // (debugging via `cat <instances>/<name>.json`, post-mortem
     // inspection). Boot itself reads `entry.config` in-memory and
     // pushes it via Driver(CMD_INIT, config_json) — see call_driver_cmd
-    // below. The cap process MUST NOT see this path; we do not export
+    // below. The provider process MUST NOT see this path; we do not export
     // it as an env var to the spawned `rbnx start`.
     let cfg_json = serde_json::to_value(&entry.config).unwrap_or(serde_json::Value::Null);
     let cfg_pretty = serde_json::to_string_pretty(&cfg_json).unwrap_or_else(|_| "{}".into());
@@ -402,12 +402,12 @@ async fn spawn_package(
     let rbnx_bin = std::env::current_exe()
         .context("could not resolve current rbnx binary path for `start` re-exec")?;
     // Per v0.1 layering: do NOT pass the config file path to the
-    // spawned `rbnx start` (which would propagate to the cap process
+    // spawned `rbnx start` (which would propagate to the provider process
     // env). rbnx boot itself drives Driver(CMD_INIT, config_json) over
-    // gRPC after the cap registers (see `call_driver_cmd` below). The
+    // gRPC after the provider registers (see `call_driver_cmd` below). The
     // cfg_file on disk is for boot's own use — we read it back via
     // `entry.config` higher in this module — and atlas-side bookkeeping;
-    // the cap never sees it.
+    // the provider never sees it.
     let _ = &cfg_file; // kept for debug / inspection; not exported
     let mut cmd = Command::new(&rbnx_bin);
     cmd.arg("start")
@@ -428,7 +428,7 @@ async fn spawn_package(
     let pid = child
         .id()
         .ok_or_else(|| anyhow::anyhow!("spawned package '{name}' but it had no pid"))?;
-    // No spawn line here — wait until cap registration and emit one
+    // No spawn line here — wait until provider registration and emit one
     // boot_ok with the provider_id so each component takes ONE line in the
     // boot log instead of three (spawn + waiting + registered).
     let kind = match component {
@@ -579,9 +579,9 @@ pub async fn execute(
                 .chain(deploy.skill.iter())
             {
                 if let Ok(pkg_path) = resolve_entry_path(entry, &cache_root, &manifest_dir) {
-                    let caps = pkg_path.join("capabilities");
-                    if caps.is_dir() {
-                        atlas_caps_roots.push(caps.to_string_lossy().into_owned());
+                    let providers = pkg_path.join("capabilities");
+                    if providers.is_dir() {
+                        atlas_caps_roots.push(providers.to_string_lossy().into_owned());
                     }
                 }
             }
@@ -1157,11 +1157,11 @@ fn system_cli_args(
 }
 
 /// Spawn one primitive / service package and wait for it to register
-/// at least one capability with atlas. If the new cap has a `*/driver`
+/// at least one capability with atlas. If the new provider has a `*/driver`
 /// gRPC capability, also drive Driver(CMD_INIT) and pass the entry's
 /// `config:` as `config_json`. Packages that don't declare a driver
 /// (e.g. system packages or new packages that just
-/// don't need init-time wiring) are deployed as-is once their first cap
+/// don't need init-time wiring) are deployed as-is once their first provider
 /// appears in atlas.
 async fn spawn_and_init(
     component: &str,
@@ -1191,7 +1191,7 @@ async fn spawn_and_init(
     .await?;
     let pkg_label = sp.name.clone();
 
-    // One package = one cap. After spawn, the new provider_id is whatever
+    // One package = one provider. After spawn, the new provider_id is whatever
     // atlas saw register that wasn't in `before`.
 
     // Once the wrapper is up, every error path below must SIGKILL the
@@ -1245,7 +1245,7 @@ async fn spawn_and_init(
     }
 
     let Some(driver_contract) = driver_contract else {
-        // No driver contract — system caps auto-promote to ACTIVE on
+        // No driver contract — system providers auto-promote to ACTIVE on
         // their own once gRPC + MCP are listening. We don't drive INIT
         // / ACTIVATE for them.
         output::boot_ok(short_label(&pkg_label, component), "ACTIVE  (no driver)");
@@ -1311,7 +1311,7 @@ async fn spawn_and_init(
             return Err(e);
         }
     };
-    // Boot succeeded: cap walked REGISTERED → INACTIVE → ACTIVE. Show
+    // Boot succeeded: provider walked REGISTERED → INACTIVE → ACTIVE. Show
     // only the final state — the two intermediate driver calls already
     // got their own spinner lines and OK ticks above. provider_id is the
     // leftmost label so we don't repeat it here.
@@ -1462,8 +1462,8 @@ fn contract_id_to_service_name(id: &str) -> String {
         .collect::<String>()
 }
 
-/// Poll atlas until a cap NOT in `before` appears. Returns the new
-/// `provider_id` plus an optional `driver_contract_id` if the new cap
+/// Poll atlas until a provider NOT in `before` appears. Returns the new
+/// `provider_id` plus an optional `driver_contract_id` if the new provider
 /// declared a `*/driver` gRPC capability (signal to the caller that
 /// Driver(CMD_INIT) lifecycle should run).
 /// Strip the leading `<component>_` from the boot-log pkg_label.
@@ -1483,9 +1483,9 @@ async fn wait_for_registration(
     component: &str,
     log_dir: &Path,
 ) -> Result<(String, Option<String>)> {
-    // One package = one cap. Find the cap that wasn't in `before`.
-    // Multiple new caps = deploy bug, fail loud. No heartbeat-based
-    // freshness fallback — every existing ACTIVE cap heartbeats
+    // One package = one provider. Find the provider that wasn't in `before`.
+    // Multiple new providers = deploy bug, fail loud. No heartbeat-based
+    // freshness fallback — every existing ACTIVE provider heartbeats
     // periodically and would falsely match.
     const SPINNER_TICK: Duration = Duration::from_millis(100);
     const POLLS_PER_TICK: u32 = 2; // poll atlas every 200 ms
@@ -1515,23 +1515,23 @@ async fn wait_for_registration(
                 output::boot_fail(
                     display_label,
                     &format!(
-                        "multiple new caps appeared from one spawn ({}) — \
+                        "multiple new providers appeared from one spawn ({}) — \
                          package start must register exactly one Capability. Log: {}",
                         cap_ids.join(", "),
                         log_file.display()
                     ),
                 );
                 anyhow::bail!(
-                    "[{component}/{pkg_label}] multiple new caps from one spawn: {} \
+                    "[{component}/{pkg_label}] multiple new providers from one spawn: {} \
                      — spec is one package start = one Capability(id=...). Log: {}",
                     cap_ids.join(", "),
                     log_file.display()
                 );
             }
             if let Some(provider) = matches.first() {
-                let driver = provider.capabilities.iter().find(|cap| {
-                    cap.transport == atlas_pb::Transport::Grpc as i32
-                        && cap.contract_id.ends_with("/driver")
+                let driver = provider.capabilities.iter().find(|provider| {
+                    provider.transport == atlas_pb::Transport::Grpc as i32
+                        && provider.contract_id.ends_with("/driver")
                 });
                 return Ok((provider.id.clone(), driver.map(|i| i.contract_id.clone())));
             }
@@ -1547,7 +1547,7 @@ async fn wait_for_registration(
                 ),
             );
             anyhow::bail!(
-                "[{component}/{pkg_label}] timed out after {:?} — package never registered a cap with atlas. Log: {}",
+                "[{component}/{pkg_label}] timed out after {:?} — package never registered a provider with atlas. Log: {}",
                 DRIVER_REGISTER_TIMEOUT,
                 log_file.display()
             );

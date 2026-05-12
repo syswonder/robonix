@@ -99,7 +99,7 @@ bash scripts/build.sh                # one-time
 bash scripts/start.sh                # docker run, stays foreground
 ```
 
-scene's container joins the host DDS bus (`--network host` + FastRTPS UDP-only) and auto-discovers any cap on atlas advertising a ROS2 `topic_out` interface. Required topics:
+scene's container joins the host DDS bus (`--network host` + FastRTPS UDP-only) and auto-discovers any provider on atlas declaring a ROS2 `topic_out` interface. Required topics:
 
 * RGB image (`sensor_msgs/Image`)
 * Depth registered to RGB (`sensor_msgs/Image`, 32FC1 metres or 16UC1 mm)
@@ -118,7 +118,7 @@ SCENE_CAMERA_FRAME=my_camera_optical bash scripts/start.sh
 |---|---|---|
 | `SCENE_OPEN_VOCAB_CLASSES` | (55-entry default) | comma-separated YOLO-World class list |
 | `SCENE_CG_FORCE_CPU` | `` | set to `1` to force CPU mode (~3× slower) |
-| `SCENE_PERCEPTION_WAIT_S` | `30` | how long to wait for camera caps before falling back |
+| `SCENE_PERCEPTION_WAIT_S` | `30` | how long to wait for camera providers before falling back |
 | `SCENE_CAMERA_INTRINSICS` | webots tiago default | `fx,fy,cx,cy,w,h` |
 | `SCENE_YOLO_WORLD_WEIGHTS` | `/opt/models/yolov8l-world.pt` | path inside container |
 | `SCENE_MOBILE_SAM_WEIGHTS` | `/opt/models/mobile_sam.pt` | |

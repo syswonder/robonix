@@ -19,7 +19,7 @@ pub struct ExecutorServiceImpl {
     atlas: AtlasClient,
     /// Executor's own provider_id. Two roles:
     ///   1. consumer_id passed to atlas on every ConnectCapability so the
-    ///      channel record reflects who is using each downstream cap.
+    ///      channel record reflects who is using each downstream provider.
     ///   2. self-detection: when a CapabilityCall in the plan targets this
     ///      provider_id, dispatch short-circuits to the in-process builtin
     ///      handlers instead of going through MCP loopback.
@@ -59,7 +59,7 @@ impl RobonixSystemExecutor for ExecutorServiceImpl {
                     .await;
 
                 log::info!(
-                    "[executor] dispatching call_id={} cap='{}' contract='{}'",
+                    "[executor] dispatching call_id={} provider='{}' contract='{}'",
                     call.call_id,
                     call.provider_id,
                     call.contract_id,

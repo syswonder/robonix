@@ -19,7 +19,7 @@ use tokio::process::Command;
 pub struct ProcessInfo {
     pub package_name: String,
     pub std_name: String,
-    pub package_type: String, // "cap" or "skl"
+    pub package_type: String, // "package" today; reserved for future kind tags
     pub pid: u32,
     pub log_file: PathBuf,
     pub hostname: String,

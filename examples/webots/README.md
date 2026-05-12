@@ -79,15 +79,15 @@ The deploy manifest references these via `${VLM_*}`.
      package's `scripts/start.sh` — for tiago drivers that's a
      `docker exec` into the sim container that runs the Python driver).
    - Polls atlas until the package registers its first capability.
-   - If the new cap declared a `*/driver` gRPC interface, also calls
+   - If the new provider declared a `*/driver` gRPC capability, also calls
      `LifecycleDriver.Driver(CMD_INIT, config_json)` to initialize it.
-     Caps without a `*/driver` interface are deployed as soon as they
+     Providers without a `*/driver` capability are deployed as soon as they
      register (no init dance) — tiago drivers fall in this bucket.
 3. Sits on Ctrl-C / SIGTERM, then tears down all children.
 
 ## How the LLM picks tools
 
-After `rbnx boot` is up, pilot's system prompt lists each cap's
+After `rbnx boot` is up, pilot's system prompt lists each provider's
 `CAPABILITY.md` path; the LLM uses the executor's `read_file` builtin
 to lazy-load the docs it needs (e.g. `read_file("/path/to/tiago_chassis/CAPABILITY.md")`).
 

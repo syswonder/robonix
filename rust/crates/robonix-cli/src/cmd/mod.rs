@@ -184,8 +184,8 @@ pub enum Commands {
         key: String,
     },
 
-    /// List all registered capabilities (one row per cap by default;
-    /// pass -v to expand the per-cap interface list, lspci -tv style)
+    /// List all registered capabilities (one row per provider by default;
+    /// pass -v to expand the per-provider interface list, lspci -tv style)
     #[command(alias = "nodes")]
     Caps {
         /// robonix-atlas endpoint
@@ -194,8 +194,8 @@ pub enum Commands {
         /// Output as JSON (forces full detail regardless of -v)
         #[arg(long)]
         json: bool,
-        /// Expand each cap's interface list; without this, only the
-        /// summary header line per cap is printed.
+        /// Expand each provider's interface list; without this, only the
+        /// summary header line per provider is printed.
         #[arg(short = 'v', long)]
         verbose: bool,
     },
@@ -216,19 +216,19 @@ pub enum Commands {
         #[arg(short = 'v', long)]
         verbose: bool,
     },
-    /// Show CAPABILITY.md for registered caps (all, or one with --cap)
+    /// Show CAPABILITY.md for registered providers (all, or one with --provider)
     Describe {
         /// robonix-atlas endpoint
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
         /// Show full CAPABILITY.md content for a specific provider_id
         #[arg(long, alias = "node")]
-        cap: Option<String>,
+        provider: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
     },
-    /// Print every MCP-callable tool visible to the agent (executor builtins + cap interfaces)
+    /// Print every MCP-callable tool visible to the agent (executor builtins + provider interfaces)
     Tools {
         /// robonix-atlas endpoint
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
@@ -349,16 +349,18 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             server,
             json,
             verbose,
-        } => inspect::caps(&server, json, verbose).await,
+        } => inspect::providers(&server, json, verbose).await,
         Commands::Contracts {
             server,
             prefix,
             json,
             verbose,
         } => inspect::contracts(&server, prefix.as_deref(), json, verbose).await,
-        Commands::Describe { server, cap, json } => {
-            inspect::describe(&server, cap.as_deref(), json).await
-        }
+        Commands::Describe {
+            server,
+            provider,
+            json,
+        } => inspect::describe(&server, provider.as_deref(), json).await,
         Commands::Tools { server, json } => inspect::tools(&server, json).await,
         Commands::Channels { server } => inspect::channels(&server).await,
         Commands::Inspect { server } => inspect::inspect(&server).await,

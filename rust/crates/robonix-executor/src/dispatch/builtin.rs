@@ -99,7 +99,7 @@ async fn run(op: &str, args_json: &str) -> anyhow::Result<String> {
 }
 
 /// Static metadata for the 5 builtin ops. Used by main.rs to declare them
-/// against atlas at startup so pilot can discover them like any other cap.
+/// against atlas at startup so pilot can discover them like any other provider.
 pub struct BuiltinSpec {
     pub op: &'static str,
     pub description: &'static str,

@@ -87,10 +87,10 @@ const DEFAULT_AUDIO_SAMPLE_RATE: u32 = 16_000;
 // ── Discovery helpers ────────────────────────────────────────────────────────
 //
 // Atlas → contract_id → endpoint resolution. Every speech / mic / speaker
-// service registers its gRPC interface with `metadata_json = {"endpoint":
+// service registers its gRPC capability with `metadata_json = {"endpoint":
 // "host:port"}` (see audio_driver/node.py and speech_service/service.py).
 
-/// Two-step endpoint resolution: query for caps offering `contract_id`, then
+/// Two-step endpoint resolution: query for providers offering `contract_id`, then
 /// `ConnectCapability` against the chosen one to actually receive the
 /// endpoint string. Atlas hides endpoints from `query_capabilities` on
 /// purpose; consumers must commit a channel before they can dial.
@@ -106,7 +106,7 @@ async fn resolve_endpoint(
         .await
         .ok()?;
 
-    // Auto-pick path: any cap providing this contract over the right transport.
+    // Auto-pick path: any provider providing this contract over the right transport.
     let auto_pick = || -> Option<&atlas_pb::CapabilityProvider> {
         providers.iter().find(|r| {
             r.capabilities
@@ -118,8 +118,8 @@ async fn resolve_endpoint(
     let pick: Option<&atlas_pb::CapabilityProvider> = if pin_capability_id.is_empty() {
         auto_pick()
     } else {
-        // Try the pinned cap first; if it isn't in atlas anymore (stale chat
-        // config / pin pointed at a cap that's not in this deploy), fall back
+        // Try the pinned provider first; if it isn't in atlas anymore (stale chat
+        // config / pin pointed at a provider that's not in this deploy), fall back
         // to auto-pick rather than failing hard. The pin is a hint, not a
         // hard requirement.
         match providers
@@ -129,7 +129,7 @@ async fn resolve_endpoint(
             Some(provider) => Some(provider),
             None => {
                 log::warn!(
-                    "[voice] pinned cap '{pin_capability_id}' for {contract_id} not in atlas; \
+                    "[voice] pinned provider '{pin_capability_id}' for {contract_id} not in atlas; \
                      falling back to auto-pick. Available providers: {:?}",
                     providers.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
                 );
@@ -138,9 +138,9 @@ async fn resolve_endpoint(
         }
     };
 
-    let cap = pick?;
+    let provider = pick?;
     let (_channel_id, endpoint, _params) = atlas
-        .connect_capability("liaison", &cap.id, contract_id, transport)
+        .connect_capability("liaison", &provider.id, contract_id, transport)
         .await
         .ok()?;
     if endpoint.is_empty() {

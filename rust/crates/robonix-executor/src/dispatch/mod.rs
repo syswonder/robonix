@@ -67,7 +67,7 @@ fn is_skill_namespace(ns: &str) -> bool {
 ///
 /// `self_cap_id` is the executor's own provider_id (used to short-circuit
 /// builtins that target this process). `atlas` is used to ConnectCapability
-/// for any external cap call; the channel is released as soon as the call
+/// for any external provider call; the channel is released as soon as the call
 /// finishes.
 pub async fn dispatch(
     call: &CapabilityCall,
@@ -105,7 +105,7 @@ pub async fn dispatch(
 
 /// If `provider_id` is a skill that hasn't been activated in this process
 /// yet, resolve its `*/driver` interface and send Driver(CMD_ACTIVATE).
-/// No-op for primitives, services, system caps, and skills already in
+/// No-op for primitives, services, system providers, and skills already in
 /// ACTIVE.
 async fn ensure_skill_runnable(atlas: &mut AtlasClient, provider_id: &str) -> Result<()> {
     if already_activated(provider_id) {

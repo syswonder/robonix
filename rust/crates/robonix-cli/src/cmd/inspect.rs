@@ -55,7 +55,7 @@ async fn connect(endpoint: &str) -> Result<AtlasClient> {
         .with_context(|| format!("connect to atlas at '{endpoint}'"))
 }
 
-pub async fn caps(endpoint: &str, json: bool, verbose: bool) -> Result<()> {
+pub async fn providers(endpoint: &str, json: bool, verbose: bool) -> Result<()> {
     let mut atlas = connect(endpoint).await?;
     let providers = atlas
         .query_capabilities("", "", atlas_pb::Transport::Unspecified)
@@ -69,7 +69,7 @@ pub async fn caps(endpoint: &str, json: bool, verbose: bool) -> Result<()> {
                     "namespace":      r.namespace,
                     "state":          state_name(r.state),
                     "state_detail":   r.state_detail,
-                    "interfaces":     r.capabilities.iter().map(|i| serde_json::json!({
+                    "capabilities":     r.capabilities.iter().map(|i| serde_json::json!({
                         "contract_id": i.contract_id,
                         "transport":   transport_name(i.transport),
                     })).collect::<Vec<_>>(),
@@ -81,21 +81,21 @@ pub async fn caps(endpoint: &str, json: bool, verbose: bool) -> Result<()> {
     }
 
     if providers.is_empty() {
-        println!("{} no capabilities registered", "[caps]".yellow().bold());
+        println!("{} no providers registered", "[providers]".yellow().bold());
         return Ok(());
     }
-    // Default: one row per cap, no interfaces. -v expands the interface
-    // list (lspci -tv style — quick scan vs full dump).
+    // Default: one row per provider, no capabilities. -v expands the
+    // capability list (lspci -tv style — quick scan vs full dump).
     for provider in &providers {
         let detail = if provider.state_detail.is_empty() {
             String::new()
         } else {
             format!(" — {}", provider.state_detail)
         };
-        let iface_count_hint = if verbose {
+        let cap_count_hint = if verbose {
             String::new()
         } else {
-            format!(" ({} ifaces)", provider.capabilities.len())
+            format!(" ({} caps)", provider.capabilities.len())
                 .dimmed()
                 .to_string()
         };
@@ -105,7 +105,7 @@ pub async fn caps(endpoint: &str, json: bool, verbose: bool) -> Result<()> {
             provider.id.bold(),
             state_tag(provider.state),
             provider.namespace.dimmed(),
-            iface_count_hint,
+            cap_count_hint,
             detail.dimmed()
         );
         if verbose {
@@ -121,7 +121,7 @@ pub async fn caps(endpoint: &str, json: bool, verbose: bool) -> Result<()> {
     }
     if !verbose {
         println!(
-            "\n{} pass {} for the per-cap interface list",
+            "\n{} pass {} for the per-provider capability list",
             "tip:".dimmed(),
             "-v".bold()
         );
@@ -136,7 +136,7 @@ pub async fn describe(endpoint: &str, provider_id: Option<&str>, json: bool) -> 
         .query_capabilities(cap_filter, "", atlas_pb::Transport::Unspecified)
         .await?;
     if providers.is_empty() {
-        println!("{} no matching capabilities", "[describe]".yellow().bold());
+        println!("{} no matching providers", "[describe]".yellow().bold());
         return Ok(());
     }
     for provider in &providers {
@@ -152,7 +152,7 @@ pub async fn describe(endpoint: &str, provider_id: Option<&str>, json: bool) -> 
                 "provider_id":   provider.id,
                 "namespace":       provider.namespace,
                 "state":           state_name(provider.state),
-                "interfaces":      provider.capabilities.iter().map(|i| serde_json::json!({
+                "capabilities":      provider.capabilities.iter().map(|i| serde_json::json!({
                     "contract_id": i.contract_id,
                     "transport":   transport_name(i.transport),
                 })).collect::<Vec<_>>(),
@@ -183,7 +183,7 @@ pub async fn describe(endpoint: &str, provider_id: Option<&str>, json: bool) -> 
 }
 
 pub async fn tools(endpoint: &str, json: bool) -> Result<()> {
-    // "Tools" in Robonix-speak = MCP-transport interfaces (LLM-callable caps).
+    // "Tools" in Robonix-speak = MCP-transport capabilities (LLM-callable providers).
     let mut atlas = connect(endpoint).await?;
     let providers = atlas
         .query_capabilities("", "", atlas_pb::Transport::Mcp)
@@ -210,9 +210,9 @@ pub async fn tools(endpoint: &str, json: bool) -> Result<()> {
     if json {
         let serialised: Vec<_> = entries
             .iter()
-            .map(|(cap, c, d, s)| {
+            .map(|(provider, c, d, s)| {
                 serde_json::json!({
-                    "provider_id":            cap,
+                    "provider_id":            provider,
                     "contract_id":       c,
                     "description":       d,
                     "input_schema_json": s,
@@ -226,7 +226,7 @@ pub async fn tools(endpoint: &str, json: bool) -> Result<()> {
         println!("{} no MCP tools registered", "[tools]".yellow().bold());
         return Ok(());
     }
-    for (cap, c, d, _s) in &entries {
+    for (provider, c, d, _s) in &entries {
         let leaf = c.rsplit_once('/').map(|(_, leaf)| leaf).unwrap_or(c);
         println!(
             "{} {}  {}",
@@ -234,7 +234,7 @@ pub async fn tools(endpoint: &str, json: bool) -> Result<()> {
             leaf.bold(),
             format!("[{}]", c).dimmed()
         );
-        println!("    cap   : {}", cap.dimmed());
+        println!("    provider   : {}", provider.dimmed());
         if !d.is_empty() {
             println!("    desc  : {}", d);
         }

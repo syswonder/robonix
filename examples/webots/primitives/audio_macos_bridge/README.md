@@ -2,7 +2,7 @@
 
 Local-only audio primitive that runs on a Linux atlas host but routes
 mic + speaker through a daemon on a macOS box across the LAN. The
-manifest-side cap (`com.robonix.primitive.audio`) is identical to the
+manifest-side provider (`com.robonix.primitive.audio`) is identical to the
 default `audio_driver` package, so liaison / scene / pilot don't see a
 difference; the only thing that changes is where the actual ADC/DAC
 lives.

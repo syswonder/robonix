@@ -135,8 +135,8 @@ pub async fn run_turn(
     // rename it freely. contract_id is the stable identity.
     let search_memory_target = initial_caps
         .iter()
-        .find(|(_, cap)| cap.contract_id == "robonix/system/memory/search")
-        .map(|(provider_id, cap)| (provider_id.clone(), cap.contract_id.clone()));
+        .find(|(_, provider)| provider.contract_id == "robonix/system/memory/search")
+        .map(|(provider_id, provider)| (provider_id.clone(), provider.contract_id.clone()));
 
     // 1b. Pre-fetch long-term memory
     // Silently dispatches search_memory before the first VLM call so that
@@ -152,12 +152,12 @@ pub async fn run_turn(
         }
     };
 
-    // 1c. Append the per-capability docs index. Each cap that registered
+    // 1c. Append the per-capability docs index. Each provider that registered
     // a `capability_md_path` shows up here as a one-liner pointing at its
     // CAPABILITY.md; the LLM is instructed to lazy-load those via the
-    // `read_file` builtin when it actually needs that cap. This keeps the
-    // system prompt tiny while still giving the LLM full per-cap context
-    // when relevant. Errors here are non-fatal — caps that didn't register
+    // `read_file` builtin when it actually needs that provider. This keeps the
+    // system prompt tiny while still giving the LLM full per-provider context
+    // when relevant. Errors here are non-fatal — providers that didn't register
     // a path simply don't appear in the block.
     if let Ok(docs) = discovery::cap_md_index(atlas).await
         && !docs.is_empty()
@@ -211,7 +211,7 @@ pub async fn run_turn(
             return_interrupted!();
         }
 
-        // Re-discover capabilities from atlas every round so caps that
+        // Re-discover capabilities from atlas every round so providers that
         // registered mid-turn are visible in the next call.
         let cap_list = discovery::discover(atlas)
             .await
@@ -219,16 +219,16 @@ pub async fn run_turn(
 
         let tool_defs: Vec<ToolDef> = cap_list
             .iter()
-            .filter_map(|(_, cap)| {
-                let mcp = match cap.params.as_ref()?.kind.as_ref()? {
+            .filter_map(|(_, provider)| {
+                let mcp = match provider.params.as_ref()?.kind.as_ref()? {
                     atlas_pb::transport_params::Kind::Mcp(m) => m,
                     _ => return None,
                 };
                 let schema: serde_json::Value =
                     serde_json::from_str(&mcp.input_schema_json).unwrap_or_default();
                 Some(ToolDef::new(
-                    &llm_name(&cap.contract_id),
-                    &cap.description,
+                    &llm_name(&provider.contract_id),
+                    &provider.description,
                     schema,
                 ))
             })
@@ -237,10 +237,10 @@ pub async fn run_turn(
         // LLM-tool-name → (provider_id, contract_id) so we can build CapabilityCall
         let target_map: HashMap<String, (String, String)> = cap_list
             .iter()
-            .map(|(provider_id, cap)| {
+            .map(|(provider_id, provider)| {
                 (
-                    llm_name(&cap.contract_id),
-                    (provider_id.clone(), cap.contract_id.clone()),
+                    llm_name(&provider.contract_id),
+                    (provider_id.clone(), provider.contract_id.clone()),
                 )
             })
             .collect();
@@ -379,7 +379,7 @@ pub async fn run_turn(
                 EX_STARTED => {
                     if let Some(ref s) = event.started {
                         log::debug!(
-                            "[pilot] executor started cap='{}' contract='{}'",
+                            "[pilot] executor started provider='{}' contract='{}'",
                             s.provider_id,
                             s.contract_id
                         );
@@ -466,9 +466,9 @@ pub async fn run_turn(
 
 // ── System prompt + SOUL ──────────────────────────────────────────────────────
 // Optional `SOUL.md` (agent personality) is read from `$ROBONIX_PILOT_SOUL`,
-// then `~/.robonix/SOUL.md`. There is no skill index — skill caps surface as
+// then `~/.robonix/SOUL.md`. There is no skill index — skill providers surface as
 // regular tools through `executor.list_tools`, with descriptions sourced from
-// each cap's CAPABILITY.md.
+// each provider's CAPABILITY.md.
 
 fn load_agent_soul() -> Option<String> {
     if let Ok(p) = std::env::var("ROBONIX_PILOT_SOUL") {

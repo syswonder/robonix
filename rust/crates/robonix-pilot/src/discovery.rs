@@ -14,7 +14,7 @@ use robonix_atlas::pb as atlas_pb;
 ///   `robonix/system/memory/search`             → `memory_search`
 ///   `robonix/service/navigation/navigate`      → `navigation_navigate`
 ///
-/// Plain leaf-only used to be enough but multiple caps share leaves
+/// Plain leaf-only used to be enough but multiple providers share leaves
 /// (`snapshot` on camera AND lidar). The OpenAI tool-list collapses
 /// duplicates and the LLM picks the wrong one. Prefixing with the
 /// area segment disambiguates while staying short and human-readable.
@@ -36,7 +36,7 @@ pub fn llm_name(contract_id: &str) -> String {
 
 /// One row per registered capability, summarised for the LLM-facing
 /// "## Capability docs (lazy-load via read_file)" block in pilot's
-/// system prompt. Includes only caps that registered with a non-empty
+/// system prompt. Includes only providers that registered with a non-empty
 /// `capability_md_path`. The path is what we hand the LLM verbatim;
 /// the executor's `read_file` builtin resolves it (it must be readable
 /// from the executor's host workspace).
@@ -82,7 +82,7 @@ pub async fn discover(atlas: &mut AtlasClient) -> Result<Vec<(String, atlas_pb::
             if cap.transport != atlas_pb::Transport::Mcp as i32 {
                 continue;
             }
-            // Sanity: an MCP interface without McpParams is malformed —
+            // Sanity: an MCP capability without McpParams is malformed —
             // skip rather than feed garbage to the LLM.
             let has_mcp = matches!(
                 cap.params.as_ref().and_then(|p| p.kind.as_ref()),
@@ -90,7 +90,7 @@ pub async fn discover(atlas: &mut AtlasClient) -> Result<Vec<(String, atlas_pb::
             );
             if !has_mcp {
                 log::warn!(
-                    "[pilot/discovery] cap='{}' contract='{}' has no MCP params; skipping",
+                    "[pilot/discovery] provider='{}' contract='{}' has no MCP params; skipping",
                     provider.id,
                     cap.contract_id
                 );

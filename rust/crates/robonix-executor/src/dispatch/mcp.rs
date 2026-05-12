@@ -13,8 +13,8 @@ type McpClient = rmcp::service::RunningService<rmcp::RoleClient, ()>;
 
 /// MCP tool name = leaf of contract_id (e.g.
 /// `robonix/system/memory/search` → `search`). Servers expose tools by
-/// short name; the cap+contract grouping is Robonix-side bookkeeping.
-/// TODO: use leaf node as tool name may  introduce collisions across caps - wheatfox
+/// short name; the provider+contract grouping is Robonix-side bookkeeping.
+/// TODO: use leaf node as tool name may  introduce collisions across providers - wheatfox
 fn mcp_tool_name(contract_id: &str) -> &str {
     contract_id
         .rsplit_once('/')

@@ -3,8 +3,8 @@
 //
 // `prefetch` runs before the first VLM call, `compact` on session_end.
 // Both build a one-call Plan and hand it to executor; the corresponding
-// memory cap is looked up via atlas the same way every other capability
-// is. Missing caps are silently tolerated — memory is never load-bearing.
+// memory provider is looked up via atlas the same way every other capability
+// is. Missing providers are silently tolerated — memory is never load-bearing.
 
 use crate::discovery;
 use crate::history::decode_string_output;
@@ -18,7 +18,7 @@ use uuid::Uuid;
 const EX_RESULT: u32 = 1;
 
 /// Dispatch one `search_memory` call and return the result text. Returns
-/// `None` if the cap is not registered, the index is empty, or any error
+/// `None` if the provider is not registered, the index is empty, or any error
 /// occurs.
 pub async fn prefetch(
     query: &str,
@@ -60,18 +60,18 @@ pub async fn prefetch(
 }
 
 /// Best-effort `compact_memory` on session teardown. Logs failures, never
-/// propagates errors (the cap may be absent entirely).
+/// propagates errors (the provider may be absent entirely).
 pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _consumer_id: &str) {
-    let caps = match discovery::discover(atlas).await {
+    let providers = match discovery::discover(atlas).await {
         Ok(c) => c,
         Err(e) => {
             log::debug!("[pilot] compact_memory: discovery failed: {e}");
             return;
         }
     };
-    let Some((provider_id, cap)) = caps
+    let Some((provider_id, provider)) = providers
         .iter()
-        .find(|(_, cap)| cap.contract_id == "robonix/system/memory/compact")
+        .find(|(_, provider)| provider.contract_id == "robonix/system/memory/compact")
     else {
         return;
     };
@@ -83,7 +83,7 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
         calls: vec![CapabilityCall {
             call_id: Uuid::new_v4().to_string(),
             provider_id: provider_id.clone(),
-            contract_id: cap.contract_id.clone(),
+            contract_id: provider.contract_id.clone(),
             args_json: "{}".to_string(),
         }],
     };
