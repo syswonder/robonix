@@ -58,6 +58,19 @@ Run Rust commands from `rust/` unless noted:
 - `cd docs && mdbook build`: build the documentation book when mdBook and
   preprocessors are installed.
 
+## Coding Style & Naming Conventions
+
+Rust uses edition 2024 and standard `rustfmt`; keep clippy clean with
+`-D warnings`. Use `snake_case` for Rust modules/functions, `CamelCase` for
+types, and crate names matching `robonix-*`. Python targets 3.10+, uses
+4-space indentation, and keeps package modules in `snake_case`. Capability
+files follow `<interface>.v1.toml` naming, grouped by domain, for example
+`capabilities/primitive/camera/rgb.v1.toml`.
+
+For each non-trivial function or method, add a standard comment block. Keep
+comments concise and focused on behavior, invariants, side effects, or
+non-obvious constraints.
+
 ## Testing Guidelines
 
 Place Rust integration tests in each crate's `tests/` directory and keep unit
@@ -102,12 +115,15 @@ available to them.
   when the user explicitly authorizes it.
 - Always create new commits rather than amending pushed commits, unless the
   user asks for an amend.
-- Use short, imperative, scope-prefixed commit subjects such as
-  `audio: list_devices + select_device contracts` or
-  `rbnx chat: rename agent reply prefix`.
-- Pull requests should describe behavior changes, list validation commands run,
-  link related issues, and include screenshots or terminal output for CLI/TUI
-  changes. Note any new capability contracts, generated code impacts, or
+- Write commit messages using the
+  [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
+  format: `<type>(optional scope): <description>`. Use imperative mood in the
+  description. Prefer `feat` and `fix` when they apply; otherwise use types
+  such as `docs`, `chore`, `refactor`, `test`, `perf`, `ci`, or `build`.
+- For breaking changes, use `!` before `:` or a `BREAKING CHANGE:` footer.
+- Pull requests should describe behavior changes, list validation commands you
+  ran, link related issues, and include screenshots or terminal output for CLI
+  or TUI changes. Note any new capability contracts, generated code impacts, or
   configuration requirements.
 
 ## Output discipline

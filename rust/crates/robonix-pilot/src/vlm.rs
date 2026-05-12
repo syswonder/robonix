@@ -15,7 +15,7 @@ use async_openai::types::chat::{
     ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ChatCompletionTool, ChatCompletionTools,
     CreateChatCompletionRequestArgs, FunctionCall, FunctionObject, FunctionObjectArgs, ImageDetail,
-    ImageUrl,
+    ImageUrl, ResponseFormat,
 };
 use futures_util::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -111,19 +111,6 @@ struct FnDef {
     parameters: Value,
 }
 
-impl ToolDef {
-    pub fn new(name: &str, description: &str, parameters: Value) -> Self {
-        Self {
-            kind: "function".into(),
-            function: FnDef {
-                name: name.into(),
-                description: description.into(),
-                parameters,
-            },
-        }
-    }
-}
-
 impl Message {
     pub fn system(content: &str) -> Self {
         Self {
@@ -161,16 +148,6 @@ impl Message {
             name: None,
             content: Some(content.into()),
             tool_calls: None,
-            tool_call_id: None,
-            image_base64: None,
-        }
-    }
-    pub fn assistant_tool_calls(tc: Vec<ToolCall>) -> Self {
-        Self {
-            role: "assistant".into(),
-            name: None,
-            content: None,
-            tool_calls: Some(tc),
             tool_call_id: None,
             image_base64: None,
         }
@@ -235,7 +212,8 @@ impl VlmClient {
         req_builder
             .model(&self.model)
             .messages(oai_messages)
-            .stream(true);
+            .stream(true)
+            .response_format(ResponseFormat::JsonObject);
         if !oai_tools.is_empty() {
             req_builder.tools(oai_tools);
         }
