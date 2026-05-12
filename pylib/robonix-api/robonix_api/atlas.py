@@ -1,30 +1,47 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Thin wrapper over the generated atlas_pb2 stubs. Lazy-import (the stubs
-live in each package's rbnx-build/codegen/proto_gen/, only on sys.path after
-ensure_proto_gen() runs).
+"""Thin Python wrapper over the generated atlas_pb2 stubs.
 
-Returns dataclasses from `robonix_api.atlas_types` so callers never see raw
-protobuf messages — keeps the consumer-side API stable across proto edits.
+Public surface — what `from robonix_api import ATLAS` exposes:
+    Registration         register_primitive / register_service / register_skill
+                         unregister  /  heartbeat
+    Capability binding   declare_capability
+    Discovery            query / query_primitives / query_services / query_skills
+                         find_capability / find_unique_capability
+    Channels             connect_capability / disconnect_capability
+    Contracts            query_contract / list_contracts
+    Debug                inspect
+
+Privileged operations (`SetLifecycleState`, in particular) are NOT exposed
+here — they're framework-internal and live in `_lifecycle_internal.py`.
+A regular `from robonix_api import ATLAS` cannot reach them.
+
+Returns dataclasses from `robonix_api.atlas_types`; raw protobuf never
+leaves this module.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from typing import Any
 
 from .atlas_types import (
-    CapabilityRecord,
-    CapabilityState,
+    Capability,
+    CapabilityProvider,
     Channel,
     ContractDescriptor,
     GrpcParams,
+    Kind,
+    LifecycleState,
     McpParams,
     Ros2Params,
     Transport,
+    from_pb_capability,
     from_pb_contract,
-    from_pb_record,
+    from_pb_params,
+    from_pb_provider,
 )
 
 log = logging.getLogger("robonix_api.atlas")
@@ -46,204 +63,312 @@ def _resolve_transport(t: Transport | str | int) -> Transport:
     }.get(name, Transport.UNSPECIFIED)
 
 
-def _resolve_state(s: CapabilityState | str | int) -> CapabilityState:
-    if isinstance(s, CapabilityState):
-        return s
-    if isinstance(s, int):
-        return CapabilityState(s)
-    name = str(s).strip().lower()
+def _resolve_kind(k: Kind | str | int) -> Kind:
+    if isinstance(k, Kind):
+        return k
+    if isinstance(k, int):
+        return Kind(k)
+    name = str(k).strip().lower()
     return {
-        "registered": CapabilityState.REGISTERED,
-        "inactive":   CapabilityState.INACTIVE,
-        "active":     CapabilityState.ACTIVE,
-        "error":      CapabilityState.ERROR,
-        "terminated": CapabilityState.TERMINATED,
-    }.get(name, CapabilityState.UNSPECIFIED)
+        "primitive": Kind.PRIMITIVE,
+        "service":   Kind.SERVICE,
+        "skill":     Kind.SKILL,
+        "":          Kind.UNSPECIFIED,
+        "unspecified": Kind.UNSPECIFIED,
+    }.get(name, Kind.UNSPECIFIED)
 
 
-class AtlasClient:
-    def __init__(self, endpoint: str = "127.0.0.1:50051") -> None:
+class _Atlas:
+    """Singleton facade for the atlas gRPC client.
+
+    Exposed as the module-level `ATLAS` constant. Lazy-connects on first
+    use, reads `$ROBONIX_ATLAS` (default `127.0.0.1:50051`).
+    """
+
+    def __init__(self, endpoint: str | None = None) -> None:
         self._endpoint = endpoint
         self._channel: Any = None
         self._stub: Any = None
-        self._pb: Any = None  # atlas_pb2 module
+        self._pb: Any = None
+
+    # -- lazy stub bootstrap -------------------------------------------------
 
     def _ensure_stub(self) -> None:
         if self._stub is not None:
             return
         import grpc
-        import atlas_pb2  # type: ignore
-        import atlas_pb2_grpc  # type: ignore
+        import atlas_pb2          # type: ignore
+        import atlas_pb2_grpc     # type: ignore
+        ep = self._endpoint or os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
+        self._endpoint = ep
         self._pb = atlas_pb2
-        self._channel = grpc.insecure_channel(self._endpoint)
+        self._channel = grpc.insecure_channel(ep)
         self._stub = atlas_pb2_grpc.AtlasStub(self._channel)
 
     @property
-    def pb(self):
+    def _wire_pb(self):
         self._ensure_stub()
         return self._pb
 
     @property
-    def stub(self):
+    def _wire_stub(self):
         self._ensure_stub()
         return self._stub
 
-    def transport_enum(self, name: Transport | str | int):
-        """Translate a Transport / string / int to the protobuf enum value
-        the generated stubs expect."""
-        t = _resolve_transport(name)
-        attr = {
-            Transport.ROS2:        "TRANSPORT_ROS2",
-            Transport.GRPC:        "TRANSPORT_GRPC",
-            Transport.MCP:         "TRANSPORT_MCP",
-            Transport.UNSPECIFIED: "TRANSPORT_UNSPECIFIED",
-        }[t]
-        return getattr(self.pb, attr)
+    def _transport_enum(self, t: Transport | str | int):
+        pb = self._wire_pb
+        return {
+            Transport.GRPC:        pb.TRANSPORT_GRPC,
+            Transport.ROS2:        pb.TRANSPORT_ROS2,
+            Transport.MCP:         pb.TRANSPORT_MCP,
+            Transport.UNSPECIFIED: pb.TRANSPORT_UNSPECIFIED,
+        }[_resolve_transport(t)]
 
-    # ── registration ─────────────────────────────────────────────────────
-    def register_capability(
-        self, capability_id: str, namespace: str, capability_md_path: str = "",
-    ) -> bool:
-        """True if newly registered, False if already exists (idempotent re-deploy)."""
-        import grpc
-        try:
-            self.stub.RegisterCapability(self.pb.RegisterCapabilityRequest(
-                capability_id=capability_id,
-                namespace=namespace,
-                capability_md_path=capability_md_path,
-            ))
-            return True
-        except grpc.RpcError as e:
-            if e.code() == grpc.StatusCode.ALREADY_EXISTS:
-                return False
-            raise
+    def _kind_enum(self, k: Kind | str | int):
+        pb = self._wire_pb
+        return {
+            Kind.PRIMITIVE:   pb.KIND_PRIMITIVE,
+            Kind.SERVICE:     pb.KIND_SERVICE,
+            Kind.SKILL:       pb.KIND_SKILL,
+            Kind.UNSPECIFIED: pb.KIND_UNSPECIFIED,
+        }[_resolve_kind(k)]
 
-    def unregister_capability(self, capability_id: str) -> bool:
+    # -- registration -------------------------------------------------------
+
+    def register_primitive(
+        self, id: str, namespace: str, capability_md_path: str = ""
+    ) -> str:
+        return self._register(self._wire_stub.RegisterPrimitive, id, namespace, capability_md_path)
+
+    def register_service(
+        self, id: str, namespace: str, capability_md_path: str = ""
+    ) -> str:
+        return self._register(self._wire_stub.RegisterService, id, namespace, capability_md_path)
+
+    def register_skill(
+        self, id: str, namespace: str, capability_md_path: str = ""
+    ) -> str:
+        return self._register(self._wire_stub.RegisterSkill, id, namespace, capability_md_path)
+
+    def _register(self, rpc, id: str, namespace: str, capability_md_path: str) -> str:
+        resp = rpc(self._wire_pb.RegisterRequest(
+            id=id,
+            namespace=namespace,
+            capability_md_path=capability_md_path,
+        ))
+        return resp.id
+
+    def unregister(self, id: str) -> bool:
         try:
-            resp = self.stub.UnregisterCapability(
-                self.pb.UnregisterCapabilityRequest(capability_id=capability_id)
-            )
+            resp = self._wire_stub.Unregister(self._wire_pb.UnregisterRequest(id=id))
             return bool(resp.was_present)
         except Exception as e:  # noqa: BLE001
-            log.debug("UnregisterCapability(%s): %s", capability_id, e)
+            log.debug("Unregister(%s): %s", id, e)
             return False
 
-    # ── interface declares ───────────────────────────────────────────────
-    def declare_ros2(
-        self, capability_id: str, contract_id: str, topic: str,
-        qos_profile: str = "best_effort",
-    ) -> str:
-        return self._declare(capability_id, contract_id, Transport.ROS2, endpoint=topic,
-                             params=self.pb.TransportParams(
-                                 ros2=self.pb.Ros2Params(qos_profile=qos_profile),
-                             ))
-
-    def declare_grpc(
-        self, capability_id: str, contract_id: str, endpoint: str,
-        service_name: str, method: str, proto_file: str = "robonix_contracts.proto",
-    ) -> str:
-        return self._declare(capability_id, contract_id, Transport.GRPC, endpoint=endpoint,
-                             params=self.pb.TransportParams(
-                                 grpc=self.pb.GrpcParams(
-                                     proto_file=proto_file,
-                                     service_name=service_name,
-                                     method=method,
-                                 ),
-                             ))
-
-    def declare_mcp(
-        self, capability_id: str, contract_id: str, endpoint: str,
-        description: str = "", input_schema_json: str = "{}",
-    ) -> str:
-        return self._declare(capability_id, contract_id, Transport.MCP, endpoint=endpoint,
-                             params=self.pb.TransportParams(
-                                 mcp=self.pb.McpParams(
-                                     description=description,
-                                     input_schema_json=input_schema_json,
-                                 ),
-                             ))
-
-    def _declare(
-        self, capability_id: str, contract_id: str, transport: Transport,
-        endpoint: str, params,
-    ) -> str:
-        import grpc
+    def heartbeat(self, id: str) -> None:
         try:
-            resp = self.stub.DeclareInterface(self.pb.DeclareInterfaceRequest(
-                capability_id=capability_id,
+            self._wire_stub.Heartbeat(self._wire_pb.HeartbeatRequest(id=id))
+        except Exception as e:  # noqa: BLE001
+            log.debug("heartbeat(%s): %s", id, e)
+
+    def start_heartbeat(self, id: str, period_s: float = 30.0) -> threading.Thread:
+        """Background daemon thread that pings Heartbeat every `period_s`
+        seconds. Returns the thread for caller bookkeeping (or to ignore)."""
+        def _loop():
+            while True:
+                time.sleep(period_s)
+                self.heartbeat(id)
+        t = threading.Thread(target=_loop, name=f"robonix-hb-{id}", daemon=True)
+        t.start()
+        return t
+
+    # -- capability binding -------------------------------------------------
+
+    def declare_capability(
+        self,
+        owner_id: str,
+        contract_id: str,
+        transport: Transport | str | int,
+        endpoint: str,
+        params: GrpcParams | Ros2Params | McpParams | None = None,
+        description: str = "",
+    ) -> str:
+        """Declare one Capability on a registered CapabilityProvider. Returns
+        the authoritative endpoint Atlas stored (may differ from `endpoint`
+        when Atlas rewrote on collision)."""
+        import grpc
+        pb_params = self._params_to_pb(transport, params)
+        try:
+            resp = self._wire_stub.DeclareCapability(self._wire_pb.DeclareCapabilityRequest(
+                owner_id=owner_id,
                 contract_id=contract_id,
-                transport=self.transport_enum(transport),
+                transport=self._transport_enum(transport),
                 endpoint=endpoint,
-                params=params,
+                params=pb_params,
+                description=description,
             ))
             return resp.endpoint or endpoint
         except grpc.RpcError as e:
             if e.code() == grpc.StatusCode.ALREADY_EXISTS:
                 log.debug("declare %s/%s/%s already exists; ok",
-                          capability_id, contract_id, transport.name)
+                          owner_id, contract_id, _resolve_transport(transport).name)
                 return endpoint
             raise
 
-    # ── discovery ────────────────────────────────────────────────────────
-    def get(self, capability_id: str) -> CapabilityRecord | None:
-        """Look up a capability by its id. Returns None if not registered."""
-        recs = self._query(capability_id=capability_id)
-        return recs[0] if recs else None
-
-    def find(
+    def _params_to_pb(
         self,
-        contract_id: str,
-        *,
-        transport: Transport | str | int = Transport.UNSPECIFIED,
-    ) -> list[CapabilityRecord]:
-        """Find capabilities providing `contract_id`. Optional `transport`
-        narrows to caps whose implementation of that contract uses the
-        given transport (otherwise any transport). Always a list (possibly
-        empty). For exactly-one-expected pattern, prefer tuple-unpack:
-        `[rec] = atlas.find("X")` raises ValueError on 0 or >1 matches."""
-        return self._query(
-            contract_id=contract_id,
-            transport=transport,
-        )
+        transport: Transport | str | int,
+        params: GrpcParams | Ros2Params | McpParams | None,
+    ):
+        pb = self._wire_pb
+        t = _resolve_transport(transport)
+        if params is None:
+            if t == Transport.ROS2:
+                return pb.TransportParams(ros2=pb.Ros2Params())
+            if t == Transport.GRPC:
+                return pb.TransportParams(grpc=pb.GrpcParams(
+                    proto_file="robonix_contracts.proto"))
+            if t == Transport.MCP:
+                return pb.TransportParams(mcp=pb.McpParams(input_schema_json="{}"))
+            return pb.TransportParams()
+        if isinstance(params, GrpcParams):
+            return pb.TransportParams(grpc=pb.GrpcParams(
+                proto_file=params.proto_file or "robonix_contracts.proto",
+                service_name=params.service_name,
+                method=params.method,
+            ))
+        if isinstance(params, Ros2Params):
+            return pb.TransportParams(ros2=pb.Ros2Params(qos_profile=params.qos_profile))
+        if isinstance(params, McpParams):
+            return pb.TransportParams(mcp=pb.McpParams(
+                input_schema_json=params.input_schema_json or "{}"))
+        raise TypeError(f"unknown params type: {type(params).__name__}")
 
-    def _query(
+    # -- discovery (CapabilityProvider-shaped) -----------------------------
+
+    def query(
         self,
         *,
-        capability_id: str = "",
+        kind: Kind | str | int = Kind.UNSPECIFIED,
+        id: str = "",
         contract_id: str = "",
+        namespace_prefix: str = "",
         transport: Transport | str | int = Transport.UNSPECIFIED,
-    ) -> list[CapabilityRecord]:
+    ) -> list[CapabilityProvider]:
+        """Generic Query. Kind=UNSPECIFIED returns all kinds; each Record's
+        `kind` field carries the actual kind so callers can demultiplex."""
         import grpc
-        t = self.transport_enum(transport)
         try:
-            resp = self.stub.QueryCapabilities(self.pb.QueryCapabilitiesRequest(
-                capability_id=capability_id,
+            resp = self._wire_stub.Query(self._wire_pb.QueryRequest(
+                kind=self._kind_enum(kind),
+                id=id,
                 contract_id=contract_id,
-                transport=t,
+                transport=self._transport_enum(transport),
+                namespace_prefix=namespace_prefix,
             ))
         except grpc.RpcError as e:
-            log.warning(
-                "QueryCapabilities(cap=%r, contract=%r): %s",
-                capability_id, contract_id, e,
-            )
+            log.warning("Query(kind=%r, id=%r, contract=%r): %s",
+                        kind, id, contract_id, e)
             return []
-        return [from_pb_record(r) for r in resp.records]
+        return [from_pb_provider(p) for p in resp.providers]
 
-    def query_md(self, capability_id: str) -> str:
-        try:
-            resp = self.stub.QueryCapabilityMd(
-                self.pb.QueryCapabilityMdRequest(capability_id=capability_id)
+    def query_primitives(
+        self,
+        *,
+        id: str = "",
+        contract_id: str = "",
+        namespace_prefix: str = "",
+        transport: Transport | str | int = Transport.UNSPECIFIED,
+    ) -> list[CapabilityProvider]:
+        return self.query(kind=Kind.PRIMITIVE, id=id, contract_id=contract_id,
+                          namespace_prefix=namespace_prefix, transport=transport)
+
+    def query_services(
+        self,
+        *,
+        id: str = "",
+        contract_id: str = "",
+        namespace_prefix: str = "",
+        transport: Transport | str | int = Transport.UNSPECIFIED,
+    ) -> list[CapabilityProvider]:
+        return self.query(kind=Kind.SERVICE, id=id, contract_id=contract_id,
+                          namespace_prefix=namespace_prefix, transport=transport)
+
+    def query_skills(
+        self,
+        *,
+        id: str = "",
+        contract_id: str = "",
+        namespace_prefix: str = "",
+        transport: Transport | str | int = Transport.UNSPECIFIED,
+    ) -> list[CapabilityProvider]:
+        return self.query(kind=Kind.SKILL, id=id, contract_id=contract_id,
+                          namespace_prefix=namespace_prefix, transport=transport)
+
+    # -- discovery (flat Capability-shaped) --------------------------------
+
+    def find_capability(
+        self,
+        *,
+        contract_id: str = "",
+        transport: Transport | str | int = Transport.UNSPECIFIED,
+        owner_kind: Kind | str | int = Kind.UNSPECIFIED,
+        owner_id: str = "",
+        namespace_prefix: str = "",
+    ) -> list[Capability]:
+        """Flat consumer-facing list of Capabilities matching the filters.
+        Walks Query() and flattens each provider's `capabilities[]`. Each
+        returned `Capability` already carries owner_id / owner_kind."""
+        providers = self.query(
+            kind=owner_kind,
+            id=owner_id,
+            contract_id=contract_id,
+            namespace_prefix=namespace_prefix,
+            transport=transport,
+        )
+        out: list[Capability] = []
+        for p in providers:
+            for c in p.capabilities:
+                out.append(c)
+        return out
+
+    def find_unique_capability(
+        self,
+        *,
+        contract_id: str,
+        transport: Transport | str | int = Transport.UNSPECIFIED,
+        owner_kind: Kind | str | int = Kind.UNSPECIFIED,
+        owner_id: str = "",
+        namespace_prefix: str = "",
+    ) -> Capability:
+        """Like find_capability but expects exactly one match. Raises
+        ValueError on 0 or >1 matches — for "I depend on THE camera/depth
+        capability" wiring where ambiguity is a config bug."""
+        caps = self.find_capability(
+            contract_id=contract_id, transport=transport,
+            owner_kind=owner_kind, owner_id=owner_id,
+            namespace_prefix=namespace_prefix,
+        )
+        if not caps:
+            raise ValueError(
+                f"find_unique_capability(contract_id={contract_id!r}): no matches"
             )
-            return resp.capability_md
-        except Exception as e:  # noqa: BLE001
-            log.debug("QueryCapabilityMd(%s): %s", capability_id, e)
-            return ""
+        if len(caps) > 1:
+            owners = ", ".join(c.owner_id for c in caps)
+            raise ValueError(
+                f"find_unique_capability(contract_id={contract_id!r}): "
+                f"{len(caps)} matches (owners: {owners}) — pass owner_id to disambiguate"
+            )
+        return caps[0]
 
-    def get_contract(self, contract_id: str) -> ContractDescriptor | None:
+    # -- contracts ----------------------------------------------------------
+
+    def query_contract(self, contract_id: str) -> ContractDescriptor | None:
         import grpc
         try:
-            resp = self.stub.QueryContract(
-                self.pb.QueryContractRequest(contract_id=contract_id)
+            resp = self._wire_stub.QueryContract(
+                self._wire_pb.QueryContractRequest(contract_id=contract_id)
             )
         except grpc.RpcError as e:
             log.debug("QueryContract(%s): %s", contract_id, e)
@@ -255,139 +380,74 @@ class AtlasClient:
     def list_contracts(self, namespace_prefix: str = "") -> list[ContractDescriptor]:
         import grpc
         try:
-            resp = self.stub.ListContracts(
-                self.pb.ListContractsRequest(namespace_prefix=namespace_prefix)
+            resp = self._wire_stub.ListContracts(
+                self._wire_pb.ListContractsRequest(namespace_prefix=namespace_prefix)
             )
         except grpc.RpcError as e:
             log.warning("ListContracts(prefix=%r): %s", namespace_prefix, e)
             return []
         return [from_pb_contract(c) for c in resp.contracts]
 
-    def inspect(self) -> dict:
-        try:
-            resp = self.stub.InspectAtlas(self.pb.InspectAtlasRequest())
-            return json.loads(resp.json) if resp.json else {}
-        except Exception as e:  # noqa: BLE001
-            log.debug("InspectAtlas: %s", e)
-            return {}
+    # -- channels -----------------------------------------------------------
 
-    # ── channels ─────────────────────────────────────────────────────────
-    def connect(
+    def connect_capability(
         self,
         *,
         consumer_id: str,
-        capability_id: str,
+        owner_id: str,
         contract_id: str,
         transport: Transport | str | int,
     ) -> Channel:
-        """Open a consumer→provider edge. Returns a `Channel` context
-        manager — `with atlas.connect(...) as ch: ...` auto-disconnects."""
-        t = self.transport_enum(transport)
-        resp = self.stub.ConnectCapability(self.pb.ConnectCapabilityRequest(
+        """Open a consumer->owner edge. Returns a `Channel` context manager
+        — `with ATLAS.connect_capability(...) as ch: ...` auto-disconnects."""
+        resp = self._wire_stub.ConnectCapability(self._wire_pb.ConnectCapabilityRequest(
             consumer_id=consumer_id,
-            capability_id=capability_id,
+            owner_id=owner_id,
+            contract_id=contract_id,
+            transport=self._transport_enum(transport),
+        ))
+        t = _resolve_transport(transport)
+        params = (
+            from_pb_params(t, resp.params)
+            if resp.HasField("params") else None
+        )
+        return Channel(
+            owner_id=owner_id,
             contract_id=contract_id,
             transport=t,
-        ))
-        # Translate pb params → dataclass params (re-use the iface helper).
-        from .atlas_types import from_pb_params
-        params = from_pb_params(_resolve_transport(transport), resp.params) if resp.HasField("params") else None
-        return Channel(
-            cap_id=capability_id,
-            contract_id=contract_id,
-            transport=_resolve_transport(transport),
             endpoint=resp.endpoint,
             channel_id=resp.channel_id,
             params=params,
-            _closer=self._disconnect,
+            _closer=self.disconnect_capability,
         )
 
-    def _disconnect(self, channel_id: str) -> bool:
+    def disconnect_capability(self, channel_id: str) -> bool:
         try:
-            resp = self.stub.DisconnectCapability(
-                self.pb.DisconnectCapabilityRequest(channel_id=channel_id)
+            resp = self._wire_stub.DisconnectCapability(
+                self._wire_pb.DisconnectCapabilityRequest(channel_id=channel_id)
             )
             return bool(resp.was_open)
         except Exception as e:  # noqa: BLE001
             log.debug("DisconnectCapability(%s): %s", channel_id, e)
             return False
 
-    # ── lifecycle / heartbeat ────────────────────────────────────────────
-    def heartbeat(self, capability_id: str) -> None:
+    # -- debug --------------------------------------------------------------
+
+    def inspect(self) -> dict:
         try:
-            self.stub.Heartbeat(self.pb.HeartbeatRequest(capability_id=capability_id))
+            resp = self._wire_stub.InspectAtlas(self._wire_pb.InspectAtlasRequest())
+            return json.loads(resp.json) if resp.json else {}
         except Exception as e:  # noqa: BLE001
-            log.debug("heartbeat: %s", e)
-
-    def set_capability_state(
-        self,
-        capability_id: str,
-        state: CapabilityState | str | int,
-        detail: str = "",
-    ) -> None:
-        """Push a lifecycle state transition. `state` accepts the new
-        CapabilityState enum, an int, or a lower-case string
-        (registered/initialized/running/error/terminated).
-        Atlas-side validation is soft in v0.1 — illegal transitions log a
-        warn but are still accepted, so this call won't raise."""
-        self._ensure_stub()
-        cs = _resolve_state(state)
-        if cs == CapabilityState.UNSPECIFIED:
-            log.warning("set_capability_state: unknown state %r", state)
-            return
-        try:
-            self.stub.SetCapabilityState(self.pb.SetCapabilityStateRequest(
-                capability_id=capability_id,
-                state=int(cs),
-                detail=detail,
-            ))
-        except Exception as e:  # noqa: BLE001
-            log.debug("SetCapabilityState(%s, %s): %s", capability_id, cs.name, e)
-
-    def start_heartbeat(
-        self, capability_id: str, period_s: float = 10.0,
-    ) -> threading.Thread:
-        def _loop():
-            while True:
-                time.sleep(period_s)
-                self.heartbeat(capability_id)
-        t = threading.Thread(target=_loop, name=f"robonix-hb-{capability_id}", daemon=True)
-        t.start()
-        return t
+            log.debug("InspectAtlas: %s", e)
+            return {}
 
 
-# ── module-level singleton facade ────────────────────────────────────────
-# `from robonix_api import atlas` → public discovery API only (`get` / `find`).
-# Internal RPCs (declares, heartbeat, set_state, connect) stay on AtlasClient
-# instances owned by Capability. The singleton resolves its endpoint lazily
-# from $ROBONIX_ATLAS (default 127.0.0.1:50051) on first use.
-
-class _AtlasFacade:
-    """Public v1 atlas API. Shared lazy singleton — `atlas.get(...)` and
-    `atlas.find(...)`. Capability internals reach into AtlasClient directly,
-    so this stays minimal."""
-    _client: AtlasClient | None = None
-
-    def _resolve(self) -> AtlasClient:
-        if self._client is None:
-            import os
-            ep = os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
-            self._client = AtlasClient(ep)
-        return self._client
-
-    def get(self, capability_id: str) -> CapabilityRecord | None:
-        return self._resolve().get(capability_id)
-
-    def find(
-        self,
-        contract_id: str,
-        *,
-        transport: Transport | str | int = Transport.UNSPECIFIED,
-    ) -> list[CapabilityRecord]:
-        return self._resolve().find(
-            contract_id,
-            transport=transport,
-        )
+# Public singleton. The uppercase name marks it as a globally-shared
+# connection (cf. `prometheus_client.REGISTRY`, `os.environ`); it is
+# fine to import everywhere — connection is lazy and per-process shared.
+ATLAS = _Atlas()
 
 
-atlas = _AtlasFacade()
+__all__ = [
+    "ATLAS",
+]

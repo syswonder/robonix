@@ -19,13 +19,13 @@ import time
 import uuid
 from typing import Optional
 
-from robonix_api import Capability, Ok, Err, Deferred, atlas
+from robonix_api import ATLAS, Service, Ok, Err, Deferred
 
 from .nav_node import Goal, NavNode
 
 log = logging.getLogger("simple_nav")
 
-cap = Capability(id="simple_nav", namespace="robonix/service/navigation")
+cap = Service(id="simple_nav", namespace="robonix/service/navigation")
 
 nav: NavNode | None = None
 # We pack our internal goal_id + tolerance_m through the contract by
@@ -61,11 +61,11 @@ def resolve_inputs(deadline_s: float = 30.0) -> dict[str, str]:
         for key, contract in wanted.items():
             if key in resolved:
                 continue
-            recs = atlas.find(contract, transport="ros2")
-            if not recs:
+            caps = ATLAS.find_capability(contract_id=contract, transport="ros2")
+            if not caps:
                 continue
             try:
-                ch = cap.connect(provider=recs[0], contract_id=contract, transport="ros2")
+                ch = cap.connect_capability(caps[0], contract, "ros2")
             except Exception:  # noqa: BLE001
                 continue
             ep = ch.endpoint

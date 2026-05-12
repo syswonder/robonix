@@ -1,37 +1,46 @@
 # SPDX-License-Identifier: MulanPSL-2.0
-"""Capability — the one Python object a robonix package instantiates.
+"""User-facing CapabilityProvider classes: `Primitive`, `Service`, `Skill`.
 
-A Capability talks to atlas (RegisterCapability + DeclareInterface +
-QueryCapabilities + Heartbeat), serves the lifecycle gRPC interface
-(Driver(CMD_INIT/ACTIVATE/DEACTIVATE/SHUTDOWN)), and provides a thin
-layer of helpers over rclpy / grpcio / FastMCP for the most common
-patterns.
+A Robonix package instantiates exactly one of these. The framework
+talks to atlas (RegisterPrimitive/Service/Skill + DeclareCapability +
+Heartbeat), serves the lifecycle gRPC interface
+(Driver(CMD_INIT/ACTIVATE/DEACTIVATE/SHUTDOWN)), and provides thin
+helpers over rclpy / grpcio / FastMCP for the most common patterns.
 
-The conscious design split:
-  - Layer 1 (always available): atlas declare/query, lifecycle, subprocess
-    spawning, sentinel waits. NO middleware-server-startup magic.
-  - Layer 2 (opt-in convenience): create_publisher / create_subscription /
-    `@cap.mcp` / `@cap.grpc`. Wraps the corresponding lib so users can write
-    one line instead of ten. Bypassable: write rclpy / grpcio / FastMCP
-    directly and call `cap.declare_*` to register with atlas.
+Internal `_ProviderBase` shares all the lifecycle / decorator / server
+plumbing; the three concrete classes differ only in which atlas
+Register RPC they call.
+
+Layered API:
+  - Layer 1 (always available): declare_capability, connect_capability,
+    spawn subprocess, sentinel waits.
+  - Layer 2 (opt-in convenience): create_publisher / create_subscription
+    for ROS 2; `@provider.provides_grpc(...)` / `@provider.provides_mcp(...)`
+    decorators that register the handler AND atlas-declare the
+    Capability in one step (description is pulled from the function's
+    docstring or passed explicitly).
 """
 from __future__ import annotations
 
 import inspect
 import json
 import logging
-import os
 import signal
-import sys
 import threading
 from pathlib import Path
 from typing import Any, Callable
 
-from .atlas import AtlasClient
+from ._lifecycle_internal import _set_lifecycle_state
+from .atlas import ATLAS
 from .atlas_types import (
-    CapabilityRecord,
-    CapabilityState,
+    Capability,
+    CapabilityProvider,
     Channel,
+    GrpcParams,
+    Kind,
+    LifecycleState,
+    McpParams,
+    Ros2Params,
     Transport,
 )
 from .codegen import ensure_proto_gen, find_pkg_root
@@ -48,12 +57,8 @@ log = logging.getLogger("robonix_api.capability")
 
 
 def _install_simple_logger() -> None:
-    """FastMCP / mcp / uvicorn install a `rich`-based RichHandler on the root
-    logger, which wraps log messages into narrow columns and inserts spurious
-    whitespace — unreadable in `tail -f`, and `logging.basicConfig` is a no-op
-    once that handler is in place. We forcibly replace the root handlers with
-    one stderr StreamHandler in a plain `[time] LEVEL logger: message` shape.
-    Idempotent — only runs once per process."""
+    """Replace `rich`-installed RichHandler (from fastmcp / uvicorn) with
+    a plain stderr handler. Idempotent."""
     if getattr(_install_simple_logger, "_done", False):
         return
     root = logging.getLogger()
@@ -74,7 +79,8 @@ def _install_simple_logger() -> None:
 
 _install_simple_logger()
 
-# ── transport-ENUM ↔ contract.mode compatibility matrix ──────────────────────
+# Transport-ENUM <-> contract.mode compatibility matrix (best-effort
+# check at declare_capability time).
 _MODE_TRANSPORT_OK = {
     "rpc": {"grpc", "mcp", "ros2"},
     "topic_in": {"ros2", "grpc"},
@@ -82,17 +88,26 @@ _MODE_TRANSPORT_OK = {
 }
 
 
-class Capability:
-    """One instance per package.
+# ── _ProviderBase ───────────────────────────────────────────────────────────
+
+
+class _ProviderBase:
+    """Internal base for Primitive / Service / Skill. NOT exported.
 
     Args:
-        id:        capability_id (e.g. "com.robonix.ranger.mid360_lidar").
-        namespace: atlas namespace (e.g. "primitive/lidar"). Framework derives
-                   the `*/driver` contract id and gRPC servicer class from this.
-        pkg_root:  package root dir; default is auto-detected via the caller's
-                   __file__ walking up to a directory with `package_manifest.yaml`.
-        atlas_endpoint:  defaults to env ROBONIX_ATLAS or "127.0.0.1:50051".
+        id:        stable provider id (e.g. "webots_tiago_camera_front").
+                   Convention: matches `name:` in package_manifest.yaml.
+        namespace: contract_id prefix this provider claims, e.g.
+                   "robonix/primitive/camera". Every declare_capability
+                   call MUST carry a contract_id under this prefix.
+        pkg_root:  package root directory; auto-detected from the
+                   caller's __file__ when omitted.
+        md_path:   absolute path to CAPABILITY.md; defaults to
+                   <pkg_root>/CAPABILITY.md if it exists.
     """
+
+    # Concrete subclasses set this to their kind.
+    _kind: Kind = Kind.UNSPECIFIED
 
     def __init__(
         self,
@@ -101,13 +116,8 @@ class Capability:
         *,
         pkg_root: Path | None = None,
         md_path: str | None = None,
-        atlas_endpoint: str | None = None,
     ) -> None:
         self.id = id
-        # Namespace is whatever the operator chose — atlas validates
-        # contract_id starts with `<namespace>/`. Built-in robonix caps use
-        # `robonix/...` but a third-party skill is free to pick any prefix
-        # (e.g. `myorg/skill/pick_vla`). We normalise trailing slashes only.
         self.namespace = namespace.strip("/")
         if not self.namespace:
             raise ValueError("namespace must be non-empty")
@@ -119,29 +129,21 @@ class Capability:
                 pkg_root = find_pkg_root(caller_file)
         self.pkg_root: Path = (pkg_root or Path.cwd()).resolve()
 
-        # Add the package's codegen output to sys.path so atlas_pb2 / contracts
-        # are importable when run() / declare_*() actually need them.
+        # Add the package's codegen output to sys.path so atlas_pb2 /
+        # contracts are importable when run() actually needs them.
         ensure_proto_gen(self.pkg_root)
 
-        self._atlas = AtlasClient(
-            endpoint=atlas_endpoint
-            or os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051"),
-        )
-        # Ports are auto-allocated in run() (gRPC's add_insecure_port returns
-        # the actually bound port; MCP uses a free-port pre-claim). Atlas
-        # gets the chosen port via DeclareInterface so consumers find us
-        # through QueryCapabilities — no port management required from the
-        # operator. This used to be ROBONIX_DRIVER_PORT / ROBONIX_MCP_PORT
-        # env vars per package; collisions became inevitable as soon as more
-        # than one capability ran on the same host.
-        self._driver_port: int = 0
-        self._mcp_port: int = 0
-
-        # md_path: explicit overrides; else <pkg_root>/CAPABILITY.md if exists.
+        # md_path: explicit overrides; else <pkg_root>/CAPABILITY.md if
+        # it exists.
         if md_path is None:
             cand = self.pkg_root / "CAPABILITY.md"
             md_path = str(cand) if cand.is_file() else ""
         self._md_path = md_path
+
+        # Ports are auto-allocated in run(): gRPC's `add_insecure_port`
+        # returns the actually bound port; MCP uses a free-port preclaim.
+        self._driver_port: int = 0
+        self._mcp_port: int = 0
 
         self._spawn = SpawnRegistry()
 
@@ -152,34 +154,32 @@ class Capability:
         self._on_shutdown: Callable | None = None
 
         # Lifecycle state. Source of truth on the cap side; pushed to
-        # atlas via SetCapabilityState whenever it transitions (see
-        # _set_state below). Initial value is REGISTERED — it flips to
-        # INACTIVE on Driver(CMD_INIT) success, ACTIVE on
-        # CMD_ACTIVATE, back to INACTIVE on CMD_DEACTIVATE,
-        # TERMINATED on CMD_SHUTDOWN.
-        self._state: str = "registered"
+        # atlas via the privileged `_set_lifecycle_state` whenever it
+        # transitions.
+        self._state: LifecycleState = LifecycleState.REGISTERED
 
-        # Channels we opened via cap.connect(); force-closed on teardown
-        # so atlas doesn't accumulate dangling consumer→provider edges.
+        # Channels we opened via connect_capability(); force-closed on
+        # teardown so atlas doesn't accumulate dangling edges.
         self._channels: list[Channel] = []
 
-        # Layer 2 registries (populated by decorators / methods).
-        self._mcp_app = None  # FastMCP app, lazy
-        self._mcp_handlers: list[Callable] = []  # decorated funcs
-        self._grpc_handlers: list[tuple[str, Callable]] = []  # (contract_id, fn)
-        self._grpc_servicers: list[tuple[str, Any]] = (
-            []
-        )  # (contract_id, servicer instance)
-        self._publishers: dict[str, Any] = {}  # contract_id → rclpy publisher
+        # Decorator-registered handlers.
+        self._mcp_app = None
+        self._mcp_handlers: list[Callable] = []
+        # (contract_id, fn, description)
+        self._grpc_handlers: list[tuple[str, Callable, str]] = []
+        # (contract_id, servicer instance)
+        self._grpc_servicers: list[tuple[str, Any]] = []
+        self._publishers: dict[str, Any] = {}
 
         self._driver_server = None
         self._mcp_server_thread: threading.Thread | None = None
         self._heartbeat_thread: threading.Thread | None = None
         self._stopping = threading.Event()
 
-    # ── lifecycle decorators ─────────────────────────────────────────────
+    # -- lifecycle decorators ----------------------------------------------
+
     def on_init(self, fn: Callable[[dict], Any]) -> Callable[[dict], Any]:
-        """REGISTERED → INACTIVE. Parse config, validate dependencies,
+        """REGISTERED -> INACTIVE. Parse config, validate dependencies,
         bind logical device. NO hot runtime resources yet."""
         if self._on_init is not None:
             raise RuntimeError("on_init handler already registered")
@@ -187,88 +187,114 @@ class Capability:
         return fn
 
     def on_activate(self, fn: Callable[[], Any]) -> Callable[[], Any]:
-        """INACTIVE → ACTIVE. Acquire hot runtime resources
-        (threads, models, ROS subs, hardware fds). After this returns
-        Ok(), atlas marks the cap ACTIVE and consumers may call its
-        data interfaces. Optional for primitives/services (framework
-        auto-promotes); REQUIRED for skills.
-        Takes no args — only on_init receives cfg."""
+        """INACTIVE -> ACTIVE. Acquire hot runtime resources (threads,
+        models, ROS subs, hardware fds). Optional for Primitives /
+        Services (framework auto-promotes); REQUIRED for Skills."""
         self._on_activate = fn
         return fn
 
     def on_deactivate(self, fn: Callable[[], Any]) -> Callable[[], Any]:
-        """ACTIVE → INACTIVE. Release hot resources but keep
-        config / atlas registration. Optional for primitives/services;
-        executor calls this on skills via its eviction policy.
-        Takes no args."""
+        """ACTIVE -> INACTIVE. Release hot resources, keep config /
+        atlas registration."""
         self._on_deactivate = fn
         return fn
 
     def on_shutdown(self, fn: Callable[[], Any]) -> Callable[[], Any]:
-        """any → TERMINATED. Last-chance cleanup before process exit
-        (close ports, flush logs). Must return a Result like the other
-        handlers (the value doesn't drive state — cap goes TERMINATED
-        regardless — but the dispatcher still type-checks it)."""
+        """any -> TERMINATED. Last-chance cleanup before process exit."""
         self._on_shutdown = fn
         return fn
 
-    # ── lifecycle state ──────────────────────────────────────────────────
+    # -- lifecycle state ---------------------------------------------------
+
     @property
-    def state(self) -> str:
-        """Current lifecycle state — one of registered / inactive /
-        active / error / terminated. The framework drives this off
-        Driver cmd transitions; users typically don't write to it
-        directly."""
+    def state(self) -> LifecycleState:
         return self._state
 
-    def _set_state(self, new_state: str | None, detail: str = "") -> None:
-        """Update local state + push to atlas. Idempotent on no-change.
-        `new_state=None` updates only state_detail without changing the
-        state itself (used for Deferred — cap stays where it is, but
-        state_detail explains why)."""
+    def _set_state(self, new_state: LifecycleState | str | None, detail: str = "") -> None:
+        """Update local state + push to atlas (privileged). Idempotent
+        on no-change. `new_state=None` updates only state_detail."""
         if new_state is None:
-            # Detail-only push; keep current state.
             try:
-                self._atlas.set_capability_state(self.id, self._state, detail)
+                _set_lifecycle_state(self.id, self._state, detail)
             except Exception:  # noqa: BLE001
                 pass
             return
-        new_state = new_state.lower()
+        if isinstance(new_state, str):
+            new_state = LifecycleState[new_state.upper()]
         if new_state == self._state:
             return
         prev = self._state
         self._state = new_state
         log.info(
-            "[%s] state %s → %s%s",
+            "[%s] state %s -> %s%s",
             self.id,
-            prev,
-            new_state,
+            prev.name,
+            new_state.name,
             f" ({detail})" if detail else "",
         )
         try:
-            self._atlas.set_capability_state(self.id, new_state, detail)
+            _set_lifecycle_state(self.id, new_state, detail)
         except Exception:  # noqa: BLE001
-            # set_capability_state already logs at debug; swallow to keep
-            # the cap usable even if atlas is briefly unreachable.
             pass
 
-    # ── Layer 1: raw atlas declares ──────────────────────────────────────
+    # -- Layer 1: raw atlas declares ---------------------------------------
+
+    def declare_capability(
+        self,
+        contract_id: str,
+        endpoint: str,
+        transport: Transport | str | int,
+        params: GrpcParams | Ros2Params | McpParams | None = None,
+        description: str = "",
+    ) -> str:
+        """Declare a Capability for `contract_id` on this CapabilityProvider.
+        `description` is the instance-specific natural-language string
+        Pilot/LLM sees; empty means "use the contract's generic
+        description from the TOML at consume time" (the two are merged,
+        not picked-one-of)."""
+        return ATLAS.declare_capability(
+            owner_id=self.id,
+            contract_id=contract_id,
+            transport=transport,
+            endpoint=endpoint,
+            params=params,
+            description=description,
+        )
+
+    # -- Layer 1 conveniences (per-transport declare helpers) --------------
+
     def declare_ros2_topic(
-        self, contract_id: str, topic: str, *, qos: str = "best_effort"
-    ) -> None:
-        """Declare a ROS 2 topic endpoint for a topic_in / topic_out contract.
-        `qos` is one of the QoS preset strings (see dev guide §10.8)."""
-        self._check_mode("ros2", contract_id)
-        self._atlas.declare_ros2(self.id, _full_id(contract_id), topic, qos)
+        self,
+        contract_id: str,
+        topic: str,
+        *,
+        qos: str = "best_effort",
+        description: str = "",
+    ) -> str:
+        """Declare a ROS 2 topic endpoint for a topic_in / topic_out contract."""
+        return self.declare_capability(
+            contract_id=contract_id,
+            endpoint=topic,
+            transport=Transport.ROS2,
+            params=Ros2Params(qos_profile=qos),
+            description=description,
+        )
 
     def declare_ros2_service(
-        self, contract_id: str, service: str
-    ) -> None:
-        """Declare a ROS 2 service endpoint for an rpc contract over
-        the ROS 2 transport. ROS 2 service QoS is fixed (reliable,
-        depth 10) — no `qos` param."""
-        self._check_mode("ros2", contract_id)
-        self._atlas.declare_ros2(self.id, _full_id(contract_id), service, "")
+        self,
+        contract_id: str,
+        service: str,
+        *,
+        description: str = "",
+    ) -> str:
+        """Declare a ROS 2 service endpoint for an rpc contract over ROS 2."""
+        return self.declare_capability(
+            contract_id=contract_id,
+            endpoint=service,
+            transport=Transport.ROS2,
+            params=Ros2Params(qos_profile=""),
+            description=description,
+        )
 
     def declare_grpc(
         self,
@@ -277,57 +303,59 @@ class Capability:
         service_name: str,
         method: str,
         proto_file: str = "robonix_contracts.proto",
-    ) -> None:
-        self._check_mode("grpc", contract_id)
-        self._atlas.declare_grpc(
-            self.id,
-            _full_id(contract_id),
-            endpoint,
-            service_name,
-            method,
-            proto_file=proto_file,
+        description: str = "",
+    ) -> str:
+        return self.declare_capability(
+            contract_id=contract_id,
+            endpoint=endpoint,
+            transport=Transport.GRPC,
+            params=GrpcParams(
+                proto_file=proto_file,
+                service_name=service_name,
+                method=method,
+            ),
+            description=description,
         )
 
     def declare_mcp(
         self,
         contract_id: str,
         endpoint: str,
-        description: str = "",
         input_schema_json: str = "{}",
-    ) -> None:
-        self._check_mode("mcp", contract_id)
-        self._atlas.declare_mcp(
-            self.id, _full_id(contract_id), endpoint, description, input_schema_json
+        description: str = "",
+    ) -> str:
+        return self.declare_capability(
+            contract_id=contract_id,
+            endpoint=endpoint,
+            transport=Transport.MCP,
+            params=McpParams(input_schema_json=input_schema_json),
+            description=description,
         )
 
-    # ── Layer 1: connect (discovery is on the atlas singleton — `from
-    # robonix_api import atlas; atlas.get(...) / atlas.find(...)`) ─────
-    def connect(
+    # -- Layer 1: connect (consumer side) ----------------------------------
+
+    def connect_capability(
         self,
-        provider: CapabilityRecord,
+        owner: CapabilityProvider | Capability,
         contract_id: str,
         transport: Transport | str | int,
     ) -> Channel:
-        """Open a consumer→provider channel given a resolved provider
-        record (from `atlas.get(id)` or `atlas.find(...)`). The returned
-        `Channel` is a context manager; auto-closes on teardown if not
-        explicitly `with`-blocked."""
-        if not isinstance(provider, CapabilityRecord):
-            raise TypeError(
-                "cap.connect(provider, ...) requires a CapabilityRecord; "
-                "use atlas.get(id) or atlas.find(...) to resolve one"
-            )
-        full_contract = _full_id(contract_id)
-        ch = self._atlas.connect(
+        """Open a channel to another CapabilityProvider's Capability.
+        `owner` may be a `CapabilityProvider` (from `ATLAS.query_*`) or a
+        `Capability` (from `ATLAS.find_capability`); both carry the
+        owner id."""
+        owner_id = owner.id if isinstance(owner, CapabilityProvider) else owner.owner_id
+        ch = ATLAS.connect_capability(
             consumer_id=self.id,
-            capability_id=provider.capability_id,
-            contract_id=full_contract,
+            owner_id=owner_id,
+            contract_id=contract_id,
             transport=transport,
         )
         self._channels.append(ch)
         return ch
 
-    # ── Layer 1: subprocess + ROS sentinel ───────────────────────────────
+    # -- Layer 1: subprocess + ROS sentinel --------------------------------
+
     def spawn(
         self,
         argv,
@@ -352,8 +380,8 @@ class Capability:
         return RosBackend.get().wait_for_topic(topic, cls, timeout_s)
 
     def resolve_host_ip(self, target_ip: str) -> str | None:
-        """`ip route get <target>` → src field. Used by drivers (e.g. mid360)
-        that need to bake the host's IP into a vendor config file."""
+        """`ip route get <target>` -> src field. Used by drivers (e.g.
+        mid360) that need to bake the host's IP into a vendor config."""
         import subprocess
 
         try:
@@ -373,7 +401,8 @@ class Capability:
                 return toks[i + 1]
         return None
 
-    # ── Layer 2: ROS publisher / subscriber ──────────────────────────────
+    # -- Layer 2: ROS publisher / subscriber -------------------------------
+
     def create_publisher(
         self,
         contract_id: str,
@@ -382,16 +411,18 @@ class Capability:
         msg_type: type | str,
         qos: str | int = "best_effort",
         declare: bool = True,
+        description: str = "",
     ):
-        """Create an rclpy publisher AND (optionally) atlas-declare it.
-        Returns the rclpy publisher; user calls `.publish(msg)` directly OR
-        via `cap.emit(contract_id, msg)`."""
         cls = msg_type if isinstance(msg_type, type) else resolve_msg_type(msg_type)
         pub = RosBackend.get().create_publisher(cls, topic, qos)
-        self._publishers[_full_id(contract_id)] = pub
+        self._publishers[contract_id] = pub
         if declare:
-            self.declare_ros2_topic(
-                contract_id, topic, qos=qos if isinstance(qos, str) else "reliable"
+            self.declare_capability(
+                contract_id=contract_id,
+                endpoint=topic,
+                transport=Transport.ROS2,
+                params=Ros2Params(qos_profile=qos if isinstance(qos, str) else "reliable"),
+                description=description,
             )
         return pub
 
@@ -405,15 +436,15 @@ class Capability:
         qos: str | int = "best_effort",
         declare: bool = True,
     ):
-        """Create an rclpy subscription. If `declare=True` we also tell atlas
-        we consume this contract over ROS2 (atlas tracks consumer-side
-        bindings too — useful for `rbnx channels` audits)."""
         cls = msg_type if isinstance(msg_type, type) else resolve_msg_type(msg_type)
         sub = RosBackend.get().create_subscription(cls, topic, callback, qos)
         if declare:
             try:
-                self.declare_ros2_topic(
-                    contract_id, topic, qos=qos if isinstance(qos, str) else "reliable"
+                self.declare_capability(
+                    contract_id=contract_id,
+                    endpoint=topic,
+                    transport=Transport.ROS2,
+                    params=Ros2Params(qos_profile=qos if isinstance(qos, str) else "reliable"),
                 )
             except Exception:  # noqa: BLE001
                 # Consumer-side declare is optional; don't fail if atlas refuses.
@@ -427,53 +458,50 @@ class Capability:
         msg_type: type | str,
         callback: Callable[[Any], None],
     ):
-        """Create an rclpy subscription using the topic + qos atlas
-        resolved via `cap.connect(...)`. Skips the `topic=` / `qos=`
-        ceremony — those come from the channel.
-
-        v0.1 still requires `msg_type` as a Python class (or a string
-        like 'sensor_msgs/Image' resolved via rosidl). v0.2 will pull
-        the message type from the contract's IDL automatically."""
         cls = msg_type if isinstance(msg_type, type) else resolve_msg_type(msg_type)
-        from .atlas_types import Ros2Params
-
         qos = 0
         if isinstance(channel.params, Ros2Params) and channel.params.qos_profile:
-            qos = channel.params.qos_profile  # rclpy resolves the named profile
-            qos = qos if isinstance(qos, int) else 0
+            qos_profile = channel.params.qos_profile
+            qos = qos_profile if isinstance(qos_profile, int) else 0
         return RosBackend.get().create_subscription(cls, channel.endpoint, callback, qos)
 
     def emit(self, contract_id: str, msg: Any) -> None:
-        """Publish `msg` on the rclpy publisher created via create_publisher."""
-        pub = self._publishers.get(_full_id(contract_id))
+        pub = self._publishers.get(contract_id)
         if pub is None:
             raise RuntimeError(
-                f"no publisher for contract {contract_id!r} — "
-                f"call cap.create_publisher(...) first"
+                f"no publisher for contract {contract_id!r} -- "
+                f"call create_publisher(...) first"
             )
         pub.publish(msg)
 
-    # ── Layer 2: MCP tool decorator ──────────────────────────────────────
-    def mcp(self, contract_id: str, *, name: str | None = None):
-        """Register an MCP tool bound to this contract. Same surface as
-        `@mcp_contract` but auto-declares to atlas + boots a FastMCP server
-        on cap.run() at port `mcp_port`."""
-        full = _full_id(contract_id)
+    # -- Layer 2: provides_mcp decorator -----------------------------------
+
+    def provides_mcp(self, contract_id: str, *, name: str | None = None,
+                     description: str = ""):
+        """Register an MCP tool bound to `contract_id`. The natural-
+        language description is taken from the wrapped function's
+        docstring unless `description=` is passed explicitly."""
         self._check_mode("mcp", contract_id)
         self._ensure_mcp_app()
 
         def decorator(fn):
             mcp_contract(
                 self._mcp_app,  # pyright: ignore[reportArgumentType]
-                contract_id=full,
+                contract_id=contract_id,
                 name=name,
-            )(
-                fn
-            )  # pyright: ignore[reportArgumentType]
+            )(fn)  # pyright: ignore[reportArgumentType]
+            # Resolve description: explicit kwarg wins; else docstring;
+            # else empty (consumer falls back to contract default).
+            desc = description.strip() or (fn.__doc__ or "").strip()
+            fn._robonix_description = desc  # type: ignore[attr-defined]
             self._mcp_handlers.append(fn)
             return fn
 
         return decorator
+
+    # Back-compat alias (old name was just `mcp`); deprecated but kept
+    # so packages can migrate.
+    mcp = provides_mcp
 
     def _ensure_mcp_app(self) -> None:
         if self._mcp_app is not None:
@@ -483,125 +511,96 @@ class Capability:
         self._mcp_app = FastMCP(self.id)
 
     def use_mcp_app(self, app) -> None:
-        """For tools that aren't typed against codegen MCP dataclasses (i.e.
-        plain `@app.tool()` with primitive Python types): build your own
-        FastMCP app, register tools on it, hand it over here. Capability
-        will run the HTTP server on `mcp_port` during cap.run().
-
-        You're then on the hook for one cap.declare_mcp(contract_id, ...)
-        call per tool — the framework can't introspect bare FastMCP tools
-        for contract metadata."""
         if self._mcp_app is not None and self._mcp_app is not app:
             raise RuntimeError(
-                "MCP app already set; use_mcp_app conflicts with @cap.mcp decorators"
+                "MCP app already set; use_mcp_app conflicts with @provides_mcp"
             )
         self._mcp_app = app
         self._user_owned_mcp = True
 
     @property
     def mcp_endpoint(self) -> str:
-        """Convenience: the URL where the MCP HTTP server will live after
-        cap.run() starts. Useful for declare_mcp(contract_id, endpoint=...)."""
         return f"http://127.0.0.1:{self._mcp_port}/mcp/"
 
-    # ── Layer 2: gRPC ─────────────────────────────────────────────────────
-    def attach_grpc_servicer(self, contract_id: str, servicer) -> None:
-        """Attach an already-built Servicer instance for a contract. Use this
-        when your gRPC handler is a whole class (e.g. one Servicer subclass
-        with several methods sharing state via __init__) rather than a single
-        function — `@cap.grpc` only handles one-method-per-class. The framework
-        adds your servicer to the shared lifecycle gRPC server so atlas only
-        sees one endpoint per cap, and atlas-declares the contract pointing
-        at it. Call BEFORE cap.run() / cap.bootstrap().
-        """
-        full = _full_id(contract_id)
+    # -- Layer 2: provides_grpc decorator + attach_grpc_servicer -----------
+
+    def attach_grpc_servicer(self, contract_id: str, servicer,
+                             *, description: str = "") -> None:
+        """Attach an already-built Servicer instance for `contract_id`.
+        Use this for multi-method services; for single-method handlers
+        prefer `@provider.provides_grpc(...)`."""
         self._check_mode("grpc", contract_id)
-        self._grpc_servicers.append((full, servicer))
+        self._grpc_servicers.append((contract_id, servicer))
+        # Description currently dropped for full servicers — they handle
+        # multiple methods and don't have a single docstring. Future:
+        # walk each method's docstring.
+        if description:
+            log.debug("attach_grpc_servicer(%s): description ignored "
+                      "(use provides_grpc for per-method docs)", contract_id)
 
-    def grpc(self, contract_id: str):
-        """Bind a handler to the contract's generated gRPC Servicer.
-
-        NOTE: For now this just stores the handler; full auto-binding to the
-        right generated servicer + start_grpc_server happens in cap.run().
-        """
-        full = _full_id(contract_id)
+    def provides_grpc(self, contract_id: str, *, description: str = ""):
+        """Bind a handler to `contract_id`'s generated gRPC Servicer.
+        Description is taken from the function's docstring unless
+        `description=` is passed explicitly."""
         self._check_mode("grpc", contract_id)
 
         def decorator(fn):
-            self._grpc_handlers.append((full, fn))
+            desc = description.strip() or (fn.__doc__ or "").strip()
+            self._grpc_handlers.append((contract_id, fn, desc))
             return fn
 
         return decorator
 
-    # ── mode/transport compatibility check (best-effort) ─────────────────
+    # Back-compat alias.
+    grpc = provides_grpc
+
+    # -- mode/transport compat check (best-effort) -------------------------
+
     def _check_mode(self, transport: str, contract_id: str) -> None:
-        """Look up the contract TOML to check transport is allowed for its mode.
-        Best-effort — silently passes if we can't find the TOML."""
-        # TODO: scan capabilities/<full_path>.v1.toml for [mode] type. For
-        # now we trust the user. Safer than failing on missing TOML.
+        # Best-effort: would scan capabilities/<full_path>.v1.toml for
+        # [mode] type. For now we trust the user.
         return
 
-    # ── run / bootstrap ──────────────────────────────────────────────────
-    def bootstrap(self) -> None:
-        """Set up atlas registration + gRPC servers + MCP HTTP + heartbeat
-        WITHOUT blocking. Useful when the package has its own asyncio main
-        loop (e.g. scene) — call bootstrap() during startup and let the
-        existing event loop manage the rest of the lifetime. Idempotent on
-        re-entry; second call is a no-op.
+    # -- run / bootstrap ---------------------------------------------------
 
-        For the standard "register + block until SIGTERM" flow use `run()`."""
+    def bootstrap(self) -> None:
+        """Non-blocking setup. Idempotent on re-entry."""
         if self._driver_server is not None:
-            return  # already bootstrapped
+            return
         self._do_bootstrap()
 
     def run(self) -> None:
-        """Block. Order:
-        1. RegisterCapability
-        2. build the gRPC server (driver lifecycle + every @cap.grpc handler
-           share one server on driver_port — atlas declares each contract
-           with its own service_name+method; consumers multiplex by service)
-        3. atlas-declare every gRPC interface
-        4. start FastMCP uvicorn (only if any @cap.mcp tool)
-        5. start heartbeat
-        6. install SIGTERM/SIGINT handlers
-        7. signal.pause() until SIGTERM/SIGINT
-        8. teardown: SIGTERM all spawn'd subprocesses, stop servers
-        """
+        """Blocking. Calls bootstrap() then signal.pause()-equivalents
+        until SIGTERM / SIGINT."""
         self._do_bootstrap()
 
-        # 6. signals
         signal.signal(signal.SIGTERM, lambda *_: self._teardown_and_exit())
         signal.signal(signal.SIGINT, lambda *_: self._teardown_and_exit())
 
-        log.info("ready — awaiting Driver(CMD_INIT)")
+        log.info("ready -- awaiting Driver(CMD_INIT)")
         try:
             while not self._stopping.is_set():
                 self._stopping.wait(60.0)
         finally:
             self._teardown()
 
+    # Subclasses override to call the right Register* RPC.
+    def _atlas_register(self) -> bool:
+        raise NotImplementedError
+
     def _do_bootstrap(self) -> None:
         # 1. atlas register
         registered_ok = False
         try:
-            new = self._atlas.register_capability(
-                self.id, self.namespace, self._md_path or ""
-            )
-            log.info(
-                "registered cap %s%s", self.id, "" if new else " (already existed)"
-            )
+            self._atlas_register()
+            log.info("registered %s '%s'", self._kind.name.lower(), self.id)
             registered_ok = True
         except Exception as e:  # noqa: BLE001
-            log.warning("RegisterCapability failed: %s", e)
-        # Push the initial REGISTERED state explicitly, so atlas reflects
-        # "process is alive but Driver(CMD_INIT) hasn't run yet" instead of
-        # leaning on the legacy "first non-driver interface declare → init"
-        # inference. No-op if register itself failed.
+            log.warning("Register%s failed: %s", self._kind.name.capitalize(), e)
         if registered_ok:
-            self._set_state("registered")
+            self._set_state(LifecycleState.REGISTERED)
 
-        # 2. gRPC server — build everything BEFORE start (gRPC python requires
-        # all servicers added before server.start()).
+        # 2. gRPC server
         import grpc
         import robonix_contracts_pb2_grpc as contracts_grpc  # type: ignore
         import lifecycle_pb2  # type: ignore
@@ -609,11 +608,10 @@ class Capability:
 
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
 
-        # 2a. driver lifecycle — only when codegen emitted a `<ns>/driver`
-        # contract for this package. system/* services that expose only MCP
-        # tools (memory, scene, speech) skip this — they have no hardware
-        # init phase, so rbnx-boot doesn't need a Driver(CMD_INIT) target.
-        driver_decl: tuple[str, str] | None = None  # (service_name, method)
+        # 2a. driver lifecycle servicer (only when codegen emitted a
+        # `<ns>/driver` contract; system services without hardware init
+        # don't need it).
+        driver_decl: tuple[str, str] | None = None
         lifecycle_info = build_lifecycle_servicer(
             self.namespace,
             contracts_grpc,
@@ -626,21 +624,17 @@ class Capability:
             log_tag=self.id,
         )
         if lifecycle_info is not None:
-            lifecycle_inst, lifecycle_add_fn, driver_base, driver_method = (
-                lifecycle_info
-            )
+            lifecycle_inst, lifecycle_add_fn, driver_base, driver_method = lifecycle_info
             lifecycle_add_fn(lifecycle_inst, server)
             driver_decl = (driver_base, driver_method)
 
-        # 2b. user @cap.grpc handlers
-        user_grpc_decls: list[tuple[str, str, str]] = (
-            []
-        )  # (contract_id, service_name, method)
-        for contract_id, fn in self._grpc_handlers:
+        # 2b. user @provider.provides_grpc handlers
+        user_grpc_decls: list[tuple[str, str, str, str]] = []
+        for contract_id, fn, desc in self._grpc_handlers:
             info = resolve_servicer(contract_id, contracts_grpc)
             if info is None:
                 log.warning(
-                    "@cap.grpc(%r): no generated Servicer found in robonix_contracts_pb2_grpc "
+                    "@provides_grpc(%r): no generated Servicer found "
                     "(did codegen run for this contract?). Skipping.",
                     contract_id,
                 )
@@ -648,37 +642,30 @@ class Capability:
             servicer_cls, method_name, add_fn, base = info
             DynServicer = bind_user_handler(servicer_cls, method_name, fn)
             add_fn(DynServicer(), server)
-            user_grpc_decls.append((contract_id, base, method_name))
-            log.info("wired @cap.grpc %s → %s.%s", contract_id, base, method_name)
+            user_grpc_decls.append((contract_id, base, method_name, desc))
+            log.info("wired @provides_grpc %s -> %s.%s", contract_id, base, method_name)
 
-        # 2b'. user-attached pre-built Servicer instances (cap.attach_grpc_servicer)
+        # 2b'. attach_grpc_servicer
         for contract_id, servicer in self._grpc_servicers:
             info = resolve_servicer(contract_id, contracts_grpc)
             if info is None:
                 log.warning(
-                    "attach_grpc_servicer(%r): no generated Servicer found in "
-                    "robonix_contracts_pb2_grpc — did codegen run? Skipping.",
+                    "attach_grpc_servicer(%r): no generated Servicer found. Skipping.",
                     contract_id,
                 )
                 continue
             servicer_cls, method_name, add_fn, base = info
             if not isinstance(servicer, servicer_cls):
                 log.warning(
-                    "attach_grpc_servicer(%r): servicer %r is not a %s; "
-                    "atlas declare may still work but the server won't dispatch.",
-                    contract_id,
-                    type(servicer).__name__,
-                    servicer_cls.__name__,
+                    "attach_grpc_servicer(%r): servicer %r is not a %s",
+                    contract_id, type(servicer).__name__, servicer_cls.__name__,
                 )
             add_fn(servicer, server)
-            user_grpc_decls.append((contract_id, base, method_name))
-            log.info(
-                "attached gRPC servicer for %s → %s.%s", contract_id, base, method_name
-            )
+            user_grpc_decls.append((contract_id, base, method_name, ""))
+            log.info("attached gRPC servicer for %s -> %s.%s",
+                     contract_id, base, method_name)
 
-        # 2c. bind on port 0 — OS picks a free port; grpc returns it.
-        # Atlas DeclareInterface below carries the actual port out, so
-        # consumers find us via QueryCapabilities regardless.
+        # 2c. bind on port 0 -- OS picks free port.
         self._driver_port = server.add_insecure_port("[::]:0")
         server.start()
         self._driver_server = server
@@ -689,54 +676,51 @@ class Capability:
         if driver_decl is not None:
             driver_base, driver_method = driver_decl
             try:
-                self._atlas.declare_grpc(
-                    capability_id=self.id,
+                self.declare_capability(
                     contract_id=f"{self.namespace}/driver",
                     endpoint=endpoint,
-                    service_name=driver_base,
-                    method=driver_method,
+                    transport=Transport.GRPC,
+                    params=GrpcParams(
+                        proto_file="robonix_contracts.proto",
+                        service_name=driver_base,
+                        method=driver_method,
+                    ),
                 )
             except Exception as e:  # noqa: BLE001
-                log.warning("DeclareInterface(driver) failed: %s", e)
-        for contract_id, service_name, method in user_grpc_decls:
+                log.warning("DeclareCapability(driver) failed: %s", e)
+        for contract_id, service_name, method, desc in user_grpc_decls:
             try:
-                self._atlas.declare_grpc(
-                    capability_id=self.id,
+                self.declare_capability(
                     contract_id=contract_id,
                     endpoint=endpoint,
-                    service_name=service_name,
-                    method=method,
+                    transport=Transport.GRPC,
+                    params=GrpcParams(
+                        proto_file="robonix_contracts.proto",
+                        service_name=service_name,
+                        method=method,
+                    ),
+                    description=desc,
                 )
             except Exception as e:  # noqa: BLE001
-                log.warning("DeclareInterface(%s) failed: %s", contract_id, e)
+                log.warning("DeclareCapability(%s) failed: %s", contract_id, e)
 
-        # 4. FastMCP server (whenever an MCP app exists, whether built via
-        # @cap.mcp decorators or handed in via cap.use_mcp_app)
+        # 4. FastMCP server
         if self._mcp_app is not None:
             self._start_mcp_server()
             if self._mcp_handlers:
                 self._declare_mcp_handlers()
 
         # 5. heartbeat
-        self._heartbeat_thread = self._atlas.start_heartbeat(self.id)
+        self._heartbeat_thread = ATLAS.start_heartbeat(self.id)
 
-        # 6. State promotion. Caps WITH a Driver(CMD_INIT/CMD_ACTIVATE)
-        # handshake rely on rbnx boot to drive them through
-        # INACTIVE → ACTIVE via the lifecycle servicer's
-        # on_state_change callback (wired above). Caps WITHOUT a driver
-        # contract (system services like memory / scene that only expose
-        # MCP tools or one-shot gRPC RPCs) are fully ready as soon as
-        # gRPC + MCP are listening — promote to ACTIVE here so
-        # `rbnx caps` shows them online instead of stranded at
-        # INACTIVE forever.
+        # 6. state promotion: caps WITHOUT a Driver contract (system
+        # services with only MCP tools) are fully ready as soon as gRPC
+        # + MCP listen, so promote to ACTIVE here. Caps WITH a Driver
+        # contract wait for rbnx-boot to fire CMD_INIT / CMD_ACTIVATE.
         if driver_decl is None and registered_ok:
-            self._set_state("active")
+            self._set_state(LifecycleState.ACTIVE)
 
     def _start_mcp_server(self) -> None:
-        # Pre-claim a free port via socket(0) → close → hand to uvicorn.
-        # Tiny race window (someone could grab it between close and bind),
-        # but in practice the OS won't immediately reassign and uvicorn
-        # binds within a few ms. Same trick used by pytest-asyncio etc.
         import socket
         import uvicorn
 
@@ -751,11 +735,7 @@ class Capability:
             log_level="warning",
         )
         server = uvicorn.Server(cfg)
-        thread = threading.Thread(
-            target=server.run,
-            name="robonix-mcp",
-            daemon=True,
-        )
+        thread = threading.Thread(target=server.run, name="robonix-mcp", daemon=True)
         thread.start()
         self._mcp_server_thread = thread
         log.info("MCP HTTP serving on 0.0.0.0:%d", self._mcp_port)
@@ -766,7 +746,7 @@ class Capability:
             cid = getattr(fn, "_robonix_contract_id", None)
             if cid is None:
                 continue
-            description = (fn.__doc__ or "").strip()
+            description = getattr(fn, "_robonix_description", "") or (fn.__doc__ or "").strip()
             input_cls = getattr(fn, "_robonix_input_cls", None)
             schema_json = json.dumps(
                 input_cls.json_schema()
@@ -774,19 +754,17 @@ class Capability:
                 else {"type": "object", "properties": {}, "required": []}
             )
             try:
-                self._atlas.declare_mcp(
-                    self.id,
-                    cid,
-                    endpoint,
+                self.declare_capability(
+                    contract_id=cid,
+                    endpoint=endpoint,
+                    transport=Transport.MCP,
+                    params=McpParams(input_schema_json=schema_json),
                     description=description,
-                    input_schema_json=schema_json,
                 )
             except Exception as e:  # noqa: BLE001
                 log.warning("declare mcp %s failed: %s", cid, e)
 
     def _user_shutdown_then_teardown(self) -> None:
-        """Called by Driver(CMD_SHUTDOWN). Run user's @cap.on_shutdown
-        first (last chance for state to flush), then framework teardown."""
         if self._on_shutdown is not None:
             try:
                 self._on_shutdown()
@@ -795,9 +773,6 @@ class Capability:
         self._teardown()
 
     def _teardown(self) -> None:
-        # Close any consumer→provider channels we opened so atlas drops
-        # the bookkeeping (provider eviction also handles this, but
-        # explicit close is cheaper + immediate).
         for ch in self._channels:
             ch.close()
         self._channels.clear()
@@ -810,28 +785,75 @@ class Capability:
 
     def _teardown_and_exit(self) -> None:
         self._stopping.set()
-        # Best-effort terminal state push so atlas reflects the shutdown
-        # in the brief window before heartbeat eviction would catch it.
         if self._on_shutdown is not None:
             try:
                 self._on_shutdown()
             except Exception:  # noqa: BLE001
                 log.exception("[%s] on_shutdown raised", self.id)
         try:
-            self._set_state("terminated", "process signal teardown")
+            self._set_state(LifecycleState.TERMINATED, "process signal teardown")
         except Exception:  # noqa: BLE001
             pass
         self._teardown()
-        # Let signal.pause loop exit naturally; don't sys.exit here so atexit
-        # hooks can run.
 
 
-# ── helpers ──────────────────────────────────────────────────────────────
-def _full_id(contract_id: str) -> str:
-    """Pass-through; contract_id is whatever string atlas/the contract TOML
-    says it is — `robonix/...` for built-ins, but a third-party skill could
-    name its contracts under any prefix. We don't auto-prepend or strip."""
-    return contract_id.strip()
+# ── concrete CapabilityProvider classes ─────────────────────────────────────
+
+
+class Primitive(_ProviderBase):
+    """A hardware / data-source driver CapabilityProvider.
+    e.g. tiago_camera, mid360_lidar, ranger CAN chassis.
+
+        primitive_cam = Primitive(
+            id="webots_tiago_camera_front",
+            namespace="robonix/primitive/camera",
+        )
+    """
+
+    _kind = Kind.PRIMITIVE
+
+    def _atlas_register(self) -> bool:
+        ATLAS.register_primitive(self.id, self.namespace, self._md_path or "")
+        return True
+
+
+class Service(_ProviderBase):
+    """A composed CapabilityProvider built on top of Primitives /
+    Services.  e.g. mapping, navigation, scene; also the platform-
+    internal pilot / executor / scene / memory / liaison services.
+
+        service_mapping = Service(
+            id="mapping",
+            namespace="robonix/service/mapping",
+        )
+    """
+
+    _kind = Kind.SERVICE
+
+    def _atlas_register(self) -> bool:
+        ATLAS.register_service(self.id, self.namespace, self._md_path or "")
+        return True
+
+
+class Skill(_ProviderBase):
+    """A model-backed, executor-activated CapabilityProvider.  Sits at
+    INACTIVE between calls; the executor flips it to ACTIVE on demand
+    (and MAY flip back when idle, configurable).
+
+        skill_explore = Skill(
+            id="explore",
+            namespace="robonix/skill/explore",
+        )
+    """
+
+    _kind = Kind.SKILL
+
+    def _atlas_register(self) -> bool:
+        ATLAS.register_skill(self.id, self.namespace, self._md_path or "")
+        return True
+
+
+# ── helpers ─────────────────────────────────────────────────────────────────
 
 
 def _caller_file(skip: int = 0) -> Path | None:
@@ -846,12 +868,11 @@ def _caller_file(skip: int = 0) -> Path | None:
             return None
         frame = frame.f_back
     while frame is not None:
-        f = frame.f_globals.get("__file__")
-        if f:
-            p = Path(f).resolve()
-            try:
-                p.relative_to(here)
-            except ValueError:
-                return p
+        f = frame.f_code.co_filename
+        if not f.startswith(str(here)):
+            return Path(f).resolve()
         frame = frame.f_back
     return None
+
+
+__all__ = ["Primitive", "Service", "Skill"]

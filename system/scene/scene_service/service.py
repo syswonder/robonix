@@ -29,10 +29,10 @@ import uvicorn  # used for the web debug UI; cap owns the MCP HTTP server
 faulthandler.enable(all_threads=True)
 
 
-from robonix_api import Capability, atlas  # noqa: E402
+from robonix_api import ATLAS, Service  # noqa: E402
 from robonix_api.atlas_types import Ros2Params, Transport  # noqa: E402
 
-cap = Capability(id="scene", namespace="robonix/system/scene")
+cap = Service(id="scene", namespace="robonix/system/scene")
 
 from . import mcp_tools
 from . import web as web_ui
@@ -194,16 +194,16 @@ def _resolve_one_contract(
 ) -> Optional[TopicSpec]:
     """atlas.find(contract) → cap.connect → endpoint. Returns None when no
     cap currently advertises the contract over this transport."""
-    recs = atlas.find(contract_id, transport=transport)
-    if not recs:
+    caps = ATLAS.find_capability(contract_id=contract_id, transport=transport)
+    if not caps:
         return None
-    rec = recs[0]
+    cap_view = caps[0]
     try:
-        ch = cap.connect(provider=rec, contract_id=contract_id, transport=transport)
+        ch = cap.connect_capability(cap_view, contract_id, transport)
     except Exception as e:  # noqa: BLE001
         log.warning(
             "[scene] cap.connect(%s/%s) failed: %s",
-            rec.capability_id, contract_id, e,
+            cap_view.owner_id, contract_id, e,
         )
         return None
     endpoint = (ch.endpoint or "").strip()
@@ -215,13 +215,13 @@ def _resolve_one_contract(
         qos_profile = ch.params.qos_profile or ""
     # Only log on first resolution / change. The auto-discover loop
     # re-resolves every ~5s; spamming the same line every cycle is noise.
-    sig = (endpoint, msg_type, qos_profile or "default", rec.capability_id)
+    sig = (endpoint, msg_type, qos_profile or "default", cap_view.owner_id)
     prev = _LAST_RESOLVED.get((transport, contract_id))
     if prev != sig:
         log.info(
             "[scene] %r ← atlas: topic=%s msg=%s qos=%s contract=%s cap=%s",
             kind, endpoint, msg_type, qos_profile or "default",
-            contract_id, rec.capability_id,
+            contract_id, cap_view.owner_id,
         )
         _LAST_RESOLVED[(transport, contract_id)] = sig
     return TopicSpec(
@@ -742,9 +742,8 @@ async def _run() -> None:
 
     # ROS2 ingest hub + downstream consumers (self-pose, perception).
     # _start_ros_ingest still wants a raw atlas stub for QueryCapabilities;
-    # cap exposes its underlying atlas client via _atlas.stub for these
-    # cases that pre-date the Capability API.
-    stub = cap._atlas.stub
+    # reach into ATLAS's wire client directly for that.
+    stub = ATLAS._wire_stub
     hub, perception, ingest_bg = await _start_ros_ingest(
         atlas_stub=stub,
         registry=registry,

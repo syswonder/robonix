@@ -25,9 +25,9 @@ import math
 import os
 import time
 
-from robonix_api import Capability, Ok, Err, Deferred
+from robonix_api import Primitive, Ok, Err, Deferred
 
-cap = Capability(id="tiago_chassis", namespace="robonix/primitive/chassis")
+cap = Primitive(id="tiago_chassis", namespace="robonix/primitive/chassis")
 
 cmd_vel_pub = None  # rclpy publisher to /cmd_vel; created in init()
 
