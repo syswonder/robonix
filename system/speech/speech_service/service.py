@@ -875,7 +875,7 @@ class SpeechDialogServicer(contracts_grpc.RobonixSystemSpeechDialogServicer):
 
 from robonix_api import Service, Ok, Err, Deferred  # noqa: E402
 
-cap = Service(id="speech", namespace="robonix/system/speech")
+speech = Service(id="speech", namespace="robonix/system/speech")
 
 
 def _try_backend(name: str, factory):
@@ -901,11 +901,11 @@ _asr_stream_servicer = SpeechAsrStreamServicer(None)
 _tts_servicer        = SpeechTtsServicer(None)
 _tts_stream_servicer = SpeechTtsStreamServicer(None)
 _dialog_servicer     = SpeechDialogServicer(_dialog_manager)
-cap.attach_grpc_servicer("robonix/system/speech/asr",        _asr_servicer)
-cap.attach_grpc_servicer("robonix/system/speech/asr_stream", _asr_stream_servicer)
-cap.attach_grpc_servicer("robonix/system/speech/tts",        _tts_servicer)
-cap.attach_grpc_servicer("robonix/system/speech/tts_stream", _tts_stream_servicer)
-cap.attach_grpc_servicer("robonix/system/speech/dialog",     _dialog_servicer)
+speech.attach_grpc_servicer("robonix/system/speech/asr",        _asr_servicer)
+speech.attach_grpc_servicer("robonix/system/speech/asr_stream", _asr_stream_servicer)
+speech.attach_grpc_servicer("robonix/system/speech/tts",        _tts_servicer)
+speech.attach_grpc_servicer("robonix/system/speech/tts_stream", _tts_stream_servicer)
+speech.attach_grpc_servicer("robonix/system/speech/dialog",     _dialog_servicer)
 
 
 # Map package_manifest cfg keys to the env vars that backend
@@ -931,7 +931,7 @@ def _apply_cfg_to_env(cfg: dict) -> None:
         os.environ[env] = v if isinstance(v, str) else json.dumps(v)
 
 
-@cap.on_init
+@speech.on_init
 def init(cfg):
     log.info("Driver(INIT) cfg keys: %s", sorted(cfg.keys()))
     _apply_cfg_to_env(cfg)
@@ -973,7 +973,7 @@ def init(cfg):
 
 
 def main() -> int:
-    cap.run()
+    speech.run()
     return 0
 
 

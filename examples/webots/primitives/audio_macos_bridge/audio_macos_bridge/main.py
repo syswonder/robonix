@@ -30,7 +30,7 @@ from queue import Queue
 
 from robonix_api import Primitive, Ok, Err, Deferred
 
-cap = Primitive(
+audio_macos_bridge = Primitive(
     id="audio_macos_bridge",
     namespace="robonix/primitive/audio",
 )
@@ -58,7 +58,7 @@ def _ws_url(path: str) -> str:
 
 
 # ── streaming handlers ─────────────────────────────────────────────────────
-@cap.grpc("robonix/primitive/audio/mic")
+@audio_macos_bridge.grpc("robonix/primitive/audio/mic")
 def mic_stream(request, context):
     """Server-streaming mic capture — proxies frames coming off the
     macOS daemon's `/mic` WebSocket as AudioChunk messages.
@@ -122,7 +122,7 @@ def mic_stream(request, context):
         log.info("mic stream client disconnected")
 
 
-@cap.grpc("robonix/primitive/audio/speaker")
+@audio_macos_bridge.grpc("robonix/primitive/audio/speaker")
 def speaker_stream(request_iterator, context):
     """Client-streaming playback — pipes incoming AudioChunk.data to
     the macOS daemon's `/speaker` WebSocket. Same threading dance as
@@ -191,7 +191,7 @@ def _ws_request(path: str, body: object | None = None, timeout_s: float = 3.0):
     return asyncio.run(go())
 
 
-@cap.grpc("robonix/primitive/audio/list_devices")
+@audio_macos_bridge.grpc("robonix/primitive/audio/list_devices")
 def list_devices(request, context):
     if bridge_host is None:
         context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
@@ -240,7 +240,7 @@ def list_devices(request, context):
     )
 
 
-@cap.grpc("robonix/primitive/audio/select_device")
+@audio_macos_bridge.grpc("robonix/primitive/audio/select_device")
 def select_device(request, context):
     if bridge_host is None:
         context.abort(__import__("grpc").StatusCode.UNAVAILABLE,
@@ -272,7 +272,7 @@ def select_device(request, context):
 
 
 # ── driver-init lifecycle ──────────────────────────────────────────────────
-@cap.on_init
+@audio_macos_bridge.on_init
 def init(cfg):
     """Read host/port from cfg + env, probe the macOS daemon's `/health`
     endpoint once. Refuse to come up if it's unreachable — atlas defers
@@ -304,7 +304,7 @@ def init(cfg):
 
 
 def main() -> int:
-    cap.run()
+    audio_macos_bridge.run()
     return 0
 
 

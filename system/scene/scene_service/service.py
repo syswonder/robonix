@@ -3,7 +3,7 @@
 relation engine, FastMCP server, and atlas registration together.
 
 Capability owns atlas register / driver lifecycle / MCP HTTP / heartbeat
-(`cap.bootstrap()` + `cap.use_mcp_app(mcp_tools.mcp)`); everything below
+(`scene.bootstrap()` + `scene.use_mcp_app(mcp_tools.mcp)`); everything below
 is scene-specific: registry + relations engine, ROS2 ingest hub,
 VLM perception, web debug UI.
 """
@@ -32,7 +32,7 @@ faulthandler.enable(all_threads=True)
 from robonix_api import ATLAS, Service  # noqa: E402
 from robonix_api.atlas_types import Ros2Params, Transport  # noqa: E402
 
-cap = Service(id="scene", namespace="robonix/system/scene")
+scene = Service(id="scene", namespace="robonix/system/scene")
 
 from . import mcp_tools
 from . import web as web_ui
@@ -164,7 +164,7 @@ def _build_topic_specs(
 
 
 def _resolve_auto(_unused, pb_transport: int) -> list[TopicSpec]:
-    """Walk `_SCENE_CONTRACTS` and use `atlas.find` + `cap.connect`
+    """Walk `_SCENE_CONTRACTS` and use `ATLAS.find_capability` + `connect_capability`
     to resolve each contract. atlas hands out the endpoint via
     ConnectCapability; the cap framework also tracks the channel for
     teardown so we don't leak edges in atlas.
@@ -192,17 +192,17 @@ def _resolve_one_contract(
     contract_id: str,
     msg_type: str,
 ) -> Optional[TopicSpec]:
-    """atlas.find(contract) → cap.connect → endpoint. Returns None when no
+    """ATLAS.find_capability(contract) → connect_capability → endpoint. Returns None when no
     cap currently advertises the contract over this transport."""
     caps = ATLAS.find_capability(contract_id=contract_id, transport=transport)
     if not caps:
         return None
     cap_view = caps[0]
     try:
-        ch = cap.connect_capability(cap_view, contract_id, transport)
+        ch = scene.connect_capability(cap_view, contract_id, transport)
     except Exception as e:  # noqa: BLE001
         log.warning(
-            "[scene] cap.connect(%s/%s) failed: %s",
+            "[scene] connect_capability(%s/%s) failed: %s",
             cap_view.owner_id, contract_id, e,
         )
         return None
@@ -697,10 +697,10 @@ async def _run() -> None:
     # 50106) and atlas-routes consumers via QueryCapabilities. The 6
     # tools were already decorated with @mcp_contract on mcp_tools.mcp
     # at import time; we still need to declare each on atlas — Capability
-    # only auto-declares tools registered via @cap.mcp(), and we kept
+    # only auto-declares tools registered via @scene.mcp(), and we kept
     # the @mcp_contract pattern in mcp_tools to avoid a cyclic-import
     # rewrite. Manual declare per tool:
-    cap.use_mcp_app(mcp_tools.mcp)
+    scene.use_mcp_app(mcp_tools.mcp)
 
     # Wire state.
     registry = ObjectRegistry(grace_period_s=5.0)
@@ -715,7 +715,7 @@ async def _run() -> None:
 
     # Bring up atlas + lifecycle gRPC + MCP HTTP. Non-blocking; scene
     # keeps running its own asyncio event loop after this returns.
-    cap.bootstrap()
+    scene.bootstrap()
 
     # Declare each scene MCP tool on atlas. Each handler has
     # `_robonix_*` attrs stashed by @mcp_contract — re-use them so the
@@ -732,13 +732,13 @@ async def _run() -> None:
             continue
         in_cls = getattr(fn, "_robonix_input_cls", None)
         schema = json.dumps(in_cls.json_schema()) if in_cls else "{}"
-        cap.declare_mcp(
+        scene.declare_mcp(
             cid,
-            cap.mcp_endpoint,
+            scene.mcp_endpoint,
             description=(fn.__doc__ or "").strip(),
             input_schema_json=schema,
         )
-    log.info("scene declared 2 MCP tools at %s", cap.mcp_endpoint)
+    log.info("scene declared 2 MCP tools at %s", scene.mcp_endpoint)
 
     # ROS2 ingest hub + downstream consumers (self-pose, perception).
     # _start_ros_ingest still wants a raw atlas stub for QueryCapabilities;
@@ -804,8 +804,8 @@ async def _run() -> None:
 
     log.info(
         "scene up; cap=%s mcp=%s observations=%d",
-        cap.id,
-        cap.mcp_endpoint,
+        scene.id,
+        scene.mcp_endpoint,
         len(config.get("observations", [])),
     )
 
@@ -831,7 +831,7 @@ async def _run() -> None:
         web_server.should_exit = True
 
     # Capability owns the gRPC server, MCP HTTP, heartbeat — stop them.
-    cap._teardown()
+    scene._teardown()
 
 
 def main() -> None:

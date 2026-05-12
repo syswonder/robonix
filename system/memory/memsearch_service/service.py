@@ -21,7 +21,7 @@ from robonix_api import Service, Ok, Err, Deferred  # noqa: E402
 from std_msgs_mcp import Empty, String  # noqa: E402
 from memsearch import MemSearch  # noqa: E402
 
-cap = Service(id="memory", namespace="robonix/system/memory")
+memory = Service(id="memory", namespace="robonix/system/memory")
 
 MEMORY_DIR = os.environ.get("AGENT_MEMORY_DIR", "./agent_memory")
 MILVUS_URI = os.environ.get("AGENT_MILVUS_URI", "./agent_milvus.db")
@@ -33,7 +33,7 @@ mem = MemSearch(
 )
 
 
-@cap.mcp("robonix/system/memory/search")
+@memory.mcp("robonix/system/memory/search")
 async def search(msg: String) -> String:
     """Search the agent's long-term memory for relevant past context, decisions, or user preferences.
     Contract: robonix/system/memory/search."""
@@ -48,7 +48,7 @@ async def search(msg: String) -> String:
     return String(data=f"Relevant memories:\n{context}")
 
 
-@cap.mcp("robonix/system/memory/save")
+@memory.mcp("robonix/system/memory/save")
 async def save(msg: String) -> String:
     """Save an important fact, user preference, or decision to long-term memory.
     Contract: robonix/system/memory/save."""
@@ -63,7 +63,7 @@ async def save(msg: String) -> String:
     return String(data="Memory saved and indexed.")
 
 
-@cap.mcp("robonix/system/memory/compact")
+@memory.mcp("robonix/system/memory/compact")
 async def compact(msg: Empty) -> String:
     """Compact and summarize recent memories. Call this at the end of a session.
     Returns std_msgs/String JSON. Contract: robonix/system/memory/compact.
@@ -88,7 +88,7 @@ async def compact(msg: Empty) -> String:
         return String(data=f"Failed to compact memory: {e}")
 
 
-@cap.on_init
+@memory.on_init
 def init(cfg):
     """Boot-time index of the corpus. Empty corpus is fine — index() returns
     quickly with no docs. Don't fail Init on indexing errors; search/save
@@ -101,7 +101,7 @@ def init(cfg):
 
 
 def main() -> int:
-    cap.run()
+    memory.run()
     return 0
 
 

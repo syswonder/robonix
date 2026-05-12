@@ -17,7 +17,7 @@ import time
 
 from robonix_api import Primitive, Ok, Err, Deferred
 
-cap = Primitive(id="tiago_lidar", namespace="robonix/primitive/lidar")
+tiago_lidar = Primitive(id="tiago_lidar", namespace="robonix/primitive/lidar")
 
 # ── shared state — the latest rclpy LaserScan we've seen ────────────────────
 state_lock = threading.Lock()
@@ -66,7 +66,7 @@ def now_header(frame_id: str) -> std_msgs_mcp.Header:
     )
 
 
-@cap.mcp("robonix/primitive/lidar/snapshot")
+@tiago_lidar.mcp("robonix/primitive/lidar/snapshot")
 def snapshot(msg: Empty) -> LaserScan:
     """Get the latest planar lidar scan. Returns sensor_msgs/LaserScan;
     `ranges[i]` is the distance (m) at angle `angle_min + i*angle_increment`.
@@ -81,20 +81,20 @@ def snapshot(msg: Empty) -> LaserScan:
 
 
 # ── lifecycle ────────────────────────────────────────────────────────────────
-@cap.on_init
+@tiago_lidar.on_init
 def init(cfg):
     topic = cfg.get("scan_topic") or os.environ.get("TIAGO_SCAN_TOPIC", "/scanner_normalized")
-    cap.create_subscription(
+    tiago_lidar.create_subscription(
         "robonix/primitive/lidar/lidar",
         topic=topic, msg_type="LaserScan",
         callback=on_scan, qos="best_effort",
         declare=False,  # we declare topic_out below (we own this contract)
     )
-    if not cap.wait_for_topic(topic, "LaserScan", float(cfg.get("sentinel_timeout_s", 15.0))):
+    if not tiago_lidar.wait_for_topic(topic, "LaserScan", float(cfg.get("sentinel_timeout_s", 15.0))):
         return Err(f"no LaserScan received on {topic} within timeout")
-    cap.declare_ros2_topic("robonix/primitive/lidar/lidar", topic, qos="best_effort")
+    tiago_lidar.declare_ros2_topic("robonix/primitive/lidar/lidar", topic, qos="best_effort")
     return Ok()
 
 
 if __name__ == "__main__":
-    cap.run()
+    tiago_lidar.run()

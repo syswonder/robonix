@@ -29,7 +29,7 @@ import numpy as np
 
 from robonix_api import Primitive, Ok, Err, Deferred
 
-cap = Primitive(id="tiago_camera", namespace="robonix/primitive/camera")
+tiago_camera = Primitive(id="tiago_camera", namespace="robonix/primitive/camera")
 
 # ── shared state ─────────────────────────────────────────────────────────────
 state_lock = threading.Lock()
@@ -133,7 +133,7 @@ def image_error(message: str) -> Image:
     )
 
 
-@cap.mcp("robonix/primitive/camera/snapshot")
+@tiago_camera.mcp("robonix/primitive/camera/snapshot")
 def snapshot(msg: Empty) -> Image:
     """PRIMARY perception tool. Use freely — between every chassis/cmd
     burst — to see what's in front of the robot and decide what to do
@@ -150,7 +150,7 @@ def snapshot(msg: Empty) -> Image:
     )
 
 
-@cap.mcp("robonix/primitive/camera/depth_snapshot")
+@tiago_camera.mcp("robonix/primitive/camera/depth_snapshot")
 def depth_snapshot(msg: Empty) -> Image:
     """Get the current depth head-camera frame as a JPEG-encoded
     sensor_msgs/Image (depth normalized to grayscale; binary `data` is
@@ -199,7 +199,7 @@ def publish_extrinsics_when_ready(base_frame: str, cam_frame: str, topic: str) -
 
 
 # ── lifecycle ────────────────────────────────────────────────────────────────
-@cap.on_init
+@tiago_camera.on_init
 def init(cfg):
     global extrinsics_pub
     rgb_topic = cfg.get("rgb_topic") or os.environ.get(
@@ -214,16 +214,16 @@ def init(cfg):
     sentinel_timeout = float(cfg.get("sentinel_timeout_s", 60.0))
 
     # subscribe RGB + depth (we own both contracts; declare manually below)
-    cap.create_subscription("robonix/primitive/camera/rgb",
+    tiago_camera.create_subscription("robonix/primitive/camera/rgb",
                             topic=rgb_topic, msg_type="Image",
                             callback=on_rgb, qos="best_effort", declare=False)
-    cap.create_subscription("robonix/primitive/camera/depth",
+    tiago_camera.create_subscription("robonix/primitive/camera/depth",
                             topic=depth_topic, msg_type="Image",
                             callback=on_depth, qos="best_effort", declare=False)
 
     # latched extrinsics publisher
     from geometry_msgs.msg import TransformStamped  # type: ignore
-    extrinsics_pub = cap.create_publisher(
+    extrinsics_pub = tiago_camera.create_publisher(
         "robonix/primitive/camera/extrinsics",
         topic=extrinsics_topic, msg_type=TransformStamped, qos="latched",
     )
@@ -234,14 +234,14 @@ def init(cfg):
     ).start()
 
     # gate INIT on first RGB arriving — same generosity as before.
-    if not cap.wait_for_topic(rgb_topic, "Image", sentinel_timeout):
+    if not tiago_camera.wait_for_topic(rgb_topic, "Image", sentinel_timeout):
         return Err(f"no RGB on {rgb_topic} within {sentinel_timeout:.1f}s")
 
     # data interfaces are ready — declare them on atlas
-    cap.declare_ros2_topic("robonix/primitive/camera/rgb",   rgb_topic,   qos="best_effort")
-    cap.declare_ros2_topic("robonix/primitive/camera/depth", depth_topic, qos="best_effort")
+    tiago_camera.declare_ros2_topic("robonix/primitive/camera/rgb",   rgb_topic,   qos="best_effort")
+    tiago_camera.declare_ros2_topic("robonix/primitive/camera/depth", depth_topic, qos="best_effort")
     return Ok()
 
 
 if __name__ == "__main__":
-    cap.run()
+    tiago_camera.run()
