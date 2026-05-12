@@ -17,11 +17,11 @@ os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
 os.environ.setdefault("GLOG_minloglevel", "2")
 logging.getLogger("absl").setLevel(logging.ERROR)
 
-from robonix_api import Capability, Ok, Err, Deferred  # noqa: E402
+from robonix_api import Service, Ok, Err, Deferred  # noqa: E402
 from std_msgs_mcp import Empty, String  # noqa: E402
 from memsearch import MemSearch  # noqa: E402
 
-cap = Capability(id="memory", namespace="robonix/system/memory")
+cap = Service(id="memory", namespace="robonix/system/memory")
 
 MEMORY_DIR = os.environ.get("AGENT_MEMORY_DIR", "./agent_memory")
 MILVUS_URI = os.environ.get("AGENT_MILVUS_URI", "./agent_milvus.db")

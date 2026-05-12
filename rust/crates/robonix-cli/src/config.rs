@@ -134,7 +134,11 @@ impl Config {
             // TOMLs (e.g. `[io.srv].srv = "demo/srv/Hello"`) have a
             // single, unambiguous base.
             SourcePathKey::InterfacesLib => root.join("capabilities").join("lib"),
-            SourcePathKey::RuntimeProto => root.join("rust").join("proto"),
+            SourcePathKey::RuntimeProto => root
+                .join("rust")
+                .join("crates")
+                .join("robonix-atlas")
+                .join("proto"),
             SourcePathKey::RobonixApi => root.join("pylib").join("robonix-api"),
         };
         if !abs.exists() {
@@ -159,7 +163,7 @@ pub enum SourcePathKey {
     Capabilities,
     /// `<root>/rust/crates/robonix-interfaces/lib` (ROS IDL source).
     InterfacesLib,
-    /// `<root>/rust/proto` (runtime / atlas protos).
+    /// `<root>/rust/crates/robonix-atlas/proto` (atlas proto).
     RuntimeProto,
     /// `<root>/pylib/robonix-api` — shared Python helper lib.
     /// Carries `mcp_contract` (codegen IO class → FastMCP tool wrapper).

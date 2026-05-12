@@ -27,9 +27,9 @@ from io import BytesIO
 
 import numpy as np
 
-from robonix_api import Capability, Ok, Err, Deferred
+from robonix_api import Primitive, Ok, Err, Deferred
 
-cap = Capability(id="tiago_camera", namespace="robonix/primitive/camera")
+cap = Primitive(id="tiago_camera", namespace="robonix/primitive/camera")
 
 # ── shared state ─────────────────────────────────────────────────────────────
 state_lock = threading.Lock()

@@ -15,9 +15,9 @@ import os
 import threading
 import time
 
-from robonix_api import Capability, Ok, Err, Deferred
+from robonix_api import Primitive, Ok, Err, Deferred
 
-cap = Capability(id="tiago_lidar", namespace="robonix/primitive/lidar")
+cap = Primitive(id="tiago_lidar", namespace="robonix/primitive/lidar")
 
 # ── shared state — the latest rclpy LaserScan we've seen ────────────────────
 state_lock = threading.Lock()

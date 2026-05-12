@@ -28,9 +28,9 @@ import time
 from queue import Empty as QueueEmpty
 from queue import Queue
 
-from robonix_api import Capability, Ok, Err, Deferred
+from robonix_api import Primitive, Ok, Err, Deferred
 
-cap = Capability(
+cap = Primitive(
     id="audio_macos_bridge",
     namespace="robonix/primitive/audio",
 )

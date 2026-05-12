@@ -873,9 +873,9 @@ class SpeechDialogServicer(contracts_grpc.RobonixSystemSpeechDialogServicer):
 # other nodes can discover it. If Atlas is unavailable or the runtime protos
 # are not installed, the service runs in standalone mode.
 
-from robonix_api import Capability, Ok, Err, Deferred  # noqa: E402
+from robonix_api import Service, Ok, Err, Deferred  # noqa: E402
 
-cap = Capability(id="speech", namespace="robonix/system/speech")
+cap = Service(id="speech", namespace="robonix/system/speech")
 
 
 def _try_backend(name: str, factory):

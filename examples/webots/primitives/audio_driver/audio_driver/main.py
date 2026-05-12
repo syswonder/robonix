@@ -28,9 +28,9 @@ from __future__ import annotations
 import logging
 import os
 
-from robonix_api import Capability, Ok, Err, Deferred
+from robonix_api import Primitive, Ok, Err, Deferred
 
-cap = Capability(id="audio_driver", namespace="robonix/primitive/audio")
+cap = Primitive(id="audio_driver", namespace="robonix/primitive/audio")
 log = logging.getLogger("audio-driver")
 
 import audio_pb2          # type: ignore  # noqa: E402  (codegen)
