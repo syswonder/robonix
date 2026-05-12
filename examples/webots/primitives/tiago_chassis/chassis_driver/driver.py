@@ -27,7 +27,7 @@ import time
 
 from robonix_api import Primitive, Ok, Err, Deferred
 
-cap = Primitive(id="tiago_chassis", namespace="robonix/primitive/chassis")
+tiago_chassis = Primitive(id="tiago_chassis", namespace="robonix/primitive/chassis")
 
 cmd_vel_pub = None  # rclpy publisher to /cmd_vel; created in init()
 
@@ -37,7 +37,7 @@ import chassis_pb2  # noqa: E402  (proto codegen, on PYTHONPATH via rbnx-build/c
 import std_msgs_pb2  # noqa: E402
 
 
-@cap.grpc("robonix/primitive/chassis/move")
+@tiago_chassis.grpc("robonix/primitive/chassis/move")
 def move(req: "chassis_pb2.ExecuteMoveCommand_Request") -> "chassis_pb2.ExecuteMoveCommand_Response":
     """Velocity-mode chassis command. Service callers (simple_nav, nav2_wrapper,
     teleop) reach this via gRPC. NOT exposed as MCP — the LLM should invoke
@@ -102,22 +102,22 @@ def move(req: "chassis_pb2.ExecuteMoveCommand_Request") -> "chassis_pb2.ExecuteM
 
 
 # ── lifecycle ────────────────────────────────────────────────────────────────
-@cap.on_init
+@tiago_chassis.on_init
 def init(cfg):
     global cmd_vel_pub
     odom_topic = cfg.get("odom_topic") or os.environ.get("TIAGO_ODOM_TOPIC", "/odom")
     twist_in_topic = cfg.get("twist_in_topic") or os.environ.get("TIAGO_CMD_VEL_TOPIC", "/cmd_vel")
 
     from geometry_msgs.msg import Twist  # type: ignore
-    cmd_vel_pub = cap.create_publisher(
+    cmd_vel_pub = tiago_chassis.create_publisher(
         "robonix/primitive/chassis/twist_in",
         topic=twist_in_topic, msg_type=Twist, qos="reliable",
         declare=False,
     )
-    cap.declare_ros2_topic("robonix/primitive/chassis/twist_in", twist_in_topic, qos="reliable")
-    cap.declare_ros2_topic("robonix/primitive/chassis/odom",     odom_topic,     qos="reliable")
+    tiago_chassis.declare_ros2_topic("robonix/primitive/chassis/twist_in", twist_in_topic, qos="reliable")
+    tiago_chassis.declare_ros2_topic("robonix/primitive/chassis/odom",     odom_topic,     qos="reliable")
     return Ok()
 
 
 if __name__ == "__main__":
-    cap.run()
+    tiago_chassis.run()

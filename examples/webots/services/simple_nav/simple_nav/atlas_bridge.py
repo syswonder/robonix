@@ -7,7 +7,7 @@ Resolves chassis odom + lidar scan + chassis cmd_vel + map occupancy_grid
 NavNode, and exposes navigate / status / cancel as MCP tools — typed
 against the codegen-generated Request/Response dataclasses for the
 service/navigation/srv/* contracts (Navigate, GetNavigationStatus,
-CancelNavigation). No hand-written JSON schemas: cap.mcp introspects
+CancelNavigation). No hand-written JSON schemas: service.mcp introspects
 each request class's `.json_schema()` automatically.
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ from .nav_node import Goal, NavNode
 
 log = logging.getLogger("simple_nav")
 
-cap = Service(id="simple_nav", namespace="robonix/service/navigation")
+simple_nav = Service(id="simple_nav", namespace="robonix/service/navigation")
 
 nav: NavNode | None = None
 # We pack our internal goal_id + tolerance_m through the contract by
@@ -65,7 +65,7 @@ def resolve_inputs(deadline_s: float = 30.0) -> dict[str, str]:
             if not caps:
                 continue
             try:
-                ch = cap.connect_capability(caps[0], contract, "ros2")
+                ch = simple_nav.connect_capability(caps[0], contract, "ros2")
             except Exception:  # noqa: BLE001
                 continue
             ep = ch.endpoint
@@ -91,7 +91,7 @@ def quat_to_yaw(z: float, w: float) -> float:
     return 2.0 * math.atan2(z, w)
 
 
-@cap.mcp("robonix/service/navigation/navigate")
+@simple_nav.mcp("robonix/service/navigation/navigate")
 def navigate(req: Navigate_Request) -> Navigate_Response:
     """Drive the robot to the goal pose in the map frame.
 
@@ -128,7 +128,7 @@ def navigate(req: Navigate_Request) -> Navigate_Response:
     return Navigate_Response(accepted=True, goal_id=goal_id, status_message=msg)
 
 
-@cap.mcp("robonix/service/navigation/status")
+@simple_nav.mcp("robonix/service/navigation/status")
 def status(req: GetNavigationStatus_Request) -> GetNavigationStatus_Response:
     """Get current status of a navigation goal. Empty `goal_id` =
     most recent. Returns known/state/terminal — `state` is a
@@ -149,7 +149,7 @@ def status(req: GetNavigationStatus_Request) -> GetNavigationStatus_Response:
     )
 
 
-@cap.mcp("robonix/service/navigation/cancel")
+@simple_nav.mcp("robonix/service/navigation/cancel")
 def cancel(req: CancelNavigation_Request) -> CancelNavigation_Response:
     """Cancel an active navigation goal. Empty `goal_id` cancels the
     currently active goal. Idempotent."""
@@ -162,7 +162,7 @@ def cancel(req: CancelNavigation_Request) -> CancelNavigation_Response:
 
 
 # ── lifecycle ────────────────────────────────────────────────────────────────
-@cap.on_init
+@simple_nav.on_init
 def init(cfg):
     global nav
     inputs = resolve_inputs()
@@ -192,7 +192,7 @@ def init(cfg):
 
 
 def main() -> int:
-    cap.run()
+    simple_nav.run()
     if nav is not None:
         nav.stop()
     return 0

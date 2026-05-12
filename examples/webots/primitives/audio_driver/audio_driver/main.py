@@ -30,7 +30,7 @@ import os
 
 from robonix_api import Primitive, Ok, Err, Deferred
 
-cap = Primitive(id="audio_driver", namespace="robonix/primitive/audio")
+audio_driver = Primitive(id="audio_driver", namespace="robonix/primitive/audio")
 log = logging.getLogger("audio-driver")
 
 import audio_pb2          # type: ignore  # noqa: E402  (codegen)
@@ -50,7 +50,7 @@ current_output_id: str = ""
 
 
 # ── streaming handlers ─────────────────────────────────────────────────────
-@cap.grpc("robonix/primitive/audio/mic")
+@audio_driver.grpc("robonix/primitive/audio/mic")
 def mic_stream(request, context):
     """Server-streaming mic capture. Drives one arecord subprocess per
     open client; ALSA only allows one capture handle so concurrent clients
@@ -78,7 +78,7 @@ def mic_stream(request, context):
         log.info("mic stream client disconnected")
 
 
-@cap.grpc("robonix/primitive/audio/speaker")
+@audio_driver.grpc("robonix/primitive/audio/speaker")
 def speaker_stream(request_iterator, context):
     """Client-streaming playback. Pipes received PCM chunks into aplay;
     SpeakerDriver lazy-starts the subprocess and auto-restarts after
@@ -131,7 +131,7 @@ def _scan_audio_devices_proto():
     return devs
 
 
-@cap.grpc("robonix/primitive/audio/list_devices")
+@audio_driver.grpc("robonix/primitive/audio/list_devices")
 def list_devices(request, context):
     return audio_pb2.ListAudioDevices_Response(
         devices=_scan_audio_devices_proto(),
@@ -140,7 +140,7 @@ def list_devices(request, context):
     )
 
 
-@cap.grpc("robonix/primitive/audio/select_device")
+@audio_driver.grpc("robonix/primitive/audio/select_device")
 def select_device(request, context):
     global mic_driver, speaker_driver, current_input_id, current_output_id
     kind = (request.kind or "").lower()
@@ -191,7 +191,7 @@ def select_device(request, context):
 
 
 # ── driver-init lifecycle ──────────────────────────────────────────────────
-@cap.on_init
+@audio_driver.on_init
 def init(cfg):
     """ALSA scan + device pickup. Honours AUDIO_{MIC,SPEAKER}_DEVICE env
     overrides; falls back to the auto-detector in alsa_utils. Refuses to
@@ -255,7 +255,7 @@ def init(cfg):
 
 
 def main() -> int:
-    cap.run()
+    audio_driver.run()
     return 0
 
 
