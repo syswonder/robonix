@@ -49,7 +49,7 @@ struct IdlRef<'a> {
     path: &'a str,
 }
 
-/// `(ROS package, srv interface name)` pairs from every contract's
+/// `(ROS package, srv name)` pairs from every contract's
 /// `[contract].idl` when it points at a `.srv`. Used by proto generation:
 /// only these `.srv` files get `*_Request` / `*_Response` messages.
 pub fn collect_referenced_srvs(contracts_dir: &Path) -> Result<BTreeSet<(String, String)>> {

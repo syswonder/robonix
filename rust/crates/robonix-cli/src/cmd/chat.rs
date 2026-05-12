@@ -217,7 +217,7 @@ async fn try_discover_once(atlas_endpoint: &str, contract_id: &str) -> Result<St
         };
         return Ok(localhost_to_ipv4_loopback(&uri));
     }
-    anyhow::bail!("no {contract_id} interface found in Atlas registry")
+    anyhow::bail!("no {contract_id} capability found in Atlas registry")
 }
 
 // ── Audio-device first-run picker ───────────────────────────────────────────
@@ -445,7 +445,7 @@ async fn try_pick(
     Ok(Some((provider_id, device_id)))
 }
 
-/// Connect to `provider_id`'s list_devices interface, ask for the device
+/// Connect to `provider_id`'s list_devices capability, ask for the device
 /// list, run a picker on the entries that match `kind` (input/output)
 /// + duplex. Returns "" when the impl doesn't expose the contract.
 async fn pick_device_for_cap(

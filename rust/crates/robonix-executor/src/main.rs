@@ -4,7 +4,7 @@
 // robonix-executor — capability-call dispatch runtime.
 // On startup executor:
 //   1. Connects to atlas, registers as `com.robonix.system.executor`.
-//   2. Declares its gRPC Execute interface (Plan → CapabilityCallEvent stream).
+//   2. Declares its gRPC Execute capability (Plan → CapabilityCallEvent stream).
 //   3. Declares 5 built-in capabilities under `robonix/system/executor/builtin/<op>`
 //      so pilot's atlas-driven discovery surfaces them to the LLM as plain
 //      capabilities. Calls hitting these contracts short-circuit to in-process
@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
         )
         .await?;
 
-    // Built-in capabilities: declared as MCP-transport interfaces so pilot's
+    // Built-in capabilities: declared as MCP-transport capabilities so pilot's
     // catalog discovery sees them like any user MCP provider. The endpoint is a
     // sentinel — dispatch never dials it; calls hitting these contracts hit
     // the provider_id == self short-circuit in `dispatch::dispatch`.
@@ -109,7 +109,7 @@ async fn main() -> Result<()> {
         .set_lifecycle_state(&cfg.id, atlas_pb::LifecycleState::StateActive, "")
         .await
     {
-        log::warn!("SetCapabilityState(ACTIVE) failed: {e:#}");
+        log::warn!("SetLifecycleState(ACTIVE) failed: {e:#}");
     }
 
     // Atlas evicts providers after ~60s without a heartbeat. Send one every

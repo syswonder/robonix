@@ -355,10 +355,10 @@ class _Atlas:
                 f"find_unique_capability(contract_id={contract_id!r}): no matches"
             )
         if len(caps) > 1:
-            owners = ", ".join(c.provider_id for c in caps)
+            providers = ", ".join(c.provider_id for c in caps)
             raise ValueError(
                 f"find_unique_capability(contract_id={contract_id!r}): "
-                f"{len(caps)} matches (owners: {owners}) — pass provider_id to disambiguate"
+                f"{len(caps)} matches (providers: {providers}) — pass provider_id to disambiguate"
             )
         return caps[0]
 

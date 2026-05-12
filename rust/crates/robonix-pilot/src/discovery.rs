@@ -67,10 +67,10 @@ pub async fn cap_md_index(atlas: &mut AtlasClient) -> Result<Vec<CapDoc>> {
     Ok(out)
 }
 
-/// Query atlas for every MCP-transport interface. Returns one
+/// Query atlas for every MCP-transport capability. Returns one
 /// `(provider_id, Capability)` pair per LLM-callable contract; callers
 /// pull description + input_schema_json out of `params.kind` themselves.
-/// Interfaces with missing or non-MCP params are dropped with a warning.
+/// Capabilities with missing or non-MCP params are dropped with a warning.
 pub async fn discover(atlas: &mut AtlasClient) -> Result<Vec<(String, atlas_pb::Capability)>> {
     let providers = atlas
         .query_capabilities("", "", atlas_pb::Transport::Mcp)

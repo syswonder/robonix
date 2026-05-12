@@ -516,7 +516,6 @@ class _ProviderBase:
                 "MCP app already set; use_mcp_app conflicts with @provides_mcp"
             )
         self._mcp_app = app
-        self._user_owned_mcp = True
 
     @property
     def mcp_endpoint(self) -> str:

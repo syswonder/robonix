@@ -715,15 +715,15 @@ async fn drive_cmd_init_after_register(
                 continue;
             }
         };
-        let match_rec = providers.iter().find(|r| !before.contains(&r.id));
-        let Some(provider) = match_rec else {
+        let new_provider = providers.iter().find(|r| !before.contains(&r.id));
+        let Some(provider) = new_provider else {
             tokio::time::sleep(POLL_INTERVAL).await;
             continue;
         };
-        let driver_iface = provider.capabilities.iter().find(|i| {
-            i.transport == atlas_pb::Transport::Grpc as i32 && i.contract_id.ends_with("/driver")
+        let driver_cap = provider.capabilities.iter().find(|c| {
+            c.transport == atlas_pb::Transport::Grpc as i32 && c.contract_id.ends_with("/driver")
         });
-        let Some(driver) = driver_iface else {
+        let Some(driver) = driver_cap else {
             tokio::time::sleep(POLL_INTERVAL).await;
             continue;
         };

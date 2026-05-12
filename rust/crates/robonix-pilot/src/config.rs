@@ -19,7 +19,7 @@ use clap::Parser;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_PILOT_CAPABILITY_ID: &str = "pilot";
+pub const DEFAULT_PILOT_PROVIDER_ID: &str = "pilot";
 pub const PILOT_NAMESPACE: &str = "robonix/system/pilot";
 pub const DEFAULT_ATLAS_ENDPOINT: &str = "127.0.0.1:50051";
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:50071";
@@ -59,7 +59,7 @@ pub struct Args {
     pub listen: Option<String>,
 
     /// Override pilot's id (singleton, rarely needed).
-    #[arg(long, env = "ROBONIX_PILOT_CAPABILITY_ID")]
+    #[arg(long, env = "ROBONIX_PILOT_PROVIDER_ID")]
     pub id: Option<String>,
 
     /// LLM API base URL (e.g. "https://api.openai.com/v1").
@@ -135,7 +135,7 @@ impl PilotConfig {
         let id = args
             .id
             .or(file_cfg.id)
-            .unwrap_or_else(|| DEFAULT_PILOT_CAPABILITY_ID.to_string());
+            .unwrap_or_else(|| DEFAULT_PILOT_PROVIDER_ID.to_string());
         let api_format = args
             .vlm_format
             .or(file_vlm.api_format)

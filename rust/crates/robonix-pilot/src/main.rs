@@ -93,7 +93,7 @@ async fn main() -> Result<()> {
         .set_lifecycle_state(&cfg.id, atlas_pb::LifecycleState::StateActive, "")
         .await
     {
-        log::warn!("SetCapabilityState(ACTIVE) failed: {e:#}");
+        log::warn!("SetLifecycleState(ACTIVE) failed: {e:#}");
     }
 
     let vlm = vlm::VlmClient::new(&cfg.vlm);

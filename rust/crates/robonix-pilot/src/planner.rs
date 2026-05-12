@@ -135,8 +135,8 @@ pub async fn run_turn(
     // rename it freely. contract_id is the stable identity.
     let search_memory_target = initial_caps
         .iter()
-        .find(|(_, provider)| provider.contract_id == "robonix/system/memory/search")
-        .map(|(provider_id, provider)| (provider_id.clone(), provider.contract_id.clone()));
+        .find(|(_, cap)| cap.contract_id == "robonix/system/memory/search")
+        .map(|(provider_id, cap)| (provider_id.clone(), cap.contract_id.clone()));
 
     // 1b. Pre-fetch long-term memory
     // Silently dispatches search_memory before the first VLM call so that
@@ -219,16 +219,16 @@ pub async fn run_turn(
 
         let tool_defs: Vec<ToolDef> = cap_list
             .iter()
-            .filter_map(|(_, provider)| {
-                let mcp = match provider.params.as_ref()?.kind.as_ref()? {
+            .filter_map(|(_, cap)| {
+                let mcp = match cap.params.as_ref()?.kind.as_ref()? {
                     atlas_pb::transport_params::Kind::Mcp(m) => m,
                     _ => return None,
                 };
                 let schema: serde_json::Value =
                     serde_json::from_str(&mcp.input_schema_json).unwrap_or_default();
                 Some(ToolDef::new(
-                    &llm_name(&provider.contract_id),
-                    &provider.description,
+                    &llm_name(&cap.contract_id),
+                    &cap.description,
                     schema,
                 ))
             })
@@ -237,10 +237,10 @@ pub async fn run_turn(
         // LLM-tool-name → (provider_id, contract_id) so we can build CapabilityCall
         let target_map: HashMap<String, (String, String)> = cap_list
             .iter()
-            .map(|(provider_id, provider)| {
+            .map(|(provider_id, cap)| {
                 (
-                    llm_name(&provider.contract_id),
-                    (provider_id.clone(), provider.contract_id.clone()),
+                    llm_name(&cap.contract_id),
+                    (provider_id.clone(), cap.contract_id.clone()),
                 )
             })
             .collect();

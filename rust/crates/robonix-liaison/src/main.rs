@@ -47,7 +47,7 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-const LIAISON_CAPABILITY_ID: &str = "liaison";
+const LIAISON_PROVIDER_ID: &str = "liaison";
 const LIAISON_NAMESPACE: &str = "robonix/system/liaison";
 const LIAISON_SUBMIT_CONTRACT: &str = "robonix/system/liaison/submit";
 const LIAISON_VOICE_CONTRACT: &str = "robonix/system/liaison/voice";
@@ -136,7 +136,7 @@ async fn resolve_pilot_endpoint(atlas: &Arc<Mutex<AtlasClient>>) -> Option<Strin
     })?;
     let (_channel_id, endpoint, _params) = atlas
         .connect_capability(
-            LIAISON_CAPABILITY_ID,
+            LIAISON_PROVIDER_ID,
             &provider.id,
             "robonix/system/pilot",
             transport,
@@ -446,12 +446,12 @@ async fn main() -> Result<()> {
         .context("connect to atlas")?;
 
     atlas
-        .register_service(LIAISON_CAPABILITY_ID, LIAISON_NAMESPACE, "")
+        .register_service(LIAISON_PROVIDER_ID, LIAISON_NAMESPACE, "")
         .await
         .context("register liaison capability")?;
     atlas
         .declare_capability(
-            LIAISON_CAPABILITY_ID,
+            LIAISON_PROVIDER_ID,
             LIAISON_SUBMIT_CONTRACT,
             atlas_pb::Transport::Grpc,
             &advertised,
@@ -465,7 +465,7 @@ async fn main() -> Result<()> {
         .context("declare liaison submit gRPC capability")?;
     atlas
         .declare_capability(
-            LIAISON_CAPABILITY_ID,
+            LIAISON_PROVIDER_ID,
             LIAISON_VOICE_CONTRACT,
             atlas_pb::Transport::Grpc,
             &advertised,
@@ -483,15 +483,15 @@ async fn main() -> Result<()> {
     // the legacy-fallback INACTIVE that atlas infers from the first declare.
     if let Err(e) = atlas
         .set_lifecycle_state(
-            LIAISON_CAPABILITY_ID,
+            LIAISON_PROVIDER_ID,
             atlas_pb::LifecycleState::StateActive,
             "",
         )
         .await
     {
-        log::warn!("SetCapabilityState(ACTIVE) on {LIAISON_CAPABILITY_ID} failed: {e:#}");
+        log::warn!("SetLifecycleState(ACTIVE) on {LIAISON_PROVIDER_ID} failed: {e:#}");
     }
-    log::info!("registered as '{LIAISON_CAPABILITY_ID}', SystemLiaison gRPC on :{listen_port}");
+    log::info!("registered as '{LIAISON_PROVIDER_ID}', SystemLiaison gRPC on :{listen_port}");
     eprintln!("robonix-liaison ready on :{listen_port}  (pilot_default={pilot_http})");
 
     {
@@ -501,7 +501,7 @@ async fn main() -> Result<()> {
             tick.tick().await;
             loop {
                 tick.tick().await;
-                if let Err(e) = hb.heartbeat(LIAISON_CAPABILITY_ID).await {
+                if let Err(e) = hb.heartbeat(LIAISON_PROVIDER_ID).await {
                     log::warn!("heartbeat failed: {e:#}");
                 }
             }
