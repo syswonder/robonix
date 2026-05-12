@@ -9,8 +9,8 @@ use crate::pb::pilot::{
     BatchResult, CapabilityCall, CapabilityCallResult, PilotEvent, Plan, SessionStatusEvent, Task,
 };
 use crate::service::{self, PilotStreamBody, SessionState};
-use crate::vlm::{Message, ToolDef, VlmClient, VlmStreamItem};
-use anyhow::Result;
+use crate::vlm::{Message, VlmClient, VlmStreamItem};
+use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
@@ -25,6 +25,15 @@ use uuid::Uuid;
 /// `Execute(Plan)` — discovery happens directly against atlas now.
 pub struct ExecutorConn {
     pub graph: SystemExecutorClient<Channel>,
+}
+
+type CapabilityTarget = (String, String);
+type CapabilityTargetMap = HashMap<String, CapabilityTarget>;
+
+struct DisplayCapability<'a> {
+    display_name: String,
+    cap_id: &'a str,
+    iface: &'a atlas_pb::InterfaceMetadata,
 }
 
 fn max_tool_rounds() -> usize {
@@ -164,10 +173,10 @@ pub async fn run_turn(
     {
         let mut block = String::from(
             "\n\n## Capability docs (lazy-load via `read_file`)\n\
-             Each capability below ships a CAPABILITY.md describing its tools \
+             Each capability below ships a CAPABILITY.md describing its operations \
              and the recommended usage pattern. Read the relevant one with the \
-             `read_file` builtin BEFORE you start using the capability — the \
-             short tool descriptions in your tool list are intentionally terse.\n\n",
+             `read_file` capability BEFORE you start using the capability — the \
+             short descriptions in your capability list are intentionally terse.\n\n",
         );
         for d in &docs {
             block.push_str(&format!(
@@ -204,7 +213,9 @@ pub async fn run_turn(
     let max_rounds = max_tool_rounds();
     let mut round: u32 = 0;
 
-    // 3. Capbility call loop
+    // 3. RTDL planning/execution loop. This preserves the old tool loop
+    // shape, but the VLM now emits JSON `{content,rtdl}` instead of
+    // assistant.tool_calls.
     loop {
         // Check for interrupt at the top of every round.
         if *cancel_rx.borrow() {
@@ -217,40 +228,18 @@ pub async fn run_turn(
             .await
             .map_err(|e| anyhow::anyhow!("atlas capability discovery failed: {e}"))?;
 
-        let tool_defs: Vec<ToolDef> = cap_list
-            .iter()
-            .filter_map(|(_, iface)| {
-                let mcp = match iface.params.as_ref()?.kind.as_ref()? {
-                    atlas_pb::transport_params::Kind::Mcp(m) => m,
-                    _ => return None,
-                };
-                let schema: serde_json::Value =
-                    serde_json::from_str(&mcp.input_schema_json).unwrap_or_default();
-                Some(ToolDef::new(
-                    &llm_name(&iface.contract_id),
-                    &mcp.description,
-                    schema,
-                ))
-            })
-            .collect();
+        let display_caps = build_display_capabilities(&cap_list);
+        let target_map = build_capability_target_map(&display_caps);
+        let rtdl_prompt = build_rtdl_prompt(&display_caps)?;
 
-        // LLM-tool-name → (cap_id, contract_id) so we can build CapabilityCall
-        let target_map: HashMap<String, (String, String)> = cap_list
-            .iter()
-            .map(|(cap_id, iface)| {
-                (
-                    llm_name(&iface.contract_id),
-                    (cap_id.clone(), iface.contract_id.clone()),
-                )
-            })
-            .collect();
-
-        let mut messages = vec![Message::system(&system_prompt)];
+        let mut messages = vec![Message::system(&format!(
+            "{system_prompt}\n\n{rtdl_prompt}"
+        ))];
         messages.extend(history::sanitize_for_vlm(history));
 
         let (content, raw_tool_calls) = {
             let mut stream = vlm
-                .chat_stream(&messages, &tool_defs)
+                .chat_stream(&messages, &[])
                 .await
                 .map_err(|e| anyhow::anyhow!("VLM stream error: {e}"))?;
 
@@ -273,10 +262,6 @@ pub async fn run_turn(
                         };
                         match item {
                             VlmStreamItem::TextDelta(delta) => {
-                                let _ = tx.send(Ok(service::pack(
-                                    &session_id,
-                                    PilotStreamBody::TextChunk(delta.clone()),
-                                ))).await;
                                 full_text.push_str(&delta);
                             }
                             VlmStreamItem::ToolCall(tc) => {
@@ -296,58 +281,74 @@ pub async fn run_turn(
             (content, tool_calls)
         };
 
-        // No tool calls → VLM is done.
-        if raw_tool_calls.is_empty() {
-            let final_text = content.unwrap_or_default();
-            if !final_text.is_empty() {
-                history.push(Message::assistant(&final_text));
+        if !raw_tool_calls.is_empty() {
+            anyhow::bail!("VLM returned tool_calls in RTDL mode");
+        }
+
+        let raw_content = content.unwrap_or_default();
+        log::debug!("raw_content: {}", raw_content);
+        let (assistant_content, rtdl) =
+            parse_rtdl_assistant_response(&raw_content).with_context(|| {
+                format!(
+                    "parse RTDL assistant response: {}",
+                    raw_preview(&raw_content)
+                )
+            })?;
+        log::debug!(
+            "[pilot/rtdl] parsed assistant JSON round={} content_chars={}",
+            round,
+            assistant_content.chars().count()
+        );
+        let plan_id = Uuid::new_v4().to_string();
+        let graph = expand_rtdl_to_plan(
+            &rtdl,
+            &target_map,
+            plan_id.clone(),
+            session_id.clone(),
+            round,
+        )
+        .context("expand RTDL to Plan")?;
+        log::info!(
+            "[pilot/rtdl] expanded plan_id={} round={} calls={}",
+            graph.plan_id,
+            graph.round,
+            graph.calls.len()
+        );
+
+        if graph.calls.is_empty() {
+            log::info!(
+                "[pilot/rtdl] empty sequence plan_id={} round={} final_text=true",
+                graph.plan_id,
+                graph.round
+            );
+            if !assistant_content.is_empty() {
+                history.push(Message::assistant(&assistant_content));
             }
             let _ = tx
                 .send(Ok(service::pack(
                     &session_id,
-                    PilotStreamBody::FinalText(final_text),
+                    PilotStreamBody::FinalText(assistant_content),
                 )))
                 .await;
             break;
         }
 
-        // Push assistant message with tool calls into history.
-        history.push(Message::assistant_tool_calls(raw_tool_calls.clone()));
-
-        // ── 5. Build Plan (v1: linear list of calls) ─────────────────────
-        let plan_id = Uuid::new_v4().to_string();
-        let calls: Vec<CapabilityCall> = raw_tool_calls
-            .iter()
-            .map(|tc| {
-                let (cap_id, contract_id) = target_map
-                    .get(&tc.function.name)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        // Unknown tool name (LLM hallucinated). Build a call
-                        // anyway so the executor surfaces a clear error.
-                        log::warn!(
-                            "[pilot] LLM picked unknown tool '{}' — no matching capability in catalog",
-                            tc.function.name
-                        );
-                        (String::new(), tc.function.name.clone())
-                    });
-                CapabilityCall {
-                    call_id: tc.id.clone(),
-                    cap_id,
-                    contract_id,
-                    args_json: tc.function.arguments.clone(),
-                }
-            })
-            .collect();
-
-        let graph = Plan {
-            plan_id: plan_id.clone(),
-            session_id: session_id.clone(),
-            round,
-            calls: calls.clone(),
-        };
+        if !assistant_content.is_empty() {
+            history.push(Message::assistant(&assistant_content));
+            let _ = tx
+                .send(Ok(service::pack(
+                    &session_id,
+                    PilotStreamBody::TextChunk(assistant_content.clone()),
+                )))
+                .await;
+        }
 
         // Notify Liaison about the outgoing task graph slice.
+        log::debug!(
+            "[pilot/rtdl] sending plan_id={} calls={} to liaison/executor",
+            graph.plan_id,
+            graph.calls.len()
+        );
         let _ = tx
             .send(Ok(service::pack(
                 &session_id,
@@ -409,16 +410,9 @@ pub async fn run_turn(
         // ── 7. Feed results back into history ─────────────────────────────────
         let mut deferred_followups: Vec<Message> = Vec::new();
         for r in &results {
-            if r.success {
-                let mapped = history::tool_result_to_messages(&r.call_id, &r.output);
-                history.extend(mapped.tool_messages);
-                deferred_followups.extend(mapped.followup_messages);
-            } else {
-                history.push(Message::tool_result(
-                    &r.call_id,
-                    &format!("error: {}", r.error),
-                ));
-            }
+            let mapped = rtdl_result_to_messages(r);
+            history.extend(mapped.tool_messages);
+            deferred_followups.extend(mapped.followup_messages);
         }
         history.extend(deferred_followups);
         history::trim(history, MAX_HISTORY);
@@ -464,11 +458,260 @@ pub async fn run_turn(
     Ok(())
 }
 
+fn build_display_capabilities(
+    cap_list: &[(String, atlas_pb::InterfaceMetadata)],
+) -> Vec<DisplayCapability<'_>> {
+    cap_list
+        .iter()
+        .map(|(cap_id, iface)| DisplayCapability {
+            display_name: format!("{}.{}", cap_id, llm_name(&iface.contract_id)),
+            cap_id,
+            iface,
+        })
+        .collect()
+}
+
+fn build_capability_target_map(display_caps: &[DisplayCapability<'_>]) -> CapabilityTargetMap {
+    let mut out = HashMap::new();
+    for cap in display_caps {
+        out.insert(
+            cap.display_name.clone(),
+            (cap.cap_id.to_string(), cap.iface.contract_id.clone()),
+        );
+    }
+    out
+}
+
+fn build_rtdl_prompt(display_caps: &[DisplayCapability<'_>]) -> Result<String> {
+    let mut p = String::from(
+        "\
+## RTDL output protocol
+
+Return a valid JSON object with exactly these top-level keys:
+- `content`: a string visible to the user.
+- `rtdl`: a Robot Task Description Language JSON AST.
+
+The whole assistant message MUST begin with `{` and end with `}`.
+Do not output markdown fences, headings, explanations, or any text outside the JSON object.
+
+RTDL nodes are JSON objects with an `op` string. MVP supports only:
+- `sequence`: fields `op` and `children`; `children` is an array of RTDL nodes executed in order.
+- `do`: fields `op`, `cap`, and `args`.
+  - `cap` MUST be copied exactly from the `capability_name` field of one Available capabilities entry.
+  - `args` MUST be a JSON object whose keys and value shapes come from that capability's `args_schema`.
+
+Rules:
+1. Use ONLY capabilities listed in the Available capabilities section.
+2. In RTDL `do.cap`, use ONLY the listed `capability_name` value. Do NOT use path fragments with `/`, hidden provider ids, contract ids, or natural-language aliases.
+3. Build RTDL `do.args` from the listed `args_schema`. Do NOT invent argument keys.
+4. Do NOT invent new capabilities, robots, objects, locations, or relations.
+5. The value of `rtdl` MUST be a JSON object, not a string.
+6. Do not output `out`, variables, expressions, or any operator other than `sequence` and `do`.
+7. If no capability call is needed, output an empty sequence: {\"op\":\"sequence\",\"children\":[]}.
+
+Example JSON format:
+{
+  \"content\": \"I will inspect the current scene.\",
+  \"rtdl\": {
+    \"op\": \"sequence\",
+    \"children\": [
+      {
+        \"op\": \"do\",
+        \"cap\": \"camera_snapshot\",
+        \"args\": {}
+      }
+    ]
+  }
+}
+
+## Available capabilities
+
+",
+    );
+
+    for cap in display_caps {
+        let iface = cap.iface;
+        let Some(atlas_pb::transport_params::Kind::Mcp(mcp)) =
+            iface.params.as_ref().and_then(|p| p.kind.as_ref())
+        else {
+            continue;
+        };
+        let schema: serde_json::Value =
+            serde_json::from_str(&mcp.input_schema_json).unwrap_or(serde_json::Value::Null);
+        p.push_str(&format!(
+            "- capability_name: `{}`\n  - description: {}\n  - args_schema: `{}`\n",
+            cap.display_name,
+            mcp.description.trim(),
+            schema
+        ));
+    }
+
+    Ok(p)
+}
+
+/// Parses one VLM reply in RTDL envelope form.
+///
+/// The model must emit a JSON **object** (single root) whose only keys are
+/// `content` and `rtdl`: `content` is user-facing narration (string); `rtdl`
+/// is the declarative ops tree (another JSON object) consumed by
+/// [`expand_rtdl_to_plan`].
+///
+/// Returns `(content, rtdl)` on success — the string is cloned for callers;
+/// `rtdl` is a [`serde_json::Value`] object subtree (not validated beyond
+/// "`rtdl` is an object").
+///
+/// Fails if `raw` is not valid JSON, the root is not an object, the key set
+/// is not exactly `{content, rtdl}`, `content` is not a JSON string, or
+/// `rtdl` is not a JSON object.
+fn parse_rtdl_assistant_response(raw: &str) -> Result<(String, serde_json::Value)> {
+    let v: serde_json::Value = serde_json::from_str(raw)?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("assistant response must be a JSON object"))?;
+    if obj.len() != 2 || !obj.contains_key("content") || !obj.contains_key("rtdl") {
+        anyhow::bail!("assistant response must contain exactly `content` and `rtdl`");
+    }
+    let content = obj
+        .get("content")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| anyhow::anyhow!("assistant `content` must be a string"))?
+        .to_string();
+    let rtdl = obj
+        .get("rtdl")
+        .filter(|x| x.is_object())
+        .ok_or_else(|| anyhow::anyhow!("assistant `rtdl` must be an object"))?
+        .clone();
+    Ok((content, rtdl))
+}
+
+fn raw_preview(raw: &str) -> String {
+    if raw.is_empty() {
+        return "assistant content was empty".to_string();
+    }
+    let preview: String = raw.chars().take(240).collect();
+    let ellipsis = if raw.chars().count() > 240 { "..." } else { "" };
+    format!("assistant content preview: {preview:?}{ellipsis}")
+}
+
+fn expand_rtdl_to_plan(
+    rtdl: &serde_json::Value,
+    target_map: &CapabilityTargetMap,
+    plan_id: String,
+    session_id: String,
+    round: u32,
+) -> Result<Plan> {
+    let mut calls = Vec::new();
+    let mut next_call = 0usize;
+    expand_rtdl_node(rtdl, "$", target_map, &plan_id, &mut next_call, &mut calls)?;
+    Ok(Plan {
+        plan_id,
+        session_id,
+        round,
+        calls,
+    })
+}
+
+fn expand_rtdl_node(
+    node: &serde_json::Value,
+    path: &str,
+    target_map: &CapabilityTargetMap,
+    plan_id: &str,
+    next_call: &mut usize,
+    calls: &mut Vec<CapabilityCall>,
+) -> Result<()> {
+    let obj = node
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("{path}: RTDL node must be an object"))?;
+    let op = obj
+        .get("op")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| anyhow::anyhow!("{path}.op must be a string"))?;
+
+    match op {
+        "sequence" => {
+            if obj.len() != 2 || !obj.contains_key("children") {
+                anyhow::bail!("{path}: sequence node must contain only `op` and `children`");
+            }
+            let children = obj
+                .get("children")
+                .and_then(|x| x.as_array())
+                .ok_or_else(|| anyhow::anyhow!("{path}.children must be an array"))?;
+            for (idx, child) in children.iter().enumerate() {
+                expand_rtdl_node(
+                    child,
+                    &format!("{path}.children[{idx}]"),
+                    target_map,
+                    plan_id,
+                    next_call,
+                    calls,
+                )?;
+            }
+        }
+        "do" => {
+            if obj.len() != 3 || !obj.contains_key("cap") || !obj.contains_key("args") {
+                anyhow::bail!("{path}: do node must contain only `op`, `cap`, and `args`");
+            }
+            let cap = obj
+                .get("cap")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| anyhow::anyhow!("{path}.cap must be a string"))?;
+            let args = obj
+                .get("args")
+                .filter(|x| x.is_object())
+                .ok_or_else(|| anyhow::anyhow!("{path}.args must be an object"))?;
+            let (cap_id, contract_id) = target_map
+                .get(cap)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("{path}.cap unknown capability `{cap}`"))?;
+            let call_index = *next_call;
+            *next_call += 1;
+            calls.push(CapabilityCall {
+                call_id: format!("{plan_id}:{call_index}"),
+                cap_id,
+                contract_id,
+                args_json: serde_json::to_string(args)?,
+            });
+        }
+        other => anyhow::bail!("{path}.op unknown operator `{other}`"),
+    }
+
+    Ok(())
+}
+
+fn rtdl_result_to_messages(r: &CapabilityCallResult) -> history::ToolResultHistory {
+    if !r.success {
+        return history::ToolResultHistory {
+            tool_messages: vec![Message::user(&format!(
+                "Executor feedback for the current task (not a new user request): capability call '{}' ({}) failed: {}",
+                r.call_id, r.contract_id, r.error
+            ))],
+            followup_messages: vec![],
+        };
+    }
+
+    let mapped = history::tool_result_to_messages(&r.call_id, &r.output);
+    let tool_messages = mapped
+        .tool_messages
+        .into_iter()
+        .map(|msg| {
+            let content = msg.content.unwrap_or_default();
+            Message::user(&format!(
+                "Executor feedback for the current task (not a new user request): capability call '{}' ({}) succeeded: {}",
+                r.call_id, r.contract_id, content
+            ))
+        })
+        .collect();
+
+    history::ToolResultHistory {
+        tool_messages,
+        followup_messages: mapped.followup_messages,
+    }
+}
+
 // ── System prompt + SOUL ──────────────────────────────────────────────────────
 // Optional `SOUL.md` (agent personality) is read from `$ROBONIX_PILOT_SOUL`,
-// then `~/.robonix/SOUL.md`. There is no skill index — skill caps surface as
-// regular tools through `executor.list_tools`, with descriptions sourced from
-// each cap's CAPABILITY.md.
+// then `~/.robonix/SOUL.md`. Capability docs are surfaced in the RTDL prompt
+// with descriptions sourced from each cap's CAPABILITY.md.
 
 fn load_agent_soul() -> Option<String> {
     if let Ok(p) = std::env::var("ROBONIX_PILOT_SOUL") {
@@ -499,36 +742,45 @@ fn build_system_prompt(soul: Option<&str>) -> String {
         "\
 You are the Robonix Pilot — the reasoning and planning component of a robot system.
 You receive requests from a user or higher-level system and translate them into actions
-by calling the tools available to you.
+by planning capability calls available to you.
 
 ## Operating principles
-- ACT immediately using your tools. Do not ask the user to run things themselves.
-- Each tool call you make is dispatched to the Executor runtime, which handles the
+- ACT immediately using available capabilities. Do not ask the user to run things themselves.
+- Each capability call you plan is dispatched to the Executor runtime, which handles the
   actual robot hardware or service call.
-- Do NOT claim missing capabilities unless verified from current tools/results.
-  - If `search_memory` / `save_memory` / `compact_memory` tools are available, treat
-    long-term memory as available via those tools.
-- Prefer structured output; report tool results concisely.
-- If a tool returns an error, diagnose and retry, or report to the user.
+- Do NOT claim missing capabilities unless verified from the current capability list/results.
+  - If `memory_search` / `memory_save` / `memory_compact` capabilities are available,
+    treat long-term memory as available via those capabilities.
+- Prefer structured output; report capability results concisely.
+- If a capability returns an error, diagnose and retry, or report to the user.
+- Some later messages may be labelled `Executor feedback for the current task`.
+  Treat those as results of capability calls you already planned, not as new
+  user requests.
+- If executor feedback already contains enough information to answer the
+  user's request, answer in `content` and output an empty RTDL sequence. Do
+  not repeat the same observation capability just to confirm unchanged data.
 
 ## Persistence (READ THIS — most common failure mode)
-The agent loop ENDS the turn the moment you produce an assistant message
-without any tool_calls. Do NOT stop until the user's task is *verifiably*
+The agent loop ENDS the turn the moment you produce an empty RTDL sequence.
+Do NOT output an empty RTDL sequence until the user's task is *verifiably*
 complete. Concretely:
 
 - Define a clear success criterion at the start of the turn (e.g. for
   'turn around': yaw delta ≈ 180° from the starting pose; for 'find the
-  door': a door is visible in `camera/snapshot`).
-- Loop tools-then-reason — observe, act, RE-observe — until that
-  criterion holds. After every physical action take a fresh
-  `camera/snapshot` to confirm the state actually changed the way you
-  expected.
-- A single short `chassis/move` burst typically rotates ~0.4–0.8 rad
+  door': a door is visible in a camera observation).
+- For pure observation or visual question-answering tasks, one successful
+  observation is usually enough. After answering from that observation, end
+  with an empty RTDL sequence.
+- For tasks that change robot or world state, loop plan-then-reason —
+  observe, act, RE-observe — until the success criterion holds. After every
+  physical action take a fresh camera observation to confirm the state actually
+  changed the way you expected.
+- A single short chassis movement burst typically rotates ~0.4–0.8 rad
   (≈ 25–45°) or translates ~0.1–0.2 m. To turn 180° you need MULTIPLE
   bursts; do not assume one call finishes the rotation.
-- Only emit a final no-tool-call assistant message once the criterion
-  is met OR you've exhausted reasonable attempts and need to report a
-  blocker. 'Done.' with no verification is wrong — verify first.
+- Only emit an empty RTDL sequence once the criterion is met OR you've
+  exhausted reasonable attempts and need to report a blocker. 'Done.'
+  with no verification is wrong — verify first.
 - On the very rare case where the user explicitly cancels, you may stop
   early; otherwise keep going.
 ",
@@ -538,8 +790,13 @@ complete. Concretely:
 
 #[cfg(test)]
 mod tests {
-    use super::{skip_memory_prefetch, task_is_session_end};
+    use super::{
+        CapabilityTargetMap, expand_rtdl_to_plan,
+        parse_rtdl_assistant_response, skip_memory_prefetch, task_is_session_end,
+    };
     use crate::pb::pilot::Task;
+    use robonix_atlas::pb as atlas_pb;
+    use serde_json::json;
 
     fn task(ctx: &str) -> Task {
         Task {
@@ -582,5 +839,89 @@ mod tests {
     fn no_skip_prefetch_real_query() {
         assert!(!skip_memory_prefetch("open the door"));
         assert!(!skip_memory_prefetch("帮我找个红色杯子"));
+    }
+
+    #[test]
+    fn rtdl_response_requires_exact_top_level_keys() {
+        let err = parse_rtdl_assistant_response(
+            r#"{"content":"x","rtdl":{"op":"sequence","children":[]},"extra":1}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("exactly `content` and `rtdl`"));
+    }
+
+    #[test]
+    fn rtdl_expands_sequence_to_plan_calls() {
+        let mut targets = CapabilityTargetMap::new();
+        targets.insert(
+            "camera_snapshot".to_string(),
+            (
+                "cap-camera".to_string(),
+                "robonix/primitive/camera/snapshot".to_string(),
+            ),
+        );
+        targets.insert(
+            "chassis_move".to_string(),
+            (
+                "cap-chassis".to_string(),
+                "robonix/primitive/chassis/move".to_string(),
+            ),
+        );
+
+        let rtdl = json!({
+            "op": "sequence",
+            "children": [
+                { "op": "do", "cap": "camera_snapshot", "args": {} },
+                { "op": "do", "cap": "chassis_move", "args": { "linear": 0.1 } }
+            ]
+        });
+        let plan = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 7).unwrap();
+
+        assert_eq!(plan.plan_id, "p");
+        assert_eq!(plan.session_id, "s");
+        assert_eq!(plan.round, 7);
+        assert_eq!(plan.calls.len(), 2);
+        assert_eq!(plan.calls[0].call_id, "p:0");
+        assert_eq!(plan.calls[0].cap_id, "cap-camera");
+        assert_eq!(
+            plan.calls[0].contract_id,
+            "robonix/primitive/camera/snapshot"
+        );
+        assert_eq!(plan.calls[0].args_json, "{}");
+        assert_eq!(plan.calls[1].call_id, "p:1");
+        assert_eq!(plan.calls[1].args_json, r#"{"linear":0.1}"#);
+    }
+
+    #[test]
+    fn rtdl_rejects_out_field() {
+        let mut targets = CapabilityTargetMap::new();
+        targets.insert(
+            "camera_snapshot".to_string(),
+            (
+                "cap-camera".to_string(),
+                "robonix/primitive/camera/snapshot".to_string(),
+            ),
+        );
+        let rtdl = json!({
+            "op": "do",
+            "cap": "camera_snapshot",
+            "args": {},
+            "out": { "image": "img" }
+        });
+        let err = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0).unwrap_err();
+        assert!(err.to_string().contains("only `op`, `cap`, and `args`"));
+    }
+
+    fn iface(contract_id: &str) -> atlas_pb::InterfaceMetadata {
+        atlas_pb::InterfaceMetadata {
+            contract_id: contract_id.to_string(),
+            transport: atlas_pb::Transport::Mcp as i32,
+            params: Some(atlas_pb::TransportParams {
+                kind: Some(atlas_pb::transport_params::Kind::Mcp(atlas_pb::McpParams {
+                    description: String::new(),
+                    input_schema_json: "{}".to_string(),
+                })),
+            }),
+        }
     }
 }
