@@ -106,13 +106,13 @@ async fn main() -> Result<()> {
     // 20s so we stay registered for the lifetime of the process.
     {
         let mut hb = atlas.clone();
-        let cap_id = cfg.id.clone();
+        let provider_id = cfg.id.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(20));
             tick.tick().await; // first tick fires immediately; skip
             loop {
                 tick.tick().await;
-                if let Err(e) = hb.heartbeat(&cap_id).await {
+                if let Err(e) = hb.heartbeat(&provider_id).await {
                     log::warn!("heartbeat failed: {e:#}");
                 }
             }

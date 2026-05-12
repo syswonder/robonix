@@ -345,7 +345,7 @@ impl AtlasClient {
     // ── Channels ───────────────────────────────────────────────────────────
 
     /// Open a channel to one (provider, contract, transport). Atlas only
-    /// records the edge — the consumer dials the returned endpoint
+    /// providers the edge — the consumer dials the returned endpoint
     /// itself using whatever transport-appropriate mechanism (tonic for
     /// grpc, rclrs for ros2, fastmcp for mcp, …).
     /// Returns `(channel_id, endpoint, params)`.
@@ -460,11 +460,18 @@ pub async fn connect_to_capability(
         .await?;
     let normalized = normalize_grpc_endpoint(&endpoint_str);
     let channel = Endpoint::new(normalized.clone())
-        .with_context(|| format!("invalid endpoint '{}' for provider '{}'", normalized, provider_id))?
+        .with_context(|| {
+            format!(
+                "invalid endpoint '{}' for provider '{}'",
+                normalized, provider_id
+            )
+        })?
         .connect()
         .await
         .with_context(|| {
-            format!("connect to provider '{provider_id}' at '{normalized}' for contract '{contract_id}'")
+            format!(
+                "connect to provider '{provider_id}' at '{normalized}' for contract '{contract_id}'"
+            )
         })?;
     Ok((channel_id, provider_id, channel))
 }

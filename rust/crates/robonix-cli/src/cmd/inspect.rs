@@ -57,11 +57,11 @@ async fn connect(endpoint: &str) -> Result<AtlasClient> {
 
 pub async fn caps(endpoint: &str, json: bool, verbose: bool) -> Result<()> {
     let mut atlas = connect(endpoint).await?;
-    let records = atlas
+    let providers = atlas
         .query_capabilities("", "", atlas_pb::Transport::Unspecified)
         .await?;
     if json {
-        let serialised: Vec<_> = records
+        let serialised: Vec<_> = providers
             .iter()
             .map(|r| {
                 serde_json::json!({
@@ -80,41 +80,41 @@ pub async fn caps(endpoint: &str, json: bool, verbose: bool) -> Result<()> {
         return Ok(());
     }
 
-    if records.is_empty() {
+    if providers.is_empty() {
         println!("{} no capabilities registered", "[caps]".yellow().bold());
         return Ok(());
     }
     // Default: one row per cap, no interfaces. -v expands the interface
     // list (lspci -tv style — quick scan vs full dump).
-    for rec in &records {
-        let detail = if rec.state_detail.is_empty() {
+    for provider in &providers {
+        let detail = if provider.state_detail.is_empty() {
             String::new()
         } else {
-            format!(" — {}", rec.state_detail)
+            format!(" — {}", provider.state_detail)
         };
         let iface_count_hint = if verbose {
             String::new()
         } else {
-            format!(" ({} ifaces)", rec.capabilities.len())
+            format!(" ({} ifaces)", provider.capabilities.len())
                 .dimmed()
                 .to_string()
         };
         println!(
             "{} {} {} {}{}{}",
             "●".green(),
-            rec.id.bold(),
-            state_tag(rec.state),
-            rec.namespace.dimmed(),
+            provider.id.bold(),
+            state_tag(provider.state),
+            provider.namespace.dimmed(),
             iface_count_hint,
             detail.dimmed()
         );
         if verbose {
-            for iface in &rec.capabilities {
+            for cap in &provider.capabilities {
                 println!(
                     "    {} {} {}",
                     "└─".dimmed(),
-                    iface.contract_id,
-                    format!("({})", transport_name(iface.transport)).dimmed()
+                    cap.contract_id,
+                    format!("({})", transport_name(cap.transport)).dimmed()
                 );
             }
         }
@@ -129,30 +129,30 @@ pub async fn caps(endpoint: &str, json: bool, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn describe(endpoint: &str, cap_id: Option<&str>, json: bool) -> Result<()> {
+pub async fn describe(endpoint: &str, provider_id: Option<&str>, json: bool) -> Result<()> {
     let mut atlas = connect(endpoint).await?;
-    let cap_filter = cap_id.unwrap_or("");
-    let records = atlas
+    let cap_filter = provider_id.unwrap_or("");
+    let providers = atlas
         .query_capabilities(cap_filter, "", atlas_pb::Transport::Unspecified)
         .await?;
-    if records.is_empty() {
+    if providers.is_empty() {
         println!("{} no matching capabilities", "[describe]".yellow().bold());
         return Ok(());
     }
-    for rec in &records {
+    for provider in &providers {
         // Atlas only stores the CAPABILITY.md path; consumers read the
         // file off the local filesystem themselves.
-        let md = if rec.capability_md_path.is_empty() {
+        let md = if provider.capability_md_path.is_empty() {
             String::new()
         } else {
-            std::fs::read_to_string(&rec.capability_md_path).unwrap_or_default()
+            std::fs::read_to_string(&provider.capability_md_path).unwrap_or_default()
         };
         if json {
             let value = serde_json::json!({
-                "provider_id":   rec.id,
-                "namespace":       rec.namespace,
-                "state":           state_name(rec.state),
-                "interfaces":      rec.capabilities.iter().map(|i| serde_json::json!({
+                "provider_id":   provider.id,
+                "namespace":       provider.namespace,
+                "state":           state_name(provider.state),
+                "interfaces":      provider.capabilities.iter().map(|i| serde_json::json!({
                     "contract_id": i.contract_id,
                     "transport":   transport_name(i.transport),
                 })).collect::<Vec<_>>(),
@@ -160,13 +160,18 @@ pub async fn describe(endpoint: &str, cap_id: Option<&str>, json: bool) -> Resul
             });
             println!("{}", serde_json::to_string_pretty(&value)?);
         } else {
-            println!("{} {} {}", "●".green(), rec.id.bold(), state_tag(rec.state));
-            for iface in &rec.capabilities {
+            println!(
+                "{} {} {}",
+                "●".green(),
+                provider.id.bold(),
+                state_tag(provider.state)
+            );
+            for cap in &provider.capabilities {
                 println!(
                     "    {} {} ({})",
                     "└─".dimmed(),
-                    iface.contract_id,
-                    transport_name(iface.transport)
+                    cap.contract_id,
+                    transport_name(cap.transport)
                 );
             }
             if !md.is_empty() {
@@ -180,23 +185,23 @@ pub async fn describe(endpoint: &str, cap_id: Option<&str>, json: bool) -> Resul
 pub async fn tools(endpoint: &str, json: bool) -> Result<()> {
     // "Tools" in Robonix-speak = MCP-transport interfaces (LLM-callable caps).
     let mut atlas = connect(endpoint).await?;
-    let records = atlas
+    let providers = atlas
         .query_capabilities("", "", atlas_pb::Transport::Mcp)
         .await?;
     let mut entries: Vec<(String, String, String, String)> = Vec::new();
-    for rec in &records {
-        for iface in &rec.capabilities {
-            if iface.transport != atlas_pb::Transport::Mcp as i32 {
+    for provider in &providers {
+        for cap in &provider.capabilities {
+            if cap.transport != atlas_pb::Transport::Mcp as i32 {
                 continue;
             }
-            let schema = match iface.params.as_ref().and_then(|p| p.kind.as_ref()) {
+            let schema = match cap.params.as_ref().and_then(|p| p.kind.as_ref()) {
                 Some(atlas_pb::transport_params::Kind::Mcp(m)) => m.input_schema_json.clone(),
                 _ => String::new(),
             };
-            let description = iface.description.clone();
+            let description = cap.description.clone();
             entries.push((
-                rec.id.clone(),
-                iface.contract_id.clone(),
+                provider.id.clone(),
+                cap.contract_id.clone(),
                 description,
                 schema,
             ));
@@ -207,7 +212,7 @@ pub async fn tools(endpoint: &str, json: bool) -> Result<()> {
             .iter()
             .map(|(cap, c, d, s)| {
                 serde_json::json!({
-                    "cap_id":            cap,
+                    "provider_id":            cap,
                     "contract_id":       c,
                     "description":       d,
                     "input_schema_json": s,

@@ -27,7 +27,7 @@ pub async fn execute(call: &CapabilityCall, endpoint: &str) -> CapabilityCallRes
     let result = call_mcp(name, &call.args_json, endpoint).await;
     let mut out = CapabilityCallResult {
         call_id: call.call_id.clone(),
-        cap_id: call.cap_id.clone(),
+        provider_id: call.provider_id.clone(),
         contract_id: call.contract_id.clone(),
         ..Default::default()
     };

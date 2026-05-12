@@ -10,7 +10,7 @@
 //      capabilities. Calls hitting these contracts short-circuit to in-process
 //      handlers in `dispatch::builtin` — no MCP loopback.
 //   4. Serves Execute on `listen`. Per-call dispatch resolves provider via
-//      `ConnectCapability(cap_id, contract_id, MCP)` on atlas.
+//      `ConnectCapability(provider_id, contract_id, MCP)` on atlas.
 
 mod config;
 mod dispatch;
@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
     // Built-in capabilities: declared as MCP-transport interfaces so pilot's
     // catalog discovery sees them like any user MCP cap. The endpoint is a
     // sentinel — dispatch never dials it; calls hitting these contracts hit
-    // the cap_id == self short-circuit in `dispatch::dispatch`.
+    // the provider_id == self short-circuit in `dispatch::dispatch`.
     let builtin_endpoint = format!("internal://{}/builtin", cfg.id);
     for spec in BUILTINS {
         let contract_id = format!("{EXECUTOR_NAMESPACE}/builtin/{}", spec.op);
@@ -116,13 +116,13 @@ async fn main() -> Result<()> {
     // 20s so we stay registered for the lifetime of the process.
     {
         let mut hb = atlas.clone();
-        let cap_id = cfg.id.clone();
+        let provider_id = cfg.id.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(20));
             tick.tick().await;
             loop {
                 tick.tick().await;
-                if let Err(e) = hb.heartbeat(&cap_id).await {
+                if let Err(e) = hb.heartbeat(&provider_id).await {
                     log::warn!("heartbeat failed: {e:#}");
                 }
             }

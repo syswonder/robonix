@@ -101,14 +101,14 @@ async fn resolve_endpoint(
 ) -> Option<String> {
     let mut atlas = atlas.lock().await;
     let transport = atlas_pb::Transport::Grpc;
-    let records = atlas
+    let providers = atlas
         .query_capabilities("", contract_id, transport)
         .await
         .ok()?;
 
     // Auto-pick path: any cap providing this contract over the right transport.
     let auto_pick = || -> Option<&atlas_pb::CapabilityProvider> {
-        records.iter().find(|r| {
+        providers.iter().find(|r| {
             r.capabilities
                 .iter()
                 .any(|i| i.contract_id == contract_id && i.transport == transport as i32)
@@ -122,16 +122,16 @@ async fn resolve_endpoint(
         // config / pin pointed at a cap that's not in this deploy), fall back
         // to auto-pick rather than failing hard. The pin is a hint, not a
         // hard requirement.
-        match records
+        match providers
             .iter()
             .find(|r| r.id == pin_capability_id || r.namespace == pin_capability_id)
         {
-            Some(rec) => Some(rec),
+            Some(provider) => Some(provider),
             None => {
                 log::warn!(
                     "[voice] pinned cap '{pin_capability_id}' for {contract_id} not in atlas; \
                      falling back to auto-pick. Available providers: {:?}",
-                    records.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+                    providers.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
                 );
                 auto_pick()
             }

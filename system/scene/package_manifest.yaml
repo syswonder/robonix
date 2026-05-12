@@ -21,7 +21,7 @@ package:
   description: Scene — semantic + geometric live map of the environment.
   license: MulanPSL-2.0
 
-# Atlas cap_id (matched verbatim by rbnx-boot). Same value as package.name
+# Atlas provider_id (matched verbatim by rbnx-boot). Same value as package.name
 # here because scene's deployment identity and runtime cap line up; the
 # explicit declaration removes any ambiguity for the wait-for-cap loop.
 

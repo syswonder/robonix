@@ -585,7 +585,7 @@ fn parse_msg_section(package: &str, name: &str, src: &str) -> Result<MsgSpec> {
 /// `parse_msg_section` (for srv request / response bodies). Captures:
 ///
 ///   - constants (`int32 FOO = 42`) are skipped (current scope; could
-///     be promoted to first-class `MsgConstant` records later)
+///     be promoted to first-class `MsgConstant` entries later)
 ///   - trailing comments (`float64 x  # in metres`) → `field.description`
 ///   - `string<=N` upper bounds → `field.string_max_len`
 ///
@@ -609,7 +609,7 @@ fn parse_fields_from_lines(
             continue;
         }
         // ROS constants like `int32 FOO=42` use `=`. Skip; constant
-        // promotion to first-class records is deferred (B2).
+        // promotion to first-class entries is deferred (B2).
         if code.contains('=') {
             continue;
         }

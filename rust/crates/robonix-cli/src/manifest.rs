@@ -125,7 +125,7 @@ struct RawManifest {
     #[serde(default)]
     depends: Vec<DependsRef>,
     /// Legacy `provider_id:` field. Removed from spec — accepted by serde but
-    /// ignored. rbnx-boot now discovers the cap_id by polling atlas for any cap
+    /// ignored. rbnx-boot now discovers the provider_id by polling atlas for any cap
     /// that registered after `start.sh` spawned. Future warning: emit deprecation.
     #[serde(default)]
     #[allow(dead_code)]

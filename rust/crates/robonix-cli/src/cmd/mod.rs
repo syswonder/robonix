@@ -221,7 +221,7 @@ pub enum Commands {
         /// robonix-atlas endpoint
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
-        /// Show full CAPABILITY.md content for a specific cap_id
+        /// Show full CAPABILITY.md content for a specific provider_id
         #[arg(long, alias = "node")]
         cap: Option<String>,
         /// Output as JSON

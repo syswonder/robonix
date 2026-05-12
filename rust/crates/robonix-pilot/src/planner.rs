@@ -135,8 +135,8 @@ pub async fn run_turn(
     // rename it freely. contract_id is the stable identity.
     let search_memory_target = initial_caps
         .iter()
-        .find(|(_, iface)| iface.contract_id == "robonix/system/memory/search")
-        .map(|(cap_id, iface)| (cap_id.clone(), iface.contract_id.clone()));
+        .find(|(_, cap)| cap.contract_id == "robonix/system/memory/search")
+        .map(|(provider_id, cap)| (provider_id.clone(), cap.contract_id.clone()));
 
     // 1b. Pre-fetch long-term memory
     // Silently dispatches search_memory before the first VLM call so that
@@ -172,7 +172,7 @@ pub async fn run_turn(
         for d in &docs {
             block.push_str(&format!(
                 "- `{}` ({}): `{}`\n",
-                d.cap_id, d.namespace, d.md_path
+                d.provider_id, d.namespace, d.md_path
             ));
         }
         system_prompt.push_str(&block);
@@ -219,28 +219,28 @@ pub async fn run_turn(
 
         let tool_defs: Vec<ToolDef> = cap_list
             .iter()
-            .filter_map(|(_, iface)| {
-                let mcp = match iface.params.as_ref()?.kind.as_ref()? {
+            .filter_map(|(_, cap)| {
+                let mcp = match cap.params.as_ref()?.kind.as_ref()? {
                     atlas_pb::transport_params::Kind::Mcp(m) => m,
                     _ => return None,
                 };
                 let schema: serde_json::Value =
                     serde_json::from_str(&mcp.input_schema_json).unwrap_or_default();
                 Some(ToolDef::new(
-                    &llm_name(&iface.contract_id),
-                    &iface.description,
+                    &llm_name(&cap.contract_id),
+                    &cap.description,
                     schema,
                 ))
             })
             .collect();
 
-        // LLM-tool-name → (cap_id, contract_id) so we can build CapabilityCall
+        // LLM-tool-name → (provider_id, contract_id) so we can build CapabilityCall
         let target_map: HashMap<String, (String, String)> = cap_list
             .iter()
-            .map(|(cap_id, iface)| {
+            .map(|(provider_id, cap)| {
                 (
-                    llm_name(&iface.contract_id),
-                    (cap_id.clone(), iface.contract_id.clone()),
+                    llm_name(&cap.contract_id),
+                    (provider_id.clone(), cap.contract_id.clone()),
                 )
             })
             .collect();
@@ -319,7 +319,7 @@ pub async fn run_turn(
         let calls: Vec<CapabilityCall> = raw_tool_calls
             .iter()
             .map(|tc| {
-                let (cap_id, contract_id) = target_map
+                let (provider_id, contract_id) = target_map
                     .get(&tc.function.name)
                     .cloned()
                     .unwrap_or_else(|| {
@@ -333,7 +333,7 @@ pub async fn run_turn(
                     });
                 CapabilityCall {
                     call_id: tc.id.clone(),
-                    cap_id,
+                    provider_id,
                     contract_id,
                     args_json: tc.function.arguments.clone(),
                 }
@@ -380,7 +380,7 @@ pub async fn run_turn(
                     if let Some(ref s) = event.started {
                         log::debug!(
                             "[pilot] executor started cap='{}' contract='{}'",
-                            s.cap_id,
+                            s.provider_id,
                             s.contract_id
                         );
                     }

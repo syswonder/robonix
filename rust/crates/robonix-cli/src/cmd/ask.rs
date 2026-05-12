@@ -82,7 +82,7 @@ pub async fn execute(server: &str, prompt: &str, json: bool) -> Result<()> {
                     "round": p.round,
                     "calls": p.calls.iter().map(|c| serde_json::json!({
                         "call_id": c.call_id,
-                        "cap_id": c.cap_id,
+                        "provider_id": c.provider_id,
                         "contract_id": c.contract_id,
                         "args_json": c.args_json,
                     })).collect::<Vec<_>>(),

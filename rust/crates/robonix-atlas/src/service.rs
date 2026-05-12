@@ -140,16 +140,20 @@ impl CapabilityProviderState {
 }
 
 impl From<&CapabilityProviderState> for pb::CapabilityProvider {
-    fn from(rec: &CapabilityProviderState) -> Self {
+    fn from(provider: &CapabilityProviderState) -> Self {
         Self {
-            id: rec.id.clone(),
-            kind: rec.kind as i32,
-            namespace: rec.namespace.clone(),
-            capability_md_path: rec.capability_md_path.clone(),
-            last_heartbeat_ms: rec.last_heartbeat_ms,
-            capabilities: rec.endpoints.iter().map(|e| rec.capability_at(e)).collect(),
-            state: rec.state() as i32,
-            state_detail: rec.state_detail.clone(),
+            id: provider.id.clone(),
+            kind: provider.kind as i32,
+            namespace: provider.namespace.clone(),
+            capability_md_path: provider.capability_md_path.clone(),
+            last_heartbeat_ms: provider.last_heartbeat_ms,
+            capabilities: provider
+                .endpoints
+                .iter()
+                .map(|e| provider.capability_at(e))
+                .collect(),
+            state: provider.state() as i32,
+            state_detail: provider.state_detail.clone(),
         }
     }
 }
@@ -226,12 +230,13 @@ pub(crate) struct State {
 }
 
 impl State {
-    /// Drop every channel whose provider is `cap_id`. Called from
+    /// Drop every channel whose provider is `provider_id`. Called from
     /// unregister / heartbeat eviction so dead providers don't leak
-    /// channel records. Returns the number of channels dropped.
-    fn drop_channels_of(&mut self, cap_id: &str) -> usize {
+    /// channel providers. Returns the number of channels dropped.
+    fn drop_channels_of(&mut self, provider_id: &str) -> usize {
         let before = self.channels.len();
-        self.channels.retain(|_, ch| ch.provider_cap_id != cap_id);
+        self.channels
+            .retain(|_, ch| ch.provider_cap_id != provider_id);
         before - self.channels.len()
     }
 }
@@ -286,10 +291,10 @@ impl AtlasRegistry {
     }
 
     /// Register a new capability instance, OR take over an existing
-    /// cap_id slot whose previous provider is gone. Empty `cap_id` triggers
+    /// provider_id slot whose previous provider is gone. Empty `provider_id` triggers
     /// Atlas-assigned ephemeral id. Returns the resolved id.
     ///
-    /// Takeover semantics — a re-Register on an existing cap_id is NOT
+    /// Takeover semantics — a re-Register on an existing provider_id is NOT
     /// an error. We assume the old process is dead (or about to be), so
     /// we drop its endpoints + state and reset last_heartbeat to now.
     /// The caller is then expected to redeclare capabilities with its own
@@ -307,23 +312,23 @@ impl AtlasRegistry {
     /// at least visible.
     pub async fn register(
         &self,
-        cap_id: &str,
+        provider_id: &str,
         kind: pb::Kind,
         namespace: &str,
         capability_md_path: &str,
     ) -> Result<String, Status> {
-        let cap_id = if cap_id.trim().is_empty() {
+        let provider_id = if provider_id.trim().is_empty() {
             Self::assign_id()
         } else {
-            cap_id.trim().to_string()
+            provider_id.trim().to_string()
         };
         let namespace = Self::require("namespace", namespace)?.to_string();
         let mut state = self.inner.write().await;
-        if let Some(existing) = state.caps.get_mut(&cap_id) {
+        if let Some(existing) = state.caps.get_mut(&provider_id) {
             // Cross-kind collision is rejected per proto contract.
             if existing.kind != kind {
                 return Err(Status::already_exists(format!(
-                    "'{cap_id}' already registered as {:?}; cannot re-register as {:?}",
+                    "'{provider_id}' already registered as {:?}; cannot re-register as {:?}",
                     existing.kind, kind
                 )));
             }
@@ -337,17 +342,17 @@ impl AtlasRegistry {
             existing.endpoints.clear();
             existing.pushed_state = None;
             existing.state_detail.clear();
-            let dropped = state.drop_channels_of(&cap_id);
+            let dropped = state.drop_channels_of(&provider_id);
             info!(
-                "[atlas] register {cap_id} (takeover; dropped {prev_iface_count} \
+                "[atlas] register {provider_id} (takeover; dropped {prev_iface_count} \
                  stale capabilities, {dropped} channels)"
             );
-            return Ok(cap_id);
+            return Ok(provider_id);
         }
         state.caps.insert(
-            cap_id.clone(),
+            provider_id.clone(),
             CapabilityProviderState {
-                id: cap_id.clone(),
+                id: provider_id.clone(),
                 kind,
                 namespace,
                 capability_md_path: capability_md_path.trim().to_string(),
@@ -357,23 +362,23 @@ impl AtlasRegistry {
                 state_detail: String::new(),
             },
         );
-        info!("[atlas] register {cap_id} kind={kind:?}");
-        Ok(cap_id)
+        info!("[atlas] register {provider_id} kind={kind:?}");
+        Ok(provider_id)
     }
 
     /// Idempotent: returns `true` if a record was removed, `false` if the id
     /// was unknown. Also drops any channels where this cap was the provider —
     /// consumers will get NOT_FOUND on their next call and can re-discover.
-    pub async fn unregister(&self, cap_id: &str) -> bool {
-        let cap_id = cap_id.trim();
-        if cap_id.is_empty() {
+    pub async fn unregister(&self, provider_id: &str) -> bool {
+        let provider_id = provider_id.trim();
+        if provider_id.is_empty() {
             return false;
         }
         let mut state = self.inner.write().await;
-        let was_present = state.caps.remove(cap_id).is_some();
-        let dropped = state.drop_channels_of(cap_id);
+        let was_present = state.caps.remove(provider_id).is_some();
+        let dropped = state.drop_channels_of(provider_id);
         info!(
-            "[atlas] unregister {cap_id} (was_present={was_present}, channels_dropped={dropped})"
+            "[atlas] unregister {provider_id} (was_present={was_present}, channels_dropped={dropped})"
         );
         was_present
     }
@@ -381,59 +386,59 @@ impl AtlasRegistry {
     /// Update the cap's lifecycle state. Returns the previous value (or
     /// the inferred fallback when nothing's been pushed yet) so callers
     /// can log "X went INACTIVE → ACTIVE" without a separate query.
-    /// Validation is **soft** in v0.1: illegal transitions log a warn
-    /// but the new state is still stored. Strict validation will land
-    /// in v0.2 once telemetry confirms there are no spurious illegal
-    /// transitions during atlas/cap startup-race conditions.
+    /// Validation is **soft**: illegal transitions log a warn but the
+    /// new state is still stored. Strict validation will land later
+    /// once telemetry confirms there are no spurious illegal
+    /// transitions during atlas/provider startup-race conditions.
     pub async fn set_lifecycle_state(
         &self,
-        cap_id: &str,
+        provider_id: &str,
         new_state: pb::LifecycleState,
         detail: &str,
     ) -> Result<pb::LifecycleState, Status> {
-        let cap_id = Self::require("provider_id", cap_id)?;
+        let provider_id = Self::require("provider_id", provider_id)?;
         if new_state == pb::LifecycleState::StateUnspecified {
             return Err(Status::invalid_argument(
                 "state: must not be STATE_UNSPECIFIED",
             ));
         }
         let mut state = self.inner.write().await;
-        let rec = state
+        let provider = state
             .caps
-            .get_mut(cap_id)
-            .ok_or_else(|| Status::not_found(format!("unknown provider_id: {cap_id}")))?;
-        let prev = rec.state();
+            .get_mut(provider_id)
+            .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_id}")))?;
+        let prev = provider.state();
         if !is_legal_transition(prev, new_state) {
             warn!(
-                "[atlas] illegal transition {cap_id}: {:?} -> {:?} (storing anyway, soft-validation v0.1)",
+                "[atlas] illegal transition {provider_id}: {:?} -> {:?} (storing anyway, soft-validation v0.1)",
                 prev, new_state
             );
         }
-        rec.pushed_state = Some(new_state);
-        rec.state_detail = detail.trim().to_string();
+        provider.pushed_state = Some(new_state);
+        provider.state_detail = detail.trim().to_string();
         info!(
-            "[atlas] state {cap_id}: {:?} -> {:?}{}",
+            "[atlas] state {provider_id}: {:?} -> {:?}{}",
             prev,
             new_state,
-            if rec.state_detail.is_empty() {
+            if provider.state_detail.is_empty() {
                 String::new()
             } else {
-                format!(" ({})", rec.state_detail)
+                format!(" ({})", provider.state_detail)
             }
         );
         Ok(prev)
     }
 
     /// Updates `last_heartbeat_ms` to now. Returns the timestamp it set.
-    pub async fn heartbeat(&self, cap_id: &str) -> Result<u64, Status> {
-        let cap_id = Self::require("provider_id", cap_id)?;
+    pub async fn heartbeat(&self, provider_id: &str) -> Result<u64, Status> {
+        let provider_id = Self::require("provider_id", provider_id)?;
         let now = Self::now_ms();
         let mut state = self.inner.write().await;
-        let rec = state
+        let provider = state
             .caps
-            .get_mut(cap_id)
-            .ok_or_else(|| Status::not_found(format!("unknown provider_id: {cap_id}")))?;
-        rec.last_heartbeat_ms = now;
+            .get_mut(provider_id)
+            .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_id}")))?;
+        provider.last_heartbeat_ms = now;
         Ok(now)
     }
 
@@ -442,80 +447,80 @@ impl AtlasRegistry {
     /// Atlas rewrote it to disambiguate on a mintable transport).
     pub async fn declare(
         &self,
-        cap_id: &str,
+        provider_id: &str,
         contract_id: &str,
         transport: Transport,
         proposed: &str,
         params: pb::TransportParams,
         description: &str,
     ) -> Result<String, Status> {
-        let cap_id = Self::require("provider_id", cap_id)?;
+        let provider_id = Self::require("provider_id", provider_id)?;
         let contract_id = Self::require("contract_id", contract_id)?.to_string();
         let params = parse_params(transport, Some(params))?;
         let proposed = proposed.trim().to_string();
 
         let mut state = self.inner.write().await;
-        let rec = state
+        let provider = state
             .caps
-            .get(cap_id)
-            .ok_or_else(|| Status::not_found(format!("unknown provider_id: {cap_id}")))?;
-        if !contract_id.starts_with(&rec.namespace) {
+            .get(provider_id)
+            .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_id}")))?;
+        if !contract_id.starts_with(&provider.namespace) {
             return Err(Status::invalid_argument(format!(
-                "contract_id '{contract_id}' is not under namespace '{}' of capability '{cap_id}'",
-                rec.namespace
+                "contract_id '{contract_id}' is not under namespace '{}' of capability '{provider_id}'",
+                provider.namespace
             )));
         }
-        if rec
+        if provider
             .endpoints
             .iter()
             .any(|e| e.contract_id == contract_id && e.transport == transport)
         {
             return Err(Status::already_exists(format!(
-                "({contract_id}, {transport:?}) already declared by {cap_id}"
+                "({contract_id}, {transport:?}) already declared by {provider_id}"
             )));
         }
 
-        let endpoint = resolve_endpoint(&state, transport, &proposed, &contract_id, cap_id)?;
-        let rec = state
+        let endpoint = resolve_endpoint(&state, transport, &proposed, &contract_id, provider_id)?;
+        let provider = state
             .caps
-            .get_mut(cap_id)
+            .get_mut(provider_id)
             .ok_or_else(|| Status::internal("capability vanished mid-declare"))?;
-        rec.endpoints.push(DeclaredEndpoint {
+        provider.endpoints.push(DeclaredEndpoint {
             contract_id: contract_id.clone(),
             transport,
             endpoint: endpoint.clone(),
             params,
             description: description.to_string(),
         });
-        info!("[atlas] declare {cap_id} {contract_id} via {transport:?} -> {endpoint}");
+        info!("[atlas] declare {provider_id} {contract_id} via {transport:?} -> {endpoint}");
         Ok(endpoint)
     }
 
     /// Snapshot of registered Providers matching the given filters. Empty
-    /// `cap_id` / empty `contract` / `Transport::Unspecified` /
+    /// `provider_id` / empty `contract` / `Transport::Unspecified` /
     /// `Kind::Unspecified` mean "no filter on that field". Each
     /// returned record carries only the Capabilities that satisfy the
     /// `contract` + `transport` filters.
     pub async fn query(
         &self,
-        cap_id: &str,
+        provider_id: &str,
         kind: pb::Kind,
         contract: &str,
         transport: Transport,
     ) -> Vec<pb::CapabilityProvider> {
-        self.query_with_prefix(cap_id, kind, contract, "", transport)
+        self.query_with_prefix(provider_id, kind, contract, "", transport)
             .await
     }
 
     pub async fn query_with_prefix(
         &self,
-        cap_id: &str,
+        provider_id: &str,
         kind: pb::Kind,
         contract: &str,
         namespace_prefix: &str,
         transport: Transport,
     ) -> Vec<pb::CapabilityProvider> {
-        let f_cap_id = cap_id.trim();
+        let f_cap_id = provider_id.trim();
         let f_contract = contract.trim();
         let f_ns_prefix = namespace_prefix.trim();
         let f_transport = if transport == Transport::Unspecified {
@@ -531,39 +536,43 @@ impl AtlasRegistry {
 
         let state = self.inner.read().await;
         let mut out = Vec::new();
-        for rec in state.caps.values() {
-            if !f_cap_id.is_empty() && rec.id != f_cap_id {
+        for provider in state.caps.values() {
+            if !f_cap_id.is_empty() && provider.id != f_cap_id {
                 continue;
             }
             if let Some(k) = f_kind
-                && rec.kind != k
+                && provider.kind != k
             {
                 continue;
             }
-            if !f_ns_prefix.is_empty() && !rec.namespace.starts_with(f_ns_prefix) {
+            if !f_ns_prefix.is_empty() && !provider.namespace.starts_with(f_ns_prefix) {
                 continue;
             }
-            if !f_contract.is_empty() && !rec.endpoints.iter().any(|e| e.contract_id == f_contract)
+            if !f_contract.is_empty()
+                && !provider
+                    .endpoints
+                    .iter()
+                    .any(|e| e.contract_id == f_contract)
             {
                 continue;
             }
-            let capabilities: Vec<pb::Capability> = rec
+            let capabilities: Vec<pb::Capability> = provider
                 .endpoints
                 .iter()
                 .filter(|e| {
                     (f_contract.is_empty() || e.contract_id == f_contract)
                         && f_transport.is_none_or(|t| e.transport == t)
                 })
-                .map(|e| rec.capability_at(e))
+                .map(|e| provider.capability_at(e))
                 .collect();
             out.push(pb::CapabilityProvider {
-                id: rec.id.clone(),
-                kind: rec.kind as i32,
-                namespace: rec.namespace.clone(),
-                capability_md_path: rec.capability_md_path.clone(),
-                last_heartbeat_ms: rec.last_heartbeat_ms,
-                state: rec.state() as i32,
-                state_detail: rec.state_detail.clone(),
+                id: provider.id.clone(),
+                kind: provider.kind as i32,
+                namespace: provider.namespace.clone(),
+                capability_md_path: provider.capability_md_path.clone(),
+                last_heartbeat_ms: provider.last_heartbeat_ms,
+                state: provider.state() as i32,
+                state_detail: provider.state_detail.clone(),
                 capabilities,
             });
         }
@@ -571,7 +580,7 @@ impl AtlasRegistry {
     }
 
     /// Open a channel to one (provider cap, contract, transport). Atlas
-    /// only records the edge — the consumer dials the returned endpoint
+    /// only providers the edge — the consumer dials the returned endpoint
     /// itself (each transport has its own connect protocol; atlas can't
     /// dial generically). Returns the allocated channel handle and the
     /// full binding the consumer needs.
@@ -592,11 +601,11 @@ impl AtlasRegistry {
         }
 
         let mut state = self.inner.write().await;
-        let rec = state
+        let provider = state
             .caps
             .get(&provider_cap_id)
             .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_cap_id}")))?;
-        let ep = rec
+        let ep = provider
             .endpoints
             .iter()
             .find(|e| e.contract_id == contract_id && e.transport == transport)
@@ -644,15 +653,15 @@ impl AtlasRegistry {
 
     /// Read the cap's CAPABILITY.md content. Returns "" when the cap
     /// registered without a path.
-    pub async fn capability_md(&self, cap_id: &str) -> Result<String, Status> {
-        let cap_id = Self::require("provider_id", cap_id)?;
+    pub async fn capability_md(&self, provider_id: &str) -> Result<String, Status> {
+        let provider_id = Self::require("provider_id", provider_id)?;
         let path = {
             let state = self.inner.read().await;
-            let rec = state
+            let provider = state
                 .caps
-                .get(cap_id)
-                .ok_or_else(|| Status::not_found(format!("unknown provider_id: {cap_id}")))?;
-            rec.capability_md_path.clone()
+                .get(provider_id)
+                .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_id}")))?;
+            provider.capability_md_path.clone()
         };
         if path.is_empty() {
             return Ok(String::new());
@@ -660,9 +669,9 @@ impl AtlasRegistry {
         match tokio::fs::read_to_string(&path).await {
             Ok(s) => Ok(s),
             Err(e) => {
-                warn!("[atlas] {cap_id}: read CAPABILITY.md '{path}' failed: {e}");
+                warn!("[atlas] {provider_id}: read CAPABILITY.md '{path}' failed: {e}");
                 Err(Status::internal(format!(
-                    "failed to read CAPABILITY.md for {cap_id}: {e}"
+                    "failed to read CAPABILITY.md for {provider_id}: {e}"
                 )))
             }
         }
@@ -696,7 +705,7 @@ fn parse_params(
             "params required: set TransportParams.kind to the variant matching `transport`",
         )
     })?;
-    let rec = match kind {
+    let provider = match kind {
         Kind::Grpc(g) => TransportParamsState::Grpc {
             proto_file: g.proto_file,
             service_name: g.service_name,
@@ -722,14 +731,14 @@ fn parse_params(
             }
         }
     };
-    if rec.transport() != transport {
+    if provider.transport() != transport {
         return Err(Status::invalid_argument(format!(
             "params: oneof variant {:?} does not match transport {:?}",
-            rec.transport(),
+            provider.transport(),
             transport
         )));
     }
-    Ok(rec)
+    Ok(provider)
 }
 
 fn parse_transport(t: i32) -> Result<Transport, Status> {
@@ -760,9 +769,9 @@ fn resolve_endpoint(
 ) -> Result<String, Status> {
     let mintable = atlas_can_mint(transport);
     let collides = |s: &str| -> bool {
-        state.caps.iter().any(|(other_id, rec)| {
+        state.caps.iter().any(|(other_id, provider)| {
             other_id != own_cap_id
-                && rec
+                && provider
                     .endpoints
                     .iter()
                     .any(|e| e.transport == transport && e.endpoint == s)
@@ -1061,16 +1070,16 @@ async fn eviction_loop(
         let lapsed: Vec<String> = state
             .caps
             .iter()
-            .filter(|(_, rec)| {
-                now.saturating_sub(rec.last_heartbeat_ms) > timeout_ms
-                    && rec.state() != pb::LifecycleState::StateTerminated
+            .filter(|(_, provider)| {
+                now.saturating_sub(provider.last_heartbeat_ms) > timeout_ms
+                    && provider.state() != pb::LifecycleState::StateTerminated
             })
             .map(|(id, _)| id.clone())
             .collect();
         for id in &lapsed {
-            if let Some(rec) = state.caps.get_mut(id) {
-                rec.pushed_state = Some(pb::LifecycleState::StateTerminated);
-                rec.state_detail = format!("heartbeat lapsed > {timeout_ms}ms");
+            if let Some(provider) = state.caps.get_mut(id) {
+                provider.pushed_state = Some(pb::LifecycleState::StateTerminated);
+                provider.state_detail = format!("heartbeat lapsed > {timeout_ms}ms");
             }
             let dropped = state.drop_channels_of(id);
             warn!(
@@ -1083,9 +1092,9 @@ async fn eviction_loop(
         let stale: Vec<String> = state
             .caps
             .iter()
-            .filter(|(_, rec)| {
-                rec.state() == pb::LifecycleState::StateTerminated
-                    && now.saturating_sub(rec.last_heartbeat_ms) > timeout_ms + gc_after_ms
+            .filter(|(_, provider)| {
+                provider.state() == pb::LifecycleState::StateTerminated
+                    && now.saturating_sub(provider.last_heartbeat_ms) > timeout_ms + gc_after_ms
             })
             .map(|(id, _)| id.clone())
             .collect();

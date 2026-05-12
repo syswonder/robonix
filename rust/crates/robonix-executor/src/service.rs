@@ -17,18 +17,18 @@ use tonic::{Request, Response, Status};
 #[derive(Clone)]
 pub struct ExecutorServiceImpl {
     atlas: AtlasClient,
-    /// Executor's own cap_id. Two roles:
+    /// Executor's own provider_id. Two roles:
     ///   1. consumer_id passed to atlas on every ConnectCapability so the
     ///      channel record reflects who is using each downstream cap.
     ///   2. self-detection: when a CapabilityCall in the plan targets this
-    ///      cap_id, dispatch short-circuits to the in-process builtin
+    ///      provider_id, dispatch short-circuits to the in-process builtin
     ///      handlers instead of going through MCP loopback.
-    cap_id: String,
+    provider_id: String,
 }
 
 impl ExecutorServiceImpl {
-    pub fn new(atlas: AtlasClient, cap_id: String) -> Self {
-        Self { atlas, cap_id }
+    pub fn new(atlas: AtlasClient, provider_id: String) -> Self {
+        Self { atlas, provider_id }
     }
 }
 
@@ -43,7 +43,7 @@ impl RobonixSystemExecutor for ExecutorServiceImpl {
         let plan = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let atlas = self.atlas.clone();
-        let cap_id = self.cap_id.clone();
+        let provider_id = self.provider_id.clone();
 
         tokio::spawn(async move {
             let plan_id = plan.plan_id.clone();
@@ -53,7 +53,7 @@ impl RobonixSystemExecutor for ExecutorServiceImpl {
                 let _ = tx
                     .send(Ok(exec_wire::started(
                         call.call_id.clone(),
-                        call.cap_id.clone(),
+                        call.provider_id.clone(),
                         call.contract_id.clone(),
                     )))
                     .await;
@@ -61,11 +61,11 @@ impl RobonixSystemExecutor for ExecutorServiceImpl {
                 log::info!(
                     "[executor] dispatching call_id={} cap='{}' contract='{}'",
                     call.call_id,
-                    call.cap_id,
+                    call.provider_id,
                     call.contract_id,
                 );
                 let mut atlas_for_call = atlas.clone();
-                let result = dispatch::dispatch(call, &cap_id, &mut atlas_for_call).await;
+                let result = dispatch::dispatch(call, &provider_id, &mut atlas_for_call).await;
 
                 if result.success {
                     let preview: String = result.output.chars().take(120).collect();

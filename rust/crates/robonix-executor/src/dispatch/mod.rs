@@ -4,9 +4,9 @@
 // dispatch/mod.rs — route a CapabilityCall to its provider.
 //
 // Two paths:
-//   1. cap_id == executor's own cap_id → run an in-process builtin
+//   1. provider_id == executor's own provider_id → run an in-process builtin
 //      (file ops / shell). The contract_id leaf names the operation.
-//   2. else → ConnectCapability(cap_id, contract_id, MCP) on atlas →
+//   2. else → ConnectCapability(provider_id, contract_id, MCP) on atlas →
 //      MCP call to the returned endpoint → DisconnectCapability.
 //
 // Skills sit at INACTIVE after `rbnx boot`. Right before dispatching
@@ -44,15 +44,15 @@ const DEPLOY_CONSUMER_ID: &str = "com.robonix.executor.skill_activate";
 
 static ACTIVATED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
-fn mark_activated(cap_id: &str) -> bool {
+fn mark_activated(provider_id: &str) -> bool {
     let mut g = ACTIVATED.lock().expect("ACTIVATED poisoned");
     let set = g.get_or_insert_with(HashSet::new);
-    set.insert(cap_id.to_string())
+    set.insert(provider_id.to_string())
 }
 
-fn already_activated(cap_id: &str) -> bool {
+fn already_activated(provider_id: &str) -> bool {
     let g = ACTIVATED.lock().expect("ACTIVATED poisoned");
-    g.as_ref().is_some_and(|s| s.contains(cap_id))
+    g.as_ref().is_some_and(|s| s.contains(provider_id))
 }
 
 fn is_skill_namespace(ns: &str) -> bool {
@@ -74,18 +74,18 @@ pub async fn dispatch(
     self_cap_id: &str,
     atlas: &mut AtlasClient,
 ) -> CapabilityCallResult {
-    if call.cap_id == self_cap_id {
+    if call.provider_id == self_cap_id {
         return builtin::execute(call).await;
     }
 
-    if let Err(e) = ensure_skill_runnable(atlas, &call.cap_id).await {
+    if let Err(e) = ensure_skill_runnable(atlas, &call.provider_id).await {
         return error_result(call, format!("Driver(CMD_ACTIVATE) failed: {e:#}"));
     }
 
     let (channel_id, endpoint, _params) = match atlas
         .connect_capability(
             self_cap_id,
-            &call.cap_id,
+            &call.provider_id,
             &call.contract_id,
             atlas_pb::Transport::Mcp,
         )
@@ -103,53 +103,53 @@ pub async fn dispatch(
     result
 }
 
-/// If `cap_id` is a skill that hasn't been activated in this process
+/// If `provider_id` is a skill that hasn't been activated in this process
 /// yet, resolve its `*/driver` interface and send Driver(CMD_ACTIVATE).
 /// No-op for primitives, services, system caps, and skills already in
 /// ACTIVE.
-async fn ensure_skill_runnable(atlas: &mut AtlasClient, cap_id: &str) -> Result<()> {
-    if already_activated(cap_id) {
-        log::debug!("[skill-activate] {cap_id}: already activated, skipping CMD_ACTIVATE");
+async fn ensure_skill_runnable(atlas: &mut AtlasClient, provider_id: &str) -> Result<()> {
+    if already_activated(provider_id) {
+        log::debug!("[skill-activate] {provider_id}: already activated, skipping CMD_ACTIVATE");
         return Ok(());
     }
-    let recs = atlas
-        .query_capabilities(cap_id, "", atlas_pb::Transport::Unspecified)
+    let providers = atlas
+        .query_capabilities(provider_id, "", atlas_pb::Transport::Unspecified)
         .await
-        .with_context(|| format!("query_capabilities({cap_id})"))?;
-    let Some(rec) = recs.into_iter().next() else {
+        .with_context(|| format!("query_capabilities({provider_id})"))?;
+    let Some(provider) = providers.into_iter().next() else {
         log::info!(
-            "[skill-activate] {cap_id}: not in atlas, letting connect_capability surface the error"
+            "[skill-activate] {provider_id}: not in atlas, letting connect_capability surface the error"
         );
         return Ok(());
     };
-    if !is_skill_namespace(&rec.namespace) {
+    if !is_skill_namespace(&provider.namespace) {
         log::debug!(
-            "[skill-activate] {cap_id} (ns={}): not a skill, no CMD_ACTIVATE",
-            rec.namespace
+            "[skill-activate] {provider_id} (ns={}): not a skill, no CMD_ACTIVATE",
+            provider.namespace
         );
         return Ok(());
     }
-    if rec.state == atlas_pb::LifecycleState::StateActive as i32 {
-        log::info!("[skill-activate] {cap_id}: already ACTIVE per atlas, marking sticky");
-        mark_activated(cap_id);
+    if provider.state == atlas_pb::LifecycleState::StateActive as i32 {
+        log::info!("[skill-activate] {provider_id}: already ACTIVE per atlas, marking sticky");
+        mark_activated(provider_id);
         return Ok(());
     }
     log::info!(
-        "[skill-activate] {cap_id} (ns={}, state={}): sending Driver(CMD_ACTIVATE)",
-        rec.namespace,
-        rec.state
+        "[skill-activate] {provider_id} (ns={}, state={}): sending Driver(CMD_ACTIVATE)",
+        provider.namespace,
+        provider.state
     );
-    let driver_contract = rec
+    let driver_contract = provider
         .capabilities
         .iter()
         .find(|i| i.contract_id.ends_with("/driver"))
         .map(|i| i.contract_id.clone())
-        .ok_or_else(|| anyhow::anyhow!("skill {cap_id} has no */driver interface"))?;
+        .ok_or_else(|| anyhow::anyhow!("skill {provider_id} has no */driver interface"))?;
     let svc_name = contract_id_to_service_name(&driver_contract);
     let (channel_id, endpoint, _) = atlas
         .connect_capability(
             DEPLOY_CONSUMER_ID,
-            cap_id,
+            provider_id,
             &driver_contract,
             atlas_pb::Transport::Grpc,
         )
@@ -201,7 +201,7 @@ async fn ensure_skill_runnable(atlas: &mut AtlasClient, cap_id: &str) -> Result<
             r.error
         );
     }
-    mark_activated(cap_id);
+    mark_activated(provider_id);
     Ok(())
 }
 
@@ -232,7 +232,7 @@ fn contract_id_to_service_name(id: &str) -> String {
 pub(crate) fn error_result(call: &CapabilityCall, msg: String) -> CapabilityCallResult {
     CapabilityCallResult {
         call_id: call.call_id.clone(),
-        cap_id: call.cap_id.clone(),
+        provider_id: call.provider_id.clone(),
         contract_id: call.contract_id.clone(),
         success: false,
         output: String::new(),

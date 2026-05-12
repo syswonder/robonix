@@ -170,8 +170,8 @@ Startup sequence (following the tiago_bridge pattern):
 2. find_default_mic/speaker()    → Select devices
 3. MicDriver / SpeakerDriver()   → Create driver instances
 4. auto-pick ports               → Auto-assign gRPC ports
-5. RegisterNode                  → Atlas registration
-6. DeclareInterface × 2          → Declare mic + speaker interfaces
+5. RegisterPrimitive                  → Atlas registration
+6. DeclareCapability × 2          → Declare mic + speaker capabilities
 7. daemon threads                → Start heartbeat + 2 gRPC servers
 8. main thread sleep             → Block and wait
 ```
@@ -199,7 +199,7 @@ Keep unchanged:
 
 ## Atlas Integration
 
-- **RegisterNode**: `com.robonix.primitive.audio`, namespace `robonix/primitive/audio`, kind `primitive`
-- **DeclareInterface**: mic (server-stream) + speaker (client-stream)
+- **RegisterPrimitive**: `audio_driver`, namespace `robonix/primitive/audio`
+- **DeclareCapability**: mic (server-stream) + speaker (client-stream)
 - **Heartbeat**: Sends NodeHeartbeat every 15 seconds
 - **Degradation**: Automatically runs standalone when Atlas is unavailable

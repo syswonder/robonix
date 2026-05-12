@@ -131,7 +131,7 @@ def build_lifecycle_servicer(
     if servicer_cls is None or add_fn is None:
         log.info(
             "[%s] no %s/driver contract — skipping lifecycle servicer "
-            "(this cap doesn't need a Driver(CMD_INIT) handler).",
+            "(this provider doesn't need a Driver(CMD_INIT) handler).",
             log_tag, namespace,
         )
         return None
@@ -141,7 +141,7 @@ def build_lifecycle_servicer(
     def _emit_state(target: str | None, detail: str = "") -> None:
         """Push state transition to the Capability layer. `target=None`
         means "don't transition; just update detail" (used for Deferred
-        so the cap stays in its current atlas-side state but
+        so the provider stays in its current atlas-side state but
         rbnx caps/state_detail explains why)."""
         if on_state_change is not None:
             try:
@@ -152,7 +152,7 @@ def build_lifecycle_servicer(
     def _post_handler_state(cmd: int, result: Result) -> None:
         """Drive the atlas state machine based on the handler's Result.
         Ok → advance to next state. Err → ERROR. Deferred → no transition
-        (cap stays in current state); the framework / operator decides
+        (provider stays in current state); the framework / operator decides
         whether to retry."""
         if isinstance(result, Err):
             _emit_state("error", result.message)
@@ -214,7 +214,7 @@ def build_lifecycle_servicer(
         log.info("[%s] Driver(cmd=%d) received", log_tag, cmd)
         cfg = parse_cfg(request)
 
-        # CMD_INIT must have a handler — that's where the cap parses
+        # CMD_INIT must have a handler — that's where the provider parses
         # its config + validates dependencies. No reasonable default.
         if cmd == CMD_INIT:
             if on_init is None:
@@ -233,7 +233,7 @@ def build_lifecycle_servicer(
         if cmd == CMD_ACTIVATE:
             if on_activate is None:
                 if is_skill:
-                    err = Err("skill is missing @cap.on_activate handler")
+                    err = Err("skill is missing  @<provider>.on_activate handler")
                     _post_handler_state(cmd, err)
                     return _to_response(cmd, err)
                 _post_handler_state(cmd, Ok())
@@ -245,7 +245,7 @@ def build_lifecycle_servicer(
         if cmd == CMD_DEACTIVATE:
             if on_deactivate is None:
                 if is_skill:
-                    err = Err("skill is missing @cap.on_deactivate handler")
+                    err = Err("skill is missing  @<provider>.on_deactivate handler")
                     _post_handler_state(cmd, err)
                     return _to_response(cmd, err)
                 _post_handler_state(cmd, Ok())
@@ -264,7 +264,7 @@ def build_lifecycle_servicer(
             _post_handler_state(cmd, result)
             return _to_response(cmd, result)
 
-        # Unknown command — proto evolved newer than the cap.
+        # Unknown command — proto evolved newer than the provider.
         err = Err(f"unknown command code {cmd}")
         _post_handler_state(cmd, err)
         return _to_response(cmd, err)
