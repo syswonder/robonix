@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Author: wheatfox <wheatfox17@icloud.com>
 //
-// dispatch/mcp.rs — MCP tool dispatch
+// dispatch/mcp.rs — dispatch a CapabilityCall over MCP transport.
+//
+// (MCP-protocol terminology uses "tool" for the server-side callable.
+// Robonix-side this is a capability with transport=MCP — same thing,
+// different layer. This file just bridges call_tool on the MCP side
+// to CapabilityCall on the executor side.)
 //
 // TODO(executor maintainer): implement full MCP dispatch.
 // Skeleton: connects to the MCP endpoint and calls the named tool.

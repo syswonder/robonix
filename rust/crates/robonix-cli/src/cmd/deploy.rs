@@ -1528,40 +1528,56 @@ async fn wait_for_registration(
                     log_file.display()
                 );
             }
-            if let Some(provider) = matches.first() {
-                let provider_id = provider.id.clone();
-                // RegisterPrimitive/Service/Skill and DeclareCapability are two
-                // separate RPCs from the package side — Register lands first,
-                // declares trickle in over the next ~50ms. A package that's
-                // going to expose a `*/driver` typically declares it within
-                // a few hundred ms. Give it up to a 1s settle window so we
-                // don't false-fire the "no driver" path on a fast poll.
-                let settle_deadline = Instant::now() + Duration::from_millis(1000);
+            if let Some(first) = matches.first() {
+                let provider_id = first.id.clone();
+                // RegisterPrimitive/Service/Skill and DeclareCapability are
+                // two separate RPCs from the package side — Register lands
+                // first, declares follow within a few hundred ms. Give it
+                // up to a 1 s settle window so we don't false-fire the
+                // "no driver" path on a fast poll. Capped by the outer
+                // `deadline` so we never exceed user-facing timeout.
+                let settle_until = Instant::now()
+                    .checked_add(Duration::from_millis(1000))
+                    .map(|t| t.min(deadline))
+                    .unwrap_or(deadline);
+                let mut current: atlas_pb::CapabilityProvider = (*first).clone();
                 let driver_contract_id = loop {
-                    let driver = provider.capabilities.iter().find(|cap| {
+                    let driver = current.capabilities.iter().find(|cap| {
                         cap.transport == atlas_pb::Transport::Grpc as i32
                             && cap.contract_id.ends_with("/driver")
                     });
                     if driver.is_some() {
                         break driver.map(|c| c.contract_id.clone());
                     }
-                    if Instant::now() >= settle_deadline {
+                    if Instant::now() >= settle_until {
                         break None;
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    // Re-fetch the provider record — its `capabilities` list
-                    // grew since we last looked.
                     let providers = atlas
                         .query_capabilities(&provider_id, "", atlas_pb::Transport::Unspecified)
                         .await
                         .with_context(|| format!("[{component}/{pkg_label}] re-poll for driver"))?;
-                    if let Some(p) = providers.iter().find(|p| p.id == provider_id) {
-                        let driver = p.capabilities.iter().find(|cap| {
-                            cap.transport == atlas_pb::Transport::Grpc as i32
-                                && cap.contract_id.ends_with("/driver")
-                        });
-                        if driver.is_some() {
-                            break driver.map(|c| c.contract_id.clone());
+                    match providers.into_iter().find(|p| p.id == provider_id) {
+                        Some(p) => current = p,
+                        None => {
+                            // Provider vanished between the original match
+                            // and now (crashed mid-settle, atlas evicted,
+                            // heartbeat lapsed). Report loudly — silently
+                            // returning "no driver" would let downstream
+                            // boot logic march on against a dead process.
+                            let log_file = log_path(log_dir, pkg_label);
+                            output::boot_fail(
+                                display_label,
+                                &format!(
+                                    "provider '{provider_id}' disappeared during settle — see {}",
+                                    log_file.display()
+                                ),
+                            );
+                            anyhow::bail!(
+                                "[{component}/{pkg_label}] provider '{provider_id}' \
+                                 unregistered during settle window. Log: {}",
+                                log_file.display()
+                            );
                         }
                     }
                 };

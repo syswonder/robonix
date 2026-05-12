@@ -105,8 +105,9 @@ pub async fn dispatch(
 
 /// If `provider_id` is a skill that hasn't been activated in this process
 /// yet, resolve its `*/driver` capability and send Driver(CMD_ACTIVATE).
-/// No-op for primitives, services, system providers, and skills already in
-/// ACTIVE.
+/// No-op for primitives, services, system providers, skills already in
+/// ACTIVE (per atlas), and skills already activated in this executor
+/// process (sticky cache).
 async fn ensure_skill_active(atlas: &mut AtlasClient, provider_id: &str) -> Result<()> {
     if already_activated(provider_id) {
         log::debug!("[skill-activate] {provider_id}: already activated, skipping CMD_ACTIVATE");

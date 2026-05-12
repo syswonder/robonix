@@ -67,7 +67,7 @@ Full first-run walkthrough: [**docs/src/getting-started/quickstart.md**](https:/
 
 Atlas is the single control plane: every capability provider (`primitive` / `service` / `skill`) calls `RegisterPrimitive` / `RegisterService` / `RegisterSkill` + `DeclareCapability(transport, endpoint, params)` on startup; pilot/executor discover via `Query` and open data-plane connections via `ConnectCapability`. Transports are pluggable — gRPC, MCP, ROS 2 — and the contract TOMLs under `capabilities/` describe the schemas all of them are allowed to carry.
 
-Reasoning lives in **Pilot** (LLM + tool-calling agent loop with persistent execution semantics; CAPABILITY.md per provider is lazy-loaded by the LLM via `read_file`). Tool dispatch lives in **Executor** (capability-call routing + a few in-process builtins for filesystem / shell). User-facing dialogue lives in **Liaison** (audio / NLP front-end; pre-dev-packaging code, currently being ported).
+Reasoning lives in **Pilot** (LLM agent loop with persistent execution semantics; CAPABILITY.md per provider is lazy-loaded by the LLM via `read_file`). Capability dispatch lives in **Executor** (capability-call routing + a few in-process builtins for filesystem / shell). User-facing dialogue lives in **Liaison** (audio / NLP front-end + session orchestration; clients talk to Liaison, never to Pilot directly).
 
 Dive deeper:
 - [**Overview**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/overview.md) — control plane, one full request end-to-end
