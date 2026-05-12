@@ -238,7 +238,7 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
         }
     }
     // `system:` non-builtin entries are real packages too (memory / scene
-    // / speech / nexus / …), they just live under `<robonix_source>/system/<key>/`
+    // / speech / …), they just live under `<robonix_source>/system/<key>/`
     // instead of being declared with an explicit `path:` / `url:`. The
     // builtin Rust binaries (atlas / executor / pilot / liaison) are
     // shipped via `cargo install` and skipped here.
