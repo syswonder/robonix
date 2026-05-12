@@ -54,6 +54,7 @@ def _to_idl(o: SceneObject) -> Object:
         x=float(o.pose.x),
         y=float(o.pose.y),
         z=float(o.pose.z),
+        yaw=float(o.pose.yaw),
         last_seen_unix=float(o.last_seen),
     )
 
