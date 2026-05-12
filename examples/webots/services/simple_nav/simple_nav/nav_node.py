@@ -234,6 +234,15 @@ class NavNode:
                                                name="simple-nav-spin",
                                                daemon=True)
         self._spin_thread.start()
+        print(
+            f"[simple_nav] node started: subs odom={self.odom_topic} "
+            f"scan={self.scan_topic} map={self.map_topic} "
+            f"pose={self.pose_topic or '(none)'} "
+            f"depth={self.depth_topic or '(none)'} goal={self.goal_topic} "
+            f"pub cmd={self.cmd_topic} path={self.path_pub_topic} "
+            f"tick=10Hz",
+            flush=True,
+        )
 
     def stop(self) -> None:
         if self._ros is None:
@@ -405,10 +414,68 @@ class NavNode:
             mp = self._map
             depth = self._depth
 
+        # Idle heartbeat — every ~10s, prove the timer is firing even
+        # with no goal. Without this, "I sent /goal_pose but the node
+        # looked dead" is indistinguishable from "the timer never
+        # registered" (e.g. on_init returned early).
+        now_t = time.time()
+        if not hasattr(self, "_last_heartbeat") or now_t - self._last_heartbeat >= 10.0:
+            have = {
+                "pose": pose is not None,
+                "scan": scan is not None,
+                "map":  mp is not None,
+                "goal": g is not None,
+            }
+            print(f"[simple_nav] heartbeat: {have}", flush=True)
+            self._last_heartbeat = now_t
+
         if g is None or g.state != "active":
+            # Surface the goal's terminal state once — without this,
+            # an aborted goal looks identical to "no goal" in the
+            # heartbeat output.
+            if g is not None and not getattr(g, "_terminal_logged", False):
+                print(
+                    f"[simple_nav] goal {g.goal_id} -> {g.state}: {g.detail}",
+                    flush=True,
+                )
+                g._terminal_logged = True
             return
+        # Diagnostic: when there's an active goal but a missing input,
+        # log the gap once per 2s so the operator sees why nothing moves.
+        # (Silently dropping the tick is the source of "goal received,
+        # then nothing happens" tickets.)
+        now_t = time.time()
+        if not hasattr(self, "_last_input_log") or now_t - self._last_input_log >= 2.0:
+            missing = [
+                n for (n, v) in (
+                    ("pose", pose), ("scan", scan), ("map", mp),
+                ) if v is None
+            ]
+            if missing:
+                print(
+                    f"[simple_nav] tick: active goal {g.goal_id} but "
+                    f"missing inputs {missing} — waiting",
+                    flush=True,
+                )
+                self._last_input_log = now_t
         if pose is None:
             return
+
+        # Per-2s "what is the goal doing" log so the operator sees
+        # phase/plan attempts/distance/detail in real time, not just
+        # `goal=True` from the heartbeat.
+        if not hasattr(self, "_last_goal_log") or now_t - self._last_goal_log >= 2.0:
+            rx, ry, ryaw = pose
+            dist = math.hypot(g.target_x - rx, g.target_y - ry)
+            print(
+                f"[simple_nav] goal {g.goal_id} phase={g.phase} "
+                f"state={g.state} dist={dist:.2f}m "
+                f"path_len={len(g.path) if g.path else 0} "
+                f"plan_attempts={g.plan_attempts} "
+                f"detail={g.detail!r}",
+                flush=True,
+            )
+            self._last_goal_log = now_t
 
         # ── Hard emergency stop (360° proximity) ──────────────────────
         # Independent of the planner / costmap / pose tracking. Reads
@@ -574,8 +641,16 @@ class NavNode:
             except Exception as e:  # noqa: BLE001
                 path = None
                 g.detail = f"plan exception: {e}"
+                print(f"[simple_nav] plan exception: {e}", flush=True)
             if path is None or len(path) < 2:
                 g.plan_attempts += 1
+                if g.plan_attempts == 1 or g.plan_attempts % 10 == 0:
+                    print(
+                        f"[simple_nav] planner returned no path "
+                        f"(attempt {g.plan_attempts}): start=({pose[0]:.2f},{pose[1]:.2f}) "
+                        f"goal=({g.target_x:.2f},{g.target_y:.2f}) detail={g.detail!r}",
+                        flush=True,
+                    )
                 if g.plan_attempts > 50:   # ~5s of failed planning
                     g.state = "aborted"
                     g.detail = "no path to goal (after 50 attempts)"
@@ -584,6 +659,12 @@ class NavNode:
             g.path = path
             g.plan_map_counter = current_map_counter
             g.detail = f"plan ok ({len(path)} pts)"
+            print(
+                f"[simple_nav] planned: {len(path)} pts, "
+                f"({pose[0]:.2f},{pose[1]:.2f}) -> "
+                f"({g.target_x:.2f},{g.target_y:.2f})",
+                flush=True,
+            )
             self._publish_path(path)
 
         # ── Run RPP follower against the cached path. ────────────────
@@ -597,6 +678,13 @@ class NavNode:
         in_lethal = (cm is not None and not _passable_at(cm, pose[0], pose[1]))
 
         if in_lethal:
+            if not hasattr(self, "_last_lethal_log") or now_t - self._last_lethal_log >= 2.0:
+                print(
+                    f"[simple_nav] in lethal halo at ({pose[0]:.2f},{pose[1]:.2f}) "
+                    f"cost={cost_at_robot:.2f}; reversing",
+                    flush=True,
+                )
+                self._last_lethal_log = now_t
             # Robot center inside an obstacle's inscribed halo.
             # Reverse straight back along current heading to escape;
             # don't try to plan from a forbidden cell.
@@ -663,6 +751,13 @@ class NavNode:
             forward_clearance_m=forward_clear,
             current_linear_vel=self._last_v,
         )
+        if not hasattr(self, "_last_follower_log") or now_t - self._last_follower_log >= 2.0:
+            print(
+                f"[simple_nav] follower: v={v:.2f} w={w:.2f} mode={mode} "
+                f"clearance={forward_clear:.2f}m cost_at_robot={cost_at_robot:.2f}",
+                flush=True,
+            )
+            self._last_follower_log = now_t
         # Costmap-aware speed cap: scale v by (1 - cost_at_robot). A
         # robot center at the lethal boundary (cost=1) crawls; in the
         # middle of an open room (cost≈0) full desired speed.
