@@ -52,7 +52,14 @@ rbnx-deploy/
 target
 
 .cursor/
-.claude/
+
+# Claude Code local config: ignore session state but track shared
+# repo-level skills / agents / settings so collaborators see them.
+.claude/*
+!.claude/skills/
+!.claude/agents/
+!.claude/settings.json
+
 rbnx-boot
 
 # generated PDFs (developer guide etc.) — keep .md only
