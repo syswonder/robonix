@@ -11,13 +11,13 @@ use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
 pub async fn execute(call: &CapabilityCall, endpoint: &str) -> CapabilityCallResult {
     log::warn!(
         "[grpc] cap='{}' contract='{}' (endpoint='{}') — gRPC dispatch not yet implemented",
-        call.cap_id,
+        call.provider_id,
         call.contract_id,
         endpoint
     );
     CapabilityCallResult {
         call_id: call.call_id.clone(),
-        cap_id: call.cap_id.clone(),
+        provider_id: call.provider_id.clone(),
         contract_id: call.contract_id.clone(),
         success: false,
         output: String::new(),

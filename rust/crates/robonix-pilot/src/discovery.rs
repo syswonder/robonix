@@ -41,7 +41,7 @@ pub fn llm_name(contract_id: &str) -> String {
 /// the executor's `read_file` builtin resolves it (it must be readable
 /// from the executor's host workspace).
 pub struct CapDoc {
-    pub cap_id: String,
+    pub provider_id: String,
     pub namespace: String,
     pub md_path: String,
 }
@@ -50,53 +50,53 @@ pub struct CapDoc {
 /// `capability_md_path`. Pilot lists these in the system prompt and
 /// the LLM read_files them lazily.
 pub async fn cap_md_index(atlas: &mut AtlasClient) -> Result<Vec<CapDoc>> {
-    let records = atlas
+    let providers = atlas
         .query_capabilities("", "", atlas_pb::Transport::Unspecified)
         .await?;
     let mut out = Vec::new();
-    for rec in records {
-        if rec.capability_md_path.is_empty() {
+    for provider in providers {
+        if provider.capability_md_path.is_empty() {
             continue;
         }
         out.push(CapDoc {
-            cap_id: rec.id,
-            namespace: rec.namespace,
-            md_path: rec.capability_md_path,
+            provider_id: provider.id,
+            namespace: provider.namespace,
+            md_path: provider.capability_md_path,
         });
     }
     Ok(out)
 }
 
 /// Query atlas for every MCP-transport interface. Returns one
-/// `(cap_id, Capability)` pair per LLM-callable contract; callers
+/// `(provider_id, Capability)` pair per LLM-callable contract; callers
 /// pull description + input_schema_json out of `params.kind` themselves.
 /// Interfaces with missing or non-MCP params are dropped with a warning.
 pub async fn discover(atlas: &mut AtlasClient) -> Result<Vec<(String, atlas_pb::Capability)>> {
-    let records = atlas
+    let providers = atlas
         .query_capabilities("", "", atlas_pb::Transport::Mcp)
         .await?;
 
     let mut out = Vec::new();
-    for rec in records {
-        for iface in rec.capabilities {
-            if iface.transport != atlas_pb::Transport::Mcp as i32 {
+    for provider in providers {
+        for cap in provider.capabilities {
+            if cap.transport != atlas_pb::Transport::Mcp as i32 {
                 continue;
             }
             // Sanity: an MCP interface without McpParams is malformed —
             // skip rather than feed garbage to the LLM.
             let has_mcp = matches!(
-                iface.params.as_ref().and_then(|p| p.kind.as_ref()),
+                cap.params.as_ref().and_then(|p| p.kind.as_ref()),
                 Some(atlas_pb::transport_params::Kind::Mcp(_))
             );
             if !has_mcp {
                 log::warn!(
                     "[pilot/discovery] cap='{}' contract='{}' has no MCP params; skipping",
-                    rec.id,
-                    iface.contract_id
+                    provider.id,
+                    cap.contract_id
                 );
                 continue;
             }
-            out.push((rec.id.clone(), iface));
+            out.push((provider.id.clone(), cap));
         }
     }
     Ok(out)

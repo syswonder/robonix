@@ -125,11 +125,11 @@ impl LiaisonPipeline {
 async fn resolve_pilot_endpoint(atlas: &Arc<Mutex<AtlasClient>>) -> Option<String> {
     let mut atlas = atlas.lock().await;
     let transport = atlas_pb::Transport::Grpc;
-    let records = atlas
+    let providers = atlas
         .query_capabilities("", "robonix/system/pilot", transport)
         .await
         .ok()?;
-    let cap = records.iter().find(|r| {
+    let cap = providers.iter().find(|r| {
         r.capabilities
             .iter()
             .any(|i| i.contract_id == "robonix/system/pilot" && i.transport == transport as i32)

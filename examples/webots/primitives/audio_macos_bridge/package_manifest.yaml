@@ -30,8 +30,8 @@ package:
   description: Audio primitive that proxies mic/speaker over WebSocket to a macOS daemon.
   license: MulanPSL-2.0
 
-# Distinct cap_id from `audio_driver` (`.alsa`) so both can co-exist in
-# atlas — the rbnx chat cap_id picker then has a real choice. Same
+# Distinct provider_id from `audio_driver` (`.alsa`) so both can co-exist in
+# atlas — the rbnx chat provider_id picker then has a real choice. Same
 # `robonix/primitive/audio/*` contract surface as audio_driver, so
 # consumers (liaison voice path, scene optional audio) don't care
 # which backend is loaded.

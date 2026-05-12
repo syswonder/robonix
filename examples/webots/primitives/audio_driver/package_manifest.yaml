@@ -16,10 +16,10 @@ package:
   description: Audio driver (mic capture + speaker playback) for robonix/primitive/audio contracts
   license: MulanPSL-2.0
 
-# atlas cap_id this package will register at runtime — distinct from
+# atlas provider_id this package will register at runtime — distinct from
 # `package.name` (which is the deployment identity). The `.alsa` suffix
 # distinguishes this from `audio_macos_bridge` so both can co-exist in
-# atlas; the cap_id picker in rbnx chat then has a real choice. Both
+# atlas; the provider_id picker in rbnx chat then has a real choice. Both
 # implementations register the same `robonix/primitive/audio/*`
 # contracts, so consumers (liaison voice path, scene optional audio)
 # don't care which one liaison picked.

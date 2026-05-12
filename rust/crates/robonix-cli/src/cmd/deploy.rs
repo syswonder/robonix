@@ -429,7 +429,7 @@ async fn spawn_package(
         .id()
         .ok_or_else(|| anyhow::anyhow!("spawned package '{name}' but it had no pid"))?;
     // No spawn line here — wait until cap registration and emit one
-    // boot_ok with the cap_id so each component takes ONE line in the
+    // boot_ok with the provider_id so each component takes ONE line in the
     // boot log instead of three (spawn + waiting + registered).
     let kind = match component {
         "system" => "system_package",
@@ -860,8 +860,8 @@ pub async fn execute(
                 started_at_ms,
                 &children,
             );
-            let records = component_records(&children);
-            teardown::teardown(&records).await;
+            let providers = component_records(&children);
+            teardown::teardown(&providers).await;
             let _ = std::fs::remove_file(&state_path);
             return Err(e);
         }
@@ -899,8 +899,8 @@ pub async fn execute(
         _ = sigterm.recv() => {}
     }
     output::action("Stopping", &format!("{} child(ren)", children.len()));
-    let records = component_records(&children);
-    teardown::teardown(&records).await;
+    let providers = component_records(&children);
+    teardown::teardown(&providers).await;
     // Best-effort wait so we get clean "exited" lines in our own log.
     for sp in &mut children {
         let _ = sp.child.wait().await;
@@ -1191,7 +1191,7 @@ async fn spawn_and_init(
     .await?;
     let pkg_label = sp.name.clone();
 
-    // One package = one cap. After spawn, the new cap_id is whatever
+    // One package = one cap. After spawn, the new provider_id is whatever
     // atlas saw register that wasn't in `before`.
 
     // Once the wrapper is up, every error path below must SIGKILL the
@@ -1210,7 +1210,7 @@ async fn spawn_and_init(
         );
     };
 
-    let (cap_id, driver_contract) =
+    let (provider_id, driver_contract) =
         match wait_for_registration(atlas, &before, &pkg_label, component, log_dir).await {
             Ok(v) => v,
             Err(e) => {
@@ -1219,28 +1219,28 @@ async fn spawn_and_init(
             }
         };
 
-    // Spec: the cap_id this process registers (Python's
+    // Spec: the provider_id this process registers (Python's
     // `Capability(id=...)`) MUST equal robonix_manifest.yaml's `name:`
     // for this entry. Mismatch is a deploy bug — surfacing it here
     // beats letting downstream consumers fail with cryptic
     // "no provider for X" errors.
-    if cap_id != entry.name {
+    if provider_id != entry.name {
         let log_file = log_path(log_dir, &pkg_label);
         output::boot_fail(
             short_label(&pkg_label, component),
             &format!(
-                "cap_id mismatch: manifest says name='{}' but Capability(id='{}') registered. \
+                "provider_id mismatch: manifest says name='{}' but Capability(id='{}') registered. \
                  Fix python source to match manifest. Log: {}",
                 entry.name,
-                cap_id,
+                provider_id,
                 log_file.display()
             ),
         );
         reap();
         anyhow::bail!(
-            "[{component}/{pkg_label}] cap_id mismatch: manifest name='{}' vs Capability(id='{}')",
+            "[{component}/{pkg_label}] provider_id mismatch: manifest name='{}' vs Capability(id='{}')",
             entry.name,
-            cap_id,
+            provider_id,
         );
     }
 
@@ -1260,7 +1260,7 @@ async fn spawn_and_init(
         "driver(INIT)…",
         call_driver_cmd(
             atlas,
-            &cap_id,
+            &provider_id,
             &driver_contract,
             component,
             &pkg_label,
@@ -1295,7 +1295,7 @@ async fn spawn_and_init(
         "driver(ACTIVATE)…",
         call_driver_cmd(
             atlas,
-            &cap_id,
+            &provider_id,
             &driver_contract,
             component,
             &pkg_label,
@@ -1313,7 +1313,7 @@ async fn spawn_and_init(
     };
     // Boot succeeded: cap walked REGISTERED → INACTIVE → ACTIVE. Show
     // only the final state — the two intermediate driver calls already
-    // got their own spinner lines and OK ticks above. cap_id is the
+    // got their own spinner lines and OK ticks above. provider_id is the
     // leftmost label so we don't repeat it here.
     let _ = init_state; // intermediate, only kept for the assertion below
     output::boot_ok(display_label, &activate_state.to_uppercase());
@@ -1361,7 +1361,7 @@ where
 /// hygiene.
 async fn call_driver_cmd(
     atlas: &mut AtlasClient,
-    cap_id: &str,
+    provider_id: &str,
     driver_contract: &str,
     component: &str,
     pkg_label: &str,
@@ -1378,7 +1378,7 @@ async fn call_driver_cmd(
     let (channel_id, endpoint, _params) = atlas
         .connect_capability(
             DEPLOY_CONSUMER_ID,
-            cap_id,
+            provider_id,
             driver_contract,
             atlas_pb::Transport::Grpc,
         )
@@ -1463,7 +1463,7 @@ fn contract_id_to_service_name(id: &str) -> String {
 }
 
 /// Poll atlas until a cap NOT in `before` appears. Returns the new
-/// `cap_id` plus an optional `driver_contract_id` if the new cap
+/// `provider_id` plus an optional `driver_contract_id` if the new cap
 /// declared a `*/driver` gRPC capability (signal to the caller that
 /// Driver(CMD_INIT) lifecycle should run).
 /// Strip the leading `<component>_` from the boot-log pkg_label.
@@ -1501,13 +1501,13 @@ async fn wait_for_registration(
             frame,
         );
         if frame.is_multiple_of(POLLS_PER_TICK as usize) {
-            let records = atlas
+            let providers = atlas
                 .query_capabilities("", "", atlas_pb::Transport::Unspecified)
                 .await
                 .with_context(|| format!("[{component}/{pkg_label}] poll atlas"))?;
-            let matches: Vec<&atlas_pb::CapabilityProvider> = records
+            let matches: Vec<&atlas_pb::CapabilityProvider> = providers
                 .iter()
-                .filter(|rec| !before.contains(&rec.id))
+                .filter(|provider| !before.contains(&provider.id))
                 .collect();
             if matches.len() > 1 {
                 let log_file = log_path(log_dir, pkg_label);
@@ -1528,12 +1528,12 @@ async fn wait_for_registration(
                     log_file.display()
                 );
             }
-            if let Some(rec) = matches.first() {
-                let driver = rec.capabilities.iter().find(|iface| {
-                    iface.transport == atlas_pb::Transport::Grpc as i32
-                        && iface.contract_id.ends_with("/driver")
+            if let Some(provider) = matches.first() {
+                let driver = provider.capabilities.iter().find(|cap| {
+                    cap.transport == atlas_pb::Transport::Grpc as i32
+                        && cap.contract_id.ends_with("/driver")
                 });
-                return Ok((rec.id.clone(), driver.map(|i| i.contract_id.clone())));
+                return Ok((provider.id.clone(), driver.map(|i| i.contract_id.clone())));
             }
         }
         if Instant::now() >= deadline {

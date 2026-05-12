@@ -632,13 +632,13 @@ pub async fn execute_start(
     // default empty config).
     let init_task = if let Some(json) = materialized_cfg_json {
         // One package = one cap. Snapshot atlas, then post-spawn diff
-        // gives the new cap_id.
+        // gives the new provider_id.
         let endpoint_for_task = endpoint.clone();
         let before_snapshot = match AtlasClient::connect(&endpoint).await {
             Ok(mut a) => a
                 .query_capabilities("", "", atlas_pb::Transport::Unspecified)
                 .await
-                .map(|recs| recs.into_iter().map(|r| r.id).collect::<HashSet<_>>())
+                .map(|providers| providers.into_iter().map(|r| r.id).collect::<HashSet<_>>())
                 .unwrap_or_default(),
             Err(_) => HashSet::new(),
         };
@@ -705,7 +705,7 @@ async fn drive_cmd_init_after_register(
             ));
             return;
         }
-        let recs = match atlas
+        let providers = match atlas
             .query_capabilities("", "", atlas_pb::Transport::Unspecified)
             .await
         {
@@ -715,12 +715,12 @@ async fn drive_cmd_init_after_register(
                 continue;
             }
         };
-        let match_rec = recs.iter().find(|r| !before.contains(&r.id));
-        let Some(rec) = match_rec else {
+        let match_rec = providers.iter().find(|r| !before.contains(&r.id));
+        let Some(provider) = match_rec else {
             tokio::time::sleep(POLL_INTERVAL).await;
             continue;
         };
-        let driver_iface = rec.capabilities.iter().find(|i| {
+        let driver_iface = provider.capabilities.iter().find(|i| {
             i.transport == atlas_pb::Transport::Grpc as i32 && i.contract_id.ends_with("/driver")
         });
         let Some(driver) = driver_iface else {
@@ -728,13 +728,22 @@ async fn drive_cmd_init_after_register(
             continue;
         };
         let driver_contract = driver.contract_id.clone();
-        let cap_id = rec.id.clone();
-        match call_driver_init(&mut atlas, &cap_id, &driver_contract, config_json.clone()).await {
+        let provider_id = provider.id.clone();
+        match call_driver_init(
+            &mut atlas,
+            &provider_id,
+            &driver_contract,
+            config_json.clone(),
+        )
+        .await
+        {
             Ok(state) => {
-                output::sub_step(&format!("Driver(CMD_INIT) → {cap_id} ok (state={state})"));
+                output::sub_step(&format!(
+                    "Driver(CMD_INIT) → {provider_id} ok (state={state})"
+                ));
             }
             Err(e) => {
-                output::warning(&format!("Driver(CMD_INIT) → {cap_id} failed: {e:#}"));
+                output::warning(&format!("Driver(CMD_INIT) → {provider_id} failed: {e:#}"));
             }
         }
         return;
@@ -746,14 +755,14 @@ async fn drive_cmd_init_after_register(
 /// keep run_package.rs free of cross-module coupling.
 async fn call_driver_init(
     atlas: &mut AtlasClient,
-    cap_id: &str,
+    provider_id: &str,
     driver_contract: &str,
     config_json: String,
 ) -> Result<String> {
     let (channel_id, endpoint, _params) = atlas
         .connect_capability(
             "rbnx-cli/start",
-            cap_id,
+            provider_id,
             driver_contract,
             atlas_pb::Transport::Grpc,
         )

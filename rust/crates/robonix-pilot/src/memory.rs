@@ -25,14 +25,14 @@ pub async fn prefetch(
     executor: &mut ExecutorConn,
     target: Option<(String, String)>,
 ) -> Option<String> {
-    let (cap_id, contract_id) = target?;
+    let (provider_id, contract_id) = target?;
     let plan = Plan {
         plan_id: Uuid::new_v4().to_string(),
         session_id: "memory-prefetch".to_string(),
         round: 0,
         calls: vec![CapabilityCall {
             call_id: Uuid::new_v4().to_string(),
-            cap_id,
+            provider_id,
             contract_id,
             args_json: serde_json::json!({ "data": query }).to_string(),
         }],
@@ -69,9 +69,9 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
             return;
         }
     };
-    let Some((cap_id, iface)) = caps
+    let Some((provider_id, cap)) = caps
         .iter()
-        .find(|(_, iface)| iface.contract_id == "robonix/system/memory/compact")
+        .find(|(_, cap)| cap.contract_id == "robonix/system/memory/compact")
     else {
         return;
     };
@@ -82,8 +82,8 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
         round: 0,
         calls: vec![CapabilityCall {
             call_id: Uuid::new_v4().to_string(),
-            cap_id: cap_id.clone(),
-            contract_id: iface.contract_id.clone(),
+            provider_id: provider_id.clone(),
+            contract_id: cap.contract_id.clone(),
             args_json: "{}".to_string(),
         }],
     };

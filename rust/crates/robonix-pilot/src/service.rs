@@ -84,10 +84,10 @@ pub struct PilotServiceImpl {
     /// each Stream RPC clones it to discover executor concurrently without
     /// serialising on a single mutex.
     atlas: AtlasClient,
-    /// Pilot's own cap_id; passed to atlas as `consumer_id` on every
+    /// Pilot's own provider_id; passed to atlas as `consumer_id` on every
     /// `ConnectCapability` so the channel record reflects who is using
     /// the executor.
-    cap_id: String,
+    provider_id: String,
     vlm: VlmClient,
     histories: Histories,
     /// Per-session cancellation senders. `abort_turn` Task signals this
@@ -96,10 +96,10 @@ pub struct PilotServiceImpl {
 }
 
 impl PilotServiceImpl {
-    pub fn new(atlas: AtlasClient, cap_id: String, vlm: VlmClient) -> Self {
+    pub fn new(atlas: AtlasClient, provider_id: String, vlm: VlmClient) -> Self {
         Self {
             atlas,
-            cap_id,
+            provider_id,
             vlm,
             histories: Arc::new(Mutex::new(HashMap::new())),
             cancels: Arc::new(Mutex::new(HashMap::new())),
@@ -159,7 +159,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
         // MPSC: Multiple Producer Single Consumer
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(64);
         let atlas = self.atlas.clone();
-        let cap_id = self.cap_id.clone();
+        let provider_id = self.provider_id.clone();
         let vlm = self.vlm.clone();
         let session_id = task.session_id.clone();
         let cancels = Arc::clone(&self.cancels);
@@ -180,7 +180,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
                 .await;
 
             let mut atlas_for_turn = atlas.clone();
-            let mut executor = match build_executor_conn(atlas, &cap_id).await {
+            let mut executor = match build_executor_conn(atlas, &provider_id).await {
                 Ok(e) => e,
                 Err(e) => {
                     let _ = tx
@@ -200,7 +200,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
                 &vlm,
                 &mut executor,
                 &mut atlas_for_turn,
-                &cap_id,
+                &provider_id,
                 &tx,
                 cancel_rx,
             )

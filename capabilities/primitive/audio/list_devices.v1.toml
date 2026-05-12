@@ -5,9 +5,9 @@
 # selection in caps that already have an internal "many physical
 # devices behind one logical handle" structure.
 #
-# Cap = robonix-level identity (`com.robonix.primitive.audio.alsa`).
-# Audio device = the specific bit of hardware that one cap routes to.
-# These are different concepts. The 1-package = 1-cap = 1-cap_id rule
+# Primitive = robonix-level identity (`com.robonix.primitive.audio.alsa`).
+# Audio device = the specific bit of hardware that one primitive routes to.
+# These are different concepts. The 1-package = 1-primitive = 1-id rule
 # is unchanged; this contract is just a way for a multi-device
 # driver to surface its internal routing table.
 #

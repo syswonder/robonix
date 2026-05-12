@@ -42,7 +42,7 @@ def _set_lifecycle_state(
     Atlas-side validation is SOFT: illegal transitions are logged but
     still applied. Unknown state (UNSPECIFIED) is hard-rejected with a
     gRPC InvalidArgument; we drop those locally without raising so a
-    misuse doesn't crash the cap process.
+    misuse doesn't crash the provider process.
     """
     cs = _resolve_state(state)
     if cs == LifecycleState.UNSPECIFIED:

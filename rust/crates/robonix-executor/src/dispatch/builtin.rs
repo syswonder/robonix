@@ -70,7 +70,7 @@ pub async fn execute(call: &CapabilityCall) -> CapabilityCallResult {
     let result = run(op, &call.args_json).await;
     let mut out = CapabilityCallResult {
         call_id: call.call_id.clone(),
-        cap_id: call.cap_id.clone(),
+        provider_id: call.provider_id.clone(),
         contract_id: call.contract_id.clone(),
         ..Default::default()
     };
@@ -333,7 +333,7 @@ mod tests {
     fn call(call_id: &str, op: &str, args_json: &str) -> CapabilityCall {
         CapabilityCall {
             call_id: call_id.to_string(),
-            cap_id: "executor".to_string(),
+            provider_id: "executor".to_string(),
             contract_id: format!("robonix/system/executor/builtin/{op}"),
             args_json: args_json.to_string(),
         }

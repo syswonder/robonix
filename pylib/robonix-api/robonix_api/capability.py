@@ -153,7 +153,7 @@ class _ProviderBase:
         self._on_deactivate: Callable | None = None
         self._on_shutdown: Callable | None = None
 
-        # Lifecycle state. Source of truth on the cap side; pushed to
+        # Lifecycle state. Source of truth on the provider side; pushed to
         # atlas via the privileged `_set_lifecycle_state` whenever it
         # transitions.
         self._state: LifecycleState = LifecycleState.REGISTERED

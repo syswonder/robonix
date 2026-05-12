@@ -67,7 +67,7 @@ class FieldSpec:
 class Capability:
     """One declared Capability on a CapabilityProvider, mirrored from
     `pb::Capability`. Carries provider_id / provider_kind so consumers can
-    flatten without rebuilding the relationship from outer records.
+    flatten without rebuilding the relationship from outer providers.
     `endpoint` is omitted on purpose (see ConnectCapability)."""
 
     provider_id: str

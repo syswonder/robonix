@@ -195,9 +195,9 @@ async fn discover_liaison(atlas_endpoint: &str) -> Result<String> {
 async fn try_discover_once(atlas_endpoint: &str, contract_id: &str) -> Result<String> {
     let mut atlas = AtlasClient::connect(atlas_endpoint).await?;
     let transport = atlas_pb::Transport::Grpc;
-    let records = atlas.query_capabilities("", contract_id, transport).await?;
-    for rec in &records {
-        let has = rec
+    let providers = atlas.query_capabilities("", contract_id, transport).await?;
+    for provider in &providers {
+        let has = provider
             .capabilities
             .iter()
             .any(|i| i.contract_id == contract_id && i.transport == transport as i32);
@@ -205,7 +205,7 @@ async fn try_discover_once(atlas_endpoint: &str, contract_id: &str) -> Result<St
             continue;
         }
         let (_, endpoint, _) = atlas
-            .connect_capability(CONSUMER_ID, &rec.id, contract_id, transport)
+            .connect_capability(CONSUMER_ID, &provider.id, contract_id, transport)
             .await?;
         if endpoint.is_empty() {
             continue;
@@ -225,7 +225,7 @@ async fn try_discover_once(atlas_endpoint: &str, contract_id: &str) -> Result<St
 // Resolution order for mic/speaker capability_ids when starting a voice
 // session is: ROBONIX_CHAT_*_NODE env (highest, overrides everything) →
 // chat.yaml on disk → first-run TUI picker. The picker only fires when
-// neither env nor config supplies the cap_id; once chosen it's saved
+// neither env nor config supplies the provider_id; once chosen it's saved
 // to ~/.robonix/chat.yaml so future sessions don't ask again. To
 // re-pick: delete that file (or just edit it), re-run rbnx chat.
 //
@@ -324,8 +324,8 @@ async fn pick_audio_settings(
         )
         .await
         {
-            Ok(Some((cap_id, device_id))) => {
-                cfg.mic_cap_id = Some(cap_id);
+            Ok(Some((provider_id, device_id))) => {
+                cfg.mic_cap_id = Some(provider_id);
                 cfg.mic_device_id = Some(device_id);
             }
             Ok(None) => warnings.push(
@@ -349,8 +349,8 @@ async fn pick_audio_settings(
         )
         .await
         {
-            Ok(Some((cap_id, device_id))) => {
-                cfg.speaker_cap_id = Some(cap_id);
+            Ok(Some((provider_id, device_id))) => {
+                cfg.speaker_cap_id = Some(provider_id);
                 cfg.speaker_device_id = Some(device_id);
             }
             Ok(None) => warnings.push(
@@ -372,7 +372,7 @@ async fn pick_audio_settings(
 /// or removed — caller drops the pin and re-prompts the picker instead of
 /// silently letting voice fail with "no provider".
 async fn pin_exists_in_atlas(atlas: &mut AtlasClient, pin: &str, contract: &str) -> bool {
-    let Ok(records) = atlas
+    let Ok(providers) = atlas
         .query_capabilities("", contract, atlas_pb::Transport::Grpc)
         .await
     else {
@@ -380,10 +380,10 @@ async fn pin_exists_in_atlas(atlas: &mut AtlasClient, pin: &str, contract: &str)
         // the outer caller already warned and degraded.
         return true;
     };
-    records.iter().any(|r| r.id == pin || r.namespace == pin)
+    providers.iter().any(|r| r.id == pin || r.namespace == pin)
 }
 
-/// `Ok(Some((cap_id, device_id)))` = picked both layers; device_id may be ""
+/// `Ok(Some((provider_id, device_id)))` = picked both layers; device_id may be ""
 /// when the impl returned UNIMPLEMENTED on list_devices.
 /// `Ok(None)` = no providers in atlas.
 #[allow(clippy::too_many_arguments)]
@@ -404,12 +404,12 @@ async fn try_pick(
         return Ok(None);
     }
 
-    // Layer A — provider (cap_id). FirstRun honours the saved choice
+    // Layer A — provider (provider_id). FirstRun honours the saved choice
     // when it's still in atlas, or auto-picks the lone provider with a
     // 400 ms flash. Reconfigure (Ctrl+A) ALWAYS shows the TUI even
     // for a single entry — auto-pick on Ctrl+A looks identical to
     // "Ctrl+A did nothing", which is what the user just hit.
-    let cap_id = match (mode, saved_cap_id) {
+    let provider_id = match (mode, saved_cap_id) {
         (PickMode::FirstRun, Some(s)) if providers.iter().any(|p| p.id == s) => s.to_string(),
         (PickMode::FirstRun, _) if providers.len() == 1 => {
             let id = providers[0].id.clone();
@@ -424,26 +424,34 @@ async fn try_pick(
 
     // Layer B — device id within the chosen impl. Connect to its
     // list_devices contract (UNIMPLEMENTED is OK — fall through with "").
-    let device_id =
-        pick_device_for_cap(atlas, terminal, &cap_id, label, kind, saved_device_id, mode).await?;
+    let device_id = pick_device_for_cap(
+        atlas,
+        terminal,
+        &provider_id,
+        label,
+        kind,
+        saved_device_id,
+        mode,
+    )
+    .await?;
 
     // Tell the impl which device to use. Best-effort; ignore failures.
     if !device_id.is_empty()
-        && let Err(e) = call_select_device(atlas, &cap_id, kind, &device_id).await
+        && let Err(e) = call_select_device(atlas, &provider_id, kind, &device_id).await
     {
-        log::warn!("SelectAudioDevice on {cap_id} ({kind}={device_id}) failed: {e:#}");
+        log::warn!("SelectAudioDevice on {provider_id} ({kind}={device_id}) failed: {e:#}");
     }
 
-    Ok(Some((cap_id, device_id)))
+    Ok(Some((provider_id, device_id)))
 }
 
-/// Connect to `cap_id`'s list_devices interface, ask for the device
+/// Connect to `provider_id`'s list_devices interface, ask for the device
 /// list, run a picker on the entries that match `kind` (input/output)
 /// + duplex. Returns "" when the impl doesn't expose the contract.
 async fn pick_device_for_cap(
     atlas: &mut AtlasClient,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    cap_id: &str,
+    provider_id: &str,
     label: &str,
     kind: &str,
     saved_device_id: Option<&str>,
@@ -460,7 +468,7 @@ async fn pick_device_for_cap(
     let endpoint = match atlas
         .connect_capability(
             CONSUMER_ID,
-            cap_id,
+            provider_id,
             LIST_CONTRACT,
             atlas_pb::Transport::Grpc,
         )
@@ -478,7 +486,7 @@ async fn pick_device_for_cap(
                 flash_picker_message(
                     terminal,
                     &format!(
-                        "{cap_id} doesn't expose list_devices — \
+                        "{provider_id} doesn't expose list_devices — \
                          using OS default device. Rebuild the package \
                          (bash scripts/build.sh) to pick up the new contract."
                     ),
@@ -492,7 +500,10 @@ async fn pick_device_for_cap(
         Ok(c) => c,
         Err(e) => {
             if reconf {
-                flash_picker_message(terminal, &format!("connect list_devices on {cap_id}: {e}"))?;
+                flash_picker_message(
+                    terminal,
+                    &format!("connect list_devices on {provider_id}: {e}"),
+                )?;
             }
             return Ok(String::new());
         }
@@ -504,7 +515,7 @@ async fn pick_device_for_cap(
         Ok(r) => r.into_inner(),
         Err(e) => {
             if reconf {
-                flash_picker_message(terminal, &format!("ListAudioDevices on {cap_id}: {e}"))?;
+                flash_picker_message(terminal, &format!("ListAudioDevices on {provider_id}: {e}"))?;
             }
             return Ok(String::new());
         }
@@ -519,7 +530,7 @@ async fn pick_device_for_cap(
         if reconf {
             flash_picker_message(
                 terminal,
-                &format!("{cap_id} reports no {kind} devices — using OS default"),
+                &format!("{provider_id} reports no {kind} devices — using OS default"),
             )?;
         }
         return Ok(String::new());
@@ -557,7 +568,7 @@ async fn pick_device_for_cap(
 
 async fn call_select_device(
     atlas: &mut AtlasClient,
-    cap_id: &str,
+    provider_id: &str,
     kind: &str,
     device_id: &str,
 ) -> Result<()> {
@@ -567,7 +578,7 @@ async fn call_select_device(
     let (_, ep, _) = atlas
         .connect_capability(
             CONSUMER_ID,
-            cap_id,
+            provider_id,
             SELECT_CONTRACT,
             atlas_pb::Transport::Grpc,
         )
@@ -745,18 +756,18 @@ struct AudioSettingsPage {
 
 async fn fetch_devices_filtered(
     atlas: &mut AtlasClient,
-    cap_id: &str,
+    provider_id: &str,
     kind: &str,
 ) -> Vec<crate::pb::audio::AudioDevice> {
     use crate::pb::contracts::robonix_primitive_audio_list_devices_client::RobonixPrimitiveAudioListDevicesClient;
     const LIST_CONTRACT: &str = "robonix/primitive/audio/list_devices";
-    if cap_id.is_empty() {
+    if provider_id.is_empty() {
         return Vec::new();
     }
     let endpoint = match atlas
         .connect_capability(
             CONSUMER_ID,
-            cap_id,
+            provider_id,
             LIST_CONTRACT,
             atlas_pb::Transport::Grpc,
         )
