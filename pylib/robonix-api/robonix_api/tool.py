@@ -2,7 +2,7 @@
 """Contract-enforced MCP tools on top of FastMCP + robonix-codegen ROS dataclasses.
 
 The decorator stashes the codegen IO classes + contract id on the original
-handler so Capability.run() can derive atlas DeclareInterface metadata
+handler so Capability.run() can derive atlas DeclareCapability metadata
 (JSON Schema, description) without re-reflecting annotations.
 """
 from __future__ import annotations

@@ -203,7 +203,7 @@ def _resolve_one_contract(
     except Exception as e:  # noqa: BLE001
         log.warning(
             "[scene] connect_capability(%s/%s) failed: %s",
-            cap_view.owner_id, contract_id, e,
+            cap_view.provider_id, contract_id, e,
         )
         return None
     endpoint = (ch.endpoint or "").strip()
@@ -215,13 +215,13 @@ def _resolve_one_contract(
         qos_profile = ch.params.qos_profile or ""
     # Only log on first resolution / change. The auto-discover loop
     # re-resolves every ~5s; spamming the same line every cycle is noise.
-    sig = (endpoint, msg_type, qos_profile or "default", cap_view.owner_id)
+    sig = (endpoint, msg_type, qos_profile or "default", cap_view.provider_id)
     prev = _LAST_RESOLVED.get((transport, contract_id))
     if prev != sig:
         log.info(
             "[scene] %r ← atlas: topic=%s msg=%s qos=%s contract=%s cap=%s",
             kind, endpoint, msg_type, qos_profile or "default",
-            contract_id, cap_view.owner_id,
+            contract_id, cap_view.provider_id,
         )
         _LAST_RESOLVED[(transport, contract_id)] = sig
     return TopicSpec(

@@ -35,7 +35,7 @@ Audio adaptation:
 
 Atlas integration:
   On startup, the service optionally registers with the Atlas control plane
-  (RegisterNode + DeclareInterface x 5). If Atlas is unavailable, the service
+  (RegisterService + DeclareCapability x 5). If Atlas is unavailable, the service
   runs in standalone mode. Set SPEECH_STANDALONE=1 to skip registration.
 
 Environment variables:

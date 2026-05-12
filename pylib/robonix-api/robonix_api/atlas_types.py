@@ -66,12 +66,12 @@ class FieldSpec:
 @dataclass(frozen=True, slots=True)
 class Capability:
     """One declared Capability on a CapabilityProvider, mirrored from
-    `pb::Capability`. Carries owner_id / owner_kind so consumers can
+    `pb::Capability`. Carries provider_id / provider_kind so consumers can
     flatten without rebuilding the relationship from outer records.
     `endpoint` is omitted on purpose (see ConnectCapability)."""
 
-    owner_id: str
-    owner_kind: Kind
+    provider_id: str
+    provider_kind: Kind
     contract_id: str
     transport: Transport
     description: str = ""
@@ -110,11 +110,11 @@ class ContractDescriptor:
 
 @dataclass
 class Channel:
-    """Open consumer->owner edge returned by `ATLAS.connect_capability`.
+    """Open consumer->provider edge returned by `ATLAS.connect_capability`.
     Context-manager — `__exit__` calls `close()` (which fires
     `DisconnectCapability` on atlas, idempotent)."""
 
-    owner_id: str
+    provider_id: str
     contract_id: str
     transport: Transport
     endpoint: str
@@ -174,8 +174,8 @@ def from_pb_params(transport: Transport, pb_params) -> GrpcParams | Ros2Params |
 def from_pb_capability(pb_cap) -> Capability:
     transport = Transport(pb_cap.transport)
     return Capability(
-        owner_id=pb_cap.owner_id,
-        owner_kind=Kind(pb_cap.owner_kind),
+        provider_id=pb_cap.provider_id,
+        provider_kind=Kind(pb_cap.provider_kind),
         contract_id=pb_cap.contract_id,
         transport=transport,
         description=pb_cap.description,
