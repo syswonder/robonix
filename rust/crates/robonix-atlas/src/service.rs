@@ -118,7 +118,7 @@ struct CapabilityProviderState {
     endpoints: Vec<DeclaredEndpoint>,
     /// Last value reported by SetLifecycleState. None for Providers
     /// that never push, in which case `state()` falls back to the
-    /// "first non-driver interface declare -> INACTIVE" inference.
+    /// "first non-driver capability declare -> INACTIVE" inference.
     #[serde(serialize_with = "serialize_pushed_state")]
     pushed_state: Option<pb::LifecycleState>,
     state_detail: String,
@@ -126,11 +126,11 @@ struct CapabilityProviderState {
 
 impl CapabilityProviderState {
     /// Convert one of this record's endpoints to a wire `pb::Capability`,
-    /// stamping owner_id / owner_kind from the parent record.
+    /// stamping provider_id / provider_kind from the parent record.
     fn capability_at(&self, e: &DeclaredEndpoint) -> pb::Capability {
         pb::Capability {
-            owner_id: self.id.clone(),
-            owner_kind: self.kind as i32,
+            provider_id: self.id.clone(),
+            provider_kind: self.kind as i32,
             contract_id: e.contract_id.clone(),
             transport: e.transport as i32,
             params: Some((&e.params).into()),
@@ -158,7 +158,7 @@ impl CapabilityProviderState {
     /// Lifecycle state. The cap pushes via SetCapabilityState whenever its
     /// on_init / on_activate / on_deactivate handler returns; that pushed
     /// value wins. For legacy caps that never push, fall back to "any
-    /// non-driver interface declared → INACTIVE" (preserves behaviour
+    /// non-driver capability declared → INACTIVE" (preserves behaviour
     /// for code still on the old register-then-declare-only flow).
     fn state(&self) -> pb::LifecycleState {
         if let Some(s) = self.pushed_state {
@@ -200,7 +200,7 @@ fn is_driver_contract(contract_id: &str) -> bool {
     // Per-area lifecycle drivers: `robonix/primitive/<area>/driver`,
     // `robonix/service/<area>/driver`. The `{CAP_CLASS}/driver` template in
     // `capabilities/{primitive,service}/driver.v1.toml` is concretised by
-    // the cap to its area at DeclareInterface time.
+    // the cap to its area at DeclareCapability time.
     contract_id.ends_with("/driver")
 }
 
@@ -286,13 +286,13 @@ impl AtlasRegistry {
     }
 
     /// Register a new capability instance, OR take over an existing
-    /// cap_id slot whose previous owner is gone. Empty `cap_id` triggers
+    /// cap_id slot whose previous provider is gone. Empty `cap_id` triggers
     /// Atlas-assigned ephemeral id. Returns the resolved id.
     ///
     /// Takeover semantics — a re-Register on an existing cap_id is NOT
     /// an error. We assume the old process is dead (or about to be), so
     /// we drop its endpoints + state and reset last_heartbeat to now.
-    /// The caller is then expected to redeclare interfaces with its own
+    /// The caller is then expected to redeclare capabilities with its own
     /// fresh endpoints. Without this, an orphan cap (heartbeat eviction
     /// hasn't fired yet — 60s default) blocks every subsequent boot of
     /// the same package: rbnx waits for a "new" cap to appear in atlas,
@@ -327,7 +327,7 @@ impl AtlasRegistry {
                     existing.kind, kind
                 )));
             }
-            // Same-kind takeover. Drop the previous owner's endpoints
+            // Same-kind takeover. Drop the previous provider's endpoints
             // and pushed state; the caller will redeclare what it owns.
             // Channels targeting dropped Capabilities are also auto-closed.
             let prev_iface_count = existing.endpoints.len();
@@ -743,7 +743,7 @@ fn parse_transport(t: i32) -> Result<Transport, Status> {
     Ok(v)
 }
 
-/// Pick a globally-unique endpoint per the rules on `DeclareInterfaceRequest`.
+/// Pick a globally-unique endpoint per the rules on `DeclareCapabilityRequest`.
 ///
 /// "Globally unique" here means: no *other* cap may already own this
 /// `(transport, endpoint)` pair. The cap itself is allowed to expose multiple
@@ -923,7 +923,7 @@ impl pb::atlas_server::Atlas for AtlasService {
         let endpoint = self
             .registry
             .declare(
-                &r.owner_id,
+                &r.provider_id,
                 &r.contract_id,
                 transport,
                 &r.endpoint,
@@ -956,7 +956,7 @@ impl pb::atlas_server::Atlas for AtlasService {
         let transport = parse_transport(r.transport)?;
         let (channel_id, endpoint, params) = self
             .registry
-            .connect(&r.consumer_id, &r.owner_id, &r.contract_id, transport)
+            .connect(&r.consumer_id, &r.provider_id, &r.contract_id, transport)
             .await?;
         Ok(Response::new(pb::ConnectCapabilityResponse {
             channel_id,

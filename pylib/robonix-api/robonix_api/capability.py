@@ -3,7 +3,7 @@
 
 A Robonix package instantiates exactly one of these. The framework
 talks to atlas (RegisterPrimitive/Service/Skill + DeclareCapability +
-Heartbeat), serves the lifecycle gRPC interface
+Heartbeat), serves the lifecycle gRPC API
 (Driver(CMD_INIT/ACTIVATE/DEACTIVATE/SHUTDOWN)), and provides thin
 helpers over rclpy / grpcio / FastMCP for the most common patterns.
 
@@ -253,7 +253,7 @@ class _ProviderBase:
         description from the TOML at consume time" (the two are merged,
         not picked-one-of)."""
         return ATLAS.declare_capability(
-            owner_id=self.id,
+            provider_id=self.id,
             contract_id=contract_id,
             transport=transport,
             endpoint=endpoint,
@@ -336,18 +336,18 @@ class _ProviderBase:
 
     def connect_capability(
         self,
-        owner: CapabilityProvider | Capability,
+        provider: CapabilityProvider | Capability,
         contract_id: str,
         transport: Transport | str | int,
     ) -> Channel:
         """Open a channel to another CapabilityProvider's Capability.
-        `owner` may be a `CapabilityProvider` (from `ATLAS.query_*`) or a
+        `provider` may be a `CapabilityProvider` (from `ATLAS.query_*`) or a
         `Capability` (from `ATLAS.find_capability`); both carry the
-        owner id."""
-        owner_id = owner.id if isinstance(owner, CapabilityProvider) else owner.owner_id
+        provider id."""
+        provider_id = provider.id if isinstance(provider, CapabilityProvider) else provider.provider_id
         ch = ATLAS.connect_capability(
             consumer_id=self.id,
-            owner_id=owner_id,
+            provider_id=provider_id,
             contract_id=contract_id,
             transport=transport,
         )
@@ -671,7 +671,7 @@ class _ProviderBase:
         self._driver_server = server
         log.info("Lifecycle gRPC serving on 0.0.0.0:%d", self._driver_port)
 
-        # 3. atlas-declare every gRPC interface
+        # 3. atlas-declare every gRPC capability
         endpoint = f"127.0.0.1:{self._driver_port}"
         if driver_decl is not None:
             driver_base, driver_method = driver_decl

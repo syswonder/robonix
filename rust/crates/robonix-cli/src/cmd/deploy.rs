@@ -7,8 +7,8 @@
 //     CLI arguments translated from the manifest block (`--listen`,
 //     `--log`, `--vlm-*`, …). No env-var translation, no YAML config files.
 //   - Package entries (`primitive` / `service`) are launched serially:
-//     spawn → wait for the package to register a cap with a `*/driver`
-//     interface on atlas → call Driver(CMD_INIT, config_json) → wait for
+//     spawn → wait for the package to register a provider with a `*/driver`
+//     capability on atlas → call Driver(CMD_INIT, config_json) → wait for
 //     `ok=true`. Only after every primitive's driver returns ok do we move
 //     on to `service:` (which can depend on primitive data being ready).
 //     The package's `config:` block is JSON-encoded and delivered ONLY via
@@ -52,7 +52,7 @@ const CMD_DEACTIVATE: u32 = 2;
 #[allow(dead_code)]
 const CMD_SHUTDOWN: u32 = 3;
 // How long to wait for a freshly spawned package to register its driver
-// interface with atlas before giving up.
+// capability with atlas before giving up.
 const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
 // How long Driver(CMD_INIT) is given to return.
 // 90s gives generous slack for slow-warming sensors (webots's camera
@@ -1158,9 +1158,9 @@ fn system_cli_args(
 
 /// Spawn one primitive / service package and wait for it to register
 /// at least one capability with atlas. If the new cap has a `*/driver`
-/// gRPC interface, also drive Driver(CMD_INIT) and pass the entry's
+/// gRPC capability, also drive Driver(CMD_INIT) and pass the entry's
 /// `config:` as `config_json`. Packages that don't declare a driver
-/// (legacy RegisterNode + DeclareInterface, or new packages that just
+/// (e.g. system packages or new packages that just
 /// don't need init-time wiring) are deployed as-is once their first cap
 /// appears in atlas.
 async fn spawn_and_init(
@@ -1464,7 +1464,7 @@ fn contract_id_to_service_name(id: &str) -> String {
 
 /// Poll atlas until a cap NOT in `before` appears. Returns the new
 /// `cap_id` plus an optional `driver_contract_id` if the new cap
-/// declared a `*/driver` gRPC interface (signal to the caller that
+/// declared a `*/driver` gRPC capability (signal to the caller that
 /// Driver(CMD_INIT) lifecycle should run).
 /// Strip the leading `<component>_` from the boot-log pkg_label.
 /// `system_memory` → `memory`; `primitive_tiago_chassis` → `tiago_chassis`.

@@ -187,7 +187,7 @@ class _Atlas:
 
     def declare_capability(
         self,
-        owner_id: str,
+        provider_id: str,
         contract_id: str,
         transport: Transport | str | int,
         endpoint: str,
@@ -201,7 +201,7 @@ class _Atlas:
         pb_params = self._params_to_pb(transport, params)
         try:
             resp = self._wire_stub.DeclareCapability(self._wire_pb.DeclareCapabilityRequest(
-                owner_id=owner_id,
+                provider_id=provider_id,
                 contract_id=contract_id,
                 transport=self._transport_enum(transport),
                 endpoint=endpoint,
@@ -212,7 +212,7 @@ class _Atlas:
         except grpc.RpcError as e:
             if e.code() == grpc.StatusCode.ALREADY_EXISTS:
                 log.debug("declare %s/%s/%s already exists; ok",
-                          owner_id, contract_id, _resolve_transport(transport).name)
+                          provider_id, contract_id, _resolve_transport(transport).name)
                 return endpoint
             raise
 
@@ -313,16 +313,16 @@ class _Atlas:
         *,
         contract_id: str = "",
         transport: Transport | str | int = Transport.UNSPECIFIED,
-        owner_kind: Kind | str | int = Kind.UNSPECIFIED,
-        owner_id: str = "",
+        provider_kind: Kind | str | int = Kind.UNSPECIFIED,
+        provider_id: str = "",
         namespace_prefix: str = "",
     ) -> list[Capability]:
         """Flat consumer-facing list of Capabilities matching the filters.
         Walks Query() and flattens each provider's `capabilities[]`. Each
-        returned `Capability` already carries owner_id / owner_kind."""
+        returned `Capability` already carries provider_id / provider_kind."""
         providers = self.query(
-            kind=owner_kind,
-            id=owner_id,
+            kind=provider_kind,
+            id=provider_id,
             contract_id=contract_id,
             namespace_prefix=namespace_prefix,
             transport=transport,
@@ -338,8 +338,8 @@ class _Atlas:
         *,
         contract_id: str,
         transport: Transport | str | int = Transport.UNSPECIFIED,
-        owner_kind: Kind | str | int = Kind.UNSPECIFIED,
-        owner_id: str = "",
+        provider_kind: Kind | str | int = Kind.UNSPECIFIED,
+        provider_id: str = "",
         namespace_prefix: str = "",
     ) -> Capability:
         """Like find_capability but expects exactly one match. Raises
@@ -347,7 +347,7 @@ class _Atlas:
         capability" wiring where ambiguity is a config bug."""
         caps = self.find_capability(
             contract_id=contract_id, transport=transport,
-            owner_kind=owner_kind, owner_id=owner_id,
+            provider_kind=provider_kind, provider_id=provider_id,
             namespace_prefix=namespace_prefix,
         )
         if not caps:
@@ -355,10 +355,10 @@ class _Atlas:
                 f"find_unique_capability(contract_id={contract_id!r}): no matches"
             )
         if len(caps) > 1:
-            owners = ", ".join(c.owner_id for c in caps)
+            owners = ", ".join(c.provider_id for c in caps)
             raise ValueError(
                 f"find_unique_capability(contract_id={contract_id!r}): "
-                f"{len(caps)} matches (owners: {owners}) — pass owner_id to disambiguate"
+                f"{len(caps)} matches (owners: {owners}) — pass provider_id to disambiguate"
             )
         return caps[0]
 
@@ -394,15 +394,15 @@ class _Atlas:
         self,
         *,
         consumer_id: str,
-        owner_id: str,
+        provider_id: str,
         contract_id: str,
         transport: Transport | str | int,
     ) -> Channel:
-        """Open a consumer->owner edge. Returns a `Channel` context manager
+        """Open a consumer->provider edge. Returns a `Channel` context manager
         — `with ATLAS.connect_capability(...) as ch: ...` auto-disconnects."""
         resp = self._wire_stub.ConnectCapability(self._wire_pb.ConnectCapabilityRequest(
             consumer_id=consumer_id,
-            owner_id=owner_id,
+            provider_id=provider_id,
             contract_id=contract_id,
             transport=self._transport_enum(transport),
         ))
@@ -412,7 +412,7 @@ class _Atlas:
             if resp.HasField("params") else None
         )
         return Channel(
-            owner_id=owner_id,
+            provider_id=provider_id,
             contract_id=contract_id,
             transport=t,
             endpoint=resp.endpoint,

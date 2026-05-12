@@ -3,7 +3,7 @@
 //
 // dispatch/mcp.rs — MCP tool dispatch
 //
-// TODO(executor owner): implement full MCP dispatch.
+// TODO(executor maintainer): implement full MCP dispatch.
 // Skeleton: connects to the MCP endpoint and calls the named tool.
 
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};

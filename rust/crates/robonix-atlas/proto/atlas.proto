@@ -67,7 +67,7 @@ package robonix.atlas;
 //      ready (e.g. ROS 2 discovery needs a few seconds).
 //
 // Why hide endpoint in the read view? Forcing consumers through
-// ConnectCapability lets Atlas record the consumer->owner edge, so
+// ConnectCapability lets Atlas record the consumer->provider edge, so
 // channel auto-cleanup on eviction has a place to deliver
 // invalidations from. The read view (`Capability`) is fan-out
 // metadata; the channel is the bookkeeping handle.
@@ -89,7 +89,7 @@ enum Transport {
 
 // Closed set of CapabilityProvider kinds -- exactly three. Used in:
 //   * `CapabilityProvider.kind` so consumers of Query can disambiguate.
-//   * `Capability.owner_kind` so Executor can reverse-lookup the
+//   * `Capability.provider_kind` so Executor can reverse-lookup the
 //     owning Skill before firing CMD_ACTIVATE.
 //   * `QueryRequest.kind` as a filter (KIND_UNSPECIFIED = no filter).
 enum Kind {
@@ -195,26 +195,26 @@ message TransportParams {
 //
 // Uniqueness: for any single CapabilityProvider, the (contract_id,
 // transport) pair appears at most once -- equivalently, the global
-// (owner_id, contract_id, transport) tuple is unique across Atlas.
+// (provider_id, contract_id, transport) tuple is unique across Atlas.
 // A duplicate DeclareCapability for the same triple returns gRPC
 // `AlreadyExists`; to redeclare with a different endpoint, the
-// caller must Unregister + re-Register the whole owner (takeover
-// semantics drop the old declares with it), or let the owner's
+// caller must Unregister + re-Register the whole provider (takeover
+// semantics drop the old declares with it), or let the provider's
 // heartbeat lapse so Atlas evicts it.
 //
 // gRPC errors:
-//   * NotFound          -- `owner_id` is not registered with Atlas.
+//   * NotFound          -- `provider_id` is not registered with Atlas.
 //   * InvalidArgument   -- `transport` is TRANSPORT_UNSPECIFIED;
-//                         `contract_id` is not under the owner's
+//                         `contract_id` is not under the provider's
 //                         declared namespace; `params.kind` does
 //                         not match `transport`; or the conflict-
 //                         resolution rules below resolve to it.
-//   * AlreadyExists     -- duplicate (owner_id, contract_id, transport)
+//   * AlreadyExists     -- duplicate (provider_id, contract_id, transport)
 //                         or a non-mintable endpoint collision.
 
 message DeclareCapabilityRequest {
   // Owning CapabilityProvider (primitive/service/skill); MUST already be registered.
-  string owner_id = 1;
+  string provider_id = 1;
   // contract_id, e.g. "robonix/primitive/camera/depth".
   string contract_id = 2;
   Transport transport = 3;
@@ -239,7 +239,7 @@ message DeclareCapabilityRequest {
   // Transport-specific params; the oneof variant MUST match `transport`.
   TransportParams params = 5;
   // Instance-specific natural-language description for THIS particular
-  // Capability instance -- the part that's specific to *this* owner's
+  // Capability instance -- the part that's specific to *this* provider's
   // setup, on top of whatever the contract already says generically.
   // Example: contract `robonix/primitive/camera/rgb` already explains
   // "returns current RGB image as sensor_msgs/Image"; this field adds
@@ -274,14 +274,14 @@ message DeclareCapabilityResponse {
 // `CapabilityProvider.capabilities` returned by Query. Mirrors the fields of
 // DeclareCapabilityRequest EXCEPT `endpoint` is OMITTED: endpoint
 // disclosure is gated behind ConnectCapability so Atlas records the
-// consumer->owner edge before any traffic flows. Consumers MUST
+// consumer->provider edge before any traffic flows. Consumers MUST
 // call ConnectCapability to obtain the dial-able endpoint.
 //
-// `owner_id` / `owner_kind` are duplicated inside each Capability
+// `provider_id` / `provider_kind` are duplicated inside each Capability
 // even when it sits inside a CapabilityProvider (where the same info is on the
 // CapabilityProvider itself) -- the cost is one extra string + one enum per cap
 // on the wire, and it lets consumers flatten `CapabilityProvider.capabilities`
-// into a flat Capability list without having to copy the owner info
+// into a flat Capability list without having to copy the provider info
 // across by hand.
 //
 // Invariant: `params`'s oneof variant matches `transport` --
@@ -290,8 +290,8 @@ message DeclareCapabilityResponse {
 // from Query is guaranteed consistent. Consumers MAY assume this and
 // skip a re-check.
 message Capability {
-  string owner_id = 1;
-  Kind owner_kind = 2;
+  string provider_id = 1;
+  Kind provider_kind = 2;
   string contract_id = 3;
   Transport transport = 4;
   TransportParams params = 5;
@@ -394,7 +394,7 @@ message CapabilityProvider {
   uint64 last_heartbeat_ms = 5;
   LifecycleState state = 6;
   string state_detail = 7;
-  // Each Capability's owner_id / owner_kind equal this CapabilityProvider's
+  // Each Capability's provider_id / provider_kind equal this CapabilityProvider's
   // id / kind. The duplication is intentional -- see Capability above.
   repeated Capability capabilities = 8;
 }
@@ -428,16 +428,16 @@ message QueryResponse {
 // -- Channels ---------------------------------------------------------------
 //
 // A channel is an Atlas-recorded edge from a consumer to one
-// (owner_id, contract_id, transport) triple. It does NOT carry
+// (provider_id, contract_id, transport) triple. It does NOT carry
 // traffic; the consumer dials the returned `endpoint` itself. Atlas
 // keeps the edge purely for bookkeeping (who is talking to whom)
 // and to fan-out invalidations.
 //
 // Channel auto-cleanup. Atlas drops every channel pointing at the
-// owner side when:
-//   * the owner Unregisters,
-//   * the owner's heartbeat lapses past the eviction threshold, or
-//   * the owner is taken over by a same-id same-kind Register (the
+// provider side when:
+//   * the provider Unregisters,
+//   * the provider's heartbeat lapses past the eviction threshold, or
+//   * the provider is taken over by a same-id same-kind Register (the
 //     Capabilities the channel was bound to disappeared).
 // After auto-drop, the consumer's next DisconnectCapability call for
 // that channel_id returns `was_open = false`; in-flight RPCs on the
@@ -446,21 +446,21 @@ message QueryResponse {
 
 // ConnectCapability -- open a channel.
 // gRPC errors:
-//   * NotFound        -- `owner_id` is not registered, or the owner
+//   * NotFound        -- `provider_id` is not registered, or the provider
 //                       has not declared a Capability with the given
 //                       (contract_id, transport).
 //   * InvalidArgument -- `transport` is TRANSPORT_UNSPECIFIED.
 message ConnectCapabilityRequest {
   string consumer_id = 1;
-  string owner_id = 2;
+  string provider_id = 2;
   string contract_id = 3;
   Transport transport = 4;
 }
 message ConnectCapabilityResponse {
-  // Opaque handle for this consumer->owner edge. Pass back to
+  // Opaque handle for this consumer->provider edge. Pass back to
   // DisconnectCapability when the consumer is done.
   string channel_id = 1;
-  // Authoritative dial-able endpoint string (same form the owner
+  // Authoritative dial-able endpoint string (same form the provider
   // registered at DeclareCapability time, possibly Atlas-rewritten on
   // collision). The consumer dials this directly using the matching
   // client (tonic for grpc, rclrs / rclpy for ros2, fastmcp for mcp).
@@ -473,7 +473,7 @@ message ConnectCapabilityResponse {
 
 // DisconnectCapability -- release a channel. Idempotent: unknown
 // `channel_id` returns `was_open = false`, NOT a gRPC error
-// (Atlas may have already dropped it due to owner eviction or
+// (Atlas may have already dropped it due to provider eviction or
 // takeover; that's expected and the caller has nothing to do).
 message DisconnectCapabilityRequest { string channel_id = 1; }
 message DisconnectCapabilityResponse { bool was_open = 1; }
@@ -540,7 +540,7 @@ service Atlas {
 
   // Discovery -- one Query RPC, kind carried in the request body.
   // Consumers wanting a flat capability list flatten `CapabilityProvider.capabilities`
-  // themselves; each Capability already carries owner_id / owner_kind.
+  // themselves; each Capability already carries provider_id / provider_kind.
   rpc Query(QueryRequest) returns (QueryResponse);
 
   // Channels.

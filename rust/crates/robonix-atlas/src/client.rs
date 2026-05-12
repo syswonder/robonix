@@ -175,14 +175,14 @@ impl AtlasClient {
     /// natural-language description for this Capability.
     pub async fn declare_capability(
         &mut self,
-        owner_id: &str,
+        provider_id: &str,
         contract_id: &str,
         transport: pb::Transport,
         endpoint: &str,
         params: pb::TransportParams,
     ) -> Result<String> {
         self.declare_capability_with_description(
-            owner_id,
+            provider_id,
             contract_id,
             transport,
             endpoint,
@@ -196,7 +196,7 @@ impl AtlasClient {
     /// description string (see DeclareCapabilityRequest.description).
     pub async fn declare_capability_with_description(
         &mut self,
-        owner_id: &str,
+        provider_id: &str,
         contract_id: &str,
         transport: pb::Transport,
         endpoint: &str,
@@ -206,7 +206,7 @@ impl AtlasClient {
         let resp = self
             .inner
             .declare_capability(pb::DeclareCapabilityRequest {
-                owner_id: owner_id.to_string(),
+                provider_id: provider_id.to_string(),
                 contract_id: contract_id.to_string(),
                 transport: transport as i32,
                 endpoint: endpoint.to_string(),
@@ -216,7 +216,7 @@ impl AtlasClient {
             .await
             .with_context(|| {
                 format!(
-                    "DeclareCapability owner='{owner_id}' contract='{contract_id}' \
+                    "DeclareCapability provider='{provider_id}' contract='{contract_id}' \
                      transport={transport:?}"
                 )
             })?;
@@ -307,7 +307,7 @@ impl AtlasClient {
     /// Consumer-facing discovery: flat list of Capabilities across all
     /// kinds. Walks `Query(kind=Unspecified)` and flattens each
     /// CapabilityProvider's nested capabilities. Each returned
-    /// `Capability` already carries `owner_id` + `owner_kind`.
+    /// `Capability` already carries `provider_id` + `provider_kind`.
     pub async fn flatten_capabilities(
         &mut self,
         contract_id: &str,
@@ -344,7 +344,7 @@ impl AtlasClient {
 
     // ── Channels ───────────────────────────────────────────────────────────
 
-    /// Open a channel to one (owner, contract, transport). Atlas only
+    /// Open a channel to one (provider, contract, transport). Atlas only
     /// records the edge — the consumer dials the returned endpoint
     /// itself using whatever transport-appropriate mechanism (tonic for
     /// grpc, rclrs for ros2, fastmcp for mcp, …).
@@ -352,7 +352,7 @@ impl AtlasClient {
     pub async fn connect_capability(
         &mut self,
         consumer_id: &str,
-        owner_id: &str,
+        provider_id: &str,
         contract_id: &str,
         transport: pb::Transport,
     ) -> Result<(String, String, pb::TransportParams)> {
@@ -360,14 +360,14 @@ impl AtlasClient {
             .inner
             .connect_capability(pb::ConnectCapabilityRequest {
                 consumer_id: consumer_id.to_string(),
-                owner_id: owner_id.to_string(),
+                provider_id: provider_id.to_string(),
                 contract_id: contract_id.to_string(),
                 transport: transport as i32,
             })
             .await
             .with_context(|| {
                 format!(
-                    "ConnectCapability consumer='{consumer_id}' owner='{owner_id}' \
+                    "ConnectCapability consumer='{consumer_id}' provider='{provider_id}' \
                      contract='{contract_id}' transport={transport:?}"
                 )
             })?;
@@ -426,7 +426,7 @@ impl AtlasClient {
 /// returned host:port, and hand back a tonic Channel + the channel_id
 /// (so the caller can DisconnectCapability on shutdown).
 ///
-/// Returns `(channel_id, owner_id, Channel)`.
+/// Returns `(channel_id, provider_id, Channel)`.
 pub async fn connect_to_capability(
     atlas: &mut AtlasClient,
     consumer_id: &str,
@@ -447,26 +447,26 @@ pub async fn connect_to_capability(
              picking first ('{}'). Use query_capabilities + connect_capability \
              for deterministic selection.",
             rows.len(),
-            rows[0].owner_id,
+            rows[0].provider_id,
         );
     }
-    let owner_id = rows
+    let provider_id = rows
         .into_iter()
         .next()
         .expect("non-empty checked above")
-        .owner_id;
+        .provider_id;
     let (channel_id, endpoint_str, _params) = atlas
-        .connect_capability(consumer_id, &owner_id, contract_id, pb::Transport::Grpc)
+        .connect_capability(consumer_id, &provider_id, contract_id, pb::Transport::Grpc)
         .await?;
     let normalized = normalize_grpc_endpoint(&endpoint_str);
     let channel = Endpoint::new(normalized.clone())
-        .with_context(|| format!("invalid endpoint '{}' for owner '{}'", normalized, owner_id))?
+        .with_context(|| format!("invalid endpoint '{}' for provider '{}'", normalized, provider_id))?
         .connect()
         .await
         .with_context(|| {
-            format!("connect to owner '{owner_id}' at '{normalized}' for contract '{contract_id}'")
+            format!("connect to provider '{provider_id}' at '{normalized}' for contract '{contract_id}'")
         })?;
-    Ok((channel_id, owner_id, channel))
+    Ok((channel_id, provider_id, channel))
 }
 
 // ── TransportParams constructors ───────────────────────────────────────────
