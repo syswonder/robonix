@@ -121,7 +121,6 @@ def mcp_contract(
     mcp: "FastMCP",
     *,
     contract_id: str,
-    name: str | None = None,
     structured_output: bool | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Register an MCP tool bound to a contract.
@@ -130,25 +129,29 @@ def mcp_contract(
     `@<provider>.mcp(...)` decorator (Primitive / Service / Skill) for a
     one-stop registration that also auto-declares to atlas + manages uvicorn.
 
+    The MCP-server-side tool name is **always** the contract_id's leaf
+    segment — executor's dispatch derives the same value from contract_id
+    (see executor/dispatch/mcp.rs `mcp_tool_name`). They must match; we
+    enforce that by deriving from a single source.
+
     Stashes the codegen IO classes + contract id on the original handler:
         fn._robonix_input_cls
         fn._robonix_output_cls
         fn._robonix_contract_id
-        fn._robonix_tool_name
     The provider framework picks these up via attribute reflection during run().
     """
     def decorator(user_fn: Callable[..., Any]) -> Callable[..., Any]:
         input_cls, output_cls = io_types_from_handler(user_fn, contract_id=contract_id)
         shim = make_shim(user_fn, input_cls, output_cls)
+        tool_name = contract_id.rsplit("/", 1)[-1]
         mcp.add_tool(
             shim,
-            name=name or user_fn.__name__,
+            name=tool_name,
             description=(user_fn.__doc__ or "").strip(),
             structured_output=structured_output,
         )
         user_fn._robonix_input_cls = input_cls    # type: ignore[attr-defined]
         user_fn._robonix_output_cls = output_cls  # type: ignore[attr-defined]
         user_fn._robonix_contract_id = contract_id  # type: ignore[attr-defined]
-        user_fn._robonix_tool_name = name or user_fn.__name__  # type: ignore[attr-defined]
         return user_fn
     return decorator

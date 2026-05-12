@@ -476,11 +476,13 @@ class _ProviderBase:
 
     # -- Layer 2: provides_mcp decorator -----------------------------------
 
-    def provides_mcp(self, contract_id: str, *, name: str | None = None,
-                     description: str = ""):
-        """Register an MCP tool bound to `contract_id`. The natural-
-        language description is taken from the wrapped function's
-        docstring unless `description=` is passed explicitly."""
+    def provides_mcp(self, contract_id: str, *, description: str = ""):
+        """Register an MCP tool bound to `contract_id`. The MCP-server-
+        side tool name is the contract_id's leaf segment — same value
+        executor's dispatch derives — so there is no overridable
+        `name=`. The natural-language description is taken from the
+        wrapped function's docstring unless `description=` is passed
+        explicitly."""
         self._check_mode("mcp", contract_id)
         self._ensure_mcp_app()
 
@@ -488,7 +490,6 @@ class _ProviderBase:
             mcp_contract(
                 self._mcp_app,  # pyright: ignore[reportArgumentType]
                 contract_id=contract_id,
-                name=name,
             )(fn)  # pyright: ignore[reportArgumentType]
             # Resolve description: explicit kwarg wins; else docstring;
             # else empty (consumer falls back to contract default).
