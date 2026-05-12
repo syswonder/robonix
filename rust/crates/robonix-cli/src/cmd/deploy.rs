@@ -1177,7 +1177,7 @@ async fn spawn_and_init(
         .await
         .with_context(|| format!("[{component}] pre-spawn atlas snapshot"))?
         .into_iter()
-        .map(|r| r.capability_id)
+        .map(|r| r.id)
         .collect();
 
     let sp = spawn_package(
@@ -1505,13 +1505,13 @@ async fn wait_for_registration(
                 .query_capabilities("", "", atlas_pb::Transport::Unspecified)
                 .await
                 .with_context(|| format!("[{component}/{pkg_label}] poll atlas"))?;
-            let matches: Vec<&atlas_pb::CapabilityRecord> = records
+            let matches: Vec<&atlas_pb::CapabilityProvider> = records
                 .iter()
-                .filter(|rec| !before.contains(&rec.capability_id))
+                .filter(|rec| !before.contains(&rec.id))
                 .collect();
             if matches.len() > 1 {
                 let log_file = log_path(log_dir, pkg_label);
-                let cap_ids: Vec<&str> = matches.iter().map(|r| r.capability_id.as_str()).collect();
+                let cap_ids: Vec<&str> = matches.iter().map(|r| r.id.as_str()).collect();
                 output::boot_fail(
                     display_label,
                     &format!(
@@ -1529,14 +1529,11 @@ async fn wait_for_registration(
                 );
             }
             if let Some(rec) = matches.first() {
-                let driver = rec.interfaces.iter().find(|iface| {
+                let driver = rec.capabilities.iter().find(|iface| {
                     iface.transport == atlas_pb::Transport::Grpc as i32
                         && iface.contract_id.ends_with("/driver")
                 });
-                return Ok((
-                    rec.capability_id.clone(),
-                    driver.map(|i| i.contract_id.clone()),
-                ));
+                return Ok((rec.id.clone(), driver.map(|i| i.contract_id.clone())));
             }
         }
         if Instant::now() >= deadline {

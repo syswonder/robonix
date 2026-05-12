@@ -198,14 +198,14 @@ async fn try_discover_once(atlas_endpoint: &str, contract_id: &str) -> Result<St
     let records = atlas.query_capabilities("", contract_id, transport).await?;
     for rec in &records {
         let has = rec
-            .interfaces
+            .capabilities
             .iter()
             .any(|i| i.contract_id == contract_id && i.transport == transport as i32);
         if !has {
             continue;
         }
         let (_, endpoint, _) = atlas
-            .connect_capability(CONSUMER_ID, &rec.capability_id, contract_id, transport)
+            .connect_capability(CONSUMER_ID, &rec.id, contract_id, transport)
             .await?;
         if endpoint.is_empty() {
             continue;
@@ -380,9 +380,7 @@ async fn pin_exists_in_atlas(atlas: &mut AtlasClient, pin: &str, contract: &str)
         // the outer caller already warned and degraded.
         return true;
     };
-    records
-        .iter()
-        .any(|r| r.capability_id == pin || r.namespace == pin)
+    records.iter().any(|r| r.id == pin || r.namespace == pin)
 }
 
 /// `Ok(Some((cap_id, device_id)))` = picked both layers; device_id may be ""
@@ -412,11 +410,9 @@ async fn try_pick(
     // for a single entry — auto-pick on Ctrl+A looks identical to
     // "Ctrl+A did nothing", which is what the user just hit.
     let cap_id = match (mode, saved_cap_id) {
-        (PickMode::FirstRun, Some(s)) if providers.iter().any(|p| p.capability_id == s) => {
-            s.to_string()
-        }
+        (PickMode::FirstRun, Some(s)) if providers.iter().any(|p| p.id == s) => s.to_string(),
         (PickMode::FirstRun, _) if providers.len() == 1 => {
-            let id = providers[0].capability_id.clone();
+            let id = providers[0].id.clone();
             flash_picker_message(terminal, &format!("auto-selected {label}: {id}"))?;
             id
         }
@@ -660,7 +656,7 @@ fn pick_tui(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     label: &str,
     contract: &str,
-    providers: &[atlas_pb::CapabilityRecord],
+    providers: &[atlas_pb::CapabilityProvider],
 ) -> Result<Option<String>> {
     let mut idx = 0usize;
     loop {
@@ -684,10 +680,7 @@ fn pick_tui(
                     } else {
                         format!("  ({})", r.state_detail)
                     };
-                    Line::from(vec![Span::styled(
-                        format!("{mark}{}{detail}", r.capability_id),
-                        style,
-                    )])
+                    Line::from(vec![Span::styled(format!("{mark}{}{detail}", r.id), style)])
                 })
                 .collect();
             let body = Paragraph::new(lines)
@@ -705,7 +698,7 @@ fn pick_tui(
                 KeyCode::Down | KeyCode::Char('j') if idx + 1 < providers.len() => {
                     idx += 1;
                 }
-                KeyCode::Enter => return Ok(Some(providers[idx].capability_id.clone())),
+                KeyCode::Enter => return Ok(Some(providers[idx].id.clone())),
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
                 _ => {}
             }
@@ -731,8 +724,8 @@ enum AudioSection {
 }
 
 struct AudioSettingsPage {
-    mic_providers: Vec<atlas_pb::CapabilityRecord>,
-    speaker_providers: Vec<atlas_pb::CapabilityRecord>,
+    mic_providers: Vec<atlas_pb::CapabilityProvider>,
+    speaker_providers: Vec<atlas_pb::CapabilityProvider>,
     mic_devices: Vec<crate::pb::audio::AudioDevice>,
     speaker_devices: Vec<crate::pb::audio::AudioDevice>,
 
@@ -804,13 +797,13 @@ impl AudioSettingsPage {
         let mic_cap_id = cfg.mic_cap_id.clone().unwrap_or_else(|| {
             mic_providers
                 .first()
-                .map(|p| p.capability_id.clone())
+                .map(|p| p.id.clone())
                 .unwrap_or_default()
         });
         let speaker_cap_id = cfg.speaker_cap_id.clone().unwrap_or_else(|| {
             speaker_providers
                 .first()
-                .map(|p| p.capability_id.clone())
+                .map(|p| p.id.clone())
                 .unwrap_or_default()
         });
 
@@ -824,11 +817,11 @@ impl AudioSettingsPage {
         // sees what's active rather than always landing at row 0.
         let cursor_mp = mic_providers
             .iter()
-            .position(|p| p.capability_id == mic_cap_id)
+            .position(|p| p.id == mic_cap_id)
             .unwrap_or(0);
         let cursor_sp = speaker_providers
             .iter()
-            .position(|p| p.capability_id == speaker_cap_id)
+            .position(|p| p.id == speaker_cap_id)
             .unwrap_or(0);
         let cursor_md = mic_devices
             .iter()
@@ -921,7 +914,7 @@ impl AudioSettingsPage {
         match self.section {
             AudioSection::MicProvider => {
                 if let Some(p) = self.mic_providers.get(i) {
-                    let new_cap = p.capability_id.clone();
+                    let new_cap = p.id.clone();
                     if new_cap != self.mic_cap_id {
                         self.mic_cap_id = new_cap.clone();
                         self.mic_devices = fetch_devices_filtered(atlas, &new_cap, "input").await;
@@ -944,7 +937,7 @@ impl AudioSettingsPage {
             }
             AudioSection::SpeakerProvider => {
                 if let Some(p) = self.speaker_providers.get(i) {
-                    let new_cap = p.capability_id.clone();
+                    let new_cap = p.id.clone();
                     if new_cap != self.speaker_cap_id {
                         self.speaker_cap_id = new_cap.clone();
                         self.speaker_devices =
@@ -998,13 +991,13 @@ impl AudioSettingsPage {
             .add_modifier(Modifier::BOLD);
 
         let render_provider_row = |i: usize,
-                                   p: &atlas_pb::CapabilityRecord,
+                                   p: &atlas_pb::CapabilityProvider,
                                    sel: &str,
                                    in_section: bool,
                                    cursor: usize|
          -> Line {
             let is_cursor = in_section && i == cursor;
-            let is_selected = p.capability_id == sel;
+            let is_selected = p.id == sel;
             let mark_left = if is_cursor { "▶" } else { " " };
             let bullet = if is_selected { "●" } else { "○" };
             let prefix = format!(" {mark_left} {bullet} ");
@@ -1015,10 +1008,7 @@ impl AudioSettingsPage {
             } else {
                 normal
             };
-            Line::from(vec![Span::styled(
-                format!("{prefix}{}", p.capability_id),
-                style,
-            )])
+            Line::from(vec![Span::styled(format!("{prefix}{}", p.id), style)])
         };
 
         let render_device_row = |i: usize,

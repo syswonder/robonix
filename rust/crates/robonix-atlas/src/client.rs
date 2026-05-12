@@ -1,22 +1,11 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Author: wheatfox <wheatfox17@icloud.com>
 //
-// Atlas client-side helpers shared by every Robonix component that talks to
-// Atlas (pilot, executor, cli, system services, …).
+// Atlas client-side helpers shared by every Robonix component that talks
+// to Atlas (pilot, executor, cli, system services, …).
 //
-// Two layers:
-//   * `AtlasClient` — thin wrapper over the generated stub with retry-able
-//     connect and one helper per Atlas RPC. Use this for register / declare /
-//     query / heartbeat / connect / disconnect / unregister.
-//   * `connect_to_capability` — gRPC-only convenience: pick the first cap
-//     offering the contract, call `ConnectCapability` to record the edge,
-//     dial the returned host:port, and hand back a tonic Channel + the
-//     channel_id (so the caller can DisconnectCapability on shutdown).
-//     For ROS 2 / MCP consumers, call `ConnectCapability` directly and
-//     dial yourself — atlas can't dial generically across transports.
-//
-// All helpers return `anyhow::Error` wrapping the underlying `tonic::Status`
-// so callers can attach context with `.with_context(...)`.
+// All helpers return `anyhow::Error` wrapping the underlying
+// `tonic::Status` so callers can attach context with `.with_context(...)`.
 
 use crate::pb;
 use anyhow::{Context, Result};
@@ -25,9 +14,9 @@ use tonic::transport::{Channel, Endpoint};
 
 /// Wrapped `pb::atlas_client::AtlasClient` with helpers.
 ///
-/// Cheap to clone — the inner generated client wraps a `Channel`, which is
-/// itself just a handle to a connection pool. Share clones across tasks
-/// rather than wrapping in a `Mutex`.
+/// Cheap to clone — the inner generated client wraps a `Channel`, which
+/// is itself just a handle to a connection pool. Share clones across
+/// tasks rather than wrapping in a `Mutex`.
 #[derive(Clone)]
 pub struct AtlasClient {
     inner: pb::atlas_client::AtlasClient<Channel>,
@@ -48,7 +37,6 @@ impl AtlasClient {
     }
 
     /// `connect`, retrying up to `attempts` times with `delay` between tries.
-    /// Returns the last error if all attempts fail.
     pub async fn connect_with_retry(
         endpoint: impl AsRef<str>,
         attempts: u32,
@@ -75,152 +63,296 @@ impl AtlasClient {
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("connect_with_retry: 0 attempts")))
     }
 
-    /// Underlying generated client. Use for raw RPCs not covered by helpers.
     pub fn inner(&self) -> pb::atlas_client::AtlasClient<Channel> {
         self.inner.clone()
     }
 
-    /// Register a capability instance. Returns the (possibly Atlas-assigned)
-    /// `capability_id`.
-    pub async fn register_capability(
+    // ── Registration (one RPC per kind, shared request/response type) ──────
+
+    fn build_register_req(
+        id: &str,
+        namespace: &str,
+        capability_md_path: &str,
+    ) -> pb::RegisterRequest {
+        pb::RegisterRequest {
+            id: id.to_string(),
+            namespace: namespace.to_string(),
+            capability_md_path: capability_md_path.to_string(),
+        }
+    }
+
+    /// Register a Primitive. Returns the (possibly Atlas-assigned) id.
+    pub async fn register_primitive(
         &mut self,
-        capability_id: &str,
+        id: &str,
         namespace: &str,
         capability_md_path: &str,
     ) -> Result<String> {
         let resp = self
             .inner
-            .register_capability(pb::RegisterCapabilityRequest {
-                capability_id: capability_id.to_string(),
-                namespace: namespace.to_string(),
-                capability_md_path: capability_md_path.to_string(),
-            })
+            .register_primitive(Self::build_register_req(id, namespace, capability_md_path))
             .await
-            .with_context(|| format!("RegisterCapability '{capability_id}'"))?;
-        Ok(resp.into_inner().capability_id)
+            .with_context(|| format!("RegisterPrimitive '{id}'"))?;
+        Ok(resp.into_inner().id)
     }
 
-    /// Declare one (transport, endpoint) binding for one interface.
-    /// Returns the *authoritative* endpoint (may differ from `endpoint`
-    /// when Atlas rewrote to disambiguate).
-    pub async fn declare_interface(
+    /// Register a Service.
+    pub async fn register_service(
         &mut self,
-        capability_id: &str,
+        id: &str,
+        namespace: &str,
+        capability_md_path: &str,
+    ) -> Result<String> {
+        let resp = self
+            .inner
+            .register_service(Self::build_register_req(id, namespace, capability_md_path))
+            .await
+            .with_context(|| format!("RegisterService '{id}'"))?;
+        Ok(resp.into_inner().id)
+    }
+
+    /// Register a Skill.
+    pub async fn register_skill(
+        &mut self,
+        id: &str,
+        namespace: &str,
+        capability_md_path: &str,
+    ) -> Result<String> {
+        let resp = self
+            .inner
+            .register_skill(Self::build_register_req(id, namespace, capability_md_path))
+            .await
+            .with_context(|| format!("RegisterSkill '{id}'"))?;
+        Ok(resp.into_inner().id)
+    }
+
+    /// Unregister any registered entity. Returns `true` if a record was
+    /// removed, `false` if the id was unknown (idempotent).
+    pub async fn unregister(&mut self, id: &str) -> Result<bool> {
+        let resp = self
+            .inner
+            .unregister(pb::UnregisterRequest { id: id.to_string() })
+            .await
+            .with_context(|| format!("Unregister '{id}'"))?;
+        Ok(resp.into_inner().was_present)
+    }
+
+    // ── Liveness + lifecycle ───────────────────────────────────────────────
+
+    pub async fn heartbeat(&mut self, id: &str) -> Result<()> {
+        self.inner
+            .heartbeat(pb::HeartbeatRequest { id: id.to_string() })
+            .await
+            .with_context(|| format!("Heartbeat '{id}'"))?;
+        Ok(())
+    }
+
+    /// Push a lifecycle state transition. `detail` is a free-form
+    /// human-readable note (e.g. "missing /opt/models/...") that
+    /// `rbnx caps` surfaces verbatim; pass empty when there's nothing.
+    pub async fn set_lifecycle_state(
+        &mut self,
+        id: &str,
+        new_state: pb::LifecycleState,
+        detail: &str,
+    ) -> Result<()> {
+        self.inner
+            .set_lifecycle_state(pb::SetLifecycleStateRequest {
+                id: id.to_string(),
+                state: new_state as i32,
+                detail: detail.to_string(),
+            })
+            .await
+            .with_context(|| format!("SetLifecycleState '{id}' -> {new_state:?}"))?;
+        Ok(())
+    }
+
+    // ── Capability binding ─────────────────────────────────────────────────
+
+    /// Declare one Capability (transport-bound endpoint) on an entity.
+    /// Returns the *authoritative* endpoint (may differ from the request
+    /// when Atlas rewrote to disambiguate). `description` is the optional
+    /// natural-language description for this Capability.
+    pub async fn declare_capability(
+        &mut self,
+        owner_id: &str,
         contract_id: &str,
         transport: pb::Transport,
         endpoint: &str,
         params: pb::TransportParams,
     ) -> Result<String> {
+        self.declare_capability_with_description(
+            owner_id,
+            contract_id,
+            transport,
+            endpoint,
+            params,
+            "",
+        )
+        .await
+    }
+
+    /// Same as `declare_capability` but with the instance-specific
+    /// description string (see DeclareCapabilityRequest.description).
+    pub async fn declare_capability_with_description(
+        &mut self,
+        owner_id: &str,
+        contract_id: &str,
+        transport: pb::Transport,
+        endpoint: &str,
+        params: pb::TransportParams,
+        description: &str,
+    ) -> Result<String> {
         let resp = self
             .inner
-            .declare_interface(pb::DeclareInterfaceRequest {
-                capability_id: capability_id.to_string(),
+            .declare_capability(pb::DeclareCapabilityRequest {
+                owner_id: owner_id.to_string(),
                 contract_id: contract_id.to_string(),
                 transport: transport as i32,
                 endpoint: endpoint.to_string(),
                 params: Some(params),
+                description: description.to_string(),
             })
             .await
             .with_context(|| {
                 format!(
-                    "DeclareInterface cap='{capability_id}' contract='{contract_id}' \
+                    "DeclareCapability owner='{owner_id}' contract='{contract_id}' \
                      transport={transport:?}"
                 )
             })?;
         Ok(resp.into_inner().endpoint)
     }
 
-    /// Query capabilities. Empty / `Transport::Unspecified` means "no filter
-    /// on that field".
-    pub async fn query_capabilities(
-        &mut self,
-        capability_id: &str,
-        contract_id: &str,
-        transport: pb::Transport,
-    ) -> Result<Vec<pb::CapabilityRecord>> {
-        self.find(capability_id, contract_id, "", transport).await
-    }
+    // ── Discovery ──────────────────────────────────────────────────────────
 
-    /// Structured discovery — filters AND together. Empty strings = no
-    /// filter. Mirrors `QueryCapabilitiesRequest` 1:1.
-    pub async fn find(
+    /// Generic Query. `kind == Kind::Unspecified` = no kind filter (all
+    /// kinds returned; each `CapabilityProvider.kind` carries its kind).
+    /// Empty strings / `Transport::Unspecified` = no filter on that field.
+    pub async fn query(
         &mut self,
-        capability_id: &str,
+        kind: pb::Kind,
+        id: &str,
         contract_id: &str,
         namespace_prefix: &str,
         transport: pb::Transport,
-    ) -> Result<Vec<pb::CapabilityRecord>> {
+    ) -> Result<Vec<pb::CapabilityProvider>> {
         let resp = self
             .inner
-            .query_capabilities(pb::QueryCapabilitiesRequest {
-                capability_id: capability_id.to_string(),
+            .query(pb::QueryRequest {
+                kind: kind as i32,
+                id: id.to_string(),
                 contract_id: contract_id.to_string(),
-                transport: transport as i32,
                 namespace_prefix: namespace_prefix.to_string(),
+                transport: transport as i32,
             })
             .await
-            .with_context(|| {
-                format!(
-                    "QueryCapabilities cap='{capability_id}' contract='{contract_id}' \
-                     ns_prefix='{namespace_prefix}' transport={transport:?}"
-                )
-            })?;
-        Ok(resp.into_inner().records)
+            .with_context(|| format!("Query kind={kind:?}"))?;
+        Ok(resp.into_inner().providers)
     }
 
-    /// Fetch the package's CAPABILITY.md content for a registered cap.
-    /// Returns "" when the cap was registered with no `capability_md_path`.
-    pub async fn query_capability_md(&mut self, capability_id: &str) -> Result<String> {
-        let resp = self
-            .inner
-            .query_capability_md(pb::QueryCapabilityMdRequest {
-                capability_id: capability_id.to_string(),
-            })
-            .await
-            .with_context(|| format!("QueryCapabilityMd '{capability_id}'"))?;
-        Ok(resp.into_inner().capability_md)
-    }
-
-    pub async fn heartbeat(&mut self, capability_id: &str) -> Result<()> {
-        self.inner
-            .heartbeat(pb::HeartbeatRequest {
-                capability_id: capability_id.to_string(),
-            })
-            .await
-            .with_context(|| format!("Heartbeat '{capability_id}'"))?;
-        Ok(())
-    }
-
-    /// Push a lifecycle state transition. Atlas does NOT validate the
-    /// transition graph — the cap is the source of truth. `detail` is a
-    /// free-form human-readable note (e.g. "missing /opt/models/...") that
-    /// `rbnx caps` surfaces verbatim; pass empty when there's nothing to add.
-    pub async fn set_capability_state(
+    /// Convenience — find Primitives (kind filter applied).
+    pub async fn query_primitives(
         &mut self,
-        capability_id: &str,
-        new_state: pb::CapabilityState,
-        detail: &str,
-    ) -> Result<()> {
-        self.inner
-            .set_capability_state(pb::SetCapabilityStateRequest {
-                capability_id: capability_id.to_string(),
-                state: new_state as i32,
-                detail: detail.to_string(),
-            })
-            .await
-            .with_context(|| format!("SetCapabilityState '{capability_id}' -> {new_state:?}"))?;
-        Ok(())
+        id: &str,
+        contract_id: &str,
+        namespace_prefix: &str,
+        transport: pb::Transport,
+    ) -> Result<Vec<pb::CapabilityProvider>> {
+        self.query(
+            pb::Kind::Primitive,
+            id,
+            contract_id,
+            namespace_prefix,
+            transport,
+        )
+        .await
     }
 
-    /// Open a channel to one cap's interface. Atlas records the
-    /// consumer→provider edge and returns the binding. Caller dials the
-    /// returned `endpoint` themselves using whatever transport-appropriate
-    /// mechanism (tonic for grpc, rclrs for ros2, fastmcp for mcp, …).
+    /// Convenience — find Services.
+    pub async fn query_services(
+        &mut self,
+        id: &str,
+        contract_id: &str,
+        namespace_prefix: &str,
+        transport: pb::Transport,
+    ) -> Result<Vec<pb::CapabilityProvider>> {
+        self.query(
+            pb::Kind::Service,
+            id,
+            contract_id,
+            namespace_prefix,
+            transport,
+        )
+        .await
+    }
+
+    /// Convenience — find Skills.
+    pub async fn query_skills(
+        &mut self,
+        id: &str,
+        contract_id: &str,
+        namespace_prefix: &str,
+        transport: pb::Transport,
+    ) -> Result<Vec<pb::CapabilityProvider>> {
+        self.query(
+            pb::Kind::Skill,
+            id,
+            contract_id,
+            namespace_prefix,
+            transport,
+        )
+        .await
+    }
+
+    /// Consumer-facing discovery: flat list of Capabilities across all
+    /// kinds. Walks `Query(kind=Unspecified)` and flattens each
+    /// CapabilityProvider's nested capabilities. Each returned
+    /// `Capability` already carries `owner_id` + `owner_kind`.
+    pub async fn flatten_capabilities(
+        &mut self,
+        contract_id: &str,
+        namespace_prefix: &str,
+        transport: pb::Transport,
+    ) -> Result<Vec<pb::Capability>> {
+        let providers = self
+            .query(
+                pb::Kind::Unspecified,
+                "",
+                contract_id,
+                namespace_prefix,
+                transport,
+            )
+            .await?;
+        Ok(providers
+            .into_iter()
+            .flat_map(|p| p.capabilities.into_iter())
+            .collect())
+    }
+
+    /// Back-compat alias for the legacy 3-arg signature returning a list
+    /// of CapabilityProviders. Equivalent to
+    /// `query(Kind::Unspecified, id, contract_id, "", transport)`.
+    pub async fn query_capabilities(
+        &mut self,
+        id: &str,
+        contract_id: &str,
+        transport: pb::Transport,
+    ) -> Result<Vec<pb::CapabilityProvider>> {
+        self.query(pb::Kind::Unspecified, id, contract_id, "", transport)
+            .await
+    }
+
+    // ── Channels ───────────────────────────────────────────────────────────
+
+    /// Open a channel to one (owner, contract, transport). Atlas only
+    /// records the edge — the consumer dials the returned endpoint
+    /// itself using whatever transport-appropriate mechanism (tonic for
+    /// grpc, rclrs for ros2, fastmcp for mcp, …).
     /// Returns `(channel_id, endpoint, params)`.
     pub async fn connect_capability(
         &mut self,
         consumer_id: &str,
-        capability_id: &str,
+        owner_id: &str,
         contract_id: &str,
         transport: pb::Transport,
     ) -> Result<(String, String, pb::TransportParams)> {
@@ -228,14 +360,14 @@ impl AtlasClient {
             .inner
             .connect_capability(pb::ConnectCapabilityRequest {
                 consumer_id: consumer_id.to_string(),
-                capability_id: capability_id.to_string(),
+                owner_id: owner_id.to_string(),
                 contract_id: contract_id.to_string(),
                 transport: transport as i32,
             })
             .await
             .with_context(|| {
                 format!(
-                    "ConnectCapability consumer='{consumer_id}' provider='{capability_id}' \
+                    "ConnectCapability consumer='{consumer_id}' owner='{owner_id}' \
                      contract='{contract_id}' transport={transport:?}"
                 )
             })?;
@@ -243,9 +375,8 @@ impl AtlasClient {
         Ok((r.channel_id, r.endpoint, r.params.unwrap_or_default()))
     }
 
-    /// Release a previously-opened channel. Idempotent: returns `false` when
-    /// the channel_id was unknown (already released, or auto-dropped because
-    /// the provider unregistered / was evicted).
+    /// Release a previously-opened channel. Idempotent: returns `false`
+    /// when the channel_id was unknown.
     pub async fn disconnect_capability(&mut self, channel_id: &str) -> Result<bool> {
         let resp = self
             .inner
@@ -257,21 +388,9 @@ impl AtlasClient {
         Ok(resp.into_inner().was_open)
     }
 
-    /// Unregister. Returns `true` if a record was removed, `false` if the
-    /// id was unknown (idempotent caller-side semantics).
-    pub async fn unregister_capability(&mut self, capability_id: &str) -> Result<bool> {
-        let resp = self
-            .inner
-            .unregister_capability(pb::UnregisterCapabilityRequest {
-                capability_id: capability_id.to_string(),
-            })
-            .await
-            .with_context(|| format!("UnregisterCapability '{capability_id}'"))?;
-        Ok(resp.into_inner().was_present)
-    }
+    // ── Contract registry ──────────────────────────────────────────────────
 
-    /// Look up one contract by id. Returns `None` when atlas hasn't
-    /// loaded it (id is not in `<robonix>/capabilities/**/*.toml`).
+    /// Look up one contract by id.
     pub async fn query_contract(
         &mut self,
         contract_id: &str,
@@ -287,8 +406,6 @@ impl AtlasClient {
         Ok(if inner.found { inner.contract } else { None })
     }
 
-    /// List atlas's loaded contract registry. Empty `prefix` returns
-    /// every contract; otherwise filters by id prefix.
     pub async fn list_contracts(
         &mut self,
         namespace_prefix: &str,
@@ -304,67 +421,56 @@ impl AtlasClient {
     }
 }
 
-/// gRPC-only convenience: pick the first cap offering `contract_id` over
-/// gRPC, call `ConnectCapability` to register the edge, dial the returned
-/// host:port, and hand back the bookkeeping handle + tonic Channel.
+/// gRPC-only convenience: pick the first Capability matching `contract_id`
+/// over gRPC, call `ConnectCapability` to register the edge, dial the
+/// returned host:port, and hand back a tonic Channel + the channel_id
+/// (so the caller can DisconnectCapability on shutdown).
 ///
-/// Returns `(channel_id, capability_id, Channel)`. The caller MUST call
-/// `disconnect_capability(channel_id)` when it's done so atlas can drop
-/// the bookkeeping. If multiple caps offer the contract atlas's order is
-/// unspecified — callers needing deterministic selection should call
-/// `query_capabilities` + `connect_capability` themselves.
-///
-/// Not for ROS 2 / MCP consumers — those transports have their own
-/// connect protocols. Use `AtlasClient::connect_capability` directly and
-/// dial yourself with rclrs / fastmcp / etc.
+/// Returns `(channel_id, owner_id, Channel)`.
 pub async fn connect_to_capability(
     atlas: &mut AtlasClient,
     consumer_id: &str,
     contract_id: &str,
 ) -> Result<(String, String, Channel)> {
-    let records = atlas
-        .query_capabilities("", contract_id, pb::Transport::Grpc)
+    let rows = atlas
+        .flatten_capabilities(contract_id, "", pb::Transport::Grpc)
         .await?;
-    if records.is_empty() {
+    if rows.is_empty() {
         anyhow::bail!(
-            "no capability offering contract_id='{contract_id}' over gRPC; \
-             registered caps may not have declared this interface yet"
+            "no Capability offering contract_id='{contract_id}' over gRPC; \
+             registered entities may not have declared this Capability yet"
         );
     }
-    if records.len() > 1 {
+    if rows.len() > 1 {
         log::warn!(
-            "[atlas-client] {} caps offer '{contract_id}' over gRPC; \
+            "[atlas-client] {} entities offer '{contract_id}' over gRPC; \
              picking first ('{}'). Use query_capabilities + connect_capability \
              for deterministic selection.",
-            records.len(),
-            records[0].capability_id,
+            rows.len(),
+            rows[0].owner_id,
         );
     }
-    let cap_id = records
+    let owner_id = rows
         .into_iter()
         .next()
         .expect("non-empty checked above")
-        .capability_id;
+        .owner_id;
     let (channel_id, endpoint_str, _params) = atlas
-        .connect_capability(consumer_id, &cap_id, contract_id, pb::Transport::Grpc)
+        .connect_capability(consumer_id, &owner_id, contract_id, pb::Transport::Grpc)
         .await?;
     let normalized = normalize_grpc_endpoint(&endpoint_str);
     let channel = Endpoint::new(normalized.clone())
-        .with_context(|| format!("invalid endpoint '{}' for cap '{}'", normalized, cap_id))?
+        .with_context(|| format!("invalid endpoint '{}' for owner '{}'", normalized, owner_id))?
         .connect()
         .await
         .with_context(|| {
-            format!("connect to cap '{cap_id}' at '{normalized}' for contract '{contract_id}'")
+            format!("connect to owner '{owner_id}' at '{normalized}' for contract '{contract_id}'")
         })?;
-    Ok((channel_id, cap_id, channel))
+    Ok((channel_id, owner_id, channel))
 }
 
-// ── TransportParams constructors ────────────────────────────────────────────
-//
-// Tiny helpers so callers don't have to write the `oneof` wrapper boilerplate
-// at every DeclareInterface site.
+// ── TransportParams constructors ───────────────────────────────────────────
 
-/// Build `TransportParams` for a gRPC interface.
 pub fn grpc_params(
     proto_file: impl Into<String>,
     service_name: impl Into<String>,
@@ -379,7 +485,6 @@ pub fn grpc_params(
     }
 }
 
-/// Build `TransportParams` for a ROS 2 interface.
 pub fn ros2_params(qos_profile: impl Into<String>) -> pb::TransportParams {
     pb::TransportParams {
         kind: Some(pb::transport_params::Kind::Ros2(pb::Ros2Params {
@@ -388,20 +493,18 @@ pub fn ros2_params(qos_profile: impl Into<String>) -> pb::TransportParams {
     }
 }
 
-/// Build `TransportParams` for an MCP tool interface.
-pub fn mcp_params(
-    description: impl Into<String>,
-    input_schema_json: impl Into<String>,
-) -> pb::TransportParams {
+/// Build `TransportParams` for an MCP tool Capability. The natural-
+/// language description now lives on `DeclareCapabilityRequest.description`,
+/// not inside `McpParams`.
+pub fn mcp_params(input_schema_json: impl Into<String>) -> pb::TransportParams {
     pb::TransportParams {
         kind: Some(pb::transport_params::Kind::Mcp(pb::McpParams {
-            description: description.into(),
             input_schema_json: input_schema_json.into(),
         })),
     }
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────────
 
 fn normalize_grpc_endpoint(s: &str) -> String {
     let s = s.trim();

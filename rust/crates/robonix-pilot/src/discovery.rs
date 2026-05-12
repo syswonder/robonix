@@ -59,7 +59,7 @@ pub async fn cap_md_index(atlas: &mut AtlasClient) -> Result<Vec<CapDoc>> {
             continue;
         }
         out.push(CapDoc {
-            cap_id: rec.capability_id,
+            cap_id: rec.id,
             namespace: rec.namespace,
             md_path: rec.capability_md_path,
         });
@@ -68,19 +68,17 @@ pub async fn cap_md_index(atlas: &mut AtlasClient) -> Result<Vec<CapDoc>> {
 }
 
 /// Query atlas for every MCP-transport interface. Returns one
-/// `(cap_id, InterfaceMetadata)` pair per LLM-callable contract; callers
+/// `(cap_id, Capability)` pair per LLM-callable contract; callers
 /// pull description + input_schema_json out of `params.kind` themselves.
 /// Interfaces with missing or non-MCP params are dropped with a warning.
-pub async fn discover(
-    atlas: &mut AtlasClient,
-) -> Result<Vec<(String, atlas_pb::InterfaceMetadata)>> {
+pub async fn discover(atlas: &mut AtlasClient) -> Result<Vec<(String, atlas_pb::Capability)>> {
     let records = atlas
         .query_capabilities("", "", atlas_pb::Transport::Mcp)
         .await?;
 
     let mut out = Vec::new();
     for rec in records {
-        for iface in rec.interfaces {
+        for iface in rec.capabilities {
             if iface.transport != atlas_pb::Transport::Mcp as i32 {
                 continue;
             }
@@ -93,12 +91,12 @@ pub async fn discover(
             if !has_mcp {
                 log::warn!(
                     "[pilot/discovery] cap='{}' contract='{}' has no MCP params; skipping",
-                    rec.capability_id,
+                    rec.id,
                     iface.contract_id
                 );
                 continue;
             }
-            out.push((rec.capability_id.clone(), iface));
+            out.push((rec.id.clone(), iface));
         }
     }
     Ok(out)

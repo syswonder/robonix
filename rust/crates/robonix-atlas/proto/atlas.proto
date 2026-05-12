@@ -1,0 +1,558 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+// Author: wheatfox <wheatfox17@icloud.com>
+syntax = "proto3";
+package robonix.atlas;
+
+// ---------------------------------------------------------------------------
+// Atlas data model -- at a glance
+//
+//   +--------------------+  owns 1..*  +------------+
+//   | CapabilityProvider |------------>| Capability |
+//   +--------------------+             +------------+
+//                                            |
+//   CapabilityProvider is one of:            | contract_id
+//     Primitive | Service | Skill            v
+//                                      +--------------------+
+//                                      | ContractDescriptor |
+//                                      +--------------------+
+//
+//   Capabilities have NO state of their own. Callability follows the
+//   owning CapabilityProvider's lifecycle state.
+//
+// Lifecycle FSM (per CapabilityProvider):
+//
+//                CMD_INIT             CMD_ACTIVATE
+//   REGISTERED ----------> INACTIVE -------------> ACTIVE
+//                              ^                     |
+//                              +-- CMD_DEACTIVATE ---+
+//
+//   any state --handler fails / raises--> ERROR  (terminal apart from SHUTDOWN)
+//   any state --CMD_SHUTDOWN / SIGTERM / heartbeat lapse--> TERMINATED
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Design notes (the UML above is the cheatsheet; this is the rationale).
+//
+// Why three kinds? They differ in lifetime semantics, so consumers
+// can pick the right reasoning shape:
+//   Primitive -- hardware / data source driver (e.g. tiago_camera,
+//                mid360_lidar, ranger CAN chassis). Long-lived; one
+//                process per device.
+//   Service   -- composed user-facing function (e.g. mapping,
+//                navigation, scene). Long-lived; includes the
+//                platform-internal services (pilot, executor, scene,
+//                memory, liaison) -- they ARE services other
+//                components consume, not a separate category. Atlas
+//                itself does not register.
+//   Skill     -- model-backed, executor-activated on demand (e.g.
+//                VLA pick_and_place, frontier explore). Sits at
+//                INACTIVE until the first call; the executor MAY
+//                (configurable, default off) flip it back to
+//                INACTIVE on idle to free GPU.
+//
+// Why decouple Capability from CapabilityProvider? Pilot composes
+// Capabilities into plans; the CapabilityProvider holds lifecycle.
+// Splitting them lets the LLM-facing surface stay flat (a list of
+// Capabilities with `description`s) while the process/resource side
+// stays grouped (one CapabilityProvider, all its Capabilities, one
+// lifecycle).
+//
+// Why two-step registration?
+//   1) RegisterPrimitive / RegisterService / RegisterSkill announces
+//      identity + namespace; heartbeat starts. The provider is on
+//      the registry but cannot yet be called.
+//   2) DeclareCapability, called once per (contract, transport),
+//      late-binds the wire endpoint for that pair. Late so the
+//      provider can come up healthy before all its transports are
+//      ready (e.g. ROS 2 discovery needs a few seconds).
+//
+// Why hide endpoint in the read view? Forcing consumers through
+// ConnectCapability lets Atlas record the consumer->owner edge, so
+// channel auto-cleanup on eviction has a place to deliver
+// invalidations from. The read view (`Capability`) is fan-out
+// metadata; the channel is the bookkeeping handle.
+//
+// Registry membership != callable. Even after Register + Declare,
+// a CapabilityProvider sits at STATE_REGISTERED. The lifecycle dance
+// (Driver(CMD_INIT) -> INACTIVE -> Driver(CMD_ACTIVATE) -> ACTIVE)
+// has to run before consumers may call its Capabilities -- consumers
+// MUST gate on `state == ACTIVE`. See LifecycleState below.
+// ---------------------------------------------------------------------------
+
+// Closed set of wire transports Atlas understands.
+enum Transport {
+  TRANSPORT_UNSPECIFIED = 0;
+  TRANSPORT_GRPC = 1;
+  TRANSPORT_ROS2 = 2;
+  TRANSPORT_MCP = 3;
+}
+
+// Closed set of CapabilityProvider kinds -- exactly three. Used in:
+//   * `CapabilityProvider.kind` so consumers of Query can disambiguate.
+//   * `Capability.owner_kind` so Executor can reverse-lookup the
+//     owning Skill before firing CMD_ACTIVATE.
+//   * `QueryRequest.kind` as a filter (KIND_UNSPECIFIED = no filter).
+enum Kind {
+  KIND_UNSPECIFIED = 0;
+  KIND_PRIMITIVE   = 1;
+  KIND_SERVICE     = 2;
+  KIND_SKILL       = 3;
+}
+
+// -- Registration ------------------------------------------------------------
+//
+// Three typed Register RPCs, one per CapabilityProvider kind. Request
+// and response bodies are identical across kinds -- the kind is carried
+// by which RPC the caller invoked (Atlas routes into the right per-kind
+// table).
+//
+// `id` is unique GLOBALLY across all three kinds. Registering an id
+// that already exists under a DIFFERENT kind returns gRPC
+// `AlreadyExists` (no cross-kind takeover -- a Primitive cannot morph
+// into a Service or Skill via Register).
+//
+// Same-kind re-registration is allowed and follows takeover semantics:
+//   * all the old id's declared Capabilities are dropped, and
+//   * all open ConnectCapability channels targeting any of those
+//     dropped Capabilities are auto-closed (next DisconnectCapability
+//     by the consumer reports was_open=false).
+// The caller is expected to redeclare its Capabilities after takeover.
+
+message RegisterRequest {
+  // Stable id, e.g. "webots_tiago_camera_front". Empty => Atlas
+  // assigns "ephemeral-<uuid>". Convention: id matches `name:` in
+  // package_manifest.yaml.
+  string id = 1;
+  // Grouping namespace, e.g. "robonix/primitive/camera". Every later
+  // DeclareCapability MUST carry a contract_id under this prefix;
+  // otherwise Atlas rejects with InvalidArgument.
+  string namespace = 2;
+  // Absolute path to the package's CAPABILITY.md (long-form manual
+  // covering the whole CapabilityProvider -- the only place where a
+  // description of the CapabilityProvider as a whole lives; per-cap
+  // descriptions live on each Capability instead). Atlas records the
+  // path only; consumers (Pilot etc.) read the file off the local
+  // filesystem themselves. v1 assumes Atlas, every CapabilityProvider,
+  // and every consumer share a filesystem (single host); cross-host
+  // deployments need a separate "fetch CAPABILITY.md content" RPC
+  // we'll add when that ships.
+  // Empty => no markdown for this CapabilityProvider.
+  string capability_md_path = 3;
+}
+message RegisterResponse { string id = 1; }
+
+// Unregister any CapabilityProvider (id is unique across kinds).
+// Idempotent: an unknown `id` returns `was_present = false`, NOT a
+// gRPC error.
+message UnregisterRequest { string id = 1; }
+message UnregisterResponse { bool was_present = 1; }
+
+// Liveness signal. Atlas may evict CapabilityProviders whose
+// heartbeat lapses.
+//
+// Cadence: clients SHOULD call Heartbeat every ~30s. The eviction
+// threshold is implementation-defined (Atlas v1: 90s, i.e. ~3 missed
+// heartbeats). Sending faster than 1Hz is wasteful; slower than
+// threshold/2 risks being evicted on a single delay.
+//
+// gRPC errors:
+//   * NotFound -- `id` does not refer to a registered CapabilityProvider.
+message HeartbeatRequest { string id = 1; }
+message HeartbeatResponse {}
+
+// -- Transport-specific declare params --------------------------------------
+
+message GrpcParams {
+  string proto_file = 1;
+  string service_name = 2;
+  string method = 3;
+}
+
+message Ros2Params {
+  // Optional QoS override; "" => ROS 2 default profile.
+  string qos_profile = 1;
+}
+
+message McpParams {
+  // JSON Schema describing the tool's input. MUST parse as a JSON
+  // object (or be empty for "no args"); MCP protocol fixes this format.
+  string input_schema_json = 1;
+}
+
+message TransportParams {
+  oneof kind {
+    GrpcParams grpc = 1;
+    Ros2Params ros2 = 2;
+    McpParams mcp = 3;
+  }
+}
+
+// -- Declare one Capability on a registered CapabilityProvider --------------------------
+//
+// To expose the same contract over multiple transports, call once per
+// transport. Atlas guarantees the returned endpoint is globally unique
+// on (transport, endpoint).
+//
+// Uniqueness: for any single CapabilityProvider, the (contract_id,
+// transport) pair appears at most once -- equivalently, the global
+// (owner_id, contract_id, transport) tuple is unique across Atlas.
+// A duplicate DeclareCapability for the same triple returns gRPC
+// `AlreadyExists`; to redeclare with a different endpoint, the
+// caller must Unregister + re-Register the whole owner (takeover
+// semantics drop the old declares with it), or let the owner's
+// heartbeat lapse so Atlas evicts it.
+//
+// gRPC errors:
+//   * NotFound          -- `owner_id` is not registered with Atlas.
+//   * InvalidArgument   -- `transport` is TRANSPORT_UNSPECIFIED;
+//                         `contract_id` is not under the owner's
+//                         declared namespace; `params.kind` does
+//                         not match `transport`; or the conflict-
+//                         resolution rules below resolve to it.
+//   * AlreadyExists     -- duplicate (owner_id, contract_id, transport)
+//                         or a non-mintable endpoint collision.
+
+message DeclareCapabilityRequest {
+  // Owning CapabilityProvider (primitive/service/skill); MUST already be registered.
+  string owner_id = 1;
+  // contract_id, e.g. "robonix/primitive/camera/depth".
+  string contract_id = 2;
+  Transport transport = 3;
+  // Preferred address string. Format is transport-specific:
+  //   grpc:  "127.0.0.1:50105"   (caller binds first)
+  //   ros2:  "/scanner/cloud"     ("" => Atlas mints)
+  //   mcp:   "http://host:port/mcp"
+  //
+  // Conflict resolution:
+  //   - empty proposal + mintable transport (ros2)
+  //                     -> Atlas mints "/rbnx/<dotted-contract>/<uuid8>"
+  //   - empty proposal + non-mintable transport (grpc, mcp)
+  //                     -> InvalidArgument
+  //   - non-empty + no collision        -> stored verbatim
+  //   - non-empty + collision + mintable
+  //                     -> Atlas rewrites by appending "~<uuid8>"
+  //   - non-empty + collision + non-mintable
+  //                     -> AlreadyExists (caller picks new and retries)
+  //
+  // CALLER MUST USE the returned endpoint.
+  string endpoint = 4;
+  // Transport-specific params; the oneof variant MUST match `transport`.
+  TransportParams params = 5;
+  // Instance-specific natural-language description for THIS particular
+  // Capability instance -- the part that's specific to *this* owner's
+  // setup, on top of whatever the contract already says generically.
+  // Example: contract `robonix/primitive/camera/rgb` already explains
+  // "returns current RGB image as sensor_msgs/Image"; this field adds
+  // "front-facing, 640x480 @ 30 Hz, no exposure compensation" for the
+  // tiago_camera_front instance specifically. Surfaced to Pilot / LLM.
+  //
+  // Filled by the CapabilityProvider -- either explicitly, or auto-
+  // filled by the framework from the handler's docstring (e.g.
+  // robonix_api's `@cap.mcp(...)` / `@cap.grpc(...)` wrappers read
+  // the wrapped function's docstring into this field before calling
+  // DeclareCapability). Either way, only this single field hits the
+  // wire.
+  //
+  // SHOULD be one short line (~200 chars or less); longer prose
+  // belongs in CAPABILITY.md.
+  //
+  // Optional; may be empty when the contract's `description` already
+  // says everything that needs saying. Consumers MERGE this with
+  // `ContractDescriptor.description` at consume time -- the two are
+  // not alternatives; they cover generic vs instance-specific aspects
+  // of the same Capability and may overlap. The CapabilityProvider's
+  // CAPABILITY.md is a separate, long-form per-CapabilityProvider
+  // doc (see RegisterRequest.capability_md_path), surfaced alongside.
+  string description = 6;
+}
+message DeclareCapabilityResponse {
+  // Authoritative endpoint actually registered.
+  string endpoint = 1;
+}
+
+// Public view of one declared Capability -- what shows up inside
+// `CapabilityProvider.capabilities` returned by Query. Mirrors the fields of
+// DeclareCapabilityRequest EXCEPT `endpoint` is OMITTED: endpoint
+// disclosure is gated behind ConnectCapability so Atlas records the
+// consumer->owner edge before any traffic flows. Consumers MUST
+// call ConnectCapability to obtain the dial-able endpoint.
+//
+// `owner_id` / `owner_kind` are duplicated inside each Capability
+// even when it sits inside a CapabilityProvider (where the same info is on the
+// CapabilityProvider itself) -- the cost is one extra string + one enum per cap
+// on the wire, and it lets consumers flatten `CapabilityProvider.capabilities`
+// into a flat Capability list without having to copy the owner info
+// across by hand.
+//
+// Invariant: `params`'s oneof variant matches `transport` --
+//   GRPC <-> GrpcParams, ROS2 <-> Ros2Params, MCP <-> McpParams.
+// Atlas enforces this at DeclareCapability time, so a Capability read
+// from Query is guaranteed consistent. Consumers MAY assume this and
+// skip a re-check.
+message Capability {
+  string owner_id = 1;
+  Kind owner_kind = 2;
+  string contract_id = 3;
+  Transport transport = 4;
+  TransportParams params = 5;
+  // Natural-language description (see DeclareCapabilityRequest.description).
+  string description = 6;
+}
+
+// -- CapabilityProvider lifecycle --------------------------------------------
+//
+// Lifecycle is per-CapabilityProvider (per Primitive / Service /
+// Skill), not per-Capability. The CapabilityProvider itself is the
+// source of truth; Atlas only stores what it reported via
+// SetLifecycleState.
+//
+// The `Driver(CMD_INIT)` / `Driver(CMD_ACTIVATE)` / etc. calls
+// referenced below are NOT part of Atlas. `Driver` is defined by
+// `lib/lifecycle/srv/Driver.srv` and exposed by each CapabilityProvider
+// as a gRPC service alongside its data Capabilities. `rbnx boot` and
+// the executor call it on the CapabilityProvider's own gRPC endpoint
+// to drive the transitions described here. Atlas only observes the
+// resulting SetLifecycleState pushes.
+//
+//   STATE_REGISTERED  -- process up, Register* succeeded, but
+//                       Driver(CMD_INIT) hasn't completed.
+//   STATE_INACTIVE    -- Driver(CMD_INIT) ok. Config parsed, upstream
+//                       CapabilityProvider dependencies looked up via
+//                       Atlas Query, soft validation done; no hot
+//                       resources held. Skills sit here until the
+//                       executor sends CMD_ACTIVATE. Primitives /
+//                       Services pass through immediately -- `rbnx
+//                       boot` auto-sends CMD_ACTIVATE next.
+//   STATE_ACTIVE      -- Driver(CMD_ACTIVATE) ok. Hot resources held,
+//                       Capabilities serve traffic. Consumers MUST
+//                       gate on `state == ACTIVE` of the owning CapabilityProvider
+//                       before calling a Capability.
+//   STATE_ERROR       -- last Driver(CMD_*) returned ok=false or
+//                       raised. Terminal apart from CMD_SHUTDOWN.
+//   STATE_TERMINATED  -- on_shutdown ran (or process exited / heartbeat
+//                       lapsed). Atlas GCs after a brief delay.
+enum LifecycleState {
+  STATE_UNSPECIFIED = 0;
+  STATE_REGISTERED  = 1;
+  STATE_INACTIVE    = 2;
+  STATE_ACTIVE      = 3;
+  STATE_ERROR       = 4;
+  STATE_TERMINATED  = 5;
+}
+
+// Push a state transition. CapabilityProviders call this after their
+// on_init / on_activate / on_deactivate handler returns; `rbnx` and
+// the executor use the result to gate follow-up Driver(CMD_*) calls
+// without polling.
+//
+// Validation policy. Two tiers -- Atlas does NOT accept literally
+// everything:
+//
+//   * HARD-reject (gRPC error, no state change):
+//       - `id` does not refer to a registered CapabilityProvider
+//                                                  -> NotFound
+//       - `state` is STATE_UNSPECIFIED             -> InvalidArgument
+//
+//   * SOFT-accept (transition is applied, new state stored, `warn`
+//     logged) whenever the (previous_state, new_state) edge is not
+//     one of the legal FSM edges in the LifecycleState diagram. The
+//     CapabilityProvider is always the source of truth -- a hardened
+//     transition check would create boot-time deadlocks if an Atlas
+//     restart loses pushed state mid-lifecycle, so we log and keep
+//     going. Pre-launch tooling (`rbnx caps`) surfaces the warns so
+//     out-of-spec transitions stay visible without blocking progress.
+message SetLifecycleStateRequest {
+  string id = 1;
+  LifecycleState state = 2;
+  // Optional human-readable reason / error attached to this
+  // transition, shown in `rbnx caps`. Empty when normal success.
+  string detail = 3;
+}
+message SetLifecycleStateResponse {
+  // The state Atlas had stored just before this call returned
+  // successfully -- the real previous state, NOT STATE_UNSPECIFIED,
+  // even when the (previous_state, new_state) edge was soft-rejected
+  // (logged but applied). Useful for the caller to log a clean
+  // "X went from PREV -> NEW" line without a separate Query.
+  LifecycleState previous_state = 1;
+}
+
+// -- Read views -------------------------------------------------------------
+
+// One registered CapabilityProvider (Primitive / Service / Skill) and the
+// Capabilities it currently offers. The shape is the same for all three
+// kinds -- the kind is carried in the `kind` field, redundant when the
+// caller used Query with a kind filter but cheap and lets consumers
+// demultiplex when `Query(kind=UNSPECIFIED)` was used.
+// `capabilities` is metadata only -- endpoint strings + TransportParams
+// are revealed only via ConnectCapability.
+message CapabilityProvider {
+  string id = 1;
+  Kind kind = 2;
+  string namespace = 3;
+  string capability_md_path = 4;
+  uint64 last_heartbeat_ms = 5;
+  LifecycleState state = 6;
+  string state_detail = 7;
+  // Each Capability's owner_id / owner_kind equal this CapabilityProvider's
+  // id / kind. The duplication is intentional -- see Capability above.
+  repeated Capability capabilities = 8;
+}
+
+// Discovery -- one Query RPC with a Kind filter. Python wrappers
+// expose typed `query_primitives` / `query_services` / `query_skills`
+// methods by setting `kind` accordingly. Filters AND together.
+//
+// Filter semantics for `contract_id` and `transport`:
+//   * They filter the *Capabilities* inside each CapabilityProvider --
+//     the returned `CapabilityProvider.capabilities` only contains the
+//     matching subset.
+//   * They also filter *CapabilityProviders* themselves: a
+//     CapabilityProvider with zero matching Capabilities after the
+//     inner filter is dropped from the response.
+//   * `id` and `namespace_prefix` filter CapabilityProviders directly
+//     (no effect on the inner capabilities list, since they describe
+//     the CapabilityProvider, not the cap).
+message QueryRequest {
+  // KIND_UNSPECIFIED = no filter (return all kinds).
+  Kind kind = 1;
+  string id = 2;
+  string contract_id = 3;
+  Transport transport = 4;
+  string namespace_prefix = 5;
+}
+message QueryResponse {
+  repeated CapabilityProvider providers = 1;
+}
+
+// -- Channels ---------------------------------------------------------------
+//
+// A channel is an Atlas-recorded edge from a consumer to one
+// (owner_id, contract_id, transport) triple. It does NOT carry
+// traffic; the consumer dials the returned `endpoint` itself. Atlas
+// keeps the edge purely for bookkeeping (who is talking to whom)
+// and to fan-out invalidations.
+//
+// Channel auto-cleanup. Atlas drops every channel pointing at the
+// owner side when:
+//   * the owner Unregisters,
+//   * the owner's heartbeat lapses past the eviction threshold, or
+//   * the owner is taken over by a same-id same-kind Register (the
+//     Capabilities the channel was bound to disappeared).
+// After auto-drop, the consumer's next DisconnectCapability call for
+// that channel_id returns `was_open = false`; in-flight RPCs on the
+// already-dialed transport return the transport's own "unavailable"
+// signal (gRPC UNAVAILABLE, etc.).
+
+// ConnectCapability -- open a channel.
+// gRPC errors:
+//   * NotFound        -- `owner_id` is not registered, or the owner
+//                       has not declared a Capability with the given
+//                       (contract_id, transport).
+//   * InvalidArgument -- `transport` is TRANSPORT_UNSPECIFIED.
+message ConnectCapabilityRequest {
+  string consumer_id = 1;
+  string owner_id = 2;
+  string contract_id = 3;
+  Transport transport = 4;
+}
+message ConnectCapabilityResponse {
+  // Opaque handle for this consumer->owner edge. Pass back to
+  // DisconnectCapability when the consumer is done.
+  string channel_id = 1;
+  // Authoritative dial-able endpoint string (same form the owner
+  // registered at DeclareCapability time, possibly Atlas-rewritten on
+  // collision). The consumer dials this directly using the matching
+  // client (tonic for grpc, rclrs / rclpy for ros2, fastmcp for mcp).
+  string endpoint = 2;
+  // Full transport-specific binding (proto_file / service_name /
+  // method for gRPC; qos_profile for ROS 2; input_schema_json for
+  // MCP). Saves the consumer a follow-up Query to resolve these.
+  TransportParams params = 3;
+}
+
+// DisconnectCapability -- release a channel. Idempotent: unknown
+// `channel_id` returns `was_open = false`, NOT a gRPC error
+// (Atlas may have already dropped it due to owner eviction or
+// takeover; that's expected and the caller has nothing to do).
+message DisconnectCapabilityRequest { string channel_id = 1; }
+message DisconnectCapabilityResponse { bool was_open = 1; }
+
+// -- Contract registry -----------------------------------------------------
+
+message ContractDescriptor {
+  string id = 1;
+  string version = 2;
+  // Kind of CapabilityProvider this contract is intended for.
+  Kind kind = 3;
+  string mode = 4;
+  string io_msg_type = 5;
+  string io_srv_type = 6;
+  string source_toml_path = 7;
+  repeated FieldSpec msg_fields = 8;
+  repeated FieldSpec srv_request_fields = 9;
+  repeated FieldSpec srv_response_fields = 10;
+  // Generic natural-language description for the Capability this
+  // contract defines -- what the contract does in the abstract,
+  // shared by every CapabilityProvider that declares it. Consumers
+  // MERGE this with each Capability's instance-specific
+  // `DeclareCapabilityRequest.description` at consume time; the two
+  // are complementary (generic + instance-specific), not
+  // alternatives.
+  string description = 11;
+}
+
+message FieldSpec {
+  string name = 1;
+  string type_name = 2;
+  bool is_primitive = 3;
+  bool is_array = 4;
+  uint32 array_size = 5;
+}
+
+message QueryContractRequest { string contract_id = 1; }
+message QueryContractResponse {
+  ContractDescriptor contract = 1;
+  bool found = 2;
+}
+
+message ListContractsRequest { string namespace_prefix = 1; }
+message ListContractsResponse { repeated ContractDescriptor contracts = 1; }
+
+message InspectAtlasRequest {}
+message InspectAtlasResponse { string json = 1; }
+
+service Atlas {
+  // Registration -- one RPC per CapabilityProvider kind.
+  rpc RegisterPrimitive(RegisterRequest) returns (RegisterResponse);
+  rpc RegisterService(RegisterRequest)   returns (RegisterResponse);
+  rpc RegisterSkill(RegisterRequest)     returns (RegisterResponse);
+  rpc Unregister(UnregisterRequest)      returns (UnregisterResponse);
+
+  // Liveness + lifecycle.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc SetLifecycleState(SetLifecycleStateRequest)
+      returns (SetLifecycleStateResponse);
+
+  // Capability binding.
+  rpc DeclareCapability(DeclareCapabilityRequest)
+      returns (DeclareCapabilityResponse);
+
+  // Discovery -- one Query RPC, kind carried in the request body.
+  // Consumers wanting a flat capability list flatten `CapabilityProvider.capabilities`
+  // themselves; each Capability already carries owner_id / owner_kind.
+  rpc Query(QueryRequest) returns (QueryResponse);
+
+  // Channels.
+  rpc ConnectCapability(ConnectCapabilityRequest)
+      returns (ConnectCapabilityResponse);
+  rpc DisconnectCapability(DisconnectCapabilityRequest)
+      returns (DisconnectCapabilityResponse);
+
+  // Contracts.
+  rpc QueryContract(QueryContractRequest) returns (QueryContractResponse);
+  rpc ListContracts(ListContractsRequest) returns (ListContractsResponse);
+
+  // Debug.
+  rpc InspectAtlas(InspectAtlasRequest) returns (InspectAtlasResponse);
+}
