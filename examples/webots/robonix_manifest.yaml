@@ -9,8 +9,6 @@ system:
   atlas:
     listen: 127.0.0.1:50051
     log: info
-  nexus:
-    log: info
   # soma+scene layer
   scene:
     log: info

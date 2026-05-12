@@ -62,8 +62,6 @@ system:
   liaison:
     listen: 127.0.0.1:50081
     log: info
-  nexus:
-    log: info
   memory: []
 
 primitive: []
