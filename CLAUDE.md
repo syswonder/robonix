@@ -8,11 +8,12 @@ repository with Claude Code. Read once at session start; obey throughout.
 - `docs/src/developer-guide.md` is the source of truth for concepts and
   terminology. When code and the dev guide disagree, fix the code, not
   the guide.
-- The four formal concepts are **capability / contract / primitive /
-  service / skill**. Do not introduce additional umbrella terms in
-  user-facing prose (dev guide, README, quickstart, CLI output, error
-  messages, commit messages). The internal Rust type `CapabilityProvider`
-  / Python `_ProviderBase` / fields `provider_id`, `provider_kind` are
+- The formal concepts are **capability** (the interface) + **contract**
+  (its shape) + three provider kinds **primitive / service / skill**.
+  Do not introduce additional umbrella terms in user-facing prose
+  (dev guide, README, quickstart, CLI output, error messages, commit
+  messages). The internal Rust type `CapabilityProvider` / Python
+  `_ProviderBase` / fields `provider_id`, `provider_kind` are
   implementation labels and stay as-is.
 - No new concept / rename / RPC / state name without explicit user
   confirmation in the conversation. If you find yourself about to
@@ -72,8 +73,10 @@ this; invoke with `/pre-commit-review` after a logical chunk is done.
 
 ## Upstream packages
 
-`mapping_rbnx`, `explore_rbnx`, `template_rbnx` are separate
-repositories cloned into `examples/webots/rbnx-boot/cache/` at boot.
-When you rename / break something that affects them, push the
-upstream fix first, then pull cache. Don't rely on local cache edits
-surviving — `rbnx clean --cache` will wipe them.
+`mapping_rbnx` and `explore_rbnx` are separate repositories cloned into
+`examples/webots/rbnx-boot/cache/` at boot. `template_rbnx` is a
+deployment scaffold users clone separately (it does **not** live in
+the webots cache). When you rename / break something that affects
+any of them, push the upstream fix first, then pull cache. Don't
+rely on local cache edits surviving — `rbnx clean --cache` will wipe
+them.

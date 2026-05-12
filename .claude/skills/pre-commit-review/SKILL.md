@@ -21,7 +21,7 @@ fan-out cost isn't worth it.
 
 ## What it does
 
-1. Read `git diff` (unstaged) so the agents know exactly what changed.
+1. Read `git diff HEAD` (staged + unstaged) so the agents see the full set about to be committed.
 2. Launch in parallel:
    - `pr-review-toolkit:code-reviewer` — CLAUDE.md / style adherence
    - `pr-review-toolkit:silent-failure-hunter` — catch-all blocks,
