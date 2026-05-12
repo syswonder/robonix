@@ -125,7 +125,7 @@ pub async fn run_turn(
 
     // Pilot's capability catalog comes straight from atlas (filtered to
     // MCP transport — only those are LLM-callable). McpParams ride along
-    // in InterfaceMetadata.params, no Connect needed.
+    // in Capability.params, no Connect needed.
     let _ = consumer_id; // currently unused; kept on the signature for future channel-tracked discovery
     let initial_caps = discovery::discover(atlas)
         .await
@@ -228,7 +228,7 @@ pub async fn run_turn(
                     serde_json::from_str(&mcp.input_schema_json).unwrap_or_default();
                 Some(ToolDef::new(
                     &llm_name(&iface.contract_id),
-                    &mcp.description,
+                    &iface.description,
                     schema,
                 ))
             })

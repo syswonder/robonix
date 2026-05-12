@@ -130,14 +130,14 @@ async fn resolve_pilot_endpoint(atlas: &Arc<Mutex<AtlasClient>>) -> Option<Strin
         .await
         .ok()?;
     let cap = records.iter().find(|r| {
-        r.interfaces
+        r.capabilities
             .iter()
             .any(|i| i.contract_id == "robonix/system/pilot" && i.transport == transport as i32)
     })?;
     let (_channel_id, endpoint, _params) = atlas
         .connect_capability(
             LIAISON_CAPABILITY_ID,
-            &cap.capability_id,
+            &cap.id,
             "robonix/system/pilot",
             transport,
         )
@@ -446,11 +446,11 @@ async fn main() -> Result<()> {
         .context("connect to atlas")?;
 
     atlas
-        .register_capability(LIAISON_CAPABILITY_ID, LIAISON_NAMESPACE, "")
+        .register_service(LIAISON_CAPABILITY_ID, LIAISON_NAMESPACE, "")
         .await
         .context("register liaison capability")?;
     atlas
-        .declare_interface(
+        .declare_capability(
             LIAISON_CAPABILITY_ID,
             LIAISON_SUBMIT_CONTRACT,
             atlas_pb::Transport::Grpc,
@@ -464,7 +464,7 @@ async fn main() -> Result<()> {
         .await
         .context("declare liaison submit gRPC interface")?;
     atlas
-        .declare_interface(
+        .declare_capability(
             LIAISON_CAPABILITY_ID,
             LIAISON_VOICE_CONTRACT,
             atlas_pb::Transport::Grpc,
@@ -482,9 +482,9 @@ async fn main() -> Result<()> {
     // state explicitly so `rbnx caps` shows ACTIVE instead of stopping at
     // the legacy-fallback INACTIVE that atlas infers from the first declare.
     if let Err(e) = atlas
-        .set_capability_state(
+        .set_lifecycle_state(
             LIAISON_CAPABILITY_ID,
-            atlas_pb::CapabilityState::StateActive,
+            atlas_pb::LifecycleState::StateActive,
             "",
         )
         .await

@@ -29,7 +29,7 @@ const MINT_ATTEMPTS: usize = 16;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "transport", rename_all = "snake_case")]
-enum TransportParamsRec {
+enum TransportParamsState {
     Grpc {
         proto_file: String,
         service_name: String,
@@ -39,12 +39,11 @@ enum TransportParamsRec {
         qos_profile: String,
     },
     Mcp {
-        description: String,
         input_schema_json: String,
     },
 }
 
-impl TransportParamsRec {
+impl TransportParamsState {
     fn transport(&self) -> Transport {
         match self {
             Self::Grpc { .. } => Transport::Grpc,
@@ -54,11 +53,11 @@ impl TransportParamsRec {
     }
 }
 
-impl From<&TransportParamsRec> for pb::TransportParams {
-    fn from(r: &TransportParamsRec) -> Self {
+impl From<&TransportParamsState> for pb::TransportParams {
+    fn from(r: &TransportParamsState) -> Self {
         use pb::transport_params::Kind;
         let kind = match r {
-            TransportParamsRec::Grpc {
+            TransportParamsState::Grpc {
                 proto_file,
                 service_name,
                 method,
@@ -67,14 +66,10 @@ impl From<&TransportParamsRec> for pb::TransportParams {
                 service_name: service_name.clone(),
                 method: method.clone(),
             }),
-            TransportParamsRec::Ros2 { qos_profile } => Kind::Ros2(pb::Ros2Params {
+            TransportParamsState::Ros2 { qos_profile } => Kind::Ros2(pb::Ros2Params {
                 qos_profile: qos_profile.clone(),
             }),
-            TransportParamsRec::Mcp {
-                description,
-                input_schema_json,
-            } => Kind::Mcp(pb::McpParams {
-                description: description.clone(),
+            TransportParamsState::Mcp { input_schema_json } => Kind::Mcp(pb::McpParams {
                 input_schema_json: input_schema_json.clone(),
             }),
         };
@@ -83,12 +78,15 @@ impl From<&TransportParamsRec> for pb::TransportParams {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct EndpointRec {
+struct DeclaredEndpoint {
     contract_id: String,
     #[serde(serialize_with = "serialize_transport")]
     transport: Transport,
     endpoint: String,
-    params: TransportParamsRec,
+    params: TransportParamsState,
+    /// Provider-supplied natural-language description for this
+    /// Capability. Empty means "fall back to contract default".
+    description: String,
 }
 
 fn serialize_transport<S: serde::Serializer>(t: &Transport, ser: S) -> Result<S::Ok, S::Error> {
@@ -96,7 +94,7 @@ fn serialize_transport<S: serde::Serializer>(t: &Transport, ser: S) -> Result<S:
 }
 
 fn serialize_pushed_state<S: serde::Serializer>(
-    s: &Option<pb::CapabilityState>,
+    s: &Option<pb::LifecycleState>,
     ser: S,
 ) -> Result<S::Ok, S::Error> {
     match s {
@@ -105,52 +103,64 @@ fn serialize_pushed_state<S: serde::Serializer>(
     }
 }
 
-impl From<&EndpointRec> for pb::InterfaceMetadata {
-    fn from(e: &EndpointRec) -> Self {
-        Self {
+fn serialize_provider_kind<S: serde::Serializer>(k: &pb::Kind, ser: S) -> Result<S::Ok, S::Error> {
+    ser.serialize_str(k.as_str_name())
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CapabilityProviderState {
+    id: String,
+    #[serde(serialize_with = "serialize_provider_kind")]
+    kind: pb::Kind,
+    namespace: String,
+    capability_md_path: String,
+    last_heartbeat_ms: u64,
+    endpoints: Vec<DeclaredEndpoint>,
+    /// Last value reported by SetLifecycleState. None for Providers
+    /// that never push, in which case `state()` falls back to the
+    /// "first non-driver interface declare -> INACTIVE" inference.
+    #[serde(serialize_with = "serialize_pushed_state")]
+    pushed_state: Option<pb::LifecycleState>,
+    state_detail: String,
+}
+
+impl CapabilityProviderState {
+    /// Convert one of this record's endpoints to a wire `pb::Capability`,
+    /// stamping owner_id / owner_kind from the parent record.
+    fn capability_at(&self, e: &DeclaredEndpoint) -> pb::Capability {
+        pb::Capability {
+            owner_id: self.id.clone(),
+            owner_kind: self.kind as i32,
             contract_id: e.contract_id.clone(),
             transport: e.transport as i32,
             params: Some((&e.params).into()),
+            description: e.description.clone(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct CapRecord {
-    capability_id: String,
-    namespace: String,
-    capability_md_path: String,
-    last_heartbeat_ms: u64,
-    endpoints: Vec<EndpointRec>,
-    /// Last value reported by SetCapabilityState. None for legacy caps
-    /// that never push, in which case `state()` falls back to the old
-    /// "first non-driver interface declare → INACTIVE" inference.
-    #[serde(serialize_with = "serialize_pushed_state")]
-    pushed_state: Option<pb::CapabilityState>,
-    state_detail: String,
-}
-
-impl From<&CapRecord> for pb::CapabilityRecord {
-    fn from(rec: &CapRecord) -> Self {
+impl From<&CapabilityProviderState> for pb::CapabilityProvider {
+    fn from(rec: &CapabilityProviderState) -> Self {
         Self {
-            capability_id: rec.capability_id.clone(),
+            id: rec.id.clone(),
+            kind: rec.kind as i32,
             namespace: rec.namespace.clone(),
             capability_md_path: rec.capability_md_path.clone(),
             last_heartbeat_ms: rec.last_heartbeat_ms,
-            interfaces: rec.endpoints.iter().map(Into::into).collect(),
+            capabilities: rec.endpoints.iter().map(|e| rec.capability_at(e)).collect(),
             state: rec.state() as i32,
             state_detail: rec.state_detail.clone(),
         }
     }
 }
 
-impl CapRecord {
+impl CapabilityProviderState {
     /// Lifecycle state. The cap pushes via SetCapabilityState whenever its
     /// on_init / on_activate / on_deactivate handler returns; that pushed
     /// value wins. For legacy caps that never push, fall back to "any
     /// non-driver interface declared → INACTIVE" (preserves behaviour
     /// for code still on the old register-then-declare-only flow).
-    fn state(&self) -> pb::CapabilityState {
+    fn state(&self) -> pb::LifecycleState {
         if let Some(s) = self.pushed_state {
             return s;
         }
@@ -159,9 +169,9 @@ impl CapRecord {
             .iter()
             .any(|e| !is_driver_contract(&e.contract_id));
         if any_non_driver {
-            pb::CapabilityState::StateInactive
+            pb::LifecycleState::StateInactive
         } else {
-            pb::CapabilityState::StateRegistered
+            pb::LifecycleState::StateRegistered
         }
     }
 }
@@ -169,8 +179,8 @@ impl CapRecord {
 /// Whether `prev → next` matches the v0.1 lifecycle FSM (see
 /// `docs/src/architecture/cap-lifecycle.md`). `Unspecified` as `prev`
 /// means "fresh cap, never pushed state" — accept any first transition.
-fn is_legal_transition(prev: pb::CapabilityState, next: pb::CapabilityState) -> bool {
-    use pb::CapabilityState::*;
+fn is_legal_transition(prev: pb::LifecycleState, next: pb::LifecycleState) -> bool {
+    use pb::LifecycleState::*;
     if next == StateError || next == StateTerminated {
         return true; // any state may fail or shut down
     }
@@ -198,7 +208,7 @@ fn is_driver_contract(contract_id: &str) -> bool {
 /// dropped by `DisconnectCapability` or when the provider unregisters /
 /// is evicted by heartbeat lapse.
 #[derive(Debug, Clone, Serialize)]
-struct ChannelRec {
+struct OpenChannel {
     channel_id: String,
     consumer_id: String,
     provider_cap_id: String,
@@ -211,8 +221,8 @@ struct ChannelRec {
 
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct State {
-    caps: HashMap<String, CapRecord>,
-    channels: HashMap<String, ChannelRec>,
+    caps: HashMap<String, CapabilityProviderState>,
+    channels: HashMap<String, OpenChannel>,
 }
 
 impl State {
@@ -298,6 +308,7 @@ impl AtlasRegistry {
     pub async fn register(
         &self,
         cap_id: &str,
+        kind: pb::Kind,
         namespace: &str,
         capability_md_path: &str,
     ) -> Result<String, Status> {
@@ -309,10 +320,16 @@ impl AtlasRegistry {
         let namespace = Self::require("namespace", namespace)?.to_string();
         let mut state = self.inner.write().await;
         if let Some(existing) = state.caps.get_mut(&cap_id) {
-            // Take over the slot. Drop the previous owner's endpoints
+            // Cross-kind collision is rejected per proto contract.
+            if existing.kind != kind {
+                return Err(Status::already_exists(format!(
+                    "'{cap_id}' already registered as {:?}; cannot re-register as {:?}",
+                    existing.kind, kind
+                )));
+            }
+            // Same-kind takeover. Drop the previous owner's endpoints
             // and pushed state; the caller will redeclare what it owns.
-            // Heartbeat moves to `now` so wait_for_registration spotters
-            // can tell this register call from the dead-cap residue.
+            // Channels targeting dropped Capabilities are also auto-closed.
             let prev_iface_count = existing.endpoints.len();
             existing.namespace = namespace;
             existing.capability_md_path = capability_md_path.trim().to_string();
@@ -320,16 +337,18 @@ impl AtlasRegistry {
             existing.endpoints.clear();
             existing.pushed_state = None;
             existing.state_detail.clear();
+            let dropped = state.drop_channels_of(&cap_id);
             info!(
                 "[atlas] register {cap_id} (takeover; dropped {prev_iface_count} \
-                 stale interfaces)"
+                 stale capabilities, {dropped} channels)"
             );
             return Ok(cap_id);
         }
         state.caps.insert(
             cap_id.clone(),
-            CapRecord {
-                capability_id: cap_id.clone(),
+            CapabilityProviderState {
+                id: cap_id.clone(),
+                kind,
                 namespace,
                 capability_md_path: capability_md_path.trim().to_string(),
                 last_heartbeat_ms: Self::now_ms(),
@@ -338,7 +357,7 @@ impl AtlasRegistry {
                 state_detail: String::new(),
             },
         );
-        info!("[atlas] register {cap_id}");
+        info!("[atlas] register {cap_id} kind={kind:?}");
         Ok(cap_id)
     }
 
@@ -366,14 +385,14 @@ impl AtlasRegistry {
     /// but the new state is still stored. Strict validation will land
     /// in v0.2 once telemetry confirms there are no spurious illegal
     /// transitions during atlas/cap startup-race conditions.
-    pub async fn set_capability_state(
+    pub async fn set_lifecycle_state(
         &self,
         cap_id: &str,
-        new_state: pb::CapabilityState,
+        new_state: pb::LifecycleState,
         detail: &str,
-    ) -> Result<pb::CapabilityState, Status> {
-        let cap_id = Self::require("capability_id", cap_id)?;
-        if new_state == pb::CapabilityState::StateUnspecified {
+    ) -> Result<pb::LifecycleState, Status> {
+        let cap_id = Self::require("provider_id", cap_id)?;
+        if new_state == pb::LifecycleState::StateUnspecified {
             return Err(Status::invalid_argument(
                 "state: must not be STATE_UNSPECIFIED",
             ));
@@ -382,7 +401,7 @@ impl AtlasRegistry {
         let rec = state
             .caps
             .get_mut(cap_id)
-            .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
+            .ok_or_else(|| Status::not_found(format!("unknown provider_id: {cap_id}")))?;
         let prev = rec.state();
         if !is_legal_transition(prev, new_state) {
             warn!(
@@ -407,13 +426,13 @@ impl AtlasRegistry {
 
     /// Updates `last_heartbeat_ms` to now. Returns the timestamp it set.
     pub async fn heartbeat(&self, cap_id: &str) -> Result<u64, Status> {
-        let cap_id = Self::require("capability_id", cap_id)?;
+        let cap_id = Self::require("provider_id", cap_id)?;
         let now = Self::now_ms();
         let mut state = self.inner.write().await;
         let rec = state
             .caps
             .get_mut(cap_id)
-            .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
+            .ok_or_else(|| Status::not_found(format!("unknown provider_id: {cap_id}")))?;
         rec.last_heartbeat_ms = now;
         Ok(now)
     }
@@ -428,8 +447,9 @@ impl AtlasRegistry {
         transport: Transport,
         proposed: &str,
         params: pb::TransportParams,
+        description: &str,
     ) -> Result<String, Status> {
-        let cap_id = Self::require("capability_id", cap_id)?;
+        let cap_id = Self::require("provider_id", cap_id)?;
         let contract_id = Self::require("contract_id", contract_id)?.to_string();
         let params = parse_params(transport, Some(params))?;
         let proposed = proposed.trim().to_string();
@@ -438,7 +458,7 @@ impl AtlasRegistry {
         let rec = state
             .caps
             .get(cap_id)
-            .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
+            .ok_or_else(|| Status::not_found(format!("unknown provider_id: {cap_id}")))?;
         if !contract_id.starts_with(&rec.namespace) {
             return Err(Status::invalid_argument(format!(
                 "contract_id '{contract_id}' is not under namespace '{}' of capability '{cap_id}'",
@@ -460,37 +480,41 @@ impl AtlasRegistry {
             .caps
             .get_mut(cap_id)
             .ok_or_else(|| Status::internal("capability vanished mid-declare"))?;
-        rec.endpoints.push(EndpointRec {
+        rec.endpoints.push(DeclaredEndpoint {
             contract_id: contract_id.clone(),
             transport,
             endpoint: endpoint.clone(),
             params,
+            description: description.to_string(),
         });
         info!("[atlas] declare {cap_id} {contract_id} via {transport:?} -> {endpoint}");
         Ok(endpoint)
     }
 
-    /// Snapshot of registered caps matching the given filters. Empty
-    /// `cap_id` / empty `contract` / `Transport::Unspecified` mean "no
-    /// filter on that field". Records carry only endpoints that satisfy
+    /// Snapshot of registered Providers matching the given filters. Empty
+    /// `cap_id` / empty `contract` / `Transport::Unspecified` /
+    /// `Kind::Unspecified` mean "no filter on that field". Each
+    /// returned record carries only the Capabilities that satisfy the
     /// `contract` + `transport` filters.
     pub async fn query(
         &self,
         cap_id: &str,
+        kind: pb::Kind,
         contract: &str,
         transport: Transport,
-    ) -> Vec<pb::CapabilityRecord> {
-        self.query_with_prefix(cap_id, contract, "", transport)
+    ) -> Vec<pb::CapabilityProvider> {
+        self.query_with_prefix(cap_id, kind, contract, "", transport)
             .await
     }
 
     pub async fn query_with_prefix(
         &self,
         cap_id: &str,
+        kind: pb::Kind,
         contract: &str,
         namespace_prefix: &str,
         transport: Transport,
-    ) -> Vec<pb::CapabilityRecord> {
+    ) -> Vec<pb::CapabilityProvider> {
         let f_cap_id = cap_id.trim();
         let f_contract = contract.trim();
         let f_ns_prefix = namespace_prefix.trim();
@@ -499,11 +523,21 @@ impl AtlasRegistry {
         } else {
             Some(transport)
         };
+        let f_kind = if kind == pb::Kind::Unspecified {
+            None
+        } else {
+            Some(kind)
+        };
 
         let state = self.inner.read().await;
         let mut out = Vec::new();
         for rec in state.caps.values() {
-            if !f_cap_id.is_empty() && rec.capability_id != f_cap_id {
+            if !f_cap_id.is_empty() && rec.id != f_cap_id {
+                continue;
+            }
+            if let Some(k) = f_kind
+                && rec.kind != k
+            {
                 continue;
             }
             if !f_ns_prefix.is_empty() && !rec.namespace.starts_with(f_ns_prefix) {
@@ -513,23 +547,24 @@ impl AtlasRegistry {
             {
                 continue;
             }
-            let interfaces: Vec<pb::InterfaceMetadata> = rec
+            let capabilities: Vec<pb::Capability> = rec
                 .endpoints
                 .iter()
                 .filter(|e| {
                     (f_contract.is_empty() || e.contract_id == f_contract)
                         && f_transport.is_none_or(|t| e.transport == t)
                 })
-                .map(Into::into)
+                .map(|e| rec.capability_at(e))
                 .collect();
-            out.push(pb::CapabilityRecord {
-                capability_id: rec.capability_id.clone(),
+            out.push(pb::CapabilityProvider {
+                id: rec.id.clone(),
+                kind: rec.kind as i32,
                 namespace: rec.namespace.clone(),
                 capability_md_path: rec.capability_md_path.clone(),
                 last_heartbeat_ms: rec.last_heartbeat_ms,
                 state: rec.state() as i32,
                 state_detail: rec.state_detail.clone(),
-                interfaces,
+                capabilities,
             });
         }
         out
@@ -548,7 +583,7 @@ impl AtlasRegistry {
         transport: Transport,
     ) -> Result<(String, String, pb::TransportParams), Status> {
         let consumer_id = Self::require("consumer_id", consumer_id)?.to_string();
-        let provider_cap_id = Self::require("capability_id", provider_cap_id)?.to_string();
+        let provider_cap_id = Self::require("provider_id", provider_cap_id)?.to_string();
         let contract_id = Self::require("contract_id", contract_id)?.to_string();
         if transport == Transport::Unspecified {
             return Err(Status::invalid_argument(
@@ -557,9 +592,10 @@ impl AtlasRegistry {
         }
 
         let mut state = self.inner.write().await;
-        let rec = state.caps.get(&provider_cap_id).ok_or_else(|| {
-            Status::not_found(format!("unknown capability_id: {provider_cap_id}"))
-        })?;
+        let rec = state
+            .caps
+            .get(&provider_cap_id)
+            .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_cap_id}")))?;
         let ep = rec
             .endpoints
             .iter()
@@ -575,7 +611,7 @@ impl AtlasRegistry {
         let channel_id = format!("ch-{}", Uuid::new_v4().simple());
         state.channels.insert(
             channel_id.clone(),
-            ChannelRec {
+            OpenChannel {
                 channel_id: channel_id.clone(),
                 consumer_id: consumer_id.clone(),
                 provider_cap_id: provider_cap_id.clone(),
@@ -609,13 +645,13 @@ impl AtlasRegistry {
     /// Read the cap's CAPABILITY.md content. Returns "" when the cap
     /// registered without a path.
     pub async fn capability_md(&self, cap_id: &str) -> Result<String, Status> {
-        let cap_id = Self::require("capability_id", cap_id)?;
+        let cap_id = Self::require("provider_id", cap_id)?;
         let path = {
             let state = self.inner.read().await;
             let rec = state
                 .caps
                 .get(cap_id)
-                .ok_or_else(|| Status::not_found(format!("unknown capability_id: {cap_id}")))?;
+                .ok_or_else(|| Status::not_found(format!("unknown provider_id: {cap_id}")))?;
             rec.capability_md_path.clone()
         };
         if path.is_empty() {
@@ -638,35 +674,6 @@ impl AtlasRegistry {
         serde_json::to_string_pretty(&*state)
             .map_err(|e| Status::internal(format!("inspect serialise failed: {e}")))
     }
-
-    // ── Legacy-shim helpers (keep parallel state out of legacy.rs) ─────────
-
-    /// Snapshot all `(cap_id, namespace, capability_md_path, endpoints-as-pb)`
-    /// for the legacy `RobonixRuntime` shim's QueryNodes / QueryAllSkills /
-    /// NegotiateChannel translations. Uses the shared registry state; no copy
-    /// of state lives in legacy.rs.
-    pub async fn snapshot_for_legacy(&self) -> Vec<pb::CapabilityRecord> {
-        self.query("", "", Transport::Unspecified).await
-    }
-
-    /// Same as `unregister` but also returns whether the slot existed —
-    /// here for symmetry with the legacy shim, which uses the boolean to
-    /// decide whether to clean up its skill_md temp file.
-    pub async fn unregister_with_path(&self, cap_id: &str) -> (bool, Option<String>) {
-        let cap_id = cap_id.trim();
-        if cap_id.is_empty() {
-            return (false, None);
-        }
-        let mut state = self.inner.write().await;
-        let prior = state.caps.remove(cap_id);
-        let path = prior.as_ref().map(|r| r.capability_md_path.clone());
-        let dropped = state.drop_channels_of(cap_id);
-        info!(
-            "[atlas] unregister {cap_id} (was_present={}, channels_dropped={dropped})",
-            prior.is_some()
-        );
-        (prior.is_some(), path)
-    }
 }
 
 /// Whether Atlas can mint a fresh endpoint name for this transport without
@@ -682,7 +689,7 @@ fn atlas_can_mint(transport: Transport) -> bool {
 fn parse_params(
     transport: Transport,
     params: Option<pb::TransportParams>,
-) -> Result<TransportParamsRec, Status> {
+) -> Result<TransportParamsState, Status> {
     use pb::transport_params::Kind;
     let kind = params.and_then(|p| p.kind).ok_or_else(|| {
         Status::invalid_argument(
@@ -690,12 +697,12 @@ fn parse_params(
         )
     })?;
     let rec = match kind {
-        Kind::Grpc(g) => TransportParamsRec::Grpc {
+        Kind::Grpc(g) => TransportParamsState::Grpc {
             proto_file: g.proto_file,
             service_name: g.service_name,
             method: g.method,
         },
-        Kind::Ros2(r) => TransportParamsRec::Ros2 {
+        Kind::Ros2(r) => TransportParamsState::Ros2 {
             qos_profile: r.qos_profile,
         },
         Kind::Mcp(m) => {
@@ -710,8 +717,7 @@ fn parse_params(
                     ));
                 }
             }
-            TransportParamsRec::Mcp {
-                description: m.description,
+            TransportParamsState::Mcp {
                 input_schema_json: m.input_schema_json,
             }
         }
@@ -827,29 +833,59 @@ impl AtlasService {
 
 #[tonic::async_trait]
 impl pb::atlas_server::Atlas for AtlasService {
-    async fn register_capability(
+    async fn register_primitive(
         &self,
-        req: Request<pb::RegisterCapabilityRequest>,
-    ) -> Result<Response<pb::RegisterCapabilityResponse>, Status> {
+        req: Request<pb::RegisterRequest>,
+    ) -> Result<Response<pb::RegisterResponse>, Status> {
         let r = req.into_inner();
-        let capability_id = self
+        let id = self
             .registry
-            .register(&r.capability_id, &r.namespace, &r.capability_md_path)
+            .register(
+                &r.id,
+                pb::Kind::Primitive,
+                &r.namespace,
+                &r.capability_md_path,
+            )
             .await?;
-        Ok(Response::new(pb::RegisterCapabilityResponse {
-            capability_id,
-        }))
+        Ok(Response::new(pb::RegisterResponse { id }))
     }
 
-    async fn unregister_capability(
+    async fn register_service(
         &self,
-        req: Request<pb::UnregisterCapabilityRequest>,
-    ) -> Result<Response<pb::UnregisterCapabilityResponse>, Status> {
+        req: Request<pb::RegisterRequest>,
+    ) -> Result<Response<pb::RegisterResponse>, Status> {
         let r = req.into_inner();
-        let was_present = self.registry.unregister(&r.capability_id).await;
-        Ok(Response::new(pb::UnregisterCapabilityResponse {
-            was_present,
-        }))
+        let id = self
+            .registry
+            .register(
+                &r.id,
+                pb::Kind::Service,
+                &r.namespace,
+                &r.capability_md_path,
+            )
+            .await?;
+        Ok(Response::new(pb::RegisterResponse { id }))
+    }
+
+    async fn register_skill(
+        &self,
+        req: Request<pb::RegisterRequest>,
+    ) -> Result<Response<pb::RegisterResponse>, Status> {
+        let r = req.into_inner();
+        let id = self
+            .registry
+            .register(&r.id, pb::Kind::Skill, &r.namespace, &r.capability_md_path)
+            .await?;
+        Ok(Response::new(pb::RegisterResponse { id }))
+    }
+
+    async fn unregister(
+        &self,
+        req: Request<pb::UnregisterRequest>,
+    ) -> Result<Response<pb::UnregisterResponse>, Status> {
+        let r = req.into_inner();
+        let was_present = self.registry.unregister(&r.id).await;
+        Ok(Response::new(pb::UnregisterResponse { was_present }))
     }
 
     async fn heartbeat(
@@ -857,73 +893,59 @@ impl pb::atlas_server::Atlas for AtlasService {
         req: Request<pb::HeartbeatRequest>,
     ) -> Result<Response<pb::HeartbeatResponse>, Status> {
         let r = req.into_inner();
-        self.registry.heartbeat(&r.capability_id).await?;
+        self.registry.heartbeat(&r.id).await?;
         Ok(Response::new(pb::HeartbeatResponse {}))
     }
 
-    async fn set_capability_state(
+    async fn set_lifecycle_state(
         &self,
-        req: Request<pb::SetCapabilityStateRequest>,
-    ) -> Result<Response<pb::SetCapabilityStateResponse>, Status> {
+        req: Request<pb::SetLifecycleStateRequest>,
+    ) -> Result<Response<pb::SetLifecycleStateResponse>, Status> {
         let r = req.into_inner();
-        let new_state = pb::CapabilityState::try_from(r.state).map_err(|_| {
-            Status::invalid_argument(format!("unknown CapabilityState value: {}", r.state))
+        let new_state = pb::LifecycleState::try_from(r.state).map_err(|_| {
+            Status::invalid_argument(format!("unknown LifecycleState value: {}", r.state))
         })?;
         let prev = self
             .registry
-            .set_capability_state(&r.capability_id, new_state, &r.detail)
+            .set_lifecycle_state(&r.id, new_state, &r.detail)
             .await?;
-        Ok(Response::new(pb::SetCapabilityStateResponse {
+        Ok(Response::new(pb::SetLifecycleStateResponse {
             previous_state: prev as i32,
         }))
     }
 
-    async fn declare_interface(
+    async fn declare_capability(
         &self,
-        req: Request<pb::DeclareInterfaceRequest>,
-    ) -> Result<Response<pb::DeclareInterfaceResponse>, Status> {
+        req: Request<pb::DeclareCapabilityRequest>,
+    ) -> Result<Response<pb::DeclareCapabilityResponse>, Status> {
         let r = req.into_inner();
         let transport = parse_transport(r.transport)?;
         let endpoint = self
             .registry
             .declare(
-                &r.capability_id,
+                &r.owner_id,
                 &r.contract_id,
                 transport,
                 &r.endpoint,
                 r.params.unwrap_or_default(),
+                &r.description,
             )
             .await?;
-        Ok(Response::new(pb::DeclareInterfaceResponse { endpoint }))
+        Ok(Response::new(pb::DeclareCapabilityResponse { endpoint }))
     }
 
-    async fn query_capabilities(
+    async fn query(
         &self,
-        req: Request<pb::QueryCapabilitiesRequest>,
-    ) -> Result<Response<pb::QueryCapabilitiesResponse>, Status> {
+        req: Request<pb::QueryRequest>,
+    ) -> Result<Response<pb::QueryResponse>, Status> {
         let r = req.into_inner();
         let transport = Transport::try_from(r.transport).unwrap_or(Transport::Unspecified);
-        let records = self
+        let kind = pb::Kind::try_from(r.kind).unwrap_or(pb::Kind::Unspecified);
+        let providers = self
             .registry
-            .query_with_prefix(
-                &r.capability_id,
-                &r.contract_id,
-                &r.namespace_prefix,
-                transport,
-            )
+            .query_with_prefix(&r.id, kind, &r.contract_id, &r.namespace_prefix, transport)
             .await;
-        Ok(Response::new(pb::QueryCapabilitiesResponse { records }))
-    }
-
-    async fn query_capability_md(
-        &self,
-        req: Request<pb::QueryCapabilityMdRequest>,
-    ) -> Result<Response<pb::QueryCapabilityMdResponse>, Status> {
-        let r = req.into_inner();
-        let capability_md = self.registry.capability_md(&r.capability_id).await?;
-        Ok(Response::new(pb::QueryCapabilityMdResponse {
-            capability_md,
-        }))
+        Ok(Response::new(pb::QueryResponse { providers }))
     }
 
     async fn connect_capability(
@@ -934,7 +956,7 @@ impl pb::atlas_server::Atlas for AtlasService {
         let transport = parse_transport(r.transport)?;
         let (channel_id, endpoint, params) = self
             .registry
-            .connect(&r.consumer_id, &r.capability_id, &r.contract_id, transport)
+            .connect(&r.consumer_id, &r.owner_id, &r.contract_id, transport)
             .await?;
         Ok(Response::new(pb::ConnectCapabilityResponse {
             channel_id,
@@ -1041,13 +1063,13 @@ async fn eviction_loop(
             .iter()
             .filter(|(_, rec)| {
                 now.saturating_sub(rec.last_heartbeat_ms) > timeout_ms
-                    && rec.state() != pb::CapabilityState::StateTerminated
+                    && rec.state() != pb::LifecycleState::StateTerminated
             })
             .map(|(id, _)| id.clone())
             .collect();
         for id in &lapsed {
             if let Some(rec) = state.caps.get_mut(id) {
-                rec.pushed_state = Some(pb::CapabilityState::StateTerminated);
+                rec.pushed_state = Some(pb::LifecycleState::StateTerminated);
                 rec.state_detail = format!("heartbeat lapsed > {timeout_ms}ms");
             }
             let dropped = state.drop_channels_of(id);
@@ -1062,7 +1084,7 @@ async fn eviction_loop(
             .caps
             .iter()
             .filter(|(_, rec)| {
-                rec.state() == pb::CapabilityState::StateTerminated
+                rec.state() == pb::LifecycleState::StateTerminated
                     && now.saturating_sub(rec.last_heartbeat_ms) > timeout_ms + gc_after_ms
             })
             .map(|(id, _)| id.clone())
@@ -1099,12 +1121,10 @@ pub async fn serve_atlas(registry: Arc<AtlasRegistry>, listen: SocketAddr) -> Re
     ));
 
     let svc = AtlasService::new(Arc::clone(&registry));
-    let legacy = crate::legacy::LegacyRuntimeService::new(Arc::clone(&registry));
 
-    info!("[atlas] gRPC listening on {listen} (Atlas + legacy)");
+    info!("[atlas] gRPC listening on {listen}");
     tonic::transport::Server::builder()
         .add_service(pb::atlas_server::AtlasServer::new(svc))
-        .add_service(crate::legacy_pb::robonix_runtime_server::RobonixRuntimeServer::new(legacy))
         .serve(listen)
         .await
         .context("Atlas server failed")?;

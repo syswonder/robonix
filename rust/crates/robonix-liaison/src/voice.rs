@@ -107,15 +107,15 @@ async fn resolve_endpoint(
         .ok()?;
 
     // Auto-pick path: any cap providing this contract over the right transport.
-    let auto_pick = || -> Option<&atlas_pb::CapabilityRecord> {
+    let auto_pick = || -> Option<&atlas_pb::CapabilityProvider> {
         records.iter().find(|r| {
-            r.interfaces
+            r.capabilities
                 .iter()
                 .any(|i| i.contract_id == contract_id && i.transport == transport as i32)
         })
     };
 
-    let pick: Option<&atlas_pb::CapabilityRecord> = if pin_capability_id.is_empty() {
+    let pick: Option<&atlas_pb::CapabilityProvider> = if pin_capability_id.is_empty() {
         auto_pick()
     } else {
         // Try the pinned cap first; if it isn't in atlas anymore (stale chat
@@ -124,17 +124,14 @@ async fn resolve_endpoint(
         // hard requirement.
         match records
             .iter()
-            .find(|r| r.capability_id == pin_capability_id || r.namespace == pin_capability_id)
+            .find(|r| r.id == pin_capability_id || r.namespace == pin_capability_id)
         {
             Some(rec) => Some(rec),
             None => {
                 log::warn!(
                     "[voice] pinned cap '{pin_capability_id}' for {contract_id} not in atlas; \
                      falling back to auto-pick. Available providers: {:?}",
-                    records
-                        .iter()
-                        .map(|r| r.capability_id.as_str())
-                        .collect::<Vec<_>>()
+                    records.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
                 );
                 auto_pick()
             }
@@ -143,7 +140,7 @@ async fn resolve_endpoint(
 
     let cap = pick?;
     let (_channel_id, endpoint, _params) = atlas
-        .connect_capability("liaison", &cap.capability_id, contract_id, transport)
+        .connect_capability("liaison", &cap.id, contract_id, transport)
         .await
         .ok()?;
     if endpoint.is_empty() {

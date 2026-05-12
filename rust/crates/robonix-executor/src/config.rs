@@ -18,7 +18,7 @@ pub const DEFAULT_LISTEN: &str = "127.0.0.1:50061";
 pub struct ExecutorConfig {
     pub atlas_endpoint: String,
     pub listen: String,
-    pub capability_id: String,
+    pub id: String,
 }
 
 #[derive(Parser, Debug)]
@@ -35,9 +35,9 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_EXECUTOR_LISTEN")]
     pub listen: Option<String>,
 
-    /// Override executor's capability_id (singleton; rarely needed).
+    /// Override executor's id (singleton; rarely needed).
     #[arg(long, env = "ROBONIX_EXECUTOR_CAPABILITY_ID")]
-    pub capability_id: Option<String>,
+    pub id: Option<String>,
 
     /// Optional YAML config file (rbnx writes this; CLI/env still override).
     #[arg(long, env = "ROBONIX_CONFIG_PATH")]
@@ -56,7 +56,7 @@ struct FileConfig {
     #[serde(default)]
     listen: Option<String>,
     #[serde(default)]
-    capability_id: Option<String>,
+    id: Option<String>,
 }
 
 impl ExecutorConfig {
@@ -74,9 +74,9 @@ impl ExecutorConfig {
                 .listen
                 .or(file_cfg.listen)
                 .unwrap_or_else(|| DEFAULT_LISTEN.to_string()),
-            capability_id: args
-                .capability_id
-                .or(file_cfg.capability_id)
+            id: args
+                .id
+                .or(file_cfg.id)
                 .unwrap_or_else(|| DEFAULT_EXECUTOR_CAPABILITY_ID.to_string()),
         })
     }

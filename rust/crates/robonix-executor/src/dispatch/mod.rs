@@ -65,7 +65,7 @@ fn is_skill_namespace(ns: &str) -> bool {
 
 /// Dispatch a single CapabilityCall and return its result.
 ///
-/// `self_cap_id` is the executor's own capability_id (used to short-circuit
+/// `self_cap_id` is the executor's own provider_id (used to short-circuit
 /// builtins that target this process). `atlas` is used to ConnectCapability
 /// for any external cap call; the channel is released as soon as the call
 /// finishes.
@@ -129,7 +129,7 @@ async fn ensure_skill_runnable(atlas: &mut AtlasClient, cap_id: &str) -> Result<
         );
         return Ok(());
     }
-    if rec.state == atlas_pb::CapabilityState::StateActive as i32 {
+    if rec.state == atlas_pb::LifecycleState::StateActive as i32 {
         log::info!("[skill-activate] {cap_id}: already ACTIVE per atlas, marking sticky");
         mark_activated(cap_id);
         return Ok(());
@@ -140,7 +140,7 @@ async fn ensure_skill_runnable(atlas: &mut AtlasClient, cap_id: &str) -> Result<
         rec.state
     );
     let driver_contract = rec
-        .interfaces
+        .capabilities
         .iter()
         .find(|i| i.contract_id.ends_with("/driver"))
         .map(|i| i.contract_id.clone())

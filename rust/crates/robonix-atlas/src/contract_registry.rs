@@ -47,6 +47,14 @@ struct ContractSection {
     /// `idl` is absent so old TOMLs keep loading until they're rewritten.
     #[serde(default)]
     idl: Option<String>,
+    /// Generic one-line natural-language description for this contract
+    /// (what it does in the abstract). Consumers MERGE this with each
+    /// CapabilityProvider's instance-specific
+    /// `DeclareCapabilityRequest.description` at consume time -- the
+    /// two are complementary (generic + instance-specific), not
+    /// alternatives.
+    #[serde(default)]
+    description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,24 +289,41 @@ fn load_one(path: &Path) -> anyhow::Result<pb::ContractDescriptor> {
         .version
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
-    let kind = parsed
+    let kind_str = parsed
         .contract
         .kind
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
+    let kind = match kind_str.as_str() {
+        "primitive" => pb::Kind::Primitive,
+        "service" => pb::Kind::Service,
+        "skill" => pb::Kind::Skill,
+        "" => pb::Kind::Unspecified,
+        other => {
+            return Err(anyhow::anyhow!(
+                "contract '{id}': unknown kind '{other}' (want primitive|service|skill)"
+            ));
+        }
+    };
     let mode = parsed
         .mode
         .and_then(|m| m.ty)
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
+    let description = parsed
+        .contract
+        .description
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
     Ok(pb::ContractDescriptor {
         id,
         version,
-        kind,
+        kind: kind as i32,
         mode,
         io_msg_type,
         io_srv_type,
         source_toml_path: path.to_string_lossy().into_owned(),
+        description,
         // Filled later by attach_idl_fields() after every TOML has
         // been loaded. Empty here is the right default.
         msg_fields: Vec::new(),

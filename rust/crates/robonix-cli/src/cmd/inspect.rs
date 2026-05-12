@@ -20,15 +20,15 @@ fn transport_name(t: i32) -> &'static str {
 }
 
 fn state_name(s: i32) -> &'static str {
-    match atlas_pb::CapabilityState::try_from(s)
-        .unwrap_or(atlas_pb::CapabilityState::StateUnspecified)
+    match atlas_pb::LifecycleState::try_from(s)
+        .unwrap_or(atlas_pb::LifecycleState::StateUnspecified)
     {
-        atlas_pb::CapabilityState::StateRegistered => "REGISTERED",
-        atlas_pb::CapabilityState::StateInactive => "INACTIVE",
-        atlas_pb::CapabilityState::StateActive => "ACTIVE",
-        atlas_pb::CapabilityState::StateError => "ERROR",
-        atlas_pb::CapabilityState::StateTerminated => "TERMINATED",
-        atlas_pb::CapabilityState::StateUnspecified => "?",
+        atlas_pb::LifecycleState::StateRegistered => "REGISTERED",
+        atlas_pb::LifecycleState::StateInactive => "INACTIVE",
+        atlas_pb::LifecycleState::StateActive => "ACTIVE",
+        atlas_pb::LifecycleState::StateError => "ERROR",
+        atlas_pb::LifecycleState::StateTerminated => "TERMINATED",
+        atlas_pb::LifecycleState::StateUnspecified => "?",
     }
 }
 
@@ -37,15 +37,15 @@ fn state_name(s: i32) -> &'static str {
 /// nothing's driving it yet, red=problem, dim=quiescent.
 fn state_tag(s: i32) -> colored::ColoredString {
     let label = format!("[{}]", state_name(s));
-    match atlas_pb::CapabilityState::try_from(s)
-        .unwrap_or(atlas_pb::CapabilityState::StateUnspecified)
+    match atlas_pb::LifecycleState::try_from(s)
+        .unwrap_or(atlas_pb::LifecycleState::StateUnspecified)
     {
-        atlas_pb::CapabilityState::StateActive => label.green().bold(),
-        atlas_pb::CapabilityState::StateInactive => label.yellow(),
-        atlas_pb::CapabilityState::StateRegistered => label.blue(),
-        atlas_pb::CapabilityState::StateTerminated => label.dimmed(),
-        atlas_pb::CapabilityState::StateError => label.red().bold(),
-        atlas_pb::CapabilityState::StateUnspecified => label.dimmed(),
+        atlas_pb::LifecycleState::StateActive => label.green().bold(),
+        atlas_pb::LifecycleState::StateInactive => label.yellow(),
+        atlas_pb::LifecycleState::StateRegistered => label.blue(),
+        atlas_pb::LifecycleState::StateTerminated => label.dimmed(),
+        atlas_pb::LifecycleState::StateError => label.red().bold(),
+        atlas_pb::LifecycleState::StateUnspecified => label.dimmed(),
     }
 }
 
@@ -65,11 +65,11 @@ pub async fn caps(endpoint: &str, json: bool, verbose: bool) -> Result<()> {
             .iter()
             .map(|r| {
                 serde_json::json!({
-                    "capability_id":  r.capability_id,
+                    "provider_id":  r.id,
                     "namespace":      r.namespace,
                     "state":          state_name(r.state),
                     "state_detail":   r.state_detail,
-                    "interfaces":     r.interfaces.iter().map(|i| serde_json::json!({
+                    "interfaces":     r.capabilities.iter().map(|i| serde_json::json!({
                         "contract_id": i.contract_id,
                         "transport":   transport_name(i.transport),
                     })).collect::<Vec<_>>(),
@@ -95,21 +95,21 @@ pub async fn caps(endpoint: &str, json: bool, verbose: bool) -> Result<()> {
         let iface_count_hint = if verbose {
             String::new()
         } else {
-            format!(" ({} ifaces)", rec.interfaces.len())
+            format!(" ({} ifaces)", rec.capabilities.len())
                 .dimmed()
                 .to_string()
         };
         println!(
             "{} {} {} {}{}{}",
             "●".green(),
-            rec.capability_id.bold(),
+            rec.id.bold(),
             state_tag(rec.state),
             rec.namespace.dimmed(),
             iface_count_hint,
             detail.dimmed()
         );
         if verbose {
-            for iface in &rec.interfaces {
+            for iface in &rec.capabilities {
                 println!(
                     "    {} {} {}",
                     "└─".dimmed(),
@@ -140,16 +140,19 @@ pub async fn describe(endpoint: &str, cap_id: Option<&str>, json: bool) -> Resul
         return Ok(());
     }
     for rec in &records {
-        let md = atlas
-            .query_capability_md(&rec.capability_id)
-            .await
-            .unwrap_or_default();
+        // Atlas only stores the CAPABILITY.md path; consumers read the
+        // file off the local filesystem themselves.
+        let md = if rec.capability_md_path.is_empty() {
+            String::new()
+        } else {
+            std::fs::read_to_string(&rec.capability_md_path).unwrap_or_default()
+        };
         if json {
             let value = serde_json::json!({
-                "capability_id":   rec.capability_id,
+                "provider_id":   rec.id,
                 "namespace":       rec.namespace,
                 "state":           state_name(rec.state),
-                "interfaces":      rec.interfaces.iter().map(|i| serde_json::json!({
+                "interfaces":      rec.capabilities.iter().map(|i| serde_json::json!({
                     "contract_id": i.contract_id,
                     "transport":   transport_name(i.transport),
                 })).collect::<Vec<_>>(),
@@ -157,13 +160,8 @@ pub async fn describe(endpoint: &str, cap_id: Option<&str>, json: bool) -> Resul
             });
             println!("{}", serde_json::to_string_pretty(&value)?);
         } else {
-            println!(
-                "{} {} {}",
-                "●".green(),
-                rec.capability_id.bold(),
-                state_tag(rec.state)
-            );
-            for iface in &rec.interfaces {
+            println!("{} {} {}", "●".green(), rec.id.bold(), state_tag(rec.state));
+            for iface in &rec.capabilities {
                 println!(
                     "    {} {} ({})",
                     "└─".dimmed(),
@@ -187,18 +185,17 @@ pub async fn tools(endpoint: &str, json: bool) -> Result<()> {
         .await?;
     let mut entries: Vec<(String, String, String, String)> = Vec::new();
     for rec in &records {
-        for iface in &rec.interfaces {
+        for iface in &rec.capabilities {
             if iface.transport != atlas_pb::Transport::Mcp as i32 {
                 continue;
             }
-            let (description, schema) = match iface.params.as_ref().and_then(|p| p.kind.as_ref()) {
-                Some(atlas_pb::transport_params::Kind::Mcp(m)) => {
-                    (m.description.clone(), m.input_schema_json.clone())
-                }
-                _ => (String::new(), String::new()),
+            let schema = match iface.params.as_ref().and_then(|p| p.kind.as_ref()) {
+                Some(atlas_pb::transport_params::Kind::Mcp(m)) => m.input_schema_json.clone(),
+                _ => String::new(),
             };
+            let description = iface.description.clone();
             entries.push((
-                rec.capability_id.clone(),
+                rec.id.clone(),
                 iface.contract_id.clone(),
                 description,
                 schema,

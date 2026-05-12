@@ -638,11 +638,7 @@ pub async fn execute_start(
             Ok(mut a) => a
                 .query_capabilities("", "", atlas_pb::Transport::Unspecified)
                 .await
-                .map(|recs| {
-                    recs.into_iter()
-                        .map(|r| r.capability_id)
-                        .collect::<HashSet<_>>()
-                })
+                .map(|recs| recs.into_iter().map(|r| r.id).collect::<HashSet<_>>())
                 .unwrap_or_default(),
             Err(_) => HashSet::new(),
         };
@@ -719,12 +715,12 @@ async fn drive_cmd_init_after_register(
                 continue;
             }
         };
-        let match_rec = recs.iter().find(|r| !before.contains(&r.capability_id));
+        let match_rec = recs.iter().find(|r| !before.contains(&r.id));
         let Some(rec) = match_rec else {
             tokio::time::sleep(POLL_INTERVAL).await;
             continue;
         };
-        let driver_iface = rec.interfaces.iter().find(|i| {
+        let driver_iface = rec.capabilities.iter().find(|i| {
             i.transport == atlas_pb::Transport::Grpc as i32 && i.contract_id.ends_with("/driver")
         });
         let Some(driver) = driver_iface else {
@@ -732,7 +728,7 @@ async fn drive_cmd_init_after_register(
             continue;
         };
         let driver_contract = driver.contract_id.clone();
-        let cap_id = rec.capability_id.clone();
+        let cap_id = rec.id.clone();
         match call_driver_init(&mut atlas, &cap_id, &driver_contract, config_json.clone()).await {
             Ok(state) => {
                 output::sub_step(&format!("Driver(CMD_INIT) → {cap_id} ok (state={state})"));

@@ -56,13 +56,8 @@ async fn main() -> Result<()> {
             .await
             .context("connect to atlas")?;
 
-    atlas
-        .register_capability(&cfg.capability_id, PILOT_NAMESPACE, "")
-        .await?;
-    info!(
-        "registered as '{}' under '{PILOT_NAMESPACE}'",
-        cfg.capability_id
-    );
+    atlas.register_service(&cfg.id, PILOT_NAMESPACE, "").await?;
+    info!("registered as '{}' under '{PILOT_NAMESPACE}'", cfg.id);
 
     let listen_addr: std::net::SocketAddr = cfg
         .listen
@@ -77,8 +72,8 @@ async fn main() -> Result<()> {
         _ => listen_addr.to_string(),
     };
     atlas
-        .declare_interface(
-            &cfg.capability_id,
+        .declare_capability(
+            &cfg.id,
             "robonix/system/pilot",
             atlas_pb::Transport::Grpc,
             &advertised,
@@ -95,11 +90,7 @@ async fn main() -> Result<()> {
     // gRPC server is up. Push ACTIVE so `rbnx caps` doesn't show the
     // legacy-fallback INACTIVE forever.
     if let Err(e) = atlas
-        .set_capability_state(
-            &cfg.capability_id,
-            atlas_pb::CapabilityState::StateActive,
-            "",
-        )
+        .set_lifecycle_state(&cfg.id, atlas_pb::LifecycleState::StateActive, "")
         .await
     {
         log::warn!("SetCapabilityState(ACTIVE) failed: {e:#}");
@@ -115,7 +106,7 @@ async fn main() -> Result<()> {
     // 20s so we stay registered for the lifetime of the process.
     {
         let mut hb = atlas.clone();
-        let cap_id = cfg.capability_id.clone();
+        let cap_id = cfg.id.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(20));
             tick.tick().await; // first tick fires immediately; skip
@@ -128,7 +119,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    let svc = PilotServiceImpl::new(atlas, cfg.capability_id.clone(), vlm);
+    let svc = PilotServiceImpl::new(atlas, cfg.id.clone(), vlm);
 
     info!("RobonixSystemPilot gRPC on {listen_addr}");
     eprintln!("robonix-pilot ready on {listen_addr}");

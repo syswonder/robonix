@@ -124,12 +124,12 @@ struct RawManifest {
     capabilities: Vec<CapabilityRef>,
     #[serde(default)]
     depends: Vec<DependsRef>,
-    /// Legacy `capability_id:` field. Removed from spec — accepted by serde but
+    /// Legacy `provider_id:` field. Removed from spec — accepted by serde but
     /// ignored. rbnx-boot now discovers the cap_id by polling atlas for any cap
     /// that registered after `start.sh` spawned. Future warning: emit deprecation.
     #[serde(default)]
     #[allow(dead_code)]
-    capability_id: Option<String>,
+    provider_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

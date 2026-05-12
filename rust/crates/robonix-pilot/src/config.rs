@@ -5,7 +5,7 @@
 // what address to bind, and how to reach the LLM upstream.
 //
 // Three sources, from lowest to highest priority:
-//   1. compiled defaults (atlas endpoint, listen address, capability_id, …)
+//   1. compiled defaults (atlas endpoint, listen address, id, …)
 //   2. optional YAML at `$ROBONIX_CONFIG_PATH` or `--config <path>`
 //      (used by `rbnx boot` to write a slice of `system.pilot` from
 //      `robonix_manifest.yaml`)
@@ -30,7 +30,7 @@ pub const DEFAULT_VLM_FORMAT: &str = "openai";
 pub struct PilotConfig {
     pub atlas_endpoint: String,
     pub listen: String,
-    pub capability_id: String,
+    pub id: String,
     pub vlm: VlmConfig,
 }
 
@@ -58,9 +58,9 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_PILOT_LISTEN")]
     pub listen: Option<String>,
 
-    /// Override pilot's capability_id (singleton, rarely needed).
+    /// Override pilot's id (singleton, rarely needed).
     #[arg(long, env = "ROBONIX_PILOT_CAPABILITY_ID")]
-    pub capability_id: Option<String>,
+    pub id: Option<String>,
 
     /// LLM API base URL (e.g. "https://api.openai.com/v1").
     #[arg(long, env = "ROBONIX_VLM_UPSTREAM")]
@@ -97,7 +97,7 @@ struct FileConfig {
     #[serde(default)]
     listen: Option<String>,
     #[serde(default)]
-    capability_id: Option<String>,
+    id: Option<String>,
     #[serde(default)]
     vlm: Option<FileVlmConfig>,
 }
@@ -132,9 +132,9 @@ impl PilotConfig {
             .listen
             .or(file_cfg.listen)
             .unwrap_or_else(|| DEFAULT_LISTEN.to_string());
-        let capability_id = args
-            .capability_id
-            .or(file_cfg.capability_id)
+        let id = args
+            .id
+            .or(file_cfg.id)
             .unwrap_or_else(|| DEFAULT_PILOT_CAPABILITY_ID.to_string());
         let api_format = args
             .vlm_format
@@ -165,7 +165,7 @@ impl PilotConfig {
         Ok(Self {
             atlas_endpoint,
             listen,
-            capability_id,
+            id,
             vlm: VlmConfig {
                 upstream,
                 api_key,

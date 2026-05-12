@@ -48,12 +48,9 @@ async fn main() -> Result<()> {
             .context("connect to atlas")?;
 
     atlas
-        .register_capability(&cfg.capability_id, EXECUTOR_NAMESPACE, "")
+        .register_service(&cfg.id, EXECUTOR_NAMESPACE, "")
         .await?;
-    info!(
-        "registered as '{}' under '{EXECUTOR_NAMESPACE}'",
-        cfg.capability_id
-    );
+    info!("registered as '{}' under '{EXECUTOR_NAMESPACE}'", cfg.id);
 
     let listen_addr: std::net::SocketAddr = cfg
         .listen
@@ -68,8 +65,8 @@ async fn main() -> Result<()> {
 
     // Execute RPC: pilot → executor for plan dispatch.
     atlas
-        .declare_interface(
-            &cfg.capability_id,
+        .declare_capability(
+            &cfg.id,
             "robonix/system/executor",
             atlas_pb::Transport::Grpc,
             &advertised,
@@ -85,16 +82,17 @@ async fn main() -> Result<()> {
     // catalog discovery sees them like any user MCP cap. The endpoint is a
     // sentinel — dispatch never dials it; calls hitting these contracts hit
     // the cap_id == self short-circuit in `dispatch::dispatch`.
-    let builtin_endpoint = format!("internal://{}/builtin", cfg.capability_id);
+    let builtin_endpoint = format!("internal://{}/builtin", cfg.id);
     for spec in BUILTINS {
         let contract_id = format!("{EXECUTOR_NAMESPACE}/builtin/{}", spec.op);
         atlas
-            .declare_interface(
-                &cfg.capability_id,
+            .declare_capability_with_description(
+                &cfg.id,
                 &contract_id,
                 atlas_pb::Transport::Mcp,
                 &builtin_endpoint,
-                atlas_client::mcp_params(spec.description, spec.input_schema_json),
+                atlas_client::mcp_params(spec.input_schema_json),
+                spec.description,
             )
             .await
             .with_context(|| format!("declare builtin '{}'", contract_id))?;
@@ -108,11 +106,7 @@ async fn main() -> Result<()> {
     // the gRPC server is up. Push ACTIVE so `rbnx caps` doesn't show the
     // legacy-fallback INACTIVE forever.
     if let Err(e) = atlas
-        .set_capability_state(
-            &cfg.capability_id,
-            atlas_pb::CapabilityState::StateActive,
-            "",
-        )
+        .set_lifecycle_state(&cfg.id, atlas_pb::LifecycleState::StateActive, "")
         .await
     {
         log::warn!("SetCapabilityState(ACTIVE) failed: {e:#}");
@@ -122,7 +116,7 @@ async fn main() -> Result<()> {
     // 20s so we stay registered for the lifetime of the process.
     {
         let mut hb = atlas.clone();
-        let cap_id = cfg.capability_id.clone();
+        let cap_id = cfg.id.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(20));
             tick.tick().await;
@@ -135,7 +129,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    let svc = ExecutorServiceImpl::new(atlas, cfg.capability_id.clone());
+    let svc = ExecutorServiceImpl::new(atlas, cfg.id.clone());
     info!("RobonixSystemExecutor gRPC on {listen_addr}");
     eprintln!("robonix-executor ready on {listen_addr}");
 

@@ -136,11 +136,9 @@ async fn main() -> Result<()> {
     log::info!("[mock-pilot] connecting to Atlas at {atlas_http}");
     let mut atlas =
         AtlasClient::connect_with_retry(&atlas_http, 10, Duration::from_secs(2)).await?;
+    atlas.register_service(CAPABILITY_ID, NAMESPACE, "").await?;
     atlas
-        .register_capability(CAPABILITY_ID, NAMESPACE, "")
-        .await?;
-    atlas
-        .declare_interface(
+        .declare_capability(
             CAPABILITY_ID,
             CONTRACT_ID,
             atlas_pb::Transport::Grpc,
