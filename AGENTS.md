@@ -20,14 +20,14 @@ Run Rust commands from `rust/` unless noted:
 - `uv sync`: resolve Python workspace dependencies from the repo root; service `scripts/build.sh` files usually perform package-local setup.
 - `cd docs && mdbook build`: build the documentation book when mdBook and preprocessors are installed.
 
-## Coding Style & Naming Conventions
-
-Rust uses edition 2024 and standard `rustfmt`; keep clippy clean with `-D warnings`. Use `snake_case` for Rust modules/functions, `CamelCase` for types, and crate names matching `robonix-*`. Python targets 3.10+, uses 4-space indentation, and keeps package modules in `snake_case`. Capability files follow `<interface>.v1.toml` naming, grouped by domain, for example `capabilities/primitive/camera/rgb.v1.toml`.
-
 ## Testing Guidelines
 
 Place Rust integration tests in each crate’s `tests/` directory and keep unit tests near the code behind `#[cfg(test)]`. CI currently gates Rust format, clippy, build, and `cargo test --workspace --all-targets`. For Python services, add package-local smoke tests or scripts when changing runtime behavior, and document required environment variables in the service README.
 
+## Coding Style
+
+**For each non-trivial function or method, add a standard comment block** 
+
 ## Commit & Pull Request Guidelines
 
-Recent commits use short, imperative, scope-prefixed subjects such as `audio: list_devices + select_device contracts` or `rbnx chat: rename agent reply prefix`. Follow that style: `<scope>: <concise change>`. Pull requests should describe behavior changes, list validation commands run, link related issues, and include screenshots or terminal output for CLI/TUI changes. Note any new capability contracts, generated code impacts, or configuration requirements.
+Write commit messages using the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) format: `<type>(optional scope): <description>` (optional `!` before `:` for breaking changes). Use imperative mood in the description. Prefer `feat` and `fix` when they apply; otherwise use types such as `docs`, `chore`, `refactor`, `test`, `perf`, `ci`, or `build`. For breaking changes you may use a `BREAKING CHANGE:` footer instead of `!`. Pull requests should describe behavior changes, list validation commands you ran, link related issues, and include screenshots or terminal output for CLI or TUI changes. Note any new capability contracts, generated code impacts, or configuration requirements.
