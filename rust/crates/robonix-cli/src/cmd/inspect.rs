@@ -267,7 +267,7 @@ pub async fn channels(endpoint: &str) -> Result<()> {
             .and_then(|x| x.as_str())
             .unwrap_or("?");
         let provider = ch
-            .get("provider_cap_id")
+            .get("provider_id")
             .and_then(|x| x.as_str())
             .unwrap_or("?");
         let contract = ch

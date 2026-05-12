@@ -159,7 +159,7 @@ impl From<&CapabilityProviderState> for pb::CapabilityProvider {
 }
 
 impl CapabilityProviderState {
-    /// Lifecycle state. The provider pushes via SetCapabilityState whenever its
+    /// Lifecycle state. The provider pushes via SetLifecycleState whenever its
     /// on_init / on_activate / on_deactivate handler returns; that pushed
     /// value wins. For legacy providers that never push, fall back to "any
     /// non-driver capability declared → INACTIVE" (preserves behaviour
@@ -215,7 +215,7 @@ fn is_driver_contract(contract_id: &str) -> bool {
 struct OpenChannel {
     channel_id: String,
     consumer_id: String,
-    provider_cap_id: String,
+    provider_id: String,
     contract_id: String,
     #[serde(serialize_with = "serialize_transport")]
     transport: Transport,
@@ -235,8 +235,7 @@ impl State {
     /// channel providers. Returns the number of channels dropped.
     fn drop_channels_of(&mut self, provider_id: &str) -> usize {
         let before = self.channels.len();
-        self.channels
-            .retain(|_, ch| ch.provider_cap_id != provider_id);
+        self.channels.retain(|_, ch| ch.provider_id != provider_id);
         before - self.channels.len()
     }
 }
@@ -587,12 +586,12 @@ impl AtlasRegistry {
     pub async fn connect(
         &self,
         consumer_id: &str,
-        provider_cap_id: &str,
+        provider_id: &str,
         contract_id: &str,
         transport: Transport,
     ) -> Result<(String, String, pb::TransportParams), Status> {
         let consumer_id = Self::require("consumer_id", consumer_id)?.to_string();
-        let provider_cap_id = Self::require("provider_id", provider_cap_id)?.to_string();
+        let provider_id = Self::require("provider_id", provider_id)?.to_string();
         let contract_id = Self::require("contract_id", contract_id)?.to_string();
         if transport == Transport::Unspecified {
             return Err(Status::invalid_argument(
@@ -603,15 +602,15 @@ impl AtlasRegistry {
         let mut state = self.inner.write().await;
         let provider = state
             .providers
-            .get(&provider_cap_id)
-            .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_cap_id}")))?;
+            .get(&provider_id)
+            .ok_or_else(|| Status::not_found(format!("unknown provider_id: {provider_id}")))?;
         let ep = provider
             .endpoints
             .iter()
             .find(|e| e.contract_id == contract_id && e.transport == transport)
             .ok_or_else(|| {
                 Status::not_found(format!(
-                    "provider '{provider_cap_id}' has not declared ({contract_id}, {transport:?})"
+                    "provider '{provider_id}' has not declared ({contract_id}, {transport:?})"
                 ))
             })?;
         let endpoint = ep.endpoint.clone();
@@ -623,7 +622,7 @@ impl AtlasRegistry {
             OpenChannel {
                 channel_id: channel_id.clone(),
                 consumer_id: consumer_id.clone(),
-                provider_cap_id: provider_cap_id.clone(),
+                provider_id: provider_id.clone(),
                 contract_id: contract_id.clone(),
                 transport,
                 endpoint: endpoint.clone(),
@@ -631,7 +630,7 @@ impl AtlasRegistry {
             },
         );
         info!(
-            "[atlas] connect '{consumer_id}' -> '{provider_cap_id}' \
+            "[atlas] connect '{consumer_id}' -> '{provider_id}' \
              {contract_id} via {transport:?} -> {endpoint} ({channel_id})"
         );
         Ok((channel_id, endpoint, params))
@@ -705,7 +704,7 @@ fn parse_params(
             "params required: set TransportParams.kind to the variant matching `transport`",
         )
     })?;
-    let provider = match kind {
+    let params_state = match kind {
         Kind::Grpc(g) => TransportParamsState::Grpc {
             proto_file: g.proto_file,
             service_name: g.service_name,
@@ -731,14 +730,14 @@ fn parse_params(
             }
         }
     };
-    if provider.transport() != transport {
+    if params_state.transport() != transport {
         return Err(Status::invalid_argument(format!(
             "params: oneof variant {:?} does not match transport {:?}",
-            provider.transport(),
+            params_state.transport(),
             transport
         )));
     }
-    Ok(provider)
+    Ok(params_state)
 }
 
 fn parse_transport(t: i32) -> Result<Transport, Status> {

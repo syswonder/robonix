@@ -1529,11 +1529,11 @@ async fn wait_for_registration(
                 );
             }
             if let Some(provider) = matches.first() {
-                let driver = provider.capabilities.iter().find(|provider| {
-                    provider.transport == atlas_pb::Transport::Grpc as i32
-                        && provider.contract_id.ends_with("/driver")
+                let driver = provider.capabilities.iter().find(|cap| {
+                    cap.transport == atlas_pb::Transport::Grpc as i32
+                        && cap.contract_id.ends_with("/driver")
                 });
-                return Ok((provider.id.clone(), driver.map(|i| i.contract_id.clone())));
+                return Ok((provider.id.clone(), driver.map(|c| c.contract_id.clone())));
             }
         }
         if Instant::now() >= deadline {

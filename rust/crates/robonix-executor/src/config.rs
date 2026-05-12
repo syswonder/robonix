@@ -9,7 +9,7 @@ use clap::Parser;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_EXECUTOR_CAPABILITY_ID: &str = "executor";
+pub const DEFAULT_EXECUTOR_PROVIDER_ID: &str = "executor";
 pub const EXECUTOR_NAMESPACE: &str = "robonix/system/executor";
 pub const DEFAULT_ATLAS_ENDPOINT: &str = "127.0.0.1:50051";
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:50061";
@@ -36,7 +36,7 @@ pub struct Args {
     pub listen: Option<String>,
 
     /// Override executor's id (singleton; rarely needed).
-    #[arg(long, env = "ROBONIX_EXECUTOR_CAPABILITY_ID")]
+    #[arg(long, env = "ROBONIX_EXECUTOR_PROVIDER_ID")]
     pub id: Option<String>,
 
     /// Optional YAML config file (rbnx writes this; CLI/env still override).
@@ -77,7 +77,7 @@ impl ExecutorConfig {
             id: args
                 .id
                 .or(file_cfg.id)
-                .unwrap_or_else(|| DEFAULT_EXECUTOR_CAPABILITY_ID.to_string()),
+                .unwrap_or_else(|| DEFAULT_EXECUTOR_PROVIDER_ID.to_string()),
         })
     }
 }

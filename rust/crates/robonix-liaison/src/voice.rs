@@ -97,7 +97,7 @@ const DEFAULT_AUDIO_SAMPLE_RATE: u32 = 16_000;
 async fn resolve_endpoint(
     atlas: &Arc<Mutex<AtlasClient>>,
     contract_id: &str,
-    pin_capability_id: &str,
+    pin_provider_id: &str,
 ) -> Option<String> {
     let mut atlas = atlas.lock().await;
     let transport = atlas_pb::Transport::Grpc;
@@ -115,7 +115,7 @@ async fn resolve_endpoint(
         })
     };
 
-    let pick: Option<&atlas_pb::CapabilityProvider> = if pin_capability_id.is_empty() {
+    let pick: Option<&atlas_pb::CapabilityProvider> = if pin_provider_id.is_empty() {
         auto_pick()
     } else {
         // Try the pinned provider first; if it isn't in atlas anymore (stale chat
@@ -124,12 +124,12 @@ async fn resolve_endpoint(
         // hard requirement.
         match providers
             .iter()
-            .find(|r| r.id == pin_capability_id || r.namespace == pin_capability_id)
+            .find(|r| r.id == pin_provider_id || r.namespace == pin_provider_id)
         {
             Some(provider) => Some(provider),
             None => {
                 log::warn!(
-                    "[voice] pinned provider '{pin_capability_id}' for {contract_id} not in atlas; \
+                    "[voice] pinned provider '{pin_provider_id}' for {contract_id} not in atlas; \
                      falling back to auto-pick. Available providers: {:?}",
                     providers.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
                 );
@@ -597,7 +597,7 @@ async fn stream_capture_and_recognize(
 
 async fn identify_user(
     atlas: &Arc<Mutex<AtlasClient>>,
-    pin_capability_id: &str,
+    pin_provider_id: &str,
     audio_pcm: &[u8],
     fallback_hint: &str,
     session_id: &str,
@@ -611,27 +611,22 @@ async fn identify_user(
         format!("voice:{fallback_hint}")
     };
 
-    let endpoint = match resolve_endpoint(
-        atlas,
-        "robonix/system/speech/voiceprint",
-        pin_capability_id,
-    )
-    .await
-    {
-        Some(ep) => ep,
-        None => {
-            let _ = tx
-                .send(Ok(event_user(
-                    KIND_USER_IDENTIFIED,
-                    session_id,
-                    &fallback,
-                    0.0,
-                    "no RobonixSystemSpeechVoiceprint provider — using client hint",
-                )))
-                .await;
-            return fallback;
-        }
-    };
+    let endpoint =
+        match resolve_endpoint(atlas, "robonix/system/speech/voiceprint", pin_provider_id).await {
+            Some(ep) => ep,
+            None => {
+                let _ = tx
+                    .send(Ok(event_user(
+                        KIND_USER_IDENTIFIED,
+                        session_id,
+                        &fallback,
+                        0.0,
+                        "no RobonixSystemSpeechVoiceprint provider — using client hint",
+                    )))
+                    .await;
+                return fallback;
+            }
+        };
 
     let mut client = match RobonixSystemSpeechVoiceprintClient::connect(endpoint.clone()).await {
         Ok(c) => c,

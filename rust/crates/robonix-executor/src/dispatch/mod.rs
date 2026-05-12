@@ -11,9 +11,9 @@
 //
 // Skills sit at INACTIVE after `rbnx boot`. Right before dispatching
 // to one, the executor sends Driver(CMD_ACTIVATE) on its `*/driver`
-// interface to flip it to ACTIVE — that's where the skill actually
+// capability to flip it to ACTIVE — that's where the skill actually
 // allocates its hot resources (frontier loop / nav subscribers / VLA
-// worker / …). We track which skill cap_ids we've already activated in
+// worker / …). We track which skill provider_ids we've already activated in
 // this executor process; subsequent calls skip the CMD_ACTIVATE RPC to
 // keep latency flat (sticky policy). A future eviction algorithm
 // (EXECUTOR_EVICTION_POLICY=deactivate) will drive CMD_DEACTIVATE.
@@ -65,26 +65,26 @@ fn is_skill_namespace(ns: &str) -> bool {
 
 /// Dispatch a single CapabilityCall and return its result.
 ///
-/// `self_cap_id` is the executor's own provider_id (used to short-circuit
+/// `self_provider_id` is the executor's own provider_id (used to short-circuit
 /// builtins that target this process). `atlas` is used to ConnectCapability
 /// for any external provider call; the channel is released as soon as the call
 /// finishes.
 pub async fn dispatch(
     call: &CapabilityCall,
-    self_cap_id: &str,
+    self_provider_id: &str,
     atlas: &mut AtlasClient,
 ) -> CapabilityCallResult {
-    if call.provider_id == self_cap_id {
+    if call.provider_id == self_provider_id {
         return builtin::execute(call).await;
     }
 
-    if let Err(e) = ensure_skill_runnable(atlas, &call.provider_id).await {
+    if let Err(e) = ensure_skill_active(atlas, &call.provider_id).await {
         return error_result(call, format!("Driver(CMD_ACTIVATE) failed: {e:#}"));
     }
 
     let (channel_id, endpoint, _params) = match atlas
         .connect_capability(
-            self_cap_id,
+            self_provider_id,
             &call.provider_id,
             &call.contract_id,
             atlas_pb::Transport::Mcp,
@@ -104,10 +104,10 @@ pub async fn dispatch(
 }
 
 /// If `provider_id` is a skill that hasn't been activated in this process
-/// yet, resolve its `*/driver` interface and send Driver(CMD_ACTIVATE).
+/// yet, resolve its `*/driver` capability and send Driver(CMD_ACTIVATE).
 /// No-op for primitives, services, system providers, and skills already in
 /// ACTIVE.
-async fn ensure_skill_runnable(atlas: &mut AtlasClient, provider_id: &str) -> Result<()> {
+async fn ensure_skill_active(atlas: &mut AtlasClient, provider_id: &str) -> Result<()> {
     if already_activated(provider_id) {
         log::debug!("[skill-activate] {provider_id}: already activated, skipping CMD_ACTIVATE");
         return Ok(());
@@ -142,9 +142,9 @@ async fn ensure_skill_runnable(atlas: &mut AtlasClient, provider_id: &str) -> Re
     let driver_contract = provider
         .capabilities
         .iter()
-        .find(|i| i.contract_id.ends_with("/driver"))
-        .map(|i| i.contract_id.clone())
-        .ok_or_else(|| anyhow::anyhow!("skill {provider_id} has no */driver interface"))?;
+        .find(|c| c.contract_id.ends_with("/driver"))
+        .map(|c| c.contract_id.clone())
+        .ok_or_else(|| anyhow::anyhow!("skill {provider_id} has no */driver capability"))?;
     let svc_name = contract_id_to_service_name(&driver_contract);
     let (channel_id, endpoint, _) = atlas
         .connect_capability(

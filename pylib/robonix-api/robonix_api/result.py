@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 """Lifecycle handler return type.
 
-Every `@<provider>.on_init / on_activate / on_deactivate / on_shutdown` handler
-takes `cfg: dict` (the CMD_* config_json, JSON-decoded) and MUST return
-one of `Ok` / `Err` / `Deferred`. Don't `raise` — the framework will
-catch and convert raises into `Err(repr(exc))` defensively but logs a
+Every `@<provider>.on_init / on_activate / on_deactivate / on_shutdown`
+handler MUST return one of `Ok` / `Err` / `Deferred`. Only `on_init`
+receives `cfg: dict` (the CMD_INIT config_json, JSON-decoded); the
+other three take no args. Don't `raise` — the framework will catch
+and convert raises into `Err(repr(exc))` defensively but logs a
 warning telling you to use `Err(...)` explicitly instead.
 
   Ok()                 — handler succeeded; framework advances state.

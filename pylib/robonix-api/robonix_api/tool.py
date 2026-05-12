@@ -126,15 +126,16 @@ def mcp_contract(
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Register an MCP tool bound to a contract.
 
-    Use directly with your own FastMCP app, OR use `Capability.mcp(...)` for
-    a one-stop decorator that also auto-declares to atlas + manages uvicorn.
+    Use directly with your own FastMCP app, OR use the provider's
+    `@<provider>.mcp(...)` decorator (Primitive / Service / Skill) for a
+    one-stop registration that also auto-declares to atlas + manages uvicorn.
 
     Stashes the codegen IO classes + contract id on the original handler:
         fn._robonix_input_cls
         fn._robonix_output_cls
         fn._robonix_contract_id
         fn._robonix_tool_name
-    Capability picks these up via attribute reflection during run().
+    The provider framework picks these up via attribute reflection during run().
     """
     def decorator(user_fn: Callable[..., Any]) -> Callable[..., Any]:
         input_cls, output_cls = io_types_from_handler(user_fn, contract_id=contract_id)

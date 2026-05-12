@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 """Driver lifecycle gRPC server + per-contract Servicer resolution.
 
-Every robonix capability declares a `*/driver` interface that `rbnx boot`
+Every Robonix provider declares a `*/driver` capability that `rbnx boot`
 calls Driver(CMD_INIT, config_json) on. The wire shape is fixed by
 lib/lifecycle/srv/Driver.srv (uint8 command + string config_json →
 bool ok + string state + string error).
@@ -233,7 +233,7 @@ def build_lifecycle_servicer(
         if cmd == CMD_ACTIVATE:
             if on_activate is None:
                 if is_skill:
-                    err = Err("skill is missing  @<provider>.on_activate handler")
+                    err = Err("skill is missing @<provider>.on_activate handler")
                     _post_handler_state(cmd, err)
                     return _to_response(cmd, err)
                 _post_handler_state(cmd, Ok())
@@ -245,7 +245,7 @@ def build_lifecycle_servicer(
         if cmd == CMD_DEACTIVATE:
             if on_deactivate is None:
                 if is_skill:
-                    err = Err("skill is missing  @<provider>.on_deactivate handler")
+                    err = Err("skill is missing @<provider>.on_deactivate handler")
                     _post_handler_state(cmd, err)
                     return _to_response(cmd, err)
                 _post_handler_state(cmd, Ok())
@@ -254,7 +254,7 @@ def build_lifecycle_servicer(
             _post_handler_state(cmd, result)
             return _to_response(cmd, result)
 
-        # CMD_SHUTDOWN: optional handler. Cap is going away regardless;
+        # CMD_SHUTDOWN: optional handler. Provider is going away regardless;
         # Result is logged but doesn't change termination.
         if cmd == CMD_SHUTDOWN:
             if on_shutdown is not None:

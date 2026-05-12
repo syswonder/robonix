@@ -10,7 +10,7 @@ use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
 #[allow(dead_code)]
 pub async fn execute(call: &CapabilityCall, endpoint: &str) -> CapabilityCallResult {
     log::warn!(
-        "[grpc] cap='{}' contract='{}' (endpoint='{}') — gRPC dispatch not yet implemented",
+        "[grpc] provider='{}' contract='{}' (endpoint='{}') — gRPC dispatch not yet implemented",
         call.provider_id,
         call.contract_id,
         endpoint

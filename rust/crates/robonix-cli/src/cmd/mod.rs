@@ -185,7 +185,7 @@ pub enum Commands {
     },
 
     /// List all registered capabilities (one row per provider by default;
-    /// pass -v to expand the per-provider interface list, lspci -tv style)
+    /// pass -v to expand the per-provider capability list, lspci -tv style)
     #[command(alias = "nodes")]
     Caps {
         /// robonix-atlas endpoint
@@ -194,7 +194,7 @@ pub enum Commands {
         /// Output as JSON (forces full detail regardless of -v)
         #[arg(long)]
         json: bool,
-        /// Expand each provider's interface list; without this, only the
+        /// Expand each provider's capability list; without this, only the
         /// summary header line per provider is printed.
         #[arg(short = 'v', long)]
         verbose: bool,
@@ -228,7 +228,7 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Print every MCP-callable tool visible to the agent (executor builtins + provider interfaces)
+    /// Print every MCP-callable tool visible to the agent (executor builtins + provider capabilities)
     Tools {
         /// robonix-atlas endpoint
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
@@ -243,7 +243,7 @@ pub enum Commands {
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
         server: String,
     },
-    /// Dump full runtime state as JSON (capabilities, interfaces, channels)
+    /// Dump full runtime state as JSON (providers, capabilities, channels)
     Inspect {
         /// robonix-atlas endpoint
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]

@@ -69,9 +69,9 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
             return;
         }
     };
-    let Some((provider_id, provider)) = providers
+    let Some((provider_id, cap)) = providers
         .iter()
-        .find(|(_, provider)| provider.contract_id == "robonix/system/memory/compact")
+        .find(|(_, cap)| cap.contract_id == "robonix/system/memory/compact")
     else {
         return;
     };
@@ -83,7 +83,7 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
         calls: vec![CapabilityCall {
             call_id: Uuid::new_v4().to_string(),
             provider_id: provider_id.clone(),
-            contract_id: provider.contract_id.clone(),
+            contract_id: cap.contract_id.clone(),
             args_json: "{}".to_string(),
         }],
     };
