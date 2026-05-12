@@ -1529,11 +1529,43 @@ async fn wait_for_registration(
                 );
             }
             if let Some(provider) = matches.first() {
-                let driver = provider.capabilities.iter().find(|cap| {
-                    cap.transport == atlas_pb::Transport::Grpc as i32
-                        && cap.contract_id.ends_with("/driver")
-                });
-                return Ok((provider.id.clone(), driver.map(|c| c.contract_id.clone())));
+                let provider_id = provider.id.clone();
+                // RegisterPrimitive/Service/Skill and DeclareCapability are two
+                // separate RPCs from the package side — Register lands first,
+                // declares trickle in over the next ~50ms. A package that's
+                // going to expose a `*/driver` typically declares it within
+                // a few hundred ms. Give it up to a 1s settle window so we
+                // don't false-fire the "no driver" path on a fast poll.
+                let settle_deadline = Instant::now() + Duration::from_millis(1000);
+                let driver_contract_id = loop {
+                    let driver = provider.capabilities.iter().find(|cap| {
+                        cap.transport == atlas_pb::Transport::Grpc as i32
+                            && cap.contract_id.ends_with("/driver")
+                    });
+                    if driver.is_some() {
+                        break driver.map(|c| c.contract_id.clone());
+                    }
+                    if Instant::now() >= settle_deadline {
+                        break None;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    // Re-fetch the provider record — its `capabilities` list
+                    // grew since we last looked.
+                    let providers = atlas
+                        .query_capabilities(&provider_id, "", atlas_pb::Transport::Unspecified)
+                        .await
+                        .with_context(|| format!("[{component}/{pkg_label}] re-poll for driver"))?;
+                    if let Some(p) = providers.iter().find(|p| p.id == provider_id) {
+                        let driver = p.capabilities.iter().find(|cap| {
+                            cap.transport == atlas_pb::Transport::Grpc as i32
+                                && cap.contract_id.ends_with("/driver")
+                        });
+                        if driver.is_some() {
+                            break driver.map(|c| c.contract_id.clone());
+                        }
+                    }
+                };
+                return Ok((provider_id, driver_contract_id));
             }
         }
         if Instant::now() >= deadline {
