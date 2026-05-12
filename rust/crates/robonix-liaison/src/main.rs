@@ -129,7 +129,7 @@ async fn resolve_pilot_endpoint(atlas: &Arc<Mutex<AtlasClient>>) -> Option<Strin
         .query_capabilities("", "robonix/system/pilot", transport)
         .await
         .ok()?;
-    let cap = providers.iter().find(|r| {
+    let provider = providers.iter().find(|r| {
         r.capabilities
             .iter()
             .any(|i| i.contract_id == "robonix/system/pilot" && i.transport == transport as i32)
@@ -137,7 +137,7 @@ async fn resolve_pilot_endpoint(atlas: &Arc<Mutex<AtlasClient>>) -> Option<Strin
     let (_channel_id, endpoint, _params) = atlas
         .connect_capability(
             LIAISON_CAPABILITY_ID,
-            &cap.id,
+            &provider.id,
             "robonix/system/pilot",
             transport,
         )
@@ -462,7 +462,7 @@ async fn main() -> Result<()> {
             ),
         )
         .await
-        .context("declare liaison submit gRPC interface")?;
+        .context("declare liaison submit gRPC capability")?;
     atlas
         .declare_capability(
             LIAISON_CAPABILITY_ID,
@@ -476,7 +476,7 @@ async fn main() -> Result<()> {
             ),
         )
         .await
-        .context("declare liaison voice gRPC interface")?;
+        .context("declare liaison voice gRPC capability")?;
     // Liaison has no Driver(CMD_INIT/CMD_ACTIVATE) handshake — it's a Rust binary
     // that's fully ready as soon as the gRPC server is listening. Push the
     // state explicitly so `rbnx caps` shows ACTIVE instead of stopping at

@@ -76,7 +76,7 @@ pub struct CapabilityRef {
     /// Contract id (matches one of the TOMLs under `capabilities/`).
     pub name: String,
     /// Optional path to a package-local TOML that overrides / defines
-    /// this capability (for experimental caps not yet in the official
+    /// this capability (for experimental providers not yet in the official
     /// capabilities directory). Relative to the package root.
     #[serde(default, alias = "definition")]
     pub path: Option<String>,
@@ -125,7 +125,7 @@ struct RawManifest {
     #[serde(default)]
     depends: Vec<DependsRef>,
     /// Legacy `provider_id:` field. Removed from spec — accepted by serde but
-    /// ignored. rbnx-boot now discovers the provider_id by polling atlas for any cap
+    /// ignored. rbnx-boot now discovers the provider_id by polling atlas for any provider
     /// that registered after `start.sh` spawned. Future warning: emit deprecation.
     #[serde(default)]
     #[allow(dead_code)]

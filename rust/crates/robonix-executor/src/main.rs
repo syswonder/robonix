@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
         .await?;
 
     // Built-in capabilities: declared as MCP-transport interfaces so pilot's
-    // catalog discovery sees them like any user MCP cap. The endpoint is a
+    // catalog discovery sees them like any user MCP provider. The endpoint is a
     // sentinel — dispatch never dials it; calls hitting these contracts hit
     // the provider_id == self short-circuit in `dispatch::dispatch`.
     let builtin_endpoint = format!("internal://{}/builtin", cfg.id);
@@ -112,7 +112,7 @@ async fn main() -> Result<()> {
         log::warn!("SetCapabilityState(ACTIVE) failed: {e:#}");
     }
 
-    // Atlas evicts caps after ~60s without a heartbeat. Send one every
+    // Atlas evicts providers after ~60s without a heartbeat. Send one every
     // 20s so we stay registered for the lifetime of the process.
     {
         let mut hb = atlas.clone();

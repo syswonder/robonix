@@ -280,8 +280,8 @@ async fn pick_audio_settings(
     };
 
     // Validate stored pins against current atlas state. A pin pointing at a
-    // cap that's not in this deploy (e.g. config saved from an earlier
-    // deploy where the audio cap was named differently) would silently break
+    // provider that's not in this deploy (e.g. config saved from an earlier
+    // deploy where the audio provider was named differently) would silently break
     // voice — re-prompt instead.
     if !need_mic
         && let Some(pin) = cfg.mic_cap_id.as_deref()
@@ -366,9 +366,9 @@ async fn pick_audio_settings(
     Ok((cfg, warnings))
 }
 
-/// True iff atlas currently has a cap whose id (or namespace) matches the
+/// True iff atlas currently has a provider whose id (or namespace) matches the
 /// pin AND it provides `contract` over GRPC. Used at chat startup to detect
-/// stale pins from a prior deploy whose audio cap has since been renamed
+/// stale pins from a prior deploy whose audio provider has since been renamed
 /// or removed — caller drops the pin and re-prompts the picker instead of
 /// silently letting voice fail with "no provider".
 async fn pin_exists_in_atlas(atlas: &mut AtlasClient, pin: &str, contract: &str) -> bool {

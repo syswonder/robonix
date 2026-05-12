@@ -546,7 +546,7 @@ pub async fn execute_start(
         .unwrap_or_else(|| "127.0.0.1:50051".to_string());
 
     // Materialize per-instance config from --config + --set overrides
-    // entirely in memory. The cap process never sees the file — config
+    // entirely in memory. The provider process never sees the file — config
     // is delivered via Driver(CMD_INIT, config_json) only (post-spawn
     // task below). Empty inputs → no CMD_INIT push (start body still
     // gets a default Driver(CMD_INIT, "{}") call so it can advance to
@@ -624,14 +624,14 @@ pub async fn execute_start(
         format!("{}; {start_body}", prefix_parts.join("; "))
     };
 
-    // Post-spawn task: wait for the cap to register with atlas, then
-    // send Driver(CMD_INIT, config_json=<materialized>). The cap
+    // Post-spawn task: wait for the provider to register with atlas, then
+    // send Driver(CMD_INIT, config_json=<materialized>). The provider
     // process never sees the JSON anywhere — atlas + this gRPC call
     // is the only delivery path. Skipped when no --config / --set was
     // given (rbnx start without config = run package as-is, init with
     // default empty config).
     let init_task = if let Some(json) = materialized_cfg_json {
-        // One package = one cap. Snapshot atlas, then post-spawn diff
+        // One package = one provider. Snapshot atlas, then post-spawn diff
         // gives the new provider_id.
         let endpoint_for_task = endpoint.clone();
         let before_snapshot = match AtlasClient::connect(&endpoint).await {
@@ -675,9 +675,9 @@ const CMD_INIT_DELIVERY: u32 = 0;
 const CAP_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Wait for the new cap (any cap not in `before`) to appear in atlas with a
-/// `*/driver` gRPC interface, then call Driver(CMD_INIT, config_json). One
-/// package = one cap. Gives up after 60s; `rbnx start` keeps the package
+/// Wait for the new provider (any provider not in `before`) to appear in atlas with a
+/// `*/driver` gRPC capability, then call Driver(CMD_INIT, config_json). One
+/// package = one provider. Gives up after 60s; `rbnx start` keeps the package
 /// running regardless.
 async fn drive_cmd_init_after_register(
     atlas_endpoint: &str,
@@ -700,7 +700,7 @@ async fn drive_cmd_init_after_register(
     loop {
         if started.elapsed() > CAP_REGISTER_TIMEOUT {
             output::warning(&format!(
-                "CMD_INIT delivery: no new cap registered within {:?}; config not delivered",
+                "CMD_INIT delivery: no new provider registered within {:?}; config not delivered",
                 CAP_REGISTER_TIMEOUT
             ));
             return;
@@ -750,8 +750,8 @@ async fn drive_cmd_init_after_register(
     }
 }
 
-/// Send Driver(CMD_INIT, config_json) to a known cap's `*/driver`
-/// gRPC interface. Mirrors deploy.rs's call_driver_cmd but inlined to
+/// Send Driver(CMD_INIT, config_json) to a known provider's `*/driver`
+/// gRPC capability. Mirrors deploy.rs's call_driver_cmd but inlined to
 /// keep run_package.rs free of cross-module coupling.
 async fn call_driver_init(
     atlas: &mut AtlasClient,
@@ -839,7 +839,7 @@ fn contract_id_to_service_name(contract_id: &str) -> String {
 ///
 /// Layering: load file (json or yaml) → overlay each `--set` on the
 /// tree → serialise to a single JSON string. The string is delivered
-/// to the cap exclusively via Driver(CMD_INIT, config_json). The cap
+/// to the provider exclusively via Driver(CMD_INIT, config_json). The provider
 /// process MUST NOT read this through env / disk — that's the v0.1
 /// invariant `rbnx start` and `rbnx boot` both honour.
 fn build_start_config_json(config_file: Option<&Path>, sets: &[String]) -> Result<Option<String>> {

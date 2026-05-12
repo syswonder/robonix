@@ -14,7 +14,7 @@
 //
 // Either way, on startup pilot:
 //   1. Connects to atlas, registers its capability, declares the
-//      `robonix/system/pilot` gRPC interface.
+//      `robonix/system/pilot` gRPC capability.
 //   2. Constructs an embedded LLM client from the resolved VLM config.
 //   3. Serves RobonixSystemPilot on `listen`. Executor address is discovered
 //      through atlas at every Stream RPC, not configured statically.
@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
         cfg.vlm.upstream, cfg.vlm.model
     );
 
-    // Atlas evicts caps after ~60s without a heartbeat. Send one every
+    // Atlas evicts providers after ~60s without a heartbeat. Send one every
     // 20s so we stay registered for the lifetime of the process.
     {
         let mut hb = atlas.clone();
