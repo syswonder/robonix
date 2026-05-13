@@ -793,8 +793,8 @@ complete. Concretely:
 #[cfg(test)]
 mod tests {
     use super::{
-        CapabilityTargetMap, expand_rtdl_to_plan,
-        parse_rtdl_assistant_response, skip_memory_prefetch, task_is_session_end,
+        CapabilityTargetMap, expand_rtdl_to_plan, parse_rtdl_assistant_response,
+        skip_memory_prefetch, task_is_session_end,
     };
     use crate::pb::pilot::Task;
     use serde_json::json;
