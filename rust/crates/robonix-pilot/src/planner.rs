@@ -32,8 +32,8 @@ type CapabilityTargetMap = HashMap<String, CapabilityTarget>;
 
 struct DisplayCapability<'a> {
     display_name: String,
-    cap_id: &'a str,
-    iface: &'a atlas_pb::InterfaceMetadata,
+    provider_id: &'a str,
+    cap: &'a atlas_pb::Capability,
 }
 
 fn max_tool_rounds() -> usize {
@@ -460,14 +460,14 @@ pub async fn run_turn(
 }
 
 fn build_display_capabilities(
-    cap_list: &[(String, atlas_pb::InterfaceMetadata)],
+    cap_list: &[(String, atlas_pb::Capability)],
 ) -> Vec<DisplayCapability<'_>> {
     cap_list
         .iter()
-        .map(|(cap_id, iface)| DisplayCapability {
-            display_name: format!("{}.{}", cap_id, llm_name(&iface.contract_id)),
-            cap_id,
-            iface,
+        .map(|(provider_id, cap)| DisplayCapability {
+            display_name: format!("{}.{}", provider_id, llm_name(&cap.contract_id)),
+            provider_id: provider_id.as_str(),
+            cap,
         })
         .collect()
 }
@@ -477,7 +477,7 @@ fn build_capability_target_map(display_caps: &[DisplayCapability<'_>]) -> Capabi
     for cap in display_caps {
         out.insert(
             cap.display_name.clone(),
-            (cap.cap_id.to_string(), cap.iface.contract_id.clone()),
+            (cap.provider_id.to_string(), cap.cap.contract_id.clone()),
         );
     }
     out
@@ -531,9 +531,9 @@ Example JSON format:
     );
 
     for cap in display_caps {
-        let iface = cap.iface;
+        let c = cap.cap;
         let Some(atlas_pb::transport_params::Kind::Mcp(mcp)) =
-            iface.params.as_ref().and_then(|p| p.kind.as_ref())
+            c.params.as_ref().and_then(|p| p.kind.as_ref())
         else {
             continue;
         };
@@ -542,7 +542,7 @@ Example JSON format:
         p.push_str(&format!(
             "- capability_name: `{}`\n  - description: {}\n  - args_schema: `{}`\n",
             cap.display_name,
-            mcp.description.trim(),
+            c.description.trim(),
             schema
         ));
     }
@@ -660,7 +660,7 @@ fn expand_rtdl_node(
                 .get("args")
                 .filter(|x| x.is_object())
                 .ok_or_else(|| anyhow::anyhow!("{path}.args must be an object"))?;
-            let (cap_id, contract_id) = target_map
+            let (provider_id, contract_id) = target_map
                 .get(cap)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("{path}.cap unknown capability `{cap}`"))?;
@@ -668,7 +668,7 @@ fn expand_rtdl_node(
             *next_call += 1;
             calls.push(CapabilityCall {
                 call_id: format!("{plan_id}:{call_index}"),
-                cap_id,
+                provider_id,
                 contract_id,
                 args_json: serde_json::to_string(args)?,
             });
@@ -797,7 +797,6 @@ mod tests {
         parse_rtdl_assistant_response, skip_memory_prefetch, task_is_session_end,
     };
     use crate::pb::pilot::Task;
-    use robonix_atlas::pb as atlas_pb;
     use serde_json::json;
 
     fn task(ctx: &str) -> Task {
@@ -884,7 +883,7 @@ mod tests {
         assert_eq!(plan.round, 7);
         assert_eq!(plan.calls.len(), 2);
         assert_eq!(plan.calls[0].call_id, "p:0");
-        assert_eq!(plan.calls[0].cap_id, "cap-camera");
+        assert_eq!(plan.calls[0].provider_id, "cap-camera");
         assert_eq!(
             plan.calls[0].contract_id,
             "robonix/primitive/camera/snapshot"
@@ -912,18 +911,5 @@ mod tests {
         });
         let err = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0).unwrap_err();
         assert!(err.to_string().contains("only `op`, `cap`, and `args`"));
-    }
-
-    fn iface(contract_id: &str) -> atlas_pb::InterfaceMetadata {
-        atlas_pb::InterfaceMetadata {
-            contract_id: contract_id.to_string(),
-            transport: atlas_pb::Transport::Mcp as i32,
-            params: Some(atlas_pb::TransportParams {
-                kind: Some(atlas_pb::transport_params::Kind::Mcp(atlas_pb::McpParams {
-                    description: String::new(),
-                    input_schema_json: "{}".to_string(),
-                })),
-            }),
-        }
     }
 }

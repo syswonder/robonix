@@ -68,3 +68,5 @@ rbnx-boot
 env.sh
 
 develop_specs/
+
+*.egg-info/
