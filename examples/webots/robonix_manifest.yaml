@@ -22,7 +22,7 @@ system:
     log: info
   pilot:
     listen: 127.0.0.1:50071
-    log: info
+    log: debug
     vlm:
       upstream: ${VLM_BASE_URL}
       api_key: ${VLM_API_KEY}

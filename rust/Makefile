@@ -15,10 +15,10 @@ help:
 	@echo "  Build:"
 	@echo "    make build           - Build all workspace crates (debug)"
 	@echo "    make release         - Build all workspace crates (release)"
-	@echo "    make build-atlas     - Build robonix-atlas only"
-	@echo "    make build-pilot     - Build robonix-pilot only"
-	@echo "    make build-executor  - Build robonix-executor only"
-	@echo "    make build-liaison   - Build robonix-liaison only"
+	@echo "    make build-atlas     - Install robonix-atlas to ~/.cargo/bin"
+	@echo "    make build-pilot     - Install robonix-pilot to ~/.cargo/bin"
+	@echo "    make build-executor  - Install robonix-executor to ~/.cargo/bin"
+	@echo "    make build-liaison   - Install robonix-liaison to ~/.cargo/bin"
 	@echo ""
 	@echo "  Install:"
 	@echo "    make install         - Install binaries to ~/.cargo/bin (proto codegen runs in each crate's build.rs)"
@@ -41,16 +41,16 @@ release:
 	@$(MAKE) BUILD_MODE=release build
 
 build-atlas:
-	cargo build -p robonix-atlas $(CARGO_FLAGS)
+	cargo install --force --path crates/robonix-atlas    --bin robonix-atlas    $(CARGO_FLAGS)
 
 build-pilot:
-	cargo build -p robonix-pilot $(CARGO_FLAGS)
+	cargo install --force --path crates/robonix-pilot    --bin robonix-pilot    $(CARGO_FLAGS)
 
 build-executor:
-	cargo build -p robonix-executor $(CARGO_FLAGS)
+	cargo install --force --path crates/robonix-executor --bin robonix-executor $(CARGO_FLAGS)
 
 build-liaison:
-	cargo build -p robonix-liaison $(CARGO_FLAGS)
+	cargo install --force --path crates/robonix-liaison  --bin robonix-liaison  $(CARGO_FLAGS)
 
 fmt:
 	cargo fmt --all
@@ -60,12 +60,12 @@ check:
 	cargo clippy --workspace -- -D warnings
 
 install:
-	cargo install --path crates/robonix-codegen  --bin robonix-codegen  $(CARGO_FLAGS)
-	cargo install --path crates/robonix-atlas    --bin robonix-atlas    $(CARGO_FLAGS)
-	cargo install --path crates/robonix-pilot    --bin robonix-pilot    $(CARGO_FLAGS)
-	cargo install --path crates/robonix-executor --bin robonix-executor $(CARGO_FLAGS)
-	cargo install --path crates/robonix-liaison  --bin robonix-liaison  $(CARGO_FLAGS)
-	cargo install --path crates/robonix-cli      --bin rbnx             $(CARGO_FLAGS)
+	cargo install --force --path crates/robonix-codegen  --bin robonix-codegen  $(CARGO_FLAGS)
+	cargo install --force --path crates/robonix-atlas    --bin robonix-atlas    $(CARGO_FLAGS)
+	cargo install --force --path crates/robonix-pilot    --bin robonix-pilot    $(CARGO_FLAGS)
+	cargo install --force --path crates/robonix-executor --bin robonix-executor $(CARGO_FLAGS)
+	cargo install --force --path crates/robonix-liaison  --bin robonix-liaison  $(CARGO_FLAGS)
+	cargo install --force --path crates/robonix-cli      --bin rbnx             $(CARGO_FLAGS)
 	@# Register this clone as the robonix source tree so packages anywhere
 	@# on disk can resolve capabilities/IDL via `rbnx path`. This updates
 	@# ~/.robonix/config.yaml robonix_source_path = <repo-root> (the parent of rust/).

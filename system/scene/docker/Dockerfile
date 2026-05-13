@@ -47,10 +47,7 @@ ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/ \
-    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
-    HF_ENDPOINT=https://hf-mirror.com
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # System packages we need at runtime:
 #   python3-pip          — install scene deps
@@ -86,6 +83,21 @@ RUN pip install --find-links https://mirrors.aliyun.com/pytorch-wheels/cu124/ \
         torch==2.5.1 torchvision==0.20.1 \
  || pip install --index-url https://download.pytorch.org/whl/cu124 \
         torch==2.5.1 torchvision==0.20.1
+
+# Optional: pass from host via `scripts/build.sh` as HTTP_PROXY_HOST /
+# HTTPS_PROXY_HOST / NO_PROXY_HOST (not HTTP_PROXY — avoids BuildKit treating
+# them as automatic global proxy args). Mapped to standard names only for the
+# network-heavy layers below (pip requirements, git, HF, etc.). Use
+# http://host.docker.internal:7890 — not 127.0.0.1 (that is the build container).
+ARG HTTP_PROXY_HOST
+ARG HTTPS_PROXY_HOST
+ARG NO_PROXY_HOST
+ENV HTTP_PROXY=${HTTP_PROXY_HOST} \
+    HTTPS_PROXY=${HTTPS_PROXY_HOST} \
+    NO_PROXY=${NO_PROXY_HOST} \
+    http_proxy=${HTTP_PROXY_HOST} \
+    https_proxy=${HTTPS_PROXY_HOST} \
+    no_proxy=${NO_PROXY_HOST}
 
 # Generic scene deps + concept-graphs perception stack (no
 # pytorch3d / chamferdist / gradslam — those are needed only by
@@ -146,6 +158,9 @@ COPY _weights/mobile_sam.pt    /opt/models/mobile_sam.pt
 RUN python3 -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')" \
  && python3 -c "import clip; clip.load('ViT-B/32', device='cpu', download_root='/root/.cache/clip')" \
  && ls -la /opt/models/ /root/.cache/clip/
+
+# Drop build-time HTTP proxy after all network-heavy build steps (pip/github/git/HF/openai CDN).
+ENV http_proxy= https_proxy= no_proxy= HTTP_PROXY= HTTPS_PROXY= NO_PROXY=
 
 # Fixed env so perception_concept_graphs.py knows where the weights
 # live without each deployment having to override.

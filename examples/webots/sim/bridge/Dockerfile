@@ -29,6 +29,7 @@ ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libxcb-cursor0 \
     python3-pip \
     python3-colcon-common-extensions \
     ros-humble-nav2-msgs \

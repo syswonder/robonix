@@ -64,3 +64,9 @@ rbnx-boot
 
 # generated PDFs (developer guide etc.) — keep .md only
 *.pdf
+
+env.sh
+
+develop_specs/
+
+*.egg-info/
