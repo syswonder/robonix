@@ -41,6 +41,27 @@ if [[ -z "${DISPLAY:-}" ]]; then
     : "${DISPLAY:=:0}"; export DISPLAY
 fi
 
+# X11 cookie file for Docker bind-mount (SSH/Moba MoTTY forwarding uses
+# localhost:N and requires MIT-MAGIC-COOKIE in the container). compose.yaml
+# mounts this path to /root/.Xauthority.
+export ROBONIX_HOST_XAUTH="${ROBONIX_HOST_XAUTH:-${XAUTHORITY:-$HOME/.Xauthority}}"
+if [[ -e "$ROBONIX_HOST_XAUTH" && ! -f "$ROBONIX_HOST_XAUTH" ]]; then
+    echo "[sim/start] error: X11 auth path exists but is not a regular file: $ROBONIX_HOST_XAUTH" >&2
+    echo "[sim/start] Refusing to continue because Docker would bind-mount an invalid path at /root/.Xauthority." >&2
+    exit 1
+fi
+
+if [[ ! -f "$ROBONIX_HOST_XAUTH" ]]; then
+    echo "[sim/start] warning: X11 auth file missing: $ROBONIX_HOST_XAUTH"
+    echo "[sim/start] Creating an empty X11 auth file so Docker bind-mounts a file at /root/.Xauthority."
+    mkdir -p "$(dirname "$ROBONIX_HOST_XAUTH")"
+    if ! touch "$ROBONIX_HOST_XAUTH"; then
+        echo "[sim/start] error: failed to create X11 auth file: $ROBONIX_HOST_XAUTH" >&2
+        echo "[sim/start] For SSH forwarding use: ssh -Y user@host (or trusted -X). For local :0, log in to a desktop session once so ~/.Xauthority exists." >&2
+        exit 1
+    fi
+fi
+
 CF=(-f compose.yaml)
 if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]] && command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
   CF+=(-f compose.gpu.yaml)
