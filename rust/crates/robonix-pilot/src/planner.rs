@@ -540,7 +540,7 @@ Example JSON format:
         let schema: serde_json::Value =
             serde_json::from_str(&mcp.input_schema_json).unwrap_or(serde_json::Value::Null);
         p.push_str(&format!(
-            "- capability_name: `{}`\n  - description: {}\n  - args_schema: `{}`\n",
+            "- capability_name: {}\n  - description: {}\n  - args_schema: `{}`\n",
             cap.display_name,
             c.description.trim(),
             schema
