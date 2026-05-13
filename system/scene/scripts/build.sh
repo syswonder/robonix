@@ -13,9 +13,11 @@
 # `docker build --no-cache`.
 #
 # HTTP proxy (Clash): export http_proxy/https_proxy on the host, e.g.
-# http://127.0.0.1:7890. For `docker build`, loopback/localhost in those URLs
-# is rewritten to host.docker.internal (+ --add-host=...:host-gateway). Clash
-# should allow LAN and listen on 0.0.0.0.
+# http://127.0.0.1:7890. Passes HTTP(S)_PROXY_HOST build-args (not HTTP_PROXY)
+# so BuildKit does not treat them as global proxy args; the Dockerfile maps them
+# to HTTP_PROXY/ENV only for the pip/git/HF-heavy layers. Loopback/localhost
+# in URLs is rewritten to host.docker.internal (+ --add-host=...:host-gateway).
+# Clash should allow LAN and listen on 0.0.0.0.
 
 set -euo pipefail
 PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -112,11 +114,11 @@ _docker_http="$(proxy_for_docker_build "$_http_proxy")"
 _docker_https="$(proxy_for_docker_build "$_https_proxy")"
 
 if [[ -n "$_docker_http" || -n "$_docker_https" ]]; then
-    echo "[build] docker build: build-arg HTTP_PROXY=${_docker_http:-<unset>} HTTPS_PROXY=${_docker_https:-<unset>}"
+    echo "[build] docker build: build-arg HTTP_PROXY_HOST=${_docker_http:-<unset>} HTTPS_PROXY_HOST=${_docker_https:-<unset>}"
     DOCKER_BUILD_FLAGS+=(--add-host=host.docker.internal:host-gateway)
-    [[ -n "$_docker_http" ]] && DOCKER_BUILD_FLAGS+=(--build-arg "HTTP_PROXY=${_docker_http}")
-    [[ -n "$_docker_https" ]] && DOCKER_BUILD_FLAGS+=(--build-arg "HTTPS_PROXY=${_docker_https}")
-    [[ -n "$_no_proxy" ]] && DOCKER_BUILD_FLAGS+=(--build-arg "NO_PROXY=${_no_proxy}")
+    [[ -n "$_docker_http" ]] && DOCKER_BUILD_FLAGS+=(--build-arg "HTTP_PROXY_HOST=${_docker_http}")
+    [[ -n "$_docker_https" ]] && DOCKER_BUILD_FLAGS+=(--build-arg "HTTPS_PROXY_HOST=${_docker_https}")
+    [[ -n "$_no_proxy" ]] && DOCKER_BUILD_FLAGS+=(--build-arg "NO_PROXY_HOST=${_no_proxy}")
 fi
 
 # Skip the rebuild when the image already exists AND its layers are
