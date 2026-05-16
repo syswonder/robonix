@@ -1796,7 +1796,7 @@ fn apply_pilot_event(
             // so we leaf-strip contract_id back into a tool-name lookalike to
             // preserve the same `[r{round}] {name}({args})` line shape.
             if let Some(ref p) = event.plan {
-                for call in &p.calls {
+                for call in plan_calls(p) {
                     let leaf = call
                         .contract_id
                         .rsplit_once('/')
@@ -1812,6 +1812,13 @@ fn apply_pilot_event(
         _ => {}
     }
     Ok(())
+}
+
+fn plan_calls(plan: &crate::pb::pilot::Plan) -> Vec<&crate::pb::pilot::CapabilityCall> {
+    plan.nodes
+        .iter()
+        .filter_map(|node| node.call.as_ref())
+        .collect()
 }
 
 fn apply_voice_event(

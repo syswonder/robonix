@@ -22,7 +22,7 @@ use tonic::Request;
 use uuid::Uuid;
 
 use crate::pb::contracts::robonix_system_pilot_client::RobonixSystemPilotClient;
-use crate::pb::pilot::Task;
+use crate::pb::pilot::{CapabilityCall, Plan, Task};
 
 // PilotEvent.event_kind discriminants — must mirror service.rs / .msg.
 const EVT_TEXT_CHUNK: u32 = 0;
@@ -80,7 +80,8 @@ pub async fn execute(server: &str, prompt: &str, json: bool) -> Result<()> {
                 "final_text": event.final_text,
                 "plan": event.plan.as_ref().map(|p| serde_json::json!({
                     "round": p.round,
-                    "calls": p.calls.iter().map(|c| serde_json::json!({
+                    "root_index": p.root_index,
+                    "calls": plan_calls(p).into_iter().map(|c| serde_json::json!({
                         "call_id": c.call_id,
                         "provider_id": c.provider_id,
                         "contract_id": c.contract_id,
@@ -130,9 +131,8 @@ pub async fn execute(server: &str, prompt: &str, json: bool) -> Result<()> {
                         writeln!(out)?;
                         last_was_chunk = false;
                     }
-                    let leaves: Vec<String> = plan
-                        .calls
-                        .iter()
+                    let leaves: Vec<String> = plan_calls(&plan)
+                        .into_iter()
                         .map(|c| {
                             c.contract_id
                                 .rsplit_once('/')
@@ -208,6 +208,13 @@ fn compact_one_line(s: &str, n: usize) -> String {
     } else {
         flat
     }
+}
+
+fn plan_calls(plan: &Plan) -> Vec<&CapabilityCall> {
+    plan.nodes
+        .iter()
+        .filter_map(|node| node.call.as_ref())
+        .collect()
 }
 
 fn now_ms() -> u64 {

@@ -67,9 +67,7 @@ types, and crate names matching `robonix-*`. Python targets 3.10+, uses
 files follow `<interface>.v1.toml` naming, grouped by domain, for example
 `capabilities/primitive/camera/rgb.v1.toml`.
 
-For each non-trivial function or method, add a standard comment block. Keep
-comments concise and focused on behavior, invariants, side effects, or
-non-obvious constraints.
+If one function/method body exceeds five lines, treat documentation as mandatory: The comment block must state behavior at minimum; add side effects, or constraints when they are not obvious from the signature.
 
 ## Testing Guidelines
 

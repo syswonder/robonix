@@ -36,7 +36,7 @@ use pb::contracts::{
     robonix_system_pilot_client::RobonixSystemPilotClient,
 };
 use pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
-use pb::pilot::{PilotEvent, Task};
+use pb::pilot::{CapabilityCall, PilotEvent, Plan, Task};
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
 use std::pin::Pin;
@@ -329,9 +329,9 @@ async fn run_text_loop(pipeline: Arc<LiaisonPipeline>) -> Result<()> {
                                 println!(
                                     "[round {}] dispatching {} call(s)…",
                                     p.round,
-                                    p.calls.len()
+                                    plan_calls(p).len()
                                 );
-                                for c in &p.calls {
+                                for c in plan_calls(p) {
                                     println!("  · {}", c.contract_id);
                                 }
                             }
@@ -557,6 +557,13 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn plan_calls(plan: &Plan) -> Vec<&CapabilityCall> {
+    plan.nodes
+        .iter()
+        .filter_map(|node| node.call.as_ref())
+        .collect()
 }
 
 #[cfg(test)]
