@@ -16,6 +16,8 @@ import math
 import time
 
 from .state import ObjectRegistry, SceneObject
+from .scene_graph.store import SceneGraphStore
+from .scene_graph.types import SceneGraphSnapshot
 
 # Resolved at import time. PYTHONPATH is set by package_manifest.yaml's
 # `start:` block to include rbnx-build/codegen/{proto_gen,robonix_mcp_types}.
@@ -23,9 +25,17 @@ import semantic_map_mcp  # type: ignore
 from semantic_map_mcp import (  # type: ignore
     GoalNear_Request,
     GoalNear_Response,
+    GetObjectContext_Request,
+    GetObjectContext_Response,
+    GetSceneGraph_Request,
+    GetSceneGraph_Response,
     ListObjects_Request,
     ListObjects_Response,
+    ListRelations_Request,
+    ListRelations_Response,
     Object,
+    SceneGraphEdge as SceneGraphEdgeIDL,
+    SceneGraphNode as SceneGraphNodeIDL,
 )
 
 from mcp.server.fastmcp import FastMCP
@@ -37,12 +47,18 @@ log = logging.getLogger(__name__)
 # ── Module-level state pointers, set by service.py at startup ──────────────
 _REGISTRY: ObjectRegistry | None = None
 _HUB = None  # SubscribersHub, exposes .latest("occupancy_grid") for goal_near BFS
+_SG_STORE: SceneGraphStore | None = None
 
 
 def attach_state(*, registry: ObjectRegistry, hub=None) -> None:
     global _REGISTRY, _HUB
     _REGISTRY = registry
     _HUB = hub
+
+
+def attach_scene_graph_store(store: SceneGraphStore) -> None:
+    global _SG_STORE
+    _SG_STORE = store
 
 
 # ── conversions: SceneObject → IDL Object ──────────────────────────────────
@@ -197,9 +213,133 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
     )
 
 
+# ── scene graph MCP tools ────────────────────────────────────────────────────
+
+def _sg_snapshot() -> SceneGraphSnapshot | None:
+    if _SG_STORE is None:
+        return None
+    return _SG_STORE.get_snapshot()
+
+
+def _node_to_idl(n) -> SceneGraphNodeIDL:
+    return SceneGraphNodeIDL(
+        object_id=n.object_id,
+        label=n.label,
+        caption=n.caption or n.label,
+        x=float(n.bbox_center[0]),
+        y=float(n.bbox_center[1]),
+        z=float(n.bbox_center[2]),
+        confidence=float(n.confidence),
+        observation_count=int(n.observation_count),
+        last_seen_unix=float(n.last_seen or 0.0),
+    )
+
+
+def _edge_to_idl(e) -> SceneGraphEdgeIDL:
+    return SceneGraphEdgeIDL(
+        source_id=e.source_id,
+        target_id=e.target_id,
+        relation=e.relation,
+        confidence=float(e.confidence),
+        reason=e.reason,
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/get_scene_graph")
+async def get_scene_graph(_req: GetSceneGraph_Request) -> GetSceneGraph_Response:
+    """Return the current scene graph snapshot — all stable nodes
+    with captions and their LLM-inferred spatial relations.
+    Contract: robonix/system/scene/get_scene_graph."""
+    snap = _sg_snapshot()
+    if snap is None:
+        return GetSceneGraph_Response(
+            nodes=[], edges=[], updated_at=0.0,
+        )
+    return GetSceneGraph_Response(
+        nodes=[_node_to_idl(n) for n in snap.nodes.values()],
+        edges=[_edge_to_idl(e) for e in snap.edges],
+        updated_at=snap.updated_at,
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/get_object_context")
+async def get_object_context(req: GetObjectContext_Request) -> GetObjectContext_Response:
+    """Return a single object's scene graph node, its direct relations,
+    and nearby objects sorted by distance. Useful for Pilot to reason
+    about one object's context without fetching the full graph.
+    Contract: robonix/system/scene/get_object_context."""
+    snap = _sg_snapshot()
+    if snap is None or req.object_id not in snap.nodes:
+        # Fall back to registry if scene graph has no data yet.
+        empty_node = SceneGraphNodeIDL(
+            object_id=req.object_id, label="", caption="",
+            x=0.0, y=0.0, z=0.0, confidence=0.0,
+            observation_count=0, last_seen_unix=0.0,
+        )
+        return GetObjectContext_Response(
+            object=empty_node, relations=[], nearby_objects=[],
+        )
+
+    node = snap.nodes[req.object_id]
+
+    # Direct relations involving this object.
+    related_edges = [
+        _edge_to_idl(e) for e in snap.edges
+        if e.source_id == req.object_id or e.target_id == req.object_id
+    ]
+
+    # Nearby objects by distance (exclude self).
+    cx, cy, cz = node.bbox_center
+    nearby: list[tuple[float, object]] = []
+    for other in snap.nodes.values():
+        if other.object_id == req.object_id:
+            continue
+        ox, oy, oz = other.bbox_center
+        d = math.sqrt((cx - ox) ** 2 + (cy - oy) ** 2 + (cz - oz) ** 2)
+        nearby.append((d, other))
+    nearby.sort(key=lambda t: t[0])
+    nearby_objs = [
+        Object(
+            id=n.object_id, label=n.label,
+            x=float(n.bbox_center[0]), y=float(n.bbox_center[1]),
+            z=float(n.bbox_center[2]),
+            last_seen_unix=float(n.last_seen or 0.0),
+        )
+        for _, n in nearby[:5]
+    ]
+
+    return GetObjectContext_Response(
+        object=_node_to_idl(node),
+        relations=related_edges,
+        nearby_objects=nearby_objs,
+    )
+
+
+@mcp_contract(mcp, contract_id="robonix/system/scene/list_relations")
+async def list_relations(req: ListRelations_Request) -> ListRelations_Response:
+    """List scene graph edges, optionally filtered by relation type.
+    Pass empty relation string to get all edges.
+    Contract: robonix/system/scene/list_relations."""
+    snap = _sg_snapshot()
+    if snap is None:
+        return ListRelations_Response(edges=[])
+
+    edges = snap.edges
+    if req.relation:
+        edges = [e for e in edges if e.relation == req.relation]
+
+    return ListRelations_Response(
+        edges=[_edge_to_idl(e) for e in edges],
+    )
+
+
 __all__ = [
     "mcp",
     "attach_state",
+    "attach_scene_graph_store",
     "list_objects",
     "goal_near",
+    "get_scene_graph",
+    "get_object_context",
+    "list_relations",
 ]
