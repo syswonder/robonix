@@ -11,5 +11,5 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              device_ids: ["${ROBONIX_GPU_ID:-0}"]
               capabilities: [gpu]
