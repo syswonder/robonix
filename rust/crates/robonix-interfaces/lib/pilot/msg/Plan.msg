@@ -1,8 +1,8 @@
 # Plan: structural payload pilot hands to executor for execution.
-# Semantically a behavior tree; v1 is a degenerate linear list of calls.
-# TODO: evolve to explicit BT nodes + RTDL bindings; keep CapabilityCall[]
-# as the linear encoding until then.
+# Encodes an RTDL execution tree as arena nodes. Empty plans are represented
+# as one sequence root node with no children.
 string plan_id
 string session_id
 uint32 round
-CapabilityCall[] calls
+RtdlNode[] nodes
+uint32 root_index

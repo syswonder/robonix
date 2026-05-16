@@ -6,7 +6,8 @@ use crate::history;
 use crate::memory;
 use crate::pb::contracts::robonix_system_executor_client::RobonixSystemExecutorClient;
 use crate::pb::pilot::{
-    BatchResult, CapabilityCall, CapabilityCallResult, PilotEvent, Plan, SessionStatusEvent, Task,
+    BatchResult, CapabilityCall, CapabilityCallResult, PilotEvent, Plan, RtdlNode,
+    SessionStatusEvent, Task,
 };
 use crate::service::{self, PilotStreamBody, SessionState};
 use crate::vlm::{Message, VlmClient, VlmStreamItem};
@@ -29,6 +30,10 @@ pub struct ExecutorConn {
 
 type CapabilityTarget = (String, String);
 type CapabilityTargetMap = HashMap<String, CapabilityTarget>;
+
+const RTDL_SEQUENCE: u32 = 0;
+const RTDL_PARALLEL: u32 = 1;
+const RTDL_DO: u32 = 2;
 
 struct DisplayCapability<'a> {
     display_name: String,
@@ -313,10 +318,10 @@ pub async fn run_turn(
             "[pilot/rtdl] expanded plan_id={} round={} calls={}",
             graph.plan_id,
             graph.round,
-            graph.calls.len()
+            plan_call_count(&graph)
         );
 
-        if graph.calls.is_empty() {
+        if plan_call_count(&graph) == 0 {
             log::info!(
                 "[pilot/rtdl] empty sequence plan_id={} round={} final_text=true",
                 graph.plan_id,
@@ -348,7 +353,7 @@ pub async fn run_turn(
         log::debug!(
             "[pilot/rtdl] sending plan_id={} calls={} to liaison/executor",
             graph.plan_id,
-            graph.calls.len()
+            plan_call_count(&graph)
         );
         let _ = tx
             .send(Ok(service::pack(
@@ -484,51 +489,9 @@ fn build_capability_target_map(display_caps: &[DisplayCapability<'_>]) -> Capabi
 }
 
 fn build_rtdl_prompt(display_caps: &[DisplayCapability<'_>]) -> Result<String> {
-    let mut p = String::from(
-        "\
-## RTDL output protocol
-
-Return a valid JSON object with exactly these top-level keys:
-- `content`: a string visible to the user.
-- `rtdl`: a Robot Task Description Language JSON AST.
-
-The whole assistant message MUST begin with `{` and end with `}`.
-Do not output markdown fences, headings, explanations, or any text outside the JSON object.
-
-RTDL nodes are JSON objects with an `op` string. MVP supports only:
-- `sequence`: fields `op` and `children`; `children` is an array of RTDL nodes executed in order.
-- `do`: fields `op`, `cap`, and `args`.
-  - `cap` MUST be copied exactly from the `capability_name` field of one Available capabilities entry.
-  - `args` MUST be a JSON object whose keys and value shapes come from that capability's `args_schema`.
-
-Rules:
-1. Use ONLY capabilities listed in the Available capabilities section.
-2. In RTDL `do.cap`, use ONLY the listed `capability_name` value. Do NOT use path fragments with `/`, hidden provider ids, contract ids, or natural-language aliases.
-3. Build RTDL `do.args` from the listed `args_schema`. Do NOT invent argument keys.
-4. Do NOT invent new capabilities, robots, objects, locations, or relations.
-5. The value of `rtdl` MUST be a JSON object, not a string.
-6. Do not output `out`, variables, expressions, or any operator other than `sequence` and `do`.
-7. If no capability call is needed, output an empty sequence: {\"op\":\"sequence\",\"children\":[]}.
-
-Example JSON format:
-{
-  \"content\": \"I will inspect the current scene.\",
-  \"rtdl\": {
-    \"op\": \"sequence\",
-    \"children\": [
-      {
-        \"op\": \"do\",
-        \"cap\": \"camera_snapshot\",
-        \"args\": {}
-      }
-    ]
-  }
-}
-
-## Available capabilities
-
-",
-    );
+    // Compile-time embedded; edit `rtdl_protocol.md` in this crate root.
+    let mut p = String::from(include_str!("../rtdl_protocol.md"));
+    p.push_str("\n## Available capabilities\n\n");
 
     for cap in display_caps {
         let c = cap.cap;
@@ -547,6 +510,7 @@ Example JSON format:
         ));
     }
 
+    // log::debug!("[pilot/rtdl] rtdl prompt:\n{}", p);
     Ok(p)
 }
 
@@ -601,14 +565,15 @@ fn expand_rtdl_to_plan(
     session_id: String,
     round: u32,
 ) -> Result<Plan> {
-    let mut calls = Vec::new();
+    let mut nodes = Vec::new();
     let mut next_call = 0usize;
-    expand_rtdl_node(rtdl, "$", target_map, &plan_id, &mut next_call, &mut calls)?;
+    let root_index = expand_rtdl_node(rtdl, "$", target_map, &plan_id, &mut next_call, &mut nodes)?;
     Ok(Plan {
         plan_id,
         session_id,
         round,
-        calls,
+        nodes,
+        root_index,
     })
 }
 
@@ -618,8 +583,8 @@ fn expand_rtdl_node(
     target_map: &CapabilityTargetMap,
     plan_id: &str,
     next_call: &mut usize,
-    calls: &mut Vec<CapabilityCall>,
-) -> Result<()> {
+    nodes: &mut Vec<RtdlNode>,
+) -> Result<u32> {
     let obj = node
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("{path}: RTDL node must be an object"))?;
@@ -629,24 +594,39 @@ fn expand_rtdl_node(
         .ok_or_else(|| anyhow::anyhow!("{path}.op must be a string"))?;
 
     match op {
-        "sequence" => {
+        "sequence" | "parallel" => {
             if obj.len() != 2 || !obj.contains_key("children") {
-                anyhow::bail!("{path}: sequence node must contain only `op` and `children`");
+                anyhow::bail!("{path}: {op} node must contain only `op` and `children`");
             }
             let children = obj
                 .get("children")
                 .and_then(|x| x.as_array())
                 .ok_or_else(|| anyhow::anyhow!("{path}.children must be an array"))?;
+            let node_index = nodes.len() as u32;
+            let node_kind = if op == "sequence" {
+                RTDL_SEQUENCE
+            } else {
+                RTDL_PARALLEL
+            };
+            nodes.push(RtdlNode {
+                node_kind,
+                children: Vec::new(),
+                call: None,
+            });
+            let mut child_indices = Vec::with_capacity(children.len());
             for (idx, child) in children.iter().enumerate() {
-                expand_rtdl_node(
+                let child_index = expand_rtdl_node(
                     child,
                     &format!("{path}.children[{idx}]"),
                     target_map,
                     plan_id,
                     next_call,
-                    calls,
+                    nodes,
                 )?;
+                child_indices.push(child_index);
             }
+            nodes[node_index as usize].children = child_indices;
+            Ok(node_index)
         }
         "do" => {
             if obj.len() != 3 || !obj.contains_key("cap") || !obj.contains_key("args") {
@@ -666,17 +646,28 @@ fn expand_rtdl_node(
                 .ok_or_else(|| anyhow::anyhow!("{path}.cap unknown capability `{cap}`"))?;
             let call_index = *next_call;
             *next_call += 1;
-            calls.push(CapabilityCall {
-                call_id: format!("{plan_id}:{call_index}"),
-                provider_id,
-                contract_id,
-                args_json: serde_json::to_string(args)?,
+            let node_index = nodes.len() as u32;
+            nodes.push(RtdlNode {
+                node_kind: RTDL_DO,
+                children: Vec::new(),
+                call: Some(CapabilityCall {
+                    call_id: format!("{plan_id}:{call_index}"),
+                    provider_id,
+                    contract_id,
+                    args_json: serde_json::to_string(args)?,
+                }),
             });
+            Ok(node_index)
         }
         other => anyhow::bail!("{path}.op unknown operator `{other}`"),
     }
+}
 
-    Ok(())
+fn plan_call_count(plan: &Plan) -> usize {
+    plan.nodes
+        .iter()
+        .filter(|node| node.node_kind == RTDL_DO && node.call.is_some())
+        .count()
 }
 
 fn rtdl_result_to_messages(r: &CapabilityCallResult) -> history::ToolResultHistory {
@@ -793,8 +784,8 @@ complete. Concretely:
 #[cfg(test)]
 mod tests {
     use super::{
-        CapabilityTargetMap, expand_rtdl_to_plan, parse_rtdl_assistant_response,
-        skip_memory_prefetch, task_is_session_end,
+        CapabilityTargetMap, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, expand_rtdl_to_plan,
+        parse_rtdl_assistant_response, skip_memory_prefetch, task_is_session_end,
     };
     use crate::pb::pilot::Task;
     use serde_json::json;
@@ -881,16 +872,98 @@ mod tests {
         assert_eq!(plan.plan_id, "p");
         assert_eq!(plan.session_id, "s");
         assert_eq!(plan.round, 7);
-        assert_eq!(plan.calls.len(), 2);
-        assert_eq!(plan.calls[0].call_id, "p:0");
-        assert_eq!(plan.calls[0].provider_id, "cap-camera");
-        assert_eq!(
-            plan.calls[0].contract_id,
-            "robonix/primitive/camera/snapshot"
+        assert_eq!(plan.nodes.len(), 3);
+        assert_eq!(plan.root_index, 0);
+        assert_eq!(plan.nodes[0].node_kind, RTDL_SEQUENCE);
+        assert_eq!(plan.nodes[0].children, vec![1, 2]);
+        let first = plan.nodes[1].call.as_ref().unwrap();
+        let second = plan.nodes[2].call.as_ref().unwrap();
+        assert_eq!(plan.nodes[1].node_kind, RTDL_DO);
+        assert_eq!(first.call_id, "p:0");
+        assert_eq!(first.provider_id, "cap-camera");
+        assert_eq!(first.contract_id, "robonix/primitive/camera/snapshot");
+        assert_eq!(first.args_json, "{}");
+        assert_eq!(second.call_id, "p:1");
+        assert_eq!(second.args_json, r#"{"linear":0.1}"#);
+    }
+
+    #[test]
+    fn rtdl_expands_parallel_root() {
+        let mut targets = CapabilityTargetMap::new();
+        targets.insert(
+            "camera_snapshot".to_string(),
+            (
+                "cap-camera".to_string(),
+                "robonix/primitive/camera/snapshot".to_string(),
+            ),
         );
-        assert_eq!(plan.calls[0].args_json, "{}");
-        assert_eq!(plan.calls[1].call_id, "p:1");
-        assert_eq!(plan.calls[1].args_json, r#"{"linear":0.1}"#);
+        targets.insert(
+            "read_temp".to_string(),
+            (
+                "cap-temp".to_string(),
+                "robonix/primitive/sensor/temp".to_string(),
+            ),
+        );
+
+        let rtdl = json!({
+            "op": "parallel",
+            "children": [
+                { "op": "do", "cap": "camera_snapshot", "args": {} },
+                { "op": "do", "cap": "read_temp", "args": { "unit": "c" } }
+            ]
+        });
+        let plan = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 1).unwrap();
+
+        assert_eq!(plan.root_index, 0);
+        assert_eq!(plan.nodes[0].node_kind, RTDL_PARALLEL);
+        assert_eq!(plan.nodes[0].children, vec![1, 2]);
+        assert_eq!(plan.nodes[1].call.as_ref().unwrap().call_id, "p:0");
+        assert_eq!(plan.nodes[2].call.as_ref().unwrap().call_id, "p:1");
+    }
+
+    #[test]
+    fn rtdl_nested_call_ids_follow_json_traversal_order() {
+        let mut targets = CapabilityTargetMap::new();
+        for name in ["a", "b", "c"] {
+            targets.insert(
+                name.to_string(),
+                (format!("provider-{name}"), format!("robonix/test/{name}")),
+            );
+        }
+
+        let rtdl = json!({
+            "op": "sequence",
+            "children": [
+                { "op": "do", "cap": "a", "args": {} },
+                {
+                    "op": "parallel",
+                    "children": [
+                        { "op": "do", "cap": "b", "args": {} },
+                        { "op": "do", "cap": "c", "args": {} }
+                    ]
+                }
+            ]
+        });
+        let plan = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 1).unwrap();
+        let calls: Vec<_> = plan
+            .nodes
+            .iter()
+            .filter_map(|node| node.call.as_ref())
+            .map(|call| call.call_id.as_str())
+            .collect();
+        assert_eq!(calls, vec!["p:0", "p:1", "p:2"]);
+    }
+
+    #[test]
+    fn rtdl_empty_sequence_generates_root_node() {
+        let targets = CapabilityTargetMap::new();
+        let rtdl = json!({ "op": "sequence", "children": [] });
+        let plan = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0).unwrap();
+
+        assert_eq!(plan.root_index, 0);
+        assert_eq!(plan.nodes.len(), 1);
+        assert_eq!(plan.nodes[0].node_kind, RTDL_SEQUENCE);
+        assert!(plan.nodes[0].children.is_empty());
     }
 
     #[test]
@@ -911,5 +984,36 @@ mod tests {
         });
         let err = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0).unwrap_err();
         assert!(err.to_string().contains("only `op`, `cap`, and `args`"));
+    }
+
+    #[test]
+    fn rtdl_rejects_parallel_non_array_children() {
+        let targets = CapabilityTargetMap::new();
+        let rtdl = json!({ "op": "parallel", "children": {} });
+        let err = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0).unwrap_err();
+        assert!(err.to_string().contains("children must be an array"));
+    }
+
+    #[test]
+    fn rtdl_rejects_do_non_object_args() {
+        let mut targets = CapabilityTargetMap::new();
+        targets.insert(
+            "camera_snapshot".to_string(),
+            (
+                "cap-camera".to_string(),
+                "robonix/primitive/camera/snapshot".to_string(),
+            ),
+        );
+        let rtdl = json!({ "op": "do", "cap": "camera_snapshot", "args": [] });
+        let err = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0).unwrap_err();
+        assert!(err.to_string().contains("args must be an object"));
+    }
+
+    #[test]
+    fn rtdl_rejects_unknown_op() {
+        let targets = CapabilityTargetMap::new();
+        let rtdl = json!({ "op": "race", "children": [] });
+        let err = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0).unwrap_err();
+        assert!(err.to_string().contains("unknown operator"));
     }
 }
