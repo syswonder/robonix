@@ -1,18 +1,138 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MulanPSL-2.0
+#
 # Sim ENVIRONMENT only — Webots + eaios_webots controller. Nav2 lives in
 # the tiago_nav2 service package (started by `rbnx boot`); robonix
 # drivers (tiago_chassis / tiago_camera / tiago_lidar) live in their
 # respective primitive packages and are exec'd into THIS container by
-# `rbnx boot` via `docker exec`. So this container is the host for
-# both the simulator and (later) every robonix driver process.
+# `rbnx boot` via `docker exec`.
+#
+# Display backend is chosen by WEBOTS_HEADLESS_MODE:
+#   unset / host    use the host DISPLAY bind-mounted in via /tmp/.X11-unix
+#                   (legacy behaviour — local workstation with an X server)
+#   nvidia          start an NVIDIA-backed Xorg on :48 inside the container,
+#                   bound to the GPU with the most free memory (avoids
+#                   disturbing peers on a shared multi-GPU box)
+#   xvfb            start Xvfb on :99 (software llvmpipe — slow but
+#                   needs no GPU, useful for CI / quick smoke)
+#   auto            nvidia if /dev/nvidia0 is present, else xvfb
+#
+# Display :48 is intentionally outside the host's typical X allocator
+# range (:0–:12 physical + :1001–:1099 xrdp) so the X socket that leaks
+# into the bind-mounted /tmp/.X11-unix won't collide with any host user.
+#
+# When WEBOTS_STREAM=1, the webots stream WebSocket is exposed on :1234
+# and a tiny HTTP server on :8080 serves the streaming-viewer assets
+# (Webots ships the viewer HTML at
+# /usr/local/webots/resources/web/streaming_viewer). Browse to
+# http://<server>:8080/ from any machine that can reach the host.
 set -eo pipefail
 source /opt/ros/humble/setup.bash
 source /colcon_ws/install/setup.bash
 set -u
 
-WEBOTS_WARMUP_SEC="${WEBOTS_WARMUP_SEC:-25}"
+NVIDIA_DISPLAY=:48
 
+start_nvidia_xorg() {
+  # Pick the GPU with the most free memory and translate its PCI BusID
+  # ("00000000:9D:00.0") into the Xorg ServerLayout form ("PCI:157:0:0").
+  local pick gpu_idx free_mib busid_full bus_hex_full bus_hex seg dev_str func busid
+  pick=$(nvidia-smi --query-gpu=index,memory.free,pci.bus_id \
+                    --format=csv,noheader,nounits 2>/dev/null \
+         | sort -t',' -k2 -nr | head -1)
+  if [ -z "$pick" ]; then
+    echo "[entrypoint] nvidia-smi returned no GPUs"
+    return 1
+  fi
+  gpu_idx=$(echo "$pick"  | awk -F',' '{gsub(/ /,"",$1); print $1}')
+  free_mib=$(echo "$pick" | awk -F',' '{gsub(/ /,"",$2); print $2}')
+  busid_full=$(echo "$pick" | awk -F',' '{gsub(/ /,"",$3); print $3}')
+  bus_hex_full=${busid_full#*:}
+  bus_hex=${bus_hex_full%%:*}
+  seg=${bus_hex_full#*:}
+  dev_str=${seg%.*}
+  func=${seg#*.}
+  busid="PCI:$((16#$bus_hex)):$((10#$dev_str)):$func"
+  echo "[entrypoint] picked GPU $gpu_idx (free=${free_mib} MiB, $busid_full) -> Xorg BusID=$busid"
+
+  cat >/tmp/xorg-nvidia.conf <<XCONF
+Section "ServerLayout"
+  Identifier "L0"
+  Screen 0 "S0"
+EndSection
+Section "Device"
+  Identifier "D0"
+  Driver "nvidia"
+  BusID  "$busid"
+EndSection
+Section "Screen"
+  Identifier "S0"
+  Device "D0"
+  Option "AllowEmptyInitialConfiguration" "true"
+  Option "UseDisplayDevice" "none"
+  SubSection "Display"
+    Virtual 1920 1080
+    Depth 24
+  EndSubSection
+EndSection
+XCONF
+
+  Xorg "$NVIDIA_DISPLAY" -config /tmp/xorg-nvidia.conf \
+       -noreset -nolisten tcp -logfile /tmp/Xorg.48.log &
+  local i
+  for i in $(seq 1 30); do
+    [ -S /tmp/.X11-unix/X48 ] && break
+    sleep 0.5
+  done
+  if ! [ -S /tmp/.X11-unix/X48 ]; then
+    echo "[entrypoint] Xorg :48 failed; last 40 lines of /tmp/Xorg.48.log:"
+    tail -40 /tmp/Xorg.48.log 2>&1 || true
+    return 1
+  fi
+  export DISPLAY=$NVIDIA_DISPLAY
+  local renderer
+  renderer=$(glxinfo -B 2>/dev/null | awk -F'string: ' '/OpenGL renderer/ {print $2; exit}')
+  echo "[entrypoint] Xorg :48 up, renderer=$renderer"
+  if ! echo "$renderer" | grep -qi nvidia; then
+    echo "[entrypoint] WARN: renderer is not NVIDIA — webots will still be slow"
+    return 1
+  fi
+  return 0
+}
+
+start_xvfb() {
+  Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -nolisten unix &
+  export DISPLAY=:99
+  sleep 1
+  echo "[entrypoint] Xvfb :99 (CPU render)"
+}
+
+case "${WEBOTS_HEADLESS_MODE:-host}" in
+  host)   : ;;                                # legacy: keep $DISPLAY from compose env
+  nvidia) start_nvidia_xorg || exit 1 ;;
+  xvfb)   start_xvfb ;;
+  auto)
+    if [ -e /dev/nvidia0 ] && command -v Xorg >/dev/null 2>&1 && start_nvidia_xorg; then
+      :
+    else
+      echo "[entrypoint] auto: falling back to Xvfb :99"
+      start_xvfb
+    fi
+    ;;
+  *) echo "[entrypoint] unknown WEBOTS_HEADLESS_MODE=$WEBOTS_HEADLESS_MODE"; exit 2 ;;
+esac
+
+if [ "${WEBOTS_STREAM:-0}" = "1" ]; then
+  # Serve the streaming-viewer assets from a separate port; the viewer
+  # HTML connects back to the WS server on :1234 (port hard-coded by
+  # webots).
+  (cd /usr/local/webots/resources/web/streaming_viewer \
+     && python3 -m http.server 8080 --bind 0.0.0.0) \
+       >/tmp/viewer-http.log 2>&1 &
+  echo "[entrypoint] viewer HTTP on :8080  ws on :1234"
+fi
+
+WEBOTS_WARMUP_SEC="${WEBOTS_WARMUP_SEC:-25}"
 ros2 launch eaios_webots robot_launch.py use_sim_time:=true &
 _webots_launch_pid=$!
 echo "[entrypoint] eaios_webots pid=${_webots_launch_pid}"
