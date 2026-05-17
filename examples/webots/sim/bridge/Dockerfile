@@ -28,8 +28,16 @@ ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
     HF_ENDPOINT=https://hf-mirror.com
 ENV DEBIAN_FRONTEND=noninteractive
 
+# xvfb / Xorg / mesa-utils / pciutils are needed by the headless display
+# backends (`WEBOTS_HEADLESS_MODE` in entrypoint.sh). They are tiny and
+# the legacy host-DISPLAY path doesn't use them, so keeping them always
+# installed avoids a second image variant.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libxcb-cursor0 \
+    xvfb \
+    xserver-xorg-core \
+    mesa-utils \
+    pciutils \
     python3-pip \
     python3-colcon-common-extensions \
     ros-humble-nav2-msgs \
@@ -55,6 +63,13 @@ RUN wget -q -O /tmp/webots.deb "${WEBOTS_DEB_URL}" \
     && apt-get install -y --no-install-recommends /tmp/webots.deb \
     && rm -f /tmp/webots.deb \
     && rm -rf /var/lib/apt/lists/*
+
+# The streaming-viewer's default WS URL is `ws://localhost:1234`, which
+# is wrong for any remote browser (they'd hit their own localhost).
+# Inject a one-line script that rewrites the input from the page's
+# location.hostname before the user clicks Connect.
+RUN sed -i 's|</body>|<script>document.getElementById("IP-input").value="ws://"+location.hostname+":1234";</script></body>|' \
+    /usr/local/webots/resources/web/streaming_viewer/index.html
 
 # Pre-populate Webots asset cache. Without this, Webots fetches ~100 files from
 # raw.githubusercontent.com at first run — often blocked or painfully slow.
