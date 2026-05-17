@@ -43,11 +43,15 @@ def generate_launch_description():
     print(f"using robot_path:{robot_description_path}")
     print(f"using world_path:{world_description_path}")
 
+    # WEBOTS_STREAM=1 (set by compose.stream.yaml) enables Webots' built-in
+    # WebSocket stream on port 1234 so a remote browser can view the 3D
+    # scene without an X11 server on the client side. Gating on env keeps
+    # the legacy (host DISPLAY) path bit-for-bit unchanged.
     webots = WebotsLauncher(
         world=world_description_path,
         mode="realtime",
-        ros2_supervisor=True
-        # Other possible Webots parameters, e.g., gui, mode, etc.
+        ros2_supervisor=True,
+        stream=os.environ.get('WEBOTS_STREAM', '0') == '1',
     )
     
     # ROS control spawners
