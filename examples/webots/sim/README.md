@@ -67,8 +67,11 @@ WebSocket streaming so the 3D view shows up in a remote browser.
 ROBONIX_SIM_STREAM=1 bash examples/webots/sim/start.sh
 ```
 
-`start.sh` then merges `compose.stream.yaml`, prints the access URLs
-(tailscale + LAN), and skips rviz2 (no local X target to render to).
+`start.sh` then merges `compose.stream.yaml` and prints the access
+URLs (tailscale + LAN). rviz2 still launches as usual — it forwards
+the **host** `$DISPLAY`, so users running the script from inside an
+xrdp / NoMachine session keep seeing rviz in their session; only the
+GPU-heavy webots 3D view goes to the browser stream.
 
 Open `http://<server>:8080/` in a browser and hit Connect — the WS URL
 is pre-filled with the page's hostname so a third machine doesn't end

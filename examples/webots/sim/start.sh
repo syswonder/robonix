@@ -122,15 +122,16 @@ fi
 # host doesn't have to). Same DDS bus as the rest of the stack so
 # /map, /scanner, /tf, /goal_pose all work. User can click "2D Nav
 # Goal" → simple_nav drives the robot.
-# Skip rviz in stream mode — the user doesn't have a local X server to
-# show rviz in, and rviz is unrelated to webots streaming.
-if [[ "${ROBONIX_SIM_STREAM:-0}" != "1" ]]; then
-  if command -v xhost &>/dev/null; then
-      xhost +local:docker >/dev/null 2>&1 || true
-  fi
-  echo "[sim/start] launching rviz2 (config: rviz2_default.rviz)"
-  bash "$SCRIPT_DIR/start_rviz.sh" >/tmp/rviz2.log 2>&1 &
+#
+# Works in stream mode too — start_rviz.sh forwards the *host* DISPLAY
+# into `docker exec`, independent of the container's internal Xorg :48.
+# So an xrdp / NoMachine user still gets rviz inside their session;
+# webots' 3D view streams to the browser via :8080 separately.
+if command -v xhost &>/dev/null; then
+    xhost +local:docker >/dev/null 2>&1 || true
 fi
+echo "[sim/start] launching rviz2 (config: rviz2_default.rviz)"
+bash "$SCRIPT_DIR/start_rviz.sh" >/tmp/rviz2.log 2>&1 &
 
 # Stay foreground tailing logs so Ctrl-C is the natural stop pattern.
 exec docker compose "${CF[@]}" logs -f
