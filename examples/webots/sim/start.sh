@@ -70,6 +70,15 @@ else
   echo "[sim/start] no GPU (or ROBONIX_FORCE_CPU=1) — CPU-only Webots"
 fi
 
+# Optional browser-streaming mode (ROBONIX_SIM_STREAM=1). Useful on
+# headless servers or xrdp boxes where the host's X session is software-
+# rendered (llvmpipe → 0.01x simulation). See compose.stream.yaml and
+# bridge/entrypoint.sh.
+if [[ "${ROBONIX_SIM_STREAM:-0}" = "1" ]]; then
+  CF+=(-f compose.stream.yaml)
+  echo "[sim/start] stream mode — merging compose.stream.yaml (WS :1234, viewer :8080)"
+fi
+
 # X11 GUI: ensure docker can reach the local DISPLAY. xhost is harmless
 # on systems without an X server (it just fails silently).
 if command -v xhost &>/dev/null; then
@@ -93,15 +102,41 @@ for _ in $(seq 1 60); do
     sleep 2
 done
 
+if [[ "${ROBONIX_SIM_STREAM:-0}" = "1" ]]; then
+  echo
+  echo "[sim/start] ========== webots stream ready =========="
+  echo "[sim/start] open ONE of these in a browser:"
+  # tailscale first (works from anywhere on the tailnet)
+  if command -v tailscale &>/dev/null; then
+    tailscale ip -4 2>/dev/null | sed 's|^|  http://|;s|$|:8080/|'
+  fi
+  # then LAN / global v4 addresses
+  ip -4 -o addr show scope global 2>/dev/null \
+    | awk '{print $4}' | cut -d/ -f1 \
+    | sed 's|^|  http://|;s|$|:8080/|'
+  echo "[sim/start] the viewer auto-fills ws://<that-host>:1234 — just hit Connect"
+  echo
+fi
+
 # Auto-launch rviz2 inside the sim container (it has ros-humble-rviz2,
 # host doesn't have to). Same DDS bus as the rest of the stack so
 # /map, /scanner, /tf, /goal_pose all work. User can click "2D Nav
 # Goal" → simple_nav drives the robot.
+#
+# Works in stream mode too — start_rviz.sh forwards the *host* DISPLAY
+# into `docker exec`, independent of the container's internal Xorg :48.
+# So an xrdp / NoMachine user still gets rviz inside their session;
+# webots' 3D view streams to the browser via :8080 separately.
 if command -v xhost &>/dev/null; then
     xhost +local:docker >/dev/null 2>&1 || true
 fi
 echo "[sim/start] launching rviz2 (config: rviz2_default.rviz)"
-bash "$SCRIPT_DIR/start_rviz.sh" >/tmp/rviz2.log 2>&1 &
+# Per-user log path: /tmp is shared on multi-tenant boxes and a fixed
+# /tmp/rviz2.log file owned by another user blocks rewrite. ${USER:-rviz}
+# falls back when USER is unset (e.g. cron/system contexts).
+RVIZ_LOG="${TMPDIR:-/tmp}/rviz2-${USER:-rviz}.log"
+bash "$SCRIPT_DIR/start_rviz.sh" >"$RVIZ_LOG" 2>&1 &
+echo "[sim/start] rviz2 log: $RVIZ_LOG"
 
 # Stay foreground tailing logs so Ctrl-C is the natural stop pattern.
 exec docker compose "${CF[@]}" logs -f

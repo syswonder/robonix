@@ -45,10 +45,55 @@ is `robonix_tiago_sim` (referenced by every driver package's
 | `start.sh` | User-facing launcher. `bash start.sh`. |
 | `compose.yaml` | Single `sim` service: Webots + eaios_webots + bind-mounts of `../primitives` and `../services` into the container at `/robonix_pkgs`. |
 | `compose.gpu.yaml` | Optional NVIDIA GPU passthrough (auto-merged by `start.sh`). |
+| `compose.stream.yaml` | Optional browser-streaming mode — headless Xorg + webots `--stream`. Merged when `ROBONIX_SIM_STREAM=1`. |
 | `bridge/Dockerfile` | Humble + Webots `.deb` + Python deps used by docker-exec'd robonix drivers. |
-| `bridge/entrypoint.sh` | Launch Webots, then `wait` so the container stays alive. |
+| `bridge/entrypoint.sh` | Launch Webots, then `wait` so the container stays alive. Picks display backend per `WEBOTS_HEADLESS_MODE`. |
 | `bridge/webots_assets_seed.tar.gz` | Pre-baked Webots proto/texture cache (offline-fast first run). |
 | `ros_ws/src/eaios_webots` | ROS 2 launch + Webots world for the simulated Tiago. |
+
+## Headless / browser-streaming mode
+
+Some deployments don't have a usable host X server: a headless
+server, a multi-user box where everyone reaches it through xrdp or
+NoMachine (both give you a `Mesa llvmpipe` software-rendered X session
+that drops Webots to ~0.01x real-time), or a shared GPU node whose
+physical display is on the BMC instead of an NVIDIA card.
+
+The fix is to (a) start an NVIDIA-backed Xorg **inside** the container
+— isolated from any host user's display — and (b) use Webots' built-in
+WebSocket streaming so the 3D view shows up in a remote browser.
+
+```bash
+ROBONIX_SIM_STREAM=1 bash examples/webots/sim/start.sh
+```
+
+`start.sh` then merges `compose.stream.yaml` and prints the access
+URLs (tailscale + LAN). rviz2 still launches as usual — it forwards
+the **host** `$DISPLAY`, so users running the script from inside an
+xrdp / NoMachine session keep seeing rviz in their session; only the
+GPU-heavy webots 3D view goes to the browser stream.
+
+Open `http://<server>:8080/` in a browser and hit Connect — the WS URL
+is pre-filled with the page's hostname so a third machine doesn't end
+up dialling its own `localhost`. The viewer supports **W3D**
+(interactive WebGL, drag-rotate) and **MJPEG** (image-only fallback
+for low-bandwidth links).
+
+Backend selection (env on the sim container):
+
+| `WEBOTS_HEADLESS_MODE` | Effect |
+|---|---|
+| `host` (default w/o stream) | inherit `$DISPLAY` from compose — legacy local-X path |
+| `auto` (default in stream) | NVIDIA Xorg `:48` on the GPU with most free memory; falls back to Xvfb if `/dev/nvidia0` is absent |
+| `nvidia` | force NVIDIA Xorg `:48` (fails fast if no GPU) |
+| `xvfb` | software llvmpipe on `:99` — slow but needs no GPU |
+
+`:48` sits well outside the host's normal X allocator range
+(`:0..:12` for physical sessions, `:1001..:1099` for xrdp), so the X
+socket that leaks into the bind-mounted `/tmp/.X11-unix` will not
+collide with any host user's session; the socket file appearing there
+also makes the host's X allocator skip the number for any future
+session it spins up.
 
 ## Why is the container kept alive after Webots launches?
 
