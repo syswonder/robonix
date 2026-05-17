@@ -131,7 +131,12 @@ if command -v xhost &>/dev/null; then
     xhost +local:docker >/dev/null 2>&1 || true
 fi
 echo "[sim/start] launching rviz2 (config: rviz2_default.rviz)"
-bash "$SCRIPT_DIR/start_rviz.sh" >/tmp/rviz2.log 2>&1 &
+# Per-user log path: /tmp is shared on multi-tenant boxes and a fixed
+# /tmp/rviz2.log file owned by another user blocks rewrite. ${USER:-rviz}
+# falls back when USER is unset (e.g. cron/system contexts).
+RVIZ_LOG="${TMPDIR:-/tmp}/rviz2-${USER:-rviz}.log"
+bash "$SCRIPT_DIR/start_rviz.sh" >"$RVIZ_LOG" 2>&1 &
+echo "[sim/start] rviz2 log: $RVIZ_LOG"
 
 # Stay foreground tailing logs so Ctrl-C is the natural stop pattern.
 exec docker compose "${CF[@]}" logs -f
