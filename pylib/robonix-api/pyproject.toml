@@ -1,13 +1,46 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 [project]
 name = "robonix-api"
-version = "0.1.0"
-description = "Robonix Python helper library: FastMCP contract decorator aligned with robonix-codegen --lang mcp ROS dataclasses, plus shared Python utilities."
+version = "0.1.0rc1"
+description = "Robonix Python client library: write Primitive/Service/Skill packages, talk to atlas, serve Driver lifecycle gRPC, wrap rclpy/FastMCP/grpcio middleware."
+readme = "README.md"
+license = { text = "MulanPSL-2.0" }
+authors = [
+    { name = "wheatfox", email = "wheatfox17@icloud.com" },
+]
 requires-python = ">=3.10"
+keywords = ["robotics", "robonix", "embodied-ai", "ros2", "mcp", "grpc"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
+    "grpcio>=1.50",
+    "protobuf>=4",
     "mcp>=1.0",
     "fastmcp>=3",
+    "pyyaml>=6",
 ]
+
+[project.optional-dependencies]
+codegen = [
+    "grpcio-tools>=1.50",
+]
+
+[project.urls]
+Homepage = "https://github.com/syswonder/robonix"
+Documentation = "https://github.com/syswonder/robonix/tree/main/docs"
+Repository = "https://github.com/syswonder/robonix"
+Issues = "https://github.com/syswonder/robonix/issues"
 
 [build-system]
 requires = ["setuptools>=61"]
@@ -16,3 +49,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["robonix_api*"]
+
+[tool.setuptools.package-data]
+robonix_api = ["_generated/*.py", "_generated/*.pyi"]
