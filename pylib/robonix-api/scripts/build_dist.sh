@@ -49,10 +49,14 @@ echo "[build_dist] generating atlas_pb2*.py from $PROTO_FILE"
     --grpc_python_out="$OUT_DIR" \
     "$PROTO_FILE"
 
-# grpc_tools emits atlas_pb2_grpc.py with `import atlas_pb2 as ...` at top
-# level. That works because robonix_api/__init__.py appends _generated/ to
-# sys.path on import. Mark _generated as a package so wheel data inclusion
-# is clean.
+# Patch grpc_tools' default `import atlas_pb2 as ...` (top-level) into a
+# relative import so _generated/ ships as a proper sub-package and we
+# don't have to mutate global sys.path at runtime.
+sed -i 's|^import atlas_pb2 as |from . import atlas_pb2 as |' \
+    "$OUT_DIR/atlas_pb2_grpc.py"
+
+# Mark _generated as a sub-package — both for wheel data inclusion and
+# for the relative import from atlas_pb2_grpc.py above.
 touch "$OUT_DIR/__init__.py"
 echo "[build_dist] generated files:"
 ls -1 "$OUT_DIR"

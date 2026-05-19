@@ -97,8 +97,16 @@ class _Atlas:
         if self._stub is not None:
             return
         import grpc
-        import atlas_pb2          # type: ignore
-        import atlas_pb2_grpc     # type: ignore
+        # Deployment-side stubs (from `<pkg>/rbnx-build/codegen/proto_gen/`,
+        # injected onto sys.path by codegen.ensure_proto_gen) take priority.
+        # Fall back to the wheel-bundled stubs under `robonix_api._generated/`
+        # for pip-installed users without a monorepo codegen run.
+        try:
+            import atlas_pb2          # type: ignore
+            import atlas_pb2_grpc     # type: ignore
+        except ImportError:
+            from ._generated import atlas_pb2          # type: ignore
+            from ._generated import atlas_pb2_grpc     # type: ignore
         ep = self._endpoint or os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
         self._endpoint = ep
         self._pb = atlas_pb2

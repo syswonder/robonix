@@ -51,4 +51,4 @@ where = ["."]
 include = ["robonix_api*"]
 
 [tool.setuptools.package-data]
-robonix_api = ["_generated/*.py", "_generated/*.pyi"]
+robonix_api = ["_generated/*.py"]
