@@ -91,6 +91,26 @@ except Exception:  # noqa: BLE001
 del _bootstrap_codegen_paths_from_caller
 
 
+# -- Wheel-bundled atlas_pb2 fallback ---------------------------------------
+# For pip-installed users (no monorepo / no `rbnx codegen` run): the sdist
+# build step pre-generates atlas_pb2.py + atlas_pb2_grpc.py into
+# `_generated/` and ships them in the wheel. Append (not insert) so any
+# deployment-side `<pkg>/rbnx-build/codegen/proto_gen/atlas_pb2.py` injected
+# above still wins -- monorepo dev flow is unchanged.
+def _bootstrap_bundled_atlas_stub() -> None:
+    import sys
+    from pathlib import Path
+    generated = Path(__file__).resolve().parent / "_generated"
+    if (generated / "atlas_pb2.py").is_file():
+        s = str(generated)
+        if s not in sys.path:
+            sys.path.append(s)
+
+
+_bootstrap_bundled_atlas_stub()
+del _bootstrap_bundled_atlas_stub
+
+
 __all__ = [
     # CapabilityProvider classes (three kinds).
     "Primitive", "Service", "Skill",
