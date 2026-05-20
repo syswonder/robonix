@@ -639,8 +639,20 @@ class SpeechAsrStreamServicer(contracts_grpc.RobonixSystemSpeechAsrStreamService
 
         from speech_service.audio_utils import adapt_audio
 
+        input_gain = float(os.environ.get("INPUT_GAIN", "1.0"))
+        dump_dir = os.environ.get("ROBONIX_ASR_DUMP_DIR", "").strip()
+        dump_buf = bytearray() if dump_dir else None
         cache = {}
         chunk_count = 0
+
+        # Paraformer streaming requires fixed chunk_stride-sample frames
+        # (the chunk_size[1]*960 granularity). Clients (liaison) stream
+        # arbitrary smaller frames (~100ms), so we re-buffer here and only
+        # call the backend on full stride-sized frames; feeding short frames
+        # straight through corrupts the encoder/decoder cache (yields "嗯").
+        stride_samples = getattr(self.stream_asr_backend, "chunk_stride", 9600)
+        stride_bytes = stride_samples * 2  # 16-bit mono
+        frame_buf = bytearray()
 
         try:
             for req in request_iterator:
@@ -649,6 +661,8 @@ class SpeechAsrStreamServicer(contracts_grpc.RobonixSystemSpeechAsrStreamService
                 if chunk_data is None:
                     continue
 
+                if dump_buf is not None:
+                    dump_buf.extend(chunk_data)
                 chunk_count += 1
 
                 # Adapt each chunk to 16kHz mono pcm_s16le using defaults
@@ -659,24 +673,29 @@ class SpeechAsrStreamServicer(contracts_grpc.RobonixSystemSpeechAsrStreamService
                     sample_rate=16000,
                     channels=1,
                     bits_per_sample=16,
+                    gain=input_gain,
                 )
+                frame_buf.extend(adapted)
 
-                results = self.stream_asr_backend.recognize_chunk(
-                    adapted, cache, is_final=False,
-                    encoding="pcm_s16le", sample_rate=16000,
-                )
-                for r in results:
-                    if r.get("text"):
-                        yield asr_pb2.RecognizeStreamEvent(
-                            event_type=0, text=r["text"],
-                            confidence=r.get("confidence", 0.0),
-                            language="",
-                        )
+                while len(frame_buf) >= stride_bytes:
+                    frame = bytes(frame_buf[:stride_bytes])
+                    del frame_buf[:stride_bytes]
+                    results = self.stream_asr_backend.recognize_chunk(
+                        frame, cache, is_final=False,
+                        encoding="pcm_s16le", sample_rate=16000,
+                    )
+                    for r in results:
+                        if r.get("text"):
+                            yield asr_pb2.RecognizeStreamEvent(
+                                event_type=0, text=r["text"],
+                                confidence=r.get("confidence", 0.0),
+                                language="",
+                            )
 
-            # Final flush
+            # Final flush — send the trailing partial frame with is_final.
             if chunk_count > 0:
                 final_results = self.stream_asr_backend.recognize_chunk(
-                    b"", cache, is_final=True,
+                    bytes(frame_buf), cache, is_final=True,
                     encoding="pcm_s16le", sample_rate=16000,
                 )
                 for r in final_results:
@@ -690,6 +709,24 @@ class SpeechAsrStreamServicer(contracts_grpc.RobonixSystemSpeechAsrStreamService
                 yield asr_pb2.RecognizeStreamEvent(
                     event_type=2, error="No audio data received",
                 )
+
+            # Debug: dump the exact audio liaison streamed in, so we can
+            # inspect level / waveform off-line when ASR misfires.
+            if dump_buf is not None and len(dump_buf) > 0:
+                import numpy as np
+                os.makedirs(dump_dir, exist_ok=True)
+                ts = time.strftime("%H%M%S")
+                path = os.path.join(dump_dir, f"asr_{ts}.wav")
+                with wave.open(path, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(16000)
+                    wf.writeframes(bytes(dump_buf))
+                a = np.frombuffer(bytes(dump_buf), dtype=np.int16)
+                peak = int(np.abs(a).max()) if a.size else 0
+                rms = float(np.sqrt(np.mean(a.astype(np.float32) ** 2))) if a.size else 0.0
+                log.info("ASR dump %s: %d samples (%.1fs) RMS=%.0f peak=%d (%.1f%%)",
+                         path, a.size, a.size / 16000, rms, peak, peak / 327.67)
         except Exception as e:
             log.exception("ASR stream recognize failed")
             yield asr_pb2.RecognizeStreamEvent(event_type=2, error=str(e))
@@ -906,6 +943,90 @@ speech.attach_grpc_servicer("robonix/system/speech/asr_stream", _asr_stream_serv
 speech.attach_grpc_servicer("robonix/system/speech/tts",        _tts_servicer)
 speech.attach_grpc_servicer("robonix/system/speech/tts_stream", _tts_stream_servicer)
 speech.attach_grpc_servicer("robonix/system/speech/dialog",     _dialog_servicer)
+
+
+# -- MCP tools: list_speakers + speak (TTS → chosen speaker primitive) -------
+# Let Pilot / RTDL discover audio output devices and make the robot announce
+# text aloud on a chosen speaker. speech here becomes a *consumer* of
+# audio/speaker primitives (find via atlas, stream AudioChunk to its Speaker
+# client-streaming RPC) — services consuming primitives is normal.
+import json as _json  # noqa: E402
+from robonix_api import ATLAS, Transport  # noqa: E402
+from speech_mcp import (  # noqa: E402
+    Speak_Request, Speak_Response,
+    ListSpeakers_Request, ListSpeakers_Response,
+)
+
+_SPEAKER_CONTRACT = "robonix/primitive/audio/speaker"
+_speak_tts = None
+
+
+@speech.mcp("robonix/system/speech/list_speakers")
+def list_speakers(req: ListSpeakers_Request) -> ListSpeakers_Response:
+    """List audio output devices (speaker primitives) registered in atlas, so
+    you can pick a `target` for speak. Returns a JSON array of
+    {provider_id, namespace, description}."""
+    caps = ATLAS.find_capability(
+        contract_id=_SPEAKER_CONTRACT,
+        namespace_prefix=(req.namespace_prefix or ""),
+    )
+    seen: dict[str, dict] = {}
+    for c in caps:
+        seen.setdefault(c.provider_id, {
+            "provider_id": c.provider_id,
+            "namespace": getattr(c, "namespace", ""),
+            "description": getattr(c, "description", ""),
+        })
+    return ListSpeakers_Response(
+        speakers_json=_json.dumps(list(seen.values()), ensure_ascii=False)
+    )
+
+
+@speech.mcp("robonix/system/speech/speak")
+def speak(req: Speak_Request) -> Speak_Response:
+    """Synthesize `text` to speech and play it out loud on a speaker. `target`
+    is the speaker primitive's provider_id (from list_speakers); empty = first
+    available. Use this to make the robot announce things aloud."""
+    global _speak_tts
+    text = (req.text or "").strip()
+    if not text:
+        return Speak_Response(ok=False, detail="empty text")
+
+    caps = ATLAS.find_capability(contract_id=_SPEAKER_CONTRACT, transport=Transport.GRPC)
+    if req.target:
+        caps = [c for c in caps if c.provider_id == req.target]
+    if not caps:
+        return Speak_Response(ok=False, detail=f"no speaker provider (target={req.target!r})")
+    cap = caps[0]
+
+    if _speak_tts is None:
+        _speak_tts = EdgeTTSBackend()
+    # MCP handlers run inside FastMCP's event loop, so asyncio.run() here
+    # would error ("loop already running"). Synthesize on a worker thread
+    # that owns its own loop.
+    import asyncio
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        pcm = ex.submit(lambda: asyncio.run(_speak_tts.synthesize(text))).result()
+
+    with speech.connect_capability(cap, _SPEAKER_CONTRACT, Transport.GRPC) as ch:
+        stub = contracts_grpc.RobonixPrimitiveAudioSpeakerStub(
+            grpc.insecure_channel(ch.endpoint)
+        )
+
+        def frames():
+            frame_bytes = 9600 * 2  # 600 ms s16le frames
+            seq = 0
+            for i in range(0, len(pcm), frame_bytes):
+                seq += 1
+                yield audio_pb2.AudioChunk(
+                    data=pcm[i:i + frame_bytes], timestamp_ns=0,
+                    sequence=seq, duration_s=0.0,
+                )
+
+        stub.Speaker(frames())
+
+    return Speak_Response(ok=True, detail=f"spoke {len(text)} chars on {cap.provider_id}")
 
 
 # Map package_manifest cfg keys to the env vars that backend
