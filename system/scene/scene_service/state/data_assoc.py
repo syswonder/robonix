@@ -32,21 +32,31 @@ from .object_registry import (
 
 
 # Per-class gating radius in metres. Below this distance, an existing
-# object is considered as a candidate for the incoming detection. Tune
-# per-class because a "table" reasonably moves 1m frame-to-frame
-# (camera shifted) while a "cup" should not.
+# object is considered as a candidate for the incoming detection.
+#
+# Widened from the v1 numbers (cup 0.3 / bottle 0.3 / person 1.5) after
+# operator feedback: when someone walks a handheld object (phone, cup,
+# bottle) through frame, per-frame depth jitter can shift the reported
+# pose by 40–80 cm tick-to-tick, which fell outside the tight gates and
+# produced a fresh object_id every frame. The web UI then showed the
+# list churning + suffixes climbing into the hundreds. Looser gates mean
+# slightly more aggressive association — acceptable for the operator
+# view; downstream relation queries already ignore matched-by-distance
+# false positives via class match.
 _GATE_RADIUS_M: dict[str, float] = {
-    "cup": 0.30,
-    "bottle": 0.30,
-    "tool": 0.30,
-    "tray": 0.50,
-    "table": 1.00,
-    "chair": 0.80,
+    "cup": 0.60,
+    "bottle": 0.60,
+    "phone": 0.60,
+    "cell phone": 0.60,
+    "tool": 0.60,
+    "tray": 0.80,
+    "table": 1.20,
+    "chair": 1.00,
     "door": 1.50,
-    "person": 1.50,
+    "person": 3.00,
     "robot": 1.00,
 }
-_DEFAULT_GATE_RADIUS_M = 0.50
+_DEFAULT_GATE_RADIUS_M = 0.80
 
 # Cost = ||D.pose - O.pose|| + alpha * (1 - D.confidence)
 # Higher alpha penalises low-confidence matches harder, biasing toward

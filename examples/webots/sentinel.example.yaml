@@ -1,0 +1,22 @@
+# Sentinel rules — POC (executor-embedded).
+#
+# Point the executor at this file via env in your robonix_manifest.yaml:
+#
+#   env:
+#     SENTINEL_RULES_FILE: /home/syswonder/robonix-v0.1-deploy/sentinel.yaml
+#
+# Rule semantics (only one rule type supported in the POC):
+#   - contract_id matches a CapabilityCall's contract_id exactly.
+#   - deny_between is [start, end] in local time HH:MM. end < start wraps midnight.
+#   - On match within the window, executor returns
+#       { success: false, error: "sentinel:<id>: <reason>" }
+#     and the planner / TUI surfaces `<reason>` to the user.
+#
+# Demo flip: change deny_between to ["00:00", "23:59"] to trigger immediately.
+
+version: 1
+rules:
+  - id: night_no_speak
+    contract_id: robonix/system/speech/speak
+    deny_between: ["22:00", "07:00"]
+    reason: "安静时段,不允许语音播报"

@@ -21,16 +21,17 @@ use crossterm::{
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Layout},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use std::cell::RefCell;
 use std::io;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
@@ -81,6 +82,62 @@ struct ChatConfig {
     speaker_cap_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     speaker_device_id: Option<String>,
+    /// Currently active controller's user_id (e.g. "voice:alice"). When
+    /// set, voice sessions whose identified speaker doesn't match are
+    /// blocked at the chat client — no Pilot call, no car action. Empty
+    /// / unset = allow anyone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current_controller: Option<String>,
+}
+
+// ── Voiceprint client-side cache (Phase 1B scaffold, currently unused) ─────
+//
+// Reserved for the Ctrl+U user-management modal that will land next.
+// Local mirror of the voiceprint catalog so the modal renders instantly
+// on open without waiting on a network round-trip, and so user-name
+// display in messages can resolve `voice:<id>` → "Alice" without
+// blocking the draw thread. Kept dead-coded behind `#[allow]` rather
+// than deleted so the next iteration can pick up the schema + path
+// without re-deriving it. Voiceprint service-side gRPC contracts
+// (voiceprint_enroll / voiceprint_list) are already shipped via IDL +
+// codegen — this is purely the client cache layer.
+
+#[allow(dead_code)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct VoiceprintDb {
+    #[serde(default)]
+    users: std::collections::BTreeMap<String, VoiceprintUser>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct VoiceprintUser {
+    name: String,
+    /// Unix epoch seconds, just for display. Not used for matching.
+    enrolled_at: u64,
+}
+
+#[allow(dead_code)]
+fn voiceprint_db_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".robonix").join("voiceprint.json"))
+}
+
+#[allow(dead_code)]
+fn load_voiceprint_db() -> VoiceprintDb {
+    voiceprint_db_path()
+        .and_then(|p| std::fs::read_to_string(&p).ok())
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+#[allow(dead_code)]
+fn save_voiceprint_db(db: &VoiceprintDb) -> Result<()> {
+    let p = voiceprint_db_path().context("no home dir")?;
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&p, serde_json::to_string_pretty(db)?)?;
+    Ok(())
 }
 
 fn chat_config_path() -> Option<std::path::PathBuf> {
@@ -983,224 +1040,288 @@ impl AudioSettingsPage {
                     .then(|| self.speaker_cap_id.clone()),
                 speaker_device_id: (!self.speaker_device_id.is_empty())
                     .then(|| self.speaker_device_id.clone()),
+                current_controller: None, // not consumed by Audio refresh
             },
         )
         .await;
         self.status = "refreshed".into();
     }
 
+    /// Centered modal popup with two side-by-side columns (Microphone /
+    /// Speaker). Each column shows the provider list on top and the
+    /// device list below it. The currently focused section (Tab cycles
+    /// through MicProvider → MicDevice → SpeakerProvider → SpeakerDevice)
+    /// gets a bright cyan border; the others render dim. Footer hints
+    /// live in the outer block's title_bottom so they're always visible.
     fn draw(&self, frame: &mut ratatui::Frame) {
-        let mut lines: Vec<Line> = Vec::with_capacity(64);
-        let dim = Style::default().fg(Color::DarkGray);
-        let normal = Style::default();
-        let selected_style = Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD);
-        let cursor_style = Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
-            .add_modifier(Modifier::BOLD);
+        let area = centered_rect(85, 80, frame.area());
+        frame.render_widget(Clear, area);
 
-        let render_provider_row = |i: usize,
-                                   p: &atlas_pb::CapabilityProvider,
-                                   sel: &str,
-                                   in_section: bool,
-                                   cursor: usize|
-         -> Line {
-            let is_cursor = in_section && i == cursor;
-            let is_selected = p.id == sel;
-            let mark_left = if is_cursor { "▶" } else { " " };
-            let bullet = if is_selected { "●" } else { "○" };
-            let prefix = format!(" {mark_left} {bullet} ");
-            let style = if is_cursor {
-                cursor_style
-            } else if is_selected {
-                selected_style
-            } else {
-                normal
-            };
-            Line::from(vec![Span::styled(format!("{prefix}{}", p.id), style)])
-        };
-
-        let render_device_row = |i: usize,
-                                 d: &crate::pb::audio::AudioDevice,
-                                 sel: &str,
-                                 in_section: bool,
-                                 cursor: usize|
-         -> Line {
-            let is_cursor = in_section && i == cursor;
-            let is_selected = d.id == sel;
-            let mark_left = if is_cursor { "▶" } else { " " };
-            let bullet = if is_selected { "●" } else { "○" };
-            let mut tags: Vec<String> = Vec::new();
-            if d.is_default {
-                tags.push("default".into());
-            }
-            if !d.note.is_empty() {
-                tags.push(format!("⚠ {}", d.note));
-            }
-            let suffix = if tags.is_empty() {
-                String::new()
-            } else {
-                format!("   [{}]", tags.join(", "))
-            };
-            let body = format!(" {mark_left} {bullet} {:<10}  {}{}", d.id, d.name, suffix);
-            let style = if is_cursor {
-                cursor_style
-            } else if is_selected {
-                selected_style
-            } else {
-                normal
-            };
-            Line::from(vec![Span::styled(body, style)])
-        };
-
-        let section_title = |title: &str, active: bool| -> Line {
-            let bar = "━".repeat(8);
-            let prefix = if active { "▼" } else { " " };
-            let style = if active {
+        // Outer popup block — title at top, hints at bottom. Status (if
+        // any) sits in the title bar on the right so it's seen but
+        // doesn't eat list space.
+        let outer_title = Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                "Audio Settings",
                 Style::default()
                     .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-                    .fg(Color::Gray)
-                    .add_modifier(Modifier::BOLD)
-            };
-            Line::from(vec![Span::styled(
-                format!("{prefix} {bar} {title} {bar}"),
-                style,
-            )])
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+        ]);
+        let status_span = if self.status.is_empty() {
+            Span::raw(" ")
+        } else {
+            Span::styled(
+                format!(" {} ", self.status),
+                Style::default().fg(Color::Yellow),
+            )
         };
+        let hints_line = Line::from(vec![
+            Span::raw(" "),
+            Span::styled("Tab", Style::default().fg(Color::White)),
+            Span::styled(" switch column · ", Style::default().fg(Color::DarkGray)),
+            Span::styled("↑↓ / jk", Style::default().fg(Color::White)),
+            Span::styled(" move · ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Enter", Style::default().fg(Color::White)),
+            Span::styled(" select · ", Style::default().fg(Color::DarkGray)),
+            Span::styled("r", Style::default().fg(Color::White)),
+            Span::styled(" refresh · ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::White)),
+            Span::styled(" close ", Style::default().fg(Color::DarkGray)),
+        ]);
+        let outer = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(outer_title)
+            .title_top(Line::from(status_span).alignment(Alignment::Right))
+            .title_bottom(hints_line);
+        let inner = outer.inner(area);
+        frame.render_widget(outer, area);
 
-        // ─── MICROPHONE ───
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![Span::styled(
-            "  MICROPHONE",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )]));
-        lines.push(section_title(
-            "Cap (robonix handle)",
+        // Two columns: microphone on the left, speaker on the right.
+        let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(inner);
+        self.draw_side(
+            frame,
+            cols[0],
+            "Microphone",
+            &self.mic_providers,
+            &self.mic_cap_id,
+            self.cursor_mp,
+            &self.mic_devices,
+            &self.mic_device_id,
+            self.cursor_md,
             self.section == AudioSection::MicProvider,
-        ));
-        if self.mic_providers.is_empty() {
-            lines.push(Line::from(vec![Span::styled(
-                "    (no providers — rbnx boot first)",
-                dim,
-            )]));
-        } else {
-            for (i, p) in self.mic_providers.iter().enumerate() {
-                lines.push(render_provider_row(
-                    i,
-                    p,
-                    &self.mic_cap_id,
-                    self.section == AudioSection::MicProvider,
-                    self.cursor_mp,
-                ));
-            }
-        }
-        lines.push(section_title(
-            "Driver-internal device",
             self.section == AudioSection::MicDevice,
-        ));
-        if self.mic_devices.is_empty() {
-            lines.push(Line::from(vec![Span::styled(
-                "    (no devices — impl missing list_devices, or rebuild package)",
-                dim,
-            )]));
-        } else {
-            for (i, d) in self.mic_devices.iter().enumerate() {
-                lines.push(render_device_row(
-                    i,
-                    d,
-                    &self.mic_device_id,
-                    self.section == AudioSection::MicDevice,
-                    self.cursor_md,
-                ));
-            }
-        }
-
-        // ─── SPEAKER ───
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![Span::styled(
-            "  SPEAKER",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )]));
-        lines.push(section_title(
-            "Cap (robonix handle)",
+        );
+        self.draw_side(
+            frame,
+            cols[1],
+            "Speaker",
+            &self.speaker_providers,
+            &self.speaker_cap_id,
+            self.cursor_sp,
+            &self.speaker_devices,
+            &self.speaker_device_id,
+            self.cursor_sd,
             self.section == AudioSection::SpeakerProvider,
-        ));
-        if self.speaker_providers.is_empty() {
-            lines.push(Line::from(vec![Span::styled(
-                "    (no providers — rbnx boot first)",
-                dim,
-            )]));
-        } else {
-            for (i, p) in self.speaker_providers.iter().enumerate() {
-                lines.push(render_provider_row(
-                    i,
-                    p,
-                    &self.speaker_cap_id,
-                    self.section == AudioSection::SpeakerProvider,
-                    self.cursor_sp,
-                ));
-            }
-        }
-        lines.push(section_title(
-            "Driver-internal device",
             self.section == AudioSection::SpeakerDevice,
-        ));
-        if self.speaker_devices.is_empty() {
-            lines.push(Line::from(vec![Span::styled(
-                "    (no devices — impl missing list_devices, or rebuild package)",
-                dim,
-            )]));
-        } else {
-            for (i, d) in self.speaker_devices.iter().enumerate() {
-                lines.push(render_device_row(
-                    i,
-                    d,
-                    &self.speaker_device_id,
-                    self.section == AudioSection::SpeakerDevice,
-                    self.cursor_sd,
-                ));
-            }
-        }
+        );
+    }
 
-        lines.push(Line::from(""));
+    /// Render one column (microphone or speaker). The Provider sub-pane
+    /// sits on top, the Device sub-pane below. Each pane has its own
+    /// Block, and the currently-focused one gets a bright cyan border
+    /// so the user can see at a glance which list ↑↓ will move within.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_side(
+        &self,
+        frame: &mut ratatui::Frame,
+        area: Rect,
+        column_title: &str,
+        providers: &[atlas_pb::CapabilityProvider],
+        sel_cap: &str,
+        cursor_p: usize,
+        devices: &[crate::pb::audio::AudioDevice],
+        sel_dev: &str,
+        cursor_d: usize,
+        provider_focused: bool,
+        device_focused: bool,
+    ) {
+        // Allocate the top half to providers (small list, usually 1-2
+        // entries) and the rest to devices (long list, can be 20+).
+        // Devices get the meat of the space.
+        let panes = Layout::vertical([Constraint::Length(6), Constraint::Min(3)])
+            .margin(1)
+            .split(area);
 
-        let area = frame.area();
-        let chunks = Layout::vertical([
-            Constraint::Min(0),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(area);
-
-        let body = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(
-                " Audio Settings — Cap = robonix handle · Driver-internal device = optional, multi-device drivers only ",
-            ))
-            .wrap(Wrap { trim: false });
-        frame.render_widget(body, chunks[0]);
-
-        let status_line = if self.status.is_empty() {
-            String::from(" ")
-        } else {
-            format!(" {}", self.status)
+        // Column title bar (above both panes). Subtle, just labels which
+        // device side we're looking at.
+        let title_area = Rect {
+            x: area.x + 1,
+            y: area.y,
+            width: area.width.saturating_sub(2),
+            height: 1,
         };
-        let status = Paragraph::new(status_line).style(Style::default().fg(Color::Cyan));
-        frame.render_widget(status, chunks[1]);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                column_title,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            title_area,
+        );
 
-        let help = Paragraph::new(
-            " Tab/Shift+Tab: section · ↑↓ jk: item · Enter/Space: pick · r: refresh · Esc/Ctrl+A: close",
-        )
-        .style(dim);
-        frame.render_widget(help, chunks[2]);
+        // ── Provider sub-pane ────────────────────────────────────────
+        let provider_block = self.focusable_block(" Source ", provider_focused);
+        let provider_inner = provider_block.inner(panes[0]);
+        frame.render_widget(provider_block, panes[0]);
+        let provider_lines: Vec<Line> = if providers.is_empty() {
+            vec![Line::from(Span::styled(
+                "  (no providers)",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        } else {
+            providers
+                .iter()
+                .enumerate()
+                .map(|(i, p)| self.row_provider(i, p, sel_cap, cursor_p, provider_focused))
+                .collect()
+        };
+        frame.render_widget(
+            Paragraph::new(provider_lines).wrap(Wrap { trim: false }),
+            provider_inner,
+        );
+
+        // ── Device sub-pane ──────────────────────────────────────────
+        let device_block = self.focusable_block(" Device ", device_focused);
+        let device_inner = device_block.inner(panes[1]);
+        frame.render_widget(device_block, panes[1]);
+        let device_lines: Vec<Line> = if devices.is_empty() {
+            vec![Line::from(Span::styled(
+                "  (no devices — driver doesn't expose list_devices)",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        } else {
+            devices
+                .iter()
+                .enumerate()
+                .map(|(i, d)| self.row_device(i, d, sel_dev, cursor_d, device_focused))
+                .collect()
+        };
+        // Scroll so the cursor stays visible when the list is taller
+        // than the pane (the device list on most cards is 20+ entries).
+        let scroll = if device_focused {
+            let visible = device_inner.height as usize;
+            if visible > 0 && cursor_d + 1 > visible {
+                (cursor_d + 1 - visible) as u16
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        frame.render_widget(
+            Paragraph::new(device_lines)
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0)),
+            device_inner,
+        );
+    }
+
+    /// Common block style — bright cyan when focused, dim gray when not.
+    /// Lets the user immediately see which sub-pane keystrokes will hit.
+    fn focusable_block(&self, title: &str, focused: bool) -> Block<'_> {
+        let style = if focused {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(style)
+            .title(Line::from(Span::styled(title.to_string(), style)))
+    }
+
+    /// One provider row. `●` = currently selected provider, `○` = other.
+    /// `▶` marks the cursor row (focused pane only).
+    fn row_provider(
+        &self,
+        i: usize,
+        p: &atlas_pb::CapabilityProvider,
+        sel: &str,
+        cursor: usize,
+        focused: bool,
+    ) -> Line<'_> {
+        let is_cursor = focused && i == cursor;
+        let is_selected = p.id == sel;
+        let mark = if is_cursor { "▶" } else { " " };
+        let bullet = if is_selected { "●" } else { "○" };
+        let style = if is_cursor {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if is_selected {
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Line::from(vec![Span::styled(
+            format!(" {mark} {bullet} {} ", p.id),
+            style,
+        )])
+    }
+
+    /// One device row. Same conventions as `row_provider`; appends
+    /// `[default]` / `[⚠ note]` tags.
+    fn row_device(
+        &self,
+        i: usize,
+        d: &crate::pb::audio::AudioDevice,
+        sel: &str,
+        cursor: usize,
+        focused: bool,
+    ) -> Line<'_> {
+        let is_cursor = focused && i == cursor;
+        let is_selected = d.id == sel;
+        let mark = if is_cursor { "▶" } else { " " };
+        let bullet = if is_selected { "●" } else { "○" };
+        let mut tags: Vec<String> = Vec::new();
+        if d.is_default {
+            tags.push("default".into());
+        }
+        if !d.note.is_empty() {
+            tags.push(format!("⚠ {}", d.note));
+        }
+        let suffix = if tags.is_empty() {
+            String::new()
+        } else {
+            format!("   [{}]", tags.join(", "))
+        };
+        let style = if is_cursor {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if is_selected {
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Line::from(vec![Span::styled(
+            format!(" {mark} {bullet} {:<14}  {}{}", d.id, d.name, suffix),
+            style,
+        )])
     }
 }
 
@@ -1234,11 +1355,14 @@ async fn run_audio_settings_page(
         }
     }
 
+    // Preserve current_controller across the audio settings round-trip;
+    // it's owned by the user-modal flow, not by audio settings.
     let new_cfg = ChatConfig {
         mic_cap_id: (!page.mic_cap_id.is_empty()).then_some(page.mic_cap_id),
         mic_device_id: (!page.mic_device_id.is_empty()).then_some(page.mic_device_id),
         speaker_cap_id: (!page.speaker_cap_id.is_empty()).then_some(page.speaker_cap_id),
         speaker_device_id: (!page.speaker_device_id.is_empty()).then_some(page.speaker_device_id),
+        current_controller: cfg.current_controller.clone(),
     };
     if let Err(e) = save_chat_config(&new_cfg) {
         log::warn!("could not save chat config: {e:#}");
@@ -1305,6 +1429,26 @@ async fn run_tui(
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                 let _ = notify_session_end(liaison_endpoint, &session_id, &local_user).await;
                 break;
+            }
+
+            // `?` (unmodified) toggles the help overlay. Render it, then
+            // block until any subsequent key dismisses; the next iteration
+            // of the loop will overpaint with the normal draw().
+            if !busy
+                && key.code == KeyCode::Char('?')
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                render_help_overlay(terminal)?;
+                // Wait for a single key event then drop it (don't let it
+                // act as an input character).
+                loop {
+                    if event::poll(std::time::Duration::from_millis(120))?
+                        && let Event::Key(_) = event::read()?
+                    {
+                        break;
+                    }
+                }
+                continue;
             }
 
             // Ctrl+A → btop-style single-page audio settings dashboard.
@@ -1797,14 +1941,23 @@ fn apply_pilot_event(
             // preserve the same `[r{round}] {name}({args})` line shape.
             if let Some(ref p) = event.plan {
                 for call in plan_calls(p) {
+                    // Display as `provider_id.<leaf>(args)` so the user
+                    // can see WHICH provider's capability is being
+                    // invoked — `snapshot({})` alone is ambiguous when
+                    // multiple providers offer the same contract leaf.
                     let leaf = call
                         .contract_id
                         .rsplit_once('/')
                         .map(|(_, l)| l.to_string())
                         .unwrap_or_else(|| call.contract_id.clone());
+                    let target = if call.provider_id.is_empty() {
+                        leaf
+                    } else {
+                        format!("{}.{}", call.provider_id, leaf)
+                    };
                     m.push(ChatMessage {
                         role: Role::ToolCall,
-                        text: format!("[r{}] {}({})", p.round, leaf, call.args_json),
+                        text: format!("[r{}] {}({})", p.round, target, call.args_json),
                     });
                 }
             }
@@ -1910,6 +2063,28 @@ fn apply_voice_event(
     Ok(())
 }
 
+/// Layout invariants:
+///   - `Min(3)` chat history pane (block with header line in title bar,
+///     spinner / scroll indicator in title_bottom)
+///   - `Length(3)` input pane (block, title carries the current mode marker)
+///   - `Length(1)` footer hint line (no border, dim, single line of keymap)
+///
+/// Visual conventions ([gfargo/tui-design-skill] + lazygit/k9s patterns):
+///   - Per-turn separator drawn whenever the next message changes role
+///     to `User` after an Agent/Tool reply — turns into visual blocks.
+///   - `Role::Voice` partial events (asr partials, tts progress) are
+///     elided from the scrolling history and instead summarised in the
+///     title_bottom of the chat block as `transient status`. Without
+///     this, a single voice turn produces ~10 lines of `[v] ...` noise.
+///   - Spinner is the 10-frame braille `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` set, advanced once
+///     per draw via a `static AtomicU64`. Only rendered while `busy`.
+///   - Footer hint line is plain text, `Color::DarkGray`, no border.
+///     Always-visible discoverability beats stashing keys in titles.
+///
+/// We intentionally keep the draw() signature unchanged so the 13
+/// existing call sites (mostly inside voice/text turn helpers) don't
+/// need to be updated. All new state (spinner counter, time-of-day,
+/// last voice transient) is derived inside draw() itself.
 fn draw(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     messages: &[ChatMessage],
@@ -1917,55 +2092,146 @@ fn draw(
     scroll: u16,
     busy: bool,
 ) -> Result<()> {
+    static SPINNER_COUNTER: AtomicU64 = AtomicU64::new(0);
+    const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let spin = SPINNER_FRAMES
+        [(SPINNER_COUNTER.fetch_add(1, Ordering::Relaxed) as usize) % SPINNER_FRAMES.len()];
+
+    // The most recent Voice event is the one worth surfacing as the
+    // live status footer; older voice traffic isn't useful once a new
+    // chunk has arrived. Walk back-to-front so the scan stops early.
+    let latest_voice: Option<&str> = messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, Role::Voice))
+        .map(|m| m.text.as_str());
+
     terminal.draw(|f| {
         let area = f.area();
-        let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).split(area);
+        let chunks = Layout::vertical([
+            Constraint::Min(3),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
+        .split(area);
 
+        // ── History pane ──────────────────────────────────────────────────
         let mut lines: Vec<Line> = Vec::new();
+        let mut prev_role: Option<&Role> = None;
         for msg in messages {
-            let (prefix, indent, style) = match msg.role {
+            // Elide Voice partials/progress from the scrolling history —
+            // they live in the title_bottom transient instead.
+            if matches!(msg.role, Role::Voice) {
+                continue;
+            }
+            // Visual separator between turns: draw a thin rule when the
+            // next message kicks off a new User turn (i.e. previous was
+            // Agent/Tool reply). Don't insert between Status lines or at
+            // top of buffer.
+            if matches!(msg.role, Role::User)
+                && matches!(prev_role, Some(Role::Agent) | Some(Role::ToolCall))
+            {
+                lines.push(Line::from(Span::styled(
+                    "─".repeat(8),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            let (label, indent, style) = match msg.role {
                 Role::User => (
-                    "You:   ",
-                    "       ",
+                    "You      ",
+                    "         ",
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
-                // "Robonix:" — the user-facing system name. The reply
-                // went through Liaison → Pilot → tools → Liaison → here,
-                // so naming it after one internal crate ("Pilot") leaks
-                // an architectural detail that the user has no reason
-                // to know or care about.
-                Role::Agent => ("Robonix: ", "         ", Style::default().fg(Color::Green)),
-                Role::ToolCall => (">      ", "       ", Style::default().fg(Color::Yellow)),
+                Role::Agent => ("Robonix  ", "         ", Style::default().fg(Color::Green)),
+                // Capability invocation from pilot's plan. The body already
+                // shows `<leaf>(<args>)`, so no noun prefix — MCP's "tool" /
+                // "tool_call" wording is the LLM-side framing and would
+                // conflict with CLAUDE.md's concept-stability rule
+                // (capability / contract / primitive / service / skill).
+                Role::ToolCall => ("⚙        ", "         ", Style::default().fg(Color::Yellow)),
                 Role::Status => (
-                    "",
-                    "",
+                    "·        ",
+                    "         ",
                     Style::default()
                         .fg(Color::Magenta)
                         .add_modifier(Modifier::ITALIC),
                 ),
-                Role::Voice => (
-                    "[v]    ",
-                    "       ",
-                    Style::default()
-                        .fg(Color::Blue)
-                        .add_modifier(Modifier::ITALIC),
-                ),
+                // Unreachable — Voice was filtered above. Keep the arm
+                // exhaustive so adding a new Role doesn't silently miss.
+                Role::Voice => continue,
             };
             for (i, text_line) in msg.text.lines().enumerate() {
-                let lead = if i == 0 { prefix } else { indent };
+                let lead = if i == 0 { label } else { indent };
                 lines.push(Line::from(vec![
                     Span::styled(lead, style),
                     Span::styled(text_line.to_string(), style),
                 ]));
             }
+            prev_role = Some(&msg.role);
         }
 
-        let status = if busy { " [thinking...]" } else { "" };
+        // Header in the block title — always-visible session context.
+        let mode_marker = "text";
+        let hhmm = current_time_hhmm();
+        let title = Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                "Robonix",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" · "),
+            Span::styled(mode_marker, Style::default().fg(Color::Cyan)),
+            Span::raw(" · "),
+            Span::styled(hhmm, Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
+        ]);
+
+        // Bottom of block: spinner + scroll indicator + last-voice
+        // transient. Right-aligned so it sits near the bottom-right corner.
+        let scroll_label = if scroll == 0 {
+            "scroll: bot"
+        } else {
+            "scroll: ↑"
+        };
+        let mut bottom_spans: Vec<Span> = Vec::new();
+        if busy {
+            bottom_spans.push(Span::styled(
+                format!(" {spin} thinking "),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            bottom_spans.push(Span::raw("· "));
+        }
+        if let Some(v) = latest_voice {
+            // truncate to keep the bottom row tidy
+            let one_line: String = v
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(48)
+                .collect::<String>();
+            bottom_spans.push(Span::styled(
+                format!("🎤 {one_line} "),
+                Style::default().fg(Color::Blue),
+            ));
+            bottom_spans.push(Span::raw("· "));
+        }
+        bottom_spans.push(Span::styled(
+            format!(" {scroll_label} "),
+            Style::default().fg(Color::DarkGray),
+        ));
+        let bottom = Line::from(bottom_spans).alignment(Alignment::Right);
+
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Robonix{status} "));
+            .title(title)
+            .title_bottom(bottom);
         let inner = block.inner(chunks[0]);
 
         let text_only = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
@@ -1983,11 +2249,142 @@ fn draw(
             .scroll((auto_scroll, 0));
         f.render_widget(history, chunks[0]);
 
-        let input_widget =
-            Paragraph::new(input.to_string()).block(Block::default().borders(Borders::ALL).title(
-                " > Enter = send · Ctrl+V = voice (auto end) · Esc = abort · Ctrl+C = quit ",
-            ));
+        // ── Input pane ────────────────────────────────────────────────────
+        let input_title = if busy {
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled(spin.to_string(), Style::default().fg(Color::Yellow)),
+                Span::raw(" "),
+            ])
+        } else {
+            Line::from(Span::styled(
+                " > ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        };
+        let input_widget = Paragraph::new(input.to_string())
+            .block(Block::default().borders(Borders::ALL).title(input_title));
         f.render_widget(input_widget, chunks[1]);
+
+        // ── Footer hint bar ──────────────────────────────────────────────
+        // Persistent, single-line, no border. Mirrors lazygit/k9s
+        // discoverability convention — all top-level keys here at all
+        // times, no need to hunt through menus.
+        let footer = Paragraph::new(Line::from(vec![
+            Span::styled(" Enter", Style::default().fg(Color::White)),
+            Span::styled(" send  · ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Ctrl+V", Style::default().fg(Color::White)),
+            Span::styled(" voice · ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Ctrl+U", Style::default().fg(Color::White)),
+            Span::styled(" users · ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Ctrl+A", Style::default().fg(Color::White)),
+            Span::styled(" audio · ", Style::default().fg(Color::DarkGray)),
+            Span::styled("?", Style::default().fg(Color::White)),
+            Span::styled(" help  · ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Ctrl+C", Style::default().fg(Color::White)),
+            Span::styled(" quit", Style::default().fg(Color::DarkGray)),
+        ]));
+        f.render_widget(footer, chunks[2]);
+    })?;
+    Ok(())
+}
+
+/// `HH:MM` of system local time. Used in the chat header.
+fn current_time_hhmm() -> String {
+    chrono::Local::now().format("%H:%M").to_string()
+}
+
+/// Centered Rect for popup overlays — used by `?` help and (Phase 1B)
+/// the Ctrl+U users modal. Standard ratatui recipe.
+#[allow(dead_code)] // Phase 1A: reserved for next step (Ctrl+U modal)
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let popup_layout = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .split(area);
+    Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .split(popup_layout[1])[1]
+}
+
+/// Draws the `?` help overlay on top of the existing terminal contents
+/// (history, input, footer all stay visible underneath). Caller is
+/// responsible for blocking the main key loop until any key is received,
+/// at which point the next `draw()` will overpaint without this overlay.
+fn render_help_overlay(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    terminal.draw(|f| {
+        let area = centered_rect(60, 60, f.area());
+        f.render_widget(Clear, area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(Line::from(vec![Span::styled(
+                " Help · Key bindings ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )]))
+            .title_bottom(
+                Line::from(Span::styled(
+                    " any key to close ",
+                    Style::default().fg(Color::DarkGray),
+                ))
+                .alignment(Alignment::Right),
+            );
+        let rows = vec![
+            ("Global", ""),
+            ("  Enter", "Send the current input"),
+            ("  Ctrl+V", "Hold to talk (auto-ends on silence)"),
+            (
+                "  Ctrl+U",
+                "Manage users (enroll a voice, pick the active speaker)",
+            ),
+            ("  Ctrl+A", "Audio settings (microphone / speaker)"),
+            ("  ?", "Show this help"),
+            ("  Ctrl+C", "Quit"),
+            ("", ""),
+            ("During a turn", ""),
+            ("  Esc", "Abort the current turn"),
+            ("  PageUp / PageDown", "Scroll history"),
+            ("", ""),
+            ("Idle", ""),
+            ("  Esc", "Clear the draft input"),
+        ];
+        let lines: Vec<Line> = rows
+            .into_iter()
+            .map(|(k, v)| {
+                if k.is_empty() && v.is_empty() {
+                    Line::from("")
+                } else if v.is_empty() {
+                    Line::from(Span::styled(
+                        k.to_string(),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                } else {
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{:<22}", k),
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(v.to_string(), Style::default().fg(Color::Gray)),
+                    ])
+                }
+            })
+            .collect();
+        let body = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
+        f.render_widget(body, area);
     })?;
     Ok(())
 }

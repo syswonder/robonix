@@ -152,10 +152,17 @@ function draw(state) {
     ctx.font = 'bold 12px ui-monospace, monospace';
     ctx.textBaseline = 'middle';
     for (const o of (state.objects || [])) {
+        // Skip missing objects on the live canvas — the operator-facing
+        // complaint was "I walked a phone through frame and it stayed
+        // there". Fading to 30% alpha (previous behaviour) still looks
+        // "on the map" to a person; hard-hide matches the intent.
+        // Stale records still surface in the side table styled `miss`,
+        // so they aren't silently lost from the registry view either.
+        if (o.missing) continue;
         const [px, py] = w2p(o.pose.x, o.pose.y);
         const r = Math.max(4, Math.min(20, (o.bbox.size_x || 0.2) * pxPerM * 0.5));
         const color = classColor(o.cls);
-        ctx.globalAlpha = o.missing ? 0.3 : 1.0;
+        ctx.globalAlpha = 1.0;
         ctx.fillStyle = color;
         ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
         ctx.globalAlpha = 1;

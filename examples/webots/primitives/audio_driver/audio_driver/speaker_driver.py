@@ -20,6 +20,7 @@ Usage:
     driver.play_chunk(more_audio_bytes)
     driver.stop()
 """
+import os
 import subprocess
 import threading
 import logging
@@ -66,12 +67,57 @@ class SpeakerDriver:
         channels: int = 1,
         bits_per_sample: int = 16,
     ):
+        # Force the `plughw:` ALSA plug so aplay does sample-rate / channel
+        # conversion in software. Without this, a card that only accepts
+        # 48 kHz stereo (e.g. MCP Plus) plays back 16 kHz mono TTS as silence
+        # — the call succeeds at the ALSA layer but nothing comes out the
+        # speaker. We unconditionally upgrade `hw:` → `plughw:` so users can
+        # never accidentally pick the raw-hardware variant via select_device.
+        if device_id.startswith("hw:") and not device_id.startswith("plughw:"):
+            device_id = "plug" + device_id
         self.device_id = device_id
         self.sample_rate = sample_rate
         self.channels = channels
         self.bits_per_sample = bits_per_sample
+        # Some USB conferencing devices (notably Lenovo MCP Plus, USB ID
+        # 17ef:a073) silently mute the PCM stream when playback idles —
+        # the firmware drops the mixer Volume control to 0 after stream
+        # close. ALSA still accepts the next aplay launch but no sound
+        # comes out the speaker. We pre-set the volume every time we
+        # spawn aplay so the firmware can't strand us. Card name is
+        # extracted from the device_id (e.g. `plughw:CARD=Plus,DEV=0`
+        # → "Plus"); numeric forms like `plughw:0,0` skip the unmute
+        # (amixer -c <num> would need card-num discovery).
+        self._mixer_card_name = self._extract_card_name(device_id)
+        self._mixer_volume_pct = int(os.environ.get(
+            "AUDIO_SPEAKER_VOLUME_PCT", "50"))
         self._process: subprocess.Popen | None = None
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _extract_card_name(device_id: str) -> str | None:
+        # Pull "Plus" out of `plughw:CARD=Plus,DEV=0` etc. Returns None
+        # when the device_id is the numeric form — we don't have a card
+        # name to pass to amixer in that case.
+        for tok in device_id.split(":", 1)[-1].split(","):
+            if tok.startswith("CARD="):
+                return tok.removeprefix("CARD=")
+        return None
+
+    def _force_unmute(self) -> None:
+        # Best-effort. If amixer is missing / card name unknown / control
+        # not present, we log and proceed — the worst case is the user
+        # hears silence, which is exactly the failure we'd be in anyway.
+        if not self._mixer_card_name:
+            return
+        cmd = [
+            "amixer", "-D", f"hw:CARD={self._mixer_card_name}",
+            "sset", "PCM", f"{self._mixer_volume_pct}%",
+        ]
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=2, check=False)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            log.warning("force-unmute %s failed: %s", self._mixer_card_name, e)
 
     def _ensure_aplay(self) -> None:
         """Lazy-start the aplay subprocess if not already running.
@@ -89,6 +135,8 @@ class SpeakerDriver:
         if fmt is None:
             raise ValueError(f"Unsupported bits_per_sample={self.bits_per_sample}")
 
+        # Unmute right before aplay, every spawn — see _force_unmute().
+        self._force_unmute()
         cmd = [
             "aplay",
             "-D", self.device_id,
