@@ -39,6 +39,10 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| "robonix_executor=info".to_string());
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_filter)).init();
 
+    // Sentinel POC — load rules from SENTINEL_RULES_FILE before serving any
+    // dispatch. Failures are non-fatal (allow-all fallback); see dispatch/sentinel.rs.
+    dispatch::sentinel::init_from_env();
+
     let cfg = ExecutorConfig::resolve(parsed)?;
 
     info!("connecting to atlas at {}", cfg.atlas_endpoint);

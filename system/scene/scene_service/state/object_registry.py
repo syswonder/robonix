@@ -128,13 +128,34 @@ class ObjectRegistry:
 
     Stable id allocation is a per-class monotonic counter."""
 
-    def __init__(self, *, grace_period_s: float = 5.0) -> None:
+    def __init__(
+        self,
+        *,
+        grace_period_s: float = 2.0,
+        forget_after_s: float = 30.0,
+    ) -> None:
+        # `grace_period_s` controls how long an object can be unseen
+        # before `mark_stale` flags it `missing=True`. Lowered from 5s
+        # to 2s: when a user walks a handheld object (phone, bottle)
+        # through frame and back out, anything > ~1s feels laggy in
+        # the web viz. The flag is what `list_objects` MCP and the
+        # web viz both gate on; smaller window → object disappears
+        # from the operator's view shortly after the camera loses it.
+        #
+        # `forget_after_s` is the second tier: an object that has
+        # stayed `missing=True` continuously for this long gets
+        # hard-deleted from the registry. Without this the registry
+        # accumulates dead entries forever (every detected "phone"
+        # ever, even from minutes ago). 30s is a balance between
+        # "Pilot can still ask about something seen a moment ago"
+        # and "the map doesn't grow unbounded".
         self._lock = asyncio.Lock()
         self._objects: dict[str, SceneObject] = {}
         self._surfaces: dict[str, SceneSurface] = {}
         self._counters: dict[str, int] = {}
         self._surface_counter: int = 0
         self.grace_period_s = grace_period_s
+        self.forget_after_s = forget_after_s
 
     # ── locking ────────────────────────────────────────────────────────────
     def lock(self) -> "asyncio.Lock":
@@ -227,18 +248,57 @@ class ObjectRegistry:
             obj.missing = False  # re-acquired
 
     def mark_stale(self, now: float) -> int:
-        """Set `missing=True` on objects past the grace period. Returns
-        how many transitioned this tick (0 most of the time). Never
-        deletes — Pilot may still ask about missing objects.
+        """Two-tier sweep called once per tick by `_stale_tick`:
+        1. Live → missing once an object's `last_seen` is older than
+           `grace_period_s` (lets the operator see "I had this just
+           a moment ago" before it vanishes from the live render).
+        2. Missing → deleted once it has been missing for longer than
+           `forget_after_s` measured from `last_seen`. Without this
+           second tier, anything ever detected sticks around forever
+           (the original bug: walk a phone through frame, leave, and
+           the phone keeps haunting the map). The robot's own pose
+           object is excluded from both transitions.
 
+        Returns the count flipped to missing this tick (deletions are
+        a side effect of housekeeping, not reported up — the caller's
+        only consumer of the return value is debug logging).
         Caller must hold the lock."""
         flipped = 0
-        for obj in self._objects.values():
-            if obj.missing or obj.attributes.get("is_robot"):
+        to_delete: list[str] = []
+        for oid, obj in self._objects.items():
+            if obj.attributes.get("is_robot"):
                 continue
-            if (now - obj.last_seen) > self.grace_period_s:
+            age = now - obj.last_seen
+            if not obj.missing and age > self.grace_period_s:
                 obj.missing = True
                 flipped += 1
+                continue
+            if obj.missing and age > self.forget_after_s:
+                to_delete.append(oid)
+        for oid in to_delete:
+            del self._objects[oid]
+        # Same forget policy for surfaces — without it, every plane
+        # ever extracted accumulates.
+        surf_to_delete = [
+            sid for sid, s in self._surfaces.items()
+            if (now - s.last_seen) > self.forget_after_s
+        ]
+        for sid in surf_to_delete:
+            del self._surfaces[sid]
+        # Compact per-class id counters when a class is fully gone.
+        # Without this, suffixes monotonically grow (`person_312` etc.)
+        # even though only one person is in the registry — every churn
+        # of insert+forget bumps the counter. After delete, if a class
+        # has zero live objects, reset its counter so the next
+        # allocation goes back to `<cls>_001`. Safe because no relation
+        # / external reference can point at a now-deleted oid: relations
+        # are recomputed every tick from the live registry snapshot.
+        for cls in list(self._counters.keys()):
+            still_alive = any(o.cls == cls for o in self._objects.values())
+            if not still_alive:
+                self._counters[cls] = 0
+        if not self._surfaces:
+            self._surface_counter = 0
         return flipped
 
     # ── surface insert ─────────────────────────────────────────────────────

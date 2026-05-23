@@ -24,6 +24,7 @@
 pub mod builtin;
 pub mod grpc;
 pub mod mcp;
+pub mod sentinel;
 
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -74,6 +75,13 @@ pub async fn dispatch(
     self_provider_id: &str,
     atlas: &mut AtlasClient,
 ) -> CapabilityCallResult {
+    // Sentinel concept validation (POC, inline). The real implementation will
+    // live as its own crate exposing a `Check` gRPC. Until then, this is the
+    // single chokepoint where every dispatch crosses, so the gate sits here.
+    if let sentinel::Decision::Deny { rule_id, reason } = sentinel::check(call) {
+        return error_result(call, format!("sentinel:{rule_id}: {reason}"));
+    }
+
     if call.provider_id == self_provider_id {
         return builtin::execute(call).await;
     }

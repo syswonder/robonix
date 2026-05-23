@@ -1,0 +1,8 @@
+# List every currently enrolled voiceprint user (admin RPC).
+# Returns a JSON-encoded array so the catalog shape can evolve without
+# changing the IDL — same pattern as robonix/system/speech/list_speakers.
+# abstract_interface_id: robonix/system/speech/voiceprint_list
+---
+string  users_json       # JSON array: [{"user_id":"...","user_name":"..."}, ...]
+uint32  count            # convenience: number of users in users_json
+string  error            # non-empty on failure
