@@ -38,7 +38,7 @@ codegen = [
 
 [project.urls]
 Homepage = "https://github.com/syswonder/robonix"
-Documentation = "https://github.com/syswonder/robonix/tree/main/docs"
+Documentation = "https://robonix.syswonder.org"
 Repository = "https://github.com/syswonder/robonix"
 Issues = "https://github.com/syswonder/robonix/issues"
 
