@@ -90,26 +90,21 @@ struct ChatConfig {
     current_controller: Option<String>,
 }
 
-// ── Voiceprint client-side cache (Phase 1B scaffold, currently unused) ─────
+// ── Voiceprint client-side cache ────────────────────────────────────────────
 //
-// Reserved for the Ctrl+U user-management modal that will land next.
-// Local mirror of the voiceprint catalog so the modal renders instantly
-// on open without waiting on a network round-trip, and so user-name
-// display in messages can resolve `voice:<id>` → "Alice" without
-// blocking the draw thread. Kept dead-coded behind `#[allow]` rather
-// than deleted so the next iteration can pick up the schema + path
-// without re-deriving it. Voiceprint service-side gRPC contracts
-// (voiceprint_enroll / voiceprint_list) are already shipped via IDL +
-// codegen — this is purely the client cache layer.
+// Local mirror of the voiceprint catalog. Backed by `~/.robonix/voiceprint.json`
+// and refreshed against the voiceprint service on every Ctrl+U open. Two
+// reasons it exists:
+//   1. Render the users modal instantly on open without an RPC stall.
+//   2. Resolve `voice:<id>` → "Alice" on User-message render so the chat
+//      shows "You (Alice)" without a per-draw network call.
 
-#[allow(dead_code)]
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct VoiceprintDb {
     #[serde(default)]
     users: std::collections::BTreeMap<String, VoiceprintUser>,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct VoiceprintUser {
     name: String,
@@ -117,12 +112,10 @@ struct VoiceprintUser {
     enrolled_at: u64,
 }
 
-#[allow(dead_code)]
 fn voiceprint_db_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".robonix").join("voiceprint.json"))
 }
 
-#[allow(dead_code)]
 fn load_voiceprint_db() -> VoiceprintDb {
     voiceprint_db_path()
         .and_then(|p| std::fs::read_to_string(&p).ok())
@@ -130,7 +123,6 @@ fn load_voiceprint_db() -> VoiceprintDb {
         .unwrap_or_default()
 }
 
-#[allow(dead_code)]
 fn save_voiceprint_db(db: &VoiceprintDb) -> Result<()> {
     let p = voiceprint_db_path().context("no home dir")?;
     if let Some(parent) = p.parent() {
@@ -1405,9 +1397,15 @@ async fn run_tui(
         role: Role::Status,
         text: format!(
             "Connected to Liaison at {liaison_endpoint} as {local_user}. \
-             Enter = send · Ctrl+V = voice (auto end on silence) · Ctrl+A = audio settings · Esc = abort turn · Ctrl+C = quit."
+             Enter = send · Ctrl+V = voice · Ctrl+U = users · Ctrl+S = system · Ctrl+A = audio · Esc = abort · Ctrl+C = quit · ? = help."
         ),
     });
+    if let Some(ctl) = chat_cfg.current_controller.as_deref() {
+        initial.push(ChatMessage {
+            role: Role::Status,
+            text: format!("Access control active — only voice from {ctl} will be accepted."),
+        });
+    }
     for w in audio_warnings {
         initial.push(ChatMessage {
             role: Role::Status,
@@ -1415,6 +1413,10 @@ async fn run_tui(
         });
     }
     let messages: Rc<RefCell<Vec<ChatMessage>>> = Rc::new(RefCell::new(initial));
+    // Local voiceprint cache; refreshed on Ctrl+U open. Used by the voice
+    // event renderer to map `voice:<id>` → display name and by the
+    // access-control gate when generating denial labels.
+    let voiceprint_db: Rc<RefCell<VoiceprintDb>> = Rc::new(RefCell::new(load_voiceprint_db()));
     let mut input = String::new();
     let mut scroll: u16 = 0;
     let mut busy = false;
@@ -1447,6 +1449,80 @@ async fn run_tui(
                     {
                         break;
                     }
+                }
+                continue;
+            }
+
+            // Ctrl+S → System modal: live atlas state, boot log tails,
+            // and ps over the boot state's PIDs. Pauses chat until Esc.
+            if !busy
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.code == KeyCode::Char('s')
+            {
+                if let Err(e) = run_system_modal(terminal, atlas_endpoint).await {
+                    messages.borrow_mut().push(ChatMessage {
+                        role: Role::Status,
+                        text: format!("system modal: {e:#}"),
+                    });
+                }
+                continue;
+            }
+
+            // Ctrl+U → Users modal: enroll a new voice, pick the active
+            // controller (the user_id whose voice may issue commands), or
+            // clear the controller. Pauses the chat key loop until Esc.
+            if !busy
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.code == KeyCode::Char('u')
+            {
+                let db_snapshot = voiceprint_db.borrow().clone();
+                match run_users_modal(terminal, atlas_endpoint, &chat_cfg, db_snapshot).await {
+                    Ok(out) => {
+                        // Persist controller selection to chat.yaml so it
+                        // survives a chat restart. Save errors aren't fatal —
+                        // just log them inline.
+                        let prev = chat_cfg.current_controller.clone();
+                        chat_cfg.current_controller = out.controller.clone();
+                        if let Err(e) = save_chat_config(&chat_cfg) {
+                            messages.borrow_mut().push(ChatMessage {
+                                role: Role::Status,
+                                text: format!("warning: chat.yaml save failed: {e:#}"),
+                            });
+                        }
+                        *voiceprint_db.borrow_mut() = out.db;
+                        for line in &out.log_lines {
+                            messages.borrow_mut().push(ChatMessage {
+                                role: Role::Status,
+                                text: line.clone(),
+                            });
+                        }
+                        // Echo the new controller state at the top of the
+                        // chat so a glance confirms the change.
+                        match (&prev, &chat_cfg.current_controller) {
+                            (a, b) if a == b => {}
+                            (_, Some(c)) => {
+                                let name = lookup_user_name(&voiceprint_db.borrow(), c)
+                                    .unwrap_or_else(|| c.clone());
+                                messages.borrow_mut().push(ChatMessage {
+                                    role: Role::Status,
+                                    text: format!(
+                                        "controller now {} ({}) — non-matching voices will be blocked",
+                                        name, c
+                                    ),
+                                });
+                            }
+                            (_, None) => {
+                                messages.borrow_mut().push(ChatMessage {
+                                    role: Role::Status,
+                                    text: "controller cleared — any speaker allowed".to_string(),
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => messages.borrow_mut().push(ChatMessage {
+                        role: Role::Status,
+                        text: format!("users modal: {e:#}"),
+                    }),
                 }
                 continue;
             }
@@ -1493,6 +1569,7 @@ async fn run_tui(
                 });
                 draw(terminal, &messages.borrow(), &input, scroll, busy)?;
                 if let Err(e) = run_voice_session_with_esc_abort(
+                    atlas_endpoint,
                     liaison_endpoint,
                     &session_id,
                     &local_user,
@@ -1501,6 +1578,7 @@ async fn run_tui(
                     &input,
                     &mut scroll,
                     &chat_cfg,
+                    Rc::clone(&voiceprint_db),
                 )
                 .await
                 {
@@ -1753,6 +1831,7 @@ async fn run_text_intent_with_esc_abort(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_voice_session_with_esc_abort(
+    atlas_endpoint: &str,
     liaison_endpoint: &str,
     session_id: &str,
     user_id: &str,
@@ -1761,6 +1840,7 @@ async fn run_voice_session_with_esc_abort(
     input: &str,
     scroll: &mut u16,
     chat_cfg: &ChatConfig,
+    voiceprint_db: Rc<RefCell<VoiceprintDb>>,
 ) -> Result<()> {
     use crate::pb::contracts::robonix_system_liaison_voice_client::RobonixSystemLiaisonVoiceClient;
     use crate::pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
@@ -1809,6 +1889,13 @@ async fn run_voice_session_with_esc_abort(
         }
     });
 
+    let mut last_identified: Option<String> = None;
+    // Whether this session has been blocked by the access-control gate
+    // (the heard speaker doesn't match the pinned controller). Once set,
+    // we swallow downstream PILOT events so the chat doesn't render a
+    // partial plan from an aborted-but-still-streaming pilot turn.
+    let mut blocked = false;
+
     loop {
         tokio::select! {
             biased;
@@ -1816,7 +1903,59 @@ async fn run_voice_session_with_esc_abort(
                 match item {
                     None => break,
                     Some(Ok(event)) => {
-                        apply_voice_event(&messages, &event)?;
+                        // Access-control gate: when a controller is pinned in
+                        // chat.yaml, every voice turn must come from that
+                        // user_id. We catch USER_IDENTIFIED first, abort
+                        // upstream, render a denial line, and flag the
+                        // session so PILOT events get dropped.
+                        if event.event_kind == KIND_USER_IDENTIFIED
+                            && let Some(want) = chat_cfg.current_controller.as_deref()
+                            && !want.is_empty()
+                            && event.user_id != want
+                        {
+                            blocked = true;
+                            let want_name = lookup_user_name(
+                                &voiceprint_db.borrow(),
+                                want,
+                            ).unwrap_or_else(|| want.to_string());
+                            let got_name = lookup_user_name(
+                                &voiceprint_db.borrow(),
+                                &event.user_id,
+                            ).unwrap_or_else(|| event.user_id.clone());
+                            messages.borrow_mut().push(ChatMessage {
+                                role: Role::Status,
+                                text: format!(
+                                    "blocked: controller is {} ({}), but heard {} ({})",
+                                    want_name, want, got_name, event.user_id
+                                ),
+                            });
+                            let _ = abort_session(liaison_endpoint, session_id, user_id).await;
+                            // Fire a TTS denial so the operator hears why
+                            // the car didn't move. Fire-and-forget.
+                            let atlas_url = atlas_endpoint.to_string();
+                            let speaker_pin = chat_cfg.speaker_cap_id.clone().unwrap_or_default();
+                            tokio::spawn(async move {
+                                let _ = speak_text(
+                                    &atlas_url,
+                                    &speaker_pin,
+                                    "未授权用户,无法执行任务",
+                                ).await;
+                            });
+                            draw(terminal, &messages.borrow(), input, 0, true)?;
+                            continue;
+                        }
+
+                        if blocked && event.event_kind == KIND_PILOT {
+                            // swallow — already showed denial above.
+                            continue;
+                        }
+
+                        apply_voice_event(
+                            &messages,
+                            &event,
+                            &voiceprint_db,
+                            &mut last_identified,
+                        )?;
                         draw(terminal, &messages.borrow(), input, 0, true)?;
                     }
                     Some(Err(e)) => {
@@ -1974,23 +2113,27 @@ fn plan_calls(plan: &crate::pb::pilot::Plan) -> Vec<&crate::pb::pilot::Capabilit
         .collect()
 }
 
+// VoiceEvent kinds — exposed here so the access-control gate in
+// run_voice_session_with_esc_abort can match on the same constants
+// without re-declaring them. Mirrors voice.rs / VoiceEvent.msg.
+const KIND_SESSION_STARTED: u32 = 0;
+const KIND_RECORDING_STARTED: u32 = 1;
+const KIND_RECORDING_DONE: u32 = 2;
+const KIND_ASR_PARTIAL: u32 = 3;
+const KIND_ASR_FINAL: u32 = 4;
+const KIND_USER_IDENTIFIED: u32 = 5;
+const KIND_PILOT: u32 = 6;
+const KIND_TTS_STARTED: u32 = 7;
+const KIND_TTS_DONE: u32 = 8;
+const KIND_SESSION_DONE: u32 = 9;
+const KIND_ERROR: u32 = 10;
+
 fn apply_voice_event(
     messages: &Rc<RefCell<Vec<ChatMessage>>>,
     event: &crate::pb::liaison::VoiceEvent,
+    voiceprint_db: &Rc<RefCell<VoiceprintDb>>,
+    last_identified: &mut Option<String>,
 ) -> Result<()> {
-    // Mirror the kinds in voice.rs / VoiceEvent.msg
-    const KIND_SESSION_STARTED: u32 = 0;
-    const KIND_RECORDING_STARTED: u32 = 1;
-    const KIND_RECORDING_DONE: u32 = 2;
-    const KIND_ASR_PARTIAL: u32 = 3;
-    const KIND_ASR_FINAL: u32 = 4;
-    const KIND_USER_IDENTIFIED: u32 = 5;
-    const KIND_PILOT: u32 = 6;
-    const KIND_TTS_STARTED: u32 = 7;
-    const KIND_TTS_DONE: u32 = 8;
-    const KIND_SESSION_DONE: u32 = 9;
-    const KIND_ERROR: u32 = 10;
-
     match event.event_kind {
         KIND_SESSION_STARTED | KIND_RECORDING_STARTED | KIND_RECORDING_DONE => {
             messages.borrow_mut().push(ChatMessage {
@@ -2005,19 +2148,35 @@ fn apply_voice_event(
             });
         }
         KIND_ASR_FINAL => {
+            // Liaison guarantees USER_IDENTIFIED arrives before ASR_FINAL,
+            // so `last_identified` is the right name for this utterance.
+            let label = match last_identified.as_deref() {
+                Some(uid) => match lookup_user_name(&voiceprint_db.borrow(), uid) {
+                    Some(name) => format!("(voice, {}) {}", name, event.text),
+                    None if uid.is_empty() => format!("(voice) {}", event.text),
+                    None => format!("(voice, {}) {}", uid, event.text),
+                },
+                None => format!("(voice) {}", event.text),
+            };
             messages.borrow_mut().push(ChatMessage {
                 role: Role::User,
-                text: format!("(voice) {}", event.text),
+                text: label,
             });
         }
         KIND_USER_IDENTIFIED => {
-            let label = if event.status_message.is_empty() {
-                format!("identified user → {}", event.user_id)
-            } else {
-                format!(
+            *last_identified = Some(event.user_id.clone());
+            let name = lookup_user_name(&voiceprint_db.borrow(), &event.user_id);
+            let label = match (&name, event.status_message.is_empty()) {
+                (Some(n), true) => format!("identified user → {} ({})", n, event.user_id),
+                (Some(n), false) => format!(
+                    "identified user → {} ({}) · {}",
+                    n, event.user_id, event.status_message
+                ),
+                (None, true) => format!("identified user → {}", event.user_id),
+                (None, false) => format!(
                     "identified user → {} · {}",
                     event.user_id, event.status_message
-                )
+                ),
             };
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Voice,
@@ -2042,6 +2201,7 @@ fn apply_voice_event(
             });
         }
         KIND_SESSION_DONE => {
+            *last_identified = None;
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Status,
                 text: "voice session done".to_string(),
@@ -2296,9 +2456,8 @@ fn current_time_hhmm() -> String {
     chrono::Local::now().format("%H:%M").to_string()
 }
 
-/// Centered Rect for popup overlays — used by `?` help and (Phase 1B)
-/// the Ctrl+U users modal. Standard ratatui recipe.
-#[allow(dead_code)] // Phase 1A: reserved for next step (Ctrl+U modal)
+/// Centered Rect for popup overlays — used by `?` help and the Ctrl+U
+/// users modal. Standard ratatui recipe.
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let popup_layout = Layout::vertical([
         Constraint::Percentage((100 - percent_y) / 2),
@@ -2344,6 +2503,10 @@ fn render_help_overlay(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) ->
             (
                 "  Ctrl+U",
                 "Manage users (enroll a voice, pick the active speaker)",
+            ),
+            (
+                "  Ctrl+S",
+                "System view (provider status / logs / process metrics)",
             ),
             ("  Ctrl+A", "Audio settings (microphone / speaker)"),
             ("  ?", "Show this help"),
@@ -2409,4 +2572,1351 @@ fn whoami_username() -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "user".to_string())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 1B — voiceprint Ctrl+U modal + access control
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The chat client lets the operator enroll a voice and pin a "controller"
+// (the user_id whose voice may issue commands). When a controller is set,
+// any voice turn whose identified speaker doesn't match is rejected at the
+// client — the in-flight pilot stream is aborted and a denial line shows
+// up in chat. Without a controller, any speaker is allowed (current
+// behaviour pre Phase 1B).
+//
+// Modal states (Ctrl+U opens at List):
+//   List       — table of enrolled users + current controller, key cmds
+//                ↑↓ move · Enter set as controller · c clear controller
+//                · n enroll new · r refresh · Esc close
+//   Naming     — input field for the new user's display name (user_id
+//                derived as `voice:<slug(name)>`). Enter starts Recording.
+//   Recording  — 5s mic capture from chat_cfg.mic_cap_id. Progress bar.
+//   Uploading  — Enroll RPC running.
+//   Notice     — info screen ("✓ enrolled" / "✗ error: ..."). Any key
+//                returns to List.
+//
+// Voice prompts via TTS+speaker are fired around the Recording transition
+// so the operator hears "please speak now" before recording and "registered
+// <name>" on success. They go through the same atlas-resolved TTS + speaker
+// providers liaison uses for voice replies.
+
+use tokio_stream::iter as stream_iter;
+use tonic::Request;
+
+use crate::pb::audio::AudioChunk;
+use crate::pb::contracts::{
+    robonix_primitive_audio_mic_client::RobonixPrimitiveAudioMicClient,
+    robonix_primitive_audio_speaker_client::RobonixPrimitiveAudioSpeakerClient,
+    robonix_system_speech_tts_client::RobonixSystemSpeechTtsClient,
+    robonix_system_speech_voiceprint_enroll_client::RobonixSystemSpeechVoiceprintEnrollClient,
+    robonix_system_speech_voiceprint_list_client::RobonixSystemSpeechVoiceprintListClient,
+};
+use crate::pb::tts as pb_tts;
+use crate::pb::voiceprint as pb_voiceprint;
+
+const MIC_RECORD_SECS: u64 = 5;
+const MIC_SAMPLE_RATE_HZ: u32 = 16_000;
+
+const VOICEPRINT_ENROLL_CONTRACT: &str = "robonix/system/speech/voiceprint_enroll";
+const VOICEPRINT_LIST_CONTRACT: &str = "robonix/system/speech/voiceprint_list";
+const TTS_CONTRACT: &str = "robonix/system/speech/tts";
+
+#[derive(Clone, Default)]
+struct UserEntry {
+    user_id: String,
+    user_name: String,
+}
+
+enum UsersModalState {
+    List,
+    Naming {
+        input: String,
+    },
+    Recording {
+        started: std::time::Instant,
+        audio: Vec<u8>,
+        display_name: String,
+        user_id: String,
+    },
+    Uploading {
+        display_name: String,
+    },
+    Notice {
+        text: String,
+        ok: bool,
+    },
+}
+
+struct UsersModal {
+    state: UsersModalState,
+    users: Vec<UserEntry>,
+    cursor: usize,
+    controller: Option<String>,
+    status: String,
+}
+
+/// Same two-step Atlas resolution liaison uses: query providers for the
+/// contract, optionally honour a pinned provider_id, then ConnectCapability
+/// to actually receive the endpoint string. Returns `None` if no live
+/// provider is available.
+async fn resolve_grpc_endpoint(
+    atlas: &mut AtlasClient,
+    contract_id: &str,
+    pin_provider_id: &str,
+) -> Option<String> {
+    let providers = atlas
+        .query_capabilities("", contract_id, atlas_pb::Transport::Grpc)
+        .await
+        .ok()?;
+    let pick = if pin_provider_id.is_empty() {
+        providers.first()
+    } else {
+        providers
+            .iter()
+            .find(|r| r.id == pin_provider_id || r.namespace == pin_provider_id)
+            .or_else(|| providers.first())
+    };
+    let provider = pick?;
+    let (_channel_id, endpoint, _params) = atlas
+        .connect_capability(
+            CONSUMER_ID,
+            &provider.id,
+            contract_id,
+            atlas_pb::Transport::Grpc,
+        )
+        .await
+        .ok()?;
+    if endpoint.is_empty() {
+        return None;
+    }
+    let with_scheme = if endpoint.starts_with("http") {
+        endpoint
+    } else {
+        format!("http://{endpoint}")
+    };
+    Some(localhost_to_ipv4_loopback(&with_scheme))
+}
+
+/// List enrolled voiceprint users via the service's ListEnrolled RPC.
+/// Returns an empty vec if the service isn't reachable; callers display
+/// the error inline rather than crashing the modal.
+async fn voiceprint_list_users(atlas_endpoint: &str) -> Result<Vec<UserEntry>> {
+    let mut atlas = AtlasClient::connect(atlas_endpoint.to_string())
+        .await
+        .context("connect atlas for voiceprint list")?;
+    let endpoint = resolve_grpc_endpoint(&mut atlas, VOICEPRINT_LIST_CONTRACT, "")
+        .await
+        .ok_or_else(|| anyhow::anyhow!("no voiceprint_list provider in atlas"))?;
+    let mut client = RobonixSystemSpeechVoiceprintListClient::connect(endpoint.clone())
+        .await
+        .with_context(|| format!("dial voiceprint_list at {endpoint}"))?;
+    let resp = client
+        .list_enrolled(Request::new(pb_voiceprint::ListEnrolledRequest {}))
+        .await
+        .context("ListEnrolled rpc")?
+        .into_inner();
+    if !resp.error.is_empty() {
+        anyhow::bail!("voiceprint service error: {}", resp.error);
+    }
+    // users_json: [{"user_id":"...","user_name":"..."}, ...]
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(&resp.users_json)
+        .with_context(|| format!("parse users_json: {}", resp.users_json))?;
+    let users = parsed
+        .into_iter()
+        .map(|v| UserEntry {
+            user_id: v
+                .get("user_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            user_name: v
+                .get("user_name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
+        .filter(|u| !u.user_id.is_empty())
+        .collect();
+    Ok(users)
+}
+
+/// Enroll one user — sends raw PCM + (user_id, user_name) to the voiceprint
+/// service. Returns Ok(()) on success and propagates the service's error
+/// string otherwise.
+async fn voiceprint_enroll(
+    atlas_endpoint: &str,
+    user_id: &str,
+    user_name: &str,
+    audio_pcm: Vec<u8>,
+) -> Result<()> {
+    let mut atlas = AtlasClient::connect(atlas_endpoint.to_string())
+        .await
+        .context("connect atlas for voiceprint enroll")?;
+    let endpoint = resolve_grpc_endpoint(&mut atlas, VOICEPRINT_ENROLL_CONTRACT, "")
+        .await
+        .ok_or_else(|| anyhow::anyhow!("no voiceprint_enroll provider in atlas"))?;
+    let mut client = RobonixSystemSpeechVoiceprintEnrollClient::connect(endpoint.clone())
+        .await
+        .with_context(|| format!("dial voiceprint_enroll at {endpoint}"))?;
+    let resp = client
+        .enroll(Request::new(pb_voiceprint::EnrollRequest {
+            user_id: user_id.to_string(),
+            user_name: user_name.to_string(),
+            audio_data: audio_pcm,
+            encoding: "pcm_s16le".to_string(),
+            sample_rate_hz: MIC_SAMPLE_RATE_HZ,
+        }))
+        .await
+        .context("Enroll rpc")?
+        .into_inner();
+    if !resp.success {
+        anyhow::bail!(
+            "voiceprint service refused enrollment: {}",
+            if resp.error.is_empty() {
+                "unknown error".to_string()
+            } else {
+                resp.error
+            }
+        );
+    }
+    Ok(())
+}
+
+/// Pull `MIC_RECORD_SECS` of raw PCM off the configured mic primitive. Mic
+/// chunks arrive as 100ms s16le frames; we accumulate `.data` until the
+/// deadline, then drop the stream. Returns the raw byte buffer suitable
+/// for handing to voiceprint enrollment.
+async fn capture_mic_pcm(atlas_endpoint: &str, mic_pin: &str) -> Result<Vec<u8>> {
+    let mut atlas = AtlasClient::connect(atlas_endpoint.to_string())
+        .await
+        .context("connect atlas for mic capture")?;
+    let endpoint = resolve_grpc_endpoint(&mut atlas, MIC_CONTRACT, mic_pin)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("no audio mic provider in atlas"))?;
+    let mut client = RobonixPrimitiveAudioMicClient::connect(endpoint.clone())
+        .await
+        .with_context(|| format!("dial mic at {endpoint}"))?;
+    let mut stream = client
+        .mic(Request::new(()))
+        .await
+        .context("mic rpc")?
+        .into_inner();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(MIC_RECORD_SECS);
+    let mut buf: Vec<u8> =
+        Vec::with_capacity((MIC_SAMPLE_RATE_HZ as usize) * 2 * (MIC_RECORD_SECS as usize));
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let remaining = deadline - now;
+        match tokio::time::timeout(remaining, stream.message()).await {
+            Ok(Ok(Some(chunk))) => buf.extend_from_slice(&chunk.data),
+            Ok(Ok(None)) => break,
+            Ok(Err(e)) => anyhow::bail!("mic stream error: {e}"),
+            Err(_) => break,
+        }
+    }
+    if buf.is_empty() {
+        anyhow::bail!("mic returned 0 bytes of audio");
+    }
+    Ok(buf)
+}
+
+/// Synthesize `text` and play it on the chat-configured speaker. Mirrors
+/// `liaison::voice::synthesize_and_play` but with `eprintln!` swallowed and
+/// no VoiceEvent emissions — this is fire-and-forget feedback for the
+/// modal, the user already sees the visual prompt.
+async fn speak_text(atlas_endpoint: &str, speaker_pin: &str, text: &str) -> Result<()> {
+    let mut atlas = AtlasClient::connect(atlas_endpoint.to_string())
+        .await
+        .context("connect atlas for speak")?;
+    let tts_endpoint = resolve_grpc_endpoint(&mut atlas, TTS_CONTRACT, "")
+        .await
+        .ok_or_else(|| anyhow::anyhow!("no tts provider in atlas"))?;
+    let speaker_endpoint = resolve_grpc_endpoint(&mut atlas, SPEAKER_CONTRACT, speaker_pin)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("no speaker provider in atlas"))?;
+    let mut tts = RobonixSystemSpeechTtsClient::connect(tts_endpoint.clone())
+        .await
+        .with_context(|| format!("dial tts at {tts_endpoint}"))?;
+    let resp = tts
+        .synthesize(Request::new(pb_tts::SynthesizeRequest {
+            text: text.to_string(),
+            language: String::new(),
+            voice: String::new(),
+            speed: 1.0,
+        }))
+        .await
+        .context("tts rpc")?
+        .into_inner();
+    if !resp.error.is_empty() {
+        anyhow::bail!("tts error: {}", resp.error);
+    }
+    if resp.audio_data.is_empty() {
+        anyhow::bail!("tts returned empty audio");
+    }
+    let mut speaker = RobonixPrimitiveAudioSpeakerClient::connect(speaker_endpoint.clone())
+        .await
+        .with_context(|| format!("dial speaker at {speaker_endpoint}"))?;
+    const SLICE: usize = 8 * 1024;
+    let chunks: Vec<AudioChunk> = resp
+        .audio_data
+        .chunks(SLICE)
+        .enumerate()
+        .map(|(i, slice)| AudioChunk {
+            timestamp_ns: 0,
+            data: slice.to_vec(),
+            sequence: i as u32,
+            duration_s: 0.0,
+        })
+        .collect();
+    speaker
+        .speaker(Request::new(stream_iter(chunks)))
+        .await
+        .context("speaker rpc")?;
+    Ok(())
+}
+
+/// Sanitise a free-form display name into a stable user_id suffix.
+/// Strips/replaces anything that isn't ASCII alphanumeric. Used to build
+/// `voice:<slug>` identifiers that match what the voiceprint service +
+/// liaison's `event_user(user_id=...)` produces.
+fn slug_for_user_id(name: &str) -> String {
+    let mut s = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            s.push(ch.to_ascii_lowercase());
+        } else if ch.is_whitespace() || ch == '-' || ch == '_' {
+            s.push('_');
+        }
+    }
+    let trimmed = s.trim_matches('_').to_string();
+    if trimmed.is_empty() {
+        format!("user_{}", now_ms())
+    } else {
+        trimmed
+    }
+}
+
+/// Look up a user_id (e.g. "voice:alice") in the local cache and return
+/// its display name. `None` if unknown — the caller decides whether to
+/// render "(unknown)" or omit the suffix.
+fn lookup_user_name(db: &VoiceprintDb, user_id: &str) -> Option<String> {
+    db.users.get(user_id).map(|u| u.name.clone())
+}
+
+/// Refresh the local voiceprint cache from the service. Returns the new
+/// db; callers replace their cell. Errors propagate so the modal can show
+/// "(offline)" instead of stale data.
+async fn refresh_voiceprint_db(atlas_endpoint: &str) -> Result<VoiceprintDb> {
+    let users = voiceprint_list_users(atlas_endpoint).await?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut db = VoiceprintDb::default();
+    for u in &users {
+        db.users.insert(
+            u.user_id.clone(),
+            VoiceprintUser {
+                name: u.user_name.clone(),
+                enrolled_at: now,
+            },
+        );
+    }
+    let _ = save_voiceprint_db(&db);
+    Ok(db)
+}
+
+/// Draws the Ctrl+U users modal as a centered popup on top of the chat
+/// view. The chat under it stays painted (the main `draw()` already ran
+/// this frame). Clear+Block follows ratatui's standard overlay recipe.
+fn draw_users_modal(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    modal: &UsersModal,
+) -> Result<()> {
+    terminal.draw(|f| {
+        let area = centered_rect(70, 70, f.area());
+        f.render_widget(Clear, area);
+        let title = match &modal.state {
+            UsersModalState::List => " Users · voiceprint ",
+            UsersModalState::Naming { .. } => " Users · new enrollment ",
+            UsersModalState::Recording { .. } => " Users · recording ",
+            UsersModalState::Uploading { .. } => " Users · uploading ",
+            UsersModalState::Notice { .. } => " Users · notice ",
+        };
+        let footer = match &modal.state {
+            UsersModalState::List => {
+                " ↑↓ move · Enter set controller · c clear · n new · r refresh · Esc close "
+            }
+            UsersModalState::Naming { .. } => " type name · Enter record · Esc back ",
+            UsersModalState::Recording { .. } => " recording — please speak ",
+            UsersModalState::Uploading { .. } => " uploading… ",
+            UsersModalState::Notice { .. } => " any key to continue ",
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(Line::from(Span::styled(
+                title,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .title_bottom(
+                Line::from(Span::styled(footer, Style::default().fg(Color::DarkGray)))
+                    .alignment(Alignment::Right),
+            );
+
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let header_line = {
+            let ctl = modal
+                .controller
+                .as_deref()
+                .unwrap_or("(any speaker allowed)");
+            Line::from(vec![
+                Span::styled("controller: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    ctl.to_string(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])
+        };
+
+        let status_line = if modal.status.is_empty() {
+            Line::from("")
+        } else {
+            Line::from(Span::styled(
+                modal.status.clone(),
+                Style::default().fg(Color::DarkGray),
+            ))
+        };
+
+        let mut body_lines: Vec<Line> = vec![header_line, status_line, Line::from("")];
+
+        match &modal.state {
+            UsersModalState::List => {
+                if modal.users.is_empty() {
+                    body_lines.push(Line::from(Span::styled(
+                        "no users enrolled yet — press `n` to enroll one",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                } else {
+                    body_lines.push(Line::from(vec![Span::styled(
+                        format!("{:<3}{:<28}{}", "", "user_id", "name"),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    )]));
+                    for (i, u) in modal.users.iter().enumerate() {
+                        let marker = if i == modal.cursor { "▶" } else { " " };
+                        let is_ctl = modal.controller.as_deref() == Some(u.user_id.as_str());
+                        let style = if i == modal.cursor {
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD)
+                        } else if is_ctl {
+                            Style::default().fg(Color::Yellow)
+                        } else {
+                            Style::default().fg(Color::White)
+                        };
+                        let suffix = if is_ctl { "  ← controller" } else { "" };
+                        body_lines.push(Line::from(Span::styled(
+                            format!(
+                                "{} {} {:<28}{}{}",
+                                marker, " ", u.user_id, u.user_name, suffix
+                            ),
+                            style,
+                        )));
+                    }
+                }
+            }
+            UsersModalState::Naming { input } => {
+                body_lines.push(Line::from(Span::styled(
+                    "Enter the new user's display name. We'll capture 5 seconds of voice.",
+                    Style::default().fg(Color::Gray),
+                )));
+                body_lines.push(Line::from(""));
+                body_lines.push(Line::from(vec![
+                    Span::styled(
+                        "name: ",
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(input.clone(), Style::default().fg(Color::Cyan)),
+                    Span::styled("█", Style::default().fg(Color::Cyan)),
+                ]));
+                let slug = slug_for_user_id(input);
+                body_lines.push(Line::from(Span::styled(
+                    format!("user_id: voice:{}", slug),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            UsersModalState::Recording {
+                started,
+                display_name,
+                ..
+            } => {
+                let elapsed = started.elapsed().as_secs_f32().min(MIC_RECORD_SECS as f32);
+                let total = MIC_RECORD_SECS as f32;
+                let pct = (elapsed / total).clamp(0.0, 1.0);
+                let bar_w = 40usize;
+                let filled = (pct * bar_w as f32) as usize;
+                let bar: String = std::iter::repeat_n('█', filled)
+                    .chain(std::iter::repeat_n('░', bar_w - filled))
+                    .collect();
+                body_lines.push(Line::from(Span::styled(
+                    format!("Recording for {}…", display_name),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                body_lines.push(Line::from(""));
+                body_lines.push(Line::from(vec![
+                    Span::styled(bar, Style::default().fg(Color::Cyan)),
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("{:.1}s / {:.0}s", elapsed, total),
+                        Style::default().fg(Color::Gray),
+                    ),
+                ]));
+                body_lines.push(Line::from(""));
+                body_lines.push(Line::from(Span::styled(
+                    "please speak normally — short sentences work best",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            UsersModalState::Uploading { display_name } => {
+                body_lines.push(Line::from(Span::styled(
+                    format!("uploading enrollment for {}…", display_name),
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+            UsersModalState::Notice { text, ok } => {
+                let style = if *ok {
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                };
+                body_lines.push(Line::from(Span::styled(text.clone(), style)));
+            }
+        }
+
+        let body = Paragraph::new(body_lines).wrap(Wrap { trim: false });
+        f.render_widget(body, inner);
+    })?;
+    Ok(())
+}
+
+/// Outcome of one modal session — returned to `run_tui` so it can update
+/// chat_cfg + the local voiceprint cache without the modal holding either
+/// across the await boundary.
+struct UsersModalOutcome {
+    controller: Option<String>,
+    db: VoiceprintDb,
+    log_lines: Vec<String>,
+}
+
+/// Run the Ctrl+U modal until the user presses Esc. Drives its own
+/// key/draw loop; the parent's `draw()` is paused for the duration.
+#[allow(clippy::too_many_arguments)]
+async fn run_users_modal(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    atlas_endpoint: &str,
+    chat_cfg: &ChatConfig,
+    initial_db: VoiceprintDb,
+) -> Result<UsersModalOutcome> {
+    let mut modal = UsersModal {
+        state: UsersModalState::List,
+        users: initial_db
+            .users
+            .iter()
+            .map(|(id, u)| UserEntry {
+                user_id: id.clone(),
+                user_name: u.name.clone(),
+            })
+            .collect(),
+        cursor: 0,
+        controller: chat_cfg.current_controller.clone(),
+        status: "refreshing from service…".to_string(),
+    };
+    let mut db = initial_db;
+    let mut log_lines: Vec<String> = Vec::new();
+
+    // Kick off a refresh in the background so the modal renders fast.
+    match refresh_voiceprint_db(atlas_endpoint).await {
+        Ok(new_db) => {
+            modal.users = new_db
+                .users
+                .iter()
+                .map(|(id, u)| UserEntry {
+                    user_id: id.clone(),
+                    user_name: u.name.clone(),
+                })
+                .collect();
+            modal.status = format!("{} user(s) enrolled", modal.users.len());
+            db = new_db;
+        }
+        Err(e) => {
+            modal.status = format!("offline (showing cached list): {e:#}");
+        }
+    }
+
+    let speaker_pin = chat_cfg.speaker_cap_id.clone().unwrap_or_default();
+    let mic_pin = chat_cfg.mic_cap_id.clone().unwrap_or_default();
+
+    loop {
+        draw_users_modal(terminal, &modal)?;
+
+        if let UsersModalState::Recording {
+            started,
+            audio,
+            display_name,
+            user_id,
+        } = &modal.state
+            && started.elapsed().as_secs() >= MIC_RECORD_SECS
+            && !audio.is_empty()
+        {
+            {
+                let dn = display_name.clone();
+                let uid = user_id.clone();
+                let audio_buf = audio.clone();
+                modal.state = UsersModalState::Uploading {
+                    display_name: dn.clone(),
+                };
+                draw_users_modal(terminal, &modal)?;
+                match voiceprint_enroll(atlas_endpoint, &uid, &dn, audio_buf).await {
+                    Ok(()) => {
+                        log_lines.push(format!("enrolled voice: {} ({})", dn, uid));
+                        // Fire-and-forget post-enroll voice prompt.
+                        let ep = atlas_endpoint.to_string();
+                        let sp = speaker_pin.clone();
+                        let prompt = format!("已注册 {} 用户", dn);
+                        tokio::spawn(async move {
+                            let _ = speak_text(&ep, &sp, &prompt).await;
+                        });
+                        modal.state = UsersModalState::Notice {
+                            text: format!("✓ enrolled {} as {}\n\nrefreshing user list…", dn, uid),
+                            ok: true,
+                        };
+                        draw_users_modal(terminal, &modal)?;
+                        if let Ok(new_db) = refresh_voiceprint_db(atlas_endpoint).await {
+                            modal.users = new_db
+                                .users
+                                .iter()
+                                .map(|(id, u)| UserEntry {
+                                    user_id: id.clone(),
+                                    user_name: u.name.clone(),
+                                })
+                                .collect();
+                            db = new_db;
+                        }
+                    }
+                    Err(e) => {
+                        log_lines.push(format!("enroll failed: {e:#}"));
+                        modal.state = UsersModalState::Notice {
+                            text: format!("✗ enroll failed: {e:#}"),
+                            ok: false,
+                        };
+                    }
+                }
+                continue;
+            }
+        }
+
+        // Recording state needs frequent redraws to animate the progress
+        // bar; everything else can sleep on keys for a longer beat.
+        let poll_ms = if matches!(modal.state, UsersModalState::Recording { .. }) {
+            80
+        } else {
+            120
+        };
+
+        if event::poll(std::time::Duration::from_millis(poll_ms))?
+            && let Event::Key(key) = event::read()?
+        {
+            match &mut modal.state {
+                UsersModalState::List => match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => break,
+                    KeyCode::Up if modal.cursor > 0 => modal.cursor -= 1,
+                    KeyCode::Down if modal.cursor + 1 < modal.users.len() => modal.cursor += 1,
+                    KeyCode::Enter => {
+                        if let Some(u) = modal.users.get(modal.cursor) {
+                            modal.controller = Some(u.user_id.clone());
+                            modal.status =
+                                format!("controller set to {} ({})", u.user_name, u.user_id);
+                            log_lines.push(format!("controller → {} ({})", u.user_name, u.user_id));
+                        }
+                    }
+                    KeyCode::Char('c') => {
+                        modal.controller = None;
+                        modal.status = "controller cleared — any speaker allowed".to_string();
+                        log_lines.push("controller cleared".to_string());
+                    }
+                    KeyCode::Char('n') => {
+                        modal.state = UsersModalState::Naming {
+                            input: String::new(),
+                        };
+                        modal.status = "enter a display name, then Enter".to_string();
+                    }
+                    KeyCode::Char('r') => {
+                        modal.status = "refreshing…".to_string();
+                        draw_users_modal(terminal, &modal)?;
+                        match refresh_voiceprint_db(atlas_endpoint).await {
+                            Ok(new_db) => {
+                                modal.users = new_db
+                                    .users
+                                    .iter()
+                                    .map(|(id, u)| UserEntry {
+                                        user_id: id.clone(),
+                                        user_name: u.name.clone(),
+                                    })
+                                    .collect();
+                                modal.status = format!("{} user(s) enrolled", modal.users.len());
+                                db = new_db;
+                            }
+                            Err(e) => {
+                                modal.status = format!("refresh failed: {e:#}");
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                UsersModalState::Naming { input } => match key.code {
+                    KeyCode::Esc => {
+                        modal.state = UsersModalState::List;
+                        modal.status.clear();
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        input.push(c);
+                    }
+                    KeyCode::Enter => {
+                        let dn = input.trim().to_string();
+                        if dn.is_empty() {
+                            modal.status = "name can't be empty".to_string();
+                            continue;
+                        }
+                        let user_id = format!("voice:{}", slug_for_user_id(&dn));
+                        let ep = atlas_endpoint.to_string();
+                        let sp = speaker_pin.clone();
+                        let prompt = "开始声纹录入,请说话".to_string();
+                        tokio::spawn(async move {
+                            let _ = speak_text(&ep, &sp, &prompt).await;
+                        });
+                        modal.state = UsersModalState::Recording {
+                            started: std::time::Instant::now(),
+                            audio: Vec::new(),
+                            display_name: dn.clone(),
+                            user_id: user_id.clone(),
+                        };
+                        modal.status = format!("recording {} for {}s…", dn, MIC_RECORD_SECS);
+                        draw_users_modal(terminal, &modal)?;
+                        // Synchronous capture — modal redraws are paused
+                        // while the mic stream drains. Acceptable: the
+                        // operator just stares at a progress bar.
+                        match capture_mic_pcm(atlas_endpoint, &mic_pin).await {
+                            Ok(buf) => {
+                                if let UsersModalState::Recording { audio, .. } = &mut modal.state {
+                                    *audio = buf;
+                                }
+                            }
+                            Err(e) => {
+                                modal.state = UsersModalState::Notice {
+                                    text: format!("✗ mic capture failed: {e:#}"),
+                                    ok: false,
+                                };
+                                log_lines.push(format!("mic capture failed: {e:#}"));
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                UsersModalState::Recording { .. } if matches!(key.code, KeyCode::Esc) => {
+                    modal.state = UsersModalState::List;
+                    modal.status = "recording cancelled".to_string();
+                }
+                UsersModalState::Recording { .. } => {}
+                UsersModalState::Uploading { .. } => { /* no input */ }
+                UsersModalState::Notice { .. } => {
+                    modal.state = UsersModalState::List;
+                    modal.status.clear();
+                }
+            }
+        }
+    }
+
+    Ok(UsersModalOutcome {
+        controller: modal.controller,
+        db,
+        log_lines,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 1C — Ctrl+S System modal (Status / Logs / Perf)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// One-key view of the running deploy:
+//
+//   Status — atlas provider table (provider_id, kind hint, state, ns).
+//            Always available so long as atlas is reachable.
+//   Logs   — tail the per-component log files boot wrote under
+//            `<deploy>/rbnx-boot/logs/`. Discovers `<deploy>` by walking up
+//            from CWD looking for `rbnx-boot/state.json`. If no deploy is
+//            found nearby, the tab explains that and stays empty.
+//   Perf   — `ps -o pid,pcpu,pmem,rss,etime,comm` over the PIDs recorded
+//            in `<deploy>/rbnx-boot/state.json`. Same discovery as Logs.
+//
+// Tabs cycle with Tab / Shift+Tab; jump directly with 1 / 2 / 3.
+// `r` refreshes the current tab; ↑↓ pick the focused log file (Logs tab).
+// Esc closes the modal.
+
+use super::teardown;
+
+#[derive(Clone, Copy, PartialEq)]
+enum SystemTab {
+    Status,
+    Logs,
+    Perf,
+}
+
+struct SystemModal {
+    tab: SystemTab,
+    // Status tab
+    providers: Vec<atlas_pb::CapabilityProvider>,
+    status_error: Option<String>,
+    // Logs / Perf tabs share a discovered deploy dir.
+    deploy_dir: Option<std::path::PathBuf>,
+    // Logs tab
+    log_files: Vec<std::path::PathBuf>,
+    log_cursor: usize,
+    log_tail: Vec<String>,
+    log_error: Option<String>,
+    // Perf tab
+    boot_pids: Vec<(String, u32)>,
+    perf_rows: Vec<String>,
+    perf_error: Option<String>,
+    // Footer / global status
+    note: String,
+}
+
+/// Walk up from CWD looking for `rbnx-boot/state.json`. Returns the
+/// containing deploy dir (the parent that holds `rbnx-boot/`). Stops at
+/// filesystem root. Used by Logs/Perf to scope themselves to an active
+/// deploy without forcing the user to launch chat from inside the
+/// deploy tree.
+fn find_deploy_dir() -> Option<std::path::PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let mut cur = cwd.as_path();
+    loop {
+        let candidate = cur.join("rbnx-boot").join("state.json");
+        if candidate.exists() {
+            return Some(cur.to_path_buf());
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => return None,
+        }
+    }
+}
+
+/// Read the last `n` lines of `path` into a Vec<String>. Uses a single
+/// read + split rather than a true reverse-scan — adequate for files
+/// boot's spawned packages produce (rotated daily at most, usually
+/// <50MB). Returns the lines in original order (oldest first).
+fn tail_log_lines(path: &std::path::Path, n: usize) -> std::io::Result<Vec<String>> {
+    let s = std::fs::read_to_string(path)?;
+    let lines: Vec<String> = s.lines().map(|l| l.to_string()).collect();
+    let start = lines.len().saturating_sub(n);
+    Ok(lines[start..].to_vec())
+}
+
+fn human_state(s: i32) -> &'static str {
+    match atlas_pb::LifecycleState::try_from(s)
+        .unwrap_or(atlas_pb::LifecycleState::StateUnspecified)
+    {
+        atlas_pb::LifecycleState::StateRegistered => "REGISTERED",
+        atlas_pb::LifecycleState::StateInactive => "INACTIVE",
+        atlas_pb::LifecycleState::StateActive => "ACTIVE",
+        atlas_pb::LifecycleState::StateError => "ERROR",
+        atlas_pb::LifecycleState::StateTerminated => "TERMINATED",
+        atlas_pb::LifecycleState::StateUnspecified => "?",
+    }
+}
+
+fn state_color(s: i32) -> Color {
+    match atlas_pb::LifecycleState::try_from(s)
+        .unwrap_or(atlas_pb::LifecycleState::StateUnspecified)
+    {
+        atlas_pb::LifecycleState::StateActive => Color::Green,
+        atlas_pb::LifecycleState::StateInactive => Color::Yellow,
+        atlas_pb::LifecycleState::StateRegistered => Color::Blue,
+        atlas_pb::LifecycleState::StateError => Color::Red,
+        atlas_pb::LifecycleState::StateTerminated => Color::DarkGray,
+        atlas_pb::LifecycleState::StateUnspecified => Color::DarkGray,
+    }
+}
+
+async fn refresh_status_tab(modal: &mut SystemModal, atlas_endpoint: &str) {
+    match AtlasClient::connect(atlas_endpoint.to_string()).await {
+        Ok(mut atlas) => match atlas
+            .query_capabilities("", "", atlas_pb::Transport::Unspecified)
+            .await
+        {
+            Ok(providers) => {
+                modal.providers = providers;
+                modal.status_error = None;
+            }
+            Err(e) => modal.status_error = Some(format!("query atlas: {e:#}")),
+        },
+        Err(e) => modal.status_error = Some(format!("connect atlas: {e:#}")),
+    }
+}
+
+fn refresh_logs_tab(modal: &mut SystemModal) {
+    modal.log_files.clear();
+    modal.log_tail.clear();
+    modal.log_error = None;
+    let Some(deploy) = modal.deploy_dir.clone() else {
+        modal.log_error =
+            Some("no active deploy found near CWD (looked for ./rbnx-boot/state.json)".to_string());
+        return;
+    };
+    let log_dir = deploy.join("rbnx-boot").join("logs");
+    let entries = match std::fs::read_dir(&log_dir) {
+        Ok(it) => it,
+        Err(e) => {
+            modal.log_error = Some(format!("read {}: {e:#}", log_dir.display()));
+            return;
+        }
+    };
+    let mut files: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "log"))
+        .collect();
+    files.sort();
+    modal.log_files = files;
+    if modal.log_cursor >= modal.log_files.len() {
+        modal.log_cursor = 0;
+    }
+    if let Some(path) = modal.log_files.get(modal.log_cursor) {
+        match tail_log_lines(path, 80) {
+            Ok(lines) => modal.log_tail = lines,
+            Err(e) => modal.log_error = Some(format!("tail {}: {e:#}", path.display())),
+        }
+    }
+}
+
+fn refresh_perf_tab(modal: &mut SystemModal) {
+    modal.boot_pids.clear();
+    modal.perf_rows.clear();
+    modal.perf_error = None;
+    let Some(deploy) = modal.deploy_dir.clone() else {
+        modal.perf_error =
+            Some("no active deploy found near CWD (looked for ./rbnx-boot/state.json)".to_string());
+        return;
+    };
+    let state_path = teardown::state_path(&deploy);
+    let state = match teardown::read_state(&state_path) {
+        Ok(s) => s,
+        Err(e) => {
+            modal.perf_error = Some(format!("read {}: {e:#}", state_path.display()));
+            return;
+        }
+    };
+    modal.boot_pids = state
+        .components
+        .iter()
+        .map(|c| (c.name.clone(), c.pid))
+        .collect();
+    if modal.boot_pids.is_empty() {
+        modal.perf_error = Some("boot state has no components".to_string());
+        return;
+    }
+    // One ps call for the whole set — cheaper than per-PID, and the
+    // output's `comm` column lets us cross-check name vs PID for free.
+    let pid_csv = modal
+        .boot_pids
+        .iter()
+        .map(|(_, pid)| pid.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let out = std::process::Command::new("ps")
+        .args([
+            "-o",
+            "pid,pcpu,pmem,rss,etime,comm",
+            "--no-headers",
+            "-p",
+            &pid_csv,
+        ])
+        .output();
+    let out = match out {
+        Ok(o) => o,
+        Err(e) => {
+            modal.perf_error = Some(format!("spawn ps: {e:#}"));
+            return;
+        }
+    };
+    if !out.status.success() {
+        modal.perf_error = Some(format!(
+            "ps failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+        return;
+    }
+    modal.perf_rows = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+}
+
+fn draw_system_modal(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    modal: &SystemModal,
+) -> Result<()> {
+    terminal.draw(|f| {
+        let area = centered_rect(80, 80, f.area());
+        f.render_widget(Clear, area);
+
+        let title_spans = vec![
+            Span::styled(
+                " System · ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            tab_span("Status", modal.tab == SystemTab::Status),
+            Span::raw(" "),
+            tab_span("Logs", modal.tab == SystemTab::Logs),
+            Span::raw(" "),
+            tab_span("Perf", modal.tab == SystemTab::Perf),
+            Span::raw(" "),
+        ];
+        let footer = match modal.tab {
+            SystemTab::Status => " Tab next · 1/2/3 jump · r refresh · Esc close ",
+            SystemTab::Logs => " Tab next · ↑↓ pick file · r refresh · Esc close ",
+            SystemTab::Perf => " Tab next · r refresh · Esc close ",
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(Line::from(title_spans))
+            .title_bottom(
+                Line::from(Span::styled(footer, Style::default().fg(Color::DarkGray)))
+                    .alignment(Alignment::Right),
+            );
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        match modal.tab {
+            SystemTab::Status => draw_status_tab(f, inner, modal),
+            SystemTab::Logs => draw_logs_tab(f, inner, modal),
+            SystemTab::Perf => draw_perf_tab(f, inner, modal),
+        }
+    })?;
+    Ok(())
+}
+
+fn tab_span(label: &'static str, active: bool) -> Span<'static> {
+    if active {
+        Span::styled(
+            format!(" {label} "),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(format!(" {label} "), Style::default().fg(Color::Gray))
+    }
+}
+
+fn draw_status_tab(f: &mut ratatui::Frame, area: Rect, modal: &SystemModal) {
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(err) = &modal.status_error {
+        lines.push(Line::from(Span::styled(
+            format!("error: {err}"),
+            Style::default().fg(Color::Red),
+        )));
+        let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+        f.render_widget(p, area);
+        return;
+    }
+    if modal.providers.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "no providers registered",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{:<12}{:<28}{:<48}{}",
+                "state", "provider_id", "namespace", "caps"
+            ),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for p in &modal.providers {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{:<12}", format!("[{}]", human_state(p.state))),
+                    Style::default()
+                        .fg(state_color(p.state))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{:<28}", truncate(&p.id, 27)),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    format!("{:<48}", truncate(&p.namespace, 47)),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(
+                    format!("{}", p.capabilities.len()),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+    }
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    f.render_widget(para, area);
+}
+
+fn draw_logs_tab(f: &mut ratatui::Frame, area: Rect, modal: &SystemModal) {
+    if let Some(err) = &modal.log_error
+        && modal.log_files.is_empty()
+    {
+        let para = Paragraph::new(Line::from(Span::styled(
+            err.clone(),
+            Style::default().fg(Color::Red),
+        )))
+        .wrap(Wrap { trim: false });
+        f.render_widget(para, area);
+        return;
+    }
+    // Left: file list (30%). Right: tail (rest).
+    let cols =
+        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).split(area);
+
+    let file_lines: Vec<Line> = if modal.log_files.is_empty() {
+        vec![Line::from(Span::styled(
+            "(no log files)",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    } else {
+        modal
+            .log_files
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let name = p
+                    .file_stem()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+                if i == modal.log_cursor {
+                    Line::from(Span::styled(
+                        format!("▶ {}", name),
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                } else {
+                    Line::from(Span::styled(
+                        format!("  {}", name),
+                        Style::default().fg(Color::White),
+                    ))
+                }
+            })
+            .collect()
+    };
+    let files = Paragraph::new(file_lines)
+        .block(
+            Block::default()
+                .borders(Borders::RIGHT)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(files, cols[0]);
+
+    let tail_lines: Vec<Line> = if let Some(err) = &modal.log_error {
+        vec![Line::from(Span::styled(
+            err.clone(),
+            Style::default().fg(Color::Red),
+        ))]
+    } else {
+        modal
+            .log_tail
+            .iter()
+            .map(|l| Line::from(Span::raw(l.clone())))
+            .collect()
+    };
+    let tail = Paragraph::new(tail_lines).wrap(Wrap { trim: false });
+    f.render_widget(tail, cols[1]);
+}
+
+fn draw_perf_tab(f: &mut ratatui::Frame, area: Rect, modal: &SystemModal) {
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(err) = &modal.perf_error {
+        lines.push(Line::from(Span::styled(
+            format!("error: {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{:<8}{:<8}{:<8}{:<12}{:<14}{}",
+                "pid", "%cpu", "%mem", "rss(kb)", "uptime", "comm"
+            ),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )));
+        // map pid → name from the boot state for the "from boot" hint
+        let pid_to_name: std::collections::HashMap<u32, String> = modal
+            .boot_pids
+            .iter()
+            .map(|(n, p)| (*p, n.clone()))
+            .collect();
+        for row in &modal.perf_rows {
+            // ps output: pid pcpu pmem rss etime comm (whitespace-separated)
+            let cols: Vec<&str> = row.split_whitespace().collect();
+            if cols.len() < 6 {
+                lines.push(Line::from(Span::raw(row.clone())));
+                continue;
+            }
+            let pid: u32 = cols[0].parse().unwrap_or(0);
+            let name = pid_to_name
+                .get(&pid)
+                .cloned()
+                .unwrap_or_else(|| cols[5].to_string());
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<8}", cols[0]), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{:<8}", cols[1]), Style::default().fg(Color::Green)),
+                Span::styled(
+                    format!("{:<8}", cols[2]),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    format!("{:<12}", cols[3]),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(format!("{:<14}", cols[4]), Style::default().fg(Color::Gray)),
+                Span::styled(name, Style::default().fg(Color::White)),
+            ]));
+        }
+        if !modal.note.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                modal.note.clone(),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    f.render_widget(para, area);
+}
+
+/// Truncate `s` to at most `max` chars, suffixing `…` when cut. `max`
+/// must be ≥ 1; if it's smaller than the ellipsis we just return the
+/// raw prefix.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else if max <= 1 {
+        s.chars().take(max).collect()
+    } else {
+        let mut out: String = s.chars().take(max - 1).collect();
+        out.push('…');
+        out
+    }
+}
+
+async fn run_system_modal(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    atlas_endpoint: &str,
+) -> Result<()> {
+    let mut modal = SystemModal {
+        tab: SystemTab::Status,
+        providers: Vec::new(),
+        status_error: None,
+        deploy_dir: find_deploy_dir(),
+        log_files: Vec::new(),
+        log_cursor: 0,
+        log_tail: Vec::new(),
+        log_error: None,
+        boot_pids: Vec::new(),
+        perf_rows: Vec::new(),
+        perf_error: None,
+        note: String::new(),
+    };
+    refresh_status_tab(&mut modal, atlas_endpoint).await;
+    refresh_logs_tab(&mut modal);
+    refresh_perf_tab(&mut modal);
+
+    loop {
+        draw_system_modal(terminal, &modal)?;
+        if event::poll(std::time::Duration::from_millis(120))?
+            && let Event::Key(key) = event::read()?
+        {
+            match key.code {
+                KeyCode::Esc => break,
+                KeyCode::Char('q') => break,
+                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    break;
+                }
+                KeyCode::Tab => {
+                    modal.tab = match modal.tab {
+                        SystemTab::Status => SystemTab::Logs,
+                        SystemTab::Logs => SystemTab::Perf,
+                        SystemTab::Perf => SystemTab::Status,
+                    };
+                }
+                KeyCode::BackTab => {
+                    modal.tab = match modal.tab {
+                        SystemTab::Status => SystemTab::Perf,
+                        SystemTab::Logs => SystemTab::Status,
+                        SystemTab::Perf => SystemTab::Logs,
+                    };
+                }
+                KeyCode::Char('1') => modal.tab = SystemTab::Status,
+                KeyCode::Char('2') => modal.tab = SystemTab::Logs,
+                KeyCode::Char('3') => modal.tab = SystemTab::Perf,
+                KeyCode::Char('r') => match modal.tab {
+                    SystemTab::Status => refresh_status_tab(&mut modal, atlas_endpoint).await,
+                    SystemTab::Logs => refresh_logs_tab(&mut modal),
+                    SystemTab::Perf => refresh_perf_tab(&mut modal),
+                },
+                KeyCode::Up if matches!(modal.tab, SystemTab::Logs) && modal.log_cursor > 0 => {
+                    modal.log_cursor -= 1;
+                    refresh_logs_tab(&mut modal);
+                }
+                KeyCode::Down
+                    if matches!(modal.tab, SystemTab::Logs)
+                        && modal.log_cursor + 1 < modal.log_files.len() =>
+                {
+                    modal.log_cursor += 1;
+                    refresh_logs_tab(&mut modal);
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
