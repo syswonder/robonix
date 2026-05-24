@@ -68,9 +68,27 @@ primitive:
     config:
       update_rate: 10
       frame_id: lidar
+  # Local ALSA mic + speaker. Default audio path for the demo —
+  # `Settings (Ctrl+,) → Audio` lets the operator pin this as both
+  # mic + speaker provider, or pick the macOS bridge below for mic
+  # while keeping audio_driver as the speaker.
   - name: audio_driver
     path: ./primitives/audio_driver
     config: {}
+
+  # Optional macOS bridge — registers a SECOND set of
+  # robonix/primitive/audio/{mic,speaker,driver} providers backed by
+  # a WebSocket to ~/robonix-scripts/mac_server/server.py running on
+  # a macOS host. When that script isn't running this primitive enters
+  # ERROR state but doesn't affect anything else. Toggle in chat via
+  # Settings → Audio → mic provider = audio_macos_bridge.
+  #
+  # Update `host:` to your macOS LAN / tailscale address before boot.
+  - name: audio_macos_bridge
+    path: ./primitives/audio_macos_bridge
+    config:
+      host: 100.78.199.22   # ← UPDATE: macOS tailscale / LAN address
+      port: 60000
 
 service:
   - name: mapping
