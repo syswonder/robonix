@@ -52,6 +52,12 @@ import numpy as np
 # segments (see rust/crates/robonix-codegen/src/contract_gen.rs).
 import robonix_contracts_pb2 as pb  # type: ignore[import-not-found]
 import robonix_contracts_pb2_grpc as pb_grpc  # type: ignore[import-not-found]
+# Voiceprint contract messages live under the per-IDL `robonix.voiceprint`
+# proto package (Identify_*, Enroll_*, ListEnrolled_*). They are NOT
+# remangled into `robonix_contracts_pb2.RobonixSystemSpeech*` — that
+# only mangles SERVICE names. Use the voiceprint_pb2 namespace for the
+# request/response dataclasses.
+import voiceprint_pb2 as vp  # type: ignore[import-not-found]
 from robonix_api import Service, Ok, Err  # noqa: E402
 
 from voiceprint_service.engine import EcapaTdnnEngine
@@ -164,7 +170,7 @@ class _IdentifyServicer(pb_grpc.RobonixSystemSpeechVoiceprintServicer):
 
     def Identify(self, request, context):  # noqa: N802 (gRPC method)
         if _engine is None or _db is None:
-            return pb.RobonixSystemSpeechVoiceprint_Response(
+            return vp.Identify_Response(
                 user_id="", user_name="", confidence=0.0, is_known=False,
                 error="voiceprint engine not initialised (Driver(CMD_INIT) not received yet)",
             )
@@ -179,13 +185,13 @@ class _IdentifyServicer(pb_grpc.RobonixSystemSpeechVoiceprintServicer):
                 "Identify: best=%s (%s) score=%.4f is_known=%s",
                 uid, name, score, is_known,
             )
-            return pb.RobonixSystemSpeechVoiceprint_Response(
+            return vp.Identify_Response(
                 user_id=uid, user_name=name, confidence=score,
                 is_known=is_known, error="",
             )
         except Exception as exc:  # noqa: BLE001
             log.exception("Identify failed")
-            return pb.RobonixSystemSpeechVoiceprint_Response(
+            return vp.Identify_Response(
                 user_id="", user_name="", confidence=0.0,
                 is_known=False, error=str(exc),
             )
@@ -196,11 +202,11 @@ class _EnrollServicer(pb_grpc.RobonixSystemSpeechVoiceprintEnrollServicer):
 
     def Enroll(self, request, context):  # noqa: N802
         if _engine is None or _db is None:
-            return pb.RobonixSystemSpeechVoiceprintEnroll_Response(
+            return vp.Enroll_Response(
                 success=False, error="engine not initialised",
             )
         if not request.user_id or not request.audio_data:
-            return pb.RobonixSystemSpeechVoiceprintEnroll_Response(
+            return vp.Enroll_Response(
                 success=False, error="user_id and audio_data are required",
             )
         try:
@@ -210,10 +216,10 @@ class _EnrollServicer(pb_grpc.RobonixSystemSpeechVoiceprintEnrollServicer):
                 request.sample_rate_hz or 16000,
             )
             _db.enroll(request.user_id, request.user_name, emb)
-            return pb.RobonixSystemSpeechVoiceprintEnroll_Response(success=True, error="")
+            return vp.Enroll_Response(success=True, error="")
         except Exception as exc:  # noqa: BLE001
             log.exception("Enroll failed")
-            return pb.RobonixSystemSpeechVoiceprintEnroll_Response(success=False, error=str(exc))
+            return vp.Enroll_Response(success=False, error=str(exc))
 
 
 class _ListServicer(pb_grpc.RobonixSystemSpeechVoiceprintListServicer):
@@ -221,18 +227,18 @@ class _ListServicer(pb_grpc.RobonixSystemSpeechVoiceprintListServicer):
 
     def ListEnrolled(self, request, context):  # noqa: N802
         if _db is None:
-            return pb.RobonixSystemSpeechVoiceprintList_Response(
+            return vp.ListEnrolled_Response(
                 users_json="[]", count=0, error="db not initialised",
             )
         try:
             users = [{"user_id": uid, "user_name": name} for uid, name in _db.list_users()]
-            return pb.RobonixSystemSpeechVoiceprintList_Response(
+            return vp.ListEnrolled_Response(
                 users_json=json.dumps(users, ensure_ascii=False),
                 count=len(users), error="",
             )
         except Exception as exc:  # noqa: BLE001
             log.exception("ListEnrolled failed")
-            return pb.RobonixSystemSpeechVoiceprintList_Response(
+            return vp.ListEnrolled_Response(
                 users_json="[]", count=0, error=str(exc),
             )
 

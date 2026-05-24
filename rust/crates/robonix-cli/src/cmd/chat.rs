@@ -1406,7 +1406,7 @@ async fn run_tui(
         role: Role::Status,
         text: format!(
             "Connected to Liaison at {liaison_endpoint} as {local_user}. \
-             Enter = send · Ctrl+V = voice · Ctrl+, = settings · Esc = abort · Ctrl+C = quit · ? = help."
+             Enter = send · Ctrl+V = voice · Ctrl+T = settings · Esc = abort · Ctrl+C = quit · ? = help."
         ),
     });
     if let Some(ctl) = chat_cfg.current_controller.as_deref() {
@@ -1462,14 +1462,19 @@ async fn run_tui(
                 continue;
             }
 
-            // Ctrl+, → Settings (unified). Replaces the old Ctrl+A/U/S
+            // Ctrl+T → Settings (unified). Replaces the old Ctrl+A/U/S
             // sprawl. Ctrl+A/U/S still work as power-user deep-links
-            // that jump straight into a specific category, but the
-            // single discoverable entry point is Ctrl+, .
+            // that jump straight into a specific category.
+            //
+            // (Originally bound to Ctrl+, but POSIX C0 only encodes
+            // Ctrl+A..Ctrl+_ — `,` has no Ctrl variant unless the
+            // terminal opts into Kitty keyboard protocol, so most
+            // emulators silently swallowed the keystroke. Ctrl+T = 0x14,
+            // a real C0 code, works everywhere.)
             let settings_entry: Option<SettingsCategory> =
                 if !busy && key.modifiers.contains(KeyModifiers::CONTROL) {
                     match key.code {
-                        KeyCode::Char(',') => Some(SettingsCategory::Modes),
+                        KeyCode::Char('t') => Some(SettingsCategory::Modes),
                         KeyCode::Char('a') => Some(SettingsCategory::Audio),
                         KeyCode::Char('u') => Some(SettingsCategory::Users),
                         KeyCode::Char('s') => Some(SettingsCategory::System),
@@ -2540,7 +2545,7 @@ fn render_help_overlay(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) ->
             ("Global", ""),
             ("  Enter", "Send the current input"),
             ("  Ctrl+V", "Hold to talk (auto-ends on silence)"),
-            ("  Ctrl+,", "Open Settings (Modes / Audio / Users / System)"),
+            ("  Ctrl+T", "Open Settings (Modes / Audio / Users / System)"),
             ("", ""),
             ("Settings deep-links", ""),
             ("  Ctrl+A", "Settings → Audio"),
@@ -3348,12 +3353,33 @@ async fn run_users_modal(
                             continue;
                         }
                         let user_id = format!("voice:{}", slug_for_user_id(&dn));
-                        let ep = atlas_endpoint.to_string();
-                        let sp = speaker_pin.clone();
-                        let prompt = "开始声纹录入,请说话".to_string();
-                        tokio::spawn(async move {
-                            let _ = speak_text(&ep, &sp, &prompt).await;
-                        });
+                        // Play the "请说话" prompt to completion BEFORE
+                        // starting the mic capture — otherwise the prompt
+                        // plays into the operator's own microphone and
+                        // pollutes the enrolled embedding. Keep the modal
+                        // on a Notice screen during playback so the operator
+                        // sees a clear "wait" state instead of a frozen
+                        // recording bar at 0.0s.
+                        modal.state = UsersModalState::Notice {
+                            text: format!(
+                                "🔊 准备录入声纹:{}\n\n请等待提示音 \"开始声纹录入,请说话\" 播放完毕,\n然后再开始说话。",
+                                dn
+                            ),
+                            ok: true,
+                        };
+                        modal.status = "playing instruction…".to_string();
+                        draw_users_modal(terminal, &modal)?;
+                        {
+                            let prompt = "开始声纹录入,请说话".to_string();
+                            if let Err(e) = speak_text(atlas_endpoint, &speaker_pin, &prompt).await {
+                                log_lines.push(format!("speak prompt warn: {e:#}"));
+                            }
+                        }
+                        // Short additional gap so the speaker driver fully
+                        // drains its ALSA buffer before we open the mic
+                        // stream — otherwise the very first ~200ms of
+                        // recording still picks up TTS tail.
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                         modal.state = UsersModalState::Recording {
                             started: std::time::Instant::now(),
                             audio: Vec::new(),
