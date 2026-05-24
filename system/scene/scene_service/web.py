@@ -254,7 +254,11 @@ function fmt(n) { return Number(n).toFixed(2); }
 
 async function tick() {
     try {
-        const r = await fetch('/api/state', { cache: 'no-store' });
+        // Tell server which occupancy revision we already have, so it
+        // can omit the (potentially MB-sized) png_b64 on every poll.
+        // Server returns `occupancy: null` when our stamp is current.
+        const url = '/api/state?occ_stamp=' + occStamp;
+        const r = await fetch(url, { cache: 'no-store' });
         if (!r.ok) return;
         const state = await r.json();
         draw(state);
@@ -286,18 +290,29 @@ def _shorten_id(object_id: str) -> str:
 _OCCUPANCY_CACHE: dict[str, Any] = {"count": -1, "payload": None}
 
 
-def _occupancy_payload(hub: Any) -> Optional[dict]:
+def _occupancy_payload(hub: Any, *, since_stamp_ms: Optional[int] = None) -> Optional[dict]:
     """Encode the latest OccupancyGrid (from /map via hub) as a small
     PNG + metadata. Cached by hub message count — only re-encodes when
     a fresh /map arrives. Returns None when no map is available yet
-    or rendering fails (e.g. numpy missing)."""
+    or rendering fails (e.g. numpy missing).
+
+    `since_stamp_ms`: if the caller already has a payload with this
+    stamp, return None instead of the full payload — saves ~MB per
+    /api/state response on large maps where the wire cost dominated
+    everything else. The client treats None as "no change, keep my
+    last decode" (see the `if state.occupancy && stamp_ms !== ...`
+    gate in tick() inside _INDEX_2D_HTML)."""
     if hub is None or not hub.has("occupancy_grid"):
         return None
     msg, stamp_unix, count = hub.latest("occupancy_grid")
     if msg is None or count == 0:
         return None
     if _OCCUPANCY_CACHE["count"] == count:
-        return _OCCUPANCY_CACHE["payload"]
+        cached = _OCCUPANCY_CACHE["payload"]
+        if since_stamp_ms is not None and cached is not None \
+                and cached["stamp_ms"] == since_stamp_ms:
+            return None  # client already has this revision
+        return cached
     try:
         import numpy as np
         from PIL import Image as PILImage
@@ -330,6 +345,11 @@ def _occupancy_payload(hub: Any) -> Optional[dict]:
     }
     _OCCUPANCY_CACHE["count"] = count
     _OCCUPANCY_CACHE["payload"] = payload
+    # Even on a freshly encoded payload, honour the since_stamp_ms hint
+    # — relevant after a /map republish where the new stamp matches
+    # what the client already happened to fetch via a parallel tick.
+    if since_stamp_ms is not None and payload["stamp_ms"] == since_stamp_ms:
+        return None
     return payload
 
 
@@ -431,7 +451,7 @@ def _camera_payload(hub: Any) -> dict:
 
 
 def _state_payload(registry: ObjectRegistry, relations: RelationEngine,
-                   hub: Any) -> dict:
+                   hub: Any, *, since_occ_stamp_ms: Optional[int] = None) -> dict:
     """Serialise the registry + relations + map into the small JSON
     shape the page consumes. Done in one snapshot so the page never
     sees a half-updated registry."""
@@ -463,7 +483,7 @@ def _state_payload(registry: ObjectRegistry, relations: RelationEngine,
         "objects": out_objects,
         "relations": out_relations,
         "robot": robot_pose,
-        "occupancy": _occupancy_payload(hub),
+        "occupancy": _occupancy_payload(hub, since_stamp_ms=since_occ_stamp_ms),
         "stamp_unix": time.time(),
     }
 
@@ -512,8 +532,22 @@ def make_app(*, registry: ObjectRegistry, relations: RelationEngine,
     async def index2d(_request) -> HTMLResponse:
         return HTMLResponse(_INDEX_HTML)
 
-    async def state(_request) -> JSONResponse:
-        return JSONResponse(_state_payload(registry, relations, hub))
+    async def state(request) -> JSONResponse:
+        # Client passes `?occ_stamp=<ms>` to tell us which occupancy
+        # revision it already has cached. We omit png_b64 from the
+        # response when it would be a no-op — the on-wire delta drops
+        # from megabytes/sec to a few kB/sec on big maps.
+        # Non-map callers (3D viewer, info panel) pass `?occ=skip` to
+        # opt out of the field entirely.
+        skip_occ = request.query_params.get("occ") == "skip"
+        raw = request.query_params.get("occ_stamp")
+        since_ms = int(raw) if raw and raw.lstrip("-").isdigit() else None
+        payload = _state_payload(
+            registry, relations, hub, since_occ_stamp_ms=since_ms
+        )
+        if skip_occ:
+            payload["occupancy"] = None
+        return JSONResponse(payload)
 
     async def index3d(_request) -> HTMLResponse:
         return HTMLResponse(_INDEX_3D_HTML)
@@ -824,7 +858,7 @@ _COMBINED_HTML = r"""<!doctype html>
     const fmt = n => Number(n).toFixed(2);
     async function fpTick() {
       try {
-        const r = await fetch('/api/state', { cache: 'no-store' });
+        const r = await fetch('/api/state?occ=skip', { cache: 'no-store' });
         if (r.ok) {
           const s = await r.json();
           const objs = (s.objects || []).slice().sort(
@@ -1311,7 +1345,7 @@ _INDEX_3D_HTML = r"""<!doctype html>
     }
     async function pollMap() {
         try {
-            const r = await fetch('/api/state', {cache: 'no-store'});
+            const r = await fetch('/api/state?occ=skip', {cache: 'no-store'});
             const j = await r.json();
             await refreshMapPlane(j.occupancy);
         } catch (e) { /* swallow — pollRobot uses the same endpoint */ }
@@ -1462,7 +1496,7 @@ _INDEX_3D_HTML = r"""<!doctype html>
 
     async function pollRobot() {
         try {
-            const r = await fetch('/api/state', {cache: 'no-store'});
+            const r = await fetch('/api/state?occ=skip', {cache: 'no-store'});
             const j = await r.json();
             const rb = j.robot;
             if (rb && Number.isFinite(rb.x)) {
