@@ -18,10 +18,6 @@ from .types import SceneGraphEdge, SceneGraphNode, SceneGraphSnapshot
 log = logging.getLogger(__name__)
 
 
-def _round_tuple(t: tuple[float, ...], decimals: int = 1) -> str:
-    return ",".join(f"{v:.{decimals}f}" for v in t)
-
-
 class SceneGraphStore:
     """In-memory snapshot + on-disk JSON cache."""
 
@@ -57,9 +53,13 @@ class SceneGraphStore:
 
     @staticmethod
     def _relation_key(a: SceneGraphNode, b: SceneGraphNode) -> str:
-        a_sig = f"{a.object_id}:{a.caption or a.label}:{_round_tuple(a.bbox_center)}"
-        b_sig = f"{b.object_id}:{b.caption or b.label}:{_round_tuple(b.bbox_center)}"
-        return f"{a_sig}__{b_sig}"
+        # Key on object identity only. Including label/caption/coords made
+        # the key drift on every float-level position jitter, causing
+        # near-100% miss rate, redundant LLM calls, and visible edge
+        # flicker in the web UI (relations.json blew up to one entry per
+        # tick). object_id is stable across re-observations of the same
+        # tracked object — that is exactly what we want for caching.
+        return f"{a.object_id}__{b.object_id}"
 
     def get_cached_relation(
         self, a: SceneGraphNode, b: SceneGraphNode

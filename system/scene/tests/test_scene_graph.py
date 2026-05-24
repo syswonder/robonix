@@ -14,6 +14,32 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
+# Env vars that SceneGraphLLMClient picks up via `arg or os.environ.get(...)`.
+# Tests that assert "LLM unavailable" must clear them — otherwise on a dev
+# machine where these are set, the constructor reads through `api_key=""`
+# and actually hits the live LLM, returning e.g. "none" instead of the
+# expected "unknown" / "llm_fail" path.
+_LLM_ENV_VARS = (
+    "VLM_API_KEY",
+    "VLM_BASE_URL",
+    "VLM_MODEL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_MODEL",
+)
+
+
+def _pop_llm_env() -> dict:
+    """Pop all LLM-related env vars and return them for restoration."""
+    return {k: os.environ.pop(k, None) for k in _LLM_ENV_VARS}
+
+
+def _restore_llm_env(backup: dict) -> None:
+    for k, v in backup.items():
+        if v is not None:
+            os.environ[k] = v
+
+
 def test_types():
     """SceneGraphNode / Edge / Snapshot constructors."""
     from scene_service.scene_graph.types import (
@@ -189,10 +215,7 @@ def test_store_cache():
 
 def test_llm_client_no_key():
     """LLM client with no API key returns empty dict and doesn't crash."""
-    # Clear env to simulate no API key.
-    env_backup = {}
-    for k in ("VLM_API_KEY", "OPENAI_API_KEY", "VLM_BASE_URL", "OPENAI_BASE_URL"):
-        env_backup[k] = os.environ.pop(k, None)
+    env_backup = _pop_llm_env()
 
     try:
         from scene_service.scene_graph.llm_client import SceneGraphLLMClient
@@ -204,32 +227,34 @@ def test_llm_client_no_key():
         )
         assert result == {}
     finally:
-        for k, v in env_backup.items():
-            if v is not None:
-                os.environ[k] = v
+        _restore_llm_env(env_backup)
     print("  [PASS] test_llm_client_no_key")
 
 
 def test_relation_inferer_no_llm():
     """RelationInferer returns unknown when LLM is unavailable."""
-    from scene_service.scene_graph.llm_client import SceneGraphLLMClient
-    from scene_service.scene_graph.relations import RelationInferer
-    from scene_service.scene_graph.types import GeometryHint, SceneGraphNode
+    env_backup = _pop_llm_env()
+    try:
+        from scene_service.scene_graph.llm_client import SceneGraphLLMClient
+        from scene_service.scene_graph.relations import RelationInferer
+        from scene_service.scene_graph.types import GeometryHint, SceneGraphNode
 
-    client = SceneGraphLLMClient(api_key="", base_url="")
-    inferer = RelationInferer(client)
+        client = SceneGraphLLMClient(api_key="", base_url="")
+        inferer = RelationInferer(client)
 
-    a = SceneGraphNode("obj_1", "cup", (1.0, 0.5, 0.8), (0.1, 0.1, 0.15), caption="cup")
-    b = SceneGraphNode("obj_2", "table", (1.0, 0.5, 0.4), (1.2, 0.8, 0.05), caption="table")
-    hint = GeometryHint(0.4, 0.6, "a_above_b", "none")
+        a = SceneGraphNode("obj_1", "cup", (1.0, 0.5, 0.8), (0.1, 0.1, 0.15), caption="cup")
+        b = SceneGraphNode("obj_2", "table", (1.0, 0.5, 0.4), (1.2, 0.8, 0.05), caption="table")
+        hint = GeometryHint(0.4, 0.6, "a_above_b", "none")
 
-    edge = asyncio.get_event_loop().run_until_complete(
-        inferer.infer_relation(a, b, hint)
-    )
-    assert edge.relation == "unknown"
-    assert edge.method == "llm_fail"
-    assert edge.source_id == "obj_1"
-    assert edge.target_id == "obj_2"
+        edge = asyncio.get_event_loop().run_until_complete(
+            inferer.infer_relation(a, b, hint)
+        )
+        assert edge.relation == "unknown"
+        assert edge.method == "llm_fail"
+        assert edge.source_id == "obj_1"
+        assert edge.target_id == "obj_2"
+    finally:
+        _restore_llm_env(env_backup)
     print("  [PASS] test_relation_inferer_no_llm")
 
 
@@ -267,6 +292,15 @@ def test_builder_rebuild_no_objects():
 
 def test_builder_rebuild_with_objects():
     """Builder with stable objects produces nodes and attempts edges."""
+    env_backup = _pop_llm_env()
+    try:
+        _run_builder_rebuild_with_objects_body()
+    finally:
+        _restore_llm_env(env_backup)
+    print("  [PASS] test_builder_rebuild_with_objects")
+
+
+def _run_builder_rebuild_with_objects_body():
     from scene_service.scene_graph.builder import SceneGraphBuilder, SceneGraphConfig
     from scene_service.scene_graph.captioner import NodeCaptioner
     from scene_service.scene_graph.llm_client import SceneGraphLLMClient
@@ -354,7 +388,6 @@ def test_builder_rebuild_with_objects():
 
         # Verify snapshot is persisted.
         assert store.get_snapshot() is snap
-    print("  [PASS] test_builder_rebuild_with_objects")
 
 
 def test_geometry_containment():
