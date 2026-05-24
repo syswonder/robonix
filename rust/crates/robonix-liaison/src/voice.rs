@@ -403,21 +403,56 @@ async fn run_session(
     }
     .await;
 
+    // Per-round accumulator. Pilot emits the round's narration as
+    // EVT_TEXT_CHUNK (possibly streamed in multiple pieces), then the
+    // round boundary is signalled by EVT_PLAN (intermediate round —
+    // capability calls follow) or EVT_FINAL_TEXT (terminal round, no
+    // more calls). Flushing only on EVT_FINAL_TEXT (which is what we
+    // did before) means the operator only ever hears the LAST sentence;
+    // every intermediate "I'll first look around" / "I'll pick the chair"
+    // was silently dropped. Flush at every round boundary instead.
+    const EVT_PLAN_KIND: u32 = 1;
+    const EVT_TEXT_CHUNK_KIND: u32 = 0;
+    let mut round_text = String::new();
+
     match pilot_stream_result {
         Ok(mut pilot_stream) => {
             while let Some(item) = pilot_stream.next().await {
                 match item {
                     Ok(ev) => {
-                        // Round-complete reply → enqueue for playback.
-                        // EVT_FINAL_TEXT carries the agent's "I'll do X /
-                        // I did Y" sentence at each round boundary.
-                        // EVT_TEXT_CHUNK is partial streaming — skipped
-                        // (would clip mid-sentence).
-                        if req.tts_enabled
-                            && ev.event_kind == EVT_FINAL_TEXT_KIND
-                            && !ev.final_text.trim().is_empty()
-                        {
-                            let _ = tts_tx.send(ev.final_text.clone()).await;
+                        if req.tts_enabled {
+                            match ev.event_kind {
+                                EVT_TEXT_CHUNK_KIND if !ev.text_chunk.is_empty() => {
+                                    round_text.push_str(&ev.text_chunk);
+                                }
+                                EVT_PLAN_KIND => {
+                                    // Round boundary — agent's narration
+                                    // for this round is complete; play
+                                    // it now while the tool batch runs.
+                                    if !round_text.trim().is_empty() {
+                                        let _ = tts_tx
+                                            .send(std::mem::take(&mut round_text))
+                                            .await;
+                                    }
+                                }
+                                EVT_FINAL_TEXT_KIND => {
+                                    // Terminal round — flush any
+                                    // leftover TEXT_CHUNK first, then
+                                    // the explicit final_text (pilot
+                                    // usually puts the whole closing
+                                    // sentence here and leaves
+                                    // round_text empty, but be safe).
+                                    if !round_text.trim().is_empty() {
+                                        let _ = tts_tx
+                                            .send(std::mem::take(&mut round_text))
+                                            .await;
+                                    }
+                                    if !ev.final_text.trim().is_empty() {
+                                        let _ = tts_tx.send(ev.final_text.clone()).await;
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                         let _ = tx
                             .send(Ok(VoiceEvent {
