@@ -133,9 +133,12 @@ fn emit_build_metadata(repo_root: &std::path::Path) {
         .unwrap_or_else(|| "unknown".to_string());
     let builder = format!("{user}@{host}");
 
-    // Build time — UTC ISO-8601, second precision. SOURCE_DATE_EPOCH (the
-    // Reproducible Builds standard) overrides the wallclock for repro
-    // builds.
+    // Build time — ISO-8601 with the BUILDER's local TZ offset (e.g.
+    // `2026-05-24T10:23:50+0800` on a China-time host) so operators can
+    // tell at a glance when their copy was built without doing UTC math.
+    // SOURCE_DATE_EPOCH (Reproducible Builds standard) still overrides
+    // for repro builds — but then the offset is forced to UTC for
+    // determinism.
     let build_time = if let Ok(s) = std::env::var("SOURCE_DATE_EPOCH")
         && let Ok(secs) = s.parse::<i64>()
     {
@@ -145,7 +148,18 @@ fn emit_build_metadata(repo_root: &std::path::Path) {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        format_unix_utc(secs)
+        // GNU date respects TZ + reads /etc/localtime; %z renders the
+        // numeric offset like +0800. Fall back to UTC if it fails so
+        // unusual builders (no coreutils) still get a usable timestamp.
+        Command::new("date")
+            .args(["-d", &format!("@{secs}"), "+%Y-%m-%dT%H:%M:%S%z"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format_unix_utc(secs))
     };
 
     // Compiler version — `rustc -V` (e.g. "rustc 1.95.0 (abc123 2026-04-15)").

@@ -816,16 +816,45 @@ fn build_task(
     }
 }
 
+/// Accumulate pilot stream text events into a single TTS payload.
+///
+/// Pilot's per-round contract (see `planner.rs`):
+///   - intermediate round (has tool calls) → `TextChunk(round_text)` + `Plan`
+///   - final round (no tool call, breaks loop) → `FinalText(round_text)`
+///
+/// So in a single-round chitchat the only text event is `FinalText`, and
+/// in a multi-round (e.g. "look around then describe") the chain looks like
+/// `TextChunk("我看一下前方。") … Plan … BatchResult … FinalText("前方有…")`.
+///
+/// Earlier code guarded `FinalText` with `into.is_empty()` — that worked
+/// for the chitchat case but silently dropped the final round's reply in
+/// every multi-round session, which is exactly what TTS users hear as
+/// "the last sentence wasn't spoken". The fix: always append. Add a
+/// space separator when the previous chunk doesn't already end with
+/// sentence-terminating punctuation so the TTS doesn't run two sentences
+/// together.
 fn accumulate_text(ev: &PilotEvent, into: &mut String) {
     const EVT_TEXT_CHUNK: u32 = 0;
     const EVT_FINAL_TEXT: u32 = 4;
     match ev.event_kind {
-        EVT_TEXT_CHUNK => into.push_str(&ev.text_chunk),
-        EVT_FINAL_TEXT if into.trim().is_empty() && !ev.final_text.is_empty() => {
-            into.push_str(&ev.final_text);
-        }
+        EVT_TEXT_CHUNK if !ev.text_chunk.is_empty() => append_with_sep(into, &ev.text_chunk),
+        EVT_FINAL_TEXT if !ev.final_text.is_empty() => append_with_sep(into, &ev.final_text),
         _ => {}
     }
+}
+
+fn append_with_sep(into: &mut String, fragment: &str) {
+    if !into.is_empty() {
+        let last = into.chars().last().unwrap_or(' ');
+        let needs_sep = !matches!(
+            last,
+            '。' | '！' | '？' | '.' | '!' | '?' | '\n' | ' ' | ',' | '，'
+        );
+        if needs_sep {
+            into.push(' ');
+        }
+    }
+    into.push_str(fragment);
 }
 
 fn event_status(kind: u32, session_id: &str, message: &str) -> VoiceEvent {
