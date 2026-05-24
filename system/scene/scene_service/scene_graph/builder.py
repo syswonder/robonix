@@ -56,6 +56,13 @@ class SceneGraphConfig:
         )
         self.caption_enabled = _env_bool("SCENE_GRAPH_CAPTION_ENABLED", True)
         self.relation_enabled = _env_bool("SCENE_GRAPH_RELATION_ENABLED", True)
+        # Edge hysteresis: keep an edge for up to N rebuild rounds in
+        # which it was not re-confirmed by the current candidate set
+        # (e.g. one of the endpoints temporarily missing, candidate
+        # truncation due to max_candidate_edges, LLM rate limit). A
+        # round of 0 edges therefore does not wipe out the UI.
+        # An edge re-confirmed as "none"/"unknown" is dropped immediately.
+        self.max_stale_rounds = _env_int("SCENE_GRAPH_MAX_STALE_ROUNDS", 2)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -139,6 +146,14 @@ class SceneGraphBuilder:
 
         # 5. Generate candidate edges.
         edges: list[SceneGraphEdge] = []
+        # Pairs (source_id, target_id) for which the current cycle has
+        # an authoritative answer (either a fresh edge or an explicit
+        # none/unknown). Old edges for these pairs are *not* carried
+        # over — the new answer wins. All other prior edges are merged
+        # in via hysteresis below.
+        confirmed_pairs: set[tuple[str, str]] = set()
+        node_ids = {n.object_id for n in nodes}
+
         if self.cfg.relation_enabled and len(nodes) >= 2:
             candidates = generate_edge_candidates(
                 nodes,
@@ -150,11 +165,15 @@ class SceneGraphBuilder:
             for a, b, hint in candidates:
                 cached_edge = self.store.get_cached_relation(a, b)
                 if cached_edge is not None:
+                    confirmed_pairs.add((a.object_id, b.object_id))
                     if cached_edge.relation not in ("none", "unknown"):
+                        cached_edge.stale_rounds = 0
                         edges.append(cached_edge)
                     continue
 
-                # Rate-limit LLM calls per cycle.
+                # Rate-limit LLM calls per cycle. Pairs we couldn't
+                # query this round are *not* added to confirmed_pairs,
+                # so any prior edge for them survives via hysteresis.
                 if llm_calls >= self.cfg.max_llm_relations_per_cycle:
                     continue
 
@@ -172,8 +191,30 @@ class SceneGraphBuilder:
                 llm_calls += 1
 
                 self.store.put_cached_relation(a, b, edge)
+                # An llm_fail (transport / parse error) is not really
+                # "the LLM said unknown" — treat it like the rate-limit
+                # case so a flaky network round does not drop edges.
+                if edge.method != "llm_fail":
+                    confirmed_pairs.add((a.object_id, b.object_id))
                 if edge.relation not in ("none", "unknown"):
+                    edge.stale_rounds = 0
                     edges.append(edge)
+
+        # 6b. Hysteresis: carry forward un-confirmed edges from the
+        # previous snapshot, capped at cfg.max_stale_rounds. Drop any
+        # edge whose endpoints are no longer in the registry.
+        prev = self.store.get_snapshot()
+        if prev is not None and self.cfg.max_stale_rounds > 0:
+            for old in prev.edges:
+                pair = (old.source_id, old.target_id)
+                if pair in confirmed_pairs:
+                    continue
+                if old.source_id not in node_ids or old.target_id not in node_ids:
+                    continue
+                if old.stale_rounds + 1 > self.cfg.max_stale_rounds:
+                    continue
+                old.stale_rounds += 1
+                edges.append(old)
 
         # 7. Build and save snapshot.
         snapshot = SceneGraphSnapshot(

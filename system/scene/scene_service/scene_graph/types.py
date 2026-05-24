@@ -71,6 +71,12 @@ class SceneGraphEdge:
     method: str = "llm"       # "llm" | "cached" | "llm_fail"
     reason: str = ""
     updated_at: float = field(default_factory=time.time)
+    # How many consecutive rebuild rounds this edge has *not* been
+    # re-confirmed by the current cycle. 0 = fresh from this round.
+    # SceneGraphBuilder uses this for hysteresis: an edge survives up
+    # to `max_stale_rounds` empty rounds before being dropped, so a
+    # transient round that returns 0 candidates does not wipe the UI.
+    stale_rounds: int = 0
 
 
 @dataclass

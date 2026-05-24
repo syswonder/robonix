@@ -39,9 +39,12 @@ ultralytics>=8.3            # YOLO-World v2 + the SAM wrapper that
 # that supports modern torch (the original openai `clip-by-openai`
 # uses a TorchScript Node API that's broken on torch 2.5+).
 clip-anytorch>=2.6
-open_clip_torch>=2.20       # ViT-B-32 LAION-2B; small enough for
+open_clip_torch>=2.20,<3    # ViT-B-32 LAION-2B; small enough for
                             # Jetson, x86-5090 happily uses ViT-L/14
                             # by swapping the env var.
+                            # Pinned <3 — open_clip 3.x changed the
+                            # tokenizer / forward signature concept-graphs
+                            # and our perception_concept_graphs.py rely on.
 supervision==0.14.0         # sv.Detections is the in-memory container
                             # gobs_to_detection_list expects.
 omegaconf==2.3.0            # concept-graphs' cfg dict format.
@@ -51,7 +54,13 @@ hydra-core==1.3.2           # for loading their cfslam yaml.
 # per tick is fine.
 open3d>=0.17,<0.19
 faiss-cpu==1.7.4            # used by their visual_similarity helper
-transformers>=4.40          # tokenizers for CLIP text path
+transformers>=4.40,<5       # tokenizers for CLIP text path; <5 because
+                            # transformers 5.x renames model classes
+                            # (Auto* import paths) and breaks
+                            # concept-graphs's CLIPTextModel load.
+huggingface-hub<1           # transformers/open_clip resolve weights via
+                            # this; 1.x changed the cached_download API
+                            # and breaks weight loading on first run.
 # pytorch3d was originally pulled in for concept-graphs's
 # compute_3d_iou_accurate_batch (used by compute_overlap_matrix_general
 # → merge_overlap_objects), but we replaced that path with a voxel-set
