@@ -88,6 +88,13 @@ struct ChatConfig {
     /// / unset = allow anyone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     current_controller: Option<String>,
+    /// When true, replies to TYPED input (Enter) are also synthesised
+    /// and played through the chosen speaker, and pilot is told the
+    /// reply will be spoken (context_json.modality=voice) so it follows
+    /// its brevity / no-markdown rule. Voice input (Ctrl+V) always
+    /// produces voice output regardless of this flag.
+    #[serde(default)]
+    response_voice: bool,
 }
 
 // ── Voiceprint client-side cache ────────────────────────────────────────────
@@ -1033,6 +1040,7 @@ impl AudioSettingsPage {
                 speaker_device_id: (!self.speaker_device_id.is_empty())
                     .then(|| self.speaker_device_id.clone()),
                 current_controller: None, // not consumed by Audio refresh
+                response_voice: false,    // not consumed by Audio refresh
             },
         )
         .await;
@@ -1355,6 +1363,7 @@ async fn run_audio_settings_page(
         speaker_cap_id: (!page.speaker_cap_id.is_empty()).then_some(page.speaker_cap_id),
         speaker_device_id: (!page.speaker_device_id.is_empty()).then_some(page.speaker_device_id),
         current_controller: cfg.current_controller.clone(),
+        response_voice: cfg.response_voice,
     };
     if let Err(e) = save_chat_config(&new_cfg) {
         log::warn!("could not save chat config: {e:#}");
@@ -1397,7 +1406,7 @@ async fn run_tui(
         role: Role::Status,
         text: format!(
             "Connected to Liaison at {liaison_endpoint} as {local_user}. \
-             Enter = send · Ctrl+V = voice · Ctrl+U = users · Ctrl+S = system · Ctrl+A = audio · Esc = abort · Ctrl+C = quit · ? = help."
+             Enter = send · Ctrl+V = voice · Ctrl+, = settings · Esc = abort · Ctrl+C = quit · ? = help."
         ),
     });
     if let Some(ctl) = chat_cfg.current_controller.as_deref() {
@@ -1453,105 +1462,74 @@ async fn run_tui(
                 continue;
             }
 
-            // Ctrl+S → System modal: live atlas state, boot log tails,
-            // and ps over the boot state's PIDs. Pauses chat until Esc.
-            if !busy
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-                && key.code == KeyCode::Char('s')
-            {
-                if let Err(e) = run_system_modal(terminal, atlas_endpoint).await {
-                    messages.borrow_mut().push(ChatMessage {
-                        role: Role::Status,
-                        text: format!("system modal: {e:#}"),
-                    });
-                }
-                continue;
-            }
-
-            // Ctrl+U → Users modal: enroll a new voice, pick the active
-            // controller (the user_id whose voice may issue commands), or
-            // clear the controller. Pauses the chat key loop until Esc.
-            if !busy
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-                && key.code == KeyCode::Char('u')
-            {
+            // Ctrl+, → Settings (unified). Replaces the old Ctrl+A/U/S
+            // sprawl. Ctrl+A/U/S still work as power-user deep-links
+            // that jump straight into a specific category, but the
+            // single discoverable entry point is Ctrl+, .
+            let settings_entry: Option<SettingsCategory> =
+                if !busy && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    match key.code {
+                        KeyCode::Char(',') => Some(SettingsCategory::Modes),
+                        KeyCode::Char('a') => Some(SettingsCategory::Audio),
+                        KeyCode::Char('u') => Some(SettingsCategory::Users),
+                        KeyCode::Char('s') => Some(SettingsCategory::System),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+            if let Some(entry) = settings_entry {
+                let prev_controller = chat_cfg.current_controller.clone();
+                let direct_open = !matches!(entry, SettingsCategory::Modes);
                 let db_snapshot = voiceprint_db.borrow().clone();
-                match run_users_modal(terminal, atlas_endpoint, &chat_cfg, db_snapshot).await {
+                let initial = if direct_open { Some(entry) } else { None };
+                match run_settings_menu(
+                    terminal,
+                    atlas_endpoint,
+                    chat_cfg.clone(),
+                    db_snapshot,
+                    initial,
+                )
+                .await
+                {
                     Ok(out) => {
-                        // Persist controller selection to chat.yaml so it
-                        // survives a chat restart. Save errors aren't fatal —
-                        // just log them inline.
-                        let prev = chat_cfg.current_controller.clone();
-                        chat_cfg.current_controller = out.controller.clone();
+                        chat_cfg = out.chat_cfg;
+                        *voiceprint_db.borrow_mut() = out.voiceprint_db;
                         if let Err(e) = save_chat_config(&chat_cfg) {
                             messages.borrow_mut().push(ChatMessage {
                                 role: Role::Status,
                                 text: format!("warning: chat.yaml save failed: {e:#}"),
                             });
                         }
-                        *voiceprint_db.borrow_mut() = out.db;
                         for line in &out.log_lines {
                             messages.borrow_mut().push(ChatMessage {
                                 role: Role::Status,
                                 text: line.clone(),
                             });
                         }
-                        // Echo the new controller state at the top of the
-                        // chat so a glance confirms the change.
-                        match (&prev, &chat_cfg.current_controller) {
-                            (a, b) if a == b => {}
-                            (_, Some(c)) => {
-                                let name = lookup_user_name(&voiceprint_db.borrow(), c)
-                                    .unwrap_or_else(|| c.clone());
-                                messages.borrow_mut().push(ChatMessage {
-                                    role: Role::Status,
-                                    text: format!(
-                                        "controller now {} ({}) — non-matching voices will be blocked",
-                                        name, c
-                                    ),
-                                });
-                            }
-                            (_, None) => {
-                                messages.borrow_mut().push(ChatMessage {
+                        if prev_controller != chat_cfg.current_controller {
+                            match &chat_cfg.current_controller {
+                                Some(c) => {
+                                    let name = lookup_user_name(&voiceprint_db.borrow(), c)
+                                        .unwrap_or_else(|| c.clone());
+                                    messages.borrow_mut().push(ChatMessage {
+                                        role: Role::Status,
+                                        text: format!(
+                                            "controller now {} ({}) — non-matching voices will be blocked",
+                                            name, c
+                                        ),
+                                    });
+                                }
+                                None => messages.borrow_mut().push(ChatMessage {
                                     role: Role::Status,
                                     text: "controller cleared — any speaker allowed".to_string(),
-                                });
+                                }),
                             }
                         }
                     }
                     Err(e) => messages.borrow_mut().push(ChatMessage {
                         role: Role::Status,
-                        text: format!("users modal: {e:#}"),
-                    }),
-                }
-                continue;
-            }
-
-            // Ctrl+A → btop-style single-page audio settings dashboard.
-            // All four sections (mic provider, mic device, speaker
-            // provider, speaker device) visible at once, Tab to cycle,
-            // ↑↓ to move within a section, Enter to pick. Esc to close.
-            if !busy
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-                && key.code == KeyCode::Char('a')
-            {
-                match run_audio_settings_page(atlas_endpoint, terminal, chat_cfg.clone()).await {
-                    Ok(new_cfg) => {
-                        chat_cfg = new_cfg;
-                        messages.borrow_mut().push(ChatMessage {
-                            role: Role::Status,
-                            text: format!(
-                                "audio settings updated: mic={}/{} · speaker={}/{}",
-                                chat_cfg.mic_cap_id.as_deref().unwrap_or("(unset)"),
-                                chat_cfg.mic_device_id.as_deref().unwrap_or("default"),
-                                chat_cfg.speaker_cap_id.as_deref().unwrap_or("(unset)"),
-                                chat_cfg.speaker_device_id.as_deref().unwrap_or("default"),
-                            ),
-                        });
-                    }
-                    Err(e) => messages.borrow_mut().push(ChatMessage {
-                        role: Role::Status,
-                        text: format!("audio settings: {e:#}"),
+                        text: format!("settings: {e:#}"),
                     }),
                 }
                 continue;
@@ -1619,11 +1597,17 @@ async fn run_tui(
                     busy = true;
                     draw(terminal, &messages.borrow(), &input, scroll, busy)?;
 
+                    let modality = if chat_cfg.response_voice {
+                        "voice"
+                    } else {
+                        "text"
+                    };
                     match run_text_intent_with_esc_abort(
                         liaison_endpoint,
                         &session_id,
                         &local_user,
                         &msg,
+                        modality,
                         Rc::clone(&messages),
                         terminal,
                         &input,
@@ -1631,7 +1615,17 @@ async fn run_tui(
                     )
                     .await
                     {
-                        Ok(()) => {}
+                        Ok(reply) => {
+                            if chat_cfg.response_voice && !reply.trim().is_empty() {
+                                // Fire-and-forget: a synthesis hiccup
+                                // should never block the next turn.
+                                let ep = atlas_endpoint.to_string();
+                                let sp = chat_cfg.speaker_cap_id.clone().unwrap_or_default();
+                                tokio::spawn(async move {
+                                    let _ = speak_text(&ep, &sp, &reply).await;
+                                });
+                            }
+                        }
                         Err(e) => {
                             messages.borrow_mut().push(ChatMessage {
                                 role: Role::Status,
@@ -1664,7 +1658,16 @@ async fn run_tui(
 
 // ── Liaison gRPC helpers ─────────────────────────────────────────────────────
 
-fn build_text_task(session_id: &str, user_id: &str, text: &str) -> crate::pb::pilot::Task {
+/// `modality` controls pilot's brevity rule (see planner.rs:181 + the
+/// liaison voice flow comment at voice.rs:803). Pass "voice" when the
+/// final reply will be spoken — pilot then drops markdown and trims to
+/// short sentences. Pass "text" for the default chat-window path.
+fn build_text_task(
+    session_id: &str,
+    user_id: &str,
+    text: &str,
+    modality: &str,
+) -> crate::pb::pilot::Task {
     use crate::pb::pilot::Task;
     const INTENT_SOURCE_TEXT: u32 = 0;
     Task {
@@ -1673,7 +1676,7 @@ fn build_text_task(session_id: &str, user_id: &str, text: &str) -> crate::pb::pi
         source: INTENT_SOURCE_TEXT,
         text: text.to_string(),
         audio_data: vec![],
-        context_json: serde_json::json!({"user_id": user_id, "modality": "text"}).to_string(),
+        context_json: serde_json::json!({"user_id": user_id, "modality": modality}).to_string(),
         timestamp_ms: now_ms(),
     }
 }
@@ -1735,24 +1738,29 @@ async fn abort_session(liaison_endpoint: &str, session_id: &str, user_id: &str) 
 
 // ── Text turn ────────────────────────────────────────────────────────────────
 
+/// Runs one text-input turn. Returns the agent's concatenated reply
+/// text so the caller can decide whether to TTS it (text-in / voice-out
+/// mode in chat.yaml). `modality` is forwarded to pilot via context_json
+/// so its brevity rule kicks in when the reply will be spoken.
 #[allow(clippy::too_many_arguments)]
 async fn run_text_intent_with_esc_abort(
     liaison_endpoint: &str,
     session_id: &str,
     user_id: &str,
     user_msg: &str,
+    modality: &str,
     messages: Rc<RefCell<Vec<ChatMessage>>>,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     input: &str,
     scroll: &mut u16,
-) -> Result<()> {
+) -> Result<String> {
     use crate::pb::contracts::robonix_system_liaison_submit_client::RobonixSystemLiaisonSubmitClient;
     use crate::pb::pilot::PilotEvent;
     use tonic::Status;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(64);
     let liaison_ep = liaison_endpoint.to_string();
-    let task = build_text_task(session_id, user_id, user_msg);
+    let task = build_text_task(session_id, user_id, user_msg, modality);
 
     let _stream_task = tokio::spawn(async move {
         let mut client = match RobonixSystemLiaisonSubmitClient::connect(liaison_ep.clone()).await {
@@ -1777,6 +1785,12 @@ async fn run_text_intent_with_esc_abort(
         }
     });
 
+    // Accumulate every TEXT_CHUNK / FINAL_TEXT into a single reply
+    // string. Same logic as liaison's voice path so the eventual TTS
+    // payload covers BOTH the round-0 chitchat AND the post-tool round-N
+    // final reply (the bug we just fixed in voice.rs).
+    let mut accumulated_reply = String::new();
+
     loop {
         tokio::select! {
             biased;
@@ -1784,6 +1798,15 @@ async fn run_text_intent_with_esc_abort(
                 match item {
                     None => break,
                     Some(Ok(event)) => {
+                        match event.event_kind {
+                            0 if !event.text_chunk.is_empty() => {
+                                append_reply_fragment(&mut accumulated_reply, &event.text_chunk);
+                            }
+                            4 if !event.final_text.is_empty() => {
+                                append_reply_fragment(&mut accumulated_reply, &event.final_text);
+                            }
+                            _ => {}
+                        }
                         apply_pilot_event(&messages, &event)?;
                         draw(terminal, &messages.borrow(), input, 0, true)?;
                     }
@@ -1824,7 +1847,24 @@ async fn run_text_intent_with_esc_abort(
             }
         }
     }
-    Ok(())
+    Ok(accumulated_reply)
+}
+
+/// Same separator-aware appender liaison's voice path uses. Re-declared
+/// here so the text-turn accumulator stays self-contained (we don't want
+/// to depend on liaison's internals from the cli crate).
+fn append_reply_fragment(into: &mut String, fragment: &str) {
+    if !into.is_empty() {
+        let last = into.chars().last().unwrap_or(' ');
+        let needs_sep = !matches!(
+            last,
+            '。' | '！' | '？' | '.' | '!' | '?' | '\n' | ' ' | ',' | '，'
+        );
+        if needs_sep {
+            into.push(' ');
+        }
+    }
+    into.push_str(fragment);
 }
 
 // ── Voice turn ───────────────────────────────────────────────────────────────
@@ -2500,15 +2540,14 @@ fn render_help_overlay(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) ->
             ("Global", ""),
             ("  Enter", "Send the current input"),
             ("  Ctrl+V", "Hold to talk (auto-ends on silence)"),
-            (
-                "  Ctrl+U",
-                "Manage users (enroll a voice, pick the active speaker)",
-            ),
-            (
-                "  Ctrl+S",
-                "System view (provider status / logs / process metrics)",
-            ),
-            ("  Ctrl+A", "Audio settings (microphone / speaker)"),
+            ("  Ctrl+,", "Open Settings (Modes / Audio / Users / System)"),
+            ("", ""),
+            ("Settings deep-links", ""),
+            ("  Ctrl+A", "Settings → Audio"),
+            ("  Ctrl+U", "Settings → Users"),
+            ("  Ctrl+S", "Settings → System (status / logs / perf)"),
+            ("", ""),
+            ("Other", ""),
             ("  ?", "Show this help"),
             ("  Ctrl+C", "Quit"),
             ("", ""),
@@ -3919,4 +3958,398 @@ async fn run_system_modal(
         }
     }
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 1D — Ctrl+, Settings page (consolidates Audio / Users / System / Modes)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Replaces the previous "one Ctrl-key per subsystem" sprawl (Ctrl+A audio,
+// Ctrl+U users, Ctrl+S system) with a single discoverable entry point:
+//
+//   Ctrl+,  → Settings menu (vertical sidebar of categories)
+//             ↑↓ select · Enter open · 1-4 jump · Esc close
+//
+// Each menu entry either renders inline (Modes — small enough to fit on
+// the sidebar's right half) or hands off to the existing full-screen
+// modal (Audio / Users / System). The existing Ctrl+A/U/S shortcuts
+// are kept as power-user deep-links — they no longer appear in the
+// footer hint, but pressing them jumps straight to that category.
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsCategory {
+    Modes,
+    Audio,
+    Users,
+    System,
+}
+
+impl SettingsCategory {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Modes => "Modes",
+            Self::Audio => "Audio",
+            Self::Users => "Users",
+            Self::System => "System",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Modes => "input / output modality",
+            Self::Audio => "microphone + speaker",
+            Self::Users => "voiceprint enrol + active speaker",
+            Self::System => "provider status / logs / process metrics",
+        }
+    }
+
+    fn all() -> [Self; 4] {
+        [Self::Modes, Self::Audio, Self::Users, Self::System]
+    }
+}
+
+/// What `run_settings_menu` returned to `run_tui`. Carries the updated
+/// chat_cfg + voiceprint cache so the parent can persist them once,
+/// instead of every category modal touching disk independently.
+struct SettingsOutcome {
+    chat_cfg: ChatConfig,
+    voiceprint_db: VoiceprintDb,
+    log_lines: Vec<String>,
+}
+
+/// Sidebar Settings menu — Ctrl+, entry point. Dispatches to the
+/// existing per-category modals (audio / users / system) or renders
+/// Modes inline. Returns once the user presses Esc.
+async fn run_settings_menu(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    atlas_endpoint: &str,
+    mut chat_cfg: ChatConfig,
+    voiceprint_db_initial: VoiceprintDb,
+    initial_category: Option<SettingsCategory>,
+) -> Result<SettingsOutcome> {
+    let cats = SettingsCategory::all();
+    let mut cursor: usize = initial_category
+        .and_then(|c| cats.iter().position(|x| *x == c))
+        .unwrap_or(0);
+    let mut voiceprint_db = voiceprint_db_initial;
+    let mut log_lines: Vec<String> = Vec::new();
+    let mut status_msg = String::new();
+
+    // If a specific category was requested (deep-link from a hotkey),
+    // open it immediately instead of forcing the user through the menu.
+    if initial_category.is_some() {
+        dispatch_settings_category(
+            terminal,
+            atlas_endpoint,
+            cats[cursor],
+            &mut chat_cfg,
+            &mut voiceprint_db,
+            &mut log_lines,
+            &mut status_msg,
+        )
+        .await;
+    }
+
+    loop {
+        draw_settings_menu(terminal, &cats, cursor, &chat_cfg, &status_msg)?;
+
+        if event::poll(std::time::Duration::from_millis(120))?
+            && let Event::Key(key) = event::read()?
+        {
+            let close = matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
+                || (key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.code == KeyCode::Char(','));
+            if close {
+                break;
+            }
+            match key.code {
+                KeyCode::Up if cursor > 0 => cursor -= 1,
+                KeyCode::Down if cursor + 1 < cats.len() => cursor += 1,
+                KeyCode::Char('1') => cursor = 0,
+                KeyCode::Char('2') => cursor = 1,
+                KeyCode::Char('3') => cursor = 2,
+                KeyCode::Char('4') => cursor = 3,
+                KeyCode::Enter | KeyCode::Right => {
+                    dispatch_settings_category(
+                        terminal,
+                        atlas_endpoint,
+                        cats[cursor],
+                        &mut chat_cfg,
+                        &mut voiceprint_db,
+                        &mut log_lines,
+                        &mut status_msg,
+                    )
+                    .await;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(SettingsOutcome {
+        chat_cfg,
+        voiceprint_db,
+        log_lines,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_settings_category(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    atlas_endpoint: &str,
+    cat: SettingsCategory,
+    chat_cfg: &mut ChatConfig,
+    voiceprint_db: &mut VoiceprintDb,
+    log_lines: &mut Vec<String>,
+    status_msg: &mut String,
+) {
+    match cat {
+        SettingsCategory::Modes => match run_modes_page(terminal, chat_cfg.clone()).await {
+            Ok(new_cfg) => {
+                *chat_cfg = new_cfg;
+                *status_msg = format!("modes saved · response_voice = {}", chat_cfg.response_voice);
+            }
+            Err(e) => *status_msg = format!("modes: {e:#}"),
+        },
+        SettingsCategory::Audio => {
+            match run_audio_settings_page(atlas_endpoint, terminal, chat_cfg.clone()).await {
+                Ok(new_cfg) => {
+                    *chat_cfg = new_cfg;
+                    *status_msg = format!(
+                        "audio saved · mic={}/{} · speaker={}/{}",
+                        chat_cfg.mic_cap_id.as_deref().unwrap_or("(unset)"),
+                        chat_cfg.mic_device_id.as_deref().unwrap_or("default"),
+                        chat_cfg.speaker_cap_id.as_deref().unwrap_or("(unset)"),
+                        chat_cfg.speaker_device_id.as_deref().unwrap_or("default"),
+                    );
+                }
+                Err(e) => *status_msg = format!("audio: {e:#}"),
+            }
+        }
+        SettingsCategory::Users => {
+            let db_snapshot = voiceprint_db.clone();
+            match run_users_modal(terminal, atlas_endpoint, chat_cfg, db_snapshot).await {
+                Ok(out) => {
+                    chat_cfg.current_controller = out.controller.clone();
+                    *voiceprint_db = out.db;
+                    log_lines.extend(out.log_lines);
+                    *status_msg = match &chat_cfg.current_controller {
+                        Some(c) => format!("users saved · controller = {c}"),
+                        None => "users saved · controller cleared".to_string(),
+                    };
+                }
+                Err(e) => *status_msg = format!("users: {e:#}"),
+            }
+        }
+        SettingsCategory::System => {
+            if let Err(e) = run_system_modal(terminal, atlas_endpoint).await {
+                *status_msg = format!("system: {e:#}");
+            } else {
+                *status_msg = "system view closed".to_string();
+            }
+        }
+    }
+}
+
+fn draw_settings_menu(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    cats: &[SettingsCategory],
+    cursor: usize,
+    chat_cfg: &ChatConfig,
+    status_msg: &str,
+) -> Result<()> {
+    terminal.draw(|f| {
+        let area = centered_rect(60, 60, f.area());
+        f.render_widget(Clear, area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(Line::from(Span::styled(
+                " Settings ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .title_bottom(
+                Line::from(Span::styled(
+                    " ↑↓ select · Enter open · 1-4 jump · Esc / Ctrl+, close ",
+                    Style::default().fg(Color::DarkGray),
+                ))
+                .alignment(Alignment::Right),
+            );
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let cols = Layout::horizontal([Constraint::Length(20), Constraint::Min(20)]).split(inner);
+
+        // Sidebar — category list
+        let sidebar: Vec<Line> = cats
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let mark = if i == cursor { "▶ " } else { "  " };
+                let style = if i == cursor {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                Line::from(Span::styled(format!("{}{}", mark, c.label()), style))
+            })
+            .collect();
+        let side = Paragraph::new(sidebar).wrap(Wrap { trim: false });
+        f.render_widget(side, cols[0]);
+
+        // Right pane — short summary for the highlighted category + current
+        // chat-cfg snapshot, so the user can glance at "where am I" without
+        // entering each tab.
+        let cur = cats[cursor];
+        let mut body: Vec<Line> = vec![
+            Line::from(Span::styled(
+                cur.label().to_string(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                cur.hint().to_string(),
+                Style::default().fg(Color::Gray),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Current configuration:",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(format!(
+                "  response voice  : {}",
+                if chat_cfg.response_voice { "on" } else { "off" }
+            )),
+            Line::from(format!(
+                "  mic provider    : {}",
+                chat_cfg.mic_cap_id.as_deref().unwrap_or("(unset)")
+            )),
+            Line::from(format!(
+                "  speaker provider: {}",
+                chat_cfg.speaker_cap_id.as_deref().unwrap_or("(unset)")
+            )),
+            Line::from(format!(
+                "  controller      : {}",
+                chat_cfg.current_controller.as_deref().unwrap_or("(any)")
+            )),
+        ];
+        if !status_msg.is_empty() {
+            body.push(Line::from(""));
+            body.push(Line::from(Span::styled(
+                status_msg.to_string(),
+                Style::default().fg(Color::Green),
+            )));
+        }
+        let pane = Paragraph::new(body).wrap(Wrap { trim: false });
+        f.render_widget(pane, cols[1]);
+    })?;
+    Ok(())
+}
+
+/// Modes page (Settings → Modes). Currently a single binary toggle —
+/// `response_voice` — but laid out as a list so future modes
+/// (e.g. continuous vs push-to-talk, language preset, …) drop in
+/// without restructuring the page.
+async fn run_modes_page(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    initial: ChatConfig,
+) -> Result<ChatConfig> {
+    let mut cfg = initial;
+    let mut cursor: usize = 0;
+    const ROW_COUNT: usize = 1;
+    loop {
+        terminal.draw(|f| {
+            let area = centered_rect(70, 60, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(Line::from(Span::styled(
+                    " Settings · Modes ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )))
+                .title_bottom(
+                    Line::from(Span::styled(
+                        " ↑↓ select · Enter / Space toggle · Esc back ",
+                        Style::default().fg(Color::DarkGray),
+                    ))
+                    .alignment(Alignment::Right),
+                );
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+
+            let mut lines: Vec<Line> = Vec::new();
+            lines.push(Line::from(Span::styled(
+                "Reply modality",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                "How the agent responds when you type via Enter. Voice input \
+                 (Ctrl+V) always uses voice output regardless of this toggle.",
+                Style::default().fg(Color::Gray),
+            )));
+            lines.push(Line::from(""));
+            let mark = if cursor == 0 { "▶ " } else { "  " };
+            let state = if cfg.response_voice {
+                "[x] voice + text  (TTS plays the reply; pilot uses voice brevity rule)"
+            } else {
+                "[ ] voice + text  (replies stay in the chat window only)"
+            };
+            let row_style = if cursor == 0 {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{mark}{state}"),
+                row_style,
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Notes",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  · Voice output requires a working speaker provider \
+                 (configure under Audio).",
+                Style::default().fg(Color::Gray),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  · Pilot trims markdown and shortens sentences when modality=voice.",
+                Style::default().fg(Color::Gray),
+            )));
+            let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+            f.render_widget(p, inner);
+        })?;
+
+        if event::poll(std::time::Duration::from_millis(120))?
+            && let Event::Key(key) = event::read()?
+        {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left => break,
+                KeyCode::Up if cursor > 0 => cursor -= 1,
+                KeyCode::Down if cursor + 1 < ROW_COUNT => cursor += 1,
+                KeyCode::Enter | KeyCode::Char(' ') if cursor == 0 => {
+                    cfg.response_voice = !cfg.response_voice;
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(cfg)
 }
