@@ -48,7 +48,7 @@ use crate::pb::contracts::{
     robonix_system_speech_voiceprint_client::RobonixSystemSpeechVoiceprintClient,
 };
 use crate::pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
-use crate::pb::pilot::{PilotEvent, Task};
+use crate::pb::pilot::Task;
 use crate::pb::tts;
 use crate::pb::voiceprint;
 
@@ -313,6 +313,28 @@ async fn run_session(
     )
     .await;
 
+    // 3.5. Access-control hard gate. The chat client passes the pinned
+    // active user via `context_json.active_user_id`. If set and the
+    // voiceprint-identified user_id doesn't match, refuse to invoke
+    // pilot/TTS at all and emit SESSION_DONE early. Without this,
+    // chat-side post-USER_IDENTIFIED `abort_session()` arrived too late
+    // — pilot was already running and TTS already spoke "你好 X".
+    if let Some(active) = extract_active_user_id(&req.context_json)
+        && !active.is_empty()
+        && active != user_id
+    {
+        let _ = tx
+            .send(Ok(event_status(
+                KIND_SESSION_DONE,
+                &session_id,
+                &format!(
+                    "denied — active user is {active} but voiceprint matched {user_id}"
+                ),
+            )))
+            .await;
+        return Ok(());
+    }
+
     // 4. Build Task and stream Pilot events.
     let pilot_endpoint = resolve_endpoint(&atlas, "robonix/system/pilot", "")
         .await
@@ -326,7 +348,51 @@ async fn run_session(
         &req.context_json,
     );
 
-    let mut accumulated_text = String::new();
+    // Per-round TTS queue — pilot can emit multiple EVT_FINAL_TEXT events
+    // across rounds (one per agent reply between tool batches). We TTS each
+    // as soon as it lands so the user hears progress in real time instead
+    // of waiting for the whole task. The worker plays sequentially (await
+    // per item) so clips never overlap; bounded queue keeps memory flat
+    // if the agent talks faster than the speaker can drain.
+    const TTS_QUEUE_DEPTH: usize = 16;
+    let (tts_tx, mut tts_rx) = mpsc::channel::<String>(TTS_QUEUE_DEPTH);
+    let tts_worker = if req.tts_enabled {
+        let atlas_for_tts = atlas.clone();
+        let tts_pin = req.tts_node_id.clone();
+        let speaker_pin = req.speaker_node_id.clone();
+        let lang = language.clone();
+        let sess = session_id.clone();
+        let tx_for_tts = tx.clone();
+        Some(tokio::spawn(async move {
+            while let Some(text) = tts_rx.recv().await {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                if let Err(e) = synthesize_and_play(
+                    &atlas_for_tts,
+                    &tts_pin,
+                    &speaker_pin,
+                    &lang,
+                    &text,
+                    &sess,
+                    &tx_for_tts,
+                )
+                .await
+                {
+                    let _ = tx_for_tts
+                        .send(Ok(event_status(
+                            KIND_TTS_DONE,
+                            &sess,
+                            &format!("tts skipped: {e:#}"),
+                        )))
+                        .await;
+                }
+            }
+        }))
+    } else {
+        drop(tts_rx);
+        None
+    };
 
     let pilot_stream_result = async {
         let mut client = RobonixSystemPilotClient::connect(pilot_endpoint.clone())
@@ -342,7 +408,17 @@ async fn run_session(
             while let Some(item) = pilot_stream.next().await {
                 match item {
                     Ok(ev) => {
-                        accumulate_text(&ev, &mut accumulated_text);
+                        // Round-complete reply → enqueue for playback.
+                        // EVT_FINAL_TEXT carries the agent's "I'll do X /
+                        // I did Y" sentence at each round boundary.
+                        // EVT_TEXT_CHUNK is partial streaming — skipped
+                        // (would clip mid-sentence).
+                        if req.tts_enabled
+                            && ev.event_kind == EVT_FINAL_TEXT_KIND
+                            && !ev.final_text.trim().is_empty()
+                        {
+                            let _ = tts_tx.send(ev.final_text.clone()).await;
+                        }
                         let _ = tx
                             .send(Ok(VoiceEvent {
                                 event_kind: KIND_PILOT,
@@ -358,43 +434,36 @@ async fn run_session(
                             .await;
                     }
                     Err(e) => {
+                        drop(tts_tx);
+                        if let Some(h) = tts_worker {
+                            let _ = h.await;
+                        }
                         anyhow::bail!("Pilot stream error: {e}");
                     }
                 }
             }
         }
         Err(e) => {
-            // No Pilot online — surface as session ERROR rather than fabricating
-            // a "成功接收信息" reply (callers must see the failure).
+            drop(tts_tx);
+            if let Some(h) = tts_worker {
+                let _ = h.await;
+            }
             anyhow::bail!("Pilot unreachable at {pilot_endpoint}: {e}");
         }
     }
 
-    // 5. Optional TTS playback (non-fatal on any error).
-    if req.tts_enabled
-        && !accumulated_text.trim().is_empty()
-        && let Err(e) = synthesize_and_play(
-            &atlas,
-            &req.tts_node_id,
-            &req.speaker_node_id,
-            &language,
-            &accumulated_text,
-            &session_id,
-            &tx,
-        )
-        .await
-    {
-        let _ = tx
-            .send(Ok(event_status(
-                KIND_TTS_DONE,
-                &session_id,
-                &format!("tts skipped: {e:#}"),
-            )))
-            .await;
+    // Close the queue and wait for the worker to drain whatever's still
+    // pending — without this the session would emit KIND_SESSION_DONE
+    // before the last clip finished playing.
+    drop(tts_tx);
+    if let Some(h) = tts_worker {
+        let _ = h.await;
     }
 
     Ok(())
 }
+
+const EVT_FINAL_TEXT_KIND: u32 = 4;
 
 // ── Mic capture + streaming ASR ─────────────────────────────────────────────
 //
@@ -785,6 +854,17 @@ async fn synthesize_and_play(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/// Pull `active_user_id` out of the request's context_json. Returns
+/// None on parse failure or missing key — caller treats that as
+/// "no access-control pin set, allow everyone".
+fn extract_active_user_id(context_json: &str) -> Option<String> {
+    if context_json.trim().is_empty() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(context_json).ok()?;
+    v.get("active_user_id")?.as_str().map(str::to_string)
+}
+
 fn build_task(
     session_id: &str,
     transcript: &str,
@@ -814,47 +894,6 @@ fn build_task(
         context_json: ctx.to_string(),
         timestamp_ms: now_ms(),
     }
-}
-
-/// Accumulate pilot stream text events into a single TTS payload.
-///
-/// Pilot's per-round contract (see `planner.rs`):
-///   - intermediate round (has tool calls) → `TextChunk(round_text)` + `Plan`
-///   - final round (no tool call, breaks loop) → `FinalText(round_text)`
-///
-/// So in a single-round chitchat the only text event is `FinalText`, and
-/// in a multi-round (e.g. "look around then describe") the chain looks like
-/// `TextChunk("我看一下前方。") … Plan … BatchResult … FinalText("前方有…")`.
-///
-/// Earlier code guarded `FinalText` with `into.is_empty()` — that worked
-/// for the chitchat case but silently dropped the final round's reply in
-/// every multi-round session, which is exactly what TTS users hear as
-/// "the last sentence wasn't spoken". The fix: always append. Add a
-/// space separator when the previous chunk doesn't already end with
-/// sentence-terminating punctuation so the TTS doesn't run two sentences
-/// together.
-fn accumulate_text(ev: &PilotEvent, into: &mut String) {
-    const EVT_TEXT_CHUNK: u32 = 0;
-    const EVT_FINAL_TEXT: u32 = 4;
-    match ev.event_kind {
-        EVT_TEXT_CHUNK if !ev.text_chunk.is_empty() => append_with_sep(into, &ev.text_chunk),
-        EVT_FINAL_TEXT if !ev.final_text.is_empty() => append_with_sep(into, &ev.final_text),
-        _ => {}
-    }
-}
-
-fn append_with_sep(into: &mut String, fragment: &str) {
-    if !into.is_empty() {
-        let last = into.chars().last().unwrap_or(' ');
-        let needs_sep = !matches!(
-            last,
-            '。' | '！' | '？' | '.' | '!' | '?' | '\n' | ' ' | ',' | '，'
-        );
-        if needs_sep {
-            into.push(' ');
-        }
-    }
-    into.push_str(fragment);
 }
 
 fn event_status(kind: u32, session_id: &str, message: &str) -> VoiceEvent {
@@ -986,33 +1025,4 @@ mod tests {
         assert_eq!(v["foo"], "bar");
     }
 
-    #[test]
-    fn accumulate_text_collects_chunks_and_final() {
-        let mut buf = String::new();
-        accumulate_text(
-            &PilotEvent {
-                event_kind: 0,
-                session_id: "s".into(),
-                text_chunk: "hello ".into(),
-                plan: None,
-                batch_result: None,
-                status: None,
-                final_text: String::new(),
-            },
-            &mut buf,
-        );
-        accumulate_text(
-            &PilotEvent {
-                event_kind: 0,
-                session_id: "s".into(),
-                text_chunk: "world".into(),
-                plan: None,
-                batch_result: None,
-                status: None,
-                final_text: String::new(),
-            },
-            &mut buf,
-        );
-        assert_eq!(buf, "hello world");
-    }
 }

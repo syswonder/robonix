@@ -1755,11 +1755,26 @@ _INDEX_3D_HTML = r"""<!doctype html>
     renderer.domElement.addEventListener('click', onClick);
 
     // ── Resize ─────────────────────────────────────────────────────────
-    window.addEventListener('resize', () => {
-        camera.aspect = window.innerWidth / window.innerHeight;
+    // Use clientWidth/clientHeight off the renderer's parent so the canvas
+    // tracks the iframe's content box, not just window. Inside the
+    // combined / view, the 3D panel iframe gets sized AFTER the grid
+    // layout resolves; relying on the window.resize event alone meant
+    // the renderer started at 0×0 (script ran before the iframe had a
+    // size) and never recovered — the user saw an empty black panel.
+    function fitCanvas() {
+        const w = app.clientWidth || window.innerWidth;
+        const h = app.clientHeight || window.innerHeight;
+        if (w <= 0 || h <= 0) return;
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
         camera.updateProjectionMatrix();
-        renderer.setSize(window.innerWidth, window.innerHeight);
-    });
+    }
+    fitCanvas();
+    window.addEventListener('resize', fitCanvas);
+    // ResizeObserver fires for iframe parent-container changes that
+    // don't bubble up as window.resize (e.g. combined-view column
+    // re-flow, expand/collapse panel toggle).
+    new ResizeObserver(fitCanvas).observe(app);
 
     // ── HUD collapse toggle ───────────────────────────────────────────
     // Default: collapsed (just the ▸ arrow). Click to expand and reveal

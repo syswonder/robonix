@@ -146,6 +146,20 @@ class EnrolledDB:
     def list_users(self) -> list[tuple[str, str]]:
         return [(uid, entry.get("name", "")) for uid, entry in self.data.items()]
 
+    def delete(self, user_id: str) -> bool:
+        # Idempotent — returning True on an absent user_id matches what
+        # callers want (delete-then-re-enrol flows shouldn't error if a
+        # stale id was already gone). Only the actual disk write is
+        # gated on `existed` to avoid spurious enrolled.json rewrites.
+        existed = user_id in self.data
+        if existed:
+            del self.data[user_id]
+            self._save()
+            log.info("Deleted enrolled user %s", user_id)
+        else:
+            log.info("Delete: user %s not enrolled — no-op", user_id)
+        return True
+
 
 # ---------------------------------------------------------------------------
 # Module-level singletons populated in on_init. None until Driver(CMD_INIT).
@@ -209,17 +223,80 @@ class _EnrollServicer(pb_grpc.RobonixSystemSpeechVoiceprintEnrollServicer):
             return vp.Enroll_Response(
                 success=False, error="user_id and audio_data are required",
             )
+        # Dup-detect by user_id OR by display name. The chat UI can pick
+        # a fresh timestamp-suffixed user_id for non-ASCII names, so the
+        # name collision matters too — operators kept re-enrolling the
+        # same person under timestamped ids and ended up with N copies
+        # of the same speaker fighting for cosine score.
+        if request.user_id in _db.data:
+            existing = _db.data[request.user_id].get("name", "")
+            return vp.Enroll_Response(
+                success=False,
+                error=f"user_id '{request.user_id}' already enrolled "
+                      f"as '{existing}'; delete it first if you want to re-enrol",
+            )
+        if request.user_name:
+            dup = next(
+                (uid for uid, e in _db.data.items()
+                 if e.get("name", "") == request.user_name),
+                None,
+            )
+            if dup is not None:
+                return vp.Enroll_Response(
+                    success=False,
+                    error=f"name '{request.user_name}' already enrolled "
+                          f"as user_id '{dup}'; delete it first if you want to re-enrol",
+                )
         try:
             emb = _engine.extract_from_pcm(
                 request.audio_data,
                 request.encoding or "pcm_s16le",
                 request.sample_rate_hz or 16000,
             )
+            # Voice-similarity dup check: the new sample's embedding is
+            # compared against every enrolled embedding; if cosine ≥
+            # threshold, the speaker is already enrolled under another
+            # id/name. Without this guard the operator can pile multiple
+            # "rows" of the same person under different display names,
+            # and Identify ends up flipping between them. Threshold
+            # matches the Identify gate so behaviour is consistent.
+            if _db.data:
+                best_id, best_name, best_score, is_match = _db.identify(
+                    emb, _threshold_value,
+                )
+                if is_match:
+                    return vp.Enroll_Response(
+                        success=False,
+                        error=f"voice already enrolled as '{best_name}' "
+                              f"(user_id={best_id}, cos={best_score:.3f} ≥ "
+                              f"{_threshold_value:.2f}); delete it first if "
+                              f"you want to re-enrol",
+                    )
             _db.enroll(request.user_id, request.user_name, emb)
             return vp.Enroll_Response(success=True, error="")
         except Exception as exc:  # noqa: BLE001
             log.exception("Enroll failed")
             return vp.Enroll_Response(success=False, error=str(exc))
+
+
+class _DeleteServicer(pb_grpc.RobonixSystemSpeechVoiceprintDeleteServicer):
+    """robonix/system/speech/voiceprint_delete — DeleteEnrolled(user_id)."""
+
+    def DeleteEnrolled(self, request, context):  # noqa: N802
+        if _db is None:
+            return vp.DeleteEnrolled_Response(
+                success=False, error="db not initialised",
+            )
+        if not request.user_id:
+            return vp.DeleteEnrolled_Response(
+                success=False, error="user_id is required",
+            )
+        try:
+            _db.delete(request.user_id)
+            return vp.DeleteEnrolled_Response(success=True, error="")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("DeleteEnrolled failed")
+            return vp.DeleteEnrolled_Response(success=False, error=str(exc))
 
 
 class _ListServicer(pb_grpc.RobonixSystemSpeechVoiceprintListServicer):
@@ -257,6 +334,9 @@ voiceprint.attach_grpc_servicer(
 )
 voiceprint.attach_grpc_servicer(
     "robonix/system/speech/voiceprint_list", _ListServicer(),
+)
+voiceprint.attach_grpc_servicer(
+    "robonix/system/speech/voiceprint_delete", _DeleteServicer(),
 )
 
 

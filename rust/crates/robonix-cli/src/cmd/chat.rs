@@ -51,6 +51,11 @@ const SPEAKER_CONTRACT: &str = "robonix/primitive/audio/speaker";
 struct ChatMessage {
     role: Role,
     text: String,
+    /// Per-message author label override. When `role == Role::User` and
+    /// `label` is Some(name), the chat renders that name (padded) instead
+    /// of the default "You" prefix — so a voiceprint-identified turn shows
+    /// "Alice    " instead of generic "You".
+    label: Option<String>,
 }
 
 enum Role {
@@ -59,6 +64,11 @@ enum Role {
     ToolCall,
     Status,
     Voice,
+    /// Hard-deny rendered in bold red. Used for:
+    ///   - voiceprint access-control rejection (heard speaker ≠ pinned controller)
+    ///   - sentinel rule intercept (executor refused the capability call)
+    /// Operator must see these immediately; they survive auto-scroll.
+    Denied,
 }
 
 const DEFAULT_LIAISON_FALLBACK: &str = "http://127.0.0.1:50081";
@@ -1408,17 +1418,20 @@ async fn run_tui(
             "Connected to Liaison at {liaison_endpoint} as {local_user}. \
              Enter = send · Ctrl+V = voice · Ctrl+T = settings · Esc = abort · Ctrl+C = quit · ? = help."
         ),
+        label: None,
     });
     if let Some(ctl) = chat_cfg.current_controller.as_deref() {
         initial.push(ChatMessage {
             role: Role::Status,
             text: format!("Access control active — only voice from {ctl} will be accepted."),
+        label: None,
         });
     }
     for w in audio_warnings {
         initial.push(ChatMessage {
             role: Role::Status,
             text: w.clone(),
+        label: None,
         });
     }
     let messages: Rc<RefCell<Vec<ChatMessage>>> = Rc::new(RefCell::new(initial));
@@ -1504,12 +1517,14 @@ async fn run_tui(
                             messages.borrow_mut().push(ChatMessage {
                                 role: Role::Status,
                                 text: format!("warning: chat.yaml save failed: {e:#}"),
+                            label: None,
                             });
                         }
                         for line in &out.log_lines {
                             messages.borrow_mut().push(ChatMessage {
                                 role: Role::Status,
                                 text: line.clone(),
+                            label: None,
                             });
                         }
                         if prev_controller != chat_cfg.current_controller {
@@ -1520,14 +1535,16 @@ async fn run_tui(
                                     messages.borrow_mut().push(ChatMessage {
                                         role: Role::Status,
                                         text: format!(
-                                            "controller now {} ({}) — non-matching voices will be blocked",
+                                            "active user → {} ({}) — non-matching voices will be denied",
                                             name, c
                                         ),
+                                        label: None,
                                     });
                                 }
                                 None => messages.borrow_mut().push(ChatMessage {
                                     role: Role::Status,
-                                    text: "controller cleared — any speaker allowed".to_string(),
+                                    text: "active user cleared — any speaker allowed".to_string(),
+                                label: None,
                                 }),
                             }
                         }
@@ -1535,6 +1552,7 @@ async fn run_tui(
                     Err(e) => messages.borrow_mut().push(ChatMessage {
                         role: Role::Status,
                         text: format!("settings: {e:#}"),
+                    label: None,
                     }),
                 }
                 continue;
@@ -1549,6 +1567,7 @@ async fn run_tui(
                 messages.borrow_mut().push(ChatMessage {
                     role: Role::Status,
                     text: "Ctrl+V — starting voice session…".to_string(),
+                label: None,
                 });
                 draw(terminal, &messages.borrow(), &input, scroll, busy)?;
                 if let Err(e) = run_voice_session_with_esc_abort(
@@ -1568,6 +1587,7 @@ async fn run_tui(
                     messages.borrow_mut().push(ChatMessage {
                         role: Role::Status,
                         text: format!("Voice error: {e:#}"),
+                    label: None,
                     });
                 }
                 busy = false;
@@ -1598,6 +1618,7 @@ async fn run_tui(
                     messages.borrow_mut().push(ChatMessage {
                         role: Role::User,
                         text: msg.clone(),
+                    label: None,
                     });
                     busy = true;
                     draw(terminal, &messages.borrow(), &input, scroll, busy)?;
@@ -1635,6 +1656,7 @@ async fn run_tui(
                             messages.borrow_mut().push(ChatMessage {
                                 role: Role::Status,
                                 text: format!("Error: {e:#}"),
+                            label: None,
                             });
                         }
                     }
@@ -1819,6 +1841,7 @@ async fn run_text_intent_with_esc_abort(
                         messages.borrow_mut().push(ChatMessage {
                             role: Role::Status,
                             text: format!("Liaison stream error: {e}"),
+                        label: None,
                         });
                         draw(terminal, &messages.borrow(), input, 0, true)?;
                         break;
@@ -1835,6 +1858,7 @@ async fn run_text_intent_with_esc_abort(
                                     role: Role::Status,
                                     text: "Esc — abort_turn sent (in-flight turn should stop)."
                                         .to_string(),
+                                label: None,
                                 });
                                 draw(terminal, &messages.borrow(), input, *scroll, true)?;
                             }
@@ -1905,7 +1929,21 @@ async fn run_voice_session_with_esc_abort(
             "ROBONIX_CHAT_SPEAKER_NODE",
             chat_cfg.speaker_cap_id.as_deref(),
         ),
-        context_json: String::new(),
+        // Pass the access-control pin to liaison so it can hard-gate
+        // BEFORE submitting to pilot. The chat side still renders a
+        // red DENIED row on mismatch, but the actual blocking has to
+        // happen at the liaison so pilot/TTS never fire — earlier
+        // chat-side `abort_session()` was too late, by then liaison
+        // had already kicked off the pilot stream.
+        context_json: if let Some(ctl) = chat_cfg
+            .current_controller
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
+            format!(r#"{{"active_user_id":"{}"}}"#, ctl.replace('"', "\\\""))
+        } else {
+            String::new()
+        },
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<VoiceEvent, Status>>(64);
@@ -1963,16 +2001,33 @@ async fn run_voice_session_with_esc_abort(
                                 &voiceprint_db.borrow(),
                                 want,
                             ).unwrap_or_else(|| want.to_string());
-                            let got_name = lookup_user_name(
-                                &voiceprint_db.borrow(),
-                                &event.user_id,
-                            ).unwrap_or_else(|| event.user_id.clone());
-                            messages.borrow_mut().push(ChatMessage {
-                                role: Role::Status,
-                                text: format!(
-                                    "blocked: controller is {} ({}), but heard {} ({})",
+                            // event.user_id starts with "voice:" only when
+                            // voiceprint actually matched a known speaker
+                            // above the threshold. Otherwise liaison filled
+                            // in the chat-cfg fallback (e.g. "local:wheatfox"),
+                            // which means "couldn't identify". Use distinct
+                            // wording so the operator knows whether the
+                            // wrong person spoke vs. nobody got recognised.
+                            let identified = event.user_id.starts_with("voice:");
+                            let denial_text = if identified {
+                                let got_name = lookup_user_name(
+                                    &voiceprint_db.borrow(),
+                                    &event.user_id,
+                                ).unwrap_or_else(|| event.user_id.clone());
+                                format!(
+                                    "Unauthorized speaker — active user is {} ({}), but heard {} ({})",
                                     want_name, want, got_name, event.user_id
-                                ),
+                                )
+                            } else {
+                                format!(
+                                    "Speaker not recognised — active user is {} ({}), voiceprint didn't match anyone",
+                                    want_name, want
+                                )
+                            };
+                            messages.borrow_mut().push(ChatMessage {
+                                role: Role::Denied,
+                                text: denial_text,
+                                label: None,
                             });
                             let _ = abort_session(liaison_endpoint, session_id, user_id).await;
                             // Fire a TTS denial so the operator hears why
@@ -2007,6 +2062,7 @@ async fn run_voice_session_with_esc_abort(
                         messages.borrow_mut().push(ChatMessage {
                             role: Role::Status,
                             text: format!("Voice stream error: {e}"),
+                        label: None,
                         });
                         draw(terminal, &messages.borrow(), input, 0, true)?;
                         break;
@@ -2022,6 +2078,7 @@ async fn run_voice_session_with_esc_abort(
                                 messages.borrow_mut().push(ChatMessage {
                                     role: Role::Status,
                                     text: "Esc — abort_turn sent (Pilot stops; voice playback may still finish).".to_string(),
+                                label: None,
                                 });
                                 draw(terminal, &messages.borrow(), input, *scroll, true)?;
                             }
@@ -2085,6 +2142,7 @@ fn apply_pilot_event(
     // event_kind discriminants — see PilotEvent.msg.
     const EVT_TEXT_CHUNK: u32 = 0;
     const EVT_PLAN: u32 = 1;
+    const EVT_BATCH_RESULT: u32 = 2;
     const EVT_FINAL_TEXT: u32 = 4;
 
     let mut m = messages.borrow_mut();
@@ -2098,12 +2156,14 @@ fn apply_pilot_event(
                     m.push(ChatMessage {
                         role: Role::Agent,
                         text: t,
+                    label: None,
                     });
                 }
             } else {
                 m.push(ChatMessage {
                     role: Role::Agent,
                     text: t,
+                label: None,
                 });
             }
         }
@@ -2114,7 +2174,74 @@ fn apply_pilot_event(
                 m.push(ChatMessage {
                     role: Role::Agent,
                     text: t,
+                label: None,
                 });
+            }
+        }
+        EVT_BATCH_RESULT => {
+            // Surface sentinel intercepts (and only sentinel — generic
+            // capability failures are usually explained by the LLM in the
+            // next text chunk, so we don't want to double-render them).
+            //
+            // The executor encodes the rejection as "sentinel:RULE_ID: REASON"
+            // (see rust/crates/robonix-executor/src/dispatch/mod.rs). Split
+            // it back into structured fields so the chat can present a
+            // legible block instead of one mashed-together line — the
+            // operator needs to see (in order): WHAT was attempted, WHICH
+            // rule fired, WHY, and HOW TO REMEDY.
+            if let Some(ref br) = event.batch_result {
+                for r in &br.results {
+                    if !r.success && r.error.starts_with("sentinel:") {
+                        let leaf = r
+                            .contract_id
+                            .rsplit_once('/')
+                            .map(|(_, l)| l.to_string())
+                            .unwrap_or_else(|| r.contract_id.clone());
+                        let target = if r.provider_id.is_empty() {
+                            leaf
+                        } else {
+                            format!("{}.{}", r.provider_id, leaf)
+                        };
+                        // Error wire format from executor:
+                        //   "sentinel:RULE_ID: REASON [deny_window: HH:MM–HH:MM]"
+                        // Peel off the bracketed window first (lives at
+                        // the tail), then split RULE_ID off REASON at
+                        // the first ": ".
+                        let body = r.error.trim_start_matches("sentinel:").trim_start();
+                        let (head, window) = match body.rfind(" [deny_window:") {
+                            Some(idx) => {
+                                let win = body[idx + " [deny_window:".len()..]
+                                    .trim_end_matches(']')
+                                    .trim()
+                                    .to_string();
+                                (body[..idx].to_string(), Some(win))
+                            }
+                            None => (body.to_string(), None),
+                        };
+                        let (rule_id, reason) = head
+                            .split_once(':')
+                            .map(|(rid, rest)| (rid.trim().to_string(), rest.trim().to_string()))
+                            .unwrap_or_else(|| (head.clone(), String::new()));
+                        let window_line = match window {
+                            Some(w) => format!("\n   window  : {w} (deny_between)"),
+                            None => String::new(),
+                        };
+                        let text = format!(
+                            "capability call rejected by sentinel\n   call    : {} (r{})\n   contract: {}\n   rule    : {}\n   reason  : {}{}",
+                            target,
+                            br.round,
+                            r.contract_id,
+                            rule_id,
+                            if reason.is_empty() { "(no reason provided)" } else { reason.as_str() },
+                            window_line,
+                        );
+                        m.push(ChatMessage {
+                            role: Role::Denied,
+                            text,
+                            label: None,
+                        });
+                    }
+                }
             }
         }
         EVT_PLAN => {
@@ -2142,6 +2269,7 @@ fn apply_pilot_event(
                     m.push(ChatMessage {
                         role: Role::ToolCall,
                         text: format!("[r{}] {}({})", p.round, target, call.args_json),
+                    label: None,
                     });
                 }
             }
@@ -2184,32 +2312,55 @@ fn apply_voice_event(
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Voice,
                 text: format!("voice · {}", event.status_message),
+            label: None,
             });
         }
         KIND_ASR_PARTIAL => {
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Voice,
                 text: format!("asr (partial, {:.2}): {}", event.confidence, event.text),
+            label: None,
             });
         }
         KIND_ASR_FINAL => {
             // Liaison guarantees USER_IDENTIFIED arrives before ASR_FINAL,
-            // so `last_identified` is the right name for this utterance.
-            let label = match last_identified.as_deref() {
-                Some(uid) => match lookup_user_name(&voiceprint_db.borrow(), uid) {
-                    Some(name) => format!("(voice, {}) {}", name, event.text),
-                    None if uid.is_empty() => format!("(voice) {}", event.text),
-                    None => format!("(voice, {}) {}", uid, event.text),
-                },
-                None => format!("(voice) {}", event.text),
+            // so `last_identified` is the right uid for this utterance.
+            // Promote a real voiceprint match (uid starts with "voice:")
+            // to the ROW label so the chat shows "Alice  (voice) …"
+            // instead of the generic "You". Fallback ids (local:*)
+            // leave label=None so draw uses "You".
+            let author_label = match last_identified.as_deref() {
+                Some(uid) if uid.starts_with("voice:") => {
+                    Some(lookup_user_name(&voiceprint_db.borrow(), uid)
+                        .unwrap_or_else(|| uid.to_string()))
+                }
+                _ => None,
             };
             messages.borrow_mut().push(ChatMessage {
                 role: Role::User,
-                text: label,
+                text: format!("(voice) {}", event.text),
+                label: author_label,
             });
         }
         KIND_USER_IDENTIFIED => {
             *last_identified = Some(event.user_id.clone());
+            // Liaison emits ASR_FINAL BEFORE this event (the comment we
+            // had above was wrong), so when this arrives the user's row
+            // has already been pushed with label=None and is rendering
+            // as "You". Back-patch it: scan back from the tail for the
+            // most-recent User row that still has label=None and stamp
+            // the voiceprint-matched display name on it. Skip if no
+            // voiceprint match (event.user_id is fallback like local:*).
+            if event.user_id.starts_with("voice:") {
+                let name_opt = lookup_user_name(&voiceprint_db.borrow(), &event.user_id);
+                let display = name_opt.unwrap_or_else(|| event.user_id.clone());
+                let mut m = messages.borrow_mut();
+                if let Some(target) = m.iter_mut().rev()
+                    .find(|x| matches!(x.role, Role::User) && x.label.is_none())
+                {
+                    target.label = Some(display);
+                }
+            }
             let name = lookup_user_name(&voiceprint_db.borrow(), &event.user_id);
             let label = match (&name, event.status_message.is_empty()) {
                 (Some(n), true) => format!("identified user → {} ({})", n, event.user_id),
@@ -2226,6 +2377,7 @@ fn apply_voice_event(
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Voice,
                 text: label,
+            label: None,
             });
         }
         KIND_PILOT => {
@@ -2237,12 +2389,14 @@ fn apply_voice_event(
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Voice,
                 text: format!("tts · {}", event.status_message),
+            label: None,
             });
         }
         KIND_TTS_DONE => {
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Voice,
                 text: format!("tts done · {}", event.status_message),
+            label: None,
             });
         }
         KIND_SESSION_DONE => {
@@ -2250,18 +2404,21 @@ fn apply_voice_event(
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Status,
                 text: "voice session done".to_string(),
+            label: None,
             });
         }
         KIND_ERROR => {
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Status,
                 text: format!("voice error: {}", event.error),
+            label: None,
             });
         }
         _ => {
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Voice,
                 text: format!("voice (kind={}) {}", event.event_kind, event.status_message),
+            label: None,
             });
         }
     }
@@ -2341,9 +2498,24 @@ fn draw(
                     Style::default().fg(Color::DarkGray),
                 )));
             }
-            let (label, indent, style) = match msg.role {
+            // Voice-identified turns carry a per-message label override
+            // (the speaker's display name). Pad to the 9-char column so
+            // bodies still align with rows that fall back to "You".
+            let user_label: String = if let Some(ref n) = msg.label {
+                if n.chars().count() >= 9 {
+                    let mut t: String = n.chars().take(8).collect();
+                    t.push(' ');
+                    t
+                } else {
+                    let pad = 9 - n.chars().count();
+                    format!("{}{}", n, " ".repeat(pad))
+                }
+            } else {
+                "You      ".to_string()
+            };
+            let (label, indent, style): (&str, &str, Style) = match msg.role {
                 Role::User => (
-                    "You      ",
+                    &user_label,
                     "         ",
                     Style::default()
                         .fg(Color::Cyan)
@@ -2363,6 +2535,13 @@ fn draw(
                         .fg(Color::Magenta)
                         .add_modifier(Modifier::ITALIC),
                 ),
+                Role::Denied => (
+                    "⛔ DENIED ",
+                    "         ",
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 // Unreachable — Voice was filtered above. Keep the arm
                 // exhaustive so adding a new Role doesn't silently miss.
                 Role::Voice => continue,
@@ -2370,7 +2549,7 @@ fn draw(
             for (i, text_line) in msg.text.lines().enumerate() {
                 let lead = if i == 0 { label } else { indent };
                 lines.push(Line::from(vec![
-                    Span::styled(lead, style),
+                    Span::styled(lead.to_string(), style),
                     Span::styled(text_line.to_string(), style),
                 ]));
             }
@@ -2653,17 +2832,19 @@ use crate::pb::contracts::{
     robonix_primitive_audio_mic_client::RobonixPrimitiveAudioMicClient,
     robonix_primitive_audio_speaker_client::RobonixPrimitiveAudioSpeakerClient,
     robonix_system_speech_tts_client::RobonixSystemSpeechTtsClient,
+    robonix_system_speech_voiceprint_delete_client::RobonixSystemSpeechVoiceprintDeleteClient,
     robonix_system_speech_voiceprint_enroll_client::RobonixSystemSpeechVoiceprintEnrollClient,
     robonix_system_speech_voiceprint_list_client::RobonixSystemSpeechVoiceprintListClient,
 };
 use crate::pb::tts as pb_tts;
 use crate::pb::voiceprint as pb_voiceprint;
 
-const MIC_RECORD_SECS: u64 = 5;
+const MIC_RECORD_SECS: u64 = 8;
 const MIC_SAMPLE_RATE_HZ: u32 = 16_000;
 
 const VOICEPRINT_ENROLL_CONTRACT: &str = "robonix/system/speech/voiceprint_enroll";
 const VOICEPRINT_LIST_CONTRACT: &str = "robonix/system/speech/voiceprint_list";
+const VOICEPRINT_DELETE_CONTRACT: &str = "robonix/system/speech/voiceprint_delete";
 const TTS_CONTRACT: &str = "robonix/system/speech/tts";
 
 #[derive(Clone, Default)]
@@ -2817,6 +2998,39 @@ async fn voiceprint_enroll(
     if !resp.success {
         anyhow::bail!(
             "voiceprint service refused enrollment: {}",
+            if resp.error.is_empty() {
+                "unknown error".to_string()
+            } else {
+                resp.error
+            }
+        );
+    }
+    Ok(())
+}
+
+/// Drop one enrolled voiceprint from the service. Idempotent on the
+/// service side (deleting an absent user_id returns success). Used by
+/// the Users modal's `d` key.
+async fn voiceprint_delete(atlas_endpoint: &str, user_id: &str) -> Result<()> {
+    let mut atlas = AtlasClient::connect(atlas_endpoint.to_string())
+        .await
+        .context("connect atlas for voiceprint delete")?;
+    let endpoint = resolve_grpc_endpoint(&mut atlas, VOICEPRINT_DELETE_CONTRACT, "")
+        .await
+        .ok_or_else(|| anyhow::anyhow!("no voiceprint_delete provider in atlas"))?;
+    let mut client = RobonixSystemSpeechVoiceprintDeleteClient::connect(endpoint.clone())
+        .await
+        .with_context(|| format!("dial voiceprint_delete at {endpoint}"))?;
+    let resp = client
+        .delete_enrolled(Request::new(pb_voiceprint::DeleteEnrolledRequest {
+            user_id: user_id.to_string(),
+        }))
+        .await
+        .context("DeleteEnrolled rpc")?
+        .into_inner();
+    if !resp.success {
+        anyhow::bail!(
+            "voiceprint service refused delete: {}",
             if resp.error.is_empty() {
                 "unknown error".to_string()
             } else {
@@ -2993,7 +3207,7 @@ fn draw_users_modal(
         };
         let footer = match &modal.state {
             UsersModalState::List => {
-                " ↑↓ move · Enter set controller · c clear · n new · r refresh · Esc close "
+                " ↑↓ move · Enter set active · c clear · n new · d delete · r refresh · Esc close "
             }
             UsersModalState::Naming { .. } => " type name · Enter record · Esc back ",
             UsersModalState::Recording { .. } => " recording — please speak ",
@@ -3022,7 +3236,7 @@ fn draw_users_modal(
                 .as_deref()
                 .unwrap_or("(any speaker allowed)");
             Line::from(vec![
-                Span::styled("controller: ", Style::default().fg(Color::Gray)),
+                Span::styled("active user: ", Style::default().fg(Color::Gray)),
                 Span::styled(
                     ctl.to_string(),
                     Style::default()
@@ -3151,7 +3365,9 @@ fn draw_users_modal(
                 } else {
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                 };
-                body_lines.push(Line::from(Span::styled(text.clone(), style)));
+                for ln in text.split('\n') {
+                    body_lines.push(Line::from(Span::styled(ln.to_string(), style)));
+                }
             }
         }
 
@@ -3266,9 +3482,27 @@ async fn run_users_modal(
                         }
                     }
                     Err(e) => {
-                        log_lines.push(format!("enroll failed: {e:#}"));
+                        let err_str = format!("{e:#}");
+                        log_lines.push(format!("enroll failed: {err_str}"));
+                        // Dup-voice path: service error string contains
+                        // "voice already enrolled as 'NAME'". Extract NAME
+                        // and speak a Chinese audio prompt so the operator
+                        // hears the rejection reason without staring at
+                        // the modal.
+                        if let Some(name) = err_str
+                            .split_once("voice already enrolled as '")
+                            .and_then(|(_, rest)| rest.split_once('\''))
+                            .map(|(n, _)| n.to_string())
+                        {
+                            let ep = atlas_endpoint.to_string();
+                            let sp = speaker_pin.clone();
+                            let prompt = format!("该声音属于用户 {name}, 您已经注册过");
+                            tokio::spawn(async move {
+                                let _ = speak_text(&ep, &sp, &prompt).await;
+                            });
+                        }
                         modal.state = UsersModalState::Notice {
-                            text: format!("✗ enroll failed: {e:#}"),
+                            text: format!("✗ enroll failed: {err_str}"),
                             ok: false,
                         };
                     }
@@ -3297,14 +3531,14 @@ async fn run_users_modal(
                         if let Some(u) = modal.users.get(modal.cursor) {
                             modal.controller = Some(u.user_id.clone());
                             modal.status =
-                                format!("controller set to {} ({})", u.user_name, u.user_id);
-                            log_lines.push(format!("controller → {} ({})", u.user_name, u.user_id));
+                                format!("active user set to {} ({})", u.user_name, u.user_id);
+                            log_lines.push(format!("active user → {} ({})", u.user_name, u.user_id));
                         }
                     }
                     KeyCode::Char('c') => {
                         modal.controller = None;
-                        modal.status = "controller cleared — any speaker allowed".to_string();
-                        log_lines.push("controller cleared".to_string());
+                        modal.status = "active user cleared — any speaker allowed".to_string();
+                        log_lines.push("active user cleared".to_string());
                     }
                     KeyCode::Char('n') => {
                         modal.state = UsersModalState::Naming {
@@ -3330,6 +3564,64 @@ async fn run_users_modal(
                             }
                             Err(e) => {
                                 modal.status = format!("refresh failed: {e:#}");
+                            }
+                        }
+                    }
+                    KeyCode::Char('d') => {
+                        // Delete the user under the cursor. Service is
+                        // idempotent so we don't bother with a confirm
+                        // dialog — the operator can just re-enrol with
+                        // `n` if they hit `d` by mistake.
+                        let Some(target) = modal.users.get(modal.cursor).cloned() else {
+                            continue;
+                        };
+                        let uid = target.user_id.clone();
+                        let dn = target.user_name.clone();
+                        modal.status = format!("deleting {dn} ({uid})…");
+                        draw_users_modal(terminal, &modal)?;
+                        match voiceprint_delete(atlas_endpoint, &uid).await {
+                            Ok(()) => {
+                                log_lines.push(format!("deleted voice: {dn} ({uid})"));
+                                // If the deleted user was the active one,
+                                // drop the pin — otherwise next ASR turn
+                                // would deny everyone forever.
+                                if modal.controller.as_deref() == Some(uid.as_str()) {
+                                    modal.controller = None;
+                                    log_lines.push(
+                                        "active user cleared (it was the deleted user)".to_string(),
+                                    );
+                                }
+                                match refresh_voiceprint_db(atlas_endpoint).await {
+                                    Ok(new_db) => {
+                                        modal.users = new_db
+                                            .users
+                                            .iter()
+                                            .map(|(id, u)| UserEntry {
+                                                user_id: id.clone(),
+                                                user_name: u.name.clone(),
+                                            })
+                                            .collect();
+                                        if modal.cursor >= modal.users.len()
+                                            && !modal.users.is_empty()
+                                        {
+                                            modal.cursor = modal.users.len() - 1;
+                                        }
+                                        modal.status =
+                                            format!("deleted {dn} · {} user(s) left", modal.users.len());
+                                        db = new_db;
+                                    }
+                                    Err(e) => {
+                                        modal.status =
+                                            format!("deleted {dn} but refresh failed: {e:#}");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log_lines.push(format!("delete failed: {e:#}"));
+                                modal.state = UsersModalState::Notice {
+                                    text: format!("✗ delete failed: {e:#}"),
+                                    ok: false,
+                                };
                             }
                         }
                     }
@@ -3362,7 +3654,7 @@ async fn run_users_modal(
                         // recording bar at 0.0s.
                         modal.state = UsersModalState::Notice {
                             text: format!(
-                                "🔊 准备录入声纹:{}\n\n请等待提示音 \"开始声纹录入,请说话\" 播放完毕,\n然后再开始说话。",
+                                "🔊 about to enrol voiceprint: {}\n\nwait for the spoken prompt to finish playing,\nthen start speaking.",
                                 dn
                             ),
                             ok: true,
@@ -3380,22 +3672,69 @@ async fn run_users_modal(
                         // stream — otherwise the very first ~200ms of
                         // recording still picks up TTS tail.
                         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        let started = std::time::Instant::now();
                         modal.state = UsersModalState::Recording {
-                            started: std::time::Instant::now(),
+                            started,
                             audio: Vec::new(),
                             display_name: dn.clone(),
                             user_id: user_id.clone(),
                         };
                         modal.status = format!("recording {} for {}s…", dn, MIC_RECORD_SECS);
-                        draw_users_modal(terminal, &modal)?;
-                        // Synchronous capture — modal redraws are paused
-                        // while the mic stream drains. Acceptable: the
-                        // operator just stares at a progress bar.
-                        match capture_mic_pcm(atlas_endpoint, &mic_pin).await {
+                        // Run capture in a background task so the modal
+                        // can redraw the progress bar on a 100ms tick.
+                        // Synchronous-await would freeze the UI for the
+                        // entire MIC_RECORD_SECS window.
+                        let ep = atlas_endpoint.to_string();
+                        let mp = mic_pin.clone();
+                        let capture_handle: tokio::task::JoinHandle<Result<Vec<u8>>> =
+                            tokio::spawn(async move { capture_mic_pcm(&ep, &mp).await });
+                        let mut handle = Some(capture_handle);
+                        // Hard cap: stream.message() can block past the
+                        // deadline if the mic stops yielding chunks.
+                        // Force-abort 2s past deadline so the UI never
+                        // hangs.
+                        let hard_cap = tokio::time::Instant::now()
+                            + std::time::Duration::from_secs(MIC_RECORD_SECS + 2);
+                        let capture_result: Result<Vec<u8>> = loop {
+                            draw_users_modal(terminal, &modal)?;
+                            // Drain key events — only Esc cancels.
+                            if event::poll(std::time::Duration::from_millis(0))?
+                                && let Event::Key(k) = event::read()?
+                                && matches!(k.code, KeyCode::Esc)
+                            {
+                                if let Some(h) = handle.take() {
+                                    h.abort();
+                                }
+                                break Err(anyhow::anyhow!("cancelled"));
+                            }
+                            if let Some(h) = handle.as_ref()
+                                && h.is_finished()
+                            {
+                                let h = handle.take().unwrap();
+                                break h
+                                    .await
+                                    .unwrap_or_else(|e| Err(anyhow::anyhow!("join: {e}")));
+                            }
+                            if tokio::time::Instant::now() > hard_cap {
+                                if let Some(h) = handle.take() {
+                                    h.abort();
+                                }
+                                break Err(anyhow::anyhow!(
+                                    "mic capture timeout (>{}s)",
+                                    MIC_RECORD_SECS + 2
+                                ));
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        };
+                        match capture_result {
                             Ok(buf) => {
                                 if let UsersModalState::Recording { audio, .. } = &mut modal.state {
                                     *audio = buf;
                                 }
+                            }
+                            Err(e) if e.to_string() == "cancelled" => {
+                                modal.state = UsersModalState::List;
+                                modal.status = "recording cancelled".to_string();
                             }
                             Err(e) => {
                                 modal.state = UsersModalState::Notice {
@@ -4160,8 +4499,8 @@ async fn dispatch_settings_category(
                     *voiceprint_db = out.db;
                     log_lines.extend(out.log_lines);
                     *status_msg = match &chat_cfg.current_controller {
-                        Some(c) => format!("users saved · controller = {c}"),
-                        None => "users saved · controller cleared".to_string(),
+                        Some(c) => format!("users saved · active = {c}"),
+                        None => "users saved · active user cleared".to_string(),
                     };
                 }
                 Err(e) => *status_msg = format!("users: {e:#}"),
@@ -4262,7 +4601,7 @@ fn draw_settings_menu(
                 chat_cfg.speaker_cap_id.as_deref().unwrap_or("(unset)")
             )),
             Line::from(format!(
-                "  controller      : {}",
+                "  active user     : {}",
                 chat_cfg.current_controller.as_deref().unwrap_or("(any)")
             )),
         ];

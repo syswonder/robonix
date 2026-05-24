@@ -1,0 +1,10 @@
+# Voiceprint deletion (admin RPC).
+# Caller sends a user_id; service forgets the embedding + persists
+# the change to enrolled.json. Subsequent Identify(...) calls will no
+# longer match this speaker. Used by `rbnx chat`'s Settings → Users
+# modal when the operator presses `d` on the cursor row.
+# abstract_interface_id: robonix/system/speech/voiceprint_delete
+string  user_id          # which user to forget; no-op + success=true if absent
+---
+bool    success          # true if the row was removed OR was already absent
+string  error            # non-empty on failure (I/O, etc.)
