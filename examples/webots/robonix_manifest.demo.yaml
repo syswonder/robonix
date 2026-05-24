@@ -136,7 +136,14 @@ service:
       disable_whisper: true   # webots ASR uses FunASR streaming
   - name: voiceprint
     path: ../../system/voiceprint
-    config: {}
+    config:
+      # ECAPA-TDNN forced to CPU on this 6GB RTX 2060 — scene
+      # (YOLO+SAM+CLIP, ~2.4G) + speech (FunASR+edge-tts, ~1G) +
+      # chrome (~0.5G) already eat ~4G, leaving <500MB free. ASR's
+      # cuBLAS workspace alloc on the 2nd Ctrl+V then fails with
+      # CUBLAS_STATUS_ALLOC_FAILED. Voiceprint inference is tiny
+      # (16k×5s clip, <200ms on CPU) so the GPU savings are free.
+      device: cpu
 
 skill:
   - name: explore

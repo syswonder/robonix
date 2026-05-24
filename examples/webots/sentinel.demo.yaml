@@ -1,22 +1,17 @@
-# Sentinel rules — demo build (always-on, designed to fire on first attempt).
+# Sentinel policy — webots demo deploy.
 #
-# Wire this into a deploy by exporting the env BEFORE `rbnx boot`:
+# Loaded by the executor at startup via SENTINEL_RULES_FILE:
 #
 #   export SENTINEL_RULES_FILE=$(realpath examples/webots/sentinel.demo.yaml)
 #   rbnx boot -f examples/webots/robonix_manifest.demo.yaml
 #
-# The rule below blocks every call to `robonix/system/speech/speak`.
-# Run the chat and ask the agent to say something — pilot's plan will
-# include a `speech.speak(...)` step, executor's sentinel hook intercepts,
-# and the chat surfaces:
-#
-#   sentinel:demo_block_speak: 演示用规则,speak 已被 sentinel 拦截
-#
-# Once you've seen the rule fire, narrow `deny_between` (e.g. to
-# ["22:00", "07:00"]) to re-enable normal speak during the day.
+# The rule below illustrates a quiet-hours policy:speaker output is
+# blocked for the entire day so the demo can show sentinel firing on
+# the first attempt. To return to normal daytime use, narrow the
+# deny_between window (e.g. ["22:00", "07:00"]) and reboot.
 version: 1
 rules:
-  - id: demo_block_speak
+  - id: quiet_hours_speaker
     contract_id: robonix/system/speech/speak
-    deny_between: ["00:00", "23:59"]   # always-deny for the demo flip
-    reason: "演示用规则:speak 已被 sentinel 拦截 (改 deny_between 解除)"
+    deny_between: ["00:00", "23:59"]
+    reason: "quiet-hours 策略:当前时段禁止扬声器输出。"

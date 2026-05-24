@@ -35,11 +35,18 @@ use serde::Deserialize;
 use crate::pb::pilot::CapabilityCall;
 
 /// Outcome of a sentinel check. `Allow` is the happy path; `Deny` carries the
-/// rule id and the human reason that flows back to the user.
+/// rule id, the human reason, and the configured deny window so callers
+/// (chat + pilot's LLM) can understand WHEN the rule applies, not just
+/// the rejection itself.
 #[derive(Debug)]
 pub enum Decision {
     Allow,
-    Deny { rule_id: String, reason: String },
+    Deny {
+        rule_id: String,
+        reason: String,
+        /// Formatted "HH:MM–HH:MM" of the configured deny window.
+        deny_window: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,6 +170,13 @@ pub fn check(call: &CapabilityCall) -> Decision {
             return Decision::Deny {
                 rule_id: rule.id.clone(),
                 reason: rule.reason.clone(),
+                deny_window: format!(
+                    "{:02}:{:02}–{:02}:{:02}",
+                    rule.deny_start / 60,
+                    rule.deny_start % 60,
+                    rule.deny_end / 60,
+                    rule.deny_end % 60,
+                ),
             };
         }
     }

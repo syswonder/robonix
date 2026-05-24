@@ -1,0 +1,15 @@
+# Voiceprint deletion (admin).
+# Caller sends a user_id; service removes the embedding from enrolled.json.
+# Idempotent — deleting an absent user_id returns success=true. Used by
+# `rbnx chat`'s Settings → Users modal (press `d` on the cursor row).
+[contract]
+id      = "robonix/system/speech/voiceprint_delete"
+version = "1"
+kind    = "service"
+idl     = "voiceprint/srv/DeleteEnrolled.srv"
+
+[mode]
+type = "rpc"
+
+[semantics]
+stateless = false   # mutates persistent enrolled.json
