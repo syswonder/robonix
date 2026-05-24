@@ -44,19 +44,43 @@ from .object_registry import (
 # view; downstream relation queries already ignore matched-by-distance
 # false positives via class match.
 _GATE_RADIUS_M: dict[str, float] = {
+    # Small / hand-held — keep tight; user moves them, two next to each
+    # other on a tray should NOT collapse.
     "cup": 0.60,
     "bottle": 0.60,
     "phone": 0.60,
     "cell phone": 0.60,
     "tool": 0.60,
     "tray": 0.80,
+    # Furniture-scale, static — loose gate tolerates depth noise on
+    # the larger footprint without users physically moving the object.
     "table": 1.20,
     "chair": 1.00,
     "door": 1.50,
+    # Static decor that depth+mask gets badly wrong because the support
+    # surface is far behind the visible silhouette (potted plants:
+    # leaves vs pot, depth picks one or the other and the pose jumps
+    # 1-2 m frame-to-frame; wall-mounted picture frames / clocks: depth
+    # may land on the wall vs the protruding frame edge). These never
+    # move in any real demo, so the gate can be very loose.
+    "potted plant": 1.80,
+    "potted_plant": 1.80,         # YOLO-World sometimes underscores
+    "plant":        1.80,
+    "picture frame": 2.00,
+    "picture_frame": 2.00,
+    "frame":         2.00,
+    "clock":         1.50,
+    "tv":            1.80,
+    "monitor":       1.50,
+    "sofa":          1.50,
+    "couch":         1.50,
+    "bed":           1.80,
+    "refrigerator":  1.50,
+    "fridge":        1.50,
     "person": 3.00,
     "robot": 1.00,
 }
-_DEFAULT_GATE_RADIUS_M = 0.80
+_DEFAULT_GATE_RADIUS_M = 1.00
 
 # Cost = ||D.pose - O.pose|| + alpha * (1 - D.confidence)
 # Higher alpha penalises low-confidence matches harder, biasing toward

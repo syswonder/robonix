@@ -67,12 +67,68 @@ function fit() { c.width = c.clientWidth; c.height = c.clientHeight; }
 window.addEventListener('resize', fit); fit();
 
 // World-to-pixel: center on robot if known, else (0,0). 1m = 40 px.
+// `panOffset` accumulates user drag so the operator can scroll around
+// the map without the auto-follow stealing focus back every tick.
+// Once `follow=false` we ignore the robot pose for centering; the
+// `r` key (or double-click) re-enables follow + resets pan.
 let center = [0, 0];
 let pxPerM = 40;
+let panOffset = [0, 0];   // pixels, accumulated drag
+let follow = true;        // if true, center re-snaps to robot each tick
 function w2p(x, y) {
-    const cx = c.width / 2, cy = c.height / 2;
+    const cx = c.width / 2 + panOffset[0];
+    const cy = c.height / 2 + panOffset[1];
     return [cx + (x - center[0]) * pxPerM, cy - (y - center[1]) * pxPerM];
 }
+
+// ── 2D canvas interactions: drag = pan, wheel = zoom, r/dbl-click = follow ──
+// (added after operator reported the canvas was un-pannable + the right
+//  3D view's default fly speed was too slow on a 30 m floor map.)
+(function attachCanvasNav() {
+    let drag = null;
+    c.style.cursor = 'grab';
+    c.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        drag = { x: e.clientX, y: e.clientY, ox: panOffset[0], oy: panOffset[1] };
+        follow = false;
+        c.style.cursor = 'grabbing';
+    });
+    window.addEventListener('mousemove', (e) => {
+        if (!drag) return;
+        panOffset[0] = drag.ox + (e.clientX - drag.x);
+        panOffset[1] = drag.oy + (e.clientY - drag.y);
+    });
+    window.addEventListener('mouseup', () => {
+        drag = null;
+        c.style.cursor = 'grab';
+    });
+    c.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        // Anchor zoom at cursor so the cell under the mouse stays put.
+        const r = c.getBoundingClientRect();
+        const mx = e.clientX - r.left, my = e.clientY - r.top;
+        const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+        const newPx = Math.max(4, Math.min(400, pxPerM * factor));
+        // (mx, my) corresponds to world (wx, wy) before zoom; keep
+        // that mapping after: panOffset += (newCenterPx - oldCenterPx)
+        const cx = c.width / 2 + panOffset[0];
+        const cy = c.height / 2 + panOffset[1];
+        const wx = (mx - cx) / pxPerM + center[0];
+        const wy = -(my - cy) / pxPerM + center[1];
+        pxPerM = newPx;
+        const cx2 = c.width / 2 + panOffset[0];
+        const cy2 = c.height / 2 + panOffset[1];
+        const mx2 = cx2 + (wx - center[0]) * pxPerM;
+        const my2 = cy2 - (wy - center[1]) * pxPerM;
+        panOffset[0] += (mx - mx2);
+        panOffset[1] += (my - my2);
+        follow = false;
+    }, { passive: false });
+    c.addEventListener('dblclick', () => { follow = true; panOffset = [0, 0]; });
+    window.addEventListener('keydown', (e) => {
+        if (e.key === 'r' || e.key === 'R') { follow = true; panOffset = [0, 0]; }
+    });
+})();
 
 const CLS_COLORS = {
     robot: '#7aa7ff', table: '#f0c674', chair: '#e9b06b', monitor: '#88c0d0',
@@ -94,8 +150,10 @@ function draw(state) {
     ctx.clearRect(0, 0, c.width, c.height);
 
     // re-center on the robot if there is one; fall back to last-known.
+    // The `follow` flag is dropped to false by drag/wheel; press `r`
+    // (or double-click the canvas) to re-snap.
     const robot = (state.objects || []).find(o => o.cls === 'robot');
-    if (robot) center = [robot.pose.x, robot.pose.y];
+    if (robot && follow) center = [robot.pose.x, robot.pose.y];
 
     // ── Occupancy map underlay ──────────────────────────────────────
     if (state.occupancy && state.occupancy.stamp_ms !== occStamp) {
@@ -1032,6 +1090,24 @@ _INDEX_3D_HTML = r"""<!doctype html>
     controls.target.set(0, 0, 0.5);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
+    // Speed knobs. Defaults felt fine on a 10 m sim map but became
+    // painfully slow once the real-world 3F corridor map grew past
+    // 20 m. Bump panSpeed (drag-pan), keyPanSpeed (arrow / wasd pan,
+    // in px units, default 7), zoomSpeed (wheel), and rotateSpeed
+    // (right-drag) by ~3-4×. Floor zoom-out at maxDistance=300 so
+    // the camera can pull back enough to frame an entire floor at
+    // once. Operator overrides at runtime via ?pan=4&zoom=4 etc.
+    const qs = new URLSearchParams(window.location.search);
+    const num = (k, d) => {
+        const v = parseFloat(qs.get(k));
+        return Number.isFinite(v) && v > 0 ? v : d;
+    };
+    controls.panSpeed     = num('pan',    4.0);  // default 1.0
+    controls.keyPanSpeed  = num('keypan', 30);   // default 7
+    controls.zoomSpeed    = num('zoom',   3.0);  // default 1.0
+    controls.rotateSpeed  = num('rot',    1.2);  // default 1.0
+    controls.maxDistance  = num('maxd',   300);  // default Infinity but tied to fov
+    controls.screenSpacePanning = true;          // drag = world-plane pan
 
     // ── Lights + grid + axes ───────────────────────────────────────────
     scene.add(new THREE.HemisphereLight(0x9ab8ff, 0x202028, 0.9));
