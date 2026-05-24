@@ -36,9 +36,6 @@ system:
     # Sentinel rules are loaded by the executor at startup; the env
     # SENTINEL_RULES_FILE in the launching shell takes precedence over
     # this manifest key. Set it BEFORE `rbnx boot`.
-  memory:
-    backend: sqlite
-    log: info
   pilot:
     listen: 127.0.0.1:50071
     log: info
@@ -105,9 +102,16 @@ service:
       planner_diagonal: true
       planner_max_iters: 500000
 
-  # ── speech / voiceprint — the demo-specific adds ────────────────────
-  # Both live under system/ in the robonix tree; the deploy reaches
-  # them via a relative path that climbs out of examples/webots/.
+  # ── memory / speech / voiceprint — not "system builtins" per the v0.1
+  # concept lock (system: only holds atlas/executor/pilot/liaison + nexus).
+  # Memory, speech and voiceprint are services that happen to live under
+  # the `system/` source tree, but they boot like any other service —
+  # robonix-api Service instance, atlas-registered capabilities, lifecycle
+  # gRPC. Path: ../../system/X reaches them from this manifest's dir.
+  - name: memory
+    path: ../../system/memory
+    config:
+      backend: sqlite
   - name: speech
     path: ../../system/speech
     config:
