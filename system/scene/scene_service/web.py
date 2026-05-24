@@ -1062,6 +1062,69 @@ _INDEX_3D_HTML = r"""<!doctype html>
     </div>
   </div>
   <div id="hud-stats">objects: 0 · points: 0</div>
+  <!-- Camera-speed sliders. Collapsible to a tiny ⚙ chip so they don't
+       clutter the canvas. Values persist across reloads via localStorage. -->
+  <div id="speed" class="collapsed">
+    <div class="head" id="speed-head" title="camera speed">
+      <span class="chip">⚙ speed</span>
+    </div>
+    <div class="body">
+      <label><span>pan</span>
+        <input type="range" id="sl-pan" min="0.5" max="20" step="0.1">
+        <span class="val" id="v-pan"></span>
+      </label>
+      <label><span>zoom</span>
+        <input type="range" id="sl-zoom" min="0.5" max="10" step="0.1">
+        <span class="val" id="v-zoom"></span>
+      </label>
+      <label><span>keypan</span>
+        <input type="range" id="sl-keypan" min="5" max="120" step="1">
+        <span class="val" id="v-keypan"></span>
+      </label>
+      <label><span>rotate</span>
+        <input type="range" id="sl-rot" min="0.2" max="4" step="0.05">
+        <span class="val" id="v-rot"></span>
+      </label>
+      <label><span>maxDist</span>
+        <input type="range" id="sl-maxd" min="20" max="1000" step="10">
+        <span class="val" id="v-maxd"></span>
+      </label>
+      <button id="sl-reset" title="reset to defaults">reset</button>
+    </div>
+  </div>
+  <style>
+    #speed { position: absolute; top: 8px; right: 100px; z-index: 6;
+             font-size: 11px; color: #aab; }
+    #speed .head { cursor: pointer; user-select: none; }
+    #speed .chip {
+      display: inline-block; padding: 4px 8px;
+      background: rgba(10,12,16,0.85);
+      border: 1px solid #303542; border-radius: 4px;
+      color: #889;
+    }
+    #speed .chip:hover { color: #f0c050; border-color: #5a606e; }
+    #speed.collapsed .body { display: none; }
+    #speed .body {
+      margin-top: 4px; padding: 6px 8px;
+      background: rgba(10,12,16,0.9); border: 1px solid #303542;
+      border-radius: 4px; min-width: 230px;
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    #speed label {
+      display: grid; grid-template-columns: 56px 1fr 42px; align-items: center;
+      gap: 6px; font-size: 11px;
+    }
+    #speed label > span:first-child { color: #889; }
+    #speed input[type=range] { width: 100%; accent-color: #5fc; }
+    #speed .val { color: #5fc; text-align: right; font-variant-numeric: tabular-nums; }
+    #speed button {
+      margin-top: 2px; padding: 3px 8px;
+      background: rgba(20,24,32,0.9); color: #889;
+      border: 1px solid #303542; border-radius: 3px; cursor: pointer;
+      font-size: 10px;
+    }
+    #speed button:hover { color: #f0c050; border-color: #5a606e; }
+  </style>
   <div id="panel" class="empty">▸</div>
   <div id="foot"><a href="/">← back to 2D map</a> · auto-refresh 1Hz · <span id="foot-time">—</span></div>
 
@@ -1102,12 +1165,54 @@ _INDEX_3D_HTML = r"""<!doctype html>
         const v = parseFloat(qs.get(k));
         return Number.isFinite(v) && v > 0 ? v : d;
     };
-    controls.panSpeed     = num('pan',    4.0);  // default 1.0
-    controls.keyPanSpeed  = num('keypan', 30);   // default 7
-    controls.zoomSpeed    = num('zoom',   3.0);  // default 1.0
-    controls.rotateSpeed  = num('rot',    1.2);  // default 1.0
-    controls.maxDistance  = num('maxd',   300);  // default Infinity but tied to fov
+    // Precedence for each knob: localStorage > URL query > built-in
+    // default. Sliders below write to localStorage so adjustments stick
+    // across reload + iframe re-mount (combined view).
+    const SPEED_DEFAULTS = { pan: 4.0, zoom: 3.0, keypan: 30, rot: 1.2, maxd: 300 };
+    const lsKey = (k) => 'scene3d.speed.' + k;
+    const speedNum = (k) => {
+        const ls = parseFloat(localStorage.getItem(lsKey(k)));
+        if (Number.isFinite(ls) && ls > 0) return ls;
+        return num(k, SPEED_DEFAULTS[k]);
+    };
+    function applySpeeds() {
+        controls.panSpeed    = speedNum('pan');
+        controls.zoomSpeed   = speedNum('zoom');
+        controls.keyPanSpeed = speedNum('keypan');
+        controls.rotateSpeed = speedNum('rot');
+        controls.maxDistance = speedNum('maxd');
+    }
+    applySpeeds();
     controls.screenSpacePanning = true;          // drag = world-plane pan
+
+    // Bind sliders → controls. Live; no need to release the slider.
+    (function bindSpeedUI() {
+        const head = document.getElementById('speed-head');
+        const panel = document.getElementById('speed');
+        head.onclick = () => panel.classList.toggle('collapsed');
+        const bind = (k) => {
+            const sl = document.getElementById('sl-' + k);
+            const v  = document.getElementById('v-'  + k);
+            sl.value = speedNum(k);
+            v.textContent = (+sl.value).toFixed(k === 'keypan' || k === 'maxd' ? 0 : 1);
+            sl.oninput = () => {
+                localStorage.setItem(lsKey(k), sl.value);
+                v.textContent = (+sl.value).toFixed(k === 'keypan' || k === 'maxd' ? 0 : 1);
+                applySpeeds();
+            };
+        };
+        ['pan', 'zoom', 'keypan', 'rot', 'maxd'].forEach(bind);
+        document.getElementById('sl-reset').onclick = () => {
+            ['pan', 'zoom', 'keypan', 'rot', 'maxd'].forEach(k => {
+                localStorage.removeItem(lsKey(k));
+                const sl = document.getElementById('sl-' + k);
+                const v  = document.getElementById('v-'  + k);
+                sl.value = SPEED_DEFAULTS[k];
+                v.textContent = (+sl.value).toFixed(k === 'keypan' || k === 'maxd' ? 0 : 1);
+            });
+            applySpeeds();
+        };
+    })();
 
     // ── Lights + grid + axes ───────────────────────────────────────────
     scene.add(new THREE.HemisphereLight(0x9ab8ff, 0x202028, 0.9));
