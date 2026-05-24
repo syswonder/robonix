@@ -1127,8 +1127,13 @@ _INDEX_3D_HTML = r"""<!doctype html>
     </div>
   </div>
   <style>
-    #speed { position: absolute; top: 8px; right: 100px; z-index: 6;
-             font-size: 11px; color: #aab; }
+    /* Bottom-right so the top-right inspector ("click an object → …")
+       and #hud-stats stay readable. The expanded panel grows UPWARD
+       from the chip so even a tall slider stack doesn't overlap the
+       inspector's collapsible body. */
+    #speed { position: absolute; bottom: 8px; right: 8px; z-index: 6;
+             font-size: 11px; color: #aab;
+             display: flex; flex-direction: column-reverse; align-items: flex-end; }
     #speed .head { cursor: pointer; user-select: none; }
     #speed .chip {
       display: inline-block; padding: 4px 8px;
@@ -1343,10 +1348,19 @@ _INDEX_3D_HTML = r"""<!doctype html>
         scene.add(mapPlane);
         mapPlaneStamp = occ.stamp_ms;
     }
+    // pollMap NEEDS the occupancy payload; send occ_stamp so the server
+    // only re-ships png_b64 when the underlying /map advances. (Earlier
+    // `?occ=skip` was wrong here — it stripped occupancy entirely and
+    // the floor map plane stayed empty.)
+    let pollMapStamp = 0;
     async function pollMap() {
         try {
-            const r = await fetch('/api/state?occ=skip', {cache: 'no-store'});
+            const r = await fetch('/api/state?occ_stamp=' + pollMapStamp,
+                                  {cache: 'no-store'});
             const j = await r.json();
+            if (j.occupancy && j.occupancy.stamp_ms) {
+                pollMapStamp = j.occupancy.stamp_ms;
+            }
             await refreshMapPlane(j.occupancy);
         } catch (e) { /* swallow — pollRobot uses the same endpoint */ }
     }
