@@ -1,0 +1,12 @@
+# pytorch3d was originally pulled in for concept-graphs's
+# compute_3d_iou_accurate_batch (used by compute_overlap_matrix_general
+# → merge_overlap_objects), but we replaced that path with a voxel-set
+# fraction-overlap impl (see perception_concept_graphs.py compute_*_
+# overlap_*); the ali-dev branch of concept-graphs does NOT import
+# pytorch3d in slam.{utils,mapping,slam_classes} or utils.model_utils.
+#
+# x86_64-only: miropsota's wheel index has no aarch64 binaries and
+# source build would need nvcc, so we skip on Jetson. Runtime path
+# does not exercise pytorch3d.
+--extra-index-url https://miropsota.github.io/torch_packages_builder
+pytorch3d==0.7.8+pt2.5.1cu124; platform_machine == "x86_64"
