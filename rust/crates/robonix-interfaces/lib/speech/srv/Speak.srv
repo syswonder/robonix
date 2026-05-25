@@ -1,0 +1,9 @@
+# robonix/system/speech/speak — synthesize `text` to speech and play it
+# out loud on the audio/speaker primitive identified by `target`
+# (its provider_id, from list_speakers). Empty target = first available
+# speaker. Lets an agent make the robot announce things aloud.
+string target
+string text
+---
+bool ok
+string detail
