@@ -79,6 +79,7 @@ def adapt_audio(
     sample_rate: int = 16000,
     channels: int = 1,
     bits_per_sample: int = 16,
+    gain: float = 1.0,
 ) -> tuple[bytes, str]:
     """Normalise audio to 16 kHz mono pcm_s16le for ASR backends.
 
@@ -102,6 +103,9 @@ def adapt_audio(
             to mono by averaging.
         bits_per_sample: Bits per sample (8, 16, 24, or 32). Used by
             pcm_s24le decoder; other encoders derive this from the format.
+        gain: Uniform linear gain applied before re-encoding. Default 1.0
+            (no change). Use >1.0 to boost a quiet mic; values that push
+            samples past full scale are clipped.
 
     Returns:
         Tuple of (audio_bytes, encoding_string):
@@ -131,7 +135,13 @@ def adapt_audio(
         log.debug("Resampled %d Hz → %d Hz (%d samples)",
                   sample_rate, TARGET_SAMPLE_RATE, len(audio))
 
-    # 4. Encode back to pcm_s16le
+    # 4. Apply uniform input gain (software AGC for quiet mics). A constant
+    # multiplier is safe for streaming ASR — every chunk gets the same gain,
+    # so there are no inter-chunk level discontinuities. clip() below bounds it.
+    if gain != 1.0:
+        audio = audio * gain
+
+    # 5. Encode back to pcm_s16le
     pcm = (audio * 32768.0).clip(-32768, 32767).astype(np.int16).tobytes()
     return pcm, "pcm_s16le"
 

@@ -44,3 +44,5 @@ capabilities:
   - name: robonix/system/speech/tts
   - name: robonix/system/speech/tts_stream
   - name: robonix/system/speech/dialog
+  - name: robonix/system/speech/list_speakers
+  - name: robonix/system/speech/speak
