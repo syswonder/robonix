@@ -20,7 +20,7 @@ package:
   name: com.robonix.example.speech_service
   version: 0.1.0
   vendor: robonix
-  description: Voice interaction service (ASR + TTS + Dialog) under robonix/system/speech.
+  description: Voice interaction service (ASR + TTS + Dialog) under robonix/service/speech.
   license: MulanPSL-2.0
 
 # Atlas runtime provider_id — `rbnx boot`'s wait-for-cap loop matches this
@@ -38,11 +38,11 @@ start: |
   exec rbnx-build/venv/bin/python -m speech_service.service
 
 capabilities:
-  - name: robonix/system/speech/driver
-  - name: robonix/system/speech/asr
-  - name: robonix/system/speech/asr_stream
-  - name: robonix/system/speech/tts
-  - name: robonix/system/speech/tts_stream
-  - name: robonix/system/speech/dialog
-  - name: robonix/system/speech/list_speakers
-  - name: robonix/system/speech/speak
+  - name: robonix/service/speech/driver
+  - name: robonix/service/speech/asr
+  - name: robonix/service/speech/asr_stream
+  - name: robonix/service/speech/tts
+  - name: robonix/service/speech/tts_stream
+  - name: robonix/service/speech/dialog
+  - name: robonix/service/speech/list_speakers
+  - name: robonix/service/speech/speak

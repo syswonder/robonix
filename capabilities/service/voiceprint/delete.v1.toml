@@ -3,7 +3,7 @@
 # Idempotent — deleting an absent user_id returns success=true. Used by
 # `rbnx chat`'s Settings → Users modal (press `d` on the cursor row).
 [contract]
-id      = "robonix/system/speech/voiceprint_delete"
+id      = "robonix/service/voiceprint/delete"
 version = "1"
 kind    = "service"
 idl     = "voiceprint/srv/DeleteEnrolled.srv"

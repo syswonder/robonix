@@ -1,5 +1,5 @@
 # Memsearch MCP server — agent long-term memory.
-# Control plane: robonix/system/memory/{save,search,compact}.
+# Control plane: robonix/service/memory/{save,search,compact}.
 # Exposes MCP tools only; no robonix_contracts gRPC servicer.
 manifestVersion: 1
 
@@ -44,6 +44,6 @@ start: |
        > rbnx-build/data/memsearch.log 2>&1
 
 capabilities:
-  - name: robonix/system/memory/save
-  - name: robonix/system/memory/search
-  - name: robonix/system/memory/compact
+  - name: robonix/service/memory/save
+  - name: robonix/service/memory/search
+  - name: robonix/service/memory/compact

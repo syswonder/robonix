@@ -3,15 +3,24 @@
 # Voiceprint service build phase.
 #
 # Robonix package convention: every Python package gets a uv-managed venv
-# under rbnx-build/. Build phase installs deps + runs codegen + pre-warms
-# the ECAPA-TDNN model so the runtime (`start:`) only activates the venv
-# and serves — no downloads at request time.
+# under rbnx-build/. Build phase installs deps + pre-warms the ECAPA-TDNN
+# model so the runtime (`start:`) only activates the venv and serves —
+# no downloads at request time.
+#
+# gRPC stubs are generated below by the `rbnx codegen -p <pkg> --mcp`
+# step, which materialises atlas-managed contract bundles into
+# rbnx-build/codegen/proto_gen/. `rbnx build` itself only runs this
+# manifest's `build:` body — packages call codegen explicitly here,
+# same as services/memsearch and services/speech.
+# The previous version of this script ran grpc_tools.protoc against a
+# bespoke `proto/voiceprint.proto` — that bespoke proto has been
+# removed in favour of the standard capabilities/*.toml flow.
 #
 # Layout under rbnx-build/:
-#   rbnx-build/venv/              per-package Python venv (uv)
-#   rbnx-build/codegen/proto_gen/ generated voiceprint_pb2*.py
-#   rbnx-build/models/            ECAPA-TDNN weights
-#   rbnx-build/data/              runtime state (enrolled.json)
+#   rbnx-build/venv/                per-package Python venv (uv)
+#   rbnx-build/codegen/proto_gen/   atlas-managed stubs (created by `rbnx codegen`)
+#   rbnx-build/models/              ECAPA-TDNN weights
+#   rbnx-build/data/                runtime state (enrolled.json)
 
 set -euo pipefail
 
@@ -25,7 +34,6 @@ cd "$PKG"
 
 BUILD="rbnx-build"
 VENV="$BUILD/venv"
-CODEGEN="$BUILD/codegen/proto_gen"
 MODELS="$BUILD/models"
 DATA="$BUILD/data"
 CLEAN="${RBNX_BUILD_CLEAN:-}"
@@ -34,7 +42,7 @@ if [[ "$CLEAN" == "1" ]]; then
     echo "[build] clean: removing $BUILD"
     rm -rf "$BUILD"
 fi
-mkdir -p "$CODEGEN" "$MODELS" "$DATA"
+mkdir -p "$MODELS" "$DATA"
 
 # ── 1. uv venv ──────────────────────────────────────────────────────────────
 if ! command -v uv >/dev/null 2>&1; then
@@ -50,17 +58,8 @@ fi
 echo "[build] uv sync (pyproject.toml → $VENV)"
 VIRTUAL_ENV="$PKG/$VENV" uv sync --active --no-managed-python
 
-# ── 3. Codegen (proto/voiceprint.proto → rbnx-build/codegen/proto_gen) ─────
+# ── 3. Pre-download ECAPA-TDNN weights (skip with SKIP_MODEL_DOWNLOAD=1) ───
 PY="$VENV/bin/python"
-echo "[build] grpc_tools.protoc → $CODEGEN"
-"$PY" -m grpc_tools.protoc \
-    -I"$PKG/proto" \
-    --python_out="$CODEGEN" \
-    --grpc_python_out="$CODEGEN" \
-    "$PKG/proto/voiceprint.proto"
-touch "$CODEGEN/__init__.py"
-
-# ── 4. Pre-download ECAPA-TDNN weights (skip with SKIP_MODEL_DOWNLOAD=1) ───
 : "${HF_ENDPOINT:=https://hf-mirror.com}"
 export HF_ENDPOINT
 if [[ "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
@@ -76,5 +75,11 @@ SpeakerRecognition.from_hparams(
 else
     echo "[build] SKIP_MODEL_DOWNLOAD=1 — skipping ECAPA-TDNN download."
 fi
+
+# ── 4. Codegen (.proto + grpc stubs + MCP dataclasses → rbnx-build/codegen/) ─
+FLAGS=(--mcp)
+[[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
+echo "[build] rbnx codegen ${FLAGS[*]}"
+rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
 echo "[build] done."

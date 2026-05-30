@@ -17,7 +17,7 @@ use rmcp::ServiceExt;
 type McpClient = rmcp::service::RunningService<rmcp::RoleClient, ()>;
 
 /// MCP tool name = leaf of contract_id (e.g.
-/// `robonix/system/memory/search` → `search`). Servers expose tools by
+/// `robonix/service/memory/search` → `search`). Servers expose tools by
 /// short name; the provider+contract grouping is Robonix-side bookkeeping.
 /// TODO: leaf-as-tool-name may collide across providers — wheatfox
 fn mcp_tool_name(contract_id: &str) -> &str {

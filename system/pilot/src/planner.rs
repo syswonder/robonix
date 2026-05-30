@@ -149,7 +149,7 @@ pub async fn run_turn(
     // rename it freely. contract_id is the stable identity.
     let search_memory_target = initial_caps
         .iter()
-        .find(|(_, cap)| cap.contract_id == "robonix/system/memory/search")
+        .find(|(_, cap)| cap.contract_id == "robonix/service/memory/search")
         .map(|(provider_id, cap)| (provider_id.clone(), cap.contract_id.clone()));
 
     // 1b. Pre-fetch long-term memory
