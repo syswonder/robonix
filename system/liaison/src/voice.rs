@@ -423,13 +423,11 @@ async fn run_session(
                                 EVT_TEXT_CHUNK_KIND if !ev.text_chunk.is_empty() => {
                                     round_text.push_str(&ev.text_chunk);
                                 }
-                                EVT_PLAN_KIND => {
+                                EVT_PLAN_KIND if !round_text.trim().is_empty() => {
                                     // Round boundary — agent's narration
                                     // for this round is complete; play
                                     // it now while the tool batch runs.
-                                    if !round_text.trim().is_empty() {
-                                        let _ = tts_tx.send(std::mem::take(&mut round_text)).await;
-                                    }
+                                    let _ = tts_tx.send(std::mem::take(&mut round_text)).await;
                                 }
                                 EVT_FINAL_TEXT_KIND => {
                                     // Terminal round — flush any
