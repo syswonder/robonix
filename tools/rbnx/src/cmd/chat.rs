@@ -67,6 +67,7 @@ enum Role {
     /// Hard-deny rendered in bold red. Used for:
     ///   - voiceprint access-control rejection (heard speaker ≠ pinned controller)
     ///   - sentinel rule intercept (executor refused the capability call)
+    ///
     /// Operator must see these immediately; they survive auto-scroll.
     Denied,
 }

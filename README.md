@@ -22,85 +22,6 @@
   <img src="images/demo_01_readme.gif" alt="Robonix demo: runtime stack in action" width="920" />
 </p>
 
-## What it is
-
-Robonix is the **system substrate** between a robot's hardware and an embodied
-LLM/VLA brain. It standardises how device drivers, runtime services, user
-skills, and the planner discover and talk to each other; it owns identity,
-configuration, time, transport, logging, health, body model, scene model,
-execution, and safety as named, replaceable components.
-
-The whitepaper ships **12 system components** organised by role (not by
-implementation language):
-
-| Component | What it owns |
-| --- | --- |
-| **[atlas](system/atlas/)**       | capability discovery / catalog                    |
-| **[chronos](system/chronos/)**   | unified time / PTP alignment              *(stub)*  |
-| **[executor](system/executor/)** | capability orchestration & dispatch              |
-| **[keystone](system/keystone/)** | identity / configuration / policy         *(stub)*  |
-| **[liaison](system/liaison/)**   | human–machine interaction (chat / audio / TUI)   |
-| **[nexus](system/nexus/)**       | high-performance transport abstraction    *(stub)*  |
-| **[pilot](system/pilot/)**       | planning / decision / memory / world model       |
-| **[scene](system/scene/)**       | scene state / semantic map / object registry     |
-| **[scribe](system/scribe/)**     | structured logs / replay / audit          *(stub)*  |
-| **[sentinel](system/sentinel/)** | safety supervision           *(in executor for v0.1)*  |
-| **[soma](system/soma/)**         | body state / device & primitive abstraction *(stub)* |
-| **[vitals](system/vitals/)**     | health monitoring / heartbeat *(partial via atlas)*  |
-
-On top of system, three open application categories — provided as contracts (61 standard interfaces in `capabilities/`) and reference implementations alongside the system:
-
-- **primitive** — one device per package (camera, lidar, chassis, arm). Lives in deployment repos and per-example folders (e.g. `examples/webots/primitives/`).
-- **service** — runtime functionality (mapping, navigation, semantic map, memory, speech, voiceprint). Default reference implementations ship in [`services/`](services/); each can be swapped out by a deployment.
-- **skill** — user-defined reusable execution flows (grasp, place, explore, fold-clothes …). Lives wherever the deploy/integrator wants.
-
-## Reference packages
-
-The Robonix project ships and maintains a set of packages you can adopt directly, fork, or read as templates when writing your own primitives / services / skills. The whitepaper interfaces (61 standard contracts in `capabilities/`) are the binding agreement — the implementations below are *one* way to satisfy them. Swap any of them out by pointing your deploy manifest at a different repo.
-
-### Default reference services (this repo)
-
-Live in [`services/`](services/) — installed by default on a fresh boot, easy to replace per deploy.
-
-| Package | Contract namespace | What it implements |
-| --- | --- | --- |
-| [`services/memsearch`](services/memsearch/)   | `robonix/service/memory/*`    | SQLite + vector-index memory store (save / search / compact) |
-| [`services/voiceprint`](services/voiceprint/) | `robonix/service/voiceprint/*` | ECAPA-TDNN voiceprint enrolment + identification |
-| [`services/speech`](services/speech/)         | `robonix/service/speech/*`     | FunASR-based STT + TTS dialog service |
-
-### Example primitives — Webots Tiago demo
-
-Live in [`examples/webots/primitives/`](examples/webots/primitives/). Each one is a 100-200 LoC Python package — a clean read-along for writing a driver for your own hardware.
-
-| Package | Contract namespace | Source |
-| --- | --- | --- |
-| `tiago_chassis`     | `robonix/primitive/chassis/*` | `/cmd_vel` + `/amcl_pose` bridge |
-| `tiago_camera`      | `robonix/primitive/camera/*`  | RGB + depth + snapshot/depth_snapshot MCP |
-| `tiago_lidar`       | `robonix/primitive/lidar/*`   | 2D laser scan bridge |
-| `audio_driver`      | `robonix/primitive/audio/*`   | Host-side ALSA mic + speaker |
-| `audio_macos_bridge`| `robonix/primitive/audio/*`   | macOS CoreAudio mic + speaker over the same contract |
-
-### Upstream (separate repos under `enkerewpo/`)
-
-These are pulled by `rbnx build` from a deploy manifest's `url:`/`branch:` entries. Each repo is small, self-contained, and a reference for a specific category.
-
-| Repo | Category | What it does |
-| --- | --- | --- |
-| [`enkerewpo/mapping_rbnx`](https://github.com/enkerewpo/mapping_rbnx)             | service (mapping) | RTAB-Map / FAST-LIO2 SLAM behind `service/map/occupancy_grid` |
-| [`enkerewpo/nav2_wrapper_rbnx`](https://github.com/enkerewpo/nav2_wrapper_rbnx)   | service (navigation) | Nav2 stack behind `service/navigation/{navigate,status,cancel}` |
-| [`enkerewpo/explore_rbnx`](https://github.com/enkerewpo/explore_rbnx)             | skill (exploration) | LLM-driven frontier exploration — example skill package |
-| [`enkerewpo/mid360_lidar_rbnx`](https://github.com/enkerewpo/mid360_lidar_rbnx)   | primitive (lidar) | Livox MID-360 3D point cloud |
-| [`enkerewpo/mid360_imu_rbnx`](https://github.com/enkerewpo/mid360_imu_rbnx)       | primitive (imu) | Livox MID-360 IMU |
-| [`enkerewpo/realsense_camera_rbnx`](https://github.com/enkerewpo/realsense_camera_rbnx) | primitive (camera) | Intel RealSense D435i RGB + depth + snapshot MCP |
-| [`enkerewpo/ranger_chassis_rbnx`](https://github.com/enkerewpo/ranger_chassis_rbnx) | primitive (chassis) | AgileX Ranger Mini CAN-bus chassis |
-| [`enkerewpo/ranger_description_rbnx`](https://github.com/enkerewpo/ranger_description_rbnx) | primitive (description) | Ranger Mini URDF + meshes |
-| [`enkerewpo/ranger_mini_deploy`](https://github.com/enkerewpo/ranger_mini_deploy) | deploy manifest | Reference real-robot deploy combining the above |
-| [`enkerewpo/template_rbnx`](https://github.com/enkerewpo/template_rbnx)           | starter | Skeleton repo to fork when starting a new primitive / service / skill |
-
-### Writing your own
-
-Easiest path: clone [`enkerewpo/template_rbnx`](https://github.com/enkerewpo/template_rbnx), pick a namespace under `robonix/primitive/...` / `robonix/service/...` / `robonix/skill/...`, declare the contract TOMLs you implement under your package's `capabilities/`, and write your handlers against the Python SDK (`pip install robonix-api`). The [developer guide](https://github.com/syswonder/robonix-book/blob/main/src/integration-guide/packaging-spec.md) walks through the full package layout; the packages above are concrete examples to read alongside.
-
 ## Quickstart
 
 ```bash
@@ -111,8 +32,7 @@ make install   # builds the Cargo workspace and installs
                # to ~/.cargo/bin, then registers this clone via `rbnx setup`
 ```
 
-The Webots Tiago example (`examples/webots/`) is the standard end-to-end demo.
-Two terminals — the simulator and Robonix itself.
+The Webots Tiago example (`examples/webots/`) is the standard end-to-end demo. Two terminals — the simulator and Robonix itself.
 
 ```bash
 # (1) — simulation environment (Webots GUI; not a Robonix package — just docker compose)
@@ -138,13 +58,38 @@ rbnx chat          # interactive TUI chat with the pilot
 Tear-down:
 
 ```bash
-cd examples/webots && rbnx shutdown    # reads rbnx-boot/state.json,
-                                       # SIGTERMs each component's PGID
+cd examples/webots && rbnx shutdown    # reads rbnx-boot/state.json, SIGTERMs each component's PGID
 bash examples/webots/sim/stop.sh       # then stop the Webots container
 ```
 
-Full first-run walkthrough:
-[**docs/src/getting-started/quickstart.md**](https://github.com/syswonder/robonix-book/blob/main/src/getting-started/quickstart.md).
+Full first-run walkthrough: [**docs/src/getting-started/quickstart.md**](https://github.com/syswonder/robonix-book/blob/main/src/getting-started/quickstart.md).
+
+## What it is
+
+Robonix is the **system substrate** between a robot's hardware and an embodied LLM/VLA brain. It standardises how device drivers, runtime services, user skills, and the planner discover and talk to each other; it owns identity, configuration, time, transport, logging, health, body model, scene model, execution, and safety as named, replaceable components.
+
+The whitepaper ships **12 system components** organised by role (not by implementation language):
+
+| Component | What it owns |
+| --- | --- |
+| **[atlas](system/atlas/)**       | capability discovery / catalog                    |
+| **[chronos](system/chronos/)**   | unified time / PTP alignment              *(stub)*  |
+| **[executor](system/executor/)** | capability orchestration & dispatch              |
+| **[keystone](system/keystone/)** | identity / configuration / policy         *(stub)*  |
+| **[liaison](system/liaison/)**   | human–machine interaction (chat / audio / TUI)   |
+| **[nexus](system/nexus/)**       | high-performance transport abstraction    *(stub)*  |
+| **[pilot](system/pilot/)**       | planning / decision / memory / world model       |
+| **[scene](system/scene/)**       | scene state / semantic map / object registry     |
+| **[scribe](system/scribe/)**     | structured logs / replay / audit          *(stub)*  |
+| **[sentinel](system/sentinel/)** | safety supervision           *(in executor for v0.1)*  |
+| **[soma](system/soma/)**         | body state / device & primitive abstraction *(stub)* |
+| **[vitals](system/vitals/)**     | health monitoring / heartbeat *(partial via atlas)*  |
+
+On top of system, three open application categories — provided as contracts (61 standard interfaces in `capabilities/`) and reference implementations alongside the system:
+
+- **primitive** — one device per package (camera, lidar, chassis, arm). Lives in deployment repos and per-example folders (e.g. `examples/webots/primitives/`).
+- **service** — runtime functionality (mapping, navigation, semantic map, memory, speech, voiceprint). Default reference implementations ship in [`services/`](services/); each can be swapped out by a deployment.
+- **skill** — user-defined reusable execution flows (grasp, place, explore, fold-clothes …). Lives wherever the deploy/integrator wants.
 
 ## Repository layout
 
@@ -160,21 +105,11 @@ Cargo.toml      workspace for the Rust components (4 in system/, 2 in tools/)
 Makefile        top-level orchestrate (build / install / fmt / check)
 ```
 
-`system/<name>/` and `services/<name>/` and `tools/<name>/` are each
-self-contained packages — Rust ones carry their own `Cargo.toml`, Python
-ones their own `pyproject.toml`. There is no top-level `rust/` /
-`python/` split; the runtime role is what determines where a component
-lives, not the implementation language.
+`system/<name>/` and `services/<name>/` and `tools/<name>/` are each self-contained packages — Rust ones carry their own `Cargo.toml`, Python ones their own `pyproject.toml`. There is no top-level `rust/` / `python/` split; the runtime role is what determines where a component lives, not the implementation language.
 
 ## Architecture
 
-Atlas is the single control plane: every capability provider (primitive /
-service / skill) calls `RegisterPrimitive` / `RegisterService` / `RegisterSkill`
-+ `DeclareCapability(transport, endpoint, params)` on startup; consumers
-(pilot, executor, downstream services) discover via `Query*` and open data-plane
-connections via `ConnectCapability`. Transports are pluggable — gRPC, MCP,
-ROS 2 — and the contract TOMLs under `capabilities/` describe the schemas
-all of them can carry.
+Atlas is the single control plane: every capability provider (primitive / service / skill) calls `RegisterPrimitive` / `RegisterService` / `RegisterSkill` + `DeclareCapability(transport, endpoint, params)` on startup; consumers (pilot, executor, downstream services) discover via `Query*` and open data-plane connections via `ConnectCapability`. Transports are pluggable — gRPC, MCP, ROS 2 — and the contract TOMLs under `capabilities/` describe the schemas all of them can carry.
 
 Boot sequence (whitepaper §*启动流程*):
 
@@ -186,8 +121,7 @@ Boot sequence (whitepaper §*启动流程*):
 6. **executor** — subscribe to Atlas capability catalog, ready to accept plans
 7. **pilot + liaison** — pilot loads memory + LLM, liaison opens the user channel
 
-System READY — users issue tasks via liaison; pilot plans, executor dispatches,
-sentinel supervises, scene keeps the world model fresh.
+System READY — users issue tasks via liaison; pilot plans, executor dispatches, sentinel supervises, scene keeps the world model fresh.
 
 Dive deeper:
 - [**Overview**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/overview.md) — control plane, one full request end-to-end
@@ -197,13 +131,56 @@ Dive deeper:
 ## Status
 
 > [!WARNING]
-> Robonix is in early development. APIs, IDL layouts, and internal designs
-> may change without notice. No API stability until a versioned release.
+> Robonix is in early development. APIs, IDL layouts, and internal designs may change without notice. No API stability until a versioned release.
 
-5 of the 12 system components are implemented today (atlas, executor,
-liaison, pilot, scene); sentinel runs as an executor sub-module; vitals'
-heartbeat half lives in atlas. The remaining stubs are tracked under
-`system/<name>/README.md` with v0.2 plans.
+5 of the 12 system components are implemented today (atlas, executor, liaison, pilot, scene); sentinel runs as an executor sub-module; vitals' heartbeat half lives in atlas. The remaining stubs are tracked under `system/<name>/README.md` with v0.2 plans.
+
+## Reference packages
+
+A set of packages you can adopt directly, fork, or read as templates when writing your own primitives / services / skills. The whitepaper interfaces (61 standard contracts in `capabilities/`) are the binding agreement — the implementations below are *one* way to satisfy them. Swap any of them out by pointing your deploy manifest at a different repo.
+
+### Default reference services (this repo)
+
+Live in [`services/`](services/) — installed by default on a fresh boot, easy to replace per deploy.
+
+| Package | Contract namespace | What it implements |
+| --- | --- | --- |
+| [`services/memsearch`](services/memsearch/)   | `robonix/service/memory/*`    | SQLite + vector-index memory store (save / search / compact) |
+| [`services/voiceprint`](services/voiceprint/) | `robonix/service/voiceprint/*` | ECAPA-TDNN voiceprint enrolment + identification |
+| [`services/speech`](services/speech/)         | `robonix/service/speech/*`     | FunASR-based STT + TTS dialog service |
+
+### Example primitives — Webots Tiago demo
+
+Live in [`examples/webots/primitives/`](examples/webots/primitives/). Each one is a 100-200 LoC Python package — a clean read-along for writing a driver for your own hardware.
+
+| Package | Contract namespace | Source |
+| --- | --- | --- |
+| `tiago_chassis`     | `robonix/primitive/chassis/*` | `/cmd_vel` + `/amcl_pose` bridge |
+| `tiago_camera`      | `robonix/primitive/camera/*`  | RGB + depth + snapshot/depth_snapshot MCP |
+| `tiago_lidar`       | `robonix/primitive/lidar/*`   | 2D laser scan bridge |
+| `audio_driver`      | `robonix/primitive/audio/*`   | Host-side ALSA mic + speaker |
+| `audio_macos_bridge`| `robonix/primitive/audio/*`   | macOS CoreAudio mic + speaker over the same contract |
+
+### Upstream packages
+
+Pulled by `rbnx build` from a deploy manifest's `url:`/`branch:` entries. Each repo is small, self-contained, and a reference for a specific category.
+
+| Repo | Category | What it does |
+| --- | --- | --- |
+| [`mapping_rbnx`](https://github.com/enkerewpo/mapping_rbnx)                  | service (mapping)        | RTAB-Map / FAST-LIO2 SLAM behind `service/map/occupancy_grid` |
+| [`nav2_wrapper_rbnx`](https://github.com/enkerewpo/nav2_wrapper_rbnx)        | service (navigation)     | Nav2 stack behind `service/navigation/{navigate,status,cancel}` |
+| [`explore_rbnx`](https://github.com/enkerewpo/explore_rbnx)                  | skill (exploration)      | LLM-driven frontier exploration — example skill package |
+| [`mid360_lidar_rbnx`](https://github.com/enkerewpo/mid360_lidar_rbnx)        | primitive (lidar)        | Livox MID-360 3D point cloud |
+| [`mid360_imu_rbnx`](https://github.com/enkerewpo/mid360_imu_rbnx)            | primitive (imu)          | Livox MID-360 IMU |
+| [`realsense_camera_rbnx`](https://github.com/enkerewpo/realsense_camera_rbnx)| primitive (camera)       | Intel RealSense D435i RGB + depth + snapshot MCP |
+| [`ranger_chassis_rbnx`](https://github.com/enkerewpo/ranger_chassis_rbnx)    | primitive (chassis)      | AgileX Ranger Mini CAN-bus chassis |
+| [`ranger_description_rbnx`](https://github.com/enkerewpo/ranger_description_rbnx) | primitive (description) | Ranger Mini URDF + meshes |
+| [`ranger_mini_deploy`](https://github.com/enkerewpo/ranger_mini_deploy)      | deploy manifest          | Reference real-robot deploy combining the above |
+| [`template_rbnx`](https://github.com/enkerewpo/template_rbnx)                | starter                  | Skeleton repo to fork when starting a new primitive / service / skill |
+
+### Writing your own
+
+Easiest path: clone [`template_rbnx`](https://github.com/enkerewpo/template_rbnx), pick a namespace under `robonix/primitive/...` / `robonix/service/...` / `robonix/skill/...`, declare the contract TOMLs you implement under your package's `capabilities/`, and write your handlers against the Python SDK (`pip install robonix-api`). The [developer guide](https://github.com/syswonder/robonix-book/blob/main/src/integration-guide/packaging-spec.md) walks through the full package layout; the packages above are concrete examples to read alongside.
 
 ## License
 
