@@ -1,0 +1,13 @@
+# Voiceprint enrollment (admin RPC).
+# Caller sends raw audio + the user_id/user_name to bind. Service
+# extracts the speaker embedding and persists it. Subsequent calls
+# to Identify(...) with the same speaker should now match this user_id.
+# abstract_interface_id: robonix/system/speech/voiceprint_enroll
+string  user_id          # stable id (caller-chosen, must be unique)
+string  user_name        # human-friendly label (free-form)
+uint8[] audio_data       # raw PCM bytes, length >= 1 second is recommended
+string  encoding         # "pcm_s16le" | "wav"; empty -> pcm_s16le
+uint32  sample_rate_hz   # sample rate of audio_data; 0 -> 16000
+---
+bool    success
+string  error            # non-empty on failure
