@@ -57,4 +57,8 @@ def _set_lifecycle_state(
             detail=detail,
         ))
     except Exception as e:  # noqa: BLE001
-        log.debug("SetLifecycleState(%s, %s): %s", id, cs.name, e)
+        # State pushes are a correctness signal — when atlas drops them
+        # the local provider thinks ACTIVE but `rbnx caps` still shows
+        # the old state. Warn loudly so the silent-divergence is visible
+        # in default-level logs (was log.debug; silenced real outages).
+        log.warning("SetLifecycleState(%s, %s) failed: %s", id, cs.name, e)
