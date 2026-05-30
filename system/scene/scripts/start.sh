@@ -107,7 +107,14 @@ exec docker run --rm \
     -e VLM_BASE_URL="${VLM_BASE_URL:-}" \
     -e VLM_API_KEY="${VLM_API_KEY:-}" \
     -e VLM_MODEL="${VLM_MODEL:-}" \
+    -e SCENE_GRAPH_ENABLED="${SCENE_GRAPH_ENABLED:-true}" \
+    -e SCENE_GRAPH_INTERVAL_SEC="${SCENE_GRAPH_INTERVAL_SEC:-30}" \
+    -e SCENE_GRAPH_CACHE_DIR="${SCENE_GRAPH_CACHE_DIR:-/data/robonix/scene_graph/cache}" \
+    -e SCENE_GRAPH_MIN_OBSERVATIONS="${SCENE_GRAPH_MIN_OBSERVATIONS:-2}" \
+    -e SCENE_GRAPH_MAX_OBJECTS="${SCENE_GRAPH_MAX_OBJECTS:-80}" \
+    -e SCENE_GRAPH_MAX_LLM_RELATIONS_PER_CYCLE="${SCENE_GRAPH_MAX_LLM_RELATIONS_PER_CYCLE:-20}" \
     -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
+    -e CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
     -v "$(pwd)":/scene \
     -v "$(rbnx path robonix-api)":/robonix-api:ro \

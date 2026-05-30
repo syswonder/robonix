@@ -723,6 +723,9 @@ async def _run() -> None:
     for fn in (
         mcp_tools.list_objects,
         mcp_tools.goal_near,
+        mcp_tools.get_scene_graph,
+        mcp_tools.get_object_context,
+        mcp_tools.list_relations,
     ):
         cid = getattr(fn, "_robonix_contract_id", None)
         if cid is None:
@@ -738,7 +741,7 @@ async def _run() -> None:
             description=(fn.__doc__ or "").strip(),
             input_schema_json=schema,
         )
-    log.info("scene declared 2 MCP tools at %s", scene.mcp_endpoint)
+    log.info("scene declared 5 MCP tools at %s", scene.mcp_endpoint)
 
     # ROS2 ingest hub + downstream consumers (self-pose, perception).
     # _start_ros_ingest still wants a raw atlas stub for QueryCapabilities;
@@ -773,6 +776,45 @@ async def _run() -> None:
         *ingest_bg,
     ]
 
+    # ── Scene Graph (LLM-enhanced relation layer) ────────────────────
+    sg_store = None
+    sg_stop: asyncio.Event | None = None
+    if os.environ.get("SCENE_GRAPH_ENABLED", "true").lower() in ("true", "1", "yes"):
+        from .scene_graph.builder import SceneGraphBuilder, SceneGraphConfig, scene_graph_loop
+        from .scene_graph.captioner import NodeCaptioner
+        from .scene_graph.llm_client import SceneGraphLLMClient
+        from .scene_graph.relations import RelationInferer
+        from .scene_graph.store import SceneGraphStore
+
+        sg_cfg = SceneGraphConfig()
+        sg_cache_dir = os.environ.get(
+            "SCENE_GRAPH_CACHE_DIR", "/data/robonix/scene_graph/cache"
+        )
+        sg_store = SceneGraphStore(cache_dir=sg_cache_dir)
+        sg_llm = SceneGraphLLMClient()
+        sg_captioner = NodeCaptioner()
+        sg_inferer = RelationInferer(sg_llm)
+        sg_builder = SceneGraphBuilder(
+            registry=registry,
+            captioner=sg_captioner,
+            relation_inferer=sg_inferer,
+            store=sg_store,
+            config=sg_cfg,
+        )
+        sg_stop = asyncio.Event()
+        bg_tasks.append(
+            asyncio.create_task(
+                scene_graph_loop(sg_builder, sg_stop),
+                name="scene-graph-loop",
+            )
+        )
+        mcp_tools.attach_scene_graph_store(sg_store)
+        log.info(
+            "scene graph enabled (interval=%.0fs, cache=%s)",
+            sg_cfg.interval_sec,
+            sg_cache_dir,
+        )
+
     # Web debug UI on a separate port — top-down 2D canvas + objects
     # table + robot pose. Lives in the same asyncio loop as the rest
     # of scene so registry reads are local. Set `web_port: 0` in the
@@ -791,6 +833,7 @@ async def _run() -> None:
             relations=relations,
             hub=hub,
             detector=perception,
+            sg_store=sg_store,
         )
         web_uv = uvicorn.Config(
             app=web_app,
@@ -819,6 +862,8 @@ async def _run() -> None:
     log.info("shutdown signal received; tearing down")
 
     # Tear down ingest first so we stop mutating the registry…
+    if sg_stop is not None:
+        sg_stop.set()
     if perception is not None:
         with contextlib.suppress(Exception):
             await perception.stop()
