@@ -327,9 +327,7 @@ async fn run_session(
             .send(Ok(event_status(
                 KIND_SESSION_DONE,
                 &session_id,
-                &format!(
-                    "denied — active user is {active} but voiceprint matched {user_id}"
-                ),
+                &format!("denied — active user is {active} but voiceprint matched {user_id}"),
             )))
             .await;
         return Ok(());
@@ -430,9 +428,7 @@ async fn run_session(
                                     // for this round is complete; play
                                     // it now while the tool batch runs.
                                     if !round_text.trim().is_empty() {
-                                        let _ = tts_tx
-                                            .send(std::mem::take(&mut round_text))
-                                            .await;
+                                        let _ = tts_tx.send(std::mem::take(&mut round_text)).await;
                                     }
                                 }
                                 EVT_FINAL_TEXT_KIND => {
@@ -443,9 +439,7 @@ async fn run_session(
                                     // sentence here and leaves
                                     // round_text empty, but be safe).
                                     if !round_text.trim().is_empty() {
-                                        let _ = tts_tx
-                                            .send(std::mem::take(&mut round_text))
-                                            .await;
+                                        let _ = tts_tx.send(std::mem::take(&mut round_text)).await;
                                     }
                                     if !ev.final_text.trim().is_empty() {
                                         let _ = tts_tx.send(ev.final_text.clone()).await;
@@ -1059,5 +1053,4 @@ mod tests {
         assert_eq!(v["voice_session"], true);
         assert_eq!(v["foo"], "bar");
     }
-
 }
