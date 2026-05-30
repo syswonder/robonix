@@ -112,7 +112,7 @@ except Exception:
 # ── 2. Service object + paths. Paths are resolved to absolute form so the
 # log makes the actual disk location obvious; relative paths are a common
 # source of "where did the index go?" confusion.
-memory = Service(id="memory", namespace="robonix/system/memory")
+memory = Service(id="memory", namespace="robonix/service/memory")
 
 MEMORY_DIR = str(Path(os.environ.get("AGENT_MEMORY_DIR", "./agent_memory")).resolve())
 MILVUS_URI = os.environ.get("AGENT_MILVUS_URI", "./agent_milvus.db")
@@ -157,10 +157,10 @@ except Exception as e:
 log.info("phase 4/4: registering MCP tools + awaiting Driver(CMD_INIT)")
 
 
-@memory.mcp("robonix/system/memory/search")
+@memory.mcp("robonix/service/memory/search")
 async def search(msg: String) -> String:
     """Search the agent's long-term memory for relevant past context, decisions, or user preferences.
-    Contract: robonix/system/memory/search."""
+    Contract: robonix/service/memory/search."""
     # Log shape only at INFO; raw query text only at DEBUG to keep user
     # content out of the default log.
     log.info("search (%d chars)", len(msg.data))
@@ -176,10 +176,10 @@ async def search(msg: String) -> String:
     return String(data=f"Relevant memories:\n{context}")
 
 
-@memory.mcp("robonix/system/memory/save")
+@memory.mcp("robonix/service/memory/save")
 async def save(msg: String) -> String:
     """Save an important fact, user preference, or decision to long-term memory.
-    Contract: robonix/system/memory/save."""
+    Contract: robonix/service/memory/save."""
     p = Path(MEMORY_DIR) / f"{date.today()}_notes.md"
     log.info("save → %s (%d chars)", p, len(msg.data))
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -192,10 +192,10 @@ async def save(msg: String) -> String:
     return String(data="Memory saved and indexed.")
 
 
-@memory.mcp("robonix/system/memory/compact")
+@memory.mcp("robonix/service/memory/compact")
 async def compact(msg: Empty) -> String:
     """Compact and summarize recent memories. Call this at the end of a session.
-    Returns std_msgs/String JSON. Contract: robonix/system/memory/compact.
+    Returns std_msgs/String JSON. Contract: robonix/service/memory/compact.
 
     Reuses pilot's OpenAI-compatible LLM endpoint so memory doesn't need a
     separate API key. Reads VLM_BASE_URL / VLM_API_KEY / VLM_MODEL (or the

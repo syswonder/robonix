@@ -3,7 +3,7 @@
 # voiceprint catalog. `rbnx chat` queries this on Ctrl+U open to
 # hydrate the local users modal.
 [contract]
-id      = "robonix/system/speech/voiceprint_list"
+id      = "robonix/service/voiceprint/list"
 version = "1"
 kind    = "service"
 idl     = "voiceprint/srv/ListEnrolled.srv"

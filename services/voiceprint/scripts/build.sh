@@ -7,9 +7,11 @@
 # model so the runtime (`start:`) only activates the venv and serves —
 # no downloads at request time.
 #
-# gRPC stubs are NOT generated here. They come from `rbnx codegen`
-# (called automatically by `rbnx build`) which materialises
-# atlas-managed contract bundles into rbnx-build/codegen/proto_gen/.
+# gRPC stubs are generated below by the `rbnx codegen -p <pkg> --mcp`
+# step, which materialises atlas-managed contract bundles into
+# rbnx-build/codegen/proto_gen/. `rbnx build` itself only runs this
+# manifest's `build:` body — packages call codegen explicitly here,
+# same as services/memsearch and services/speech.
 # The previous version of this script ran grpc_tools.protoc against a
 # bespoke `proto/voiceprint.proto` — that bespoke proto has been
 # removed in favour of the standard capabilities/*.toml flow.
@@ -73,5 +75,11 @@ SpeakerRecognition.from_hparams(
 else
     echo "[build] SKIP_MODEL_DOWNLOAD=1 — skipping ECAPA-TDNN download."
 fi
+
+# ── 4. Codegen (.proto + grpc stubs + MCP dataclasses → rbnx-build/codegen/) ─
+FLAGS=(--mcp)
+[[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
+echo "[build] rbnx codegen ${FLAGS[*]}"
+rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
 echo "[build] done."

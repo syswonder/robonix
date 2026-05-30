@@ -94,7 +94,7 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
     };
     let Some((provider_id, cap)) = providers
         .iter()
-        .find(|(_, cap)| cap.contract_id == "robonix/system/memory/compact")
+        .find(|(_, cap)| cap.contract_id == "robonix/service/memory/compact")
     else {
         return;
     };

@@ -13,7 +13,7 @@
 //     version: 1
 //     rules:
 //       - id: night_no_speak
-//         contract_id: robonix/system/speech/speak
+//         contract_id: robonix/service/speech/speak
 //         deny_between: ["22:00", "07:00"]   # local time, HH:MM, wraps overnight
 //         reason: "安静时段,不允许语音播报"
 //

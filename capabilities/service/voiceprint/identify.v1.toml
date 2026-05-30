@@ -3,7 +3,7 @@
 # Used by Liaison.StartVoiceSession to attribute a voice turn to a user.
 # ROS: `lib/system/voiceprint/srv/Identify.srv`.
 [contract]
-id      = "robonix/system/speech/voiceprint"
+id      = "robonix/service/voiceprint/identify"
 version = "1"
 kind    = "service"
 idl     = "voiceprint/srv/Identify.srv"

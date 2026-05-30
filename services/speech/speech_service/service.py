@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Speech service -- the srv-layer voice interaction service for Robonix.
 
-Architecture position: robonix/system/speech
+Architecture position: robonix/service/speech
   - Sits ABOVE the primitive layer (audio_driver) and BELOW the application layer
   - Receives raw audio from audio_driver via gRPC, returns transcriptions
   - Receives text from applications, returns synthesized audio (MP3)
@@ -543,7 +543,7 @@ class DialogManager:
 # Note: the codegen service methods are named Call / Stream (not Recognize
 # or Synthesize) because the contract RPC is always called "Call" or "Stream".
 
-class SpeechAsrServicer(contracts_grpc.RobonixSystemSpeechAsrServicer):
+class SpeechAsrServicer(contracts_grpc.RobonixServiceSpeechAsrServicer):
     """ASR gRPC servicer -- handles the Call RPC for one-shot speech recognition.
 
     Delegates to WhisperASRBackend for transcription.
@@ -601,7 +601,7 @@ class SpeechAsrServicer(contracts_grpc.RobonixSystemSpeechAsrServicer):
             return asr_pb2.Recognize_Response(text="", confidence=0.0, error=str(e))
 
 
-class SpeechAsrStreamServicer(contracts_grpc.RobonixSystemSpeechAsrStreamServicer):
+class SpeechAsrStreamServicer(contracts_grpc.RobonixServiceSpeechAsrStreamServicer):
     """Streaming ASR gRPC servicer -- handles the Stream RPC for chunk-by-chunk
     speech recognition.
 
@@ -732,7 +732,7 @@ class SpeechAsrStreamServicer(contracts_grpc.RobonixSystemSpeechAsrStreamService
             yield asr_pb2.RecognizeStreamEvent(event_type=2, error=str(e))
 
 
-class SpeechTtsServicer(contracts_grpc.RobonixSystemSpeechTtsServicer):
+class SpeechTtsServicer(contracts_grpc.RobonixServiceSpeechTtsServicer):
     """TTS gRPC servicer -- handles the Call RPC for one-shot text-to-speech.
 
     Delegates to EdgeTTSBackend for audio generation.
@@ -782,7 +782,7 @@ class SpeechTtsServicer(contracts_grpc.RobonixSystemSpeechTtsServicer):
             return tts_pb2.Synthesize_Response(audio_data=b"", error=str(e))
 
 
-class SpeechTtsStreamServicer(contracts_grpc.RobonixSystemSpeechTtsStreamServicer):
+class SpeechTtsStreamServicer(contracts_grpc.RobonixServiceSpeechTtsStreamServicer):
     """Streaming TTS gRPC servicer -- handles the Stream RPC for chunk-by-chunk
     text-to-speech synthesis.
 
@@ -855,7 +855,7 @@ class SpeechTtsStreamServicer(contracts_grpc.RobonixSystemSpeechTtsStreamService
             context.set_details(str(e))
 
 
-class SpeechDialogServicer(contracts_grpc.RobonixSystemSpeechDialogServicer):
+class SpeechDialogServicer(contracts_grpc.RobonixServiceSpeechDialogServicer):
     """Dialog gRPC servicer -- handles the Stream RPC for voice dialog sessions.
 
     Creates a DialogSession and streams DialogEvent updates to the client.
@@ -912,7 +912,7 @@ class SpeechDialogServicer(contracts_grpc.RobonixSystemSpeechDialogServicer):
 
 from robonix_api import Service, Ok, Err, Deferred  # noqa: E402
 
-speech = Service(id="speech", namespace="robonix/system/speech")
+speech = Service(id="speech", namespace="robonix/service/speech")
 
 
 def _try_backend(name: str, factory):
@@ -938,11 +938,11 @@ _asr_stream_servicer = SpeechAsrStreamServicer(None)
 _tts_servicer        = SpeechTtsServicer(None)
 _tts_stream_servicer = SpeechTtsStreamServicer(None)
 _dialog_servicer     = SpeechDialogServicer(_dialog_manager)
-speech.attach_grpc_servicer("robonix/system/speech/asr",        _asr_servicer)
-speech.attach_grpc_servicer("robonix/system/speech/asr_stream", _asr_stream_servicer)
-speech.attach_grpc_servicer("robonix/system/speech/tts",        _tts_servicer)
-speech.attach_grpc_servicer("robonix/system/speech/tts_stream", _tts_stream_servicer)
-speech.attach_grpc_servicer("robonix/system/speech/dialog",     _dialog_servicer)
+speech.attach_grpc_servicer("robonix/service/speech/asr",        _asr_servicer)
+speech.attach_grpc_servicer("robonix/service/speech/asr_stream", _asr_stream_servicer)
+speech.attach_grpc_servicer("robonix/service/speech/tts",        _tts_servicer)
+speech.attach_grpc_servicer("robonix/service/speech/tts_stream", _tts_stream_servicer)
+speech.attach_grpc_servicer("robonix/service/speech/dialog",     _dialog_servicer)
 
 
 # -- MCP tools: list_speakers + speak (TTS → chosen speaker primitive) -------
@@ -961,7 +961,7 @@ _SPEAKER_CONTRACT = "robonix/primitive/audio/speaker"
 _speak_tts = None
 
 
-@speech.mcp("robonix/system/speech/list_speakers")
+@speech.mcp("robonix/service/speech/list_speakers")
 def list_speakers(req: ListSpeakers_Request) -> ListSpeakers_Response:
     """List audio output devices (speaker primitives) registered in atlas, so
     you can pick a `target` for speak. Returns a JSON array of
@@ -982,7 +982,7 @@ def list_speakers(req: ListSpeakers_Request) -> ListSpeakers_Response:
     )
 
 
-@speech.mcp("robonix/system/speech/speak")
+@speech.mcp("robonix/service/speech/speak")
 def speak(req: Speak_Request) -> Speak_Response:
     """Synthesize `text` to speech and play it out loud on a speaker. `target`
     is the speaker primitive's provider_id (from list_speakers); empty = first

@@ -18,13 +18,13 @@ voiceprint.proto + voiceprint_pb2) with the standard robonix v0.1 flow:
 
 Three RPCs land on the same listener under the same atlas Service:
 
-  * robonix/system/speech/voiceprint           — Identify(...)
+  * robonix/service/voiceprint/identify           — Identify(...)
       Frozen v0.1 capability surface; Liaison's voice path resolves it
       via atlas and calls it directly.
-  * robonix/system/speech/voiceprint_enroll    — Enroll(...)
+  * robonix/service/voiceprint/enroll    — Enroll(...)
       Admin RPC, used by `rbnx chat`'s Ctrl+U modal to register a fresh
       sample. Mutates enrolled.json on success.
-  * robonix/system/speech/voiceprint_list      — ListEnrolled(...)
+  * robonix/service/voiceprint/list      — ListEnrolled(...)
       Read-only catalog; chat hydrates the user list with this on open.
 
 State storage is unchanged: a single JSON file (`<data_dir>/enrolled.json`)
@@ -54,7 +54,7 @@ import robonix_contracts_pb2 as pb  # type: ignore[import-not-found]
 import robonix_contracts_pb2_grpc as pb_grpc  # type: ignore[import-not-found]
 # Voiceprint contract messages live under the per-IDL `robonix.voiceprint`
 # proto package (Identify_*, Enroll_*, ListEnrolled_*). They are NOT
-# remangled into `robonix_contracts_pb2.RobonixSystemSpeech*` — that
+# remangled into `robonix_contracts_pb2.RobonixServiceSpeech*` — that
 # only mangles SERVICE names. Use the voiceprint_pb2 namespace for the
 # request/response dataclasses.
 import voiceprint_pb2 as vp  # type: ignore[import-not-found]
@@ -179,8 +179,8 @@ _threshold_value: float = _DEFAULT_THRESHOLD
 # ---------------------------------------------------------------------------
 
 
-class _IdentifyServicer(pb_grpc.RobonixSystemSpeechVoiceprintServicer):
-    """robonix/system/speech/voiceprint — Identify(audio) → (user_id, confidence)."""
+class _IdentifyServicer(pb_grpc.RobonixServiceVoiceprintIdentifyServicer):
+    """robonix/service/voiceprint/identify — Identify(audio) → (user_id, confidence)."""
 
     def Identify(self, request, context):  # noqa: N802 (gRPC method)
         if _engine is None or _db is None:
@@ -211,8 +211,8 @@ class _IdentifyServicer(pb_grpc.RobonixSystemSpeechVoiceprintServicer):
             )
 
 
-class _EnrollServicer(pb_grpc.RobonixSystemSpeechVoiceprintEnrollServicer):
-    """robonix/system/speech/voiceprint_enroll — Enroll(audio + user_id + user_name)."""
+class _EnrollServicer(pb_grpc.RobonixServiceVoiceprintEnrollServicer):
+    """robonix/service/voiceprint/enroll — Enroll(audio + user_id + user_name)."""
 
     def Enroll(self, request, context):  # noqa: N802
         if _engine is None or _db is None:
@@ -279,8 +279,8 @@ class _EnrollServicer(pb_grpc.RobonixSystemSpeechVoiceprintEnrollServicer):
             return vp.Enroll_Response(success=False, error=str(exc))
 
 
-class _DeleteServicer(pb_grpc.RobonixSystemSpeechVoiceprintDeleteServicer):
-    """robonix/system/speech/voiceprint_delete — DeleteEnrolled(user_id)."""
+class _DeleteServicer(pb_grpc.RobonixServiceVoiceprintDeleteServicer):
+    """robonix/service/voiceprint/delete — DeleteEnrolled(user_id)."""
 
     def DeleteEnrolled(self, request, context):  # noqa: N802
         if _db is None:
@@ -299,8 +299,8 @@ class _DeleteServicer(pb_grpc.RobonixSystemSpeechVoiceprintDeleteServicer):
             return vp.DeleteEnrolled_Response(success=False, error=str(exc))
 
 
-class _ListServicer(pb_grpc.RobonixSystemSpeechVoiceprintListServicer):
-    """robonix/system/speech/voiceprint_list — ListEnrolled() → JSON catalog."""
+class _ListServicer(pb_grpc.RobonixServiceVoiceprintListServicer):
+    """robonix/service/voiceprint/list — ListEnrolled() → JSON catalog."""
 
     def ListEnrolled(self, request, context):  # noqa: N802
         if _db is None:
@@ -324,19 +324,19 @@ class _ListServicer(pb_grpc.RobonixSystemSpeechVoiceprintListServicer):
 # robonix-api Service wiring
 # ---------------------------------------------------------------------------
 
-voiceprint = Service(id="voiceprint", namespace="robonix/system/speech")
+voiceprint = Service(id="voiceprint", namespace="robonix/service/voiceprint")
 
 voiceprint.attach_grpc_servicer(
-    "robonix/system/speech/voiceprint", _IdentifyServicer(),
+    "robonix/service/voiceprint/identify", _IdentifyServicer(),
 )
 voiceprint.attach_grpc_servicer(
-    "robonix/system/speech/voiceprint_enroll", _EnrollServicer(),
+    "robonix/service/voiceprint/enroll", _EnrollServicer(),
 )
 voiceprint.attach_grpc_servicer(
-    "robonix/system/speech/voiceprint_list", _ListServicer(),
+    "robonix/service/voiceprint/list", _ListServicer(),
 )
 voiceprint.attach_grpc_servicer(
-    "robonix/system/speech/voiceprint_delete", _DeleteServicer(),
+    "robonix/service/voiceprint/delete", _DeleteServicer(),
 )
 
 

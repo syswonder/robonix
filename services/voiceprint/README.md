@@ -1,7 +1,7 @@
 # robonix/system/voiceprint
 
 ECAPA-TDNN speaker-identification service. Implements the frozen v0.1
-capability `robonix/system/speech/voiceprint` (one-shot `Identify`)
+capability `robonix/service/voiceprint/identify` (one-shot `Identify`)
 consumed by Liaison's voice-gating path, and adds two package-private
 admin RPCs (`Enroll`, `ListEnrolled`) for off-line enrollment tooling.
 
