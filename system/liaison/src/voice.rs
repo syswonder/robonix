@@ -42,10 +42,10 @@ use crate::pb::audio::AudioChunk;
 use crate::pb::contracts::{
     robonix_primitive_audio_mic_client::RobonixPrimitiveAudioMicClient,
     robonix_primitive_audio_speaker_client::RobonixPrimitiveAudioSpeakerClient,
-    robonix_system_pilot_client::RobonixSystemPilotClient,
     robonix_service_speech_asr_stream_client::RobonixServiceSpeechAsrStreamClient,
     robonix_service_speech_tts_client::RobonixServiceSpeechTtsClient,
     robonix_service_voiceprint_identify_client::RobonixServiceVoiceprintIdentifyClient,
+    robonix_system_pilot_client::RobonixSystemPilotClient,
 };
 use crate::pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
 use crate::pb::pilot::Task;
@@ -707,22 +707,27 @@ async fn identify_user(
         format!("voice:{fallback_hint}")
     };
 
-    let endpoint =
-        match resolve_endpoint(atlas, "robonix/service/voiceprint/identify", pin_provider_id).await {
-            Some(ep) => ep,
-            None => {
-                let _ = tx
-                    .send(Ok(event_user(
-                        KIND_USER_IDENTIFIED,
-                        session_id,
-                        &fallback,
-                        0.0,
-                        "no RobonixServiceVoiceprintIdentify provider — using client hint",
-                    )))
-                    .await;
-                return fallback;
-            }
-        };
+    let endpoint = match resolve_endpoint(
+        atlas,
+        "robonix/service/voiceprint/identify",
+        pin_provider_id,
+    )
+    .await
+    {
+        Some(ep) => ep,
+        None => {
+            let _ = tx
+                .send(Ok(event_user(
+                    KIND_USER_IDENTIFIED,
+                    session_id,
+                    &fallback,
+                    0.0,
+                    "no RobonixServiceVoiceprintIdentify provider — using client hint",
+                )))
+                .await;
+            return fallback;
+        }
+    };
 
     let mut client = match RobonixServiceVoiceprintIdentifyClient::connect(endpoint.clone()).await {
         Ok(c) => c,
