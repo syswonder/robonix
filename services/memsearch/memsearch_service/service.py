@@ -74,7 +74,7 @@ async def compact(msg: Empty) -> String:
     _ = msg
     base_url = os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
     api_key = os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    model = os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-5.4-mini-mini"
+    model = os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-5.5"
     if not api_key:
         return String(data="compact: no LLM credentials available. "
                            "Set VLM_API_KEY in the deploy manifest's system.memory env block.")

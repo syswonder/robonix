@@ -41,7 +41,7 @@ bash examples/webots/sim/start.sh
 # (2) — Robonix: system services + Tiago primitives + Nav2 + scene
 export VLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
 export VLM_API_KEY=sk-...
-export VLM_MODEL=gpt-5.4-mini
+export VLM_MODEL=gpt-5.5
 cd examples/webots
 rbnx build       # first run pulls model weights + docker images, may take a while
 rbnx boot
