@@ -25,4 +25,4 @@ When Sentinel is extracted into its own process it will:
   rather than purely static,
 - get its own log channel to [scribe](../scribe/).
 
-See the whitepaper §3 *L2 执行安全层*.
+See the whitepaper for the broader picture.

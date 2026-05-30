@@ -18,4 +18,4 @@ When Scribe lands it will:
 - expose a query / replay capability so a past plan can be re-played
   against the current scene for debugging or audit.
 
-See the whitepaper §3 *L0 系统服务层*.
+See the whitepaper for the broader picture.

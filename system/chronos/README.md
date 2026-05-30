@@ -18,4 +18,4 @@ When implemented, Chronos will:
   the body's compute units,
 - emit drift / sync-quality metrics to [vitals](../vitals/).
 
-See the whitepaper §3 *L0 系统服务层* for the broader picture.
+See the whitepaper for the broader picture.

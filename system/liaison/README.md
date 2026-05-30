@@ -1,90 +1,84 @@
 # robonix-liaison
 
-统一的用户输入网关，支持文本和语音两种模态。
+`robonix-liaison` is the unified user-input gateway for Robonix — one of the 12 system components. It owns text and voice as two parallel input modalities and forwards the resulting tasks to `pilot`. Clients always talk to liaison, never to pilot directly.
 
-## 架构
+## Architecture
 
 ```
-用户
+user
   │
-  ├─ 文字输入 (Enter)
+  ├─ text input (Enter)
   │     │
   │     ▼
-  │   SrvLiaison.Stream(Task) ──► Pilot
+  │   SrvLiaison.Stream(Task) ──► pilot
   │     │
   │     ▼
   │   PilotEvent stream ◄────────────┘
   │
-  └─ 语音输入 (Ctrl+V in TUI)
+  └─ voice input (Ctrl+V in TUI)
         │
         ▼
       SrvLiaison.StartVoiceSession(req)
         │
-        ├─ PrmAudioMic.Stream (录音 N 秒)
-        ├─ SrvSpeechAsr.Call (语音识别)
-        ├─ SrvSpeechVoiceprint.Call (声纹识别 → user_id)
-        ├─ 组装 pilot::Task { user_id, text=transcript, … }
+        ├─ PrmAudioMic.Stream            (record N seconds)
+        ├─ SrvSpeechAsr.Call             (speech-to-text)
+        ├─ SrvSpeechVoiceprint.Call      (identify speaker → user_id)
+        ├─ build pilot::Task { user_id, text=transcript, … }
         ├─ SrvPilot.Stream
-        ├─ (可选) SrvSpeechTts.Call + PrmAudioSpeaker.Stream
+        ├─ (optional) SrvSpeechTts.Call + PrmAudioSpeaker.Stream
         │
         ▼
       VoiceEvent stream ◄───────────────────────────────────┘
 ```
 
-## 主要改动
+Both paths populate `pilot::Task.user_id` so downstream policy (sentinel) and personalised pilot behaviour can act on who is talking:
 
-1. **`pilot::Task.user_id`** — 新增字段，Liaison 自动填充：
-   - 文本路径：`local:<os_user>`
-   - 语音路径：`voice:<id>` (来自 voiceprint) 或 fallback `voice:unknown`
+- text path  → `local:<os_user>`
+- voice path → `voice:<id>` from voiceprint, falling back to `voice:unknown`
 
-2. **`SrvLiaison.StartVoiceSession`** — 新 RPC，全程编排语音对话。
+## Demo (mock mode)
 
-3. **`rbnx chat` TUI** — 现在连接 Liaison 而非 Pilot；`Ctrl+V` 启动语音对话。
-
-## 运行 Demo (Mock 模式)
-
-无需真实 mic / ASR / TTS / VLM，使用预置文本验证端到端链路：
+End-to-end run without real mic / ASR / TTS / VLM, using a pre-canned transcript:
 
 ```bash
-cd rust
-./examples/voice_demo.sh
+bash system/liaison/examples/voice_demo.sh
 ```
 
-输出应显示 `text path → OK` 和 `voice path → OK`。
+Expected output: `text path → OK` followed by `voice path → OK`.
 
-## 环境变量
+## Environment variables
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `ROBONIX_ATLAS` | `127.0.0.1:50051` | Atlas 地址 |
-| `ROBONIX_PILOT_ENDPOINT` | `127.0.0.1:50071` | Pilot 地址 |
-| `ROBONIX_LIAISON_PORT` | `50081` | Liaison 监听端口 |
-| `ROBONIX_LIAISON_VOICE_MOCK` | (unset) | 设为 `1` 跳过 mic+ASR，使用预置文本 |
-| `ROBONIX_LIAISON_VOICE_MOCK_TEXT` | `你好，请介绍一下你自己。` | mock 模式下使用的文本 |
-| `ROBONIX_LIAISON_SOURCE` | (unset) | 设为 `text` 启用 stdin 文本循环 (headless) |
+| Variable                          | Default                              | Purpose |
+| ---                               | ---                                  | --- |
+| `ROBONIX_ATLAS`                   | `127.0.0.1:50051`                    | Atlas endpoint |
+| `ROBONIX_PILOT_ENDPOINT`          | `127.0.0.1:50071`                    | Pilot endpoint |
+| `ROBONIX_LIAISON_PORT`            | `50081`                              | Liaison gRPC listen port |
+| `ROBONIX_LIAISON_VOICE_MOCK`      | (unset)                              | Set to `1` to skip mic+ASR and use the canned transcript |
+| `ROBONIX_LIAISON_VOICE_MOCK_TEXT` | `Hello, please introduce yourself.`  | The canned transcript used when `_VOICE_MOCK=1` |
+| `ROBONIX_LIAISON_SOURCE`          | (unset)                              | Set to `text` for a headless stdin text loop |
 
-## TUI 快捷键
+## TUI shortcuts (`rbnx chat`)
 
-| 按键 | 功能 |
-|------|------|
-| `Enter` | 发送文本消息 |
-| `Ctrl+V` | 开始语音对话 (默认 5 秒录音) |
-| `Esc` | 中断当前回合 (abort_turn) |
-| `Ctrl+C` | 退出 |
-| `PageUp/PageDown` | 滚动历史 |
+| Key                | Action |
+| ---                | --- |
+| `Enter`            | Send a text message |
+| `Ctrl+V`           | Start a voice turn (default: 5 s of mic capture) |
+| `Esc`              | Abort the current turn (`abort_turn`) |
+| `Ctrl+C`           | Quit |
+| `PageUp`/`PageDown`| Scroll the history view |
 
-## 语音路径 VoiceEvent 类型
+## `VoiceEvent` kinds (voice path)
 
-| kind | 名称 | 说明 |
-|------|------|------|
-| 0 | SESSION_STARTED | 会话开始 |
-| 1 | RECORDING_STARTED | 开始录音 |
-| 2 | RECORDING_DONE | 录音结束 |
-| 3 | ASR_PARTIAL | ASR 中间结果 |
-| 4 | ASR_FINAL | ASR 最终结果 |
-| 5 | USER_IDENTIFIED | 声纹识别结果 |
-| 6 | PILOT | 包装的 PilotEvent |
-| 7 | TTS_STARTED | TTS 开始 |
-| 8 | TTS_DONE | TTS 完成 |
-| 9 | SESSION_DONE | 会话正常结束 |
-| 10 | ERROR | 错误 |
+| kind | Name               | Meaning |
+| ---  | ---                | --- |
+| 0    | `SESSION_STARTED`  | Session opened |
+| 1    | `RECORDING_STARTED`| Mic capture started |
+| 2    | `RECORDING_DONE`   | Mic capture finished |
+| 3    | `ASR_PARTIAL`      | ASR partial result |
+| 4    | `ASR_FINAL`        | ASR final transcript |
+| 5    | `USER_IDENTIFIED`  | Voiceprint identity decision |
+| 6    | `PILOT`            | Wrapped `PilotEvent` |
+| 7    | `TTS_STARTED`      | TTS playback started |
+| 8    | `TTS_DONE`         | TTS playback finished |
+| 9    | `SESSION_DONE`     | Session ended normally |
+| 10   | `ERROR`            | Session ended with an error |
