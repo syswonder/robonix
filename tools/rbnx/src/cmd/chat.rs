@@ -1424,14 +1424,14 @@ async fn run_tui(
         initial.push(ChatMessage {
             role: Role::Status,
             text: format!("Access control active — only voice from {ctl} will be accepted."),
-        label: None,
+            label: None,
         });
     }
     for w in audio_warnings {
         initial.push(ChatMessage {
             role: Role::Status,
             text: w.clone(),
-        label: None,
+            label: None,
         });
     }
     let messages: Rc<RefCell<Vec<ChatMessage>>> = Rc::new(RefCell::new(initial));
@@ -1517,14 +1517,14 @@ async fn run_tui(
                             messages.borrow_mut().push(ChatMessage {
                                 role: Role::Status,
                                 text: format!("warning: chat.yaml save failed: {e:#}"),
-                            label: None,
+                                label: None,
                             });
                         }
                         for line in &out.log_lines {
                             messages.borrow_mut().push(ChatMessage {
                                 role: Role::Status,
                                 text: line.clone(),
-                            label: None,
+                                label: None,
                             });
                         }
                         if prev_controller != chat_cfg.current_controller {
@@ -1544,7 +1544,7 @@ async fn run_tui(
                                 None => messages.borrow_mut().push(ChatMessage {
                                     role: Role::Status,
                                     text: "active user cleared — any speaker allowed".to_string(),
-                                label: None,
+                                    label: None,
                                 }),
                             }
                         }
@@ -1552,7 +1552,7 @@ async fn run_tui(
                     Err(e) => messages.borrow_mut().push(ChatMessage {
                         role: Role::Status,
                         text: format!("settings: {e:#}"),
-                    label: None,
+                        label: None,
                     }),
                 }
                 continue;
@@ -1567,7 +1567,7 @@ async fn run_tui(
                 messages.borrow_mut().push(ChatMessage {
                     role: Role::Status,
                     text: "Ctrl+V — starting voice session…".to_string(),
-                label: None,
+                    label: None,
                 });
                 draw(terminal, &messages.borrow(), &input, scroll, busy)?;
                 if let Err(e) = run_voice_session_with_esc_abort(
@@ -1587,7 +1587,7 @@ async fn run_tui(
                     messages.borrow_mut().push(ChatMessage {
                         role: Role::Status,
                         text: format!("Voice error: {e:#}"),
-                    label: None,
+                        label: None,
                     });
                 }
                 busy = false;
@@ -1618,7 +1618,7 @@ async fn run_tui(
                     messages.borrow_mut().push(ChatMessage {
                         role: Role::User,
                         text: msg.clone(),
-                    label: None,
+                        label: None,
                     });
                     busy = true;
                     draw(terminal, &messages.borrow(), &input, scroll, busy)?;
@@ -1656,7 +1656,7 @@ async fn run_tui(
                             messages.borrow_mut().push(ChatMessage {
                                 role: Role::Status,
                                 text: format!("Error: {e:#}"),
-                            label: None,
+                                label: None,
                             });
                         }
                     }
@@ -2156,14 +2156,14 @@ fn apply_pilot_event(
                     m.push(ChatMessage {
                         role: Role::Agent,
                         text: t,
-                    label: None,
+                        label: None,
                     });
                 }
             } else {
                 m.push(ChatMessage {
                     role: Role::Agent,
                     text: t,
-                label: None,
+                    label: None,
                 });
             }
         }
@@ -2174,7 +2174,7 @@ fn apply_pilot_event(
                 m.push(ChatMessage {
                     role: Role::Agent,
                     text: t,
-                label: None,
+                    label: None,
                 });
             }
         }
@@ -2232,7 +2232,11 @@ fn apply_pilot_event(
                             br.round,
                             r.contract_id,
                             rule_id,
-                            if reason.is_empty() { "(no reason provided)" } else { reason.as_str() },
+                            if reason.is_empty() {
+                                "(no reason provided)"
+                            } else {
+                                reason.as_str()
+                            },
                             window_line,
                         );
                         m.push(ChatMessage {
@@ -2269,7 +2273,7 @@ fn apply_pilot_event(
                     m.push(ChatMessage {
                         role: Role::ToolCall,
                         text: format!("[r{}] {}({})", p.round, target, call.args_json),
-                    label: None,
+                        label: None,
                     });
                 }
             }
@@ -2312,14 +2316,14 @@ fn apply_voice_event(
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Voice,
                 text: format!("voice · {}", event.status_message),
-            label: None,
+                label: None,
             });
         }
         KIND_ASR_PARTIAL => {
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Voice,
                 text: format!("asr (partial, {:.2}): {}", event.confidence, event.text),
-            label: None,
+                label: None,
             });
         }
         KIND_ASR_FINAL => {
@@ -2330,10 +2334,10 @@ fn apply_voice_event(
             // instead of the generic "You". Fallback ids (local:*)
             // leave label=None so draw uses "You".
             let author_label = match last_identified.as_deref() {
-                Some(uid) if uid.starts_with("voice:") => {
-                    Some(lookup_user_name(&voiceprint_db.borrow(), uid)
-                        .unwrap_or_else(|| uid.to_string()))
-                }
+                Some(uid) if uid.starts_with("voice:") => Some(
+                    lookup_user_name(&voiceprint_db.borrow(), uid)
+                        .unwrap_or_else(|| uid.to_string()),
+                ),
                 _ => None,
             };
             messages.borrow_mut().push(ChatMessage {
@@ -2355,7 +2359,9 @@ fn apply_voice_event(
                 let name_opt = lookup_user_name(&voiceprint_db.borrow(), &event.user_id);
                 let display = name_opt.unwrap_or_else(|| event.user_id.clone());
                 let mut m = messages.borrow_mut();
-                if let Some(target) = m.iter_mut().rev()
+                if let Some(target) = m
+                    .iter_mut()
+                    .rev()
                     .find(|x| matches!(x.role, Role::User) && x.label.is_none())
                 {
                     target.label = Some(display);
@@ -2377,7 +2383,7 @@ fn apply_voice_event(
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Voice,
                 text: label,
-            label: None,
+                label: None,
             });
         }
         KIND_PILOT => {
@@ -2389,14 +2395,14 @@ fn apply_voice_event(
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Voice,
                 text: format!("tts · {}", event.status_message),
-            label: None,
+                label: None,
             });
         }
         KIND_TTS_DONE => {
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Voice,
                 text: format!("tts done · {}", event.status_message),
-            label: None,
+                label: None,
             });
         }
         KIND_SESSION_DONE => {
@@ -2404,21 +2410,21 @@ fn apply_voice_event(
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Status,
                 text: "voice session done".to_string(),
-            label: None,
+                label: None,
             });
         }
         KIND_ERROR => {
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Status,
                 text: format!("voice error: {}", event.error),
-            label: None,
+                label: None,
             });
         }
         _ => {
             messages.borrow_mut().push(ChatMessage {
                 role: Role::Voice,
                 text: format!("voice (kind={}) {}", event.event_kind, event.status_message),
-            label: None,
+                label: None,
             });
         }
     }
@@ -2538,9 +2544,7 @@ fn draw(
                 Role::Denied => (
                     "⛔ DENIED ",
                     "         ",
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
                 // Unreachable — Voice was filtered above. Keep the arm
                 // exhaustive so adding a new Role doesn't silently miss.
@@ -3532,7 +3536,8 @@ async fn run_users_modal(
                             modal.controller = Some(u.user_id.clone());
                             modal.status =
                                 format!("active user set to {} ({})", u.user_name, u.user_id);
-                            log_lines.push(format!("active user → {} ({})", u.user_name, u.user_id));
+                            log_lines
+                                .push(format!("active user → {} ({})", u.user_name, u.user_id));
                         }
                     }
                     KeyCode::Char('c') => {
@@ -3606,8 +3611,10 @@ async fn run_users_modal(
                                         {
                                             modal.cursor = modal.users.len() - 1;
                                         }
-                                        modal.status =
-                                            format!("deleted {dn} · {} user(s) left", modal.users.len());
+                                        modal.status = format!(
+                                            "deleted {dn} · {} user(s) left",
+                                            modal.users.len()
+                                        );
                                         db = new_db;
                                     }
                                     Err(e) => {
@@ -3663,7 +3670,8 @@ async fn run_users_modal(
                         draw_users_modal(terminal, &modal)?;
                         {
                             let prompt = "开始声纹录入,请说话".to_string();
-                            if let Err(e) = speak_text(atlas_endpoint, &speaker_pin, &prompt).await {
+                            if let Err(e) = speak_text(atlas_endpoint, &speaker_pin, &prompt).await
+                            {
                                 log_lines.push(format!("speak prompt warn: {e:#}"));
                             }
                         }

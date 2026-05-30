@@ -78,7 +78,12 @@ pub async fn dispatch(
     // Sentinel concept validation (POC, inline). The real implementation will
     // live as its own crate exposing a `Check` gRPC. Until then, this is the
     // single chokepoint where every dispatch crosses, so the gate sits here.
-    if let sentinel::Decision::Deny { rule_id, reason, deny_window } = sentinel::check(call) {
+    if let sentinel::Decision::Deny {
+        rule_id,
+        reason,
+        deny_window,
+    } = sentinel::check(call)
+    {
         // Include the deny window so the LLM (which sees this via
         // memory.rs's tool-result history) can reason about WHEN the
         // restriction applies, not just THAT something was rejected.
