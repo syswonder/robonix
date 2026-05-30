@@ -67,22 +67,14 @@ RUN apt-get update \
         ros-humble-zenoh-bridge-dds \
  && rm -rf /var/lib/apt/lists/*
 
-# torch + torchvision pinned to cu124 — required for sm_120 (Blackwell
-# RTX 5090); the cu118 wheels concept-graphs originally pinned can't
-# even import on this hardware. CPU-only torch fallback would be too
-# slow for YOLO-World/MobileSAM. Jetson AGX builds will swap this for
-# NVIDIA's torch fork wheel; the rest of the deps in requirements.txt
-# stay identical because they're CPU-side or torch-only consumers.
-# Aliyun pytorch-wheels carries both x86_64 (`torch-2.5.1+cu124-...`)
-# and aarch64 Jetson (`torch-2.5.1-...-linux_aarch64.whl`) wheels in
-# a flat directory; use --find-links to crawl the HTML listing (it's
-# not a PEP 503 simple-index, so --index-url doesn't work). Transitive
-# deps come from TUNA pypi via the inherited PIP_INDEX_URL env. Fall
-# back to upstream download.pytorch.org on failure.
-RUN pip install --find-links https://mirrors.aliyun.com/pytorch-wheels/cu124/ \
-        torch==2.5.1 torchvision==0.20.1 \
- || pip install --index-url https://download.pytorch.org/whl/cu124 \
-        torch==2.5.1 torchvision==0.20.1
+# torch + torchvision — sm_120 (Blackwell / RTX 5090) requires
+# torch 2.7+ with CUDA 12.8 kernels. cu124 wheels only cover up to
+# sm_90 and will fail with "no kernel image" on Blackwell.
+# Aliyun mirror carries cu128 wheels; fall back to upstream PyPI.
+RUN pip install --find-links https://mirrors.aliyun.com/pytorch-wheels/cu128/ \
+        torch==2.7.1 torchvision==0.22.1 \
+ || pip install --index-url https://download.pytorch.org/whl/cu128 \
+        torch==2.7.1 torchvision==0.22.1
 
 # Optional: pass from host via `scripts/build.sh` as HTTP_PROXY_HOST /
 # HTTPS_PROXY_HOST / NO_PROXY_HOST (not HTTP_PROXY — avoids BuildKit treating

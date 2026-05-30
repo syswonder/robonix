@@ -171,6 +171,36 @@ function draw(state) {
         ctx.fillText(text, tx, ty);
     }
 
+    // scene graph relation edges — dashed lines between object centers
+    const sgEdgeColors = {
+      on_top_of: '#4caf50', under: '#4caf50',
+      inside: '#2196f3', contains: '#2196f3',
+      near: '#9e9e9e', attached_to: '#ff9800',
+      part_of: '#ff9800', same_object: '#f44336',
+    };
+    if (state.scene_graph && state.scene_graph.edges) {
+        const objById = {};
+        for (const o of (state.objects || [])) objById[o.id] = o;
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.lineWidth = 1.5;
+        ctx.font = '10px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        for (const e of state.scene_graph.edges) {
+            const oa = objById[e.source_id], ob = objById[e.target_id];
+            if (!oa || !ob) continue;
+            const [ax, ay] = w2p(oa.pose.x, oa.pose.y);
+            const [bx, by] = w2p(ob.pose.x, ob.pose.y);
+            ctx.strokeStyle = sgEdgeColors[e.relation] || '#757575';
+            ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+            // relation label at midpoint
+            const mx = (ax + bx) / 2, my = (ay + by) / 2;
+            ctx.fillStyle = ctx.strokeStyle;
+            ctx.fillText(e.relation, mx, my - 4);
+        }
+        ctx.restore();
+    }
+
     // robot heading arrow
     if (robot) {
         const yaw = robot.pose.yaw || 0;
@@ -366,7 +396,7 @@ def _camera_payload(hub: Any) -> dict:
 
 
 def _state_payload(registry: ObjectRegistry, relations: RelationEngine,
-                   hub: Any) -> dict:
+                   hub: Any, sg_store: Any = None) -> dict:
     """Serialise the registry + relations + map into the small JSON
     shape the page consumes. Done in one snapshot so the page never
     sees a half-updated registry."""
@@ -394,9 +424,29 @@ def _state_payload(registry: ObjectRegistry, relations: RelationEngine,
         {"subject": r.subject_object_id, "predicate": r.predicate, "target": r.target_object_id}
         for r in rels
     ]
+
+    # Scene graph edges from the LLM-enhanced layer (if enabled).
+    sg_payload: dict[str, Any] = {"edges": [], "updated_at": 0.0}
+    if sg_store is not None:
+        snap = sg_store.get_snapshot()
+        if snap is not None:
+            sg_payload = {
+                "edges": [
+                    {
+                        "source_id": e.source_id,
+                        "target_id": e.target_id,
+                        "relation": e.relation,
+                        "confidence": round(e.confidence, 2),
+                    }
+                    for e in snap.edges
+                ],
+                "updated_at": snap.updated_at,
+            }
+
     return {
         "objects": out_objects,
         "relations": out_relations,
+        "scene_graph": sg_payload,
         "robot": robot_pose,
         "occupancy": _occupancy_payload(hub),
         "stamp_unix": time.time(),
@@ -419,7 +469,8 @@ def _sync_snapshot(registry: ObjectRegistry):
 
 
 def make_app(*, registry: ObjectRegistry, relations: RelationEngine,
-             hub: Any = None, detector: Any = None) -> Starlette:
+             hub: Any = None, detector: Any = None,
+             sg_store: Any = None) -> Starlette:
     """Build the Starlette ASGI app the entrypoint mounts on its own
     uvicorn server.
 
@@ -448,7 +499,7 @@ def make_app(*, registry: ObjectRegistry, relations: RelationEngine,
         return HTMLResponse(_INDEX_HTML)
 
     async def state(_request) -> JSONResponse:
-        return JSONResponse(_state_payload(registry, relations, hub))
+        return JSONResponse(_state_payload(registry, relations, hub, sg_store))
 
     async def index3d(_request) -> HTMLResponse:
         return HTMLResponse(_INDEX_3D_HTML)
@@ -765,7 +816,7 @@ _COMBINED_HTML = r"""<!doctype html>
           const objs = (s.objects || []).slice().sort(
             (a, b) => a.cls.localeCompare(b.cls));
           document.getElementById('info-stamp').textContent =
-            `${objs.length} obj · ${(s.relations || []).length} rel · t=${fmt(s.stamp_unix)}`;
+            `${objs.length} obj · ${(s.relations || []).length} rel · ${(s.scene_graph && s.scene_graph.edges || []).length} sg · t=${fmt(s.stamp_unix)}`;
           const robotEl = document.getElementById('info-pose');
           if (s.robot) {
             robotEl.textContent =
@@ -1286,6 +1337,93 @@ _INDEX_3D_HTML = r"""<!doctype html>
     setInterval(pollRobot, 500);  // 2 Hz — same as the 2D map / panel
                                   // pollers; matches /map publish rate
                                   // and avoids redundant /api/state hits
+
+    // ── Scene Graph relation edges ────────────────────────────────────
+    const sgEdgeGroup = new THREE.Group();
+    sgEdgeGroup.name = 'scene-graph-edges';
+    scene.add(sgEdgeGroup);
+    const sgLabelGroup = new THREE.Group();
+    sgLabelGroup.name = 'scene-graph-labels';
+    scene.add(sgLabelGroup);
+
+    const SG_EDGE_COLORS = {
+      on_top_of: 0x4caf50,  // green
+      under:     0x4caf50,
+      inside:    0x2196f3,  // blue
+      contains:  0x2196f3,
+      near:      0x9e9e9e,  // gray
+      attached_to: 0xff9800, // orange
+      part_of:   0xff9800,
+      same_object: 0xf44336, // red
+    };
+
+    function makeSGLabel(text) {
+      const c = document.createElement('canvas');
+      c.width = 256; c.height = 48;
+      const ctx = c.getContext('2d');
+      ctx.font = 'bold 22px monospace';
+      ctx.fillStyle = '#e8eaed';
+      ctx.textAlign = 'center';
+      ctx.fillText(text, 128, 32);
+      const tex = new THREE.CanvasTexture(c);
+      const mat = new THREE.SpriteMaterial({map: tex, transparent: true, depthTest: false});
+      const s = new THREE.Sprite(mat);
+      s.scale.set(0.6, 0.12, 1);
+      return s;
+    }
+
+    function rebuildSGEdges(sgData) {
+      // Clear old edges
+      while (sgEdgeGroup.children.length) sgEdgeGroup.remove(sgEdgeGroup.children[0]);
+      while (sgLabelGroup.children.length) sgLabelGroup.remove(sgLabelGroup.children[0]);
+      if (!sgData || !sgData.edges || sgData.edges.length === 0) return;
+
+      // Build position lookup from current objectMeshes
+      const posMap = new Map();
+      for (const [id, entry] of objectMeshes) {
+        if (entry.data && entry.data.center) {
+          posMap.set(id, entry.data.center);
+        }
+      }
+
+      for (const edge of sgData.edges) {
+        const posA = posMap.get(edge.source_id);
+        const posB = posMap.get(edge.target_id);
+        if (!posA || !posB) continue;
+
+        const color = SG_EDGE_COLORS[edge.relation] || 0x757575;
+        const pts = new Float32Array([
+          posA[0], posA[1], posA[2],
+          posB[0], posB[1], posB[2],
+        ]);
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute('position', new THREE.BufferAttribute(pts, 3));
+        const mat = new THREE.LineBasicMaterial({
+          color, linewidth: 2, transparent: true, opacity: 0.7,
+        });
+        const line = new THREE.LineSegments(geom, mat);
+        sgEdgeGroup.add(line);
+
+        // Label at midpoint
+        const mx = (posA[0] + posB[0]) / 2;
+        const my = (posA[1] + posB[1]) / 2;
+        const mz = (posA[2] + posB[2]) / 2 + 0.05;
+        const label = makeSGLabel(edge.relation);
+        label.position.set(mx, my, mz);
+        sgLabelGroup.add(label);
+      }
+    }
+
+    // Poll scene graph edges at 0.2 Hz (every 5s — it updates at 30s)
+    async function pollSGEdges() {
+      try {
+        const r = await fetch('/api/state', {cache: 'no-store'});
+        const j = await r.json();
+        if (j.scene_graph) rebuildSGEdges(j.scene_graph);
+      } catch (e) {}
+    }
+    pollSGEdges();
+    setInterval(pollSGEdges, 5000);
 
     // ── Color palette (deterministic per class) ────────────────────────
     function classColor(cls) {
