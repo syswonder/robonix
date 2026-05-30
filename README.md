@@ -109,24 +109,25 @@ Makefile        top-level orchestrate (build / install / fmt / check)
 
 ## Architecture
 
-Atlas is the single control plane: every capability provider (primitive / service / skill) calls `RegisterPrimitive` / `RegisterService` / `RegisterSkill` + `DeclareCapability(transport, endpoint, params)` on startup; consumers (pilot, executor, downstream services) discover via `Query*` and open data-plane connections via `ConnectCapability`. Transports are pluggable — gRPC, MCP, ROS 2 — and the contract TOMLs under `capabilities/` describe the schemas all of them can carry.
+Robonix is a **capability-centric runtime** built around one idea: every operation a robot can perform — read a camera frame, drive the chassis, plan a multi-step task, persist a memory — is registered with the system as a typed *capability*. Discovery, connection, lifecycle, and safety are all expressed in terms of those capabilities, not in terms of which process or transport happens to provide them today.
 
-Boot sequence (whitepaper §*启动流程*):
+The control plane is `atlas`. On startup every provider — a hardware driver (primitive), a runtime service (mapping, voiceprint, …), a high-level skill — calls `RegisterPrimitive` / `RegisterService` / `RegisterSkill` and then issues one `DeclareCapability(contract_id, transport, endpoint, params)` per interface it serves. Consumers (`pilot`, `executor`, downstream services) discover providers via `QueryCapabilities` and open data-plane channels via `ConnectCapability`. Transports are pluggable — gRPC, MCP, ROS 2 — and the TOML contracts under `capabilities/` are the binding agreement that lets the same contract id be served over any of them.
 
-1. **base** — Bootloader / kernel
-2. **L0 系统服务** — chronos / atlas / nexus / scribe come up first
-3. **soma** — enumerate hardware, body state ready, primitives register
-4. **scene** — receive perception, time/space alignment, build object registry
-5. **sentinel** — load safety rules
-6. **executor** — subscribe to Atlas capability catalog, ready to accept plans
-7. **pilot + liaison** — pilot loads memory + LLM, liaison opens the user channel
+A single user task — "tell me what you see and put the cup on the table" — flows through the stack as follows:
 
-System READY — users issue tasks via liaison; pilot plans, executor dispatches, sentinel supervises, scene keeps the world model fresh.
+1. **liaison** turns mic audio (or text) into a structured task, gates it through voiceprint identity + the access-control policy, and forwards it to pilot.
+2. **pilot** asks atlas which capabilities are currently `ACTIVE`, builds a prompt from their `CAPABILITY.md` blurbs, asks the VLM for a step-by-step plan, then sends the plan to executor.
+3. **executor** dispatches each plan step as a capability call. Before every call it consults **sentinel**, which can deny based on rate limit, deny-window, or identity policy.
+4. The provider (a primitive, a service, or a skill) runs the call and returns a result. Results that came from perception are reconciled by **scene**'s semantic-map layer, so the next round of planning sees an updated world.
+5. liaison streams the agent's narration back to the user as TTS audio while executor keeps working.
 
-Dive deeper:
-- [**Overview**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/overview.md) — control plane, one full request end-to-end
-- [**Namespaces & contracts**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/namespace-and-interfaces.md) — how `robonix/primitive/*` / `robonix/service/*` / `robonix/skill/*` / `robonix/system/*` work
-- [**Interface catalog**](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md) — every primitive + service contract
+Startup of the stack itself follows the same dependency direction. First the L0 services (`chronos`, `atlas`, `nexus`, `scribe`) come up — they own time, the capability catalog, transport, and logs. Then `soma` enumerates hardware and registers primitives, `scene` begins consuming perception and builds an object registry, `sentinel` loads safety rules, `executor` subscribes to the capability catalog, and finally `pilot + liaison` load LLM credentials and open the user channel. At that point `rbnx caps` shows every component `ACTIVE` and the system is ready to accept tasks.
+
+For the long form — full RPC tables, lifecycle state machine, contract grammar, codegen pipeline — see the developer guide:
+
+- [**Overview**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/overview.md) — one full request, end-to-end
+- [**Namespaces & contracts**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/namespace-and-interfaces.md) — how `robonix/primitive/*` / `robonix/service/*` / `robonix/skill/*` / `robonix/system/*` are wired
+- [**Interface catalog**](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md) — every primitive + service contract Robonix ships
 
 ## Status
 

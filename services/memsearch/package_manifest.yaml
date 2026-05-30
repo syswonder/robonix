@@ -16,6 +16,10 @@ build: bash scripts/build.sh
 
 start: |
   export PYTHONPATH="$(pwd)/rbnx-build/codegen/proto_gen:$(pwd)/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
+  # Force line-buffered stdout/stderr so users see startup progress in real
+  # time through `rbnx-boot/logs/system_memory.log` instead of waiting for
+  # Python's default block-buffered output to flush.
+  export PYTHONUNBUFFERED=1
   mkdir -p rbnx-build/data
 
   # Self-heal stale milvus locks. memsearch embeds milvus_lite, which
@@ -39,9 +43,11 @@ start: |
     fi
   fi
 
-  # FastMCP internal logs are verbose — redirect to keep rbnx log clean.
-  exec rbnx-build/venv/bin/python -m memsearch_service.service \
-       > rbnx-build/data/memsearch.log 2>&1
+  # Stream stdout + stderr straight through to rbnx-cli, which captures
+  # them into rbnx-boot/logs/system_memory.log. No separate per-package
+  # log file — debugging cross-component issues is much easier when
+  # everything is in one place.
+  exec rbnx-build/venv/bin/python -u -m memsearch_service.service
 
 capabilities:
   - name: robonix/system/memory/save
