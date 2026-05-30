@@ -18,6 +18,25 @@ import sys
 import traceback
 from datetime import date
 from pathlib import Path
+from urllib.parse import urlsplit
+
+
+def _redact_url(url: str | None) -> str:
+    """Strip userinfo (`user:password@`) from a URL before logging it.
+    Treats anything that doesn't parse as an opaque string and returns it
+    unchanged — the goal is just to keep credentials out of the log when
+    someone wrote `https://user:pw@host/v1` in their env."""
+    if not url:
+        return "(unset)"
+    try:
+        u = urlsplit(url)
+    except ValueError:
+        return url
+    if not u.netloc or "@" not in u.netloc:
+        return url
+    host = u.hostname or ""
+    netloc = f"{host}:{u.port}" if u.port else host
+    return u._replace(netloc=netloc).geturl()
 
 # ── 0. Logging setup: stdout only, prefixed with [memsearch] for grep-ability.
 # We configure the root logger here BEFORE importing robonix_api / memsearch /
@@ -54,11 +73,14 @@ def _log_environment() -> None:
         if p:
             log.info("  - %s%s", p, "" if Path(p).exists() else "  (MISSING)")
     log.info("env (non-secret):")
+    _URL_KEYS = {"VLM_BASE_URL", "OPENAI_BASE_URL", "ROBONIX_ATLAS"}
     for k in ("AGENT_MEMORY_DIR", "AGENT_MILVUS_URI",
               "MEMSEARCH_LOG_LEVEL",
               "VLM_BASE_URL", "VLM_MODEL", "OPENAI_BASE_URL", "OPENAI_MODEL",
               "ROBONIX_ATLAS"):
         v = os.environ.get(k)
+        if v and k in _URL_KEYS:
+            v = _redact_url(v)
         log.info("  %-22s = %s", k, v if v else "(unset)")
     log.info("vlm api key set: %s",
              "yes" if (os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY"))
@@ -139,7 +161,10 @@ log.info("phase 4/4: registering MCP tools + awaiting Driver(CMD_INIT)")
 async def search(msg: String) -> String:
     """Search the agent's long-term memory for relevant past context, decisions, or user preferences.
     Contract: robonix/system/memory/search."""
-    log.info("search(%r)", msg.data[:80])
+    # Log shape only at INFO; raw query text only at DEBUG to keep user
+    # content out of the default log.
+    log.info("search (%d chars)", len(msg.data))
+    log.debug("search query: %r", msg.data[:80])
     try:
         results = await mem.search(msg.data, top_k=2)
     except Exception as e:
@@ -179,7 +204,7 @@ async def compact(msg: Empty) -> String:
     base_url = os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
     api_key = os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
     model = os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-5.5"
-    log.info("compact (model=%s, base_url=%s)", model, base_url or "(default)")
+    log.info("compact (model=%s, base_url=%s)", model, _redact_url(base_url))
     if not api_key:
         log.warning("compact: no LLM key set (VLM_API_KEY / OPENAI_API_KEY)")
         return String(data="compact: no LLM credentials available. "
@@ -192,10 +217,13 @@ async def compact(msg: Empty) -> String:
         log.info("compact done → %s", summary_path)
         return String(data=f"Memory compacted successfully to {summary_path}.")
     except Exception as e:
+        # Keep details in the log; return only the exception type to the MCP
+        # caller so any base_url / api_key fragments that the exception
+        # string might have captured don't get echoed back over the wire.
         log.error("compact failed: %s: %s", type(e).__name__, e)
         traceback.print_exc(file=sys.stdout)
         sys.stdout.flush()
-        return String(data=f"Failed to compact memory: {e}")
+        return String(data=f"Failed to compact memory ({type(e).__name__}).")
 
 
 @memory.on_init
