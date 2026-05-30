@@ -17,8 +17,8 @@
 //       VoiceEvent. See `voice.rs`.
 //
 // Liaison itself does NOT contain ASR / TTS / voiceprint logic. Each is an
-// Atlas-registered system capability (robonix/system/speech/asr,
-// robonix/system/speech/tts, robonix/system/speech/voiceprint) discovered
+// Atlas-registered system capability (robonix/service/speech/asr,
+// robonix/service/speech/tts, robonix/service/voiceprint/identify) discovered
 // and called via gRPC — same pattern as the VLM service in Pilot.
 
 mod pb;

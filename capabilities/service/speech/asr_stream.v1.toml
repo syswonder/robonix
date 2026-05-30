@@ -1,7 +1,7 @@
 # ASR streaming recognition (bidirectional stream).
 # Client streams AsrAudioChunk; server streams RecognizeStreamEvent.
 [contract]
-id      = "robonix/system/speech/asr_stream"
+id      = "robonix/service/speech/asr_stream"
 version = "1"
 kind    = "service"
 idl     = "asr/srv/RecognizeStream.srv"
