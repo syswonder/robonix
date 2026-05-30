@@ -4,8 +4,8 @@
 # Build robonix-api sdist + wheel for PyPI / Test PyPI.
 #
 # Steps:
-#   1. Run protoc against rust/crates/robonix-atlas/proto/atlas.proto
-#      and write atlas_pb2.py / atlas_pb2_grpc.py into robonix_api/_generated/.
+#   1. Run protoc against system/atlas/proto/atlas.proto and write
+#      atlas_pb2.py / atlas_pb2_grpc.py into robonix_api/_generated/.
 #   2. `python -m build` to produce dist/*.tar.gz + dist/*.whl.
 #
 # Does NOT upload. Run scripts/publish_testpypi.sh / scripts/publish_pypi.sh
@@ -16,7 +16,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG_ROOT="$(cd "$HERE/.." && pwd)"
 REPO_ROOT="$(cd "$PKG_ROOT/../.." && pwd)"
-PROTO_DIR="$REPO_ROOT/rust/crates/robonix-atlas/proto"
+PROTO_DIR="$REPO_ROOT/system/atlas/proto"
 PROTO_FILE="$PROTO_DIR/atlas.proto"
 OUT_DIR="$PKG_ROOT/robonix_api/_generated"
 
