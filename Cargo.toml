@@ -1,0 +1,79 @@
+[workspace]
+# The 12 Robonix system components live one-per-directory under `system/`.
+# Four currently have a Rust implementation:
+#   - atlas    (capability discovery)
+#   - executor (capability orchestration; embeds sentinel for v0.1)
+#   - liaison  (human-machine interaction)
+#   - pilot    (planning + decision + memory + world model)
+# Repo-side dev tooling lives under `tools/` (rbnx CLI + codegen).
+# Python-only system components (scene) and reference service implementations
+# (services/{memsearch,voiceprint,speech}) are managed by uv and not part of
+# this Cargo workspace.
+members = [
+    "system/atlas",
+    "system/executor",
+    "system/liaison",
+    "system/pilot",
+    "tools/rbnx",
+    "tools/codegen",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MulanPSL-2.0"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+toml = "1.1"
+walkdir = "2"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0.18"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# gRPC
+tonic = "0.14"
+prost = "0.14"
+tonic-prost = "0.14"
+
+# gRPC build
+tonic-build = "0.14"
+tonic-prost-build = "0.14"
+protoc-bin-vendored = "3.2"
+
+# UUID
+uuid = { version = "1", features = ["v4"] }
+
+# OpenAI-compatible VLM client
+async-openai = "0.34.0"
+
+# MCP (Model Context Protocol)
+rmcp = { version = "1.3.0", features = ["server", "client"] }
+
+# HTTP client
+reqwest = { version = "0.13.2", features = ["json"] }
+
+# Image encoding
+image = "0.25"
+
+# TUI
+ratatui = "0.30.0"
+crossterm = "0.29.0"
+
+# Internal crates
+robonix-codegen = { path = "tools/codegen" }
