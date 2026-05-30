@@ -1,8 +1,8 @@
 # Webots full-stack demo manifest — sim + speech + voiceprint + sentinel.
 #
 # Differs from the default robonix_manifest.yaml in three ways:
-#   1. Adds `speech` service  (system/speech)  — FunASR + edge-tts + speak/list_speakers.
-#   2. Adds `voiceprint` service (system/voiceprint) — ECAPA-TDNN identify+enroll+list.
+#   1. Adds `speech` service (services/speech) — FunASR + edge-tts + speak/list_speakers.
+#   2. Adds `voiceprint` service (services/voiceprint) — ECAPA-TDNN identify+enroll+list.
 #   3. Documents the sentinel POC env wiring (rule file lives at
 #      `examples/webots/sentinel.demo.yaml`).
 #
@@ -120,22 +120,20 @@ service:
       planner_diagonal: true
       planner_max_iters: 500000
 
-  # ── memory / speech / voiceprint — not "system builtins" per the v0.1
-  # concept lock (system: only holds atlas/executor/pilot/liaison + nexus).
-  # Memory, speech and voiceprint are services that happen to live under
-  # the `system/` source tree, but they boot like any other service —
+  # ── memory / speech / voiceprint — regular services living under
+  # the top-level `services/` tree. They boot like any other service —
   # robonix-api Service instance, atlas-registered capabilities, lifecycle
-  # gRPC. Path: ../../system/X reaches them from this manifest's dir.
+  # gRPC. Path: ../../services/X reaches them from this manifest's dir.
   - name: memory
-    path: ../../system/memory
+    path: ../../services/memsearch
     config:
       backend: sqlite
   - name: speech
-    path: ../../system/speech
+    path: ../../services/speech
     config:
       disable_whisper: true   # webots ASR uses FunASR streaming
   - name: voiceprint
-    path: ../../system/voiceprint
+    path: ../../services/voiceprint
     config:
       # ECAPA-TDNN forced to CPU on this 6GB RTX 2060 — scene
       # (YOLO+SAM+CLIP, ~2.4G) + speech (FunASR+edge-tts, ~1G) +

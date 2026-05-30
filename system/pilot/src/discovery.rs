@@ -11,7 +11,7 @@ use robonix_atlas::pb as atlas_pb;
 ///   `robonix/primitive/camera/snapshot`        → `camera_snapshot`
 ///   `robonix/primitive/lidar/snapshot`         → `lidar_snapshot`
 ///   `robonix/primitive/chassis/move`           → `chassis_move`
-///   `robonix/system/memory/search`             → `memory_search`
+///   `robonix/service/memory/search`             → `memory_search`
 ///   `robonix/service/navigation/navigate`      → `navigation_navigate`
 ///
 /// Plain leaf-only used to be enough but multiple providers share leaves

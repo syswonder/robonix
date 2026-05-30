@@ -12,6 +12,6 @@
 version: 1
 rules:
   - id: quiet_hours_speaker
-    contract_id: robonix/system/speech/speak
+    contract_id: robonix/service/speech/speak
     deny_between: ["00:00", "23:59"]
     reason: "quiet-hours 策略:当前时段禁止扬声器输出。"

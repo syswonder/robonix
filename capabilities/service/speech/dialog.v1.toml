@@ -2,7 +2,7 @@
 # Orchestrates mic → ASR → intent → TTS → speaker pipeline.
 # Manages VAD, dialog state machine, and language switching.
 [contract]
-id      = "robonix/system/speech/dialog"
+id      = "robonix/service/speech/dialog"
 version = "1"
 kind    = "service"
 idl     = "speech/srv/StartDialog.srv"

@@ -2836,10 +2836,10 @@ use crate::pb::audio::AudioChunk;
 use crate::pb::contracts::{
     robonix_primitive_audio_mic_client::RobonixPrimitiveAudioMicClient,
     robonix_primitive_audio_speaker_client::RobonixPrimitiveAudioSpeakerClient,
-    robonix_system_speech_tts_client::RobonixSystemSpeechTtsClient,
-    robonix_system_speech_voiceprint_delete_client::RobonixSystemSpeechVoiceprintDeleteClient,
-    robonix_system_speech_voiceprint_enroll_client::RobonixSystemSpeechVoiceprintEnrollClient,
-    robonix_system_speech_voiceprint_list_client::RobonixSystemSpeechVoiceprintListClient,
+    robonix_service_speech_tts_client::RobonixServiceSpeechTtsClient,
+    robonix_service_voiceprint_delete_client::RobonixServiceVoiceprintDeleteClient,
+    robonix_service_voiceprint_enroll_client::RobonixServiceVoiceprintEnrollClient,
+    robonix_service_voiceprint_list_client::RobonixServiceVoiceprintListClient,
 };
 use crate::pb::tts as pb_tts;
 use crate::pb::voiceprint as pb_voiceprint;
@@ -2847,10 +2847,10 @@ use crate::pb::voiceprint as pb_voiceprint;
 const MIC_RECORD_SECS: u64 = 8;
 const MIC_SAMPLE_RATE_HZ: u32 = 16_000;
 
-const VOICEPRINT_ENROLL_CONTRACT: &str = "robonix/system/speech/voiceprint_enroll";
-const VOICEPRINT_LIST_CONTRACT: &str = "robonix/system/speech/voiceprint_list";
-const VOICEPRINT_DELETE_CONTRACT: &str = "robonix/system/speech/voiceprint_delete";
-const TTS_CONTRACT: &str = "robonix/system/speech/tts";
+const VOICEPRINT_ENROLL_CONTRACT: &str = "robonix/service/voiceprint/enroll";
+const VOICEPRINT_LIST_CONTRACT: &str = "robonix/service/voiceprint/list";
+const VOICEPRINT_DELETE_CONTRACT: &str = "robonix/service/voiceprint/delete";
+const TTS_CONTRACT: &str = "robonix/service/speech/tts";
 
 #[derive(Clone, Default)]
 struct UserEntry {
@@ -2938,7 +2938,7 @@ async fn voiceprint_list_users(atlas_endpoint: &str) -> Result<Vec<UserEntry>> {
     let endpoint = resolve_grpc_endpoint(&mut atlas, VOICEPRINT_LIST_CONTRACT, "")
         .await
         .ok_or_else(|| anyhow::anyhow!("no voiceprint_list provider in atlas"))?;
-    let mut client = RobonixSystemSpeechVoiceprintListClient::connect(endpoint.clone())
+    let mut client = RobonixServiceVoiceprintListClient::connect(endpoint.clone())
         .await
         .with_context(|| format!("dial voiceprint_list at {endpoint}"))?;
     let resp = client
@@ -2986,7 +2986,7 @@ async fn voiceprint_enroll(
     let endpoint = resolve_grpc_endpoint(&mut atlas, VOICEPRINT_ENROLL_CONTRACT, "")
         .await
         .ok_or_else(|| anyhow::anyhow!("no voiceprint_enroll provider in atlas"))?;
-    let mut client = RobonixSystemSpeechVoiceprintEnrollClient::connect(endpoint.clone())
+    let mut client = RobonixServiceVoiceprintEnrollClient::connect(endpoint.clone())
         .await
         .with_context(|| format!("dial voiceprint_enroll at {endpoint}"))?;
     let resp = client
@@ -3023,7 +3023,7 @@ async fn voiceprint_delete(atlas_endpoint: &str, user_id: &str) -> Result<()> {
     let endpoint = resolve_grpc_endpoint(&mut atlas, VOICEPRINT_DELETE_CONTRACT, "")
         .await
         .ok_or_else(|| anyhow::anyhow!("no voiceprint_delete provider in atlas"))?;
-    let mut client = RobonixSystemSpeechVoiceprintDeleteClient::connect(endpoint.clone())
+    let mut client = RobonixServiceVoiceprintDeleteClient::connect(endpoint.clone())
         .await
         .with_context(|| format!("dial voiceprint_delete at {endpoint}"))?;
     let resp = client
@@ -3101,7 +3101,7 @@ async fn speak_text(atlas_endpoint: &str, speaker_pin: &str, text: &str) -> Resu
     let speaker_endpoint = resolve_grpc_endpoint(&mut atlas, SPEAKER_CONTRACT, speaker_pin)
         .await
         .ok_or_else(|| anyhow::anyhow!("no speaker provider in atlas"))?;
-    let mut tts = RobonixSystemSpeechTtsClient::connect(tts_endpoint.clone())
+    let mut tts = RobonixServiceSpeechTtsClient::connect(tts_endpoint.clone())
         .await
         .with_context(|| format!("dial tts at {tts_endpoint}"))?;
     let resp = tts

@@ -1,19 +1,19 @@
 # Robonix voiceprint service — ECAPA-TDNN one-shot speaker identification.
 # Three atlas-registered capabilities (all gRPC, all on the same listener):
 #
-#   robonix/system/speech/voiceprint         — Identify(audio) → user_id
+#   robonix/service/voiceprint/identify         — Identify(audio) → user_id
 #       Consumed by Liaison's voice gating path; LLM-visible only
 #       indirectly via the user_id stamped on each Task.
 #
-#   robonix/system/speech/voiceprint_enroll  — Enroll(audio,id,name) → ok
+#   robonix/service/voiceprint/enroll  — Enroll(audio,id,name) → ok
 #       Admin RPC. Used by `rbnx chat`'s Ctrl+U user-management modal
 #       to register a new speaker from a freshly captured sample.
 #
-#   robonix/system/speech/voiceprint_list    — ListEnrolled() → json
+#   robonix/service/voiceprint/list    — ListEnrolled() → json
 #       Admin RPC. Returns the (user_id, user_name) catalog so the chat
 #       client can hydrate its user list on modal open.
 #
-# Service id is `voiceprint` under the shared `robonix/system/speech`
+# Service id is `voiceprint` under the shared `robonix/service/speech`
 # namespace; multiple Service instances can coexist in the same
 # namespace (speech_service registers there too).
 #
@@ -46,6 +46,6 @@ start: |
   exec uv run --active python -m voiceprint_service.service
 
 capabilities:
-  - name: robonix/system/speech/voiceprint
-  - name: robonix/system/speech/voiceprint_enroll
-  - name: robonix/system/speech/voiceprint_list
+  - name: robonix/service/voiceprint/identify
+  - name: robonix/service/voiceprint/enroll
+  - name: robonix/service/voiceprint/list

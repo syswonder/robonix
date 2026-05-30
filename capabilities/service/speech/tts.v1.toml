@@ -2,7 +2,7 @@
 # Caller sends text; returns synthesized audio.
 # ROS: `lib/system/speech/tts/srv/Synthesize.srv`.
 [contract]
-id      = "robonix/system/speech/tts"
+id      = "robonix/service/speech/tts"
 version = "1"
 kind    = "service"
 idl     = "tts/srv/Synthesize.srv"

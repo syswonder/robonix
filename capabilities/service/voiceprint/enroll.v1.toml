@@ -4,7 +4,7 @@
 # the embedding. Not invoked from the LLM path — this is purely an
 # operator-facing setup RPC.
 [contract]
-id      = "robonix/system/speech/voiceprint_enroll"
+id      = "robonix/service/voiceprint/enroll"
 version = "1"
 kind    = "service"
 idl     = "voiceprint/srv/Enroll.srv"
