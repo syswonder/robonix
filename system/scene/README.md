@@ -82,12 +82,12 @@ Use natural language so Pilot runs the explore skill:
 
 ```bash
 # 3rd terminal, anywhere on the host
-rbnx ask "请彻底探索整个房间，等待 explore 完成"
+rbnx ask "Thoroughly explore the entire room and wait until exploration is complete."
 ```
 
 Pilot calls `skill/explore/explore`, polls `status` every few seconds, and lets rtabmap + scene fill in the map as the robot frontiers across the room. With the default Webots Tiago scene this takes ~3–4 minutes to cover ~6 frontier hops.
 
-For interactive use: `rbnx chat`, type `请探索环境`; Esc cancels current reasoning, `Ctrl+C` exits.
+For interactive use: `rbnx chat`, type `explore the environment`; Esc cancels current reasoning, `Ctrl+C` exits.
 
 Within ~15 s of the explore goal landing you should see: the robot moving in rviz / Webots; 2D occupancy updating (web UI left panel); objects accumulating in the 3D panel and the scene registry (`get_snapshot` via `rbnx tools`); live RGB + depth in the cam panel (third column).
 
@@ -170,7 +170,7 @@ The cam panel shows the same RGB + depth frames the perception pipeline consumes
 
 **Robot dot in web UI doesn't match rviz** — was the `/odom` vs. `map` frame mismatch; fixed by reading tf2 directly. If still off, `docker exec robonix_tiago_sim ros2 run tf2_ros tf2_echo map base_link` should match the web UI's `robot` field exactly.
 
-**Lots of duplicate objects across the room ("重影")** — lower `SCENE_CG_MERGE_THRESHOLD` (default 0.55). Or raise `SCENE_CG_MAX_MERGE_DIST_M` if you have very large objects (e.g. big tables) that span >1.5 m.
+**Lots of duplicate objects across the room (ghosting)** — lower `SCENE_CG_MERGE_THRESHOLD` (default 0.55). Or raise `SCENE_CG_MAX_MERGE_DIST_M` if you have very large objects (e.g. big tables) that span >1.5 m.
 
 **"Desk" detected on the floor** — YOLO-World mask leaked past the object's footprint and the depth points are floor. Floor-noise filter already drops detections of falling-class types if `pcd.z_max < 0.30`; adjust the floor_classes list in `perception_concept_graphs.py` if your robot has a low desk.
 

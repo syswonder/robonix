@@ -121,7 +121,7 @@ A single user task — "tell me what you see and put the cup on the table" — f
 4. The provider (a primitive, a service, or a skill) runs the call and returns a result. Results that came from perception are reconciled by **scene**'s semantic-map layer, so the next round of planning sees an updated world.
 5. liaison streams the agent's narration back to the user as TTS audio while executor keeps working.
 
-Startup of the stack itself follows the same dependency direction. First the L0 services (`chronos`, `atlas`, `nexus`, `scribe`) come up — they own time, the capability catalog, transport, and logs. Then `soma` enumerates hardware and registers primitives, `scene` begins consuming perception and builds an object registry, `sentinel` loads safety rules, `executor` subscribes to the capability catalog, and finally `pilot + liaison` load LLM credentials and open the user channel. At that point `rbnx caps` shows every component `ACTIVE` and the system is ready to accept tasks.
+Startup of the stack itself follows the same dependency direction. First the core platform services (`chronos`, `atlas`, `nexus`, `scribe`) come up — they own time, the capability catalog, transport, and logs. Then `soma` enumerates hardware and registers primitives, `scene` begins consuming perception and builds an object registry, `sentinel` loads safety rules, `executor` subscribes to the capability catalog, and finally `pilot + liaison` load LLM credentials and open the user channel. At that point `rbnx caps` shows every component `ACTIVE` and the system is ready to accept tasks.
 
 For the long form — full RPC tables, lifecycle state machine, contract grammar, codegen pipeline — see the developer guide:
 

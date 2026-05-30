@@ -20,4 +20,4 @@ When Keystone lands it will:
 - be the source-of-truth that [sentinel](../sentinel/) consults for
   "is this user allowed to call this skill right now".
 
-See the whitepaper §3 *L0 系统服务层*.
+See the whitepaper for the broader picture.

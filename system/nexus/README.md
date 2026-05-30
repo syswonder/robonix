@@ -9,7 +9,7 @@ behind one capability-facing API.
 Today every Robonix component picks its own transport directly: atlas
 declares per-interface that a capability is reachable over gRPC / ROS
 2 / MCP, and consumers dial that transport themselves. The dev guide
-section *能力与能力接口* covers the current mechanism.
+section *Namespaces & contracts* covers the current mechanism.
 
 When Nexus lands it will:
 
@@ -21,5 +21,4 @@ When Nexus lands it will:
 - give a single back-pressure / cancellation model regardless of the
   underlying transport.
 
-See the whitepaper §3 *L0 系统服务层* and §3.4 *统一通信* for design
-intent.
+See the whitepaper for the broader picture.
