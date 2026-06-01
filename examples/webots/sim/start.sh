@@ -65,7 +65,15 @@ fi
 CF=(-f compose.yaml)
 if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]] && command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
   CF+=(-f compose.gpu.yaml)
-  echo "[sim/start] NVIDIA GPU detected — merging compose.gpu.yaml"
+  # Auto-select the GPU with most free memory unless user already set ROBONIX_GPU_ID.
+  if [[ -z "${ROBONIX_GPU_ID:-}" ]]; then
+    ROBONIX_GPU_ID=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits \
+      | sort -t',' -k2 -nr | head -1 | cut -d',' -f1 | tr -d ' ')
+    export ROBONIX_GPU_ID
+    echo "[sim/start] auto-selected GPU $ROBONIX_GPU_ID (most free memory)"
+  else
+    echo "[sim/start] using user-specified GPU $ROBONIX_GPU_ID"
+  fi
 else
   echo "[sim/start] no GPU (or ROBONIX_FORCE_CPU=1) — CPU-only Webots"
 fi

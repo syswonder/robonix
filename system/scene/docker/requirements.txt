@@ -1,0 +1,87 @@
+# NOTE: This file is a BACKUP of requirements/ !!!
+
+# Scene-container Python deps. Subset of pyproject.toml's
+# [project.dependencies] minus what the base image already provides
+# (numpy / cv-bridge / rclpy / tf2_ros).
+#
+# Two layers of deps:
+#   1. Generic scene infrastructure (state, MCP, web).
+#   2. concept-graphs perception stack (per-frame detection +
+#      segmentation + CLIP + 3D backproject + graph merge).
+#
+# Versions chosen for x86 + sm_120 (5090). Jetson port pins differ
+# (NVIDIA's torch fork; mobile_sam + ViT-B-32 instead of larger
+# variants; see notes in perception_concept_graphs.py).
+#
+# Heavy CV models load weights from /opt/models — the Dockerfile
+# bakes those at build time. Never fetch at start (robonix invariant).
+
+# ── Generic scene ────────────────────────────────────────────────
+scipy>=1.11
+mcp
+fastmcp
+grpcio
+grpcio-tools
+protobuf
+uvicorn
+httpx
+Pillow
+PyYAML
+
+# ── concept-graphs perception stack ──────────────────────────────
+# torch 2.5+/cu124 because cu118 wheels don't run on sm_120 (Blackwell);
+# ROS Humble's python3-numpy is pinned to 1.x so we let pip pick a
+# compatible scipy build automatically.
+opencv-python-headless>=4.8
+ultralytics>=8.3            # YOLO-World v2 + the SAM wrapper that
+                            # accepts `.predict(image, bboxes=...)`
+# ultralytics' YOLOWorld imports openai's `clip` (NOT the same as
+# open_clip below) for its CLIP text encoder. Without it the model
+# load raises "No module named 'clip'". `clip-anytorch` is the fork
+# that supports modern torch (the original openai `clip-by-openai`
+# uses a TorchScript Node API that's broken on torch 2.5+).
+clip-anytorch>=2.6
+open_clip_torch>=2.20,<3    # ViT-B-32 LAION-2B; small enough for
+                            # Jetson, x86-5090 happily uses ViT-L/14
+                            # by swapping the env var.
+                            # Pinned <3 — open_clip 3.x changed the
+                            # tokenizer / forward signature concept-graphs
+                            # and our perception_concept_graphs.py rely on.
+supervision==0.14.0         # sv.Detections is the in-memory container
+                            # gobs_to_detection_list expects.
+omegaconf==2.3.0            # concept-graphs' cfg dict format.
+hydra-core==1.3.2           # for loading their cfslam yaml.
+# Open3D is concept-graphs' point-cloud rep. Pcd ops are CPU-bound
+# but we don't accumulate tens of thousands per frame; one per object
+# per tick is fine.
+open3d>=0.17,<0.19
+faiss-cpu==1.7.4            # used by their visual_similarity helper
+transformers>=4.40,<5       # tokenizers for CLIP text path; <5 because
+                            # transformers 5.x renames model classes
+                            # (Auto* import paths) and breaks
+                            # concept-graphs's CLIPTextModel load.
+huggingface-hub<1           # transformers/open_clip resolve weights via
+                            # this; 1.x changed the cached_download API
+                            # and breaks weight loading on first run.
+# pytorch3d was originally pulled in for concept-graphs's
+# compute_3d_iou_accurate_batch (used by compute_overlap_matrix_general
+# → merge_overlap_objects), but we replaced that path with a voxel-set
+# fraction-overlap impl (see perception_concept_graphs.py compute_*_
+# overlap_*); the ali-dev branch of concept-graphs does NOT import
+# pytorch3d in slam.{utils,mapping,slam_classes} or utils.model_utils.
+#
+# x86_64-only: miropsota's wheel index has no aarch64 binaries and
+# source build would need nvcc, so we skip on Jetson. Runtime path
+# does not exercise pytorch3d.
+# pytorch3d removed — scene uses voxel-overlap instead (see
+# perception_concept_graphs.py). The miropsota wheel was also pinned
+# to torch 2.5.1 and unreachable behind GFW.
+# concept-graphs's general_utils → vlm imports openai unconditionally,
+# even though we don't call any VLM helpers from our merge path. Add
+# it as a stub install so the slam module imports cleanly.
+openai>=1.0
+# concept-graphs also imports wandb (optional) and rich; wandb is a
+# soft import via OptionalWandB, but rich is mandatory.
+rich
+matplotlib                 # used by DetectionList.color_by_instance
+seaborn                    # used by some logging utilities

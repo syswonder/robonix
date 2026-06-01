@@ -18,7 +18,7 @@
 #
 # The image is built on demand by `bash system/scene/scripts/build.sh`
 # the first time, then reused. Rebuild only when this Dockerfile or
-# requirements.txt change.
+# requirements/ change.
 
 FROM ros:humble-ros-base
 
@@ -96,18 +96,30 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 # pip: do NOT use proxy.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    without-proxy python3 -m pip install --upgrade pip
+    without-proxy python3 -m pip install \
+        --progress-bar raw \
+        --timeout 60 \
+        --retries 3 \
+        --upgrade pip
 
-# torch + torchvision pinned to cu124 — required for sm_120.
-# pip: do NOT use proxy; use Aliyun PyTorch wheels + Aliyun PyPI.
+# torch + torchvision — sm_120 (Blackwell / RTX 5090) requires
+# torch 2.7+ with CUDA 12.8 kernels. cu124 wheels only cover up to
+# sm_90 and will fail with "no kernel image" on Blackwell.
+# Aliyun mirror carries cu128 wheels; fall back to upstream PyTorch index.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     without-proxy python3 -m pip install \
         --progress-bar raw \
         --timeout 60 \
         --retries 3 \
         -i https://mirrors.aliyun.com/pypi/simple/ \
-        --find-links https://mirrors.aliyun.com/pytorch-wheels/cu124/ \
-        torch==2.5.1 torchvision==0.20.1
+        --find-links https://mirrors.aliyun.com/pytorch-wheels/cu128/ \
+        torch==2.7.1 torchvision==0.22.1 \
+    || with-build-proxy python3 -m pip install \
+        --progress-bar raw \
+        --timeout 60 \
+        --retries 3 \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        torch==2.7.1 torchvision==0.22.1
 
 # Generic scene deps + concept-graphs perception stack.
 # pip: do NOT use proxy; use PIP_INDEX_URL=TUNA.
