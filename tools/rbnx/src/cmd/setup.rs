@@ -11,11 +11,7 @@ use std::path::{Path, PathBuf};
 /// The Cargo workspace lives at the repo root; capabilities/ hosts the
 /// contract TOMLs plus the IDL tree under capabilities/lib (used to be a
 /// symlink into rust/crates/robonix-interfaces/lib; now hosted directly).
-const ROBONIX_ROOT_MARKERS: &[&str] = &[
-    "Cargo.toml",
-    "capabilities",
-    "capabilities/lib",
-];
+const ROBONIX_ROOT_MARKERS: &[&str] = &["Cargo.toml", "capabilities", "capabilities/lib"];
 
 fn looks_like_robonix_root(dir: &Path) -> bool {
     ROBONIX_ROOT_MARKERS.iter().all(|m| dir.join(m).exists())
