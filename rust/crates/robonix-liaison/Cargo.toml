@@ -21,6 +21,10 @@ path = "examples/mock_pilot.rs"
 name = "mock_audio"
 path = "examples/mock_audio.rs"
 
+[[example]]
+name = "voice_client"
+path = "examples/voice_client.rs"
+
 [dependencies]
 tokio.workspace = true
 tokio-stream = "0.1"
@@ -35,6 +39,11 @@ log.workspace = true
 env_logger.workspace = true
 uuid.workspace = true
 futures = "0.3"
+hmac = "0.12"
+sha1 = "0.10"
+base64 = "0.22"
+urlencoding = "2.1"
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 whoami = "1.5"
 robonix-atlas = { path = "../robonix-atlas" }
 

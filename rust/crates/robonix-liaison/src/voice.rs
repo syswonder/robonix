@@ -6,7 +6,7 @@
 //   RobonixPrimitiveAudioMic.Stream  (record_seconds)
 //       │
 //       ▼
-//   SystemSpeechAsr.Recognize    → transcript
+//   Tencent Cloud ASR WebSocket API   → transcript
 //       │
 //       ▼
 //   RobonixSystemSpeechVoiceprint.Identify → user_id  (graceful: hint fallback on absence)
@@ -28,13 +28,17 @@
 // audio hardware. This is what the demo script uses by default.
 
 use anyhow::Result;
-use futures::Stream;
+use base64::Engine as _;
+use futures::{SinkExt, Stream};
+use hmac::{Hmac, Mac};
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 use tonic::{Request, Status};
 use uuid::Uuid;
 
@@ -43,7 +47,6 @@ use crate::pb::contracts::{
     robonix_primitive_audio_mic_client::RobonixPrimitiveAudioMicClient,
     robonix_primitive_audio_speaker_client::RobonixPrimitiveAudioSpeakerClient,
     robonix_system_pilot_client::RobonixSystemPilotClient,
-    robonix_system_speech_asr_stream_client::RobonixSystemSpeechAsrStreamClient,
     robonix_system_speech_tts_client::RobonixSystemSpeechTtsClient,
     robonix_system_speech_voiceprint_client::RobonixSystemSpeechVoiceprintClient,
 };
@@ -75,7 +78,7 @@ const DEFAULT_RECORD_SECONDS: u32 = 30;
 /// Silence-VAD parameters. After we've heard a chunk above
 /// `VAD_SPEECH_RMS`, count consecutive sub-threshold chunks; once the
 /// silence lasts `VAD_END_SILENCE_SECS`, treat the utterance as done
-/// and close the ASR request stream so the server flushes its final.
+/// and stop collecting mic chunks before calling the ASR API.
 /// Tuned for 16 kHz mono s16le speech: speech RMS is typically 1k–8k,
 /// background noise sits around 50–300, so 500 is a comfortable gap.
 const VAD_SPEECH_RMS: f32 = 500.0;
@@ -83,6 +86,12 @@ const VAD_END_SILENCE_SECS: f32 = 1.2;
 const DEFAULT_ASR_LANGUAGE: &str = "";
 const DEFAULT_AUDIO_ENCODING: &str = "pcm_s16le";
 const DEFAULT_AUDIO_SAMPLE_RATE: u32 = 16_000;
+const TENCENT_ASR_DEFAULT_HOST: &str = "asr.cloud.tencent.com";
+const TENCENT_ASR_DEFAULT_PATH: &str = "/asr/v2";
+const TENCENT_ASR_DEFAULT_ENGINE: &str = "16k_zh";
+const TENCENT_ASR_CHUNK_BYTES: usize = 6400;
+const TENCENT_ASR_CHUNK_INTERVAL_MS: u64 = 200;
+const TENCENT_ASR_END_TAG: &str = r#"{"type":"end"}"#;
 
 // ── Discovery helpers ────────────────────────────────────────────────────────
 //
@@ -250,10 +259,10 @@ async fn run_session(
 ) -> Result<()> {
     let mock = is_mock_mode();
     // `record_seconds` is now a hard-stop ceiling on streaming capture
-    // (FunASR's VAD ends the turn under most conditions; this just
+    // (local silence-VAD ends the turn under most conditions; this just
     // protects against a sensor that never goes silent). 0 / unset →
-    // 30 s default. Whisper's old "record-then-recognize" pattern is
-    // gone; voice goes through `asr_stream` end-to-end.
+    // 30 s default. ASR recognition now goes through the Tencent Cloud ASR API
+    // after mic capture finishes.
     let max_seconds: u32 = if record_seconds == 0 {
         30
     } else {
@@ -281,16 +290,12 @@ async fn run_session(
             .await;
         (Vec::new(), canned)
     } else {
-        // Mic → AsrAudioChunk pump + asr_stream.RecognizeStream both
-        // run inside `stream_capture_and_recognize`. It returns once
-        // FunASR emits is_final, the user hits max_seconds, or the
-        // mic stream drops. Voiceprint still gets the accumulated PCM
-        // for downstream identification (currently fallback-only).
-        stream_capture_and_recognize(
+        // Mic capture still comes from the audio primitive. ASR now calls
+        // Tencent Cloud ASR over WebSocket directly instead of discovering a
+        // Robonix speech/asr_stream gRPC provider.
+        capture_and_transcribe_with_cloud_asr(
             &atlas,
             &req.mic_node_id,
-            &req.asr_node_id,
-            &language,
             max_seconds,
             &session_id,
             &tx,
@@ -396,50 +401,62 @@ async fn run_session(
     Ok(())
 }
 
-// ── Mic capture + streaming ASR ─────────────────────────────────────────────
+// ── Mic capture + Tencent Cloud ASR API ─────────────────────────────────────
 //
-// Open the mic primitive AND `robonix/system/speech/asr_stream` (FunASR
-// paraformer-zh-streaming bidi) at the same time. Mic AudioChunks get
-// wrapped as AsrAudioChunk and pumped up the request side; the response
-// side yields RecognizeStreamEvents (PARTIAL → … → FINAL). On FINAL,
-// stop both streams and return `(accumulated_pcm, final_text)`.
-//
-// `max_seconds` is a hard ceiling — FunASR's VAD usually ends the turn
-// well before that, but we don't want to hang on a stuck mic.
+// Open the mic primitive, collect one utterance with the local silence-VAD,
+// then send the PCM to Tencent Cloud ASR over WebSocket. Tencent expects
+// 16 kHz mono s16le audio in 6400-byte chunks roughly every 200 ms.
 
-#[allow(clippy::too_many_arguments)]
-async fn stream_capture_and_recognize(
+async fn capture_and_transcribe_with_cloud_asr(
     atlas: &Arc<Mutex<AtlasClient>>,
     mic_pin: &str,
-    asr_pin: &str,
-    language: &str,
     max_seconds: u32,
     session_id: &str,
     tx: &mpsc::Sender<Result<VoiceEvent, Status>>,
 ) -> Result<(Vec<u8>, String)> {
+    let audio_pcm = capture_audio_pcm(atlas, mic_pin, max_seconds, session_id, tx).await?;
+    let _ = tx
+        .send(Ok(event_status(
+            KIND_RECORDING_DONE,
+            session_id,
+            &format!(
+                "captured {} bytes (~{:.2}s @ 16kHz mono s16le); sending to Tencent ASR API",
+                audio_pcm.len(),
+                audio_pcm.len() as f32 / (DEFAULT_AUDIO_SAMPLE_RATE as f32 * 2.0),
+            ),
+        )))
+        .await;
+
+    let transcript = cloud_asr_transcribe_pcm(&audio_pcm).await?;
+    if !transcript.is_empty() {
+        let _ = tx
+            .send(Ok(event_text(KIND_ASR_FINAL, session_id, &transcript, 1.0)))
+            .await;
+    }
+    Ok((audio_pcm, transcript))
+}
+
+async fn capture_audio_pcm(
+    atlas: &Arc<Mutex<AtlasClient>>,
+    mic_pin: &str,
+    max_seconds: u32,
+    session_id: &str,
+    tx: &mpsc::Sender<Result<VoiceEvent, Status>>,
+) -> Result<Vec<u8>> {
     let mic_endpoint = resolve_endpoint(atlas, "robonix/primitive/audio/mic", mic_pin)
         .await
         .ok_or_else(|| {
             anyhow::anyhow!("no RobonixPrimitiveAudioMic provider registered in Atlas")
         })?;
-    let asr_endpoint = resolve_endpoint(atlas, "robonix/system/speech/asr_stream", asr_pin)
-        .await
-        .ok_or_else(|| {
-            anyhow::anyhow!("no RobonixSystemSpeechAsrStream provider registered in Atlas")
-        })?;
-
     let mut mic_client = RobonixPrimitiveAudioMicClient::connect(mic_endpoint.clone())
         .await
         .map_err(|e| anyhow::anyhow!("connect mic at {mic_endpoint}: {e}"))?;
-    let mut asr_client = RobonixSystemSpeechAsrStreamClient::connect(asr_endpoint.clone())
-        .await
-        .map_err(|e| anyhow::anyhow!("connect asr_stream at {asr_endpoint}: {e}"))?;
 
     let _ = tx
         .send(Ok(event_status(
             KIND_RECORDING_STARTED,
             session_id,
-            &format!("streaming mic {mic_endpoint} → asr_stream {asr_endpoint}"),
+            &format!("recording mic {mic_endpoint} for Tencent ASR API"),
         )))
         .await;
 
@@ -449,148 +466,328 @@ async fn stream_capture_and_recognize(
         .map_err(|e| anyhow::anyhow!("mic rpc failed: {e}"))?
         .into_inner();
 
-    // Buffered hand-off: mic-pump task drops AsrAudioChunks onto the
-    // mpsc; tonic forwards them up the bidi as the request stream.
-    let (asr_req_tx, asr_req_rx) = mpsc::channel::<crate::pb::asr::AsrAudioChunk>(64);
-    let asr_req_stream = ReceiverStream::new(asr_req_rx);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(max_seconds as u64);
+    let mut pcm_buf =
+        Vec::<u8>::with_capacity((DEFAULT_AUDIO_SAMPLE_RATE as usize) * 2 * (max_seconds as usize));
+    let mut has_spoken = false;
+    let mut silence_secs: f32 = 0.0;
 
-    // Accumulator the mic-pump writes into; the outer task reads it
-    // back at the end so we can hand the raw PCM to identify_user.
-    let pcm_buf = Arc::new(Mutex::new(Vec::<u8>::with_capacity(
-        (DEFAULT_AUDIO_SAMPLE_RATE as usize) * 2 * (max_seconds as usize),
-    )));
-    let pcm_buf_for_pump = Arc::clone(&pcm_buf);
-    let _language_owned = language.to_string();
-
-    // Mic pump — drains the mic gRPC stream into the asr_req sender,
-    // accumulates raw PCM, runs silence-VAD on each chunk, stops on
-    // (whichever first):
-    //   1. max_seconds hard ceiling
-    //   2. mic stream EOF / error
-    //   3. silence-VAD end-of-utterance (after speech then quiet)
-    //   4. outer task drops asr_req_rx (server already returned FINAL)
-    let pump_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(max_seconds as u64);
-        let mut has_spoken = false;
-        let mut silence_secs: f32 = 0.0;
-        loop {
-            if tokio::time::Instant::now() >= deadline {
-                break;
-            }
-            let remaining = deadline - tokio::time::Instant::now();
-            match tokio::time::timeout(remaining, mic_stream.message()).await {
-                Ok(Ok(Some(chunk))) => {
-                    let dur = chunk.duration_s.max(0.0);
-                    let rms = pcm_rms_s16le(&chunk.data);
-                    if rms >= VAD_SPEECH_RMS {
-                        has_spoken = true;
-                        silence_secs = 0.0;
-                    } else if has_spoken {
-                        silence_secs += dur;
-                    }
-                    pcm_buf_for_pump.lock().await.extend_from_slice(&chunk.data);
-                    let asr_chunk = crate::pb::asr::AsrAudioChunk { chunk: Some(chunk) };
-                    if asr_req_tx.send(asr_chunk).await.is_err() {
-                        break;
-                    }
-                    if has_spoken && silence_secs >= VAD_END_SILENCE_SECS {
-                        // Drops asr_req_tx → server sees stream EOF →
-                        // FunASR emits its is_final flush → outer loop
-                        // collects the final transcript and breaks.
-                        break;
-                    }
-                }
-                Ok(Ok(None)) => break,
-                Ok(Err(_)) => break,
-                Err(_) => break,
-            }
-        }
-    });
-
-    // FunASR docs: AsrAudioChunk + ASR backend reads its own audio_config
-    // defaults (16 kHz mono pcm_s16le); language hint is on the bidi
-    // request metadata, not the per-chunk message. Tonic-codegen
-    // doesn't surface a separate header field here, so we just rely on
-    // FunASR's auto-detection — paraformer-zh-streaming is zh-only so
-    // this is fine. If a multi-lingual backend is ever wired in, the
-    // contract needs an extra preamble message.
-    let asr_resp = asr_client
-        .recognize_stream(Request::new(asr_req_stream))
-        .await
-        .map_err(|e| anyhow::anyhow!("asr_stream rpc failed: {e}"))?;
-    let mut asr_events = asr_resp.into_inner();
-
-    // FunASR's paraformer-zh-streaming emits *incremental* partials —
-    // each event carries only the words decoded from the most recent
-    // chunk window, not a cumulative transcript. The is_final flush
-    // (`recognize_chunk(b"", is_final=True)`) emits the residual
-    // window's text the same way (sometimes empty).
-    //
-    // Strategy: append every non-empty event text into `accumulated`,
-    // and use the accumulator as the final transcript. The server's
-    // is_final flag only tells us when to stop the loop — it does
-    // NOT mean "this event's text is the whole utterance"; treating
-    // it that way drops every prior partial and leaves the user with
-    // just the last syllable.
-    let mut accumulated = String::new();
-    let mut last_confidence = 0.0_f32;
-    while let Some(ev_or_err) = asr_events.next().await {
-        let ev = ev_or_err.map_err(|e| anyhow::anyhow!("asr_stream recv: {e}"))?;
-        if !ev.error.is_empty() {
-            anyhow::bail!("asr error: {}", ev.error);
-        }
-        let is_final = ev.is_final || ev.event_type == 1;
-        let text = ev.text.clone();
-        if !text.is_empty() {
-            accumulated.push_str(&text);
-            last_confidence = ev.confidence;
-            if !is_final {
-                let _ = tx
-                    .send(Ok(event_text(
-                        KIND_ASR_PARTIAL,
-                        session_id,
-                        &text,
-                        ev.confidence,
-                    )))
-                    .await;
-            }
-        }
-        if is_final {
+    loop {
+        if tokio::time::Instant::now() >= deadline {
             break;
         }
-    }
-    let transcript = accumulated;
-    if !transcript.is_empty() {
-        let _ = tx
-            .send(Ok(event_text(
-                KIND_ASR_FINAL,
-                session_id,
-                &transcript,
-                last_confidence,
-            )))
-            .await;
+        let remaining = deadline - tokio::time::Instant::now();
+        match tokio::time::timeout(remaining, mic_stream.message()).await {
+            Ok(Ok(Some(chunk))) => {
+                let dur = chunk.duration_s.max(0.0);
+                let rms = pcm_rms_s16le(&chunk.data);
+                if rms >= VAD_SPEECH_RMS {
+                    has_spoken = true;
+                    silence_secs = 0.0;
+                } else if has_spoken {
+                    silence_secs += dur;
+                }
+                pcm_buf.extend_from_slice(&chunk.data);
+                if has_spoken && silence_secs >= VAD_END_SILENCE_SECS {
+                    break;
+                }
+            }
+            Ok(Ok(None)) => break,
+            Ok(Err(e)) => anyhow::bail!("mic stream error: {e}"),
+            Err(_) => break,
+        }
     }
 
-    // Stop the mic pump (the outer task already dropped asr_req_rx by
-    // returning from the `while let` loop above, which closes the
-    // request stream).
-    pump_handle.abort();
-    let _ = pump_handle.await;
+    if pcm_buf.is_empty() {
+        anyhow::bail!("mic returned empty audio");
+    }
+    Ok(pcm_buf)
+}
 
-    let pcm = std::mem::take(&mut *pcm_buf.lock().await);
-    let _ = tx
-        .send(Ok(event_status(
-            KIND_RECORDING_DONE,
-            session_id,
-            &format!(
-                "captured {} bytes (~{:.2}s @ 16kHz mono s16le); transcript={:?}",
-                pcm.len(),
-                pcm.len() as f32 / (DEFAULT_AUDIO_SAMPLE_RATE as f32 * 2.0),
-                transcript,
-            ),
-        )))
-        .await;
-    Ok((pcm, transcript))
+async fn cloud_asr_transcribe_pcm(audio_pcm: &[u8]) -> Result<String> {
+    if audio_pcm.is_empty() {
+        anyhow::bail!("empty audio for Tencent ASR");
+    }
+
+    let config = TencentAsrConfig::from_env()?;
+    let url = config.signed_url()?;
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
+        .await
+        .map_err(|e| anyhow::anyhow!("connect Tencent ASR websocket: {e}"))?;
+
+    let mut results = TencentAsrResults::default();
+    let mut send_finished = false;
+    wait_for_tencent_asr_handshake(&mut ws, &mut results).await?;
+
+    for chunk in audio_pcm.chunks(TENCENT_ASR_CHUNK_BYTES) {
+        ws.send(Message::Binary(chunk.to_vec().into()))
+            .await
+            .map_err(|e| anyhow::anyhow!("send Tencent ASR audio chunk: {e}"))?;
+        drain_tencent_asr_messages(&mut ws, &mut results).await?;
+        tokio::time::sleep(Duration::from_millis(TENCENT_ASR_CHUNK_INTERVAL_MS)).await;
+    }
+    ws.send(Message::Text(TENCENT_ASR_END_TAG.into()))
+        .await
+        .map_err(|e| anyhow::anyhow!("send Tencent ASR end tag: {e}"))?;
+
+    let final_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < final_deadline {
+        match tokio::time::timeout(Duration::from_millis(500), ws.next()).await {
+            Ok(Some(Ok(msg))) => {
+                handle_tencent_asr_message(msg, &mut results, &mut send_finished)?;
+                if send_finished {
+                    break;
+                }
+            }
+            Ok(Some(Err(e))) => anyhow::bail!("receive Tencent ASR message: {e}"),
+            Ok(None) => break,
+            Err(_) if !results.is_empty() => break,
+            Err(_) => {}
+        }
+    }
+    let _ = ws.close(None).await;
+
+    Ok(results.transcript())
+}
+
+async fn wait_for_tencent_asr_handshake(
+    ws: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+    results: &mut TencentAsrResults,
+) -> Result<()> {
+    match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
+        Ok(Some(Ok(msg))) => {
+            let mut finished = false;
+            handle_tencent_asr_message(msg, results, &mut finished)?;
+            Ok(())
+        }
+        Ok(Some(Err(e))) => anyhow::bail!("receive Tencent ASR handshake: {e}"),
+        Ok(None) => anyhow::bail!("Tencent ASR websocket closed before handshake"),
+        Err(_) => anyhow::bail!("Tencent ASR handshake timed out"),
+    }
+}
+
+async fn drain_tencent_asr_messages(
+    ws: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+    results: &mut TencentAsrResults,
+) -> Result<()> {
+    loop {
+        match tokio::time::timeout(Duration::from_millis(10), ws.next()).await {
+            Ok(Some(Ok(msg))) => {
+                let mut finished = false;
+                handle_tencent_asr_message(msg, results, &mut finished)?;
+                if finished {
+                    break;
+                }
+            }
+            Ok(Some(Err(e))) => anyhow::bail!("receive Tencent ASR message: {e}"),
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    Ok(())
+}
+
+fn handle_tencent_asr_message(
+    msg: Message,
+    results: &mut TencentAsrResults,
+    finished: &mut bool,
+) -> Result<TencentAsrAction> {
+    let text = match msg {
+        Message::Text(s) => s.to_string(),
+        Message::Binary(bytes) => String::from_utf8(bytes.to_vec())
+            .map_err(|e| anyhow::anyhow!("Tencent ASR binary message is not utf-8: {e}"))?,
+        Message::Close(_) => {
+            *finished = true;
+            return Ok(TencentAsrAction::Closed);
+        }
+        Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {
+            return Ok(TencentAsrAction::Other);
+        }
+    };
+    if text.is_empty() {
+        *finished = true;
+        return Ok(TencentAsrAction::Closed);
+    }
+
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("parse Tencent ASR response JSON: {e}; raw={text}"))?;
+    let code = value.get("code").and_then(|v| v.as_i64()).unwrap_or(0);
+    if code != 0 {
+        let message = value
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        anyhow::bail!("Tencent ASR error code {code}: {message}; raw={text}");
+    }
+    if let Some(result) = value.get("result") {
+        results.push_result(result);
+    }
+    if value.get("final").and_then(|v| v.as_i64()) == Some(1) {
+        *finished = true;
+        Ok(TencentAsrAction::Final)
+    } else if value.get("result").is_some() {
+        Ok(TencentAsrAction::Result)
+    } else {
+        Ok(TencentAsrAction::Started)
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum TencentAsrAction {
+    Started,
+    Result,
+    Final,
+    Closed,
+    Other,
+}
+
+#[derive(Default)]
+struct TencentAsrResults {
+    latest: BTreeMap<i64, String>,
+    stable: BTreeMap<i64, String>,
+}
+
+impl TencentAsrResults {
+    fn push_result(&mut self, result: &serde_json::Value) {
+        let index = result.get("index").and_then(|v| v.as_i64()).unwrap_or(0);
+        let slice_type = result
+            .get("slice_type")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let text = result
+            .get("voice_text_str")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.latest.insert(index, text.clone());
+        if slice_type == 2 {
+            self.stable.insert(index, text);
+        }
+    }
+
+    fn transcript(&self) -> String {
+        let source = if self.stable.is_empty() {
+            &self.latest
+        } else {
+            &self.stable
+        };
+        source.values().cloned().collect::<String>()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.latest.is_empty() && self.stable.is_empty()
+    }
+}
+
+struct TencentAsrConfig {
+    app_id: String,
+    secret_id: String,
+    secret_key: String,
+    host: String,
+    path: String,
+    engine_model_type: String,
+    need_vad: String,
+}
+
+impl TencentAsrConfig {
+    /// Loads Tencent ASR credentials from environment so secrets do not land
+    /// in the repository or boot manifest by accident.
+    fn from_env() -> Result<Self> {
+        let app_id = std::env::var("ROBONIX_LIAISON_TENCENT_ASR_APP_ID")
+            .or_else(|_| std::env::var("TENCENT_ASR_APP_ID"))
+            .or_else(|_| std::env::var("TENCENTCLOUD_APP_ID"))
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "missing Tencent ASR app id; set ROBONIX_LIAISON_TENCENT_ASR_APP_ID or TENCENT_ASR_APP_ID"
+                )
+            })?;
+        let secret_id = std::env::var("ROBONIX_LIAISON_TENCENT_ASR_SECRET_ID")
+            .or_else(|_| std::env::var("TENCENT_ASR_SECRET_ID"))
+            .or_else(|_| std::env::var("TENCENTCLOUD_SECRET_ID"))
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "missing Tencent ASR SecretId; set ROBONIX_LIAISON_TENCENT_ASR_SECRET_ID or TENCENTCLOUD_SECRET_ID"
+                )
+            })?;
+        let secret_key = std::env::var("ROBONIX_LIAISON_TENCENT_ASR_SECRET_KEY")
+            .or_else(|_| std::env::var("TENCENT_ASR_SECRET_KEY"))
+            .or_else(|_| std::env::var("TENCENTCLOUD_SECRET_KEY"))
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "missing Tencent ASR SecretKey; set ROBONIX_LIAISON_TENCENT_ASR_SECRET_KEY or TENCENTCLOUD_SECRET_KEY"
+                )
+            })?;
+        let host = std::env::var("ROBONIX_LIAISON_TENCENT_ASR_HOST")
+            .unwrap_or_else(|_| TENCENT_ASR_DEFAULT_HOST.to_string());
+        let path = std::env::var("ROBONIX_LIAISON_TENCENT_ASR_PATH")
+            .unwrap_or_else(|_| TENCENT_ASR_DEFAULT_PATH.to_string());
+        let engine_model_type = std::env::var("ROBONIX_LIAISON_TENCENT_ASR_ENGINE_MODEL_TYPE")
+            .or_else(|_| std::env::var("TENCENT_ASR_ENGINE_MODEL_TYPE"))
+            .unwrap_or_else(|_| TENCENT_ASR_DEFAULT_ENGINE.to_string());
+        let need_vad = std::env::var("ROBONIX_LIAISON_TENCENT_ASR_NEED_VAD")
+            .unwrap_or_else(|_| "1".to_string());
+        Ok(Self {
+            app_id,
+            secret_id,
+            secret_key,
+            host,
+            path,
+            engine_model_type,
+            need_vad,
+        })
+    }
+
+    fn signed_url(&self) -> Result<String> {
+        type HmacSha1 = Hmac<sha1::Sha1>;
+        let timestamp = now_secs();
+        let expired = timestamp + 600;
+        let nonce = (timestamp % 10_000_000_000).to_string();
+        let mut params = BTreeMap::<String, String>::new();
+        params.insert("engine_model_type".into(), self.engine_model_type.clone());
+        params.insert("expired".into(), expired.to_string());
+        params.insert("filter_dirty".into(), "1".into());
+        params.insert("filter_modal".into(), "1".into());
+        params.insert("filter_punc".into(), "0".into());
+        params.insert("needvad".into(), self.need_vad.clone());
+        params.insert("nonce".into(), nonce);
+        params.insert("secretid".into(), self.secret_id.clone());
+        params.insert("timestamp".into(), timestamp.to_string());
+        params.insert("voice_format".into(), "1".into());
+        params.insert("voice_id".into(), Uuid::new_v4().to_string());
+
+        let query = params
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let path = format!("{}/{}", self.path.trim_end_matches('/'), self.app_id);
+        let sign_payload = format!("{}{path}?{query}", self.host);
+        let mut mac = HmacSha1::new_from_slice(self.secret_key.as_bytes())
+            .map_err(|e| anyhow::anyhow!("create Tencent ASR hmac signer: {e}"))?;
+        mac.update(sign_payload.as_bytes());
+        let signature =
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+        let encoded_query = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        Ok(format!(
+            "wss://{}{path}?{encoded_query}&signature={}",
+            self.host,
+            urlencoding::encode(&signature)
+        ))
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 // ── Voiceprint ───────────────────────────────────────────────────────────────
@@ -985,5 +1182,60 @@ mod tests {
             &mut buf,
         );
         assert_eq!(buf, "hello world");
+    }
+
+    #[test]
+    fn tencent_asr_results_prefers_stable_slices() {
+        let mut results = TencentAsrResults::default();
+        results.push_result(&serde_json::json!({
+            "slice_type": 0,
+            "index": 0,
+            "voice_text_str": "你"
+        }));
+        results.push_result(&serde_json::json!({
+            "slice_type": 2,
+            "index": 0,
+            "voice_text_str": "你好"
+        }));
+        results.push_result(&serde_json::json!({
+            "slice_type": 2,
+            "index": 1,
+            "voice_text_str": "世界"
+        }));
+
+        assert_eq!(results.transcript(), "你好世界");
+    }
+
+    #[test]
+    fn tencent_asr_signed_url_has_required_query_params() {
+        let config = TencentAsrConfig {
+            app_id: "1250000000".into(),
+            secret_id: "AKIDexample".into(),
+            secret_key: "secret".into(),
+            host: TENCENT_ASR_DEFAULT_HOST.into(),
+            path: TENCENT_ASR_DEFAULT_PATH.into(),
+            engine_model_type: TENCENT_ASR_DEFAULT_ENGINE.into(),
+            need_vad: "1".into(),
+        };
+
+        let url = config.signed_url().unwrap();
+        assert!(url.starts_with("wss://asr.cloud.tencent.com/asr/v2/1250000000?"));
+        assert!(url.contains("engine_model_type=16k_zh"));
+        assert!(url.contains("secretid=AKIDexample"));
+        assert!(url.contains("voice_format=1"));
+        assert!(url.contains("signature="));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn tencent_asr_live_connects_with_env_credentials() {
+        let mut pcm = Vec::with_capacity(DEFAULT_AUDIO_SAMPLE_RATE as usize * 2);
+        for i in 0..DEFAULT_AUDIO_SAMPLE_RATE {
+            let phase = i as f32 * 440.0 * std::f32::consts::TAU / DEFAULT_AUDIO_SAMPLE_RATE as f32;
+            let sample = (phase.sin() * 1200.0) as i16;
+            pcm.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        let _ = cloud_asr_transcribe_pcm(&pcm).await.unwrap();
     }
 }

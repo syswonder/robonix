@@ -21,7 +21,7 @@
       SrvLiaison.StartVoiceSession(req)
         │
         ├─ PrmAudioMic.Stream (录音 N 秒)
-        ├─ SrvSpeechAsr.Call (语音识别)
+        ├─ Tencent Cloud ASR WebSocket API (语音识别)
         ├─ SrvSpeechVoiceprint.Call (声纹识别 → user_id)
         ├─ 组装 pilot::Task { user_id, text=transcript, … }
         ├─ SrvPilot.Stream
@@ -62,6 +62,13 @@ cd rust
 | `ROBONIX_LIAISON_VOICE_MOCK` | (unset) | 设为 `1` 跳过 mic+ASR，使用预置文本 |
 | `ROBONIX_LIAISON_VOICE_MOCK_TEXT` | `你好，请介绍一下你自己。` | mock 模式下使用的文本 |
 | `ROBONIX_LIAISON_SOURCE` | (unset) | 设为 `text` 启用 stdin 文本循环 (headless) |
+| `ROBONIX_LIAISON_TENCENT_ASR_APP_ID` / `TENCENT_ASR_APP_ID` / `TENCENTCLOUD_APP_ID` | (必填) | 腾讯云账号 AppID |
+| `ROBONIX_LIAISON_TENCENT_ASR_SECRET_ID` / `TENCENT_ASR_SECRET_ID` / `TENCENTCLOUD_SECRET_ID` | (必填) | 腾讯云 API SecretId |
+| `ROBONIX_LIAISON_TENCENT_ASR_SECRET_KEY` / `TENCENT_ASR_SECRET_KEY` / `TENCENTCLOUD_SECRET_KEY` | (必填) | 腾讯云 API SecretKey |
+| `ROBONIX_LIAISON_TENCENT_ASR_HOST` | `asr.cloud.tencent.com` | 腾讯云实时 ASR WebSocket host |
+| `ROBONIX_LIAISON_TENCENT_ASR_PATH` | `/asr/v2` | 腾讯云实时 ASR WebSocket path |
+| `ROBONIX_LIAISON_TENCENT_ASR_ENGINE_MODEL_TYPE` / `TENCENT_ASR_ENGINE_MODEL_TYPE` | `16k_zh` | 识别引擎，默认 16 kHz 中文 |
+| `ROBONIX_LIAISON_TENCENT_ASR_NEED_VAD` | `1` | 是否启用腾讯云服务端 VAD |
 
 ## TUI 快捷键
 
