@@ -22,7 +22,15 @@ package:
 build: bash scripts/build.sh
 
 start: |
-  exec rbnx-build/venv/bin/python -m voiceprint_service.service
+  # MUST start through `uv run` so the uv-managed venv at rbnx-build/venv/
+  # is the one in use (auto-syncs deps if pyproject.toml changed since
+  # build, and avoids the silent split between system python + bundled
+  # venv that bit speech earlier). VIRTUAL_ENV + `--active` tells uv to
+  # reuse the venv that build.sh created instead of spawning a new one.
+  export VIRTUAL_ENV="$(pwd)/rbnx-build/venv"
+  export PATH="$VIRTUAL_ENV/bin:$PATH"
+  export PYTHONPATH="$(pwd)/rbnx-build/codegen/proto_gen:${PYTHONPATH:-}"
+  exec uv run --active python -m voiceprint_service.service
 
 capabilities:
   - name: robonix/system/speech/voiceprint
