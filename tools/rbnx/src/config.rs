@@ -136,10 +136,7 @@ impl Config {
             // single, unambiguous base.
             SourcePathKey::InterfacesLib => root.join("capabilities").join("lib"),
             // Atlas proto lives inside the atlas system component.
-            SourcePathKey::RuntimeProto => root
-                .join("system")
-                .join("atlas")
-                .join("proto"),
+            SourcePathKey::RuntimeProto => root.join("system").join("atlas").join("proto"),
             SourcePathKey::RobonixApi => root.join("pylib").join("robonix-api"),
         };
         if !abs.exists() {

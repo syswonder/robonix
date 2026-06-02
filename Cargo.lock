@@ -2952,10 +2952,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "robonix-py"
-version = "0.0.0"
-
-[[package]]
 name = "roxmltree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
