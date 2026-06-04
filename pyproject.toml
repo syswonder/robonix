@@ -36,6 +36,7 @@ package = false
 
 [tool.uv.workspace]
 members = [
-    "pylib/*",      # shared Python libs (robonix-api, …)
-    "system/*",     # system services (memory, speech, …)
+    "pylib/*",        # shared Python libs (robonix-api, …)
+    "system/scene",   # only Python-implemented system component today
+    "services/*",     # reference services (memsearch, speech, voiceprint, …)
 ]
