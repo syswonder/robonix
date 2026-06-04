@@ -1,0 +1,10 @@
+# TTS streaming synthesis.
+# Client sends one SynthesizeStreamRequest; server streams back SynthesizeAudioChunk.
+[contract]
+id      = "robonix/service/speech/tts_stream"
+version = "1"
+kind    = "service"
+idl     = "tts/srv/SynthesizeStream.srv"
+
+[mode]
+type = "rpc_server_stream"

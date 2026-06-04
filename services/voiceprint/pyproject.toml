@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+# Robonix system service: voiceprint (ECAPA-TDNN speaker identification).
+#
+# uv-managed: `uv sync` (called from scripts/build.sh) materialises the
+# local rbnx-build/venv/ from this file + the workspace uv.lock.
+
+[project]
+name = "robonix-system-voiceprint"
+version = "0.1.0"
+description = "Robonix Voiceprint Service — ECAPA-TDNN speaker identification."
+requires-python = ">=3.10"
+dependencies = [
+    # robonix_api is the framework — Service / Ok / Err / lifecycle gRPC.
+    # Sourced from the in-repo workspace (pylib/robonix-api) via the
+    # [tool.uv.sources] table below. Without this dep the runtime dies
+    # immediately with `ModuleNotFoundError: No module named 'robonix_api'`
+    # — uv has no reason to materialise robonix-api into the venv unless
+    # it is declared here.
+    "robonix-api",
+    "speechbrain>=1.0",
+    "torch>=2.0",
+    "torchaudio>=2.0",
+    "grpcio>=1.60",
+    "grpcio-tools>=1.60",
+    "protobuf>=4.24",
+    "numpy>=1.24,<2",
+    "soundfile>=0.12",
+    "huggingface-hub>=0.20",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+robonix-api = { workspace = true }

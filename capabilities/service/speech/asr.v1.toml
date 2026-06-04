@@ -1,0 +1,11 @@
+# ASR one-shot recognition.
+# Caller sends raw audio; returns transcript.
+# ROS: `lib/system/speech/asr/srv/Recognize.srv`.
+[contract]
+id      = "robonix/service/speech/asr"
+version = "1"
+kind    = "service"
+idl     = "asr/srv/Recognize.srv"
+
+[mode]
+type = "rpc"
