@@ -52,6 +52,16 @@ pub async fn execute(name: &str, pkg_type: &str, path: Option<&Path>) -> Result<
 
     output::action("PackageNew", &format!("creating package '{name}'"));
 
+    // Provider class + namespace segment for the generated skeleton.
+    // `--path` mode leaves pkg_type at its clap default ("service"); fall
+    // back to primitive for anything unrecognised so the skeleton is still
+    // valid Python the author can edit.
+    let (provider_class, ns_kind) = match pkg_type {
+        "service" => ("Service", "service"),
+        "skill" => ("Skill", "skill"),
+        _ => ("Primitive", "primitive"),
+    };
+
     // Create directory structure; put .gitkeep in empty dirs.
     for sub in ["scripts", "capabilities"] {
         let dir = pkg_dir.join(sub);
@@ -85,12 +95,17 @@ depends: []
     std::fs::write(pkg_dir.join("package_manifest.yaml"), manifest)
         .context("failed to write package_manifest.yaml")?;
 
-    // scripts/build.sh
+    // scripts/build.sh — generate the gRPC / MCP stubs for the contracts
+    // this package declares. `robonix-api` auto-discovers the output under
+    // <pkg>/rbnx-build/codegen/, so nothing else is needed for a pure
+    // Python package. Append your own steps (cargo, pip install -e, docker
+    // build, ...) after this line if your package needs them.
     let build_sh = format!(
         r#"#!/usr/bin/env bash
 set -euo pipefail
-echo "[{name}] building..."
-mkdir -p rbnx-build
+PKG="${{RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}}"
+
+rbnx codegen -p "$PKG"
 echo "[{name}] build done"
 "#
     );
@@ -105,13 +120,20 @@ echo "[{name}] build done"
         )?;
     }
 
-    // scripts/start.sh
+    // scripts/start.sh — launch the provider process. `rbnx path
+    // robonix-api` puts the pip-installed client library on PYTHONPATH so
+    // `from robonix_api import ...` resolves. Edit the final line if your
+    // entrypoint module differs, or replace it entirely (docker run, ssh,
+    // a compiled binary, ...).
     let start_sh = format!(
         r#"#!/usr/bin/env bash
-set -euo pipefail
-echo "[{name}] starting..."
-# TODO: replace with actual start command
-sleep infinity
+set -eo pipefail
+PKG_ROOT="${{RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}}"
+cd "$PKG_ROOT"
+
+export PYTHONPATH="$(rbnx path robonix-api):$PKG_ROOT:${{PYTHONPATH:-}}"
+
+exec python3 -m {name}.main
 "#
     );
     std::fs::write(pkg_dir.join("scripts/start.sh"), start_sh)
@@ -128,6 +150,35 @@ sleep infinity
     // Remove .gitkeep from scripts/ since it now has real files.
     let _ = std::fs::remove_file(pkg_dir.join("scripts/.gitkeep"));
 
+    // Minimal Python provider skeleton: <pkg>/<name>/{__init__.py, main.py}
+    // so `python3 -m {name}.main` (from start.sh) runs out of the box. The
+    // author fills in lifecycle handlers + capability declarations.
+    let module_dir = pkg_dir.join(name);
+    std::fs::create_dir_all(&module_dir).context("failed to create python module directory")?;
+    std::fs::write(module_dir.join("__init__.py"), "").context("failed to write __init__.py")?;
+    let main_py = format!(
+        r#"#!/usr/bin/env python3
+"""{name} — Robonix {provider_class_lower} provider."""
+from robonix_api import {provider_class}, Ok
+
+# `id` must equal this entry's `name:` in the deploy robonix_manifest.yaml.
+# `namespace` groups the capabilities this provider declares.
+provider = {provider_class}(id="{name}", namespace="robonix/{ns_kind}/{name}")
+
+
+@provider.on_init
+def init(cfg: dict):
+    # TODO: initialise hardware / resources; declare capabilities to atlas.
+    return Ok()
+
+
+if __name__ == "__main__":
+    provider.run()
+"#,
+        provider_class_lower = provider_class.to_lowercase(),
+    );
+    std::fs::write(module_dir.join("main.py"), main_py).context("failed to write main.py")?;
+
     // .gitignore
     std::fs::write(
         pkg_dir.join(".gitignore"),
@@ -142,6 +193,7 @@ sleep infinity
     output::sub_step("package_manifest.yaml");
     output::sub_step("scripts/build.sh");
     output::sub_step("scripts/start.sh");
+    output::sub_step(&format!("{name}/main.py  (provider skeleton)"));
     output::sub_step("capabilities/  (.gitkeep)");
     output::sub_step(".gitignore");
 
