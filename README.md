@@ -21,14 +21,11 @@
 
 ## What it is
 
-Robonix is the **system substrate** between a robot's hardware and an embodied
-LLM/VLA brain. It standardises how device drivers, runtime services, user
+Robonix is the **operating system** between a robot's hardware and an embodied
+LLM/VLM/VLA/WAM brain. It standardises how device drivers, runtime services, user
 skills, and the planner discover and talk to each other; it owns identity,
 configuration, time, transport, logging, health, body model, scene model,
 execution, and safety as named, replaceable components.
-
-The whitepaper ships **12 system components** organised by role (not by
-implementation language):
 
 | Component | What it owns |
 | --- | --- |
@@ -45,16 +42,16 @@ implementation language):
 | **[soma](system/soma/)**         | body state / device & primitive abstraction *(stub)* |
 | **[vitals](system/vitals/)**     | health monitoring / heartbeat *(partial via atlas)*  |
 
-On top of system, three open application categories — provided as
+On top of system, three open categories — provided as
 contracts (61 standard interfaces in `capabilities/`) and reference
 implementations alongside the system:
 
-- **primitive** — one device per package (camera, lidar, chassis, arm). Lives
+* **primitive** — one device per package (camera, lidar, chassis, arm). Lives
   in deployment repos and per-example folders (e.g. `examples/webots/primitives/`).
-- **service** — runtime functionality (mapping, navigation, semantic map,
+* **service** — runtime functionality (mapping, navigation, semantic map,
   memory, speech, voiceprint). Default reference implementations ship in
   [`services/`](services/); each can be swapped out by a deployment.
-- **skill** — user-defined reusable execution flows (grasp, place, explore,
+* **skill** — user-defined reusable execution flows (grasp, place, explore,
   fold-clothes …). Lives wherever the deploy/integrator wants.
 
 ## Quickstart
@@ -77,7 +74,7 @@ bash examples/webots/sim/start.sh
 # (2) — Robonix: system services + Tiago primitives + Nav2 + scene
 export VLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
 export VLM_API_KEY=sk-...
-export VLM_MODEL=gpt-5.4-mini
+export VLM_MODEL=gpt-5.5
 cd examples/webots
 rbnx build       # first run pulls model weights + docker images, may take a while
 rbnx boot
@@ -105,7 +102,7 @@ Full first-run walkthrough:
 ## Repository layout
 
 ```
-system/         the 12 system components, one directory each
+system/         system components, one directory each
 services/       default reference service implementations (memsearch, voiceprint, speech)
 pylib/          Python SDK (robonix-api on PyPI)
 capabilities/   contract TOMLs + ROS-style IDL tree (capabilities/lib/)
@@ -124,42 +121,17 @@ lives, not the implementation language.
 
 ## Architecture
 
-Atlas is the single control plane: every capability provider (primitive /
-service / skill) calls `RegisterPrimitive` / `RegisterService` / `RegisterSkill`
-+ `DeclareCapability(transport, endpoint, params)` on startup; consumers
-(pilot, executor, downstream services) discover via `Query*` and open data-plane
-connections via `ConnectCapability`. Transports are pluggable — gRPC, MCP,
-ROS 2 — and the contract TOMLs under `capabilities/` describe the schemas
-all of them can carry.
-
-Boot sequence (whitepaper §*启动流程*):
-
-1. **base** — Bootloader / kernel
-2. **L0 系统服务** — chronos / atlas / nexus / scribe come up first
-3. **soma** — enumerate hardware, body state ready, primitives register
-4. **scene** — receive perception, time/space alignment, build object registry
-5. **sentinel** — load safety rules
-6. **executor** — subscribe to Atlas capability catalog, ready to accept plans
-7. **pilot + liaison** — pilot loads memory + LLM, liaison opens the user channel
-
-System READY — users issue tasks via liaison; pilot plans, executor dispatches,
-sentinel supervises, scene keeps the world model fresh.
-
 Dive deeper:
-- [**Overview**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/overview.md) — control plane, one full request end-to-end
-- [**Namespaces & contracts**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/namespace-and-interfaces.md) — how `robonix/primitive/*` / `robonix/service/*` / `robonix/skill/*` / `robonix/system/*` work
-- [**Interface catalog**](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md) — every primitive + service contract
+
+* [**Overview**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/overview.md) — control plane, one full request end-to-end
+* [**Namespaces & contracts**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/namespace-and-interfaces.md) — how `robonix/primitive/*` / `robonix/service/*` / `robonix/skill/*` / `robonix/system/*` work
+* [**Interface catalog**](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md) — every primitive + service contract
 
 ## Status
 
-> [!WARNING]
+> \[!WARNING]
 > Robonix is in early development. APIs, IDL layouts, and internal designs
 > may change without notice. No API stability until a versioned release.
-
-5 of the 12 system components are implemented today (atlas, executor,
-liaison, pilot, scene); sentinel runs as an executor sub-module; vitals'
-heartbeat half lives in atlas. The remaining stubs are tracked under
-`system/<name>/README.md` with v0.2 plans.
 
 ## License
 
