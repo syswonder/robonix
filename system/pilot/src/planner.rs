@@ -830,7 +830,7 @@ mod tests {
     #[test]
     fn no_skip_prefetch_real_query() {
         assert!(!skip_memory_prefetch("open the door"));
-        assert!(!skip_memory_prefetch("帮我找个红色杯子"));
+        assert!(!skip_memory_prefetch("find me a red cup"));
     }
 
     #[test]

@@ -365,7 +365,7 @@ async fn run_session(
         }
         Err(e) => {
             // No Pilot online — surface as session ERROR rather than fabricating
-            // a "成功接收信息" reply (callers must see the failure).
+            // a "message received successfully" reply (callers must see the failure).
             anyhow::bail!("Pilot unreachable at {pilot_endpoint}: {e}");
         }
     }
