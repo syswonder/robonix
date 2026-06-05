@@ -148,7 +148,7 @@ _CFG_DEFAULTS = {
     #   sim_sum with phys_bias=0 sums them. At threshold=1.10 the
     #   same physical object seen from a new viewpoint (e.g. across
     #   the room) usually has IoU≈0 and visual≈0.6 → 0.60 < 1.10 →
-    #   spawned as a NEW object. That's the "重影" (duplicate) the
+    #   spawned as a NEW object. That's the "ghosting" (duplicate) the
     #   user kept catching.
     #   Lowering to 0.55 was needed when spatial sim was AABB IoU
     #   (which is ≈0 for partial-view bboxes). With voxel pcd-overlap
@@ -156,7 +156,7 @@ _CFG_DEFAULTS = {
     #   reliably reaches 0.4–0.7 for "same physical object seen from
     #   another angle" — combined with visual sim that's 1.0–1.3 for
     #   true matches and 0.3–0.7 for spurious pairs, threshold 0.85
-    #   is the sweet spot. Lower → over-merging, higher → 重影 again.
+    #   is the sweet spot. Lower → over-merging, higher → ghosting again.
     "merge_threshold": 0.85,
     # Hard centroid-distance gate on the per-tick merge. With
     # merge_threshold low, visual similarity alone can match; this
@@ -914,7 +914,7 @@ class ConceptGraphsDetector:
                 #     top of a cabinet has near-zero centroid distance
                 #     and reasonable visual sim → without this gate
                 #     the two get merged into a single record (the
-                #     "potted_plant 和 cabinet 区分不开了" complaint).
+                #     "potted_plant and cabinet can no longer be told apart" complaint).
                 #     CLIP's discrimination breaks down on co-located
                 #     objects; the YOLO-World class label is more
                 #     reliable. Only merge when the YOLO classes match
