@@ -1,6 +1,6 @@
 # Tiago chassis driver — primitive package.
 # One device = one package. This driver exposes the robot base/chassis:
-#   robonix/primitive/chassis/move      → MCP tool chassis_move(MoveCommand) → String
+#   robonix/primitive/chassis/move      → gRPC ExecuteMoveCommand(MoveCommand) → String
 #   robonix/primitive/chassis/odom      → ROS2 topic_out (nav_msgs/Odometry, /odom)
 #   robonix/primitive/chassis/twist_in  → ROS2 topic_in (geometry_msgs/Twist, /cmd_vel)
 #   robonix/primitive/chassis/driver    → gRPC LifecycleDriver.Driver(INIT/PROBE/...)
