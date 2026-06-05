@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Speech service -- the srv-layer voice interaction service for Robonix.
+"""Speech service -- the voice interaction service for Robonix.
 
 Architecture position: robonix/service/speech
-  - Sits ABOVE the primitive layer (audio_driver) and BELOW the application layer
+  - Consumes the audio_driver primitive; consumed in turn by skills / pilot
   - Receives raw audio from audio_driver via gRPC, returns transcriptions
   - Receives text from applications, returns synthesized audio (MP3)
 
@@ -649,7 +649,7 @@ class SpeechAsrStreamServicer(contracts_grpc.RobonixServiceSpeechAsrStreamServic
         # (the chunk_size[1]*960 granularity). Clients (liaison) stream
         # arbitrary smaller frames (~100ms), so we re-buffer here and only
         # call the backend on full stride-sized frames; feeding short frames
-        # straight through corrupts the encoder/decoder cache (yields "嗯").
+        # straight through corrupts the encoder/decoder cache (yields a filler "uh-huh").
         stride_samples = getattr(self.stream_asr_backend, "chunk_stride", 9600)
         stride_bytes = stride_samples * 2  # 16-bit mono
         frame_buf = bytearray()

@@ -132,10 +132,10 @@ connections via `ConnectCapability`. Transports are pluggable — gRPC, MCP,
 ROS 2 — and the contract TOMLs under `capabilities/` describe the schemas
 all of them can carry.
 
-Boot sequence (whitepaper §*启动流程*):
+Boot sequence (whitepaper §*Boot Flow*):
 
 1. **base** — Bootloader / kernel
-2. **L0 系统服务** — chronos / atlas / nexus / scribe come up first
+2. **System services** — chronos / atlas / nexus / scribe come up first
 3. **soma** — enumerate hardware, body state ready, primitives register
 4. **scene** — receive perception, time/space alignment, build object registry
 5. **sentinel** — load safety rules
