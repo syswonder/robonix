@@ -27,7 +27,9 @@ docker exec -i \
   -e ROBONIX_PKG_HOST_DIR="$(cd "$(dirname "$0")/.." && pwd)" \
   -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api" \
   robonix_tiago_sim \
-  bash -lc 'source /opt/ros/humble/setup.bash && \
-            cd /robonix_pkgs/primitives/tiago_chassis && \
+  bash -lc 'source /opt/ros/humble/setup.bash
+            OVL=/robonix_pkgs/primitives/tiago_chassis/rbnx-build/codegen/ros2_idl/install/setup.bash
+            [ -f "$OVL" ] && source "$OVL" || true
+            cd /robonix_pkgs/primitives/tiago_chassis
             exec python3 -m chassis_driver.driver' &
 wait $!
