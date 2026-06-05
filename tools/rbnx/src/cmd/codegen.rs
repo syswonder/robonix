@@ -65,6 +65,7 @@ pub async fn execute(
     config: Config,
     package: Option<PathBuf>,
     mcp: bool,
+    ros2: bool,
     clean: bool,
     out_dir: Option<PathBuf>,
 ) -> Result<()> {
@@ -109,6 +110,10 @@ pub async fn execute(
     };
     let proto_gen = out_root.join("proto_gen");
     let mcp_types = out_root.join("robonix_mcp_types");
+    // ROS 2 canonical message overlay (a colcon workspace of source). Only
+    // generated with --ros2; consumers colcon-build it and source
+    // install/setup.bash so their rclpy types are Robonix's.
+    let ros2_idl = out_root.join("ros2_idl");
     // Per-invocation staging for the system-wide .proto files. No commits;
     // grpc_tools.protoc reads from here in step 3.
     let proto_staging = rbnx_build.join("proto-staging");
@@ -227,6 +232,23 @@ pub async fn execute(
             "python3 -m grpc_tools.protoc failed with {status}. \
              Re-run with -v / RUST_LOG=debug to see protoc output."
         );
+    }
+
+    // 3b. Optional: ROS 2 canonical message overlay (source). Emitted next
+    //     to proto_gen / robonix_mcp_types so it follows the same rbnx-build
+    //     convention. It still needs `colcon build` in a ROS 2 environment;
+    //     the package's build.sh does that (e.g. docker exec into the
+    //     container) and start.sh sources <ros2_idl>/install/setup.bash.
+    if ros2 {
+        println!("{} robonix-codegen --lang ros2 ...", "[codegen]".bold());
+        let mut ros2_cmd =
+            build_codegen_cmd(direct_codegen.as_ref(), cargo_bin.as_deref(), &rust_root);
+        ros2_cmd.args(["--lang", "ros2", "-I"]).arg(&interfaces_lib);
+        if let Some(p) = pkg_caps_lib.as_ref() {
+            ros2_cmd.arg("-I").arg(p);
+        }
+        ros2_cmd.arg("-o").arg(&ros2_idl);
+        run_cmd("robonix-codegen ros2", &mut ros2_cmd)?;
     }
 
     // 4. Write PYTHONPATH setup stub so `rbnx start` sees all the right paths.

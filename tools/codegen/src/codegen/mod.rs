@@ -6,3 +6,4 @@ pub mod err;
 pub mod mcp_python_gen;
 pub mod msg_parser;
 pub mod proto_gen;
+pub mod ros2_gen;

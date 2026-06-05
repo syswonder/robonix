@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
-use robonix_codegen::codegen::{contract_gen, mcp_python_gen, msg_parser, proto_gen};
+use robonix_codegen::codegen::{contract_gen, mcp_python_gen, msg_parser, proto_gen, ros2_gen};
 
 #[derive(Parser)]
 #[command(name = "robonix-codegen")]
@@ -30,8 +30,9 @@ struct Args {
     #[arg(short = 'o', long = "out")]
     out: PathBuf,
 
-    /// Target language: "proto" (gRPC stubs + contracts) or "mcp"
-    /// (Python typed-input helpers for MCP servers).
+    /// Target language: "proto" (gRPC stubs + contracts), "mcp"
+    /// (Python typed-input helpers for MCP servers), or "ros2"
+    /// (a colcon overlay of the canonical ROS interface packages).
     #[arg(long = "lang", default_value = "proto")]
     lang: String,
 
@@ -68,9 +69,11 @@ fn main() -> Result<()> {
     }
 
     match args.lang.as_str() {
-        "proto" | "mcp" => {}
+        "proto" | "mcp" | "ros2" => {}
         other => {
-            bail!("[robonix-codegen] unsupported --lang '{other}'. Supported: 'proto', 'mcp'.")
+            bail!(
+                "[robonix-codegen] unsupported --lang '{other}'. Supported: 'proto', 'mcp', 'ros2'."
+            )
         }
     }
 
@@ -134,6 +137,9 @@ fn main() -> Result<()> {
                 specs.len(),
                 args.out.display()
             );
+        }
+        "ros2" => {
+            ros2_gen::generate(&resolver, &args.out, verbose)?;
         }
         _ => {
             proto_gen::generate(&resolver, &args.out, contract_srvs.as_ref(), verbose)?;
