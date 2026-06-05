@@ -161,6 +161,11 @@ pub enum Commands {
         /// Also generate robonix_mcp_types/ (for MCP-based packages)
         #[arg(long)]
         mcp: bool,
+        /// Also generate ros2_idl/ — the canonical ROS 2 message overlay
+        /// (source). Build it with `colcon build` in a ROS 2 environment and
+        /// source install/setup.bash so rclpy types are Robonix's.
+        #[arg(long)]
+        ros2: bool,
         /// Remove previous proto_gen/, robonix_mcp_types/, rbnx-build/ before regenerating
         #[arg(long)]
         clean: bool,
@@ -340,9 +345,10 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
         Commands::Codegen {
             package,
             mcp,
+            ros2,
             clean,
             out_dir,
-        } => codegen::execute(config, package, mcp, clean, out_dir).await,
+        } => codegen::execute(config, package, mcp, ros2, clean, out_dir).await,
         Commands::Setup { path } => setup::execute(config, path).await,
         Commands::Path { key } => path::execute(config, key).await,
         Commands::Caps {
