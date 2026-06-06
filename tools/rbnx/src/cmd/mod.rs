@@ -16,6 +16,7 @@ mod clean;
 mod codegen;
 mod config;
 mod deploy;
+mod docs;
 mod info;
 mod init;
 mod inspect;
@@ -172,6 +173,15 @@ pub enum Commands {
         /// Directory (relative to package root, or absolute) where proto_gen/ and robonix_mcp_types/
         /// should be placed. Defaults to package root; use e.g. `--out-dir tiago_bridge` to put
         /// stubs inside a package subdirectory.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+    },
+    /// Regenerate the mdBook contract + ROS IDL reference
+    /// (`docs/src/reference/{contracts,idl}.md`) from `capabilities/`. The
+    /// pages are auto-generated and version-stamped — run after changing any
+    /// contract or IDL so the browsable reference stays in sync.
+    Docs {
+        /// Output directory (default: `<root>/docs/src/reference`).
         #[arg(long)]
         out_dir: Option<PathBuf>,
     },
@@ -349,6 +359,7 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             clean,
             out_dir,
         } => codegen::execute(config, package, mcp, ros2, clean, out_dir).await,
+        Commands::Docs { out_dir } => docs::execute(config, out_dir).await,
         Commands::Setup { path } => setup::execute(config, path).await,
         Commands::Path { key } => path::execute(config, key).await,
         Commands::Caps {
