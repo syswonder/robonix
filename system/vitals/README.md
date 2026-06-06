@@ -17,5 +17,3 @@ When Vitals is split out it will:
   joint temperatures, motor faults, …),
 - expose a single `vitals/state` capability that pilot / liaison /
   sentinel can query for "can we accept new tasks right now".
-
-See the whitepaper §3 *L0 系统服务层*.

@@ -23,5 +23,3 @@ When Soma lands it will:
 - broker the "device id → capability instance(s)" mapping so a single
   physical camera shows up as one [scene](../scene/)-visible device
   rather than three independent rgb / depth / extrinsics primitives.
-
-See the whitepaper §3 *L1 具身场景层* and §4 *本体抽象 (Soma)*.

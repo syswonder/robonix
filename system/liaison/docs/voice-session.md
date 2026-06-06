@@ -1,209 +1,209 @@
-# 语音交互功能 (Voice Session)
+# Voice Session
 
-## 一、新增功能概述
+## 1. Overview of the New Feature
 
-本次在 robonix 系统中新增了 **语音交互能力**。在此之前，用户只能通过
-文本输入与系统交互；现在用户可以在 TUI 界面按 `Ctrl+V`，系统自动完成
-"录音 → 语音识别 → 智能推理 → 语音合成" 的全流程。
+This change adds **voice interaction capabilities** to the robonix system. Previously, users could only interact with the system through
+text input; now users can press `Ctrl+V` in the TUI, and the system automatically completes
+the full pipeline of "record audio -> speech recognition -> intelligent reasoning -> speech synthesis".
 
-## 二、系统整体架构与链路
+## 2. Overall System Architecture and Flow
 
-robonix 采用微服务架构，各服务之间通过 gRPC 通信，由 Atlas 做服务注册和发现。
+robonix uses a microservice architecture in which services communicate over gRPC, with Atlas handling service registration and discovery.
 
-### 涉及的服务
+### Services Involved
 
-| 服务 | 端口 | 职责 |
+| Service | Port | Responsibility |
 |------|------|------|
-| **Atlas** | :50051 | 控制面板：服务注册、发现、端点分配 |
-| **Liaison** | :50082 | 用户入口网关：接收文本/语音请求，编排下游调用 |
-| **Pilot** | :50071 | 推理引擎：接收用户意图，调用工具，生成回复（基于 DeepSeek VLM） |
-| **speech_service** | :动态 | 语音服务：Whisper ASR 语音识别 + Edge TTS 语音合成 |
-| **mock_audio** | :50091 | 硬件模拟：用 WAV 文件替代真实麦克风/扬声器（仅测试用） |
+| **Atlas** | :50051 | Control plane: service registration, discovery, endpoint allocation |
+| **Liaison** | :50082 | User entry gateway: receives text/voice requests, orchestrates downstream calls |
+| **Pilot** | :50071 | Reasoning engine: receives user intent, calls tools, generates replies (based on DeepSeek VLM) |
+| **speech_service** | :dynamic | Speech service: Whisper ASR speech recognition + Edge TTS speech synthesis |
+| **mock_audio** | :50091 | Hardware emulation: uses WAV files in place of a real microphone/speaker (for testing only) |
 
-### 文本路径（Enter）
+### Text Path (Enter)
 
-用户在 TUI 输入文本，按 Enter 发送：
+The user types text in the TUI and presses Enter to send:
 
 ```
-用户 (TUI)
+User (TUI)
   │
-  │  输入 "我想要查询我当前所在的位置"
+  │  Input "I want to query my current location"
   │
   ▼
-SrvLiaison.Stream(Task)                    ← gRPC ① 用户→Liaison
+SrvLiaison.Stream(Task)                    ← gRPC ① User→Liaison
   │
-  │  Liaison 组装 Task { text, user_id, session_id, ... }
+  │  Liaison assembles Task { text, user_id, session_id, ... }
   │
   ▼
 SrvPilot.Stream(Task)                      ← gRPC ② Liaison→Pilot
   │
-  │  Pilot 解析意图 → 调用 robot_state 工具 → 生成回复
+  │  Pilot parses intent → calls robot_state tool → generates reply
   │
   ▼
-PilotEvent 流                              → gRPC ② 返回
+PilotEvent stream                          → gRPC ② returns
   │
-  │  Liaison 透传 PilotEvent 给 TUI
+  │  Liaison passes PilotEvent through to the TUI
   │
   ▼
-TUI 渲染 Pilot 回复
+TUI renders Pilot reply
 ```
 
-涉及 **2 次 gRPC 调用**。
+Involves **2 gRPC calls**.
 
-### 语音路径（Ctrl+V）
+### Voice Path (Ctrl+V)
 
-用户按 Ctrl+V，Liaison 内部自动编排 5 步 gRPC 调用：
+When the user presses Ctrl+V, Liaison internally orchestrates a 5-step gRPC call sequence:
 
 ```
-用户 (TUI)
+User (TUI)
   │
-  │  按 Ctrl+V
+  │  Press Ctrl+V
   │
   ▼
-SrvLiaison.StartVoiceSession(req)          ← gRPC ① 用户→Liaison
+SrvLiaison.StartVoiceSession(req)          ← gRPC ① User→Liaison
   │
-  │  ┌─────────── Liaison 内部编排 ──────────────────────────────────┐
+  │  ┌─────────── Liaison internal orchestration ──────────────────────┐
   │  │                                                                │
-  │  │  Step 1: 录音                                                  │
+  │  │  Step 1: Recording                                            │
   │  │  PrmAudioMic.Stream()               ← gRPC ② Liaison→mock_audio
-  │  │    mock_audio 读取 WAV 文件, 流式返回 PCM 音频块               │
-  │  │    返回: 86016 bytes PCM (16kHz mono s16le, ~2.69s)            │
+  │  │    mock_audio reads the WAV file, streams back PCM audio chunks│
+  │  │    Returns: 86016 bytes PCM (16kHz mono s16le, ~2.69s)         │
   │  │                                                                │
-  │  │  Step 2: 语音识别                                              │
+  │  │  Step 2: Speech recognition                                   │
   │  │  SrvSpeechAsr.Call(audio_data)       ← gRPC ③ Liaison→speech_service
-  │  │    speech_service 用 Whisper 识别音频                          │
-  │  │    返回: "我目前所在的位置是哪里" (confidence=0.9)              │
+  │  │    speech_service uses Whisper to recognize the audio          │
+  │  │    Returns: "Where is my current location" (confidence=0.9)    │
   │  │                                                                │
-  │  │  Step 3: 推理                                                  │
+  │  │  Step 3: Reasoning                                            │
   │  │  SrvPilot.Stream(Task)              ← gRPC ④ Liaison→Pilot
-  │  │    Task { text="我目前所在的位置是哪里", source=AUDIO,          │
+  │  │    Task { text="Where is my current location", source=AUDIO,   │
   │  │           user_id="voice:liukaile", ... }                      │
-  │  │    Pilot 调用 robot_state 等工具，流式返回 PilotEvent          │
-  │  │    返回: 位置信息 + 操作建议（~300 字）                        │
+  │  │    Pilot calls tools such as robot_state, streams back PilotEvent│
+  │  │    Returns: location info + suggested actions (~300 chars)     │
   │  │                                                                │
-  │  │  Step 4: 语音合成                                              │
+  │  │  Step 4: Speech synthesis                                     │
   │  │  SrvSpeechTts.Call(text)            ← gRPC ⑤ Liaison→speech_service
-  │  │    speech_service 用 Edge TTS 将 Pilot 回复合成为音频          │
-  │  │    返回: MP3 音频 (292 chars → ~337KB)                         │
+  │  │    speech_service uses Edge TTS to synthesize the Pilot reply into audio│
+  │  │    Returns: MP3 audio (292 chars → ~337KB)                     │
   │  │                                                                │
-  │  │  Step 5: 播放/保存                                             │
+  │  │  Step 5: Playback/Save                                        │
   │  │  PrmAudioSpeaker.Stream(chunks)     ← gRPC ⑥ Liaison→mock_audio
-  │  │    mock_audio 将 MP3 保存到 /tmp/robonix_tts_output.mp3        │
+  │  │    mock_audio saves the MP3 to /tmp/robonix_tts_output.mp3      │
   │  │                                                                │
   │  └────────────────────────────────────────────────────────────────┘
   │
   ▼
-VoiceEvent 流                              → gRPC ① 返回
+VoiceEvent stream                          → gRPC ① returns
   │
-  │  每完成一步，Liaison 发送一个 VoiceEvent 给 TUI：
+  │  After each step completes, Liaison sends a VoiceEvent to the TUI:
   │  SESSION_STARTED → RECORDING → ASR_FINAL → PILOT → TTS → DONE
   │
   ▼
-TUI 实时渲染每一步进度和 Pilot 回复
+TUI renders the progress of each step and the Pilot reply in real time
 ```
 
-涉及 **6 次 gRPC 调用**（1 次用户→Liaison + 5 次 Liaison 内部编排）。
+Involves **6 gRPC calls** (1 User→Liaison + 5 internal Liaison orchestration calls).
 
-## 三、TUI 测试实际使用的服务
+## 3. Services Actually Used in the TUI Test
 
-`run_tui_test.sh` 测试脚本的设计原则：**复用 dev 栈已有的真实服务，只
-mock 硬件**。
+The design principle of the `run_tui_test.sh` test script: **reuse the real services already
+in the dev stack, and mock only the hardware**.
 
-| 组件 | 用的什么 | 是否真实 | 说明 |
+| Component | What it uses | Real? | Notes |
 |------|----------|----------|------|
-| Atlas | dev 栈的 robonix-atlas | ✓ 真实 | 服务注册发现 |
-| Pilot | dev 栈的 robonix-pilot | ✓ 真实 | DeepSeek VLM 推理，调用 robot_state 等工具 |
-| ASR | dev 栈的 speech_service | ✓ 真实 | Whisper large-v3 模型，真实语音识别 |
-| TTS | dev 栈的 speech_service | ✓ 真实 | Edge TTS (微软)，真实语音合成 |
-| 麦克风 | mock_audio (本次新增) | mock | WAV 文件模拟录音，替代 ALSA 硬件 |
-| 扬声器 | mock_audio (本次新增) | mock | 接收音频写入文件，替代 ALSA 硬件 |
-| Liaison | 独立实例 (本次新增) | ✓ 真实 | 新增了 StartVoiceSession RPC |
+| Atlas | dev stack's robonix-atlas | ✓ Real | Service registration and discovery |
+| Pilot | dev stack's robonix-pilot | ✓ Real | DeepSeek VLM reasoning, calls tools such as robot_state |
+| ASR | dev stack's speech_service | ✓ Real | Whisper large-v3 model, real speech recognition |
+| TTS | dev stack's speech_service | ✓ Real | Edge TTS (Microsoft), real speech synthesis |
+| Microphone | mock_audio (new) | mock | WAV file emulates recording, replaces ALSA hardware |
+| Speaker | mock_audio (new) | mock | Receives audio and writes to file, replaces ALSA hardware |
+| Liaison | standalone instance (new) | ✓ Real | Added the StartVoiceSession RPC |
 
-**为什么要 mock 麦克风/扬声器？**
-开发机没有音频硬件（或多用户共享服务器），但 gRPC 调用链路需要完整测试。
-mock_audio 提供与真实 audio_driver 完全相同的 gRPC 接口
-（`PrmAudioMic.Stream` / `PrmAudioSpeaker.Stream`），下游服务无法区分。
+**Why mock the microphone/speaker?**
+The development machine has no audio hardware (or it is a shared multi-user server), but the gRPC call chain still needs full testing.
+mock_audio provides exactly the same gRPC interface as the real audio_driver
+(`PrmAudioMic.Stream` / `PrmAudioSpeaker.Stream`), so downstream services cannot tell the difference.
 
-**为什么 Liaison 用独立端口？**
-dev 栈已有一个 Liaison 在 :50081，但不支持语音。本次新增的 Liaison 在
-:50082 运行，通过 `ROBONIX_LIAISON_ENDPOINT` 让 TUI 直连。
+**Why does Liaison use a standalone port?**
+The dev stack already has a Liaison at :50081, but it does not support voice. The newly added Liaison runs at
+:50082, and `ROBONIX_LIAISON_ENDPOINT` lets the TUI connect to it directly.
 
-## 四、已测试验证的结果
+## 4. Verified Test Results
 
-### 文本路径
-
-```
-输入: "我想要查询我当前所在的位置"
-Pilot 回复: 调用 robot_state → 返回坐标 (x≈0.00012, y≈0, heading≈0°)
-结果: 正确识别为 start 位置
-```
-
-### 语音路径
+### Text Path
 
 ```
-WAV 输入: "我目前所在的位置是哪里" (edge_tts 合成, 16kHz PCM, 2.69s)
-ASR 识别: gRPC → speech_service (Whisper) → 识别出文本
-Pilot 推理: 调用 robot_state/list_named_locations → 返回位置 + 已知地点
-TTS 合成: gRPC → speech_service (Edge TTS) → 292 chars → 337KB MP3
-Speaker: gRPC → mock_audio → 保存到 /tmp/robonix_tts_output.mp3
+Input: "I want to query my current location"
+Pilot reply: calls robot_state → returns coordinates (x≈0.00012, y≈0, heading≈0°)
+Result: correctly identified as the start position
 ```
 
-### Pilot 故障回退
+### Voice Path
 
 ```
-当 Pilot 不可达时:
-  Liaison 不中断会话
-  自动返回 "成功接收信息" 作为 mock 回复
-  TUI 正常显示，用户可继续操作
+WAV input: "Where is my current location" (synthesized by edge_tts, 16kHz PCM, 2.69s)
+ASR recognition: gRPC → speech_service (Whisper) → recognizes the text
+Pilot reasoning: calls robot_state/list_named_locations → returns location + known places
+TTS synthesis: gRPC → speech_service (Edge TTS) → 292 chars → 337KB MP3
+Speaker: gRPC → mock_audio → saves to /tmp/robonix_tts_output.mp3
 ```
 
-## 五、如何运行测试
+### Pilot Failure Fallback
+
+```
+When Pilot is unreachable:
+  Liaison does not interrupt the session
+  Automatically returns "Information received successfully" as a mock reply
+  The TUI displays normally, and the user can continue operating
+```
+
+## 5. How to Run the Test
 
 ```bash
-# 1. 确保 dev 栈已启动 (Atlas + Pilot + speech_service + ...)
+# 1. Make sure the dev stack is started (Atlas + Pilot + speech_service + ...)
 cd rust/examples
 ./run.sh
 
-# 2. 在另一个终端启动语音 TUI 测试
+# 2. In another terminal, start the voice TUI test
 cd rust/examples
 ./run_tui_test.sh
 
-# 3. 在 TUI 中操作
-#    Enter   → 文本输入测试
-#    Ctrl+V  → 语音输入测试 (WAV → ASR → Pilot → TTS → 文件)
-#    Ctrl+C  → 退出
+# 3. Operate in the TUI
+#    Enter   → text input test
+#    Ctrl+V  → voice input test (WAV → ASR → Pilot → TTS → file)
+#    Ctrl+C  → exit
 ```
 
-自定义测试：
+Customizing the test:
 ```bash
-MOCK_WAV_TEXT="帮我导航到厨房" ./run_tui_test.sh          # 不同语音内容
-MOCK_WAV_INPUT=/path/to/recording.wav ./run_tui_test.sh   # 自定义 WAV
-MOCK_WAV_OUTPUT=~/tts_result.wav ./run_tui_test.sh        # 指定输出位置
+MOCK_WAV_TEXT="Navigate me to the kitchen" ./run_tui_test.sh   # different voice content
+MOCK_WAV_INPUT=/path/to/recording.wav ./run_tui_test.sh        # custom WAV
+MOCK_WAV_OUTPUT=~/tts_result.wav ./run_tui_test.sh             # specify output location
 ```
 
-## 六、从 mock 硬件切换到真实硬件
+## 6. Switching from Mock Hardware to Real Hardware
 
-当前 mock 的只有麦克风和扬声器。切换方式：
+Currently only the microphone and speaker are mocked. To switch:
 
-**真实麦克风**：用 `audio_driver`（ALSA 驱动）替代 mock_audio，
-取消 `ROBONIX_CHAT_MIC_NODE` 固定。
+**Real microphone**: use `audio_driver` (the ALSA driver) instead of mock_audio,
+and remove the `ROBONIX_CHAT_MIC_NODE` pin.
 
-**真实扬声器**：同上，取消 `ROBONIX_CHAT_SPEAKER_NODE` 固定。
-注意 TTS 输出为 MP3，扬声器需支持 MP3 播放。
+**Real speaker**: same as above, remove the `ROBONIX_CHAT_SPEAKER_NODE` pin.
+Note that TTS output is MP3, so the speaker must support MP3 playback.
 
-**完全真实**：直接用 `./run.sh` 启动全栈（含 audio_driver），
-TUI 中 Ctrl+V 使用真实麦克风和扬声器。
+**Fully real**: just use `./run.sh` to start the full stack (including audio_driver),
+and Ctrl+V in the TUI will use the real microphone and speaker.
 
-## 七、新增/修改代码清单
+## 7. List of New/Modified Code
 
-| 文件 | 类型 | 说明 |
+| File | Type | Notes |
 |------|------|------|
-| `robonix-liaison/src/voice.rs` | 新增 | 语音会话编排器 (893行) |
-| `robonix-liaison/src/main.rs` | 修改 | 集成 StartVoiceSession RPC + Pilot 回退 |
-| `robonix-cli/src/cmd/chat.rs` | 修改 | TUI Ctrl+V + 直连 Liaison + 节点固定 |
-| `liaison.proto` | 修改 | VoiceEvent / StartVoiceSession_Request 消息 |
-| `pilot.proto` | 修改 | Task.user_id 字段 |
-| `robonix_contracts.proto` | 修改 | StartVoiceSession RPC / SrvSpeechVoiceprint |
-| `voiceprint.proto` | 新增 | 声纹识别消息定义 |
-| `mock_audio.rs` | 新增 | WAV 模拟麦克风/扬声器 |
-| `run_tui_test.sh` | 新增 | 一键测试脚本 |
+| `robonix-liaison/src/voice.rs` | New | Voice session orchestrator (893 lines) |
+| `robonix-liaison/src/main.rs` | Modified | Integrate StartVoiceSession RPC + Pilot fallback |
+| `robonix-cli/src/cmd/chat.rs` | Modified | TUI Ctrl+V + direct Liaison connection + node pinning |
+| `liaison.proto` | Modified | VoiceEvent / StartVoiceSession_Request messages |
+| `pilot.proto` | Modified | Task.user_id field |
+| `robonix_contracts.proto` | Modified | StartVoiceSession RPC / SrvSpeechVoiceprint |
+| `voiceprint.proto` | New | Voiceprint recognition message definitions |
+| `mock_audio.rs` | New | WAV-based mock microphone/speaker |
+| `run_tui_test.sh` | New | One-click test script |
