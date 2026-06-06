@@ -121,8 +121,8 @@ echo "[{name}] build done"
     }
 
     // scripts/start.sh — launch the provider process. `rbnx path
-    // robonix-api` resolves the in-tree client library
-    // (`<robonix>/pylib/robonix-api`) and puts it on PYTHONPATH so
+    // robonix-api` prints the path to the in-tree client library
+    // (`<robonix>/pylib/robonix-api`), which start.sh puts on PYTHONPATH so
     // `from robonix_api import ...` resolves. Edit the final line if your
     // entrypoint module differs, or replace it entirely (docker run, ssh,
     // a compiled binary, ...).
