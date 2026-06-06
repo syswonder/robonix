@@ -37,7 +37,7 @@ implementation language):
 | **[executor](system/executor/)** | capability orchestration & dispatch              |
 | **[keystone](system/keystone/)** | identity / configuration / policy         *(stub)*  |
 | **[liaison](system/liaison/)**   | human–machine interaction (chat / audio / TUI)   |
-| **[nexus](system/nexus/)**       | high-performance transport abstraction    *(stub)*  |
+| **[nexus](system/nexus/)**       | gRPC / MCP / ROS 2 communication libraries *(library, not a process)* |
 | **[pilot](system/pilot/)**       | planning / decision / memory / world model       |
 | **[scene](system/scene/)**       | scene state / semantic map / object registry     |
 | **[scribe](system/scribe/)**     | structured logs / replay / audit          *(stub)*  |
@@ -135,7 +135,7 @@ all of them can carry.
 Boot sequence (whitepaper §*启动流程*):
 
 1. **base** — Bootloader / kernel
-2. **L0 系统服务** — chronos / atlas / nexus / scribe come up first
+2. **L0 系统服务** — chronos / atlas / scribe come up first
 3. **soma** — enumerate hardware, body state ready, primitives register
 4. **scene** — receive perception, time/space alignment, build object registry
 5. **sentinel** — load safety rules
@@ -146,8 +146,8 @@ System READY — users issue tasks via liaison; pilot plans, executor dispatches
 sentinel supervises, scene keeps the world model fresh.
 
 Dive deeper:
-- [**Overview**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/overview.md) — control plane, one full request end-to-end
-- [**Namespaces & contracts**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/namespace-and-interfaces.md) — how `robonix/primitive/*` / `robonix/service/*` / `robonix/skill/*` / `robonix/system/*` work
+- [**System components**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/components.md) — the 12 components and what's implemented vs stub
+- [**Namespaces & contracts**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/namespace-and-contracts.md) — how `robonix/primitive/*` / `robonix/service/*` / `robonix/skill/*` / `robonix/system/*` work
 - [**Interface catalog**](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md) — every primitive + service contract
 
 ## Status
@@ -158,8 +158,10 @@ Dive deeper:
 
 5 of the 12 system components are implemented today (atlas, executor,
 liaison, pilot, scene); sentinel runs as an executor sub-module; vitals'
-heartbeat half lives in atlas. The remaining stubs are tracked under
-`system/<name>/README.md` with v0.2 plans.
+heartbeat half lives in atlas; nexus is the gRPC / MCP / ROS 2 library set
+every component links (not a process). The remaining stubs (chronos,
+keystone, scribe, soma) are tracked under `system/<name>/README.md` with
+v0.2 plans.
 
 ## License
 
