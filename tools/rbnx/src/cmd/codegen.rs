@@ -25,7 +25,7 @@ use robonix_cli::{Config, SourcePathKey};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn run_cmd(label: &str, cmd: &mut Command) -> Result<()> {
+pub(crate) fn run_cmd(label: &str, cmd: &mut Command) -> Result<()> {
     log::debug!("[codegen] {}: {:?}", label, cmd);
     let status = cmd
         .status()
@@ -297,7 +297,7 @@ pub async fn execute(
 /// Returns `None` only when none of those exist; callers fall back to
 /// `cargo run -p robonix-codegen` which keeps a fresh-checkout workflow
 /// alive even before the user has installed any binaries.
-fn locate_codegen_bin(rust_root: &Path) -> Option<PathBuf> {
+pub(crate) fn locate_codegen_bin(rust_root: &Path) -> Option<PathBuf> {
     if let Ok(s) = std::env::var("ROBONIX_CODEGEN_BIN")
         && !s.is_empty()
     {
@@ -375,7 +375,11 @@ fn probe_python_grpc_tools() -> Result<()> {
 /// (preferred — picks up `$ROBONIX_CODEGEN_BIN` / installed bin / target/
 /// in that order) or via `cargo run -p robonix-codegen` as a last
 /// resort. Caller appends the actual `--lang … -I … -o …` args.
-fn build_codegen_cmd(direct: Option<&PathBuf>, cargo: Option<&str>, rust_root: &Path) -> Command {
+pub(crate) fn build_codegen_cmd(
+    direct: Option<&PathBuf>,
+    cargo: Option<&str>,
+    rust_root: &Path,
+) -> Command {
     if let Some(bin) = direct {
         Command::new(bin)
     } else {
