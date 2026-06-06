@@ -120,9 +120,9 @@ echo "[{name}] build done"
         )?;
     }
 
-    // scripts/start.sh — launch the provider process. `rbnx path
-    // robonix-api` puts the pip-installed client library on PYTHONPATH so
-    // `from robonix_api import ...` resolves. Edit the final line if your
+    // scripts/start.sh — launch the provider process. `rbnx path robonix-api`
+    // prints the absolute path to the robonix-api source directory so
+    // `from robonix_api import ...` resolves via PYTHONPATH. Edit the final line if your
     // entrypoint module differs, or replace it entirely (docker run, ssh,
     // a compiled binary, ...).
     let start_sh = format!(
