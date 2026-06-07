@@ -17,5 +17,3 @@ When implemented, Chronos will:
 - run a PTP master/slave loop (1588v2) to discipline NIC clocks across
   the body's compute units,
 - emit drift / sync-quality metrics to [vitals](../vitals/).
-
-See the whitepaper §3 *L0 系统服务层* for the broader picture.

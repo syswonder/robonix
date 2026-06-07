@@ -119,7 +119,9 @@ pub async fn execute(
     let proto_staging = rbnx_build.join("proto-staging");
 
     if clean {
-        for p in [&proto_gen, &mcp_types, &rbnx_build] {
+        // Include ros2_idl explicitly: when --out-dir points outside
+        // rbnx-build/, removing rbnx_build alone leaves the overlay behind.
+        for p in [&proto_gen, &mcp_types, &ros2_idl, &rbnx_build] {
             if p.exists() {
                 std::fs::remove_dir_all(p).ok();
             }

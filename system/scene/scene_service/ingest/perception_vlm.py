@@ -106,7 +106,7 @@ class VLMObjectDetector:
         # visible at startup rather than first tick.
         self.base_url = (os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
         self.api_key = os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
-        self.model = os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-5.4-mini"
+        self.model = os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-5.5"
         if not self.api_key:
             log.warning("[scene-vlm] VLM_API_KEY not set; perception will be inert")
 

@@ -17,5 +17,3 @@ When Scribe lands it will:
 - persist with retention / rotation,
 - expose a query / replay capability so a past plan can be re-played
   against the current scene for debugging or audit.
-
-See the whitepaper §3 *L0 系统服务层*.
