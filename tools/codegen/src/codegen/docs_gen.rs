@@ -90,7 +90,7 @@ fn render_contracts(
     banner: &str,
 ) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "# 契约参考（自动生成）");
+    let _ = writeln!(out, "# 能力约定参考（自动生成）");
     let _ = writeln!(out);
     let _ = writeln!(
         out,
@@ -99,7 +99,7 @@ fn render_contracts(
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "本页罗列 `capabilities/` 下的所有标准契约（共 {} 条）。",
+        "本页罗列 `capabilities/` 下的所有标准能力约定（共 {} 条）。",
         contracts.len()
     );
     let _ = writeln!(
@@ -126,7 +126,7 @@ fn render_contracts(
         let _ = writeln!(out);
         let _ = writeln!(out, "## {cat}");
         let _ = writeln!(out);
-        let _ = writeln!(out, "| 契约 ID | kind | mode | 载荷（IDL） | 契约 TOML |");
+        let _ = writeln!(out, "| 能力约定 ID | kind | mode | 载荷（IDL） | 能力约定 TOML |");
         let _ = writeln!(out, "|---|---|---|---|---|");
         for c in rows {
             let payload = if idl_rels.contains(c.idl.as_str()) {
@@ -165,7 +165,7 @@ fn render_idl(idl: &[IdlFile], banner: &str) -> String {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "本页收录从 IDL 包含根（`rbnx docs --include`，默认 `capabilities/lib/`）收集的全部 ROS IDL（`.msg` / `.srv`）原文，按 ROS 包分组（共 {} 个文件）。[契约参考](contracts.md) 的载荷列链到这里对应的锚点。",
+        "本页收录从 IDL 包含根（`rbnx docs --include`，默认 `capabilities/lib/`）收集的全部 ROS IDL（`.msg` / `.srv`）原文，按 ROS 包分组（共 {} 个文件）。[能力约定参考](contracts.md) 的载荷列链到这里对应的锚点。",
         idl.len()
     );
     let _ = writeln!(out);
