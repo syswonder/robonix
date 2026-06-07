@@ -34,7 +34,7 @@ execution, and safety as named, replaceable components.
 | **[executor](system/executor/)** | capability orchestration & dispatch              |
 | **[keystone](system/keystone/)** | identity / configuration / policy         *(stub)*  |
 | **[liaison](system/liaison/)**   | human–machine interaction (chat / audio / TUI)   |
-| **[nexus](system/nexus/)**       | high-performance transport abstraction    *(stub)*  |
+| **[nexus](system/nexus/)**       | gRPC / MCP / ROS 2 communication libraries *(library, not a process)* |
 | **[pilot](system/pilot/)**       | planning / decision / memory / world model       |
 | **[scene](system/scene/)**       | scene state / semantic map / object registry     |
 | **[scribe](system/scribe/)**     | structured logs / replay / audit          *(stub)*  |
