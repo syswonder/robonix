@@ -165,7 +165,7 @@ fn render_idl(idl: &[IdlFile], banner: &str) -> String {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "本页是 `capabilities/lib/` 下全部 ROS IDL（`.msg` / `.srv`）的原文，按 ROS 包分组（共 {} 个文件）。[契约参考](contracts.md) 的载荷列链到这里对应的锚点。",
+        "本页收录从 IDL 包含根（`rbnx docs --include`，默认 `capabilities/lib/`）收集的全部 ROS IDL（`.msg` / `.srv`）原文，按 ROS 包分组（共 {} 个文件）。[契约参考](contracts.md) 的载荷列链到这里对应的锚点。",
         idl.len()
     );
     let _ = writeln!(out);
