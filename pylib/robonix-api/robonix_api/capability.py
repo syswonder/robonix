@@ -502,8 +502,8 @@ class _ProviderBase:
 
         return decorator
 
-    # Back-compat alias (old name was just `mcp`); deprecated but kept
-    # so packages can migrate.
+    # `mcp` is the canonical decorator name (used throughout the dev guide
+    # and all packages); `provides_mcp` is an equivalent long-form alias.
     mcp = provides_mcp
 
     def _ensure_mcp_app(self) -> None:
@@ -553,7 +553,8 @@ class _ProviderBase:
 
         return decorator
 
-    # Back-compat alias.
+    # `grpc` is the canonical decorator name (used throughout the dev guide
+    # and all packages); `provides_grpc` is an equivalent long-form alias.
     grpc = provides_grpc
 
     # -- mode/transport compat check (best-effort) -------------------------
