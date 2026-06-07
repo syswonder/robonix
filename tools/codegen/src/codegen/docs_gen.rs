@@ -126,7 +126,10 @@ fn render_contracts(
         let _ = writeln!(out);
         let _ = writeln!(out, "## {cat}");
         let _ = writeln!(out);
-        let _ = writeln!(out, "| 能力约定 ID | kind | mode | 载荷（IDL） | 能力约定 TOML |");
+        let _ = writeln!(
+            out,
+            "| 能力约定 ID | kind | mode | 载荷（IDL） | 能力约定 TOML |"
+        );
         let _ = writeln!(out, "|---|---|---|---|---|");
         for c in rows {
             let payload = if idl_rels.contains(c.idl.as_str()) {
