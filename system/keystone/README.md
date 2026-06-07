@@ -19,5 +19,3 @@ When Keystone lands it will:
   that bind them to capability allow-lists,
 - be the source-of-truth that [sentinel](../sentinel/) consults for
   "is this user allowed to call this skill right now".
-
-See the whitepaper §3 *L0 系统服务层*.

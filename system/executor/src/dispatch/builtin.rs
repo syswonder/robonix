@@ -433,9 +433,9 @@ mod tests {
 
     #[test]
     fn truncate_multibyte_utf8_does_not_panic() {
-        // Each Chinese char is 3 bytes in UTF-8
-        let s = "你好世界测试数据"; // 8 chars × 3 bytes = 24 bytes
-        // Truncate at byte 7 — in the middle of the 3rd char '世'
+        // Each euro sign is 3 bytes in UTF-8
+        let s = "€€€€€€€€"; // 8 chars × 3 bytes = 24 bytes
+        // Truncate at byte 7 — in the middle of the 3rd char '€'
         let result = truncate(s, 7);
         // Should NOT panic, and should truncate at a valid boundary
         assert!(
@@ -444,7 +444,7 @@ mod tests {
         );
         // The truncated prefix should be valid UTF-8 (it is, since we're returning a String)
         assert!(
-            result.starts_with("你好"),
+            result.starts_with("€€"),
             "should keep first 2 chars, got: {result}"
         );
     }
