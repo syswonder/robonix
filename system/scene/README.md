@@ -126,6 +126,32 @@ SCENE_CAMERA_FRAME=my_camera_optical bash scripts/start.sh
 | `SCENE_CG_MERGE_THRESHOLD` | `0.55` | per-tick merge threshold |
 | `SCENE_CG_MAX_MERGE_DIST_M` | `1.5` | hard distance gate |
 | `SCENE_PORT` / `SCENE_WEB_PORT` | `50106` / `50107` | gRPC + web UI ports |
+| `SCENE_OBJECT_MEMORY_ENABLED` | `true` | persist stable objects + warm-restore the registry on boot |
+| `SCENE_OBJECT_MEMORY_DB` | `/data/robonix/scene_memory/objects.db` | milvus-lite DB path (inside container; host-mounted via `rbnx-build/data/robonix`) |
+| `SCENE_MAP_ID` | `default` | SLAM map the persisted objects belong to; restore loads only this map's objects (manifest `map_id` overrides) |
+
+## Object memory (warm restore)
+
+When `SCENE_OBJECT_MEMORY_ENABLED` is on, scene persists its stable objects to a
+small embedded milvus-lite DB (`SCENE_OBJECT_MEMORY_DB`) at the scene-graph
+builder cadence, and reloads them into the registry at boot. After a restart the
+graph is populated immediately instead of re-accumulating every object through
+the `min_observations` filter; re-observation re-confirms restored objects in
+place (no duplicate ids). Each row carries a caption vector embedded with the
+open_clip text encoder already loaded for perception (512-d, shared with the
+per-object image features), so a future object-search layer can reuse the table.
+The DB is scene-owned — a separate file/process from `system/memory`'s memsearch
+DB — and lives under the host-mounted `/data/robonix`, which also makes the
+scene-graph JSON caches survive boots. Writes are driven by the scene-graph
+builder, so disabling `SCENE_GRAPH_ENABLED` stops new writes (restore still runs).
+
+Persistence is partitioned by `SCENE_MAP_ID` (or the manifest `map_id`): an
+object's pose is only meaningful in the `map` frame of the SLAM map it was
+observed on, so restore loads exactly the current map's objects and never mixes
+two maps. The same `object_id` may exist on different maps without colliding.
+`map_id` is a deploy-controlled string today (default `"default"`) and stays
+internal to scene — no atlas/MCP contract changes — until mapping emits a real
+map identity to wire in here.
 
 ## Capabilities exposed
 

@@ -25,6 +25,12 @@ uvicorn
 httpx
 Pillow
 PyYAML
+# Object persistence (warm restore across restarts). Embedded milvus-lite,
+# its own scene-owned objects.db — same DB tech as system/memory's memsearch
+# but a separate file/process. 2.6.10 is excluded (broken upsert); system/
+# memory pulls pymilvus transitively (via memsearch), without an explicit pin.
+# pymilvus pulls milvus-lite on linux.
+pymilvus!=2.6.10,>=2.5.0
 
 # ── concept-graphs perception stack ──────────────────────────────
 # torch 2.5+/cu124 because cu118 wheels don't run on sm_120 (Blackwell);

@@ -707,6 +707,44 @@ async def _run() -> None:
     relations = RelationEngine(registry, period_s=1.0)
     await relations.start()
     self_tracker = _SelfTracker(registry)
+
+    # Object persistence (warm restore across restarts). Created before
+    # perception so the registry is repopulated before the first detections
+    # arrive; the embedder is wired in later (only needed for writes). The
+    # store is independent of SCENE_GRAPH_ENABLED — restore always runs if a
+    # prior boot wrote rows — but writes are driven by the scene-graph builder.
+    obj_store = None
+    if os.environ.get("SCENE_OBJECT_MEMORY_ENABLED", "true").lower() in ("true", "1", "yes"):
+        from .persistence import ObjectStore
+
+        db_path = os.environ.get(
+            "SCENE_OBJECT_MEMORY_DB", "/data/robonix/scene_memory/objects.db"
+        )
+        # Which SLAM map's objects to load/store. Deploy-controlled until
+        # mapping emits a real map identity — manifest `map_id` wins, else
+        # the SCENE_MAP_ID env, else "default". Object poses are only valid
+        # in their own map's frame, so persistence is scoped per map.
+        map_id = str(config.get("map_id") or os.environ.get("SCENE_MAP_ID") or "default")
+        try:
+            obj_store = ObjectStore(db_path, map_id=map_id)
+            restored = obj_store.load_all()
+            async with registry.lock():
+                for o in restored:
+                    registry.restore_object(o)
+            log.info(
+                "[scene-persist] restored %d objects (map_id=%s) from %s",
+                len(restored), obj_store.map_id, db_path,
+            )
+        except Exception as e:  # noqa: BLE001
+            # Object memory is opted in (default on), so a failure here is not
+            # benign: persistence is OFF for the whole session — no warm
+            # restore now and no writes later. Log at error, not warning.
+            log.error(
+                "[scene-persist] object memory enabled but store init/restore "
+                "failed — persistence OFF for this session (no restore, no "
+                "writes): %s", e,
+            )
+            obj_store = None
     # mcp_tools v0 only needs the registry + the ROS hub (the latter is
     # supplied later in _start_ros_ingest); relations engine still runs
     # internally for ingest/web-UI but isn't exposed in the LLM tool
@@ -758,6 +796,13 @@ async def _run() -> None:
     # only; this one re-binds with the hub — attach_state is intentionally
     # cheap and idempotent.)
     mcp_tools.attach_state(registry=registry, hub=hub)
+
+    # Wire the persistence embedder to perception's loaded CLIP text encoder
+    # (same 512-d space as the per-object image features). The VLM-fallback
+    # detector has no `embed_text`; persistence then stores placeholder
+    # vectors (scalar state still restores fine).
+    if obj_store is not None:
+        obj_store.set_embedder(getattr(perception, "embed_text", None))
     bg_tasks = [
         asyncio.create_task(_stale_tick(registry), name="scene-stale-tick"),
         # Background reconciler: keeps scene's hub adding subscriptions
@@ -800,6 +845,7 @@ async def _run() -> None:
             relation_inferer=sg_inferer,
             store=sg_store,
             config=sg_cfg,
+            object_store=obj_store,
         )
         sg_stop = asyncio.Event()
         bg_tasks.append(
@@ -877,6 +923,11 @@ async def _run() -> None:
 
     # Capability owns the gRPC server, MCP HTTP, heartbeat — stop them.
     scene._teardown()
+
+    # Release the milvus-lite lock so the next boot can re-open the .db.
+    if obj_store is not None:
+        with contextlib.suppress(Exception):
+            obj_store.close()
 
 
 def main() -> None:
