@@ -25,7 +25,7 @@ use robonix_cli::{Config, SourcePathKey};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn run_cmd(label: &str, cmd: &mut Command) -> Result<()> {
+pub(crate) fn run_cmd(label: &str, cmd: &mut Command) -> Result<()> {
     log::debug!("[codegen] {}: {:?}", label, cmd);
     let status = cmd
         .status()
@@ -65,6 +65,7 @@ pub async fn execute(
     config: Config,
     package: Option<PathBuf>,
     mcp: bool,
+    ros2: bool,
     clean: bool,
     out_dir: Option<PathBuf>,
 ) -> Result<()> {
@@ -109,12 +110,18 @@ pub async fn execute(
     };
     let proto_gen = out_root.join("proto_gen");
     let mcp_types = out_root.join("robonix_mcp_types");
+    // ROS 2 canonical message overlay (a colcon workspace of source). Only
+    // generated with --ros2; consumers colcon-build it and source
+    // install/setup.bash so their rclpy types are Robonix's.
+    let ros2_idl = out_root.join("ros2_idl");
     // Per-invocation staging for the system-wide .proto files. No commits;
     // grpc_tools.protoc reads from here in step 3.
     let proto_staging = rbnx_build.join("proto-staging");
 
     if clean {
-        for p in [&proto_gen, &mcp_types, &rbnx_build] {
+        // Include ros2_idl explicitly: when --out-dir points outside
+        // rbnx-build/, removing rbnx_build alone leaves the overlay behind.
+        for p in [&proto_gen, &mcp_types, &ros2_idl, &rbnx_build] {
             if p.exists() {
                 std::fs::remove_dir_all(p).ok();
             }
@@ -229,6 +236,23 @@ pub async fn execute(
         );
     }
 
+    // 3b. Optional: ROS 2 canonical message overlay (source). Emitted next
+    //     to proto_gen / robonix_mcp_types so it follows the same rbnx-build
+    //     convention. It still needs `colcon build` in a ROS 2 environment;
+    //     the package's build.sh does that (e.g. docker exec into the
+    //     container) and start.sh sources <ros2_idl>/install/setup.bash.
+    if ros2 {
+        println!("{} robonix-codegen --lang ros2 ...", "[codegen]".bold());
+        let mut ros2_cmd =
+            build_codegen_cmd(direct_codegen.as_ref(), cargo_bin.as_deref(), &rust_root);
+        ros2_cmd.args(["--lang", "ros2", "-I"]).arg(&interfaces_lib);
+        if let Some(p) = pkg_caps_lib.as_ref() {
+            ros2_cmd.arg("-I").arg(p);
+        }
+        ros2_cmd.arg("-o").arg(&ros2_idl);
+        run_cmd("robonix-codegen ros2", &mut ros2_cmd)?;
+    }
+
     // 4. Write PYTHONPATH setup stub so `rbnx start` sees all the right paths.
     let ws_install = rbnx_build.join("ws").join("install");
     std::fs::create_dir_all(&ws_install)?;
@@ -275,7 +299,7 @@ pub async fn execute(
 /// Returns `None` only when none of those exist; callers fall back to
 /// `cargo run -p robonix-codegen` which keeps a fresh-checkout workflow
 /// alive even before the user has installed any binaries.
-fn locate_codegen_bin(rust_root: &Path) -> Option<PathBuf> {
+pub(crate) fn locate_codegen_bin(rust_root: &Path) -> Option<PathBuf> {
     if let Ok(s) = std::env::var("ROBONIX_CODEGEN_BIN")
         && !s.is_empty()
     {
@@ -353,7 +377,11 @@ fn probe_python_grpc_tools() -> Result<()> {
 /// (preferred — picks up `$ROBONIX_CODEGEN_BIN` / installed bin / target/
 /// in that order) or via `cargo run -p robonix-codegen` as a last
 /// resort. Caller appends the actual `--lang … -I … -o …` args.
-fn build_codegen_cmd(direct: Option<&PathBuf>, cargo: Option<&str>, rust_root: &Path) -> Command {
+pub(crate) fn build_codegen_cmd(
+    direct: Option<&PathBuf>,
+    cargo: Option<&str>,
+    rust_root: &Path,
+) -> Command {
     if let Some(bin) = direct {
         Command::new(bin)
     } else {

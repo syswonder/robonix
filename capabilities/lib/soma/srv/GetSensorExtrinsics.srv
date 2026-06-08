@@ -8,7 +8,6 @@
 #   "camera"  → just RGBD / mono cameras
 #   "lidar"   → just 2D / 3D lidars
 #   "imu"     → just imus
----
 string sensor_kind  # filter; empty = all
 ---
 soma/SensorExtrinsic[] sensors

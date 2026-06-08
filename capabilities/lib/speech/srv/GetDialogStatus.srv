@@ -1,5 +1,4 @@
 # Query current dialog session status.
----
 string session_id
 ---
 speech/msg/DialogState state

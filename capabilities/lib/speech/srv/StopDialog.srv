@@ -1,5 +1,4 @@
 # Stop an active voice dialog session.
----
 string session_id
 ---
 bool success

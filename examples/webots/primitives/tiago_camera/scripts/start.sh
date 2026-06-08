@@ -45,7 +45,10 @@ docker exec -i \
   -e TIAGO_DEPTH_FRAME_ID="${TIAGO_DEPTH_FRAME_ID:-head_front_camera_depth_optical_frame}" \
   -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api" \
   robonix_tiago_sim \
-  bash -lc 'source /opt/ros/humble/setup.bash && \
-            cd /robonix_pkgs/primitives/tiago_camera && \
+  bash -lc 'set -eo pipefail
+            source /opt/ros/humble/setup.bash
+            OVL=/robonix_pkgs/primitives/tiago_camera/rbnx-build/codegen/ros2_idl/install/setup.bash
+            [ -f "$OVL" ] && source "$OVL" || true
+            cd /robonix_pkgs/primitives/tiago_camera
             exec python3 -m camera_driver.driver' &
 wait $!

@@ -23,9 +23,7 @@ struct ContractToml {
 #[derive(Debug, Deserialize)]
 struct ContractMeta {
     id: String,
-    #[allow(dead_code)]
     version: String,
-    #[allow(dead_code)]
     kind: String,
     /// IDL reference: full path under one of the merged lib roots
     /// (`<robonix>/capabilities/lib/` or `<pkg>/capabilities/lib/`),
@@ -75,6 +73,47 @@ pub fn collect_referenced_srvs(contracts_dir: &Path) -> Result<BTreeSet<(String,
         }
     }
     Ok(set)
+}
+
+/// Lightweight per-contract view for documentation generation. Built from
+/// the same TOML parse + directory walk as proto generation, so the docs
+/// reference can't drift from what codegen / atlas actually read.
+pub struct ContractSummary {
+    pub id: String,
+    pub version: String,
+    pub kind: String,
+    pub mode: String,
+    pub idl: String,
+    /// Absolute path to the source `.v1.toml`.
+    pub toml_path: PathBuf,
+}
+
+/// Load every contract under `dirs` (recursively, skipping `lib/`), de-duped
+/// by id (later dir wins, matching atlas merge semantics), sorted by id.
+/// Backs `robonix-codegen --lang docs`.
+pub fn load_contract_summaries(dirs: &[PathBuf]) -> Result<Vec<ContractSummary>> {
+    let mut by_id: std::collections::BTreeMap<String, ContractSummary> =
+        std::collections::BTreeMap::new();
+    for d in dirs {
+        for p in collect_tomls(d)? {
+            let raw =
+                fs::read_to_string(&p).with_context(|| format!("read contract {}", p.display()))?;
+            let c: ContractToml =
+                toml::from_str(&raw).with_context(|| format!("parse TOML {}", p.display()))?;
+            by_id.insert(
+                c.contract.id.clone(),
+                ContractSummary {
+                    id: c.contract.id,
+                    version: c.contract.version,
+                    kind: c.contract.kind,
+                    mode: c.mode.mode_type,
+                    idl: c.contract.idl,
+                    toml_path: p,
+                },
+            );
+        }
+    }
+    Ok(by_id.into_values().collect())
 }
 
 pub fn generate(
