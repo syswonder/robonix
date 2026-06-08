@@ -41,6 +41,11 @@ dependencies = [
     "httpx",
     "Pillow",
     "PyYAML",
+    # Object persistence (warm restore). Embedded milvus-lite in a scene-owned
+    # objects.db; same DB tech as system/memory but a separate file/process.
+    # 2.6.10 excluded (broken upsert); system/memory pulls pymilvus
+    # transitively (via memsearch), without an explicit pin.
+    "pymilvus!=2.6.10,>=2.5.0",
     "robonix-api",
 ]
 
