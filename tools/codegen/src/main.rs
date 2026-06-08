@@ -7,7 +7,9 @@ use std::collections::BTreeSet;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
-use robonix_codegen::codegen::{contract_gen, mcp_python_gen, msg_parser, proto_gen};
+use robonix_codegen::codegen::{
+    contract_gen, docs_gen, mcp_python_gen, msg_parser, proto_gen, ros2_gen,
+};
 
 #[derive(Parser)]
 #[command(name = "robonix-codegen")]
@@ -30,10 +32,17 @@ struct Args {
     #[arg(short = 'o', long = "out")]
     out: PathBuf,
 
-    /// Target language: "proto" (gRPC stubs + contracts) or "mcp"
-    /// (Python typed-input helpers for MCP servers).
+    /// Target language: "proto" (gRPC stubs + contracts), "mcp"
+    /// (Python typed-input helpers for MCP servers), "ros2"
+    /// (a colcon overlay of the canonical ROS interface packages), or
+    /// "docs" (the mdBook contract + ROS IDL reference pages).
     #[arg(long = "lang", default_value = "proto")]
     lang: String,
+
+    /// For `--lang docs` only: version line written verbatim into the
+    /// generated reference headers (e.g. "v0.1 @ abc1234 (2026-06-06)").
+    #[arg(long = "doc-stamp")]
+    doc_stamp: Option<String>,
 
     /// Print per-package lines and every IDL resolution warning (default: one summary line; set ROBONIX_CODEGEN_VERBOSE=1 for same without flag)
     #[arg(long, short = 'v')]
@@ -68,9 +77,11 @@ fn main() -> Result<()> {
     }
 
     match args.lang.as_str() {
-        "proto" | "mcp" => {}
+        "proto" | "mcp" | "ros2" | "docs" => {}
         other => {
-            bail!("[robonix-codegen] unsupported --lang '{other}'. Supported: 'proto', 'mcp'.")
+            bail!(
+                "[robonix-codegen] unsupported --lang '{other}'. Supported: 'proto', 'mcp', 'ros2', 'docs'."
+            )
         }
     }
 
@@ -88,6 +99,20 @@ fn main() -> Result<()> {
     }
 
     std::fs::create_dir_all(&args.out)?;
+
+    // Docs reference: a pure file walk over contracts + lib IDL — no
+    // resolver / proto build needed. Handle before building the resolver
+    // so an unrelated task doesn't emit IDL-resolution warnings.
+    if args.lang == "docs" {
+        docs_gen::generate(
+            &args.contracts,
+            &args.include,
+            &args.out,
+            args.doc_stamp.as_deref(),
+            verbose,
+        )?;
+        return Ok(());
+    }
 
     let mut resolver = msg_parser::MsgResolver::new(&args.include)?;
     let mut idl_skips = 0usize;
@@ -134,6 +159,9 @@ fn main() -> Result<()> {
                 specs.len(),
                 args.out.display()
             );
+        }
+        "ros2" => {
+            ros2_gen::generate(&resolver, &args.out, verbose)?;
         }
         _ => {
             proto_gen::generate(&resolver, &args.out, contract_srvs.as_ref(), verbose)?;
