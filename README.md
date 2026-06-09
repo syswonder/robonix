@@ -27,20 +27,20 @@ skills, and the planner discover and talk to each other; it owns identity,
 configuration, time, transport, logging, health, body model, scene model,
 execution, and safety as named, replaceable components.
 
-| Component | What it owns |
-| --- | --- |
-| **[atlas](system/atlas/)**       | capability discovery / catalog                    |
-| **[chronos](system/chronos/)**   | unified time / PTP alignment              *(stub)*  |
-| **[executor](system/executor/)** | capability orchestration & dispatch              |
-| **[keystone](system/keystone/)** | identity / configuration / policy         *(stub)*  |
-| **[liaison](system/liaison/)**   | human–machine interaction (chat / audio / TUI)   |
-| **[nexus](system/nexus/)**       | gRPC / MCP / ROS 2 communication libraries *(library, not a process)* |
-| **[pilot](system/pilot/)**       | planning / decision / memory / world model       |
-| **[scene](system/scene/)**       | scene state / semantic map / object registry     |
-| **[scribe](system/scribe/)**     | structured logs / replay / audit          *(stub)*  |
-| **[sentinel](system/sentinel/)** | safety supervision           *(in executor for v0.1)*  |
-| **[soma](system/soma/)**         | body state / device & primitive abstraction *(stub)* |
-| **[vitals](system/vitals/)**     | health monitoring / heartbeat *(partial via atlas)*  |
+| Component                           | What it owns                                                           |
+| ----------------------------------- | ---------------------------------------------------------------------- |
+| **[atlas](system/atlas/)**       | capability discovery / catalog                                         |
+| **[chronos](system/chronos/)**   | unified time / PTP alignment*(stub)*                                 |
+| **[executor](system/executor/)** | capability orchestration & dispatch                                    |
+| **[keystone](system/keystone/)** | identity / configuration / policy*(stub)*                            |
+| **[liaison](system/liaison/)**   | human–machine interaction (chat / audio / TUI)                        |
+| **[nexus](system/nexus/)**       | gRPC / MCP / ROS 2 communication libraries*(library, not a process)* |
+| **[pilot](system/pilot/)**       | planning / decision / memory / world model                             |
+| **[scene](system/scene/)**       | scene state / semantic map / object registry                           |
+| **[scribe](system/scribe/)**     | structured logs / replay / audit*(stub)*                             |
+| **[sentinel](system/sentinel/)** | safety supervision*(in executor for v0.1)*                           |
+| **[soma](system/soma/)**         | body state / device & primitive abstraction*(stub)*                  |
+| **[vitals](system/vitals/)**     | health monitoring / heartbeat*(partial via atlas)*                   |
 
 On top of system, three open categories — provided as
 contracts (61 standard interfaces in `capabilities/`) and reference
@@ -126,6 +126,10 @@ Dive deeper:
 * [**Overview**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/overview.md) — control plane, one full request end-to-end
 * [**Namespaces & contracts**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/namespace-and-interfaces.md) — how `robonix/primitive/*` / `robonix/service/*` / `robonix/skill/*` / `robonix/system/*` work
 * [**Interface catalog**](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md) — every primitive + service contract
+
+## Skills
+
+We develop Skill workflows adapted to Robonix, including fine-tuning, post-training and model deployment optimization.
 
 ## Status
 
