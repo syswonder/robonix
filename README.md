@@ -63,6 +63,21 @@ implementations alongside the system:
 * **skill** — user-defined reusable execution flows (grasp, place, explore,
   fold-clothes …). Lives wherever the deploy/integrator wants.
 
+## Supported platforms
+
+| Arch    | OS / Distribution                                  | Status     |
+| ------- | -------------------------------------------------- | ---------- |
+| x86\_64 | Ubuntu 22.04                                       | ✅ Tested  |
+| x86\_64 | Debian 13                                          | ✅ Tested  |
+| arm64   | NVIDIA Jetson — JetPack 6.2 (L4T 36.4.3, Ubuntu 22.04) | ✅ Tested  |
+| x86\_64 / arm64 | Ubuntu 24.04 and newer                     | 🚧 Planned |
+| x86\_64 / arm64 | Arch Linux                                 | 🚧 Planned |
+| arm64   | macOS                                              | 🚧 Planned |
+
+"Tested" means the full Quickstart below (build, `rbnx boot`, the Webots
+Tiago end-to-end demo) runs on that platform. Other Linux distributions
+will likely work but are not regularly verified.
+
 ## Quickstart
 
 ```bash
