@@ -74,9 +74,11 @@ implementations alongside the system:
 | x86\_64 / arm64 | Arch Linux                                 | 🚧 Planned |
 | arm64   | macOS                                              | 🚧 Planned |
 
-"Tested" means the full Quickstart below (build, `rbnx boot`, the Webots
-Tiago end-to-end demo) runs on that platform. Other Linux distributions
-will likely work but are not regularly verified.
+"Tested" means the full Robonix pipeline runs end-to-end on that platform —
+in simulation or on a real robot: voice & interaction, task execution, body
+movement, scene & mapping (semantic map + spatial map), navigation, and skill
+execution. Other Linux distributions will likely work but are not regularly
+verified.
 
 ## Quickstart
 
