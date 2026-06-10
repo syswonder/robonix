@@ -36,20 +36,20 @@ skills, and the planner discover and talk to each other; it owns identity,
 configuration, time, transport, logging, health, body model, scene model,
 execution, and safety as named, replaceable components.
 
-| Component                           | What it owns                                                           |
-| ----------------------------------- | ---------------------------------------------------------------------- |
-| **[atlas](system/atlas/)**       | capability discovery / catalog                                         |
-| **[chronos](system/chronos/)**   | unified time / PTP alignment*(stub)*                                 |
-| **[executor](system/executor/)** | capability orchestration & dispatch                                    |
-| **[keystone](system/keystone/)** | identity / configuration / policy*(stub)*                            |
-| **[liaison](system/liaison/)**   | human–machine interaction (chat / audio / TUI)                        |
-| **[nexus](system/nexus/)**       | gRPC / MCP / ROS 2 communication libraries*(library, not a process)* |
-| **[pilot](system/pilot/)**       | planning / decision / memory / world model                             |
-| **[scene](system/scene/)**       | scene state / semantic map / object registry                           |
-| **[scribe](system/scribe/)**     | structured logs / replay / audit*(stub)*                             |
-| **[sentinel](system/sentinel/)** | safety supervision*(in executor for v0.1)*                           |
-| **[soma](system/soma/)**         | body state / device & primitive abstraction*(stub)*                  |
-| **[vitals](system/vitals/)**     | health monitoring / heartbeat*(partial via atlas)*                   |
+| Component                        | Responsibility                                                                          | Status (v0.1)        |
+| -------------------------------- | --------------------------------------------------------------------------------------- | -------------------- |
+| **[atlas](system/atlas/)**       | Capability discovery: the catalog of every registered capability and its contract       | Implemented          |
+| **[chronos](system/chronos/)**   | Unified time source with PTP / IEEE-1588 alignment across sensors and hosts             | Stub                 |
+| **[executor](system/executor/)** | Plan execution: validates Pilot plans and dispatches each step to capability providers  | Implemented          |
+| **[keystone](system/keystone/)** | Body identity, persistent configuration, and policy                                     | Stub                 |
+| **[liaison](system/liaison/)**   | Human–machine interaction gateway: chat, voice, and TUI                                 | Implemented          |
+| **[nexus](system/nexus/)**       | Transport libraries for gRPC / MCP / ROS 2 (a library, not a process)                   | Implemented          |
+| **[pilot](system/pilot/)**       | VLM-driven planning and decision making, memory, and world model                        | Implemented          |
+| **[scene](system/scene/)**       | Live environment estimate: object registry, semantic relations, and occupancy grid     | Implemented          |
+| **[scribe](system/scribe/)**     | Structured, persistent, replayable system journal for audit                             | Stub                 |
+| **[sentinel](system/sentinel/)** | Safety supervision over capability calls                                                | Merged into executor |
+| **[soma](system/soma/)**         | Body model: device topology and primitive abstraction                                   | Stub                 |
+| **[vitals](system/vitals/)**     | Liveness and health aggregation across all running components                           | Partial (via atlas)  |
 
 On top of system, three open categories — provided as
 contracts (61 standard interfaces in `capabilities/`) and reference
@@ -62,6 +62,30 @@ implementations alongside the system:
   [`services/`](services/); each can be swapped out by a deployment.
 * **skill** — user-defined reusable execution flows (grasp, place, explore,
   fold-clothes …). Lives wherever the deploy/integrator wants.
+
+## Supported platforms
+
+| Arch    | OS / Distribution                                  | Status     |
+| ------- | -------------------------------------------------- | ---------- |
+| x86\_64 | Ubuntu 22.04                                       | ✅ Tested  |
+| x86\_64 | Debian 13                                          | ✅ Tested  |
+| arm64   | NVIDIA Jetson — JetPack 6.2 (L4T 36.4.3, Ubuntu 22.04) | ✅ Tested  |
+| x86\_64 / arm64 | Ubuntu 24.04 and newer                     | 🚧 Planned |
+| x86\_64 / arm64 | Arch Linux                                 | 🚧 Planned |
+| arm64   | macOS                                              | 🚧 Planned |
+
+"Tested" means the full Robonix pipeline runs end-to-end on that platform —
+in simulation or on a real robot: voice & interaction, task execution, body
+movement, scene & mapping (semantic map + spatial map), navigation, and skill
+execution. Other Linux distributions will likely work but are not regularly
+verified.
+
+**Relationship with ROS 2.** Robonix itself does not depend on ROS 2 — it is
+one of the transports nexus offers, not a requirement of the system. If a
+capability provider needs the ROS 2 communication libraries and the host OS
+has no ROS 2 support, run that provider in a Docker container. Within a single
+Robonix deployment, all ROS 2-based capability providers must use the same
+ROS 2 distribution (Foxy / Humble / Jazzy); **Humble is recommended**.
 
 ## Quickstart
 
