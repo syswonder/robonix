@@ -36,20 +36,20 @@ skills, and the planner discover and talk to each other; it owns identity,
 configuration, time, transport, logging, health, body model, scene model,
 execution, and safety as named, replaceable components.
 
-| Component                           | What it owns                                                           |
-| ----------------------------------- | ---------------------------------------------------------------------- |
-| **[atlas](system/atlas/)**       | capability discovery / catalog                                         |
-| **[chronos](system/chronos/)**   | unified time / PTP alignment*(stub)*                                 |
-| **[executor](system/executor/)** | capability orchestration & dispatch                                    |
-| **[keystone](system/keystone/)** | identity / configuration / policy*(stub)*                            |
-| **[liaison](system/liaison/)**   | human–machine interaction (chat / audio / TUI)                        |
-| **[nexus](system/nexus/)**       | gRPC / MCP / ROS 2 communication libraries*(library, not a process)* |
-| **[pilot](system/pilot/)**       | planning / decision / memory / world model                             |
-| **[scene](system/scene/)**       | scene state / semantic map / object registry                           |
-| **[scribe](system/scribe/)**     | structured logs / replay / audit*(stub)*                             |
-| **[sentinel](system/sentinel/)** | safety supervision*(in executor for v0.1)*                           |
-| **[soma](system/soma/)**         | body state / device & primitive abstraction*(stub)*                  |
-| **[vitals](system/vitals/)**     | health monitoring / heartbeat*(partial via atlas)*                   |
+| Component                        | Responsibility                                                                          | Status (v0.1)        |
+| -------------------------------- | --------------------------------------------------------------------------------------- | -------------------- |
+| **[atlas](system/atlas/)**       | Capability discovery: the catalog of every registered capability and its contract       | Implemented          |
+| **[chronos](system/chronos/)**   | Unified time source with PTP / IEEE-1588 alignment across sensors and hosts             | Stub                 |
+| **[executor](system/executor/)** | Plan execution: validates Pilot plans and dispatches each step to capability providers  | Implemented          |
+| **[keystone](system/keystone/)** | Body identity, persistent configuration, and policy                                     | Stub                 |
+| **[liaison](system/liaison/)**   | Human–machine interaction gateway: chat, voice, and TUI                                 | Implemented          |
+| **[nexus](system/nexus/)**       | Transport libraries for gRPC / MCP / ROS 2 (a library, not a process)                   | Implemented          |
+| **[pilot](system/pilot/)**       | VLM-driven planning and decision making, memory, and world model                        | Implemented          |
+| **[scene](system/scene/)**       | Live environment estimate: object registry, semantic relations, and occupancy grid     | Implemented          |
+| **[scribe](system/scribe/)**     | Structured, persistent, replayable system journal for audit                             | Stub                 |
+| **[sentinel](system/sentinel/)** | Safety supervision over capability calls                                                | Merged into executor |
+| **[soma](system/soma/)**         | Body model: device topology and primitive abstraction                                   | Stub                 |
+| **[vitals](system/vitals/)**     | Liveness and health aggregation across all running components                           | Partial (via atlas)  |
 
 On top of system, three open categories — provided as
 contracts (61 standard interfaces in `capabilities/`) and reference
