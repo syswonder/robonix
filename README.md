@@ -136,3 +136,10 @@ Dive deeper:
 ## License
 
 Mulan Permissive Software License, Version 2 (MulanPSL-2.0). See [LICENSE](LICENSE).
+
+## Ecosystem
+
+* [**Robonix Skill Toolkit**](https://github.com/zhengzihaoPKU/Robonix-Skill-Toolkit)
+  — a training toolkit for VLA-based Robonix `skill`s: collect teleop data,
+  fine-tune an [OpenVLA-OFT](https://openvla-oft.github.io) policy, and deploy it
+  on a real robotic arm ([AgileX Piper](https://github.com/agilexrobotics/Agilex-College)).
