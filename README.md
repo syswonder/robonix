@@ -18,9 +18,9 @@
 
 <br />
 
-<p align="center">
-  <img src="images/demo_01_readme.gif" alt="Robonix demo: runtime stack in action" width="920" />
-</p>
+
+https://github.com/user-attachments/assets/604b2c7f-3b6d-46be-858b-c52acaf686e3
+
 
 ## Status
 
