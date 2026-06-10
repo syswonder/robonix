@@ -151,7 +151,7 @@ Dive deeper:
 
 ### Services
 
-* [**SLAM Mapping Robonix Service Package**](https://github.com/enkerewpo/ranger_chassis_rbnx)
+* [**SLAM Mapping Robonix Service Package**](https://github.com/enkerewpo/mapping_rbnx)
   - With RTABMAP, FAST-LIO2 integration
 * [**Nav2 Robonix Service Package**](https://github.com/lhw2002426/nav2_wrapper_rbnx)
 
