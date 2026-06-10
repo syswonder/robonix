@@ -19,6 +19,12 @@
 <br />
 
 
+## Status
+
+> \[!WARNING]
+> Robonix is in early development. APIs, IDL layouts, and internal designs
+> may change without notice. No API stability until a versioned release.
+
 ## What it is
 
 Robonix is the **operating system** between a robot's hardware and an embodied
@@ -127,15 +133,36 @@ Dive deeper:
 * [**Namespaces & contracts**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/namespace-and-interfaces.md) — how `robonix/primitive/*` / `robonix/service/*` / `robonix/skill/*` / `robonix/system/*` work
 * [**Interface catalog**](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md) — every primitive + service contract
 
-## Skills
+## Ecosystem
 
-We develop Skill workflows adapted to Robonix, including fine-tuning, post-training and model deployment optimization.
+### Tools
 
-## Status
+* [**Robonix Skill Toolkit**](https://github.com/zhengzihaoPKU/Robonix-Skill-Toolkit)
+  — a training toolkit for VLA-based Robonix skills: collect teleop data,
+  fine-tune an [OpenVLA-OFT](https://openvla-oft.github.io) policy, and deploy it
+  on a real robotic arm ([AgileX Piper](https://github.com/agilexrobotics/Agilex-College)).
 
-> \[!WARNING]
-> Robonix is in early development. APIs, IDL layouts, and internal designs
-> may change without notice. No API stability until a versioned release.
+### Primitives
+
+* [**Agilex Ranger Mini v3 Chassis Robonix Primitive Package**](https://github.com/enkerewpo/ranger_chassis_rbnx)
+* [**Livox MID360 Lidar Robonix Primitive Package**](https://github.com/enkerewpo/mid360_lidar_rbnx)
+* [**Livox MID360 IMU Robonix Primitive Package**](https://github.com/enkerewpo/mid360_imu_rbnx)
+* [**Intel Realsense Camera Robonix Primitive Package**](https://github.com/enkerewpo/realsense_camera_rbnx)
+
+### Services
+
+* [**SLAM Mapping Robonix Service Package**](https://github.com/enkerewpo/ranger_chassis_rbnx)
+  - With RTABMAP, FAST-LIO2 integration
+* [**Nav2 Robonix Service Package**](https://github.com/lhw2002426/nav2_wrapper_rbnx)
+
+### Skills
+
+* [**Environment Explorer Robonix Skill Package**](https://github.com/enkerewpo/explore_rbnx)
+  - A simple room exploration skill `robonix/skill/explore/*`
+
+### Full Robot Deployment Examples
+
+* [**Deploy Manifest for AgileX Ranger Mini Robot at Syswonder Lab**](https://github.com/enkerewpo/ranger_mini_deploy)
 
 ## Contributors
 
@@ -178,10 +205,3 @@ This project follows the [all-contributors](https://github.com/all-contributors/
 ## License
 
 Mulan Permissive Software License, Version 2 (MulanPSL-2.0). See [LICENSE](LICENSE).
-
-## Ecosystem
-
-* [**Robonix Skill Toolkit**](https://github.com/zhengzihaoPKU/Robonix-Skill-Toolkit)
-  — a training toolkit for VLA-based Robonix `skill`s: collect teleop data,
-  fine-tune an [OpenVLA-OFT](https://openvla-oft.github.io) policy, and deploy it
-  on a real robotic arm ([AgileX Piper](https://github.com/agilexrobotics/Agilex-College)).
