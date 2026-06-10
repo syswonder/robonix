@@ -80,6 +80,13 @@ movement, scene & mapping (semantic map + spatial map), navigation, and skill
 execution. Other Linux distributions will likely work but are not regularly
 verified.
 
+**Relationship with ROS 2.** Robonix itself does not depend on ROS 2 — it is
+one of the transports nexus offers, not a requirement of the system. If a
+capability provider needs the ROS 2 communication libraries and the host OS
+has no ROS 2 support, run that provider in a Docker container. Within a single
+Robonix deployment, all ROS 2-based capability providers must use the same
+ROS 2 distribution (Foxy / Humble / Jazzy); **Humble is recommended**.
+
 ## Quickstart
 
 ```bash
