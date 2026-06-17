@@ -510,14 +510,29 @@ class _ProviderBase:
         if self._mcp_app is not None:
             return
         from mcp.server.fastmcp import FastMCP
+        from mcp.server.transport_security import TransportSecuritySettings
 
-        # Bind host="0.0.0.0" explicitly. FastMCP defaults to host="127.0.0.1",
-        # which makes the SDK auto-enable DNS-rebinding protection with
-        # allowed_hosts restricted to localhost. A cross-host consumer (e.g. a
-        # remote executor) dialing this provider by IP is then rejected with
-        # HTTP 421 "Invalid Host header". "0.0.0.0" skips that localhost-only
-        # restriction so the MCP endpoint is reachable cross-host.
-        self._mcp_app = FastMCP(self.id, host="0.0.0.0")
+        # Disable the MCP SDK's DNS-rebinding protection (Host-header allowlist)
+        # explicitly. The SDK auto-enables it with allowed_hosts restricted to
+        # localhost whenever no transport_security is given and the FastMCP host
+        # is loopback (its default). The executor reaches a remote provider by
+        # its LAN/VPN IP, so that Host header fails the localhost allowlist and
+        # the request is rejected with HTTP 421 "Invalid Host header" *after*
+        # the TCP connection is established. This is independent of the `/mcp/`
+        # trailing-slash 307 redirect — even a direct POST /mcp 421s under the
+        # default. DNS-rebinding protection defends a browser attack vector
+        # (a malicious page driving a victim browser at a loopback service);
+        # the executor↔provider call is server-to-server over a trusted
+        # LAN/VPN, so that control does not apply. The listen socket is bound
+        # by `_start_mcp_server` (uvicorn host="0.0.0.0") and is unaffected by
+        # this setting. Endpoint authentication is a separate, wire-wide
+        # hardening item, not introduced here.
+        self._mcp_app = FastMCP(
+            self.id,
+            transport_security=TransportSecuritySettings(
+                enable_dns_rebinding_protection=False
+            ),
+        )
 
     def use_mcp_app(self, app) -> None:
         if self._mcp_app is not None and self._mcp_app is not app:
