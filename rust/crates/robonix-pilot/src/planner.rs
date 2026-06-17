@@ -34,6 +34,11 @@ type CapabilityTargetMap = HashMap<String, CapabilityTarget>;
 const RTDL_SEQUENCE: u32 = 0;
 const RTDL_PARALLEL: u32 = 1;
 const RTDL_DO: u32 = 2;
+const EXECUTOR_EVT_NODE_STATE: u32 = 1;
+const EXECUTOR_STATE_SUCCEEDED: u32 = 2;
+const EXECUTOR_STATE_FAILED: u32 = 3;
+const EXECUTOR_STATE_CANCELED: u32 = 4;
+const EXECUTOR_STATE_TIMEOUT: u32 = 5;
 
 struct DisplayCapability<'a> {
     display_name: String,
@@ -372,44 +377,29 @@ pub async fn run_turn(
 
         let mut results: Vec<CapabilityCallResult> = Vec::new();
 
-        const EX_STARTED: u32 = 0;
-        const EX_RESULT: u32 = 1;
-        #[allow(dead_code)]
-        const EX_COMPLETE: u32 = 2;
-
         while let Some(event) = exec_stream
             .message()
             .await
             .map_err(|e| anyhow::anyhow!("Executor stream recv: {e}"))?
         {
-            match event.event_kind {
-                EX_STARTED => {
-                    if let Some(ref s) = event.started {
-                        log::debug!(
-                            "[pilot] executor started provider='{}' contract='{}'",
-                            s.provider_id,
-                            s.contract_id
-                        );
-                    }
+            if event.event_kind == EXECUTOR_EVT_NODE_STATE
+                && let Some(ns) = event.node_state
+                && is_terminal_executor_state(ns.state)
+            {
+                let r = executor_node_state_to_result(ns);
+                if r.success {
+                    let preview: String = r.output.chars().take(120).collect();
+                    let ellipsis = if r.output.len() > 120 { "…" } else { "" };
+                    log::debug!(
+                        "[pilot] tool result '{}': {}{}",
+                        r.call_id,
+                        preview,
+                        ellipsis
+                    );
+                } else {
+                    log::debug!("[pilot] tool error '{}': {}", r.call_id, r.error);
                 }
-                EX_RESULT => {
-                    if let Some(r) = event.result {
-                        if r.success {
-                            let preview: String = r.output.chars().take(120).collect();
-                            let ellipsis = if r.output.len() > 120 { "…" } else { "" };
-                            log::debug!(
-                                "[pilot] tool result '{}': {}{}",
-                                r.call_id,
-                                preview,
-                                ellipsis
-                            );
-                        } else {
-                            log::debug!("[pilot] tool error '{}': {}", r.call_id, r.error);
-                        }
-                        results.push(r);
-                    }
-                }
-                _ => {}
+                results.push(r);
             }
         }
 
@@ -668,6 +658,33 @@ fn plan_call_count(plan: &Plan) -> usize {
         .iter()
         .filter(|node| node.node_kind == RTDL_DO && node.call.is_some())
         .count()
+}
+
+fn is_terminal_executor_state(state: u32) -> bool {
+    matches!(
+        state,
+        EXECUTOR_STATE_SUCCEEDED
+            | EXECUTOR_STATE_FAILED
+            | EXECUTOR_STATE_CANCELED
+            | EXECUTOR_STATE_TIMEOUT
+    )
+}
+
+/// Convert Executor's terminal RTDL node event back into Pilot's legacy result
+/// shape.
+///
+/// The old turn loop still reasons over `CapabilityCallResult` after the stream
+/// closes. This adapter keeps that loop intact while accepting Executor's newer
+/// `RtdlEvent.node_state` response shape.
+fn executor_node_state_to_result(ns: crate::pb::executor::RtdlNodeState) -> CapabilityCallResult {
+    CapabilityCallResult {
+        call_id: ns.call_id,
+        provider_id: ns.provider_id,
+        contract_id: ns.contract_id,
+        success: ns.success,
+        output: ns.output,
+        error: ns.error,
+    }
 }
 
 fn rtdl_result_to_messages(r: &CapabilityCallResult) -> history::ToolResultHistory {

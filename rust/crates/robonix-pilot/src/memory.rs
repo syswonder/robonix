@@ -8,16 +8,19 @@
 
 use crate::discovery;
 use crate::history::decode_string_output;
-use crate::pb::pilot::{CapabilityCall, Plan, RtdlNode};
+use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode};
 use crate::planner::ExecutorConn;
 use robonix_atlas::client::AtlasClient;
 use tonic::Request;
 use uuid::Uuid;
 
-/// Executor `CapabilityCallEvent.event_kind` for "tool result".
-const EX_RESULT: u32 = 1;
 const RTDL_SEQUENCE: u32 = 0;
 const RTDL_DO: u32 = 2;
+const EXECUTOR_EVT_NODE_STATE: u32 = 1;
+const EXECUTOR_STATE_SUCCEEDED: u32 = 2;
+const EXECUTOR_STATE_FAILED: u32 = 3;
+const EXECUTOR_STATE_CANCELED: u32 = 4;
+const EXECUTOR_STATE_TIMEOUT: u32 = 5;
 
 fn single_call_plan(plan_id: String, session_id: String, round: u32, call: CapabilityCall) -> Plan {
     Plan {
@@ -68,9 +71,11 @@ pub async fn prefetch(
         .ok()?
         .into_inner();
     while let Ok(Some(event)) = stream.message().await {
-        if event.event_kind == EX_RESULT
-            && let Some(r) = event.result
+        if event.event_kind == EXECUTOR_EVT_NODE_STATE
+            && let Some(ns) = event.node_state
+            && is_terminal_executor_state(ns.state)
         {
+            let r = executor_node_state_to_result(ns);
             let out = decode_string_output(&r.output);
             if r.success && !out.contains("No relevant memories") && !out.is_empty() {
                 log::debug!("[pilot] memory prefetch: {out}");
@@ -120,9 +125,11 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
         return;
     };
     while let Ok(Some(event)) = stream.message().await {
-        if event.event_kind == EX_RESULT
-            && let Some(r) = event.result
+        if event.event_kind == EXECUTOR_EVT_NODE_STATE
+            && let Some(ns) = event.node_state
+            && is_terminal_executor_state(ns.state)
         {
+            let r = executor_node_state_to_result(ns);
             let out = decode_string_output(&r.output);
             if r.success {
                 log::debug!("[pilot] compact_memory: {out}");
@@ -131,5 +138,31 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
             }
             return;
         }
+    }
+}
+
+fn is_terminal_executor_state(state: u32) -> bool {
+    matches!(
+        state,
+        EXECUTOR_STATE_SUCCEEDED
+            | EXECUTOR_STATE_FAILED
+            | EXECUTOR_STATE_CANCELED
+            | EXECUTOR_STATE_TIMEOUT
+    )
+}
+
+/// Convert Executor's terminal RTDL node event into the result shape memory
+/// helpers already understand.
+///
+/// Memory prefetch and compaction are intentionally best effort, so this keeps
+/// their old control flow while accepting the newer Executor stream contract.
+fn executor_node_state_to_result(ns: crate::pb::executor::RtdlNodeState) -> CapabilityCallResult {
+    CapabilityCallResult {
+        call_id: ns.call_id,
+        provider_id: ns.provider_id,
+        contract_id: ns.contract_id,
+        success: ns.success,
+        output: ns.output,
+        error: ns.error,
     }
 }
