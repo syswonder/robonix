@@ -17,9 +17,9 @@ system:
     listen: 127.0.0.1:50061
     log: info
   # interaction layer
-  memory: # used by pilot now
-    backend: sqlite
-    log: info
+  # memory: # used by pilot now
+  #   backend: sqlite
+  #   log: info
   pilot:
     listen: 127.0.0.1:50071
     log: debug
