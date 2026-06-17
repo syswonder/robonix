@@ -1,3 +1,5 @@
+# Request cancellation of a navigation goal. Empty run_id targets the most
+# recent navigation call.
 [contract]
 id      = "robonix/service/navigation/cancel"
 version = "1"
