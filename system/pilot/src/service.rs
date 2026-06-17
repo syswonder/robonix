@@ -194,6 +194,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
             };
 
             let mut history = history_arc.lock().await;
+            let history_len_before_turn = history.len();
             if let Err(e) = planner::run_turn(
                 &task,
                 &mut history,
@@ -206,6 +207,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
             )
             .await
             {
+                history.truncate(history_len_before_turn);
                 log::error!("[pilot] turn error for session '{session_id}': {e:#}");
                 let _ = tx.send(Err(Status::internal(e.to_string()))).await;
             }
