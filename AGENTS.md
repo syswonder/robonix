@@ -3,7 +3,7 @@
 This file defines repository-specific rules for AI coding agents working on
 Robonix. Read once at session start; obey throughout.
 
-## Concept and naming stability (v0.1 lock)
+## Concept and naming stability
 
 - `docs/src/developer-guide.md` is the source of truth for concepts and
   terminology. When code and the dev guide disagree, fix the code, not
@@ -19,9 +19,6 @@ Robonix. Read once at session start; obey throughout.
   confirmation in the conversation. If you find yourself about to
   introduce a noun or verb that is not already in the dev guide, **stop
   and ask** before writing code.
-- Wire format (`atlas.proto`, `Driver.srv`, contract TOML schema) and
-  `pylib/robonix-api/` public surface are frozen for v0.1. Changes
-  require an explicit discussion thread, not a patch.
 
 ## Project Structure & Module Organization
 
@@ -76,6 +73,10 @@ tests near the code behind `#[cfg(test)]`. CI currently gates Rust format,
 clippy, build, and `cargo test --workspace --all-targets`. For Python services,
 add package-local smoke tests or scripts when changing runtime behavior, and
 document required environment variables in the service README.
+
+Do not add production-code solely to make tests pass; if tests require
+production changes, those changes must improve real behavior, design clarity,
+diagnostics, or maintainability outside the test.
 
 ## Editing discipline
 
