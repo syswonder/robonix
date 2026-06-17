@@ -1,0 +1,7 @@
+# Send a text-based message into the dialog (bypass ASR).
+string session_id
+string text
+string language
+---
+bool accepted
+string error

@@ -1,0 +1,11 @@
+# TTS one-shot synthesis.
+# Caller sends text; returns synthesized audio.
+# ROS: `lib/system/speech/tts/srv/Synthesize.srv`.
+[contract]
+id      = "robonix/service/speech/tts"
+version = "1"
+kind    = "service"
+idl     = "tts/srv/Synthesize.srv"
+
+[mode]
+type = "rpc"

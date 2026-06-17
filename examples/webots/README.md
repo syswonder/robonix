@@ -64,7 +64,7 @@ Pre-export before `rbnx boot` (or set in shell rc):
 ```bash
 export VLM_BASE_URL=https://api.openai.com/v1   # or your OpenAI-compatible endpoint
 export VLM_API_KEY=sk-...
-export VLM_MODEL=gpt-5.4-mini
+export VLM_MODEL=gpt-5.5
 ```
 
 The deploy manifest references these via `${VLM_*}`.

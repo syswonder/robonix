@@ -1,0 +1,15 @@
+# Voiceprint enrolled-users list (admin).
+# Read-only. Returns the (user_id, user_name) pairs currently in the
+# voiceprint catalog. `rbnx chat` queries this on Ctrl+U open to
+# hydrate the local users modal.
+[contract]
+id      = "robonix/service/voiceprint/list"
+version = "1"
+kind    = "service"
+idl     = "voiceprint/srv/ListEnrolled.srv"
+
+[mode]
+type = "rpc"
+
+[semantics]
+stateless = true

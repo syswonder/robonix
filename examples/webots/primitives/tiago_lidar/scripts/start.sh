@@ -36,6 +36,8 @@ docker exec -i \
   bash -lc "
     set -eo pipefail
     source /opt/ros/humble/setup.bash
+    OVL=/robonix_pkgs/primitives/tiago_lidar/rbnx-build/codegen/ros2_idl/install/setup.bash
+    [ -f \"\$OVL\" ] && source \"\$OVL\" || true
     python3 /robonix_pkgs/primitives/tiago_lidar/scripts/scan_normalize.py \\
         --in $RAW_TOPIC --out $OUT_TOPIC &
     NORM_PID=\$!

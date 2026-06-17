@@ -5,7 +5,7 @@
 <h3 align="center">Robonix — The Embodied AI Operating System</h3>
 
 <p align="center">
-  <em>Rust-native EAIOS. Capability-centric runtime with Atlas (control plane), Pilot (LLM + plan), Executor (dispatch), Liaison (dialogue) — human intent to embodied action.</em>
+  <em>An EAIOS that turns the robot body into a uniform, capability-first runtime — so models, sensors, and actuators plug in once and reuse everywhere.</em>
 </p>
 
 <p align="center">
@@ -19,66 +19,215 @@
 <br />
 
 
+https://github.com/user-attachments/assets/604b2c7f-3b6d-46be-858b-c52acaf686e3
+
+
+## Status
+
+> \[!WARNING]
+> Robonix is in early development. APIs, IDL layouts, and internal designs
+> may change without notice. No API stability until a versioned release.
+
+## What it is
+
+Robonix is the **operating system** between a robot's hardware and an embodied
+LLM/VLM/VLA/WAM brain. It standardises how device drivers, runtime services, user
+skills, and the planner discover and talk to each other; it owns identity,
+configuration, time, transport, logging, health, body model, scene model,
+execution, and safety as named, replaceable components.
+
+| Component                        | Responsibility                                                                          | Status (v0.1)        |
+| -------------------------------- | --------------------------------------------------------------------------------------- | -------------------- |
+| **[atlas](system/atlas/)**       | Capability discovery: the catalog of every registered capability and its contract       | Implemented          |
+| **[chronos](system/chronos/)**   | Unified time source with PTP / IEEE-1588 alignment across sensors and hosts             | Stub                 |
+| **[executor](system/executor/)** | Plan execution: validates Pilot plans and dispatches each step to capability providers  | Implemented          |
+| **[keystone](system/keystone/)** | Body identity, persistent configuration, and policy                                     | Stub                 |
+| **[liaison](system/liaison/)**   | Human–machine interaction gateway: chat, voice, and TUI                                 | Implemented          |
+| **[nexus](system/nexus/)**       | Transport libraries for gRPC / MCP / ROS 2 (a library, not a process)                   | Implemented          |
+| **[pilot](system/pilot/)**       | VLM-driven planning and decision making, memory, and world model                        | Implemented          |
+| **[scene](system/scene/)**       | Live environment estimate: object registry, semantic relations, and occupancy grid     | Implemented          |
+| **[scribe](system/scribe/)**     | Structured, persistent, replayable system journal for audit                             | Stub                 |
+| **[sentinel](system/sentinel/)** | Safety supervision over capability calls                                                | Merged into executor |
+| **[soma](system/soma/)**         | Body model: device topology and primitive abstraction                                   | Stub                 |
+| **[vitals](system/vitals/)**     | Liveness and health aggregation across all running components                           | Partial (via atlas)  |
+
+On top of system, three open categories — provided as
+contracts (61 standard interfaces in `capabilities/`) and reference
+implementations alongside the system:
+
+* **primitive** — one device per package (camera, lidar, chassis, arm). Lives
+  in deployment repos and per-example folders (e.g. `examples/webots/primitives/`).
+* **service** — runtime functionality (mapping, navigation, semantic map,
+  memory, speech, voiceprint). Default reference implementations ship in
+  [`services/`](services/); each can be swapped out by a deployment.
+* **skill** — user-defined reusable execution flows (grasp, place, explore,
+  fold-clothes …). Lives wherever the deploy/integrator wants.
+
+## Supported platforms
+
+| Arch    | OS / Distribution                                  | Status     |
+| ------- | -------------------------------------------------- | ---------- |
+| x86\_64 | Ubuntu 22.04                                       | ✅ Tested  |
+| x86\_64 | Debian 13                                          | ✅ Tested  |
+| arm64   | NVIDIA Jetson — JetPack 6.2 (L4T 36.4.3, Ubuntu 22.04) | ✅ Tested  |
+| x86\_64 / arm64 | Ubuntu 24.04 and newer                     | 🚧 Planned |
+| x86\_64 / arm64 | Arch Linux                                 | 🚧 Planned |
+| arm64   | macOS                                              | 🚧 Planned |
+
+"Tested" means the full Robonix pipeline runs end-to-end on that platform —
+in simulation or on a real robot: voice & interaction, task execution, body
+movement, scene & mapping (semantic map + spatial map), navigation, and skill
+execution. Other Linux distributions will likely work but are not regularly
+verified.
+
+**Relationship with ROS 2.** Robonix itself does not depend on ROS 2 — it is
+one of the transports nexus offers, not a requirement of the system. If a
+capability provider needs the ROS 2 communication libraries and the host OS
+has no ROS 2 support, run that provider in a Docker container. Within a single
+Robonix deployment, all ROS 2-based capability providers must use the same
+ROS 2 distribution (Foxy / Humble / Jazzy); **Humble is recommended**.
+
 ## Quickstart
 
 ```bash
 git clone --recursive https://github.com/syswonder/robonix
-cd robonix/rust
-make install                              # → ~/.cargo/bin (rbnx, robonix-atlas, robonix-pilot, robonix-executor)
-                                          # also runs `rbnx setup` to register this clone as the source tree
+cd robonix
+make install   # builds the Cargo workspace and installs
+               # rbnx + robonix-{atlas,pilot,executor,liaison,codegen}
+               # to ~/.cargo/bin, then registers this clone via `rbnx setup`
 ```
 
 The Webots Tiago example (`examples/webots/`) is the standard end-to-end demo.
-It runs in two terminals: the simulator and Robonix itself.
+Two terminals — the simulator and Robonix itself.
 
 ```bash
-# Terminal (1) — simulation environment (Webots GUI; not a Robonix package — just docker compose)
+# (1) — simulation environment (Webots GUI; not a Robonix package — just docker compose)
 bash examples/webots/sim/start.sh
 
-# Then in another terminal (2) — Robonix stack: system services + Tiago primitives + Nav2 service
+# (2) — Robonix: system services + Tiago primitives + Nav2 + scene
 export VLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
 export VLM_API_KEY=sk-...
-export VLM_MODEL=gpt-5.4-mini
+export VLM_MODEL=gpt-5.5
 cd examples/webots
-rbnx build # might take a while since scene and speech needs some model weights and docker containers downloaded while building
+rbnx build       # first run pulls model weights + docker images, may take a while
 rbnx boot
 ```
 
-Once `rbnx boot` reports the stack is up, in a third terminal:
+Once `rbnx boot` reports the stack is up:
 
 ```bash
-# Terminal (3)
+# (3)
 rbnx caps          # list registered capabilities + interfaces
-rbnx chat          # interactive ratatui chat with the pilot
+rbnx chat          # interactive TUI chat with the pilot
 ```
 
-To tear everything down — Ctrl-C the `rbnx boot` terminal, or from
-any other shell:
+Tear-down:
 
 ```bash
-cd examples/webots && rbnx shutdown      # reads rbnx-boot/state.json,
-                                         # SIGTERMs each component's PGID
-bash sim/stop.sh                         # then stop the Webots container
+cd examples/webots && rbnx shutdown    # reads rbnx-boot/state.json,
+                                       # SIGTERMs each component's PGID
+bash examples/webots/sim/stop.sh       # then stop the Webots container
 ```
 
-Full first-run walkthrough: [**docs/src/getting-started/quickstart.md**](https://github.com/syswonder/robonix-book/blob/main/src/getting-started/quickstart.md).
+Full first-run walkthrough:
+[**docs/src/getting-started/quickstart.md**](https://github.com/syswonder/robonix-book/blob/main/src/getting-started/quickstart.md).
+
+## Repository layout
+
+```
+system/         system components, one directory each
+services/       default reference service implementations (memsearch, voiceprint, speech)
+pylib/          Python SDK (robonix-api on PyPI)
+capabilities/   contract TOMLs + ROS-style IDL tree (capabilities/lib/)
+tools/          dev tooling — rbnx CLI + codegen
+examples/       end-to-end deployments (webots, test_ci)
+docs/           mdBook developer guide (submodule)
+Cargo.toml      workspace for the Rust components (4 in system/, 2 in tools/)
+Makefile        top-level orchestrate (build / install / fmt / check)
+```
+
+`system/<name>/` and `services/<name>/` and `tools/<name>/` are each
+self-contained packages — Rust ones carry their own `Cargo.toml`, Python
+ones their own `pyproject.toml`. There is no top-level `rust/` /
+`python/` split; the runtime role is what determines where a component
+lives, not the implementation language.
 
 ## Architecture
 
-Atlas is the single control plane: every capability provider (`primitive` / `service` / `skill`) calls `RegisterPrimitive` / `RegisterService` / `RegisterSkill` + `DeclareCapability(transport, endpoint, params)` on startup; pilot/executor discover via `Query` and open data-plane connections via `ConnectCapability`. Transports are pluggable — gRPC, MCP, ROS 2 — and the contract TOMLs under `capabilities/` describe the schemas all of them are allowed to carry.
-
-Reasoning lives in **Pilot** (LLM agent loop with persistent execution semantics; CAPABILITY.md per provider is lazy-loaded by the LLM via `read_file`). Capability dispatch lives in **Executor** (capability-call routing + a few in-process builtins for filesystem / shell). User-facing dialogue lives in **Liaison** (audio / NLP front-end + session orchestration; clients talk to Liaison, never to Pilot directly).
-
 Dive deeper:
-- [**Overview**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/overview.md) — control plane, one full request end-to-end
-- [**Crates**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/crates.md) — each binary's role and listening port
-- [**Namespaces & contracts**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/namespace-and-interfaces.md) — how `robonix/primitive/*` and `robonix/service/*` work
-- [**Interface catalog**](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md) — every primitive + service contract
 
-## Status
+* [**Overview**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/overview.md) — control plane, one full request end-to-end
+* [**Namespaces & contracts**](https://github.com/syswonder/robonix-book/blob/main/src/architecture/namespace-and-interfaces.md) — how `robonix/primitive/*` / `robonix/service/*` / `robonix/skill/*` / `robonix/system/*` work
+* [**Interface catalog**](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md) — every primitive + service contract
 
-> [!WARNING]
-> Robonix is in early development. API and interfaces, IDL layouts, internal designs may change without notice. No API stability until a versioned release.
+## Ecosystem
+
+### Tools
+
+* [**Robonix Skill Toolkit**](https://github.com/zhengzihaoPKU/Robonix-Skill-Toolkit)
+  — a training toolkit for VLA-based Robonix skills: collect teleop data,
+  fine-tune an [OpenVLA-OFT](https://openvla-oft.github.io) policy, and deploy it
+  on a real robotic arm ([AgileX Piper](https://github.com/agilexrobotics/Agilex-College)).
+
+### Primitives
+
+* [**Agilex Ranger Mini v3 Chassis Robonix Primitive Package**](https://github.com/enkerewpo/ranger_chassis_rbnx)
+* [**Livox MID360 Lidar Robonix Primitive Package**](https://github.com/enkerewpo/mid360_lidar_rbnx)
+* [**Livox MID360 IMU Robonix Primitive Package**](https://github.com/enkerewpo/mid360_imu_rbnx)
+* [**Intel Realsense Camera Robonix Primitive Package**](https://github.com/enkerewpo/realsense_camera_rbnx)
+
+### Services
+
+* [**SLAM Mapping Robonix Service Package**](https://github.com/enkerewpo/mapping_rbnx)
+  - With RTABMAP, FAST-LIO2 integration
+* [**Nav2 Robonix Service Package**](https://github.com/lhw2002426/nav2_wrapper_rbnx)
+
+### Skills
+
+* [**Environment Explorer Robonix Skill Package**](https://github.com/enkerewpo/explore_rbnx)
+  - A simple room exploration skill `robonix/skill/explore/*`
+
+### Full Robot Deployment Examples
+
+* [**Deploy Manifest for AgileX Ranger Mini Robot at Syswonder Lab**](https://github.com/enkerewpo/ranger_mini_deploy)
+
+## Contributors
+
+[![All Contributors](https://img.shields.io/github/all-contributors/syswonder/robonix?color=ee8449&style=flat-square)](#contributors)
+
+Thanks goes to these wonderful people:
+
+<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
+<!-- prettier-ignore-start -->
+<!-- markdownlint-disable -->
+<table>
+  <tbody>
+    <tr>
+      <td align="center" valign="top" width="20%"><a href="https://github.com/enkerewpo"><img src="https://avatars.githubusercontent.com/u/17263645?v=4?s=80" width="80px;" alt="wheatfox"/><br /><sub><b>wheatfox</b></sub></a><br /><a href="https://github.com/syswonder/robonix/commits?author=enkerewpo" title="Code">💻</a> <a href="#maintenance-enkerewpo" title="Maintenance">🚧</a></td>
+      <td align="center" valign="top" width="20%"><a href="https://github.com/HustWolfzzb"><img src="https://avatars.githubusercontent.com/u/19464597?v=4?s=80" width="80px;" alt="Zhaobo Zhang"/><br /><sub><b>Zhaobo Zhang</b></sub></a><br /><a href="https://github.com/syswonder/robonix/commits?author=HustWolfzzb" title="Code">💻</a></td>
+      <td align="center" valign="top" width="20%"><a href="https://github.com/KouweiLee"><img src="https://avatars.githubusercontent.com/u/98637586?v=4?s=80" width="80px;" alt="Guowei Li"/><br /><sub><b>Guowei Li</b></sub></a><br /><a href="https://github.com/syswonder/robonix/commits?author=KouweiLee" title="Code">💻</a></td>
+      <td align="center" valign="top" width="20%"><a href="https://github.com/ken4647"><img src="https://avatars.githubusercontent.com/u/87317372?v=4?s=80" width="80px;" alt="wuzheng"/><br /><sub><b>wuzheng</b></sub></a><br /><a href="https://github.com/syswonder/robonix/commits?author=ken4647" title="Code">💻</a></td>
+      <td align="center" valign="top" width="20%"><a href="https://github.com/kaileliu"><img src="https://avatars.githubusercontent.com/u/157936297?v=4?s=80" width="80px;" alt="Kaile Liu"/><br /><sub><b>Kaile Liu</b></sub></a><br /><a href="https://github.com/syswonder/robonix/commits?author=kaileliu" title="Code">💻</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="20%"><a href="https://github.com/HeartLinked"><img src="https://avatars.githubusercontent.com/u/78212101?v=4?s=80" width="80px;" alt="Feiyang Li"/><br /><sub><b>Feiyang Li</b></sub></a><br /><a href="https://github.com/syswonder/robonix/commits?author=HeartLinked" title="Code">💻</a></td>
+      <td align="center" valign="top" width="20%"><a href="https://github.com/1mujue"><img src="https://avatars.githubusercontent.com/u/115391890?v=4?s=80" width="80px;" alt="MuJue"/><br /><sub><b>MuJue</b></sub></a><br /><a href="https://github.com/syswonder/robonix/commits?author=1mujue" title="Code">💻</a></td>
+      <td align="center" valign="top" width="20%"><a href="https://github.com/LittleRookie1115"><img src="https://avatars.githubusercontent.com/u/157590849?v=4?s=80" width="80px;" alt="Zhenyu Zhang"/><br /><sub><b>Zhenyu Zhang</b></sub></a><br /><a href="https://github.com/syswonder/robonix/commits?author=LittleRookie1115" title="Code">💻</a></td>
+      <td align="center" valign="top" width="20%"><a href="https://github.com/lhw2002426"><img src="https://avatars.githubusercontent.com/u/75192950?v=4?s=80" width="80px;" alt="lhw2002426"/><br /><sub><b>lhw2002426</b></sub></a><br /><a href="https://github.com/syswonder/robonix/commits?author=lhw2002426" title="Code">💻</a></td>
+      <td align="center" valign="top" width="20%"><a href="https://github.com/zhengzihaoPKU"><img src="https://avatars.githubusercontent.com/u/141690701?v=4?s=80" width="80px;" alt="Zihao Zheng"/><br /><sub><b>Zihao Zheng</b></sub></a><br /><a href="#tool-zhengzihaoPKU" title="Tools">🔧</a> <a href="#data-zhengzihaoPKU" title="Data">🔣</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="20%"><a href="https://github.com/QingFeng34048"><img src="https://avatars.githubusercontent.com/u/202889188?v=4?s=80" width="80px;" alt="qingfeng123"/><br /><sub><b>qingfeng123</b></sub></a><br /><a href="#tool-QingFeng34048" title="Tools">🔧</a> <a href="#data-QingFeng34048" title="Data">🔣</a></td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- markdownlint-restore -->
+<!-- prettier-ignore-end -->
+
+<!-- ALL-CONTRIBUTORS-LIST:END -->
+
+This project follows the [all-contributors](https://github.com/all-contributors/all-contributors) specification. Contributions of any kind welcome!
 
 ## License
 

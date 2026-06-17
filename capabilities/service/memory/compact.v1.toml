@@ -1,0 +1,8 @@
+[contract]
+id      = "robonix/service/memory/compact"
+version = "1"
+kind    = "service"
+idl     = "memory/srv/Compact.srv"
+
+[mode]
+type = "rpc"

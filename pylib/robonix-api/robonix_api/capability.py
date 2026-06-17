@@ -58,7 +58,12 @@ log = logging.getLogger("robonix_api.capability")
 
 def _install_simple_logger() -> None:
     """Replace `rich`-installed RichHandler (from fastmcp / uvicorn) with
-    a plain stderr handler. Idempotent."""
+    a plain stderr handler. Idempotent.
+
+    Called from `_do_bootstrap()` (NOT at module import) so a bare
+    `import robonix_api` does not wipe the host application's logging
+    config — only kicks in when the caller actually decides to run a
+    Primitive / Service / Skill."""
     if getattr(_install_simple_logger, "_done", False):
         return
     root = logging.getLogger()
@@ -75,9 +80,6 @@ def _install_simple_logger() -> None:
     if root.level == logging.NOTSET or root.level > logging.INFO:
         root.setLevel(logging.INFO)
     _install_simple_logger._done = True  # type: ignore[attr-defined]
-
-
-_install_simple_logger()
 
 # Transport-ENUM <-> contract.mode compatibility matrix (best-effort
 # check at declare_capability time).
@@ -500,8 +502,8 @@ class _ProviderBase:
 
         return decorator
 
-    # Back-compat alias (old name was just `mcp`); deprecated but kept
-    # so packages can migrate.
+    # `mcp` is the canonical decorator name (used throughout the dev guide
+    # and all packages); `provides_mcp` is an equivalent long-form alias.
     mcp = provides_mcp
 
     def _ensure_mcp_app(self) -> None:
@@ -551,7 +553,8 @@ class _ProviderBase:
 
         return decorator
 
-    # Back-compat alias.
+    # `grpc` is the canonical decorator name (used throughout the dev guide
+    # and all packages); `provides_grpc` is an equivalent long-form alias.
     grpc = provides_grpc
 
     # -- mode/transport compat check (best-effort) -------------------------
@@ -589,6 +592,13 @@ class _ProviderBase:
         raise NotImplementedError
 
     def _do_bootstrap(self) -> None:
+        # 0. swap the rich-installed RichHandler (if any) for our plain
+        # stderr handler. Deliberately deferred from import time so that
+        # `import robonix_api` is a no-op on the host application's
+        # logging — only kicks in once the caller is actually running a
+        # provider process.
+        _install_simple_logger()
+
         # 1. atlas register
         registered_ok = False
         try:
@@ -710,8 +720,9 @@ class _ProviderBase:
             if self._mcp_handlers:
                 self._declare_mcp_handlers()
 
-        # 5. heartbeat
-        self._heartbeat_thread = ATLAS.start_heartbeat(self.id)
+        # 5. heartbeat — pass the provider's stop Event so the thread
+        # exits on _teardown instead of pinging atlas after TERMINATED.
+        self._heartbeat_thread = ATLAS.start_heartbeat(self.id, stop=self._stopping)
 
         # 6. state promotion: caps WITHOUT a Driver contract (system
         # services with only MCP tools) are fully ready as soon as gRPC

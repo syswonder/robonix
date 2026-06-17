@@ -1,8 +1,0 @@
-[contract]
-id      = "robonix/system/memory/search"
-version = "1"
-kind    = "service"
-idl     = "memory/srv/Search.srv"
-
-[mode]
-type = "rpc"
