@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Author: wheatfox <wheatfox17@icloud.com>
 //
-// gRPC contract handler: RobonixSystemExecutor.Execute(Plan) → stream CapabilityCallEvent.
+// gRPC contract handler: RobonixSystemExecutor.Execute(Plan) → stream RtdlEvent.
 
-use crate::dispatch;
-use crate::exec_wire;
+use crate::dispatch::{async_poll, async_registry};
 use crate::pb::contracts::robonix_system_executor_server::RobonixSystemExecutor;
-use crate::pb::executor::CapabilityCallEvent;
+use crate::pb::executor::RtdlEvent;
 use crate::pb::pilot::{CapabilityCall, Plan};
+use crate::plan_runtime::PlanRuntime;
+use crate::rtdl_wire;
 use robonix_atlas::client::AtlasClient;
 use std::future::Future;
 use std::pin::Pin;
@@ -32,17 +33,22 @@ pub struct ExecutorServiceImpl {
     ///      provider_id, dispatch short-circuits to the in-process builtin
     ///      handlers instead of going through MCP loopback.
     provider_id: String,
+    runtime: PlanRuntime,
 }
 
 impl ExecutorServiceImpl {
     pub fn new(atlas: AtlasClient, provider_id: String) -> Self {
-        Self { atlas, provider_id }
+        Self {
+            atlas,
+            provider_id,
+            runtime: PlanRuntime::default(),
+        }
     }
 }
 
 #[tonic::async_trait]
 impl RobonixSystemExecutor for ExecutorServiceImpl {
-    type ExecuteStream = ReceiverStream<Result<CapabilityCallEvent, Status>>;
+    type ExecuteStream = ReceiverStream<Result<RtdlEvent, Status>>;
 
     async fn execute(
         &self,
@@ -53,20 +59,31 @@ impl RobonixSystemExecutor for ExecutorServiceImpl {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let atlas = self.atlas.clone();
         let provider_id = self.provider_id.clone();
+        let runtime = self.runtime.clone();
 
         tokio::spawn(async move {
             let plan_id = plan.plan_id.clone();
             let plan = Arc::new(plan);
+            runtime.register_plan(&plan_id).await;
+            let _ = tx.send(Ok(rtdl_wire::plan_started(plan_id.clone()))).await;
             let any_failed = execute_node(
                 Arc::clone(&plan),
                 plan.root_index as usize,
                 tx.clone(),
                 atlas,
                 provider_id,
+                runtime.clone(),
             )
             .await;
+            let cancelled = runtime.is_cancelled(&plan_id).await;
+            runtime.complete_plan(&plan_id).await;
 
-            let _ = tx.send(Ok(exec_wire::complete(plan_id, any_failed))).await;
+            let _ = tx
+                .send(Ok(rtdl_wire::plan_complete(
+                    plan_id,
+                    any_failed || cancelled,
+                )))
+                .await;
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
@@ -78,24 +95,36 @@ type ExecuteNodeFuture = Pin<Box<dyn Future<Output = bool> + Send + 'static>>;
 fn execute_node(
     plan: Arc<Plan>,
     node_index: usize,
-    tx: Sender<Result<CapabilityCallEvent, Status>>,
+    tx: Sender<Result<RtdlEvent, Status>>,
     atlas: AtlasClient,
     provider_id: String,
+    runtime: PlanRuntime,
 ) -> ExecuteNodeFuture {
     Box::pin(async move {
+        if runtime.is_cancelled(&plan.plan_id).await {
+            return true;
+        }
         let node = &plan.nodes[node_index];
         match node.node_kind {
             RTDL_SEQUENCE => {
                 let mut any_failed = false;
                 for child in &node.children {
+                    if runtime.is_cancelled(&plan.plan_id).await {
+                        any_failed = true;
+                        break;
+                    }
                     any_failed |= execute_node(
                         Arc::clone(&plan),
                         *child as usize,
                         tx.clone(),
                         atlas.clone(),
                         provider_id.clone(),
+                        runtime.clone(),
                     )
                     .await;
+                    if any_failed {
+                        break;
+                    }
                 }
                 any_failed
             }
@@ -106,6 +135,7 @@ fn execute_node(
                     let child_tx = tx.clone();
                     let child_atlas = atlas.clone();
                     let child_provider_id = provider_id.clone();
+                    let child_runtime = runtime.clone();
                     let child_index = *child as usize;
                     handles.push(tokio::spawn(async move {
                         execute_node(
@@ -114,6 +144,7 @@ fn execute_node(
                             child_tx,
                             child_atlas,
                             child_provider_id,
+                            child_runtime,
                         )
                         .await
                     }));
@@ -135,7 +166,7 @@ fn execute_node(
                     .call
                     .as_ref()
                     .expect("validated do node must contain call");
-                execute_call(call, tx, atlas, provider_id).await
+                execute_call(call, tx, atlas, provider_id, &plan.plan_id, runtime).await
             }
             _ => {
                 log::warn!(
@@ -148,20 +179,24 @@ fn execute_node(
     })
 }
 
-/// Dispatch one RTDL `do` node and stream its started/result events.
+/// Dispatch one RTDL `do` node and stream node_state events.
 async fn execute_call(
     call: &CapabilityCall,
-    tx: Sender<Result<CapabilityCallEvent, Status>>,
-    atlas: AtlasClient,
+    tx: Sender<Result<RtdlEvent, Status>>,
+    mut atlas: AtlasClient,
     provider_id: String,
+    plan_id: &str,
+    runtime: PlanRuntime,
 ) -> bool {
-    // `tokio::sync::mpsc::Sender` is concurrency-safe when cloned (parallel branches).
-    // Outbound events ride the Execute server-stream to the gRPC client (Pilot).
     let _ = tx
-        .send(Ok(exec_wire::started(
+        .send(Ok(rtdl_wire::node_state(
             call.call_id.clone(),
             call.provider_id.clone(),
             call.contract_id.clone(),
+            String::new(),
+            rtdl_wire::STATE_PENDING,
+            String::new(),
+            None,
         )))
         .await;
 
@@ -171,8 +206,40 @@ async fn execute_call(
         call.provider_id,
         call.contract_id,
     );
-    let mut atlas_for_call = atlas.clone();
-    let result = dispatch::dispatch(call, &provider_id, &mut atlas_for_call).await;
+
+    let async_group = if call.provider_id == provider_id {
+        None
+    } else {
+        async_registry::resolve_async_group(&mut atlas, &call.provider_id, &call.contract_id).await
+    };
+
+    let result = if let Some(group) = async_group {
+        async_poll::run_until_terminal(
+            call,
+            &group,
+            &provider_id,
+            &mut atlas,
+            &tx,
+            plan_id,
+            &runtime,
+        )
+        .await
+    } else {
+        let r = crate::dispatch::dispatch(call, &provider_id, &mut atlas, &runtime).await;
+        let state = if r.success {
+            rtdl_wire::STATE_SUCCEEDED
+        } else {
+            rtdl_wire::STATE_FAILED
+        };
+        let _ = tx
+            .send(Ok(rtdl_wire::node_state_from_result(
+                r.clone(),
+                state,
+                String::new(),
+            )))
+            .await;
+        r
+    };
     let failed = !result.success;
 
     if result.success {
@@ -188,7 +255,6 @@ async fn execute_call(
         log::warn!("[executor] '{}' failed: {}", call.contract_id, result.error);
     }
 
-    let _ = tx.send(Ok(exec_wire::result(result))).await;
     failed
 }
 

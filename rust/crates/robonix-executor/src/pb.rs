@@ -6,7 +6,7 @@
 // Used here:
 //   pb::contracts::robonix_system_executor_server          — Stream RPC handler
 //   pb::contracts::robonix_system_executor_list_tools_server — Call RPC handler
-//   pb::executor                                   — CapabilityCallEvent / ListTools_*
+//   pb::executor                                   — RtdlEvent / ListTools_*
 //   pb::pilot                                      — Plan / CapabilityCall / CapabilityCallResult / ToolRouting
 #![allow(
     dead_code,
