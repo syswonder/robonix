@@ -511,7 +511,13 @@ class _ProviderBase:
             return
         from mcp.server.fastmcp import FastMCP
 
-        self._mcp_app = FastMCP(self.id)
+        # Bind host="0.0.0.0" explicitly. FastMCP defaults to host="127.0.0.1",
+        # which makes the SDK auto-enable DNS-rebinding protection with
+        # allowed_hosts restricted to localhost. A cross-host consumer (e.g. a
+        # remote executor) dialing this provider by IP is then rejected with
+        # HTTP 421 "Invalid Host header". "0.0.0.0" skips that localhost-only
+        # restriction so the MCP endpoint is reachable cross-host.
+        self._mcp_app = FastMCP(self.id, host="0.0.0.0")
 
     def use_mcp_app(self, app) -> None:
         if self._mcp_app is not None and self._mcp_app is not app:
