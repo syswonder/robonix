@@ -31,3 +31,6 @@ start: bash scripts/start.sh
 capabilities:
   - name: robonix/system/scene/list_objects
   - name: robonix/system/scene/goal_near
+  - name: robonix/system/scene/get_scene_graph
+  - name: robonix/system/scene/get_object_context
+  - name: robonix/system/scene/list_relations

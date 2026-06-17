@@ -1,0 +1,6 @@
+# Change language mid-session.
+string session_id
+string language           # BCP-47 code
+---
+bool success
+string error

@@ -17,9 +17,6 @@ system:
     listen: 127.0.0.1:50061
     log: info
   # interaction layer
-  # memory: # used by pilot now
-  #   backend: sqlite
-  #   log: info
   pilot:
     listen: 127.0.0.1:50071
     log: debug
@@ -63,6 +60,14 @@ primitive:
 
 # after booted all the primitives, start the services
 service:
+  # memsearch — default reference long-term-memory service for the
+  # agent. Lives at services/memsearch in the robonix tree; pilot
+  # queries it for relevant past context when planning.
+  - name: memory
+    path: ../../services/memsearch
+    config:
+      backend: sqlite
+
   # mapping_rbnx — SLAM service. Listed FIRST because simple_nav
   # depends on `service/map/occupancy_grid` and rbnx-cli currently
   # boots services in manifest order; until the defer-queue lands

@@ -1,0 +1,8 @@
+[contract]
+id      = "robonix/service/memory/save"
+version = "1"
+kind    = "service"
+idl     = "memory/srv/Save.srv"
+
+[mode]
+type = "rpc"

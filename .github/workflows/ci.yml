@@ -8,7 +8,6 @@ on:
     branches: [main, dev, dev/**]
 
 env:
-  RUST_DIR: rust
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -27,21 +26,19 @@ jobs:
 
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ${{ env.RUST_DIR }}
 
       - name: cargo fmt --check
-        run: cd ${{ env.RUST_DIR }} && cargo fmt --all -- --check
+        run: cargo fmt --all -- --check
 
       - name: cargo clippy (lib + bins + tests)
-        run: cd ${{ env.RUST_DIR }} && cargo clippy --workspace --tests -- -D warnings
+        run: cargo clippy --workspace --tests -- -D warnings
 
       - name: cargo build
-        run: cd ${{ env.RUST_DIR }} && cargo build --workspace
+        run: cargo build --workspace
 
       # Unit tests: per-crate #[cfg(test)] mods (atlas registry, pilot helpers, …).
       # System tests: robonix-atlas/tests/end_to_end.rs spawns Atlas on an
       # ephemeral port and drives it through the SDK — exercises RegisterNode /
       # DeclareInterface / QueryNodes / NegotiateChannel end-to-end.
       - name: cargo test --workspace --all-targets
-        run: cd ${{ env.RUST_DIR }} && cargo test --workspace --all-targets
+        run: cargo test --workspace --all-targets

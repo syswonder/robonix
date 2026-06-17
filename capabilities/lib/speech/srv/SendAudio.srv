@@ -1,0 +1,8 @@
+# Inject audio into an active dialog session (for non-streaming input).
+string session_id
+uint8[] audio_data
+string encoding
+uint32 sample_rate_hz
+---
+bool accepted
+string error

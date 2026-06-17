@@ -90,28 +90,37 @@ class _Atlas:
         self._channel: Any = None
         self._stub: Any = None
         self._pb: Any = None
+        # Guards the singleton cold start: heartbeat thread + main thread
+        # race the first declare_capability otherwise (double channel +
+        # leaked grpc.aio polling threads). Double-checked under the lock.
+        self._stub_lock = threading.Lock()
 
     # -- lazy stub bootstrap -------------------------------------------------
 
     def _ensure_stub(self) -> None:
         if self._stub is not None:
             return
-        import grpc
-        # Deployment-side stubs (from `<pkg>/rbnx-build/codegen/proto_gen/`,
-        # injected onto sys.path by codegen.ensure_proto_gen) take priority.
-        # Fall back to the wheel-bundled stubs under `robonix_api._generated/`
-        # for pip-installed users without a monorepo codegen run.
-        try:
-            import atlas_pb2          # type: ignore
-            import atlas_pb2_grpc     # type: ignore
-        except ImportError:
-            from ._generated import atlas_pb2          # type: ignore
-            from ._generated import atlas_pb2_grpc     # type: ignore
-        ep = self._endpoint or os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
-        self._endpoint = ep
-        self._pb = atlas_pb2
-        self._channel = grpc.insecure_channel(ep)
-        self._stub = atlas_pb2_grpc.AtlasStub(self._channel)
+        with self._stub_lock:
+            if self._stub is not None:
+                return
+            import grpc
+            # Deployment-side stubs (from `<pkg>/rbnx-build/codegen/proto_gen/`,
+            # injected onto sys.path by codegen.ensure_proto_gen) take priority.
+            # Fall back to the wheel-bundled stubs under `robonix_api._generated/`
+            # for pip-installed users without a monorepo codegen run.
+            try:
+                import atlas_pb2          # type: ignore
+                import atlas_pb2_grpc     # type: ignore
+            except ImportError:
+                from ._generated import atlas_pb2          # type: ignore
+                from ._generated import atlas_pb2_grpc     # type: ignore
+            ep = self._endpoint or os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
+            self._endpoint = ep
+            self._pb = atlas_pb2
+            channel = grpc.insecure_channel(ep)
+            stub = atlas_pb2_grpc.AtlasStub(channel)
+            self._channel = channel
+            self._stub = stub
 
     @property
     def _wire_pb(self):
@@ -180,13 +189,28 @@ class _Atlas:
         except Exception as e:  # noqa: BLE001
             log.debug("heartbeat(%s): %s", id, e)
 
-    def start_heartbeat(self, id: str, period_s: float = 30.0) -> threading.Thread:
+    def start_heartbeat(
+        self,
+        id: str,
+        period_s: float = 30.0,
+        stop: threading.Event | None = None,
+    ) -> threading.Thread:
         """Background daemon thread that pings Heartbeat every `period_s`
-        seconds. Returns the thread for caller bookkeeping (or to ignore)."""
+        seconds. Returns the thread for caller bookkeeping (or to ignore).
+
+        If `stop` is given, the loop polls it via `stop.wait(period_s)` and
+        exits cleanly when set — providers should pass their teardown
+        Event so the heartbeat thread stops trying to ping atlas after
+        `_set_state(TERMINATED)`. Default `None` keeps the legacy
+        unbounded loop (interpreter-exit relies on daemon=True)."""
         def _loop():
-            while True:
-                time.sleep(period_s)
-                self.heartbeat(id)
+            if stop is None:
+                while True:
+                    time.sleep(period_s)
+                    self.heartbeat(id)
+            else:
+                while not stop.wait(period_s):
+                    self.heartbeat(id)
         t = threading.Thread(target=_loop, name=f"robonix-hb-{id}", daemon=True)
         t.start()
         return t
