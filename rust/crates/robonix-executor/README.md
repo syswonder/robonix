@@ -34,12 +34,60 @@ Important configuration:
 
 Executor interprets `Plan.nodes` from `Plan.root_index`:
 
-- `sequence`: executes child nodes in order. A failed child marks the batch as failed, but later children still run.
-- `parallel`: starts one async task per child and waits for all children. A failed branch does not cancel sibling branches.
+- `sequence`: executes child nodes in order. Stops at the first failed child
+  (fail-fast); later siblings are skipped.
+- `parallel`: starts one async task per child and waits for all children. A
+  failed branch does not cancel sibling branches.
 - `do`: dispatches one `CapabilityCall`.
 
-The Execute stream emits `CapabilityCallEvent.started` and
-`CapabilityCallEvent.result` for each `do` node. In `parallel` branches, result
-events are emitted in completion order, not RTDL order. The final
-`BatchComplete` event contains `any_failed=true` when at least one capability
-call failed.
+Executor keeps an in-process table of active RTDL plans. The builtin
+`cancel_plan` capability can mark a plan as cancelled by `plan_id`; `sequence`
+skips children that have not started yet, `parallel` shares the cancellation
+state across branches, and the target plan still emits `plan_complete` with
+`any_failed=true`.
+
+The Execute stream emits `RtdlEvent` messages:
+
+| `event_kind` | Meaning |
+|--------------|---------|
+| `0` plan_started | Executor began executing the plan |
+| `1` node_state | RTDL node (cap call) state change; terminal states include merged call outcome |
+| `2` plan_complete | Entire plan finished |
+
+In `parallel` branches, result events are emitted in completion order, not RTDL
+order. The final `RtdlPlanComplete` event contains `any_failed=true` when at
+least one capability call failed.
+
+## Async capability polling
+
+When a provider registers a sibling `status` contract in the same namespace
+(e.g. `robonix/service/navigation/status` alongside `navigate`), executor
+detects that per cap call and polls `status` every **2 seconds** until a
+terminal state (`SUCCEEDED`, `FAILED`, `CANCELED`, `TIMEOUT`) is reported.
+
+MCP handler requirements for async caps:
+
+- Initial async cap response JSON must include `run_id`.
+- Status cap response JSON must include `state` (`PENDING`, `RUNNING`, `SUCCEEDED`,
+  `FAILED`, `CANCELED`, `TIMEOUT`, `PAUSED`); optional `detail` for human-readable text.
+  Missing `state` is treated as a failed status response.
+- When `run_id` is omitted on status/cancel requests, handlers should query the
+  most recent run.
+- A `cancel` contract in the same namespace is recommended; its absence logs a
+  warning but does not block execution.
+
+Sync caps (no sibling `status` contract) complete when the initial MCP call
+returns, as before.
+
+## Builtin capabilities
+
+Executor declares builtin MCP capabilities under
+`robonix/system/executor/builtin/*`. They execute in-process when Pilot routes a
+`do` node back to the Executor provider id.
+
+- `read_file`, `write_file`, `patch_file`, `list_dir`, `run_command`: workspace
+  file and shell helpers.
+- `cancel_plan`: best-effort cancellation for an in-flight RTDL plan. Args:
+  `plan_id` (required) and `wait_ms` (optional, default 5000). Async capability
+  calls with sibling `cancel` contracts receive cancel requests; synchronous
+  calls already in progress are allowed to return naturally.

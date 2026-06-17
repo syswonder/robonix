@@ -4,8 +4,8 @@
 // robonix-executor — capability-call dispatch runtime.
 // On startup executor:
 //   1. Connects to atlas, registers as `com.robonix.system.executor`.
-//   2. Declares its gRPC Execute capability (Plan → CapabilityCallEvent stream).
-//   3. Declares 5 built-in capabilities under `robonix/system/executor/builtin/<op>`
+//   2. Declares its gRPC Execute capability (Plan → RtdlEvent stream).
+//   3. Declares built-in capabilities under `robonix/system/executor/builtin/<op>`
 //      so pilot's atlas-driven discovery surfaces them to the LLM as plain
 //      capabilities. Calls hitting these contracts short-circuit to in-process
 //      handlers in `dispatch::builtin` — no MCP loopback.
@@ -14,8 +14,9 @@
 
 mod config;
 mod dispatch;
-mod exec_wire;
 mod pb;
+mod plan_runtime;
+mod rtdl_wire;
 mod service;
 
 use anyhow::{Context, Result};
