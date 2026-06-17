@@ -50,7 +50,8 @@ pub struct VlmConfig {
 #[derive(Parser, Debug)]
 #[command(name = "robonix-pilot", about = "Robonix Pilot — VLM planner")]
 pub struct Args {
-    /// Atlas control-plane endpoint.
+    /// Atlas control-plane endpoint. Also reads `ROBONIX_ATLAS` (the var rbnx /
+    /// the Python API / liaison use) as an alias; see `env_atlas`.
     #[arg(long, env = "ROBONIX_ATLAS_ENDPOINT")]
     pub atlas: Option<String>,
 
@@ -126,6 +127,7 @@ impl PilotConfig {
 
         let atlas_endpoint = args
             .atlas
+            .or_else(env_atlas)
             .or(file_cfg.atlas_endpoint)
             .unwrap_or_else(|| DEFAULT_ATLAS_ENDPOINT.to_string());
         let listen = args
@@ -174,6 +176,23 @@ impl PilotConfig {
             },
         })
     }
+}
+
+/// Read the `ROBONIX_ATLAS` env var as an atlas-endpoint alias.
+///
+/// rbnx, the Python API, and liaison all configure the atlas endpoint via
+/// `ROBONIX_ATLAS`, while executor/pilot historically only honored
+/// `ROBONIX_ATLAS_ENDPOINT` (the clap `env`). Accepting `ROBONIX_ATLAS` here as
+/// well means a single env var configures every component. Without it, setting
+/// only `ROBONIX_ATLAS` left pilot silently falling back to
+/// `DEFAULT_ATLAS_ENDPOINT` (127.0.0.1:50051) — it would then dial the wrong
+/// atlas and log 127.0.0.1 even after the operator "changed" the endpoint.
+/// Empty values are ignored so an exported-but-blank var doesn't shadow later
+/// sources.
+fn env_atlas() -> Option<String> {
+    std::env::var("ROBONIX_ATLAS")
+        .ok()
+        .filter(|v| !v.is_empty())
 }
 
 fn load_yaml(path: &Path) -> Result<FileConfig> {
