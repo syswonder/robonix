@@ -4,7 +4,7 @@
 // `RobonixSystemPilot` gRPC handler (contract `robonix/system/pilot`).
 
 use crate::pb::contracts::{
-    robonix_system_executor_client::RobonixSystemExecutorClient,
+    robonix_system_executor_execute_client::RobonixSystemExecutorExecuteClient,
     robonix_system_pilot_server::RobonixSystemPilot,
 };
 use crate::pb::pilot::{BatchResult, PilotEvent, Plan, SessionStatusEvent, Task};
@@ -223,12 +223,15 @@ async fn build_executor_conn(
     mut atlas: AtlasClient,
     consumer_id: &str,
 ) -> anyhow::Result<ExecutorConn> {
-    let (_, _, exec_ch) =
-        atlas_client::connect_to_capability(&mut atlas, consumer_id, "robonix/system/executor")
-            .await
-            .context("connect_to_capability robonix/system/executor")?;
+    let (_, _, exec_ch) = atlas_client::connect_to_capability(
+        &mut atlas,
+        consumer_id,
+        "robonix/system/executor/execute",
+    )
+    .await
+    .context("connect_to_capability robonix/system/executor/execute")?;
     Ok(ExecutorConn {
-        graph: RobonixSystemExecutorClient::new(exec_ch),
+        graph: RobonixSystemExecutorExecuteClient::new(exec_ch),
     })
 }
 

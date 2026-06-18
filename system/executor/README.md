@@ -46,17 +46,26 @@ skips children that have not started yet, `parallel` shares the cancellation
 state across branches, and the target plan still emits `plan_complete` with
 `any_failed=true`.
 
+Executor declares two gRPC contracts:
+
+- `robonix/system/executor/execute`: Pilot submits one `Plan` and receives an
+  `RtdlEvent` stream.
+- `robonix/system/executor/cancel_all_plans`: cancels every active RTDL plan.
+
 The Execute stream emits `RtdlEvent` messages:
 
 | `event_kind` | Meaning |
 |--------------|---------|
 | `0` plan_started | Executor began executing the plan |
-| `1` node_state | RTDL node (cap call) state change; terminal states include merged call outcome |
+| `1` node_state | RTDL node state change with `plan_id`, `node_index`, `node_kind`, `state`, `operator_detail`, and optional `leaf_result` |
 | `2` plan_complete | Entire plan finished |
 
 In `parallel` branches, result events are emitted in completion order, not RTDL
 order. The final `RtdlPlanComplete` event contains `any_failed=true` when at
-least one capability call failed.
+least one capability call failed. For `do` nodes (leaf RTDL node ), terminal events carry the
+concrete `pilot/CapabilityCallResult` in `RtdlNodeState.leaf_result` and leave
+`operator_detail` empty. Other non-leaf RTDL node kinds use `operator_detail` for
+operator-specific text.
 
 ## Async capability polling
 

@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Author: wheatfox <wheatfox17@icloud.com>
 //
-// gRPC contract handler: RobonixSystemExecutor.Execute(Plan) → stream RtdlEvent.
+// gRPC contract handlers for executor plan execution and cancellation.
 
 use crate::dispatch::{async_poll, async_registry};
-use crate::pb::contracts::robonix_system_executor_server::RobonixSystemExecutor;
-use crate::pb::executor::RtdlEvent;
+use crate::pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlans;
+use crate::pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecute;
+use crate::pb::executor::{CancelAllResponse, RtdlEvent};
 use crate::pb::pilot::{CapabilityCall, Plan};
 use crate::plan_runtime::PlanRuntime;
-use crate::rtdl_wire;
+use crate::rtdl_wire::{self, NodeEventContext};
 use robonix_atlas::client::AtlasClient;
 use std::future::Future;
 use std::pin::Pin;
@@ -47,7 +48,7 @@ impl ExecutorServiceImpl {
 }
 
 #[tonic::async_trait]
-impl RobonixSystemExecutor for ExecutorServiceImpl {
+impl RobonixSystemExecutorExecute for ExecutorServiceImpl {
     type ExecuteStream = ReceiverStream<Result<RtdlEvent, Status>>;
 
     async fn execute(
@@ -166,7 +167,19 @@ fn execute_node(
                     .call
                     .as_ref()
                     .expect("validated do node must contain call");
-                execute_call(call, tx, atlas, provider_id, &plan.plan_id, runtime).await
+                execute_call(
+                    call,
+                    NodeEventContext {
+                        plan_id: plan.plan_id.clone(),
+                        node_index: node_index as u32,
+                        node_kind: node.node_kind,
+                    },
+                    tx,
+                    atlas,
+                    provider_id,
+                    runtime,
+                )
+                .await
             }
             _ => {
                 log::warn!(
@@ -182,23 +195,12 @@ fn execute_node(
 /// Dispatch one RTDL `do` node and stream node_state events.
 async fn execute_call(
     call: &CapabilityCall,
+    node: NodeEventContext,
     tx: Sender<Result<RtdlEvent, Status>>,
     mut atlas: AtlasClient,
     provider_id: String,
-    plan_id: &str,
     runtime: PlanRuntime,
 ) -> bool {
-    let _ = tx
-        .send(Ok(rtdl_wire::node_state(
-            call.call_id.clone(),
-            call.provider_id.clone(),
-            call.contract_id.clone(),
-            String::new(),
-            rtdl_wire::STATE_PENDING,
-            String::new(),
-            None,
-        )))
-        .await;
 
     log::info!(
         "[executor] dispatching call_id={} provider='{}' contract='{}'",
@@ -214,16 +216,8 @@ async fn execute_call(
     };
 
     let result = if let Some(group) = async_group {
-        async_poll::run_until_terminal(
-            call,
-            &group,
-            &provider_id,
-            &mut atlas,
-            &tx,
-            plan_id,
-            &runtime,
-        )
-        .await
+        async_poll::run_until_terminal(call, &group, &provider_id, &mut atlas, &tx, &node, &runtime)
+            .await
     } else {
         let r = crate::dispatch::dispatch(call, &provider_id, &mut atlas, &runtime).await;
         let state = if r.success {
@@ -233,9 +227,12 @@ async fn execute_call(
         };
         let _ = tx
             .send(Ok(rtdl_wire::node_state_from_result(
+                &node.plan_id,
+                node.node_index,
+                node.node_kind,
+                call,
                 r.clone(),
                 state,
-                String::new(),
             )))
             .await;
         r
@@ -256,6 +253,21 @@ async fn execute_call(
     }
 
     failed
+}
+
+#[tonic::async_trait]
+impl RobonixSystemExecutorCancelAllPlans for ExecutorServiceImpl {
+    async fn cancel_all(
+        &self,
+        _request: Request<crate::pb::executor::CancelAllRequest>,
+    ) -> Result<Response<CancelAllResponse>, Status> {
+        let mut atlas = self.atlas.clone();
+        let success = self
+            .runtime
+            .cancel_all_plans(&self.provider_id, &mut atlas)
+            .await;
+        Ok(Response::new(CancelAllResponse { success }))
+    }
 }
 
 /// Validate Plan arena shape before spawning execution work.

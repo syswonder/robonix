@@ -1,11 +1,9 @@
 # state: 0=PENDING 1=RUNNING 2=SUCCEEDED 3=FAILED 4=CANCELED 5=TIMEOUT 6=PAUSED
-string call_id
-string provider_id
-string contract_id
-string run_id
+string plan_id
+uint32 node_index
+uint32 node_kind
 uint32 state
-string detail
-# Terminal states carry the merged capability call outcome.
-bool success
-string output
-string error
+# rtdl non-leaf node result, like `Parallel`, `Sequence`
+string operator_detail 
+# rtdl leaf node result
+pilot/CapabilityCallResult leaf_result

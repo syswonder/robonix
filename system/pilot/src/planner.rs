@@ -4,7 +4,7 @@
 use crate::discovery::{self, llm_name};
 use crate::history;
 use crate::memory;
-use crate::pb::contracts::robonix_system_executor_client::RobonixSystemExecutorClient;
+use crate::pb::contracts::robonix_system_executor_execute_client::RobonixSystemExecutorExecuteClient;
 use crate::pb::pilot::{
     BatchResult, CapabilityCall, CapabilityCallResult, PilotEvent, Plan, RtdlNode,
     SessionStatusEvent, Task,
@@ -25,7 +25,7 @@ use uuid::Uuid;
 /// gRPC client for executor's plan-dispatch contract. Pilot only ever calls
 /// `Execute(Plan)` — discovery happens directly against atlas now.
 pub struct ExecutorConn {
-    pub graph: RobonixSystemExecutorClient<Channel>,
+    pub graph: RobonixSystemExecutorExecuteClient<Channel>,
 }
 
 type CapabilityTarget = (String, String);
@@ -368,6 +368,7 @@ pub async fn run_turn(
             .await;
 
         // ── 6. Dispatch to Executor ───────────────────────────────────────────
+        let submitted_plan = graph.clone();
         let mut exec_stream = executor
             .graph
             .execute(Request::new(graph))
@@ -386,10 +387,10 @@ pub async fn run_turn(
                 && let Some(ns) = event.node_state
                 && is_terminal_executor_state(ns.state)
             {
-                let r = executor_node_state_to_result(ns);
+                let r = executor_node_state_to_result(&submitted_plan, ns);
                 if r.success {
                     let preview: String = r.output.chars().take(120).collect();
-                    let ellipsis = if r.output.len() > 120 { "…" } else { "" };
+                    let ellipsis = if r.output.len() > 120 { "..." } else { "" };
                     log::debug!(
                         "[pilot] tool result '{}': {}{}",
                         r.call_id,
@@ -670,20 +671,34 @@ fn is_terminal_executor_state(state: u32) -> bool {
     )
 }
 
-/// Convert Executor's terminal RTDL node event back into Pilot's legacy result
-/// shape.
-///
-/// The old turn loop still reasons over `CapabilityCallResult` after the stream
-/// closes. This adapter keeps that loop intact while accepting Executor's newer
-/// `RtdlEvent.node_state` response shape.
-fn executor_node_state_to_result(ns: crate::pb::executor::RtdlNodeState) -> CapabilityCallResult {
+/// Convert an Executor terminal node event into the result record shape exposed
+/// on `BatchResult`. `do` nodes carry the concrete capability call result in
+/// the event; the plan lookup is only a fallback for malformed or missing results.
+fn executor_node_state_to_result(
+    plan: &Plan,
+    ns: crate::pb::executor::RtdlNodeState,
+) -> CapabilityCallResult {
+    if let Some(result) = ns.leaf_result {
+        return result;
+    }
+    let call = plan
+        .nodes
+        .get(ns.node_index as usize)
+        .and_then(|node| node.call.as_ref());
+    let state = ns.state;
+    let success = state == EXECUTOR_STATE_SUCCEEDED;
+    let operator_detail = ns.operator_detail;
     CapabilityCallResult {
-        call_id: ns.call_id,
-        provider_id: ns.provider_id,
-        contract_id: ns.contract_id,
-        success: ns.success,
-        output: ns.output,
-        error: ns.error,
+        call_id: call.map(|c| c.call_id.clone()).unwrap_or_default(),
+        provider_id: call.map(|c| c.provider_id.clone()).unwrap_or_default(),
+        contract_id: call.map(|c| c.contract_id.clone()).unwrap_or_default(),
+        success,
+        output: operator_detail.clone(),
+        error: if success {
+            String::new()
+        } else {
+            operator_detail
+        },
     }
 }
 
@@ -691,8 +706,8 @@ fn rtdl_result_to_messages(r: &CapabilityCallResult) -> history::ToolResultHisto
     if !r.success {
         return history::ToolResultHistory {
             tool_messages: vec![Message::user(&format!(
-                "Executor feedback for the current task (not a new user request): capability call '{}' ({}) failed: {}",
-                r.call_id, r.contract_id, r.error
+                "Executor feedback for the current task (not a new user request): {}",
+                r.output
             ))],
             followup_messages: vec![],
         };
@@ -705,8 +720,8 @@ fn rtdl_result_to_messages(r: &CapabilityCallResult) -> history::ToolResultHisto
         .map(|msg| {
             let content = msg.content.unwrap_or_default();
             Message::user(&format!(
-                "Executor feedback for the current task (not a new user request): capability call '{}' ({}) succeeded: {}",
-                r.call_id, r.contract_id, content
+                "Executor feedback for the current task (not a new user request): {}",
+                content
             ))
         })
         .collect();

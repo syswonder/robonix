@@ -8,7 +8,8 @@ use crate::pb::executor::RtdlEvent;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
 use crate::plan_runtime::{PlanRuntime, RunningAsyncCall};
 use crate::rtdl_wire::{
-    self, STATE_CANCELED, STATE_FAILED, STATE_RUNNING, STATE_SUCCEEDED, STATE_TIMEOUT,
+    self, NodeEventContext, STATE_CANCELED, STATE_FAILED, STATE_RUNNING, STATE_SUCCEEDED,
+    STATE_TIMEOUT,
 };
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
@@ -24,16 +25,19 @@ pub async fn run_until_terminal(
     self_provider_id: &str,
     atlas: &mut AtlasClient,
     tx: &Sender<Result<RtdlEvent, tonic::Status>>,
-    plan_id: &str,
+    node: &NodeEventContext,
     runtime: &PlanRuntime,
 ) -> CapabilityCallResult {
     let initial = dispatch::dispatch(call, self_provider_id, atlas, runtime).await;
     if !initial.success {
         let _ = tx
             .send(Ok(rtdl_wire::node_state_from_result(
+                &node.plan_id,
+                node.node_index,
+                node.node_kind,
+                call,
                 initial.clone(),
                 STATE_FAILED,
-                String::new(),
             )))
             .await;
         return initial;
@@ -43,7 +47,7 @@ pub async fn run_until_terminal(
     if let Some(cancel_contract) = &group.cancel_contract {
         let accepted = runtime
             .register_or_cancel_async_call(
-                plan_id,
+                &node.plan_id,
                 RunningAsyncCall {
                     call_id: call.call_id.clone(),
                     provider_id: call.provider_id.clone(),
@@ -58,43 +62,36 @@ pub async fn run_until_terminal(
             let result = canceled_result(call, "plan was cancelled before async polling began");
             let _ = tx
                 .send(Ok(rtdl_wire::node_state_from_result(
+                    &node.plan_id,
+                    node.node_index,
+                    node.node_kind,
+                    call,
                     result.clone(),
                     STATE_CANCELED,
-                    run_id,
                 )))
                 .await;
             return result;
         }
     }
 
-    let _ = tx
-        .send(Ok(rtdl_wire::node_state(
-            call.call_id.clone(),
-            call.provider_id.clone(),
-            call.contract_id.clone(),
-            run_id.clone(),
-            STATE_RUNNING,
-            initial.output.clone(),
-            None,
-        )))
-        .await;
-    let mut last_state = STATE_RUNNING;
-
     let mut interval = time::interval(POLL_INTERVAL);
     interval.tick().await;
 
     loop {
         interval.tick().await;
-        if runtime.is_cancelled(plan_id).await {
+        if runtime.is_cancelled(&node.plan_id).await {
             runtime
-                .cancel_async_call_for_plan(plan_id, &call.call_id, self_provider_id, atlas)
+                .cancel_async_call_for_plan(&node.plan_id, &call.call_id, self_provider_id, atlas)
                 .await;
             let result = canceled_result(call, "plan was cancelled");
             let _ = tx
                 .send(Ok(rtdl_wire::node_state_from_result(
+                    &node.plan_id,
+                    node.node_index,
+                    node.node_kind,
+                    call,
                     result.clone(),
                     STATE_CANCELED,
-                    run_id,
                 )))
                 .await;
             return result;
@@ -119,32 +116,23 @@ pub async fn run_until_terminal(
         };
 
         let (state, detail) = parse_status_json(&status_out);
-        if state != last_state {
-            if rtdl_wire::is_terminal_state(state) {
-                let result = terminal_result(call, state, &detail, &status_out);
-                runtime.unregister_async_call(plan_id, &call.call_id).await;
-                let _ = tx
-                    .send(Ok(rtdl_wire::node_state_from_result(
-                        result.clone(),
-                        state,
-                        run_id.clone(),
-                    )))
-                    .await;
-                return result;
-            }
+        if rtdl_wire::is_terminal_state(state) {
+            let result = terminal_result(call, state, &detail, &status_out);
+            runtime
+                .unregister_async_call(&node.plan_id, &call.call_id)
+                .await;
             let _ = tx
-                .send(Ok(rtdl_wire::node_state(
-                    call.call_id.clone(),
-                    call.provider_id.clone(),
-                    call.contract_id.clone(),
-                    run_id.clone(),
+                .send(Ok(rtdl_wire::node_state_from_result(
+                    &node.plan_id,
+                    node.node_index,
+                    node.node_kind,
+                    call,
+                    result.clone(),
                     state,
-                    detail.clone(),
-                    None,
                 )))
                 .await;
-            last_state = state;
-        }
+            return result;
+        }    
     }
 }
 
