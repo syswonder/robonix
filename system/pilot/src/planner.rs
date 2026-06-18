@@ -322,7 +322,7 @@ pub async fn run_turn(
                     );
                     let plan_id = Uuid::new_v4().to_string();
                     let graph = empty_sequence_plan(plan_id.clone(), session_id.clone(), round);
-                    break (rtdl_recovery_final_text(&e), graph, plan_id);
+                    break (rtdl_recovery_final_text(), graph, plan_id);
                 }
             };
 
@@ -357,7 +357,7 @@ pub async fn run_turn(
                     );
                     let plan_id = Uuid::new_v4().to_string();
                     let graph = empty_sequence_plan(plan_id.clone(), session_id.clone(), round);
-                    break (rtdl_recovery_final_text(&e), graph, plan_id);
+                    break (rtdl_recovery_final_text(), graph, plan_id);
                 }
             }
         };
@@ -570,8 +570,8 @@ fn build_rtdl_retry_prompt(
         "Your previous RTDL response could not be parsed or expanded by Pilot.\n\
          Error: {err:#}\n\
          Previous response preview: {}\n\n\
-         Retry the same user request exactly once. The previous `cap` value is invalid; \
-         do not repeat it. Return only a JSON object with exactly \
+         Fix the RTDL error and retry the same user request exactly once. If the error \
+         mentions an unknown capability, do not repeat that capability. Return only a JSON object with exactly \
          `content` and `rtdl`. Use only capability_name values from this list; do not invent \
          provider names, method names, or aliases:\n",
         raw_preview(raw_content)
@@ -667,10 +667,9 @@ fn empty_sequence_plan(plan_id: String, session_id: String, round: u32) -> Plan 
     }
 }
 
-fn rtdl_recovery_final_text(err: &anyhow::Error) -> String {
-    format!(
-        "I could not safely continue because the planner produced an invalid capability call after retrying once. {err:#}"
-    )
+fn rtdl_recovery_final_text() -> String {
+    "I couldn't produce a valid robot plan after retrying once. Please try again or rephrase the request."
+        .to_string()
 }
 
 fn expand_rtdl_node(
@@ -880,8 +879,9 @@ complete. Concretely:
 #[cfg(test)]
 mod tests {
     use super::{
-        CapabilityTargetMap, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, expand_rtdl_to_plan,
-        parse_rtdl_assistant_response, skip_memory_prefetch, task_is_session_end,
+        CapabilityTargetMap, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, build_rtdl_retry_prompt,
+        expand_rtdl_to_plan, parse_rtdl_assistant_response, rtdl_recovery_final_text,
+        skip_memory_prefetch, task_is_session_end,
     };
     use crate::pb::pilot::Task;
     use serde_json::json;
@@ -1060,6 +1060,27 @@ mod tests {
         assert_eq!(plan.nodes.len(), 1);
         assert_eq!(plan.nodes[0].node_kind, RTDL_SEQUENCE);
         assert!(plan.nodes[0].children.is_empty());
+    }
+
+    #[test]
+    fn rtdl_retry_prompt_does_not_assume_cap_error() {
+        let err = anyhow::anyhow!("assistant response must be a JSON object");
+        let prompt = build_rtdl_retry_prompt(&err, "not json", &[]);
+
+        assert!(prompt.contains("could not be parsed or expanded"));
+        assert!(prompt.contains("Fix the RTDL error"));
+        assert!(prompt.contains("If the error mentions an unknown capability"));
+        assert!(!prompt.contains("previous `cap` value is invalid"));
+    }
+
+    #[test]
+    fn rtdl_recovery_final_text_hides_internal_error() {
+        let text = rtdl_recovery_final_text();
+
+        assert!(text.contains("valid robot plan"));
+        assert!(!text.contains("expand RTDL"));
+        assert!(!text.contains("capability call"));
+        assert!(!text.contains("assistant content preview"));
     }
 
     #[test]
