@@ -60,8 +60,10 @@ Limit to at most 12 detections, prioritising larger / closer items.
 @dataclass
 class _CamIntrinsics:
     """Pinhole intrinsics. Defaults match Webots Tiago's head_front_camera
-    at 640×480 (60° HFOV). Real cameras supply these via /camera/info;
-    v1 doesn't subscribe to it — we just default and document."""
+    at 640×480 (60° HFOV). The metric ConceptGraphs path sources real K
+    from the `primitive/camera/intrinsics` contract (and waits when it is
+    absent rather than using these defaults). These defaults remain only
+    as the VLM (approximate) path's coarse fallback."""
     width: int = 640
     height: int = 480
     fx: float = 554.0
