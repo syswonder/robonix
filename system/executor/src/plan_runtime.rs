@@ -38,6 +38,10 @@ struct CancelSnapshot {
     async_calls: Vec<RunningAsyncCall>,
 }
 
+struct CancelAllSnapshot {
+    async_calls: Vec<RunningAsyncCall>,
+}
+
 #[derive(Deserialize)]
 struct CancelPlanArgs {
     plan_id: String,
@@ -182,14 +186,16 @@ impl PlanRuntime {
                 .await
                 .is_ok();
 
-        let output = serde_json::json!({
-            "plan_id": args.plan_id,
-            "cancelled": true,
-            "completed": completed,
-            "async_cancel_attempts": snapshot.async_calls.len(),
-            "async_cancel_errors": cancel_errors,
-        })
-        .to_string();
+        let mut output = format!(
+            "Cancellation was requested for RTDL plan '{}'; cancelled=true, completed={}, async_cancel_attempts={}.",
+            args.plan_id,
+            completed,
+            snapshot.async_calls.len()
+        );
+        if !cancel_errors.is_empty() {
+            output.push_str(" Some async cancel requests failed: ");
+            output.push_str(&cancel_errors.join("; "));
+        }
         CapabilityCallResult {
             call_id: call.call_id.clone(),
             provider_id: call.provider_id.clone(),
@@ -198,6 +204,20 @@ impl PlanRuntime {
             output,
             error: String::new(),
         }
+    }
+
+    /// Cancel every active plan and make best-effort cancel calls for running async work.
+    pub async fn cancel_all_plans(&self, self_provider_id: &str, atlas: &mut AtlasClient) -> bool {
+        let snapshot = self.begin_cancel_all().await;
+        for running in &snapshot.async_calls {
+            if let Err(e) = cancel_async_call(self_provider_id, running, atlas).await {
+                log::warn!(
+                    "[executor] cancel_all_plans async cancel failed for {}: {e:#}",
+                    running.call_id
+                );
+            }
+        }
+        true
     }
 
     /// Mark a plan cancelled and return the state needed by `cancel_plan`.
@@ -219,6 +239,19 @@ impl PlanRuntime {
                 .map(|(_, running)| running)
                 .collect(),
         })
+    }
+
+    /// Mark every active plan cancelled and drain their async cancel sets into
+    /// one snapshot. Provider cancel calls happen after the runtime lock is
+    /// released by `cancel_all_plans`.
+    async fn begin_cancel_all(&self) -> CancelAllSnapshot {
+        let mut plans = self.inner.lock().await;
+        let mut async_calls = Vec::new();
+        for run in plans.values_mut() {
+            run.cancelled = true;
+            async_calls.extend(run.running_async.drain().map(|(_, running)| running));
+        }
+        CancelAllSnapshot { async_calls }
     }
 }
 
@@ -314,6 +347,18 @@ mod tests {
         assert_eq!(snapshot.async_calls.len(), 1);
         let plans = runtime.inner.lock().await;
         assert!(plans.get("p").unwrap().running_async.is_empty());
+    }
+
+    #[tokio::test]
+    async fn begin_cancel_all_marks_every_plan() {
+        let runtime = PlanRuntime::default();
+        runtime.register_plan("p1").await;
+        runtime.register_plan("p2").await;
+        let snapshot = runtime.begin_cancel_all().await;
+
+        assert!(snapshot.async_calls.is_empty());
+        assert!(runtime.is_cancelled("p1").await);
+        assert!(runtime.is_cancelled("p2").await);
     }
 
     fn running_call(call_id: &str) -> RunningAsyncCall {

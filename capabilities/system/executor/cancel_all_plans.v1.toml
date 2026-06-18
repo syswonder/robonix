@@ -1,0 +1,8 @@
+[contract]
+id      = "robonix/system/executor/cancel_all_plans"
+version = "1"
+kind    = "service"
+idl     = "executor/srv/CancelAll.srv"
+
+[mode]
+type = "rpc"

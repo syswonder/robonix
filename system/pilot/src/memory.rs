@@ -7,7 +7,6 @@
 // is. Missing providers are silently tolerated — memory is never load-bearing.
 
 use crate::discovery;
-use crate::history::decode_string_output;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode};
 use crate::planner::ExecutorConn;
 use robonix_atlas::client::AtlasClient;
@@ -64,6 +63,7 @@ pub async fn prefetch(
         },
     );
 
+    let submitted_plan = plan.clone();
     let mut stream = executor
         .graph
         .execute(Request::new(plan))
@@ -75,8 +75,8 @@ pub async fn prefetch(
             && let Some(ns) = event.node_state
             && is_terminal_executor_state(ns.state)
         {
-            let r = executor_node_state_to_result(ns);
-            let out = decode_string_output(&r.output);
+            let r = executor_node_state_to_result(&submitted_plan, ns);
+            let out = r.output;
             if r.success && !out.contains("No relevant memories") && !out.is_empty() {
                 log::debug!("[pilot] memory prefetch: {out}");
                 return Some(out);
@@ -116,6 +116,7 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
         },
     );
 
+    let submitted_plan = plan.clone();
     let Ok(mut stream) = executor
         .graph
         .execute(Request::new(plan))
@@ -129,8 +130,8 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
             && let Some(ns) = event.node_state
             && is_terminal_executor_state(ns.state)
         {
-            let r = executor_node_state_to_result(ns);
-            let out = decode_string_output(&r.output);
+            let r = executor_node_state_to_result(&submitted_plan, ns);
+            let out = r.output;
             if r.success {
                 log::debug!("[pilot] compact_memory: {out}");
             } else {
@@ -151,18 +152,30 @@ fn is_terminal_executor_state(state: u32) -> bool {
     )
 }
 
-/// Convert Executor's terminal RTDL node event into the result shape memory
-/// helpers already understand.
-///
-/// Memory prefetch and compaction are intentionally best effort, so this keeps
-/// their old control flow while accepting the newer Executor stream contract.
-fn executor_node_state_to_result(ns: crate::pb::executor::RtdlNodeState) -> CapabilityCallResult {
+/// Convert memory helper node events into the shared result record. `do` nodes
+/// carry a concrete capability result; operator detail is only a fallback.
+fn executor_node_state_to_result(
+    plan: &Plan,
+    ns: crate::pb::executor::RtdlNodeState,
+) -> CapabilityCallResult {
+    if let Some(result) = ns.leaf_result {
+        return result;
+    }
+    let call = plan
+        .nodes
+        .get(ns.node_index as usize)
+        .and_then(|node| node.call.as_ref());
+    let success = ns.state == EXECUTOR_STATE_SUCCEEDED;
     CapabilityCallResult {
-        call_id: ns.call_id,
-        provider_id: ns.provider_id,
-        contract_id: ns.contract_id,
-        success: ns.success,
-        output: ns.output,
-        error: ns.error,
+        call_id: call.map(|c| c.call_id.clone()).unwrap_or_default(),
+        provider_id: call.map(|c| c.provider_id.clone()).unwrap_or_default(),
+        contract_id: call.map(|c| c.contract_id.clone()).unwrap_or_default(),
+        success,
+        output: ns.operator_detail.clone(),
+        error: if success {
+            String::new()
+        } else {
+            ns.operator_detail
+        },
     }
 }

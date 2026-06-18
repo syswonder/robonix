@@ -2,7 +2,7 @@
 // Flat `RtdlEvent` (`lib/executor/msg/RtdlEvent.msg`).
 
 use crate::pb::executor::{RtdlEvent, RtdlNodeState, RtdlPlanComplete, RtdlPlanStarted};
-use crate::pb::pilot::CapabilityCallResult;
+use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
 
 pub const EVT_PLAN_STARTED: u32 = 0;
 pub const EVT_NODE_STATE: u32 = 1;
@@ -15,6 +15,13 @@ pub const STATE_FAILED: u32 = 3;
 pub const STATE_CANCELED: u32 = 4;
 pub const STATE_TIMEOUT: u32 = 5;
 pub const STATE_PAUSED: u32 = 6;
+
+#[derive(Clone)]
+pub struct NodeEventContext {
+    pub plan_id: String,
+    pub node_index: u32,
+    pub node_kind: u32,
+}
 
 pub fn is_terminal_state(state: u32) -> bool {
     matches!(
@@ -31,56 +38,43 @@ pub fn plan_started(plan_id: String) -> RtdlEvent {
     }
 }
 
-/// Emit an RTDL node (cap call) state change. When `result` is set, success/output/error
-/// are copied into the event (required for terminal states).
 pub fn node_state(
-    call_id: String,
-    provider_id: String,
-    contract_id: String,
-    run_id: String,
+    plan_id: String,
+    node_index: u32,
+    node_kind: u32,
     state: u32,
-    detail: String,
-    result: Option<CapabilityCallResult>,
+    operator_detail: String,
+    leaf_result: Option<CapabilityCallResult>,
 ) -> RtdlEvent {
-    let (success, output, error) = if let Some(r) = result {
-        (r.success, r.output, r.error)
-    } else {
-        (false, String::new(), String::new())
-    };
     RtdlEvent {
         event_kind: EVT_NODE_STATE,
         node_state: Some(RtdlNodeState {
-            call_id,
-            provider_id,
-            contract_id,
-            run_id,
+            plan_id,
+            node_index,
+            node_kind,
             state,
-            detail,
-            success,
-            output,
-            error,
+            operator_detail,
+            leaf_result,
         }),
         ..Default::default()
     }
 }
 
 pub fn node_state_from_result(
+    plan_id: &str,
+    node_index: u32,
+    node_kind: u32,
+    call: &CapabilityCall,
     result: CapabilityCallResult,
     state: u32,
-    run_id: String,
 ) -> RtdlEvent {
-    let detail = if result.success {
-        String::new()
-    } else {
-        result.error.clone()
-    };
+    let _ = call;
     node_state(
-        result.call_id.clone(),
-        result.provider_id.clone(),
-        result.contract_id.clone(),
-        run_id,
+        plan_id.to_string(),
+        node_index,
+        node_kind,
         state,
-        detail,
+        String::new(),
         Some(result),
     )
 }
@@ -93,5 +87,31 @@ pub fn plan_complete(plan_id: String, any_failed: bool) -> RtdlEvent {
             any_failed,
         }),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_state_uses_plan_and_node_fields() {
+        let event = node_state(
+            "p".into(),
+            7,
+            2,
+            STATE_RUNNING,
+            "operator detail".into(),
+            None,
+        );
+        let ns = event.node_state.unwrap();
+
+        assert_eq!(event.event_kind, EVT_NODE_STATE);
+        assert_eq!(ns.plan_id, "p");
+        assert_eq!(ns.node_index, 7);
+        assert_eq!(ns.node_kind, 2);
+        assert_eq!(ns.state, STATE_RUNNING);
+        assert_eq!(ns.operator_detail, "operator detail");
+        assert!(ns.leaf_result.is_none());
     }
 }
