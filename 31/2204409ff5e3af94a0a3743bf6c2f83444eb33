@@ -1,0 +1,14 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "312204409ff5e3af94a0a3743bf6c2f83444eb33",
+  "prompts": {},
+  "humans": {
+    "h_ed98d80d2de624": {
+      "author": "lifeiyang.ads <lifeiyang.ads@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
