@@ -32,10 +32,7 @@ pub async fn run_until_terminal(
     if !initial.success {
         let _ = tx
             .send(Ok(rtdl_wire::node_state_from_result(
-                &node.plan_id,
-                node.node_index,
-                node.node_kind,
-                call,
+                node,
                 initial.clone(),
                 STATE_FAILED,
             )))
@@ -62,10 +59,7 @@ pub async fn run_until_terminal(
             let result = canceled_result(call, "plan was cancelled before async polling began");
             let _ = tx
                 .send(Ok(rtdl_wire::node_state_from_result(
-                    &node.plan_id,
-                    node.node_index,
-                    node.node_kind,
-                    call,
+                    node,
                     result.clone(),
                     STATE_CANCELED,
                 )))
@@ -86,10 +80,7 @@ pub async fn run_until_terminal(
             let result = canceled_result(call, "plan was cancelled");
             let _ = tx
                 .send(Ok(rtdl_wire::node_state_from_result(
-                    &node.plan_id,
-                    node.node_index,
-                    node.node_kind,
-                    call,
+                    node,
                     result.clone(),
                     STATE_CANCELED,
                 )))
@@ -123,16 +114,13 @@ pub async fn run_until_terminal(
                 .await;
             let _ = tx
                 .send(Ok(rtdl_wire::node_state_from_result(
-                    &node.plan_id,
-                    node.node_index,
-                    node.node_kind,
-                    call,
+                    node,
                     result.clone(),
                     state,
                 )))
                 .await;
             return result;
-        }    
+        }
     }
 }
 
