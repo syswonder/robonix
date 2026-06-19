@@ -237,83 +237,130 @@ pub async fn run_turn(
         let target_map = build_capability_target_map(&display_caps);
         let rtdl_prompt = build_rtdl_prompt(&display_caps)?;
 
-        let mut messages = vec![Message::system(&format!(
-            "{system_prompt}\n\n{rtdl_prompt}"
-        ))];
+        let mut correction: Option<String> = None;
+        let (assistant_content, graph, plan_id) = loop {
+            let mut messages = vec![Message::system(&format!(
+                "{system_prompt}\n\n{rtdl_prompt}"
+            ))];
 
-        messages.extend(history::sanitize_for_vlm(history));
+            messages.extend(history::sanitize_for_vlm(history));
+            if let Some(ref correction) = correction {
+                messages.push(Message::user(correction));
+            }
 
-        let (content, raw_tool_calls) = {
-            let mut stream = vlm
-                .chat_stream(&messages, &[])
-                .await
-                .map_err(|e| anyhow::anyhow!("VLM stream error: {e}"))?;
+            let (content, raw_tool_calls) = {
+                let mut stream = vlm
+                    .chat_stream(&messages, &[])
+                    .await
+                    .map_err(|e| anyhow::anyhow!("VLM stream error: {e}"))?;
 
-            let mut full_text = String::new();
-            let mut tool_calls: Vec<crate::vlm::ToolCall> = Vec::new();
+                let mut full_text = String::new();
+                let mut tool_calls: Vec<crate::vlm::ToolCall> = Vec::new();
 
-            loop {
-                tokio::select! {
-                    biased;
-                    // Cancel takes priority — checked before every new VLM token.
-                    _ = cancel_rx.changed() => {
-                        drop(stream);
-                        return_interrupted!();
-                    }
-                    item = stream.next() => {
-                        let item = match item {
-                            Some(Ok(it)) => it,
-                            Some(Err(e)) => return Err(anyhow::anyhow!("VLM stream recv: {e:#}")),
-                            None => break,
-                        };
-                        match item {
-                            VlmStreamItem::TextDelta(delta) => {
-                                full_text.push_str(&delta);
+                loop {
+                    tokio::select! {
+                        biased;
+                        // Cancel takes priority — checked before every new VLM token.
+                        _ = cancel_rx.changed() => {
+                            drop(stream);
+                            return_interrupted!();
+                        }
+                        item = stream.next() => {
+                            let item = match item {
+                                Some(Ok(it)) => it,
+                                Some(Err(e)) => return Err(anyhow::anyhow!("VLM stream recv: {e:#}")),
+                                None => break,
+                            };
+                            match item {
+                                VlmStreamItem::TextDelta(delta) => {
+                                    full_text.push_str(&delta);
+                                }
+                                VlmStreamItem::ToolCall(tc) => {
+                                    tool_calls.push(tc);
+                                }
+                                VlmStreamItem::Finish => {}
                             }
-                            VlmStreamItem::ToolCall(tc) => {
-                                tool_calls.push(tc);
-                            }
-                            VlmStreamItem::Finish => {}
                         }
                     }
                 }
+
+                let content = if full_text.is_empty() {
+                    None
+                } else {
+                    Some(full_text)
+                };
+                (content, tool_calls)
+            };
+
+            if !raw_tool_calls.is_empty() {
+                anyhow::bail!("VLM returned tool_calls in RTDL mode");
             }
 
-            let content = if full_text.is_empty() {
-                None
-            } else {
-                Some(full_text)
-            };
-            (content, tool_calls)
-        };
-
-        if !raw_tool_calls.is_empty() {
-            anyhow::bail!("VLM returned tool_calls in RTDL mode");
-        }
-
-        let raw_content = content.unwrap_or_default();
-        log::debug!("raw_content: {}", raw_content);
-        let (assistant_content, rtdl) =
-            parse_rtdl_assistant_response(&raw_content).with_context(|| {
+            let raw_content = content.unwrap_or_default();
+            log::debug!("raw_content: {}", raw_content);
+            let parsed = parse_rtdl_assistant_response(&raw_content).with_context(|| {
                 format!(
                     "parse RTDL assistant response: {}",
                     raw_preview(&raw_content)
                 )
-            })?;
-        log::debug!(
-            "[pilot/rtdl] parsed assistant JSON round={} content_chars={}",
-            round,
-            assistant_content.chars().count()
-        );
-        let plan_id = Uuid::new_v4().to_string();
-        let graph = expand_rtdl_to_plan(
-            &rtdl,
-            &target_map,
-            plan_id.clone(),
-            session_id.clone(),
-            round,
-        )
-        .context("expand RTDL to Plan")?;
+            });
+
+            let (assistant_content, rtdl) = match parsed {
+                Ok(parsed) => parsed,
+                Err(e) if correction.is_none() => {
+                    log::warn!(
+                        "[pilot/rtdl] parse failed round={}, retrying once: {e:#}",
+                        round
+                    );
+                    correction = Some(build_rtdl_retry_prompt(&e, &raw_content, &display_caps));
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[pilot/rtdl] parse failed again round={}, ending turn gracefully: {e:#}",
+                        round
+                    );
+                    let plan_id = Uuid::new_v4().to_string();
+                    let graph = empty_sequence_plan(plan_id.clone(), session_id.clone(), round);
+                    break (rtdl_recovery_final_text(), graph, plan_id);
+                }
+            };
+
+            log::debug!(
+                "[pilot/rtdl] parsed assistant JSON round={} content_chars={}",
+                round,
+                assistant_content.chars().count()
+            );
+            let plan_id = Uuid::new_v4().to_string();
+            let graph_result = expand_rtdl_to_plan(
+                &rtdl,
+                &target_map,
+                plan_id.clone(),
+                session_id.clone(),
+                round,
+            )
+            .context("expand RTDL to Plan");
+
+            match graph_result {
+                Ok(graph) => break (assistant_content, graph, plan_id),
+                Err(e) if correction.is_none() => {
+                    log::warn!(
+                        "[pilot/rtdl] expand failed round={}, retrying once: {e:#}",
+                        round
+                    );
+                    correction = Some(build_rtdl_retry_prompt(&e, &raw_content, &display_caps));
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[pilot/rtdl] expand failed again round={}, ending turn gracefully: {e:#}",
+                        round
+                    );
+                    let plan_id = Uuid::new_v4().to_string();
+                    let graph = empty_sequence_plan(plan_id.clone(), session_id.clone(), round);
+                    break (rtdl_recovery_final_text(), graph, plan_id);
+                }
+            }
+        };
         log::info!(
             "[pilot/rtdl] expanded plan_id={} round={} calls={}",
             graph.plan_id,
@@ -514,6 +561,35 @@ fn build_rtdl_prompt(display_caps: &[DisplayCapability<'_>]) -> Result<String> {
     Ok(p)
 }
 
+fn build_rtdl_retry_prompt(
+    err: &anyhow::Error,
+    raw_content: &str,
+    display_caps: &[DisplayCapability<'_>],
+) -> String {
+    let mut p = format!(
+        "Your previous RTDL response could not be parsed or expanded by Pilot.\n\
+         Error: {err:#}\n\
+         Previous response preview: {}\n\n\
+         Fix the RTDL error and retry the same user request exactly once. If the error \
+         mentions an unknown capability, do not repeat that capability. Return only a JSON object with exactly \
+         `content` and `rtdl`. Use only capability_name values from this list; do not invent \
+         provider names, method names, or aliases:\n",
+        raw_preview(raw_content)
+    );
+    for cap in display_caps {
+        p.push_str("- ");
+        p.push_str(&cap.display_name);
+        p.push('\n');
+    }
+    p.push_str(
+        "\nIf no further capability call is needed, use \
+         {\"op\":\"sequence\",\"children\":[]} as `rtdl`. If the user's requested action cannot \
+         be performed using the listed capabilities, explain the missing capability in `content` \
+         and return an empty RTDL sequence instead of inventing a capability.\n",
+    );
+    p
+}
+
 /// Parses one VLM reply in RTDL envelope form.
 ///
 /// The model must emit a JSON **object** (single root) whose only keys are
@@ -575,6 +651,25 @@ fn expand_rtdl_to_plan(
         nodes,
         root_index,
     })
+}
+
+fn empty_sequence_plan(plan_id: String, session_id: String, round: u32) -> Plan {
+    Plan {
+        plan_id,
+        session_id,
+        round,
+        nodes: vec![RtdlNode {
+            node_kind: RTDL_SEQUENCE,
+            children: Vec::new(),
+            call: None,
+        }],
+        root_index: 0,
+    }
+}
+
+fn rtdl_recovery_final_text() -> String {
+    "I couldn't produce a valid robot plan after retrying once. Please try again or rephrase the request."
+        .to_string()
 }
 
 fn expand_rtdl_node(
@@ -784,8 +879,9 @@ complete. Concretely:
 #[cfg(test)]
 mod tests {
     use super::{
-        CapabilityTargetMap, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, expand_rtdl_to_plan,
-        parse_rtdl_assistant_response, skip_memory_prefetch, task_is_session_end,
+        CapabilityTargetMap, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, build_rtdl_retry_prompt,
+        expand_rtdl_to_plan, parse_rtdl_assistant_response, rtdl_recovery_final_text,
+        skip_memory_prefetch, task_is_session_end,
     };
     use crate::pb::pilot::Task;
     use serde_json::json;
@@ -964,6 +1060,27 @@ mod tests {
         assert_eq!(plan.nodes.len(), 1);
         assert_eq!(plan.nodes[0].node_kind, RTDL_SEQUENCE);
         assert!(plan.nodes[0].children.is_empty());
+    }
+
+    #[test]
+    fn rtdl_retry_prompt_does_not_assume_cap_error() {
+        let err = anyhow::anyhow!("assistant response must be a JSON object");
+        let prompt = build_rtdl_retry_prompt(&err, "not json", &[]);
+
+        assert!(prompt.contains("could not be parsed or expanded"));
+        assert!(prompt.contains("Fix the RTDL error"));
+        assert!(prompt.contains("If the error mentions an unknown capability"));
+        assert!(!prompt.contains("previous `cap` value is invalid"));
+    }
+
+    #[test]
+    fn rtdl_recovery_final_text_hides_internal_error() {
+        let text = rtdl_recovery_final_text();
+
+        assert!(text.contains("valid robot plan"));
+        assert!(!text.contains("expand RTDL"));
+        assert!(!text.contains("capability call"));
+        assert!(!text.contains("assistant content preview"));
     }
 
     #[test]
