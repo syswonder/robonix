@@ -4192,6 +4192,7 @@ dependencies = [
     { name = "memsearch", extra = ["onnx"] },
     { name = "numpy" },
     { name = "protobuf" },
+    { name = "requests" },
     { name = "robonix-api" },
     { name = "uvicorn" },
 ]
@@ -4265,6 +4266,7 @@ dependencies = [
     { name = "torch" },
     { name = "torchaudio" },
     { name = "transformers" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
@@ -4276,11 +4278,13 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.24,<2" },
     { name = "opencc-python-reimplemented", specifier = ">=0.1.7" },
     { name = "protobuf", specifier = ">=4.24" },
+    { name = "requests", specifier = ">=2.31" },
     { name = "robonix-api", editable = "pylib/robonix-api" },
     { name = "scipy", specifier = ">=1.10" },
     { name = "torch", specifier = ">=2.0" },
     { name = "torchaudio", specifier = ">=2.0" },
     { name = "transformers", specifier = ">=4.30" },
+    { name = "websockets", specifier = ">=16.0" },
 ]
 
 [[package]]

@@ -1,9 +1,11 @@
-# Robonix speech service — ASR (Whisper one-shot + FunASR streaming) +
-# TTS (Edge TTS) + Dialog manager. Declares 5 data-plane gRPC contracts
+# Robonix speech service — ASR/TTS + Dialog manager. The default backend is
+# local (Whisper one-shot + FunASR streaming + Edge TTS); `speech_backend:
+# tencent` switches ASR/TTS to Tencent Cloud APIs. Declares 5 data-plane gRPC contracts
 # and a driver lifecycle contract so `rbnx boot` ships the boot
 # manifest's `system: speech: {...}` block as Driver(CMD_INIT, config_json).
 #
 # Config schema consumed by the on_init handler (see speech_service.service):
+#   speech_backend:    str   — local | tencent (default: local)
 #   disable_whisper:   bool  — skip Whisper backend entirely (asr returns UNAVAILABLE)
 #   asr_model:         str   — Whisper model id / path (default: openai/whisper-large-v3)
 #   asr_device:        str   — cuda | cpu (default: cuda)
@@ -13,6 +15,10 @@
 #   funasr_device:     str   — auto | cuda | cpu (default: auto — try GPU then fall back to CPU on OOM)
 #   funasr_chunk_size: list  — Paraformer [left, current, right] (default: [0,10,5])
 #   tts_voice:         str   — Edge TTS voice (default: zh-CN-XiaoxiaoNeural)
+#   tencent_asr_appid: str   — Tencent Cloud ASR AppID (secret id/key stay in env)
+#   tencent_asr_engine: str  — default 16k_zh_en
+#   tencent_tts_voice_type: int — default 1001
+#   tencent_tts_region: str — default ap-guangzhou
 #   log:               str   — log level (default: info)
 manifestVersion: 1
 
