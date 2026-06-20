@@ -39,6 +39,7 @@ Atlas integration:
   runs in standalone mode. Set SPEECH_STANDALONE=1 to skip registration.
 
 Environment variables:
+  SPEECH_BACKEND      Backend selector: local | tencent (default: local)
   ASR_MODEL          Whisper model path (default: openai/whisper-large-v3)
   ASR_DEVICE         Torch device: cuda | cpu (default: cuda)
   ASR_CHUNK_LENGTH   Whisper chunk length in seconds (default: 30.0)
@@ -46,6 +47,9 @@ Environment variables:
   FUNASR_MODEL       FunASR model name or path (default: paraformer-zh-streaming)
   FUNASR_CHUNK_SIZE  Paraformer chunk_size as JSON (default: [0,10,5])
   TTS_VOICE          Edge TTS voice name (default: zh-CN-XiaoxiaoNeural)
+  TENCENTCLOUD_SECRET_ID / TENCENTCLOUD_SECRET_KEY
+                     Tencent Cloud credentials when SPEECH_BACKEND=tencent
+  TENCENT_ASR_APPID  Tencent Cloud ASR AppID when SPEECH_BACKEND=tencent
   ROBONIX_ATLAS      Atlas control-plane address (default: localhost:50051)
   SPEECH_PORT        gRPC listen port, 0 = auto-pick (default: 0)
   SPEECH_BIND_ADDR   gRPC bind address (default: 0.0.0.0)
@@ -89,6 +93,32 @@ import tts_pb2
 import speech_pb2
 import audio_pb2  # for AudioChunk (lib/primitive/audio/msg/AudioChunk.msg)
 import robonix_contracts_pb2_grpc as contracts_grpc
+
+SpeechAsrBase = getattr(
+    contracts_grpc,
+    "RobonixServiceSpeechAsrServicer",
+    contracts_grpc.RobonixSystemSpeechAsrServicer,
+)
+SpeechAsrStreamBase = getattr(
+    contracts_grpc,
+    "RobonixServiceSpeechAsrStreamServicer",
+    contracts_grpc.RobonixSystemSpeechAsrStreamServicer,
+)
+SpeechTtsBase = getattr(
+    contracts_grpc,
+    "RobonixServiceSpeechTtsServicer",
+    contracts_grpc.RobonixSystemSpeechTtsServicer,
+)
+SpeechTtsStreamBase = getattr(
+    contracts_grpc,
+    "RobonixServiceSpeechTtsStreamServicer",
+    contracts_grpc.RobonixSystemSpeechTtsStreamServicer,
+)
+SpeechDialogBase = getattr(
+    contracts_grpc,
+    "RobonixServiceSpeechDialogServicer",
+    contracts_grpc.RobonixSystemSpeechDialogServicer,
+)
 
 # -- CI mock mode ------------------------------------------------------------
 
@@ -543,7 +573,7 @@ class DialogManager:
 # Note: the codegen service methods are named Call / Stream (not Recognize
 # or Synthesize) because the contract RPC is always called "Call" or "Stream".
 
-class SpeechAsrServicer(contracts_grpc.RobonixServiceSpeechAsrServicer):
+class SpeechAsrServicer(SpeechAsrBase):
     """ASR gRPC servicer -- handles the Call RPC for one-shot speech recognition.
 
     Delegates to WhisperASRBackend for transcription.
@@ -601,7 +631,7 @@ class SpeechAsrServicer(contracts_grpc.RobonixServiceSpeechAsrServicer):
             return asr_pb2.Recognize_Response(text="", confidence=0.0, error=str(e))
 
 
-class SpeechAsrStreamServicer(contracts_grpc.RobonixServiceSpeechAsrStreamServicer):
+class SpeechAsrStreamServicer(SpeechAsrStreamBase):
     """Streaming ASR gRPC servicer -- handles the Stream RPC for chunk-by-chunk
     speech recognition.
 
@@ -638,6 +668,44 @@ class SpeechAsrStreamServicer(contracts_grpc.RobonixServiceSpeechAsrStreamServic
             return
 
         from speech_service.audio_utils import adapt_audio
+
+        if hasattr(self.stream_asr_backend, "recognize_stream"):
+            try:
+                def adapted_chunks():
+                    input_gain = float(os.environ.get("INPUT_GAIN", "1.0"))
+                    chunk_count = 0
+                    for req in request_iterator:
+                        chunk_data = bytes(req.chunk.data) if req.chunk and req.chunk.data else None
+                        if chunk_data is None:
+                            continue
+                        chunk_count += 1
+                        adapted, _ = adapt_audio(
+                            chunk_data,
+                            encoding="pcm_s16le",
+                            sample_rate=16000,
+                            channels=1,
+                            bits_per_sample=16,
+                            gain=input_gain,
+                        )
+                        yield adapted
+                    if chunk_count == 0:
+                        raise RuntimeError("No audio data received")
+
+                for r in self.stream_asr_backend.recognize_stream(adapted_chunks()):
+                    text = r.get("text", "")
+                    if not text:
+                        continue
+                    yield asr_pb2.RecognizeStreamEvent(
+                        event_type=int(r.get("event_type", 0)),
+                        text=text,
+                        confidence=r.get("confidence", 0.0),
+                        language="",
+                        is_final=bool(r.get("is_final", False)),
+                    )
+            except Exception as e:
+                log.exception("ASR stream recognize failed")
+                yield asr_pb2.RecognizeStreamEvent(event_type=2, error=str(e))
+            return
 
         input_gain = float(os.environ.get("INPUT_GAIN", "1.0"))
         dump_dir = os.environ.get("ROBONIX_ASR_DUMP_DIR", "").strip()
@@ -732,7 +800,7 @@ class SpeechAsrStreamServicer(contracts_grpc.RobonixServiceSpeechAsrStreamServic
             yield asr_pb2.RecognizeStreamEvent(event_type=2, error=str(e))
 
 
-class SpeechTtsServicer(contracts_grpc.RobonixServiceSpeechTtsServicer):
+class SpeechTtsServicer(SpeechTtsBase):
     """TTS gRPC servicer -- handles the Call RPC for one-shot text-to-speech.
 
     Delegates to EdgeTTSBackend for audio generation.
@@ -773,8 +841,8 @@ class SpeechTtsServicer(contracts_grpc.RobonixServiceSpeechTtsServicer):
             audio_data = asyncio.run(self.tts_backend.synthesize(text, voice, speed))
             return tts_pb2.Synthesize_Response(
                 audio_data=audio_data,
-                encoding="mp3",
-                sample_rate_hz=24000,
+                encoding=os.environ.get("SPEECH_TTS_OUTPUT_ENCODING", "pcm_s16le"),
+                sample_rate_hz=int(os.environ.get("SPEECH_TTS_OUTPUT_SAMPLE_RATE", "16000")),
                 error="",
             )
         except Exception as e:
@@ -782,7 +850,7 @@ class SpeechTtsServicer(contracts_grpc.RobonixServiceSpeechTtsServicer):
             return tts_pb2.Synthesize_Response(audio_data=b"", error=str(e))
 
 
-class SpeechTtsStreamServicer(contracts_grpc.RobonixServiceSpeechTtsStreamServicer):
+class SpeechTtsStreamServicer(SpeechTtsStreamBase):
     """Streaming TTS gRPC servicer -- handles the Stream RPC for chunk-by-chunk
     text-to-speech synthesis.
 
@@ -835,16 +903,16 @@ class SpeechTtsStreamServicer(contracts_grpc.RobonixServiceSpeechTtsStreamServic
                             data=chunk_data,
                             sequence=seq,
                         ),
-                        encoding="mp3",
-                        sample_rate_hz=24000,
+                        encoding=os.environ.get("SPEECH_TTS_OUTPUT_ENCODING", "pcm_s16le"),
+                        sample_rate_hz=int(os.environ.get("SPEECH_TTS_OUTPUT_SAMPLE_RATE", "16000")),
                         is_final=False,
                     )
                     seq += 1
                 except StopAsyncIteration:
                     yield tts_pb2.SynthesizeAudioChunk(
                         chunk=audio_pb2.AudioChunk(data=b""),
-                        encoding="mp3",
-                        sample_rate_hz=24000,
+                        encoding=os.environ.get("SPEECH_TTS_OUTPUT_ENCODING", "pcm_s16le"),
+                        sample_rate_hz=int(os.environ.get("SPEECH_TTS_OUTPUT_SAMPLE_RATE", "16000")),
                         is_final=True,
                     )
                     break
@@ -855,7 +923,7 @@ class SpeechTtsStreamServicer(contracts_grpc.RobonixServiceSpeechTtsStreamServic
             context.set_details(str(e))
 
 
-class SpeechDialogServicer(contracts_grpc.RobonixServiceSpeechDialogServicer):
+class SpeechDialogServicer(SpeechDialogBase):
     """Dialog gRPC servicer -- handles the Stream RPC for voice dialog sessions.
 
     Creates a DialogSession and streams DialogEvent updates to the client.
@@ -1033,6 +1101,7 @@ def speak(req: Speak_Request) -> Speak_Response:
 # constructors read. Cfg wins; absent keys leave existing env intact so
 # operators who export ASR_MODEL etc. in the start: block still work.
 _CFG_ENV_MAP = {
+    "speech_backend":    "SPEECH_BACKEND",
     "asr_model":         "ASR_MODEL",
     "asr_device":        "ASR_DEVICE",
     "asr_chunk_length":  "ASR_CHUNK_LENGTH",
@@ -1041,6 +1110,10 @@ _CFG_ENV_MAP = {
     "funasr_device":     "FUNASR_DEVICE",
     "funasr_chunk_size": "FUNASR_CHUNK_SIZE",
     "tts_voice":         "TTS_VOICE",
+    "tencent_asr_appid": "TENCENT_ASR_APPID",
+    "tencent_asr_engine": "TENCENT_ASR_ENGINE",
+    "tencent_tts_voice_type": "TENCENT_TTS_VOICE_TYPE",
+    "tencent_tts_region": "TENCENT_TTS_REGION",
 }
 
 
@@ -1066,6 +1139,16 @@ def init(cfg):
         asr = MockASRBackend()
         asr_stream = MockASRStreamingBackend()
         tts = MockTTSBackend()
+    elif os.environ.get("SPEECH_BACKEND", "local").strip().lower() == "tencent":
+        from speech_service.tencent_cloud import TencentRealtimeASRBackend, TencentTTSBackend
+
+        os.environ["SPEECH_TTS_OUTPUT_ENCODING"] = "pcm_s16le"
+        os.environ["SPEECH_TTS_OUTPUT_SAMPLE_RATE"] = os.environ.get(
+            "TENCENT_TTS_SAMPLE_RATE", "16000"
+        )
+        asr = None
+        asr_stream = _try_backend("Tencent Cloud ASR", TencentRealtimeASRBackend)
+        tts = _try_backend("Tencent Cloud TTS", TencentTTSBackend)
     else:
         if disable_whisper:
             log.info("Whisper ASR disabled by config; asr contract will return UNAVAILABLE")
