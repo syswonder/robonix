@@ -182,22 +182,33 @@ impl RobonixSystemPilot for PilotServiceImpl {
             return Ok(Response::new(ReceiverStream::new(rx)));
         }
 
-        // If a turn is already live for this session, this task is a mid-task
-        // steer: hand it to that turn's queue and return an empty stream. Events
-        // keep flowing on the turn's original SubmitTask stream.
-        if !task.session_id.is_empty() {
-            let steer_tx = self.steers.lock().await.get(&task.session_id).cloned();
-            if let Some(steer_tx) = steer_tx {
-                let id = task.session_id.clone();
-                let ok = steer_tx.send(task).await.is_ok();
-                log::debug!("[pilot] steer task for session {id} (queued={ok})");
-                let (_tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(1);
-                return Ok(Response::new(ReceiverStream::new(rx)));
-            }
-        }
-
         if task.session_id.is_empty() {
             task.session_id = Uuid::new_v4().to_string();
+        }
+
+        // Decide — under a single `steers` lock — whether this task is a mid-task
+        // steer for an already-live turn or the start of a new turn. Doing the
+        // check and the registration atomically prevents a check-then-insert race
+        // where two near-simultaneous submits for one session both start a turn.
+        let (steer_tx, steer_rx) = mpsc::channel::<Task>(32);
+        let existing_steer = {
+            let mut steers = self.steers.lock().await;
+            match steers.get(&task.session_id) {
+                Some(existing) => Some(existing.clone()),
+                None => {
+                    steers.insert(task.session_id.clone(), steer_tx.clone());
+                    None
+                }
+            }
+        };
+        if let Some(existing) = existing_steer {
+            // A turn is already live: hand this to its steer queue and return an
+            // empty stream; events keep flowing on that turn's original stream.
+            let id = task.session_id.clone();
+            let ok = existing.send(task).await.is_ok();
+            log::debug!("[pilot] steer task for session {id} (queued={ok})");
+            let (_tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(1);
+            return Ok(Response::new(ReceiverStream::new(rx)));
         }
 
         let history_arc = self.get_or_create_history(&task.session_id).await;
@@ -216,10 +227,9 @@ impl RobonixSystemPilot for PilotServiceImpl {
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
         cancels.lock().await.insert(session_id.clone(), cancel_tx);
-        // Steer queue: mid-task submissions for this session land here until the
-        // turn ends. Bounded; a full queue applies natural backpressure.
-        let (steer_tx, steer_rx) = mpsc::channel::<Task>(32);
-        steers.lock().await.insert(session_id.clone(), steer_tx);
+        // `steer_tx`/`steer_rx` were created above; the sender is already
+        // registered in `self.steers` under the atomic check, and `steer_rx`
+        // moves into the turn below to drain mid-task steers.
 
         tokio::spawn(async move {
             let _ = tx
