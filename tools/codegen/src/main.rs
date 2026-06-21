@@ -68,7 +68,7 @@ fn verbose_from_args_and_env(args: &Args) -> bool {
 }
 
 fn main() -> Result<()> {
-    env_logger::init();
+    robonix_scribe::info("codegen", "robonix-codegen starting");
     let args = Args::parse();
     let verbose = verbose_from_args_and_env(&args);
 

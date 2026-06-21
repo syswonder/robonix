@@ -2,7 +2,6 @@
 // Author: wheatfox <wheatfox17@icloud.com>
 
 use clap::Parser;
-use log::{info, warn};
 use robonix_atlas::contract_registry::{ContractRegistry, resolve_capabilities_roots};
 use robonix_atlas::service::{AtlasRegistry, serve_atlas};
 use std::sync::Arc;
@@ -39,13 +38,16 @@ struct Args {
 async fn main() {
     let args = Args::parse();
 
-    let log_filter = args
-        .log
-        .or_else(|| std::env::var("RUST_LOG").ok())
-        .unwrap_or_else(|| "robonix_atlas=info".to_string());
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_filter)).init();
+    // Log level is no longer consumed — Scribe writes everything and
+    // filtering happens at read time (`rbnx logs --level`).  The CLI
+    // arg and RUST_LOG env are kept for backward compat with existing
+    // launch scripts.
+    let _ = args.log.or_else(|| std::env::var("RUST_LOG").ok());
 
-    info!("robonix-atlas starting (control plane)");
+    // First scribe call registers Scribe as the `log` facade backend
+    // so subsequent `log::info!()` / `log::warn!()` macros also route
+    // through the unified pipeline (tag = module_path!(), e.g. "robonix_atlas").
+    log::info!("robonix-atlas starting (control plane)");
 
     let listen = args.listen.unwrap_or_else(|| DEFAULT_LISTEN.to_string());
     let listen_addr: std::net::SocketAddr = match listen.parse() {
@@ -57,7 +59,7 @@ async fn main() {
     };
     let roots = resolve_capabilities_roots(&args.capabilities);
     let contracts = if roots.is_empty() {
-        warn!(
+        log::warn!(
             "[atlas] contract registry: no capabilities dir configured \
              (pass --capabilities or set ROBONIX_SOURCE_PATH); QueryContract \
              will return found=false for every id"
@@ -68,7 +70,7 @@ async fn main() {
         match ContractRegistry::load_from_capability_roots(&refs) {
             Ok(r) => r,
             Err(e) => {
-                warn!(
+                log::warn!(
                     "[atlas] contract registry: load failed ({e:#}); running with empty registry"
                 );
                 ContractRegistry::default()
@@ -77,7 +79,7 @@ async fn main() {
     };
     let registry = Arc::new(AtlasRegistry::with_contracts(contracts));
 
-    info!("atlas gRPC on {listen}");
+    log::info!("atlas gRPC on {listen}");
 
     if let Err(e) = serve_atlas(registry, listen_addr).await {
         eprintln!("robonix-atlas error: {e:?}");

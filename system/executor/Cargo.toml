@@ -21,7 +21,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 log.workspace = true
-env_logger.workspace = true
+robonix-scribe.workspace = true
 uuid.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 robonix-atlas = { path = "../atlas" }
