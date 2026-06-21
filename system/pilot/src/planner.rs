@@ -644,7 +644,7 @@ pub async fn run_turn(
         // recovery plan) instead of crashing the whole turn. The loop yields a
         // valid (narration, tree label, plan, id) tuple for the forest dispatch.
         let mut correction: Option<String> = None;
-        let (assistant_content, rtdl_description, graph, plan_id, task_update) = loop {
+        let (assistant_content, rtdl_description, graph, plan_id, task_update, recovered) = loop {
             let mut messages = vec![Message::system(&format!(
                 "{system_prompt}\n\n{rtdl_prompt}{task_block}{forest_block}"
             ))];
@@ -729,6 +729,7 @@ pub async fn run_turn(
                         graph,
                         plan_id,
                         None,
+                        true,
                     );
                 }
             };
@@ -757,6 +758,7 @@ pub async fn run_turn(
                         graph,
                         plan_id,
                         task_update,
+                        false,
                     );
                 }
                 Err(e) if correction.is_none() => {
@@ -775,10 +777,27 @@ pub async fn run_turn(
                         graph,
                         plan_id,
                         None,
+                        true,
                     );
                 }
             }
         };
+
+        // RTDL recovery gave up after a retry: surface the user-facing message
+        // once and END the turn. Without this the empty recovery plan would fall
+        // through to "no new tree this round" and re-plan forever.
+        if recovered {
+            if !assistant_content.is_empty() {
+                history.push(Message::assistant(&assistant_content));
+            }
+            let _ = tx
+                .send(Ok(service::pack(
+                    &session_id,
+                    PilotStreamBody::FinalText(assistant_content),
+                )))
+                .await;
+            break;
+        }
 
         // Apply the task update now that we have a real expanded tree (recovery
         // breaks carry `None`). `None` keeps the standing task unchanged.
@@ -938,13 +957,26 @@ fn build_capability_target_map(display_caps: &[DisplayCapability<'_>]) -> Capabi
 /// ~9KB `rtdl_protocol.md` is sent only on round 0 (and the model's own prior
 /// envelopes stay in history), so later rounds re-anchor cheaply instead of
 /// re-shipping the whole spec — a large latency/token win on multi-round turns.
-const RTDL_PROTOCOL_REMINDER: &str = "## RTDL output (reminder)\n\
-Reply with exactly ONE JSON object: {\"content\", \"rtdl_description\", \"rtdl\", \"task_update\"} \
-— same format as your previous turns. `rtdl` is a sequence/parallel/do tree built ONLY from the \
-capabilities listed below. Compose multi-step trees; don't drip one node per round. Set \
-`task_update` to null to keep the goal, or to {goal, success_criterion, status} — status \"done\" \
-only when the criterion verifiably holds. Use plan_id -1 for new trees; reference an existing \
-plan_id only to cancel it via builtin_cancel_plan.\n";
+const RTDL_PROTOCOL_REMINDER: &str = "## RTDL output (reminder — same format as your earlier turns)\n\
+Reply with exactly ONE JSON object, keys EXACTLY these four: \
+`content`, `rtdl_description`, `rtdl`, `task_update`. No other top-level keys.\n\
+`rtdl` is a tree; every node is EXACTLY one of:\n\
+- {\"op\":\"sequence\",\"children\":[ ...nodes... ]}   (run children in order)\n\
+- {\"op\":\"parallel\",\"children\":[ ...nodes... ]}   (run children concurrently)\n\
+- {\"op\":\"do\",\"cap\":\"<capability_name>\",\"args\":{ ... }}   (one capability call)\n\
+A capability name goes ONLY in a do node's `cap` — NEVER as an `op`. \
+Do NOT add any other fields to a node (no `plan_id`, no `out`, no `id`). \
+Use ONLY capability_name values from the list below; never invent names.\n\
+`task_update`: null keeps the current goal, or {\"goal\",\"success_criterion\",\"status\"} with \
+status \"done\" only when the success_criterion verifiably holds AND no tree in the \
+\"In-flight trees\" list is still running (cancelling a tree does not make the task done — wait \
+for it to leave the list first).\n\
+Compose multi-step trees; don't drip one node per round. No new capability call this round = \
+{\"op\":\"sequence\",\"children\":[]}.\n\
+To stop a running tree, add a do node calling `builtin_cancel_plan` with the exact plan_id from \
+the In-flight trees list.\n\
+Example: {\"content\":\"listing\",\"rtdl_description\":\"list tmp\",\"rtdl\":{\"op\":\"sequence\",\
+\"children\":[{\"op\":\"do\",\"cap\":\"list_dir\",\"args\":{\"path\":\"/tmp\"}}]},\"task_update\":null}\n";
 
 /// Build the per-round protocol + capability catalog. `full_protocol` ships the
 /// complete spec (round 0); otherwise a one-line reminder. The capability

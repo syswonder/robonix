@@ -32,6 +32,12 @@ empty `rtdl` only means "I am dispatching no new tree this round" (e.g. you are
 waiting for an in-flight tree to finish). Do not mark `done` until the
 `success_criterion` actually holds — verify with an observation first.
 
+Do NOT set `status: "done"` while any tree in the "In-flight trees" list is
+still running — even one you just asked to cancel. Cancelling a tree does not
+make the task done; wait for that tree to actually leave the In-flight list (you
+will see its result) before declaring done. Keep emitting empty-`rtdl` rounds
+(which just wait) until the forest is clear, then mark `done`.
+
 Set `task_update` to a fresh object when:
 - the user gives a new goal or steers you mid-task (incorporate their change);
 - you refine the goal as you learn more;
