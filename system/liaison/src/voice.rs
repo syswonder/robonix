@@ -974,6 +974,8 @@ mod tests {
                 batch_result: None,
                 status: None,
                 final_text: String::new(),
+                node_state: None,
+                task_state: None,
             },
             &mut buf,
         );
@@ -986,6 +988,8 @@ mod tests {
                 batch_result: None,
                 status: None,
                 final_text: String::new(),
+                node_state: None,
+                task_state: None,
             },
             &mut buf,
         );

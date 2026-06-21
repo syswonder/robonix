@@ -96,6 +96,8 @@ impl RobonixSystemPilot for MockPilot {
                 batch_result: None,
                 status: None,
                 final_text: String::new(),
+                node_state: None,
+                task_state: None,
             };
             let _ = tx.send(Ok(chunk)).await;
             tokio::time::sleep(Duration::from_millis(80)).await;
@@ -107,6 +109,8 @@ impl RobonixSystemPilot for MockPilot {
                 batch_result: None,
                 status: None,
                 final_text: format!("you said \"{}\"", task.text),
+                node_state: None,
+                task_state: None,
             };
             let _ = tx.send(Ok(final_ev)).await;
         });
