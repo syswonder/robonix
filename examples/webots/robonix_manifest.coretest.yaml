@@ -1,0 +1,31 @@
+manifestVersion: 1
+name: robonix-coretest-deploy
+
+# Minimal core-only deploy for testing the pilot RTDL / forest / steering
+# changes WITHOUT the Webots sim or scene docker. Only the four system
+# components come up; the executor registers its builtin capabilities
+# (run_command, list_dir, read_file, write_file, patch_file, cancel_plan)
+# with atlas, so the LLM has real tools to compose multi-node RTDL trees
+# and to exercise mid-task steering (e.g. a long `run_command` while you
+# type a steer). No primitives / services / skills.
+
+env:
+
+system:
+  atlas:
+    listen: 127.0.0.1:50051
+    log: info
+  executor:
+    listen: 127.0.0.1:50061
+    log: info
+  pilot:
+    listen: 127.0.0.1:50071
+    log: debug
+    vlm:
+      upstream: ${VLM_BASE_URL}
+      api_key: ${VLM_API_KEY}
+      model: ${VLM_MODEL}
+      api_format: openai
+  liaison:
+    listen: 127.0.0.1:50081
+    log: info
