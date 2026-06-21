@@ -185,7 +185,7 @@ impl RobonixPrimitiveAudioSpeaker for MockSpeaker {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    robonix_scribe::info("mock_audio", "mock audio starting");
 
     let atlas = std::env::var("ROBONIX_ATLAS").unwrap_or_else(|_| "127.0.0.1:50051".to_string());
     let atlas_http = if atlas.starts_with("http") {

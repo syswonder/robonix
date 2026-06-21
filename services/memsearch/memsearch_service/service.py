@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from robonix_api import scribe_logger
 import os
 import platform
 import sys
@@ -57,6 +58,9 @@ os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
 os.environ.setdefault("GLOG_minloglevel", "2")
 logging.getLogger("absl").setLevel(logging.ERROR)
 
+# Transitional: also emit key lifecycle events through Scribe so the
+# unified `rbnx logs` tool can see them alongside other components.
+scribe_logger.info("service_memory", "memory service starting")
 
 def _log_environment() -> None:
     """Print a compact environment summary at boot. Many of the reported

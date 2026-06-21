@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::fs::OpenOptions;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 /// Information about a running process for a capability or skill
@@ -74,8 +74,8 @@ impl ProcessTreeNode {
 /// Manager for processes running capabilities and skills
 pub struct ProcessManager {
     processes: Arc<Mutex<HashMap<String, ProcessInfo>>>, // key: "{package_type}::{std_name}"
-    /// Ensures the deploy log directory exists; reserved for future file logging.
-    _log_dir: PathBuf,
+    /// Per-package log directory for Scribe structured logs.
+    log_dir: PathBuf,
     state_file: PathBuf,
     hostname: String,
 }
@@ -102,7 +102,7 @@ impl ProcessManager {
 
         let mut manager = Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
-            _log_dir: log_dir,
+            log_dir,
             state_file,
             hostname,
         };
@@ -199,7 +199,13 @@ impl ProcessManager {
         &self.hostname
     }
 
-    /// Start a process; blocks until it exits. Output goes to terminal (no log file for now).
+    /// Start a process; blocks until it exits.  Stdout / stderr are captured
+    /// line-by-line and written to Scribe structured logs under
+    /// `$SCRIBE_LOG_DIR/{tag}.log` (tag = `std_name`, e.g.
+    /// `"com.robonix.service.mapping"`).  Lines are NOT forwarded to the
+    /// terminal — `rbnx boot` owns the display and raw package output would
+    /// drown out the boot progress lines.  Use `rbnx logs -f` for live
+    /// per-package log tailing.
     pub async fn start_process(
         &self,
         _package_name: &str,
@@ -248,9 +254,10 @@ impl ProcessManager {
         cmd.arg("-c").arg(start_script);
 
         cmd.current_dir(package_path)
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .env("PYTHONUNBUFFERED", "1");
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("PYTHONUNBUFFERED", "1")
+            .env("SCRIBE_LOG_DIR", &self.log_dir);
 
         let mut child = cmd
             .spawn()
@@ -260,10 +267,43 @@ impl ProcessManager {
             .ok_or_else(|| anyhow::anyhow!("Failed to get process ID"))?;
         log::info!("Running {} (PID {})", key, pid);
 
+        // Pipe stdout / stderr through Scribe so structured logs land in
+        // $SCRIBE_LOG_DIR/{tag}.log.  Do NOT forward to the terminal —
+        // `rbnx boot` owns the display and raw package output would
+        // drown out the boot progress lines.
+        let stdout = child.stdout.take().expect("stdout not piped");
+        let stderr = child.stderr.take().expect("stderr not piped");
+        let tag = std_name.to_string();
+
+        let stdout_task = tokio::spawn(async move {
+            let reader = tokio::io::BufReader::new(stdout);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                robonix_scribe::info(&tag, &line);
+            }
+        });
+
+        let tag2 = std_name.to_string();
+        let stderr_task = tokio::spawn(async move {
+            let reader = tokio::io::BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                // Many programs (Python in particular) write INFO and
+                // WARNING messages to stderr — use `info` rather than
+                // `warn` so the level in the file doesn't misrepresent
+                // the actual severity.
+                robonix_scribe::info(&tag2, &line);
+            }
+        });
+
         let status = child
             .wait()
             .await
             .with_context(|| "Failed to wait for process")?;
+
+        // Drain remaining pipe output before returning.
+        let _ = tokio::join!(stdout_task, stderr_task);
+
         if !status.success() {
             anyhow::bail!("{}: process exited with {}", std_name, status);
         }

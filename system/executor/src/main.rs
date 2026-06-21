@@ -22,7 +22,6 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use config::{Args, EXECUTOR_NAMESPACE, ExecutorConfig};
 use dispatch::builtin::BUILTINS;
-use log::info;
 use pb::contracts::robonix_system_executor_server::RobonixSystemExecutorServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
@@ -32,16 +31,15 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() -> Result<()> {
     let parsed = Args::parse();
-    let log_filter = parsed
+    let _ = parsed
         .log
         .clone()
-        .or_else(|| std::env::var("RUST_LOG").ok())
-        .unwrap_or_else(|| "robonix_executor=info".to_string());
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_filter)).init();
+        .or_else(|| std::env::var("RUST_LOG").ok());
+    robonix_scribe::info("executor", "robonix-executor starting");
 
     let cfg = ExecutorConfig::resolve(parsed)?;
 
-    info!("connecting to atlas at {}", cfg.atlas_endpoint);
+    log::info!("connecting to atlas at {}", cfg.atlas_endpoint);
     let mut atlas =
         AtlasClient::connect_with_retry(&cfg.atlas_endpoint, 10, Duration::from_secs(2))
             .await
@@ -50,7 +48,7 @@ async fn main() -> Result<()> {
     atlas
         .register_service(&cfg.id, EXECUTOR_NAMESPACE, "")
         .await?;
-    info!("registered as '{}' under '{EXECUTOR_NAMESPACE}'", cfg.id);
+    log::info!("registered as '{}' under '{EXECUTOR_NAMESPACE}'", cfg.id);
 
     let listen_addr: std::net::SocketAddr = cfg
         .listen
@@ -97,7 +95,7 @@ async fn main() -> Result<()> {
             .await
             .with_context(|| format!("declare builtin '{}'", contract_id))?;
     }
-    info!(
+    log::info!(
         "declared RobonixSystemExecutor + {} builtin capabilities at {advertised}",
         BUILTINS.len()
     );
@@ -130,8 +128,11 @@ async fn main() -> Result<()> {
     }
 
     let svc = ExecutorServiceImpl::new(atlas, cfg.id.clone());
-    info!("RobonixSystemExecutor gRPC on {listen_addr}");
-    eprintln!("robonix-executor ready on {listen_addr}");
+    log::info!("RobonixSystemExecutor gRPC on {listen_addr}");
+    robonix_scribe::info(
+        "executor",
+        &format!("robonix-executor ready on {listen_addr}"),
+    );
 
     tonic::transport::Server::builder()
         .add_service(RobonixSystemExecutorServer::new(svc))

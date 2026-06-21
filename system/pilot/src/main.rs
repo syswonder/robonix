@@ -31,7 +31,6 @@ mod vlm;
 use anyhow::{Context, Result};
 use clap::Parser;
 use config::{Args, PILOT_NAMESPACE, PilotConfig};
-use log::info;
 use pb::contracts::robonix_system_pilot_server::RobonixSystemPilotServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
@@ -41,23 +40,22 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() -> Result<()> {
     let parsed = Args::parse();
-    let log_filter = parsed
+    let _ = parsed
         .log
         .clone()
-        .or_else(|| std::env::var("RUST_LOG").ok())
-        .unwrap_or_else(|| "robonix_pilot=info".to_string());
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_filter)).init();
+        .or_else(|| std::env::var("RUST_LOG").ok());
+    robonix_scribe::info("pilot", "robonix-pilot starting");
 
     let cfg = PilotConfig::resolve(parsed)?;
 
-    info!("connecting to atlas at {}", cfg.atlas_endpoint);
+    log::info!("connecting to atlas at {}", cfg.atlas_endpoint);
     let mut atlas =
         AtlasClient::connect_with_retry(&cfg.atlas_endpoint, 10, Duration::from_secs(2))
             .await
             .context("connect to atlas")?;
 
     atlas.register_service(&cfg.id, PILOT_NAMESPACE, "").await?;
-    info!("registered as '{}' under '{PILOT_NAMESPACE}'", cfg.id);
+    log::info!("registered as '{}' under '{PILOT_NAMESPACE}'", cfg.id);
 
     let listen_addr: std::net::SocketAddr = cfg
         .listen
@@ -84,7 +82,7 @@ async fn main() -> Result<()> {
             ),
         )
         .await?;
-    info!("declared RobonixSystemPilot gRPC at {advertised}");
+    log::info!("declared RobonixSystemPilot gRPC at {advertised}");
 
     // Pilot has no Driver lifecycle handshake — it's ready as soon as the
     // gRPC server is up. Push ACTIVE so `rbnx caps` doesn't show the
@@ -97,9 +95,10 @@ async fn main() -> Result<()> {
     }
 
     let vlm = vlm::VlmClient::new(&cfg.vlm);
-    info!(
+    log::info!(
         "VLM upstream='{}' model='{}'",
-        cfg.vlm.upstream, cfg.vlm.model
+        cfg.vlm.upstream,
+        cfg.vlm.model
     );
 
     // Atlas evicts providers after ~60s without a heartbeat. Send one every
@@ -121,8 +120,8 @@ async fn main() -> Result<()> {
 
     let svc = PilotServiceImpl::new(atlas, cfg.id.clone(), vlm);
 
-    info!("RobonixSystemPilot gRPC on {listen_addr}");
-    eprintln!("robonix-pilot ready on {listen_addr}");
+    log::info!("RobonixSystemPilot gRPC on {listen_addr}");
+    robonix_scribe::info("pilot", &format!("robonix-pilot ready on {listen_addr}"));
 
     tonic::transport::Server::builder()
         .add_service(RobonixSystemPilotServer::new(svc))

@@ -389,12 +389,8 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let log_filter = args
-        .log
-        .clone()
-        .or_else(|| std::env::var("RUST_LOG").ok())
-        .unwrap_or_else(|| "robonix_liaison=info".to_string());
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_filter)).init();
+    let _ = args.log.clone().or_else(|| std::env::var("RUST_LOG").ok());
+    robonix_scribe::info("liaison", "robonix-liaison starting");
 
     let atlas_endpoint = args.atlas.clone().unwrap_or_else(|| {
         env_first(
@@ -492,7 +488,10 @@ async fn main() -> Result<()> {
         log::warn!("SetLifecycleState(ACTIVE) on {LIAISON_PROVIDER_ID} failed: {e:#}");
     }
     log::info!("registered as '{LIAISON_PROVIDER_ID}', SystemLiaison gRPC on :{listen_port}");
-    eprintln!("robonix-liaison ready on :{listen_port}  (pilot_default={pilot_http})");
+    robonix_scribe::info(
+        "liaison",
+        &format!("robonix-liaison ready on :{listen_port}  (pilot_default={pilot_http})"),
+    );
 
     {
         let mut hb = atlas.clone();
