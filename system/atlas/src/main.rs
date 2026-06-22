@@ -4,6 +4,7 @@
 use clap::Parser;
 use robonix_atlas::contract_registry::{ContractRegistry, resolve_capabilities_roots};
 use robonix_atlas::service::{AtlasRegistry, serve_atlas};
+use robonix_scribe::{info, warn};
 use std::sync::Arc;
 
 const DEFAULT_LISTEN: &str = "0.0.0.0:50051";
@@ -44,10 +45,8 @@ async fn main() {
     // launch scripts.
     let _ = args.log.or_else(|| std::env::var("RUST_LOG").ok());
 
-    // First scribe call registers Scribe as the `log` facade backend
-    // so subsequent `log::info!()` / `log::warn!()` macros also route
-    // through the unified pipeline (tag = module_path!(), e.g. "robonix_atlas").
-    log::info!("robonix-atlas starting (control plane)");
+    robonix_scribe::init("atlas");
+    info!("robonix-atlas starting (control plane)");
 
     let listen = args.listen.unwrap_or_else(|| DEFAULT_LISTEN.to_string());
     let listen_addr: std::net::SocketAddr = match listen.parse() {
@@ -59,7 +58,7 @@ async fn main() {
     };
     let roots = resolve_capabilities_roots(&args.capabilities);
     let contracts = if roots.is_empty() {
-        log::warn!(
+        warn!(
             "[atlas] contract registry: no capabilities dir configured \
              (pass --capabilities or set ROBONIX_SOURCE_PATH); QueryContract \
              will return found=false for every id"
@@ -70,7 +69,7 @@ async fn main() {
         match ContractRegistry::load_from_capability_roots(&refs) {
             Ok(r) => r,
             Err(e) => {
-                log::warn!(
+                warn!(
                     "[atlas] contract registry: load failed ({e:#}); running with empty registry"
                 );
                 ContractRegistry::default()
@@ -79,7 +78,7 @@ async fn main() {
     };
     let registry = Arc::new(AtlasRegistry::with_contracts(contracts));
 
-    log::info!("atlas gRPC on {listen}");
+    info!("atlas gRPC on {listen}");
 
     if let Err(e) = serve_atlas(registry, listen_addr).await {
         eprintln!("robonix-atlas error: {e:?}");

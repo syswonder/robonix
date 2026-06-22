@@ -9,6 +9,7 @@ use crate::pb::contracts::robonix_system_executor_server::RobonixSystemExecutor;
 use crate::pb::executor::CapabilityCallEvent;
 use crate::pb::pilot::{CapabilityCall, Plan};
 use robonix_atlas::client::AtlasClient;
+use robonix_scribe::{info, warn};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -124,7 +125,7 @@ fn execute_node(
                         Ok(child_failed) => any_failed |= child_failed,
                         Err(e) => {
                             any_failed = true;
-                            log::warn!("[executor] parallel branch task failed: {e}");
+                            warn!("[executor] parallel branch task failed: {e}");
                         }
                     }
                 }
@@ -138,7 +139,7 @@ fn execute_node(
                 execute_call(call, tx, atlas, provider_id).await
             }
             _ => {
-                log::warn!(
+                warn!(
                     "[executor] invalid node_kind={} reached after validation",
                     node.node_kind
                 );
@@ -165,11 +166,9 @@ async fn execute_call(
         )))
         .await;
 
-    log::info!(
+    info!(
         "[executor] dispatching call_id={} provider='{}' contract='{}'",
-        call.call_id,
-        call.provider_id,
-        call.contract_id,
+        call.call_id, call.provider_id, call.contract_id,
     );
     let mut atlas_for_call = atlas.clone();
     let result = dispatch::dispatch(call, &provider_id, &mut atlas_for_call).await;
@@ -178,14 +177,12 @@ async fn execute_call(
     if result.success {
         let preview: String = result.output.chars().take(120).collect();
         let ellipsis = if result.output.len() > 120 { "..." } else { "" };
-        log::info!(
+        info!(
             "[executor] '{}' ok: {}{}",
-            call.contract_id,
-            preview,
-            ellipsis
+            call.contract_id, preview, ellipsis
         );
     } else {
-        log::warn!("[executor] '{}' failed: {}", call.contract_id, result.error);
+        warn!("[executor] '{}' failed: {}", call.contract_id, result.error);
     }
 
     let _ = tx.send(Ok(exec_wire::result(result))).await;

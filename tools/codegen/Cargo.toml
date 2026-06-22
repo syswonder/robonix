@@ -16,7 +16,6 @@ path = "src/main.rs"
 clap.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
-log.workspace = true
 robonix-scribe.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

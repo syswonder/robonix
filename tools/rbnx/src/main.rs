@@ -6,6 +6,7 @@
 use anyhow::Result;
 use clap::Parser;
 use robonix_cli::Config;
+use robonix_scribe::{info, warn};
 
 mod cmd;
 mod pb;
@@ -29,7 +30,8 @@ async fn main() -> Result<()> {
         std::env::set_var("SCRIBE_CONSOLE_LEVEL", "error");
     }
 
-    robonix_scribe::info("rbnx", "rbnx starting");
+    robonix_scribe::init("rbnx");
+    info!("rbnx starting");
 
     let cli = Cli::parse();
 
@@ -53,7 +55,7 @@ async fn main() -> Result<()> {
     }
 
     if let Err(e) = robonix_cli::PackageDatabase::sync(&config.package_storage_path) {
-        log::warn!("Package database sync failed: {}", e);
+        warn!("Package database sync failed: {}", e);
     }
 
     cmd::execute(cli.command, config).await?;

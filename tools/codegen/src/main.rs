@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use robonix_codegen::codegen::{
     contract_gen, docs_gen, mcp_python_gen, msg_parser, proto_gen, ros2_gen,
 };
+use robonix_scribe::info;
 
 #[derive(Parser)]
 #[command(name = "robonix-codegen")]
@@ -68,7 +69,8 @@ fn verbose_from_args_and_env(args: &Args) -> bool {
 }
 
 fn main() -> Result<()> {
-    robonix_scribe::info("codegen", "robonix-codegen starting");
+    robonix_scribe::init("codegen");
+    info!("robonix-codegen starting");
     let args = Args::parse();
     let verbose = verbose_from_args_and_env(&args);
 
