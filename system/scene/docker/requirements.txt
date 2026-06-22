@@ -1,3 +1,5 @@
+# NOTE: This file is a BACKUP of requirements/ !!!
+
 # Scene-container Python deps. Subset of pyproject.toml's
 # [project.dependencies] minus what the base image already provides
 # (numpy / cv-bridge / rclpy / tf2_ros).
