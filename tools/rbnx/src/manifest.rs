@@ -18,6 +18,7 @@
 // in favour of "capability"; "runtime" is "system".
 
 use anyhow::{Context, Result};
+use robonix_scribe::warn;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -273,7 +274,7 @@ impl Manifest {
         }
 
         if self.is_legacy {
-            log::warn!(
+            warn!(
                 "package '{}' uses legacy manifest fields (package.id / nodes[] / \
                  build.script / robonix_manifest.yaml). These still work but are \
                  deprecated — migrate to the new spec (package_manifest.yaml with \

@@ -25,6 +25,7 @@ use dispatch::builtin::BUILTINS;
 use pb::contracts::robonix_system_executor_server::RobonixSystemExecutorServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
+use robonix_scribe::{info, warn};
 use service::ExecutorServiceImpl;
 use std::time::Duration;
 
@@ -35,11 +36,12 @@ async fn main() -> Result<()> {
         .log
         .clone()
         .or_else(|| std::env::var("RUST_LOG").ok());
-    robonix_scribe::info("executor", "robonix-executor starting");
+    robonix_scribe::init("executor");
+    info!("robonix-executor starting");
 
     let cfg = ExecutorConfig::resolve(parsed)?;
 
-    log::info!("connecting to atlas at {}", cfg.atlas_endpoint);
+    info!("connecting to atlas at {}", cfg.atlas_endpoint);
     let mut atlas =
         AtlasClient::connect_with_retry(&cfg.atlas_endpoint, 10, Duration::from_secs(2))
             .await
@@ -48,7 +50,7 @@ async fn main() -> Result<()> {
     atlas
         .register_service(&cfg.id, EXECUTOR_NAMESPACE, "")
         .await?;
-    log::info!("registered as '{}' under '{EXECUTOR_NAMESPACE}'", cfg.id);
+    info!("registered as '{}' under '{EXECUTOR_NAMESPACE}'", cfg.id);
 
     let listen_addr: std::net::SocketAddr = cfg
         .listen
@@ -95,7 +97,7 @@ async fn main() -> Result<()> {
             .await
             .with_context(|| format!("declare builtin '{}'", contract_id))?;
     }
-    log::info!(
+    info!(
         "declared RobonixSystemExecutor + {} builtin capabilities at {advertised}",
         BUILTINS.len()
     );
@@ -107,7 +109,7 @@ async fn main() -> Result<()> {
         .set_lifecycle_state(&cfg.id, atlas_pb::LifecycleState::StateActive, "")
         .await
     {
-        log::warn!("SetLifecycleState(ACTIVE) failed: {e:#}");
+        warn!("SetLifecycleState(ACTIVE) failed: {e:#}");
     }
 
     // Atlas evicts providers after ~60s without a heartbeat. Send one every
@@ -121,18 +123,15 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 if let Err(e) = hb.heartbeat(&provider_id).await {
-                    log::warn!("heartbeat failed: {e:#}");
+                    warn!("heartbeat failed: {e:#}");
                 }
             }
         });
     }
 
     let svc = ExecutorServiceImpl::new(atlas, cfg.id.clone());
-    log::info!("RobonixSystemExecutor gRPC on {listen_addr}");
-    robonix_scribe::info(
-        "executor",
-        &format!("robonix-executor ready on {listen_addr}"),
-    );
+    info!("RobonixSystemExecutor gRPC on {listen_addr}");
+    info!("robonix-executor ready on {listen_addr}");
 
     tonic::transport::Server::builder()
         .add_service(RobonixSystemExecutorServer::new(svc))

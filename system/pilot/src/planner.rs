@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
+use robonix_scribe::{debug, info, warn};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::{mpsc::Sender, watch};
@@ -119,7 +120,7 @@ pub async fn run_turn(
     }
 
     if task_is_session_end(task) {
-        log::info!("[pilot] session_end: invoking compact_memory if available");
+        info!("[pilot] session_end: invoking compact_memory if available");
         memory::try_compact(executor, atlas, consumer_id).await;
         let _ = tx
             .send(Ok(service::pack(
@@ -297,7 +298,7 @@ pub async fn run_turn(
             }
 
             let raw_content = content.unwrap_or_default();
-            log::debug!("raw_content: {}", raw_content);
+            debug!("raw_content: {}", raw_content);
             let parsed = parse_rtdl_assistant_response(&raw_content).with_context(|| {
                 format!(
                     "parse RTDL assistant response: {}",
@@ -308,7 +309,7 @@ pub async fn run_turn(
             let (assistant_content, rtdl) = match parsed {
                 Ok(parsed) => parsed,
                 Err(e) if correction.is_none() => {
-                    log::warn!(
+                    warn!(
                         "[pilot/rtdl] parse failed round={}, retrying once: {e:#}",
                         round
                     );
@@ -316,7 +317,7 @@ pub async fn run_turn(
                     continue;
                 }
                 Err(e) => {
-                    log::warn!(
+                    warn!(
                         "[pilot/rtdl] parse failed again round={}, ending turn gracefully: {e:#}",
                         round
                     );
@@ -326,7 +327,7 @@ pub async fn run_turn(
                 }
             };
 
-            log::debug!(
+            debug!(
                 "[pilot/rtdl] parsed assistant JSON round={} content_chars={}",
                 round,
                 assistant_content.chars().count()
@@ -344,14 +345,14 @@ pub async fn run_turn(
             match graph_result {
                 Ok(graph) => break (assistant_content, graph, plan_id),
                 Err(e) if correction.is_none() => {
-                    log::warn!(
+                    warn!(
                         "[pilot/rtdl] expand failed round={}, retrying once: {e:#}",
                         round
                     );
                     correction = Some(build_rtdl_retry_prompt(&e, &raw_content, &display_caps));
                 }
                 Err(e) => {
-                    log::warn!(
+                    warn!(
                         "[pilot/rtdl] expand failed again round={}, ending turn gracefully: {e:#}",
                         round
                     );
@@ -361,7 +362,7 @@ pub async fn run_turn(
                 }
             }
         };
-        log::info!(
+        info!(
             "[pilot/rtdl] expanded plan_id={} round={} calls={}",
             graph.plan_id,
             graph.round,
@@ -369,10 +370,9 @@ pub async fn run_turn(
         );
 
         if plan_call_count(&graph) == 0 {
-            log::info!(
+            info!(
                 "[pilot/rtdl] empty sequence plan_id={} round={} final_text=true",
-                graph.plan_id,
-                graph.round
+                graph.plan_id, graph.round
             );
             if !assistant_content.is_empty() {
                 history.push(Message::assistant(&assistant_content));
@@ -397,7 +397,7 @@ pub async fn run_turn(
         }
 
         // Notify Liaison about the outgoing task graph slice.
-        log::debug!(
+        debug!(
             "[pilot/rtdl] sending plan_id={} calls={} to liaison/executor",
             graph.plan_id,
             plan_call_count(&graph)
@@ -432,10 +432,9 @@ pub async fn run_turn(
             match event.event_kind {
                 EX_STARTED => {
                     if let Some(ref s) = event.started {
-                        log::debug!(
+                        debug!(
                             "[pilot] executor started provider='{}' contract='{}'",
-                            s.provider_id,
-                            s.contract_id
+                            s.provider_id, s.contract_id
                         );
                     }
                 }
@@ -444,14 +443,12 @@ pub async fn run_turn(
                         if r.success {
                             let preview: String = r.output.chars().take(120).collect();
                             let ellipsis = if r.output.len() > 120 { "…" } else { "" };
-                            log::debug!(
+                            debug!(
                                 "[pilot] tool result '{}': {}{}",
-                                r.call_id,
-                                preview,
-                                ellipsis
+                                r.call_id, preview, ellipsis
                             );
                         } else {
-                            log::debug!("[pilot] tool error '{}': {}", r.call_id, r.error);
+                            debug!("[pilot] tool error '{}': {}", r.call_id, r.error);
                         }
                         results.push(r);
                     }
@@ -488,7 +485,7 @@ pub async fn run_turn(
 
         round += 1;
         if round as usize >= max_rounds {
-            log::warn!(
+            warn!(
                 "[pilot] hit max tool rounds ({}), stopping turn",
                 max_rounds
             );
@@ -557,7 +554,7 @@ fn build_rtdl_prompt(display_caps: &[DisplayCapability<'_>]) -> Result<String> {
         ));
     }
 
-    // log::debug!("[pilot/rtdl] rtdl prompt:\n{}", p);
+    // debug!("[pilot/rtdl] rtdl prompt:\n{}", p);
     Ok(p)
 }
 

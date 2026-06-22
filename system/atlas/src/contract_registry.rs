@@ -13,7 +13,7 @@
 // capability-card-style fields) waits until the TOML schema grows.
 
 use anyhow::Context;
-use log::{info, warn};
+use robonix_scribe::{info, warn};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

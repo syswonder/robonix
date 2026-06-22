@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use dirs;
+use robonix_scribe::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -135,10 +136,9 @@ impl ProcessManager {
                 let key = format!("{}::{}", process_info.package_type, process_info.std_name);
                 valid_processes.insert(key, process_info);
             } else {
-                log::info!(
+                info!(
                     "Process {} (PID: {}) is no longer running, removing from state",
-                    process_info.std_name,
-                    process_info.pid
+                    process_info.std_name, process_info.pid
                 );
             }
         }
@@ -218,7 +218,7 @@ impl ProcessManager {
         {
             let processes = self.processes.lock().unwrap();
             if let Some(existing) = processes.get(&key) {
-                log::warn!("Process for {} already running, skipping", key);
+                warn!("Process for {} already running, skipping", key);
                 #[cfg(unix)]
                 let (pgid, pids) = {
                     if let Ok(pgid) = Self::get_process_group_id(existing.pid) {
@@ -265,7 +265,7 @@ impl ProcessManager {
         let pid = child
             .id()
             .ok_or_else(|| anyhow::anyhow!("Failed to get process ID"))?;
-        log::info!("Running {} (PID {})", key, pid);
+        info!("Running {} (PID {})", key, pid);
 
         // Pipe stdout / stderr through Scribe so structured logs land in
         // $SCRIBE_LOG_DIR/{tag}.log.  Do NOT forward to the terminal —
@@ -372,7 +372,7 @@ impl ProcessManager {
                 let pgid_obj = Pid::from_raw(gid as i32);
                 // List all processes in the group before killing
                 if let Ok(pids) = Self::get_processes_in_group(gid) {
-                    log::info!(
+                    info!(
                         "Stopping process group {} (root PID: {}): found {} processes: {:?}",
                         gid,
                         pid,
@@ -380,24 +380,24 @@ impl ProcessManager {
                         pids
                     );
                 } else {
-                    log::info!("Stopping process group {} (root PID: {})", gid, pid);
+                    info!("Stopping process group {} (root PID: {})", gid, pid);
                 }
                 pgid_obj
             }
             Err(_) => {
                 // Fallback: assume PGID equals PID (true if we used setsid)
-                log::warn!(
+                warn!(
                     "Could not get process group ID for PID {}, assuming PGID=PID",
                     pid
                 );
-                log::info!("Stopping process (PID: {}, assumed PGID: {})", pid, pid);
+                info!("Stopping process (PID: {}, assumed PGID: {})", pid, pid);
                 pid_obj
             }
         };
 
         // First, send SIGTERM to the entire process group
         if let Err(e) = killpg(pgid, Signal::SIGTERM) {
-            log::warn!("Failed to send SIGTERM to process group {}: {:?}", pgid, e);
+            warn!("Failed to send SIGTERM to process group {}: {:?}", pgid, e);
             // Fallback: try killing the process directly
             let _ = kill(pid_obj, Signal::SIGTERM);
         }
@@ -440,7 +440,7 @@ impl ProcessManager {
                 }
 
                 if !still_alive.is_empty() {
-                    log::info!(
+                    info!(
                         "Process group still has {} processes alive, sending SIGKILL",
                         still_alive.len()
                     );
@@ -642,7 +642,7 @@ impl ProcessManager {
         };
 
         if let Some(process_info) = process_info {
-            log::info!("Stopping process: {} (PID: {})", key, process_info.pid);
+            info!("Stopping process: {} (PID: {})", key, process_info.pid);
 
             // Get process group information before killing
             #[cfg(unix)]
@@ -659,10 +659,9 @@ impl ProcessManager {
 
             // Kill the process tree (parent + all children)
             if let Err(e) = self.kill_process_tree(process_info.pid) {
-                log::warn!(
+                warn!(
                     "Failed to kill process tree for PID {}: {:?}",
-                    process_info.pid,
-                    e
+                    process_info.pid, e
                 );
                 // Fallback: try to kill just the main process
                 #[cfg(unix)]
@@ -699,7 +698,7 @@ impl ProcessManager {
                 let _ = file.write_all(stop_msg.as_bytes()).await;
             }
 
-            log::info!("Process stopped: {}", key);
+            info!("Process stopped: {}", key);
 
             // Save state to persistent storage (lock is already dropped, so this is safe)
             self.save_state()?;
@@ -710,7 +709,7 @@ impl ProcessManager {
                 pids,
             })
         } else {
-            log::warn!("Process not found: {}", key);
+            warn!("Process not found: {}", key);
             anyhow::bail!("Process not found: {}", key)
         }
     }
