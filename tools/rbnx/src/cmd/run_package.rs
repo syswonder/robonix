@@ -198,6 +198,10 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
         name: String,
         pkg_dir: PathBuf,
         url_to_clone: Option<(String, Option<String>)>, // (url, branch)
+        // Deploy `manifest:` override — selects a per-target package
+        // manifest variant (e.g. package_manifest.jetson-native.yaml) so
+        // the right build path runs. None = default package_manifest.yaml.
+        manifest_override: Option<String>,
     }
     let mut entries: Vec<Resolved> = Vec::new();
     for section in &["primitive", "service", "skill"] {
@@ -216,18 +220,24 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
                 .get("branch")
                 .and_then(|v| v.as_str())
                 .map(String::from);
+            let manifest_override = entry
+                .get("manifest")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             match (local_path, url) {
                 (Some(p), _) => entries.push(Resolved {
                     section,
                     name,
                     pkg_dir: manifest_dir.join(p),
                     url_to_clone: None,
+                    manifest_override,
                 }),
                 (None, Some(u)) => entries.push(Resolved {
                     section,
                     name: name.clone(),
                     pkg_dir: cache_root.join(&name),
                     url_to_clone: Some((u.to_string(), branch)),
+                    manifest_override,
                 }),
                 (None, None) => {
                     output::warning(&format!(
@@ -272,6 +282,7 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
                 name: key_str.to_string(),
                 pkg_dir,
                 url_to_clone: None,
+                manifest_override: None,
             });
         }
     }
@@ -358,7 +369,7 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
         output::step(r.section, &r.name);
         let (pkg_name, version) = read_pkg_meta(&canon);
         let location = rel_to(&manifest_dir, &canon);
-        match build::build_local_package(&canon, clean) {
+        match build::build_local_package(&canon, clean, r.manifest_override.as_deref()) {
             Ok(()) => built.push(Row {
                 section: r.section,
                 name: r.name.clone(),
@@ -532,12 +543,13 @@ pub async fn execute_start(
     registry_endpoint: Option<&str>,
     config_file: Option<&Path>,
     set_overrides: &[String],
+    manifest_override: Option<&str>,
 ) -> Result<()> {
     let package_root = match spec {
         Some(s) => resolve_package_path_for_start(config, s)?,
         None => find_package_from_cwd()?,
     };
-    let detected = manifest::detect_and_load(&package_root)?;
+    let detected = manifest::detect_and_load(&package_root, manifest_override)?;
     let manifest = &detected.manifest;
     manifest.validate_and_summarize()?;
 
@@ -595,7 +607,7 @@ pub async fn execute_start(
 
     if !manifest.build.trim().is_empty() && !build::build_stamp_path(&package_root).exists() {
         output::sub_step("No rbnx-build/.rbnx-built — running package build first");
-        build::build_local_package(&package_root, false)?;
+        build::build_local_package(&package_root, false, manifest_override)?;
     }
 
     let exports = env

@@ -21,7 +21,7 @@ pub async fn execute(path: Option<PathBuf>) -> Result<()> {
         "Validating",
         &format!("package at {}", package_root.display()),
     );
-    let detected = manifest::detect_and_load(&package_root)?;
+    let detected = manifest::detect_and_load(&package_root, None)?;
     let summary = detected.manifest.validate_and_summarize()?;
 
     output::check(&format!("Manifest: {}", detected.path.display()));
