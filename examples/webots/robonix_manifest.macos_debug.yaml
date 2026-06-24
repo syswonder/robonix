@@ -91,7 +91,7 @@ service:
         lidar2d: true
         lidar3d: false
         rgb: true
-        rgbd: true
+        depth: true
         imu: false
         odom: true
   - name: simple_nav
