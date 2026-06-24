@@ -97,7 +97,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # pip: do NOT use proxy.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     without-proxy python3 -m pip install \
-        --progress-bar raw \
+        --progress-bar on \
         --timeout 60 \
         --retries 3 \
         --upgrade pip
@@ -108,14 +108,14 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 # Aliyun mirror carries cu128 wheels; fall back to upstream PyTorch index.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     without-proxy python3 -m pip install \
-        --progress-bar raw \
+        --progress-bar on \
         --timeout 60 \
         --retries 3 \
         -i https://mirrors.aliyun.com/pypi/simple/ \
         --find-links https://mirrors.aliyun.com/pytorch-wheels/cu128/ \
         torch==2.7.1 torchvision==0.22.1 \
     || with-build-proxy python3 -m pip install \
-        --progress-bar raw \
+        --progress-bar on \
         --timeout 60 \
         --retries 3 \
         --index-url https://download.pytorch.org/whl/cu128 \
@@ -128,7 +128,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 COPY requirements/scene-base.txt /tmp/requirements/scene-base.txt
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     without-proxy pip install -r /tmp/requirements/scene-base.txt \
-        --progress-bar raw \
+        --progress-bar on \
         --timeout 60 \
         --retries 3 \
     && rm /tmp/requirements/scene-base.txt
@@ -137,7 +137,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 COPY requirements/scene-perception-core.txt /tmp/requirements/scene-perception-core.txt
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     without-proxy pip install -r /tmp/requirements/scene-perception-core.txt \
-        --progress-bar raw \
+        --progress-bar on \
         --timeout 60 \
         --retries 3 \
     && rm /tmp/requirements/scene-perception-core.txt
@@ -146,7 +146,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 COPY requirements/scene-perception-heavy.txt /tmp/requirements/scene-perception-heavy.txt
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     without-proxy pip install -r /tmp/requirements/scene-perception-heavy.txt \
-        --progress-bar raw \
+        --progress-bar on \
         --timeout 60 \
         --retries 3 \
     && rm /tmp/requirements/scene-perception-heavy.txt
@@ -155,7 +155,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 # COPY requirements/scene-pytorch3d.txt /tmp/requirements/scene-pytorch3d.txt
 # RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 #     without-proxy pip install -r /tmp/requirements/scene-pytorch3d.txt \
-#         --progress-bar raw \
+#         --progress-bar on \
 #         --timeout 60 \
 #         --retries 3 \
 #     && rm /tmp/requirements/scene-pytorch3d.txt
