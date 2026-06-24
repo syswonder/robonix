@@ -148,7 +148,12 @@ DOCKER_BUILD_FLAGS=(--network=host)
 #
 #   Because we use --network=host, keep 127.0.0.1 unchanged.
 #
-USE_PROXY="${RBNX_BUILD_PROXY:-auto}"
+# Default to no proxy: this repo targets domestic (CN) networks where the
+# aliyun / tuna mirrors are reached directly and fast. Picking up the host's
+# http_proxy (the old `auto` default) would tunnel large wheel downloads
+# (torch, ~1 GB) through a local proxy and stall them. Opt back in with
+# RBNX_BUILD_PROXY=1 only when the host genuinely needs a proxy for egress.
+USE_PROXY="${RBNX_BUILD_PROXY:-0}"
 
 _http_proxy="${HTTP_PROXY:-${http_proxy:-}}"
 _https_proxy="${HTTPS_PROXY:-${https_proxy:-}}"
@@ -189,14 +194,16 @@ case "$USE_PROXY" in
         ;;
 esac
 
-# Skip the rebuild when the image already exists AND its layers are
-# all cached — `docker build` is idempotent so this branch is just an
-# optimisation; safe to remove if it ever surprises someone.
+# Reuse the image when it already exists. `docker build` re-runs every layer
+# whose instruction hash changed (e.g. a tweaked pip line), which on a flaky
+# mirror means re-downloading multi-hundred-MB wheels (torch) — slow and
+# failure-prone. The built image is self-contained, so an existing one is
+# safe to reuse. Force a clean rebuild with RBNX_BUILD_CLEAN=1.
 if [[ "$CLEAN" != "1" ]] && docker image inspect "$IMG" >/dev/null 2>&1; then
-    echo "[build] image $IMG already present; rebuilding incrementally"
+    echo "[build] image $IMG already present; reusing (RBNX_BUILD_CLEAN=1 to force rebuild)"
+else
+    echo "[build] docker build -t $IMG docker/"
+    docker build "${DOCKER_BUILD_FLAGS[@]}" -t "$IMG" docker/
 fi
-
-echo "[build] docker build -t $IMG docker/"
-docker build "${DOCKER_BUILD_FLAGS[@]}" -t "$IMG" docker/
 
 echo "[build] done."
