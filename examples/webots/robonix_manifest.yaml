@@ -48,6 +48,11 @@ primitive:
       width: 640
       height: 480
       frame_id: head_front_camera_rgb_optical_frame
+      # First-RGB-frame wait at INIT. Webots under a CPU-starved boot (all
+      # drivers initialising at once) can take well over a minute to deliver
+      # the first frame — lidar alone routinely needs ~70s — so the default
+      # 60s is too tight here. Match the lidar tolerance with headroom.
+      sentinel_timeout_s: 150
   - name: tiago_lidar
     path: ./primitives/tiago_lidar
     config:
