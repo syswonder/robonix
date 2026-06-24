@@ -36,6 +36,7 @@ scene = Service(id="scene", namespace="robonix/system/scene")
 
 from . import mcp_tools
 from . import web as web_ui
+from .ingest.capabilities import plan_perception
 from .ingest.perception_concept_graphs import ConceptGraphsDetector
 from .ingest.perception_vlm import VLMObjectDetector, _CamIntrinsics
 from .ingest.ros_subscribers import (
@@ -101,6 +102,7 @@ _SCENE_CONTRACTS: list[tuple[str, str, str]] = [
     ("lidar2d",           "robonix/primitive/lidar/lidar",       "LaserScan"),
     ("lidar3d",           "robonix/primitive/lidar/pointcloud",  "PointCloud2"),
     ("camera_extrinsics", "robonix/primitive/camera/extrinsics", "TransformStamped"),
+    ("intrinsics",        "robonix/primitive/camera/intrinsics", "CameraInfo"),
     ("pose",              "robonix/service/map/pose",            "PoseWithCovarianceStamped"),
     ("odom",              "robonix/service/map/odom",            "Odometry"),
     ("occupancy_grid",    "robonix/service/map/occupancy_grid",  "OccupancyGrid"),
@@ -454,12 +456,15 @@ async def _start_ros_ingest(
         await asyncio.sleep(2.0)
 
     # ── perception ─────────────────────────────────────────────────────────
-    # ConceptGraphs path is *strongly* preferred: it owns metric-accurate
-    # depth-backprojected poses. The VLM path stays as a no-depth fallback
-    # but we log loudly when we fall into it because pose accuracy will
-    # suffer.
+    # Which perception tier the current hardware supports is decided by the
+    # capability probe, not inline here: `plan.detector` routes to the
+    # ConceptGraphs (metric), VLM (visual), or no (geometric) path. The
+    # metric path is strongly preferred — it owns depth-backprojected
+    # poses; the others are named, logged degradations, not silent ones.
+    plan = plan_perception(hub)
+    log.info("[scene] perception plan: %s", plan.summary())
     detector: Optional[Any] = None
-    if hub.has("rgb") and hub.has("depth"):
+    if plan.detector == "concept_graphs":
 
         def _rgb_msg() -> Optional[Any]:
             msg, stamp, _ = hub.latest("rgb")
@@ -473,14 +478,42 @@ async def _start_ros_ingest(
                 return None
             return msg
 
-        # Camera intrinsics: prefer a dedicated camera_info topic if a
-        # primitive ever publishes one (TODO: subscribe to camera_info as
-        # a separate kind). For now we fall back to the static webots
-        # tiago intrinsics — same as the VLM path used. If a deployment
-        # has different intrinsics it can override via
-        # SCENE_CAMERA_INTRINSICS=fx,fy,cx,cy,w,h.
+        # Camera intrinsics come *only* from the live
+        # `primitive/camera/intrinsics` contract — the real per-deployment
+        # K, exactly as extrinsics come from the camera's tf2/URDF rather
+        # than a scene-side env var. Back-projection scales every point by
+        # fx/fy, so a wrong guess silently misplaces objects; we therefore
+        # return None when no usable K is available and let the detector
+        # *wait* (it logs "waiting for camera intrinsics") instead of
+        # grounding perception on a default.
+        intrinsics_logged = {"ok": False, "bad": False}
+
         def _cam_info() -> Optional[_CamIntrinsics]:
-            return _resolved_cam_intrinsics()
+            if not hub.has("intrinsics"):
+                return None
+            msg, stamp, _ = hub.latest("intrinsics")
+            if msg is None or stamp <= 0.0:
+                return None
+            k = _cam_info_to_intrinsics(msg)
+            if k is not None:
+                if not intrinsics_logged["ok"]:
+                    log.info(
+                        "[scene] camera intrinsics from contract: "
+                        "fx=%.1f fy=%.1f cx=%.1f cy=%.1f %dx%d",
+                        k.fx, k.fy, k.cx, k.cy, k.width, k.height,
+                    )
+                    intrinsics_logged["ok"] = True
+                return k
+            # Contract is published but the CameraInfo K is zero/garbage —
+            # distinct from "no contract"; warn once so a miscalibrated
+            # publisher is visible rather than silently stalling perception.
+            if not intrinsics_logged["bad"]:
+                log.warning(
+                    "[scene] intrinsics contract published but CameraInfo K "
+                    "is unusable — detector will wait for valid intrinsics"
+                )
+                intrinsics_logged["bad"] = True
+            return None
 
         detector = ConceptGraphsDetector(
             rgb_fetcher_msg=_rgb_msg,
@@ -498,7 +531,7 @@ async def _start_ros_ingest(
         )
         await detector.start()
         log.info("[scene] perception: ConceptGraphsDetector (rgb+depth)")
-    elif hub.has("rgb"):
+    elif plan.detector == "vlm":
         log.warning(
             "[scene] perception: no depth stream — falling back to "
             "VLMObjectDetector. Object positions will be approximate. "
@@ -511,35 +544,69 @@ async def _start_ros_ingest(
                 return None
             return _image_msg_to_jpeg(msg)
 
+        # Use the contract K when it has already landed, else the built-in
+        # default. Unlike the metric path the visual tier must NOT wait for
+        # intrinsics: its depth is a VLM guess, so K is a minor term, and
+        # the tier's whole job is to emit approximate cues from minimal
+        # hardware. A one-time snapshot is fine — intrinsics are latched and
+        # this branch only runs after the perception-wait window.
+        vlm_intrinsics: Optional[_CamIntrinsics] = None
+        if hub.has("intrinsics"):
+            msg, stamp, _ = hub.latest("intrinsics")
+            if msg is not None and stamp > 0.0:
+                vlm_intrinsics = _cam_info_to_intrinsics(msg)
+        log.info(
+            "[scene] VLM intrinsics: %s",
+            "from contract" if vlm_intrinsics is not None else "built-in default",
+        )
+
         detector = VLMObjectDetector(
             rgb_fetcher=_rgb_jpeg,
             chassis_pose_fn=self_tracker.latest_xy_yaw,
             on_detections=lambda dets: _ingest_detections(registry, dets),
             period_s=4.0,
+            intrinsics=vlm_intrinsics,
         )
         await detector.start()
     else:
-        log.warning("[scene] perception: no RGB stream — detector disabled")
+        # geometric tier: no camera. Object detection is off, but the
+        # occupancy grid + goal_near BFS stay available, so navigation-
+        # style queries still work — this is a degraded mode, not a fault.
+        log.warning(
+            "[scene] perception: geometric tier — no camera wired; object "
+            "detection disabled (occupancy_grid + goal_near remain available)"
+        )
 
     return hub, detector, bg_tasks
 
 
-def _resolved_cam_intrinsics() -> _CamIntrinsics:
-    """Camera intrinsics for the ConceptGraphs detector. Default is
-    webots tiago head_front_camera at 640x480 (60° HFOV). Override
-    via SCENE_CAMERA_INTRINSICS=fx,fy,cx,cy,w,h."""
-    raw = os.environ.get("SCENE_CAMERA_INTRINSICS", "").strip()
-    if raw:
-        try:
-            parts = [float(s) for s in raw.split(",")]
-            if len(parts) >= 4:
-                fx, fy, cx, cy = parts[:4]
-                w = int(parts[4]) if len(parts) > 4 else 640
-                h = int(parts[5]) if len(parts) > 5 else 480
-                return _CamIntrinsics(width=w, height=h, fx=fx, fy=fy, cx=cx, cy=cy)
-        except Exception:  # noqa: BLE001
-            pass
-    return _CamIntrinsics()
+def _cam_info_to_intrinsics(msg: Any) -> Optional[_CamIntrinsics]:
+    """Convert a sensor_msgs/CameraInfo into _CamIntrinsics.
+
+    Reads the 3x3 row-major K matrix (`k[0]=fx`, `k[2]=cx`, `k[4]=fy`,
+    `k[5]=cy`) plus width/height. ROS2 exposes the field as lowercase
+    `k`; we also accept `K` for safety. Returns None when any of
+    fx/fy/cx/cy/width/height is non-positive — an all-zero or partially
+    populated CameraInfo carries no usable geometry, and the caller
+    treats None as "wait for valid intrinsics", never as "use a default".
+    The except is narrow on purpose: a genuinely unexpected error should
+    surface, not be swallowed as if intrinsics were merely missing."""
+    try:
+        k = list(getattr(msg, "k", None) or getattr(msg, "K", []) or [])
+        w = int(getattr(msg, "width", 0))
+        h = int(getattr(msg, "height", 0))
+        if len(k) < 6 or min(k[0], k[4], k[2], k[5]) <= 0 or w <= 0 or h <= 0:
+            return None
+        return _CamIntrinsics(
+            width=w,
+            height=h,
+            fx=float(k[0]),
+            fy=float(k[4]),
+            cx=float(k[2]),
+            cy=float(k[5]),
+        )
+    except (AttributeError, TypeError, ValueError, IndexError):
+        return None
 
 
 async def _self_pose_loop(hub: SubscribersHub, self_tracker: "_SelfTracker") -> None:
