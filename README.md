@@ -121,6 +121,17 @@ rbnx caps          # list registered capabilities + interfaces
 rbnx chat          # interactive TUI chat with the pilot
 ```
 
+Keeping upstream packages fresh: some providers in the manifest are cloned
+from upstream git repos (e.g. `mapping`, `nav2`, `explore` declared with
+`url:`). They are cloned once and reused, so they don't advance on their own.
+`rbnx boot` and `rbnx build` print a notice when a local clone is behind its
+remote; sync to the latest upstream commit with `rbnx update`:
+
+```bash
+rbnx update                  # update every remote provider in this deploy (asks y/N)
+rbnx update -p <package dir>  # or just one package
+```
+
 Tear-down:
 
 ```bash
