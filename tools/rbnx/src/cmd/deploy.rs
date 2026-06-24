@@ -486,6 +486,8 @@ pub async fn execute(
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
     let mut deploy: DeployManifest = serde_yaml::from_str(&raw)
         .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    // Notice (non-fatal) if any cloned remote provider is behind upstream.
+    super::check_remotes::report_outdated(&manifest_path);
     // Env expansion applies to both the top-level env block and all nested
     // scalar strings in system / primitive / service / skill configs.
     for v in deploy.system.values_mut() {

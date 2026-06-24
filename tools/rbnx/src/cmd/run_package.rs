@@ -191,6 +191,8 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
         "Building",
         &format!("packages declared in {}", manifest_path.display()),
     );
+    // Notice (non-fatal) if any cloned remote provider is behind upstream.
+    super::check_remotes::report_outdated(manifest_path);
 
     // Collect (section, name, pkg_dir, url_to_clone) for every entry.
     struct Resolved {
