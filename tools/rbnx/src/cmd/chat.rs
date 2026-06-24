@@ -95,14 +95,35 @@ impl ForestView {
     }
 }
 
-/// Compact one-line label for a `do` node: `leaf(short args)`. Collapses
-/// whitespace/newlines (run_command args are whole shell scripts) and elides
-/// past ~48 chars so the tree stays readable in both the log and the panel.
-fn compact_call_label(contract_id: &str, args_json: &str) -> String {
-    let leaf = contract_id
-        .rsplit_once('/')
-        .map(|(_, l)| l)
-        .unwrap_or(contract_id);
+/// The standard LLM-facing capability name, exactly as pilot presents it to
+/// the model and as the model emits it in `do.cap`: `provider_id.<area>_<leaf>`
+/// — e.g. `tiago_camera.camera_snapshot`, `tiago_lidar.lidar_snapshot`,
+/// `explore.explore_status`, `executor.builtin_read_file`. The `<area>_<leaf>`
+/// part mirrors `robonix_pilot::discovery::llm_name` (kept in sync here since
+/// rbnx-cli doesn't depend on the pilot crate); the `<area>` prefix is what
+/// disambiguates the shared `snapshot` / `status` leaves across providers.
+fn cap_short_name(provider_id: &str, contract_id: &str) -> String {
+    let mut segs = contract_id.rsplit('/');
+    let leaf = segs.next().unwrap_or(contract_id);
+    let area = segs.next().unwrap_or("");
+    let llm_name = if area.is_empty() {
+        leaf.to_string()
+    } else {
+        format!("{area}_{leaf}")
+    };
+    if provider_id.is_empty() {
+        llm_name
+    } else {
+        format!("{provider_id}.{llm_name}")
+    }
+}
+
+/// Compact one-line label for a `do` node: `provider.leaf(short args)`.
+/// Collapses whitespace/newlines (run_command args are whole shell scripts)
+/// and elides past ~48 chars so the tree stays readable in both the log and
+/// the panel.
+fn compact_call_label(provider_id: &str, contract_id: &str, args_json: &str) -> String {
+    let name = cap_short_name(provider_id, contract_id);
     let flat = args_json.split_whitespace().collect::<Vec<_>>().join(" ");
     const MAX: usize = 48;
     let total = flat.chars().count();
@@ -112,7 +133,7 @@ fn compact_call_label(contract_id: &str, args_json: &str) -> String {
     } else {
         flat
     };
-    format!("{leaf}({shown})")
+    format!("{name}({shown})")
 }
 
 /// Glyph + style for one node given its executor state (None = pending).
@@ -217,11 +238,7 @@ fn forest_node_lines(
         0 => "sequence".to_string(),
         1 => "parallel".to_string(),
         _ => match node.call.as_ref() {
-            Some(c) => c
-                .contract_id
-                .rsplit_once('/')
-                .map(|(_, l)| l.to_string())
-                .unwrap_or_else(|| c.contract_id.clone()),
+            Some(c) => cap_short_name(&c.provider_id, &c.contract_id),
             None => node.description.clone(),
         },
     };
@@ -2148,7 +2165,7 @@ fn render_plan_node(
         0 => format!("sequence: {}", node.description),
         1 => format!("parallel: {}", node.description),
         _ => match node.call.as_ref() {
-            Some(c) => compact_call_label(&c.contract_id, &c.args_json),
+            Some(c) => compact_call_label(&c.provider_id, &c.contract_id, &c.args_json),
             None => node.description.clone(),
         },
     };
