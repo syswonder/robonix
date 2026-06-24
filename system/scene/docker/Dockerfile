@@ -106,14 +106,24 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 # torch 2.7+ with CUDA 12.8 kernels. cu124 wheels only cover up to
 # sm_90 and will fail with "no kernel image" on Blackwell.
 # Aliyun mirror carries cu128 wheels; fall back to upstream PyTorch index.
+# torch / torchvision cu128 only live on the aliyun pytorch-wheels mirror
+# (TUNA has no cu128), so curl those two big wheels from aliyun — curl's
+# -C - (resume) + --retry saturates the link (~11 MB/s), whereas pip's
+# downloader does NOT resume and dies in an infinite restart loop when the
+# aliyun mirror stalls a ~1 GB transfer partway. The nvidia-* deps are then
+# resolved by pip from the default PIP_INDEX_URL (TUNA, set above) — do NOT
+# point pip at aliyun's pypi index here, its large-file throttling stalls
+# pip the same way.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    without-proxy python3 -m pip install \
-        --progress-bar on \
-        --timeout 60 \
-        --retries 3 \
-        -i https://mirrors.aliyun.com/pypi/simple/ \
-        --find-links https://mirrors.aliyun.com/pytorch-wheels/cu128/ \
-        torch==2.7.1 torchvision==0.22.1 \
+    without-proxy sh -c 'set -eu; \
+        base="https://mirrors.aliyun.com/pytorch-wheels/cu128"; \
+        curl -fSL --retry 5 --retry-delay 2 -C - -o /tmp/torch.whl \
+             "$base/torch-2.7.1%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl"; \
+        curl -fSL --retry 5 --retry-delay 2 -C - -o /tmp/torchvision.whl \
+             "$base/torchvision-0.22.1%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl"; \
+        python3 -m pip install --progress-bar on --timeout 60 --retries 3 \
+             /tmp/torch.whl /tmp/torchvision.whl; \
+        rm -f /tmp/torch.whl /tmp/torchvision.whl' \
     || with-build-proxy python3 -m pip install \
         --progress-bar on \
         --timeout 60 \
@@ -198,10 +208,14 @@ COPY _weights/mobile_sam.pt    /opt/models/mobile_sam.pt
 #   1. open_clip's ViT-B-32 LAION-2B — goes to HF_HOME.
 #   2. openai's `clip` ViT-B/32 — goes to /root/.cache/clip.
 #
-# Non-pip model downloads: use proxy.
+# Non-pip model downloads. CN-native: open_clip's weights come from the HF
+# mirror (HF_ENDPOINT, set above); openai's `clip` pulls from Azure's CDN
+# (openaipublic.azureedge.net), which is reachable directly from CN. No proxy
+# needed — keep HF_ENDPOINT pointed at hf-mirror.com instead of unsetting it
+# (unsetting sent open_clip to huggingface.co, which is GFW-blocked).
 RUN with-build-proxy sh <<'EOF'
 set -eux
-unset HF_ENDPOINT
+export HF_ENDPOINT=https://hf-mirror.com
 export HF_HUB_DOWNLOAD_TIMEOUT=120
 
 python3 -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')"
