@@ -86,28 +86,24 @@ service:
         imu: false
         odom: true
 
-  # `simple_nav` IS the navigation service for this deploy.
+  # nav2_wrapper_rbnx IS the navigation service for this deploy.
   #
-  # Implementation: A* on rtabmap's /map (35 cm inscribed + 40 cm
-  # inflation costmap) → Regulated Pure Pursuit follower → publishes
-  # /cmd_vel. Re-validates the cached path on every /map update and
-  # auto-replans if a waypoint becomes blocked. 360° lidar emergency
-  # stop. Target_yaw align phase.
-  - name: simple_nav
-    path: ./services/simple_nav
+  # Wraps a standard Nav2 stack. Discovers its inputs through atlas — /map
+  # (mapping/occupancy_grid), /odom (chassis/odom), /scan (lidar/lidar) —
+  # and drives /cmd_vel via Nav2's navigate_to_pose action. Runs in the
+  # `robonix-nav2` docker image (built by `rbnx build`, so the host needs
+  # no ROS2). The `sim` params profile navigates in the odom frame with a
+  # rolling-window costmap, so it needs only odom + a 2D scan and no SLAM
+  # map->odom TF — which is what makes it work in Webots. Listed after
+  # mapping (its /map provider); on_init returns Deferred until mapping is
+  # up, so order is a convenience, not a hard requirement.
+  - name: nav2
+    url: https://github.com/enkerewpo/nav2_wrapper_rbnx
+    branch: main
     config:
-      # just examples place holders, we passthrough it to the service when calling INIT
-      robot_radius: 0.25
-      follower_hz: 20
-      max_linear: 0.5
-      max_angular: 1.0
-      pid_linear: [0.8, 0.0, 0.1]
-      pid_angular: [1.5, 0.0, 0.2]
-      goal_tolerance: 0.3
-      goal_yaw_tolerance: 0.2
-      timeout: 120
-      planner_diagonal: true
-      planner_max_iters: 500000
+      params_profile: sim
+      use_sim_time: true
+      action_wait_s: 90.0
 
 # after booted all the services, register the skills (but don't activate them now)
 skill:
