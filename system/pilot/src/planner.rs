@@ -131,6 +131,11 @@ fn skip_memory_prefetch(user_text: &str) -> bool {
 struct TreeMeta {
     /// LLM-supplied `rtdl_description` (sub-task label).
     description: String,
+    /// True when this tree is purely control ops (only `cancel_plan` /
+    /// `cancel_all_plans`). Such trees are NOT advertised to the LLM as
+    /// cancellable in-flight work — a cancel is not itself a task tree, and
+    /// listing it makes the model cancel its own cancels in a loop.
+    control_only: bool,
 }
 
 /// Events fed from per-tree driver tasks back to the supervisor loop. One
@@ -229,17 +234,47 @@ async fn drive_plan(
 /// Render the in-flight forest as a system-prompt block so the LLM can see what
 /// is still running and reference a `plan_id` to cancel it. Empty when no tree
 /// is running. Trees are ordered by numeric plan id for stable output.
+/// True when every `do` node is a control builtin (`cancel_plan` /
+/// `cancel_all_plans`) and there is at least one. A cancel is not itself a
+/// cancellable task tree; advertising it makes the model cancel its own cancels.
+fn is_control_only(plan: &Plan) -> bool {
+    let mut has_do = false;
+    for n in &plan.nodes {
+        if n.node_kind != RTDL_DO {
+            continue;
+        }
+        has_do = true;
+        let leaf = n
+            .call
+            .as_ref()
+            .map(|c| c.contract_id.rsplit('/').next().unwrap_or(""))
+            .unwrap_or("");
+        if !matches!(leaf, "cancel_plan" | "cancel_all_plans") {
+            return false;
+        }
+    }
+    has_do
+}
+
 fn build_forest_block(forest: &HashMap<String, TreeMeta>) -> String {
-    if forest.is_empty() {
+    // Only real task trees are cancellable in-flight work; hide pure control
+    // (cancel-only) trees so the model never tries to cancel its own cancels.
+    let mut entries: Vec<(&String, &TreeMeta)> = forest
+        .iter()
+        .filter(|(_, m)| !m.control_only)
+        .collect();
+    if entries.is_empty() {
         return String::new();
     }
-    let mut entries: Vec<(&String, &TreeMeta)> = forest.iter().collect();
     entries.sort_by_key(|(plan_id, _)| plan_id.parse::<u64>().unwrap_or(u64::MAX));
     let mut block = String::from(
         "\n\n## In-flight trees\n\
          These RTDL trees you dispatched earlier are still running concurrently. \
-         To stop one, call `builtin_cancel_plan` with its exact `plan_id` below. \
-         Do not reuse these ids for new trees.\n",
+         To stop one, call `builtin_cancel_plan` with its exact `plan_id` below \
+         (or `executor_cancel_all_plans` to stop everything at once). Cancel each \
+         plan_id at most once — a cancel that returned is already stopping; do NOT \
+         re-issue it. Only the plan_ids listed here are running; never cancel an id \
+         not in this list. Do not reuse these ids for new trees.\n",
     );
     for (plan_id, meta) in entries {
         block.push_str(&format!(
@@ -444,17 +479,25 @@ pub async fn run_turn(
         && !docs.is_empty()
     {
         let mut block = String::from(
-            "\n\n## Capability docs (lazy-load via `read_file`)\n\
-             Each capability below ships a CAPABILITY.md describing its operations \
-             and the recommended usage pattern. Read the relevant one with the \
-             `read_file` capability BEFORE you start using the capability — the \
-             short descriptions in your capability list are intentionally terse.\n\n",
+            "\n\n## Capability docs (lazy-load via `read_capability_doc`)\n\
+             The providers below ship a CAPABILITY.md manual. Read one by calling \
+             the `read_capability_doc` builtin with its `provider_id` (shown in \
+             backticks). IMPORTANT: before the FIRST time you call a capability of \
+             a provider marked `[skill]`, read that provider's CAPABILITY.md first \
+             — skills have multi-step usage (e.g. start → poll status → cancel) and \
+             constraints the terse description omits. For primitives/services, \
+             reading is optional. Never use `read_file` and never guess a file path \
+             for docs; `read_capability_doc` is the only way, and only the providers \
+             listed here have one.\n\n",
         );
         for d in &docs {
-            block.push_str(&format!(
-                "- `{}` ({}): `{}`\n",
-                d.provider_id, d.namespace, d.md_path
-            ));
+            let tag = if d.namespace.contains("/skill/") || d.namespace.starts_with("skill/")
+            {
+                " `[skill]`"
+            } else {
+                ""
+            };
+            block.push_str(&format!("- `{}` ({}){}\n", d.provider_id, d.namespace, tag));
         }
         system_prompt.push_str(&block);
     }
@@ -573,6 +616,23 @@ pub async fn run_turn(
                                     }),
                                 )))
                                 .await;
+                            // Feed every node's result into context the moment it
+                            // reaches a terminal state (2=SUCCEEDED 3=FAILED
+                            // 4=CANCELED 5=TIMEOUT) so the model's view is always
+                            // current — but do NOT re-plan mid-tree. The model
+                            // decides at tree completion (PlanDone, which carries
+                            // any_failed) or when the user steers; a steer-triggered
+                            // re-plan then sees these partial results. Re-planning
+                            // per node caused runaway loops (a wall of repeated
+                            // narration; retrying a failed cancel forever). The
+                            // tree-level feed in PlanDone is dropped to avoid
+                            // double-feeding — every leaf result already arrives here.
+                            const TERMINAL: [u32; 4] = [2, 3, 4, 5];
+                            if TERMINAL.contains(&node_state.state)
+                                && let Some(r) = node_state.leaf_result.as_ref()
+                            {
+                                feed_results_into_history(history, std::slice::from_ref(r));
+                            }
                             log::debug!(
                                 "[pilot/forest] node_state plan_id={} node={} state={}",
                                 plan_id,
@@ -582,7 +642,8 @@ pub async fn run_turn(
                         }
                         Some(ForestEvent::PlanDone { plan_id, results, any_failed }) => {
                             forest.remove(&plan_id);
-                            feed_results_into_history(history, &results);
+                            // Leaf results were already fed per-node (see above);
+                            // only surface the batch to the chat UI here.
                             let batch = BatchResult {
                                 plan_id: plan_id.clone(),
                                 session_id: session_id.clone(),
@@ -899,6 +960,7 @@ pub async fn run_turn(
             plan_id.clone(),
             TreeMeta {
                 description: rtdl_description,
+                control_only: is_control_only(&graph),
             },
         );
         tokio::spawn(drive_plan(graph, executor.graph.clone(), forest_tx.clone()));

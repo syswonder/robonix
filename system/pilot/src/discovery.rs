@@ -34,34 +34,31 @@ pub fn llm_name(contract_id: &str) -> String {
     }
 }
 
-/// One row per registered capability, summarised for the LLM-facing
-/// "## Capability docs (lazy-load via read_file)" block in pilot's
-/// system prompt. Includes only providers that registered with a non-empty
-/// `capability_md_path`. The path is what we hand the LLM verbatim;
-/// the executor's `read_file` builtin resolves it (it must be readable
-/// from the executor's host workspace).
+/// One row per provider that registered a CAPABILITY.md, summarised for the
+/// LLM-facing "## Capability docs" block in pilot's system prompt. We expose
+/// only the `provider_id` (what the LLM passes to the `read_capability_doc`
+/// builtin) and `namespace` — never a filesystem path, which is not portable
+/// across the provider's / executor's mount namespaces.
 pub struct CapDoc {
     pub provider_id: String,
     pub namespace: String,
-    pub md_path: String,
 }
 
-/// Returns a `CapDoc` per capability that has a non-empty
-/// `capability_md_path`. Pilot lists these in the system prompt and
-/// the LLM read_files them lazily.
+/// Returns a `CapDoc` per provider that registered non-empty CAPABILITY.md
+/// *content*. Pilot lists these in the system prompt and instructs the LLM to
+/// pull the full text on demand via the `read_capability_doc` builtin.
 pub async fn cap_md_index(atlas: &mut AtlasClient) -> Result<Vec<CapDoc>> {
     let providers = atlas
         .query_capabilities("", "", atlas_pb::Transport::Unspecified)
         .await?;
     let mut out = Vec::new();
     for provider in providers {
-        if provider.capability_md_path.is_empty() {
+        if provider.capability_md.trim().is_empty() {
             continue;
         }
         out.push(CapDoc {
             provider_id: provider.id,
             namespace: provider.namespace,
-            md_path: provider.capability_md_path,
         });
     }
     Ok(out)

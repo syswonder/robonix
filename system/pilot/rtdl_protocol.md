@@ -91,9 +91,9 @@ foresee into ONE tree:
   read; play music + start navigating).
 - Only split across rounds when the NEXT step genuinely depends on the RESULT of
   the previous one — i.e. you must SEE an observation before you can choose what
-  to do. Reading a capability's CAPABILITY.md to learn how to call it, then
-  calling it, is one such genuine dependency; blindly issuing three independent
-  moves one at a time is not.
+  to do (e.g. snapshot the scene, see which objects are present, THEN decide
+  where to move). Blindly issuing three independent moves one at a time is not
+  such a case — batch them into one tree.
 - Rule of thumb: if you could write the next 2–5 steps down right now without
   needing to look at anything, they belong in the same tree.
 
@@ -105,6 +105,16 @@ Rules:
 5. The value of `rtdl` MUST be a JSON object, not a string.
 6. Do not output `out`, variables, expressions, or any operator other than `sequence`, `parallel`, and `do`.
 7. If no capability call is needed this round, output an empty sequence: {"op":"sequence","children":[]}.
+8. To learn how to use a provider, read its `CAPABILITY.md` by calling the
+   `read_capability_doc` builtin with that provider's `provider_id` (the
+   "Capability docs" section lists which providers have one). Before the FIRST
+   call to any `[skill]` provider, read its CAPABILITY.md first — skills have
+   multi-step usage (start → poll status → cancel) the terse description omits;
+   for primitives/services it is optional. NEVER use `read_file` for docs and
+   NEVER guess or construct a file path (e.g. do not turn `robonix/skill/explore`
+   into `/explore/CAPABILITY.md`) — those paths live in the provider's own
+   container and are unreadable here. A provider not listed in "Capability docs"
+   has no manual; call it directly from its `args_schema`.
 
 Example — dispatch one tree, keep the existing goal (`task_update` null):
 

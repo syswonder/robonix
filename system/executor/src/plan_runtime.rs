@@ -171,7 +171,24 @@ impl PlanRuntime {
         // Get a snapshot so that the planruntime's lock can be released immediately.
         let snapshot = match self.begin_cancel(&args.plan_id).await {
             Ok(snapshot) => snapshot,
-            Err(error) => return error_result(call, error),
+            // Cancelling a plan that is no longer in the active table (already
+            // finished, already cancelled, or never existed) is a no-op SUCCESS,
+            // not an error: the caller's intent — "this plan must not be running"
+            // — is already satisfied. Returning an error here makes the planner
+            // retry the cancel forever. begin_cancel's only error is unknown-id.
+            Err(_) => {
+                return CapabilityCallResult {
+                    call_id: call.call_id.clone(),
+                    provider_id: call.provider_id.clone(),
+                    contract_id: call.contract_id.clone(),
+                    success: true,
+                    output: format!(
+                        "RTDL plan '{}' is not running (already finished or cancelled); nothing to cancel.",
+                        args.plan_id
+                    ),
+                    error: String::new(),
+                };
+            }
         };
 
         let mut cancel_errors = Vec::new();

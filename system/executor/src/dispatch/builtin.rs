@@ -6,6 +6,7 @@
 use crate::pb::pilot::CapabilityCallResult;
 use crate::plan_runtime::PlanRuntime;
 use robonix_atlas::client::AtlasClient;
+use robonix_atlas::pb as atlas_pb;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -79,6 +80,9 @@ pub async fn execute(
             .cancel_plan_builtin(call, self_provider_id, atlas)
             .await;
     }
+    if op == "read_capability_doc" {
+        return read_capability_doc(call, atlas).await;
+    }
 
     let result = run(op, &call.args_json).await;
     let mut out = CapabilityCallResult {
@@ -150,7 +154,70 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         description: "Cancellation for an in-flight RTDL plan by plan_id",
         input_schema_json: r#"{"type":"object","properties":{"plan_id":{"type":"string","description":"RTDL Plan.plan_id to cancel"},"wait_ms":{"type":"integer","minimum":0,"description":"Optional milliseconds to wait for the target plan to stop; default 5000"}},"required":["plan_id"]}"#,
     },
+    BuiltinSpec {
+        op: "read_capability_doc",
+        description: "Read a capability provider's full CAPABILITY.md manual by provider_id. Call this to learn how to use a provider before invoking it. Only providers listed as having a doc carry one; never guess or read a file path for docs.",
+        input_schema_json: r#"{"type":"object","properties":{"provider_id":{"type":"string","description":"The provider_id whose CAPABILITY.md to read"}},"required":["provider_id"]}"#,
+    },
 ];
+
+#[derive(Deserialize)]
+struct DocArgs {
+    provider_id: String,
+}
+
+/// Apply the `read_capability_doc` builtin: fetch a provider's registered
+/// CAPABILITY.md *content* from atlas and return it as markdown text.
+///
+/// Unlike `read_file`, this never touches the filesystem — atlas serves the
+/// content the provider sent at registration, so it works regardless of the
+/// provider's (possibly containerised) mount layout. Errors when the provider
+/// is unknown or registered no doc; output is truncated to keep prompt size
+/// bounded.
+async fn read_capability_doc(
+    call: &CapabilityCall,
+    atlas: &mut AtlasClient,
+) -> CapabilityCallResult {
+    let mut out = CapabilityCallResult {
+        call_id: call.call_id.clone(),
+        provider_id: call.provider_id.clone(),
+        contract_id: call.contract_id.clone(),
+        ..Default::default()
+    };
+    let provider_id = match serde_json::from_str::<DocArgs>(&call.args_json) {
+        Ok(a) => a.provider_id.trim().to_string(),
+        Err(e) => {
+            out.error = format!("invalid read_capability_doc args: {e}");
+            return out;
+        }
+    };
+    if provider_id.is_empty() {
+        out.error = "read_capability_doc: provider_id is required".to_string();
+        return out;
+    }
+    match atlas
+        .query_capabilities(&provider_id, "", atlas_pb::Transport::Unspecified)
+        .await
+    {
+        Ok(providers) => match providers.iter().find(|p| p.id == provider_id) {
+            Some(p) if !p.capability_md.is_empty() => {
+                out.success = true;
+                out.output = truncate(&p.capability_md, 12000);
+            }
+            Some(_) => {
+                out.error =
+                    format!("provider '{provider_id}' registered no CAPABILITY.md");
+            }
+            None => {
+                out.error = format!("no provider '{provider_id}' registered in atlas");
+            }
+        },
+        Err(e) => {
+            out.error = format!("atlas query for '{provider_id}' failed: {e}");
+        }
+    }
+    out
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

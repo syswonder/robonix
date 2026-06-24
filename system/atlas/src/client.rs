@@ -78,6 +78,10 @@ impl AtlasClient {
             id: id.to_string(),
             namespace: namespace.to_string(),
             capability_md_path: capability_md_path.to_string(),
+            // Rust system components (atlas / executor / pilot / liaison)
+            // ship no CAPABILITY.md; only Python packages register content
+            // (via the robonix_api client). Leave empty here.
+            capability_md: String::new(),
         }
     }
 
