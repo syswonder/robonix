@@ -205,8 +205,7 @@ async fn read_capability_doc(
                 out.output = truncate(&p.capability_md, 12000);
             }
             Some(_) => {
-                out.error =
-                    format!("provider '{provider_id}' registered no CAPABILITY.md");
+                out.error = format!("provider '{provider_id}' registered no CAPABILITY.md");
             }
             None => {
                 out.error = format!("no provider '{provider_id}' registered in atlas");

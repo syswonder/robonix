@@ -259,10 +259,8 @@ fn is_control_only(plan: &Plan) -> bool {
 fn build_forest_block(forest: &HashMap<String, TreeMeta>) -> String {
     // Only real task trees are cancellable in-flight work; hide pure control
     // (cancel-only) trees so the model never tries to cancel its own cancels.
-    let mut entries: Vec<(&String, &TreeMeta)> = forest
-        .iter()
-        .filter(|(_, m)| !m.control_only)
-        .collect();
+    let mut entries: Vec<(&String, &TreeMeta)> =
+        forest.iter().filter(|(_, m)| !m.control_only).collect();
     if entries.is_empty() {
         return String::new();
     }
@@ -491,8 +489,7 @@ pub async fn run_turn(
              listed here have one.\n\n",
         );
         for d in &docs {
-            let tag = if d.namespace.contains("/skill/") || d.namespace.starts_with("skill/")
-            {
+            let tag = if d.namespace.contains("/skill/") || d.namespace.starts_with("skill/") {
                 " `[skill]`"
             } else {
                 ""
