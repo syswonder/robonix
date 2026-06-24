@@ -81,8 +81,8 @@ service:
       sensors:
         lidar2d: true # webots do not have 3d pointcloud, so we use 2d lidar
         lidar3d: false
-        rgb: true # rtabmap fuses RGB for visual loop closure
-        rgbd: true # depth fills below-lidar-plane obstacles
+        rgb: true # color image — rtabmap fuses RGB for visual loop closure
+        depth: true # depth image — fills below-lidar-plane obstacles (rgb+depth = RGB-D)
         imu: false
         odom: true
 
