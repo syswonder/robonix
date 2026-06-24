@@ -104,6 +104,15 @@ struct PackageEntry {
     /// `start` body as `RBNX_CAP_CONFIG_JSON`.
     #[serde(default)]
     config: serde_yaml::Value,
+    /// Optional package-manifest filename override. A package may ship
+    /// per-deployment-target manifests (e.g. `package_manifest.yaml` for
+    /// x86+docker, `package_manifest.jetson-native.yaml`,
+    /// `package_manifest.jetson-docker.yaml`), each with its own build/start.
+    /// This selects which one `rbnx build`/`boot` uses for THIS deployment;
+    /// the package-manifest schema itself is unchanged. Defaults to
+    /// `package_manifest.yaml`.
+    #[serde(default)]
+    manifest: Option<String>,
 }
 
 /// Compute a `PackageEntry`'s expected on-disk path. PURE — no I/O,
@@ -158,8 +167,11 @@ fn check_prerequisites(
     manifest_dir: &Path,
 ) -> Result<()> {
     use std::collections::BTreeMap;
-    let mut needs_clone: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
-    let mut needs_build: BTreeMap<String, PathBuf> = BTreeMap::new();
+    // value: (url, branch, manifest_override)
+    let mut needs_clone: BTreeMap<String, (String, Option<String>, Option<String>)> =
+        BTreeMap::new();
+    // value: (pkg_path, manifest_override)
+    let mut needs_build: BTreeMap<String, (PathBuf, Option<String>)> = BTreeMap::new();
     for entry in deploy
         .primitive
         .iter()
@@ -182,19 +194,22 @@ fn check_prerequisites(
         if !pkg_path.exists()
             && let Some(url) = entry.url.as_ref()
         {
-            needs_clone.insert(name.clone(), (url.clone(), entry.branch.clone()));
+            needs_clone.insert(
+                name.clone(),
+                (url.clone(), entry.branch.clone(), entry.manifest.clone()),
+            );
             continue;
         }
         let stamp = pkg_path.join("rbnx-build").join(".rbnx-built");
         if !stamp.exists() {
-            needs_build.insert(name, pkg_path);
+            needs_build.insert(name, (pkg_path, entry.manifest.clone()));
         }
     }
     if needs_clone.is_empty() && needs_build.is_empty() {
         return Ok(());
     }
     output::boot_section("prerequisites");
-    for (name, (url, branch)) in &needs_clone {
+    for (name, (url, branch, manifest_ov)) in &needs_clone {
         output::warning(&format!(
             "{name}: not in cache — `rbnx build` should run before `rbnx boot`. cloning inline."
         ));
@@ -215,14 +230,14 @@ fn check_prerequisites(
         // Newly-cloned package needs a build too.
         let stamp = dest.join("rbnx-build").join(".rbnx-built");
         if !stamp.exists() {
-            needs_build.insert(name.clone(), dest);
+            needs_build.insert(name.clone(), (dest, manifest_ov.clone()));
         }
     }
-    for (name, pkg_path) in &needs_build {
+    for (name, (pkg_path, manifest_ov)) in &needs_build {
         output::warning(&format!(
             "{name}: not built — `rbnx build` should run before `rbnx boot`. building inline."
         ));
-        crate::cmd::build::build_local_package(pkg_path, false)
+        crate::cmd::build::build_local_package(pkg_path, false, manifest_ov.as_deref())
             .with_context(|| format!("inline build of {name} at {} failed", pkg_path.display()))?;
     }
     Ok(())
@@ -419,6 +434,12 @@ async fn spawn_package(
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(err))
         .process_group(0);
+    // Per-deployment-target package manifest selector (deploy entry's
+    // `manifest:` field) — `rbnx start` loads this file instead of the
+    // default package_manifest.yaml so the right start path runs.
+    if let Some(m) = entry.manifest.as_deref() {
+        cmd.arg("--manifest").arg(m);
+    }
     let child = cmd.spawn().with_context(|| {
         format!(
             "failed to spawn package {name} via `{} start`",
@@ -712,6 +733,7 @@ pub async fn execute(
                     url: None,
                     branch: None,
                     config: value.clone(),
+                    manifest: None,
                 };
                 match spawn_and_init(
                     "system",

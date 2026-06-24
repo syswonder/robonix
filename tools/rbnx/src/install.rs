@@ -60,7 +60,7 @@ impl PackageInstaller {
         let commit = head.target().context("Failed to get commit OID")?;
         let commit_str = commit.to_string();
 
-        let detected = manifest::detect_and_load(&temp_path)?;
+        let detected = manifest::detect_and_load(&temp_path, None)?;
         output::step("Validating", "package manifest");
         let summary = detected
             .manifest
@@ -119,7 +119,7 @@ impl PackageInstaller {
             .canonicalize()
             .with_context(|| format!("Failed to canonicalize: {}", source_path.display()))?;
 
-        let detected = manifest::detect_and_load(&source_path)?;
+        let detected = manifest::detect_and_load(&source_path, None)?;
         output::step("Validating", "package manifest");
         let summary = detected
             .manifest

@@ -72,6 +72,12 @@ pub enum Commands {
         /// is a bool); fall back to a string when JSON parsing fails.
         #[arg(short = 's', long = "set", value_name = "KEY=VALUE")]
         set: Vec<String>,
+        /// Package manifest filename to use instead of the default
+        /// `package_manifest.yaml`. Lets a package ship per-deployment-target
+        /// variants (e.g. `package_manifest.jetson-native.yaml`). `rbnx boot`
+        /// passes this through from a deploy entry's `manifest:` field.
+        #[arg(short = 'm', long)]
+        manifest: Option<String>,
     },
     /// Boot the whole stack from a top-level `robonix_manifest.yaml` — system
     /// services (atlas/executor/pilot/liaison/memory/vlm) plus every package
@@ -323,6 +329,7 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             endpoint,
             config: cfg_file,
             set,
+            manifest,
         } => {
             run_package::execute_start(
                 &config,
@@ -330,6 +337,7 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
                 endpoint.as_deref(),
                 cfg_file.as_deref(),
                 &set,
+                manifest.as_deref(),
             )
             .await
         }
