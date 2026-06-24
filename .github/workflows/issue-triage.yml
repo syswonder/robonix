@@ -1,0 +1,85 @@
+name: Issue triage
+
+# On a new/edited issue, scan the title + body for component keywords and
+# (1) add the matching comp:* label(s) and (2) assign the component owner.
+# Untrusted text (title/body) is only ever read as a JS string from the
+# `context` object - never interpolated into a shell run: step.
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            // keyword -> { label, owner }. owner "" = label only (e.g. chronos).
+            const ROUTES = [
+              ["atlas",        { label: "comp:atlas",        owner: "enkerewpo" }],
+              ["executor",     { label: "comp:executor",     owner: "kouweilee" }],
+              ["rtdl",         { label: "comp:executor",     owner: "kouweilee" }],
+              ["pilot",        { label: "comp:pilot",        owner: "enkerewpo" }],
+              ["liaison",      { label: "comp:liaison",      owner: "kaileliu" }],
+              ["scene",        { label: "comp:scene",        owner: "HeartLinked" }],
+              ["soma",         { label: "comp:soma",         owner: "Chenyantt" }],
+              ["sentinel",     { label: "comp:sentinel",     owner: "HustWolfzzb" }],
+              ["scribe",       { label: "comp:scribe",       owner: "ohhhHwH" }],
+              ["vitals",       { label: "comp:vitals",       owner: "AuYang261" }],
+              ["keystone",     { label: "comp:keystone",     owner: "kaileliu" }],
+              ["nexus",        { label: "comp:nexus",        owner: "ZZJJWarth" }],
+              ["chronos",      { label: "comp:chronos",      owner: "" }],
+              ["memory",       { label: "comp:memory",       owner: "ohhhHwH" }],
+              ["memsearch",    { label: "comp:memory",       owner: "ohhhHwH" }],
+              ["speech",       { label: "comp:speech",       owner: "kaileliu" }],
+              ["voiceprint",   { label: "comp:voiceprint",   owner: "kaileliu" }],
+              ["rbnx",         { label: "comp:rbnx",         owner: "enkerewpo" }],
+              ["codegen",      { label: "comp:codegen",      owner: "enkerewpo" }],
+              ["robonix-api",  { label: "comp:api",          owner: "enkerewpo" }],
+              ["robonix_api",  { label: "comp:api",          owner: "enkerewpo" }],
+            ];
+
+            const issue = context.payload.issue;
+            const text = `${issue.title || ""}\n${issue.body || ""}`.toLowerCase();
+
+            const labels = new Set();
+            const owners = new Set();
+            for (const [kw, route] of ROUTES) {
+              // word-boundary match so "atlas" doesn't fire inside "atlast"
+              const re = new RegExp(`(^|[^a-z0-9_])${kw}([^a-z0-9_]|$)`);
+              if (re.test(text)) {
+                labels.add(route.label);
+                if (route.owner) owners.add(route.owner);
+              }
+            }
+
+            if (labels.size === 0) {
+              core.info("No component keyword matched; leaving untriaged.");
+              return;
+            }
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              labels: [...labels],
+            });
+            core.info(`Labels: ${[...labels].join(", ")}`);
+
+            // Assign at most the matched owners. GitHub silently ignores any
+            // assignee without repo access, so this never hard-fails.
+            if (owners.size > 0 && (!issue.assignees || issue.assignees.length === 0)) {
+              await github.rest.issues.addAssignees({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                assignees: [...owners],
+              });
+              core.info(`Assignees: ${[...owners].join(", ")}`);
+            }
