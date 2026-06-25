@@ -1,4 +1,4 @@
-# robonix/service/navigation/status — query status of a navigation goal (RPC)
+# robonix/service/navigation/navigate/status — query status of a navigation goal (RPC)
 string run_id
 ---
 bool known

@@ -74,10 +74,12 @@ summary.
 
 ## Async capability polling
 
-When a provider registers a sibling `status` contract in the same namespace
-(e.g. `robonix/service/navigation/status` alongside `navigate`), executor
-detects that per cap call and polls `status` every **2 seconds** until a
-terminal state (`SUCCEEDED`, `FAILED`, `CANCELED`, `TIMEOUT`) is reported.
+When a provider registers required async sub-contracts for a capability
+(e.g. `robonix/service/navigation/navigate/status` and
+`robonix/service/navigation/navigate/cancel` for
+`robonix/service/navigation/navigate`), executor detects that per cap call and
+polls `status` every **2 seconds** until a terminal state (`SUCCEEDED`,
+`FAILED`, `CANCELED`, `TIMEOUT`) is reported.
 
 MCP handler requirements for async caps:
 
@@ -87,10 +89,10 @@ MCP handler requirements for async caps:
   Missing `state` is treated as a failed status response.
 - When `run_id` is omitted on status/cancel requests, handlers should query the
   most recent run.
-- A `cancel` contract in the same namespace is recommended; its absence logs a
-  warning but does not block execution.
+- Every async cap must register both `<contract_id>/status` and
+  `<contract_id>/cancel`. Registering only one is a provider configuration error.
 
-Sync caps (no sibling `status` contract) complete when the initial MCP call
+Sync caps (no `<contract_id>/status` and `<contract_id>/cancel` pair) complete when the initial MCP call
 returns, as before.
 
 ## Builtin capabilities
@@ -103,5 +105,5 @@ Executor declares builtin MCP capabilities under
   file and shell helpers.
 - `cancel_plan`: best-effort cancellation for an in-flight RTDL plan. Args:
   `plan_id` (required) and `wait_ms` (optional, default 5000). Async capability
-  calls with sibling `cancel` contracts receive cancel requests; synchronous
+  calls receive cancel requests through `<contract_id>/cancel`; synchronous
   calls already in progress are allowed to return naturally.

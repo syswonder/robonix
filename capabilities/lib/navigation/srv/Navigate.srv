@@ -1,7 +1,8 @@
 # robonix/service/navigation/navigate — goal-based navigation (RPC).
 # Returns an optional provider-allocated `run_id` so callers can address the
-# goal in the sibling `status` / `cancel` contracts. Empty run_id means those
-# sibling contracts should target the most recent navigation call.
+# goal in the async sub-contracts `navigate/status` and `navigate/cancel`.
+# Empty run_id means those sub-contracts should target the most recent
+# navigation call.
 geometry_msgs/PoseStamped goal
 ---
 bool accepted
