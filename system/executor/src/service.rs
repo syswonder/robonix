@@ -7,7 +7,7 @@ use crate::dispatch::{async_poll, async_registry};
 use crate::pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlans;
 use crate::pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecute;
 use crate::pb::executor::{CancelAllResponse, RtdlEvent};
-use crate::pb::pilot::{CapabilityCall, Plan};
+use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan};
 use crate::plan_runtime::PlanRuntime;
 use crate::rtdl_wire::{self, NodeEventContext};
 use robonix_atlas::client::AtlasClient;
@@ -273,29 +273,58 @@ async fn execute_call(
     );
 
     let async_group = if call.provider_id == provider_id {
-        None
+        Ok(None)
     } else {
         async_registry::resolve_async_group(&mut atlas, &call.provider_id, &call.contract_id).await
     };
 
-    let result = if let Some(group) = async_group {
-        async_poll::run_until_terminal(call, &group, &provider_id, &mut atlas, &tx, &node, &runtime)
-            .await
-    } else {
-        let r = crate::dispatch::dispatch(call, &provider_id, &mut atlas, &runtime).await;
-        let state = if r.success {
-            rtdl_wire::STATE_SUCCEEDED
-        } else {
-            rtdl_wire::STATE_FAILED
-        };
-        let _ = tx
-            .send(Ok(rtdl_wire::node_state_from_result(
+    let result = match async_group {
+        Err(error) => {
+            let r = CapabilityCallResult {
+                call_id: call.call_id.clone(),
+                provider_id: call.provider_id.clone(),
+                contract_id: call.contract_id.clone(),
+                success: false,
+                output: String::new(),
+                error,
+            };
+            let _ = tx
+                .send(Ok(rtdl_wire::node_state_from_result(
+                    &node,
+                    r.clone(),
+                    rtdl_wire::STATE_FAILED,
+                )))
+                .await;
+            r
+        }
+        Ok(Some(group)) => {
+            async_poll::run_until_terminal(
+                call,
+                &group,
+                &provider_id,
+                &mut atlas,
+                &tx,
                 &node,
-                r.clone(),
-                state,
-            )))
-            .await;
-        r
+                &runtime,
+            )
+            .await
+        }
+        Ok(None) => {
+            let r = crate::dispatch::dispatch(call, &provider_id, &mut atlas, &runtime).await;
+            let state = if r.success {
+                rtdl_wire::STATE_SUCCEEDED
+            } else {
+                rtdl_wire::STATE_FAILED
+            };
+            let _ = tx
+                .send(Ok(rtdl_wire::node_state_from_result(
+                    &node,
+                    r.clone(),
+                    state,
+                )))
+                .await;
+            r
+        }
     };
     let failed = !result.success;
 

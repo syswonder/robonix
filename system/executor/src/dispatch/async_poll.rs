@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MulanPSL-2.0
-// Poll async MCP capabilities via sibling status contract until terminal state.
+// Poll async MCP capabilities via `<contract_id>/status` until terminal state.
 
 use robonix_scribe::warn;
 use std::time::Duration;
@@ -42,31 +42,29 @@ pub async fn run_until_terminal(
     }
 
     let run_id = extract_run_id(&initial.output);
-    if let Some(cancel_contract) = &group.cancel_contract {
-        let accepted = runtime
-            .register_or_cancel_async_call(
-                &node.plan_id,
-                RunningAsyncCall {
-                    call_id: call.call_id.clone(),
-                    provider_id: call.provider_id.clone(),
-                    cancel_contract: cancel_contract.clone(),
-                    run_id: run_id.clone(),
-                },
-                self_provider_id,
-                atlas,
-            )
+    let accepted = runtime
+        .register_or_cancel_async_call(
+            &node.plan_id,
+            RunningAsyncCall {
+                call_id: call.call_id.clone(),
+                provider_id: call.provider_id.clone(),
+                cancel_contract: group.cancel_contract.clone(),
+                run_id: run_id.clone(),
+            },
+            self_provider_id,
+            atlas,
+        )
+        .await;
+    if !accepted {
+        let result = canceled_result(call, "plan was cancelled before async polling began");
+        let _ = tx
+            .send(Ok(rtdl_wire::node_state_from_result(
+                node,
+                result.clone(),
+                STATE_CANCELED,
+            )))
             .await;
-        if !accepted {
-            let result = canceled_result(call, "plan was cancelled before async polling began");
-            let _ = tx
-                .send(Ok(rtdl_wire::node_state_from_result(
-                    node,
-                    result.clone(),
-                    STATE_CANCELED,
-                )))
-                .await;
-            return result;
-        }
+        return result;
     }
 
     let mut interval = time::interval(POLL_INTERVAL);

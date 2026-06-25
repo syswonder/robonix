@@ -156,7 +156,7 @@ impl PlanRuntime {
     ///
     /// Cancellation is best-effort: future sequence children are skipped by the
     /// executor loop, and currently running async capability calls receive their
-    /// sibling cancel contract when available. Synchronous calls already in
+    /// required `<contract_id>/cancel` call. Synchronous calls already in
     /// progress are allowed to return naturally.
     pub async fn cancel_plan_builtin(
         &self,

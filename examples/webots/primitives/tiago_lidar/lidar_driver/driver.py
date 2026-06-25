@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import os
 import threading
-import time
 
 from robonix_api import Primitive, Ok, Err, Deferred
 
@@ -56,16 +55,6 @@ def ros_to_mcp(msg) -> LaserScan:
     )
 
 
-def now_header(frame_id: str) -> std_msgs_mcp.Header:
-    now = time.time()
-    sec = int(now)
-    ns = int((now % 1) * 1e9) % 1_000_000_000
-    return std_msgs_mcp.Header(
-        stamp=builtin_interfaces_mcp.Time(sec=sec, nanosec=ns),
-        frame_id=frame_id,
-    )
-
-
 @tiago_lidar.mcp("robonix/primitive/lidar/snapshot")
 def snapshot(msg: Empty) -> LaserScan:
     """Get the latest planar lidar scan. Returns sensor_msgs/LaserScan;
@@ -76,7 +65,7 @@ def snapshot(msg: Empty) -> LaserScan:
     with state_lock:
         ros_scan = latest_scan
     if ros_scan is None:
-        return LaserScan(header=now_header("error:no scan yet"), ranges=[], intensities=[])
+        raise RuntimeError("no LaserScan received yet")
     return ros_to_mcp(ros_scan)
 
 

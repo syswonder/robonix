@@ -127,15 +127,6 @@ def jpeg_to_image_mcp(jpg: bytes, frame_id: str) -> Image:
     )
 
 
-def image_error(message: str) -> Image:
-    raw = message.encode("utf-8")
-    return Image(
-        header=now_header("tiago_camera_error"),
-        height=0, width=0, encoding="error", is_bigendian=0,
-        step=len(raw), data=raw,
-    )
-
-
 @tiago_camera.mcp("robonix/primitive/camera/snapshot")
 def snapshot(msg: Empty) -> Image:
     """PRIMARY perception tool. Use freely — between every chassis/cmd
@@ -147,7 +138,7 @@ def snapshot(msg: Empty) -> Image:
     with state_lock:
         data = latest_rgb_jpeg
     if data is None:
-        return image_error("no RGB image received yet")
+        raise RuntimeError("no RGB image received yet")
     return jpeg_to_image_mcp(
         data, os.environ.get("TIAGO_RGB_FRAME_ID", "head_front_camera_rgb_optical_frame")
     )
@@ -163,7 +154,7 @@ def depth_snapshot(msg: Empty) -> Image:
     with state_lock:
         data = latest_depth_jpeg
     if data is None:
-        return image_error("no depth image received yet")
+        raise RuntimeError("no depth image received yet")
     return jpeg_to_image_mcp(
         data, os.environ.get("TIAGO_DEPTH_FRAME_ID", "head_front_camera_depth_optical_frame")
     )
