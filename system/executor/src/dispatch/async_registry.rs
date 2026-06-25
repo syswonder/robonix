@@ -3,7 +3,6 @@
 
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
-use robonix_scribe::warn;
 
 #[derive(Debug, Clone)]
 pub struct AsyncGroup {
