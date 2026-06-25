@@ -96,12 +96,10 @@ def navigate(req: Navigate_Request) -> Navigate_Response:
     succeeds on xy alone.)
 
     Per Navigate.srv the response carries optional `run_id` directly; track
-    via the sibling `status` / `cancel` contracts. Empty run_id on those
-    contracts means the most recent navigation call."""
+    via the `navigate/status` and `navigate/cancel` async sub-contracts.
+    Empty run_id on those contracts means the most recent navigation call."""
     if nav is None:
-        return Navigate_Response(
-            accepted=False, run_id="", detail="nav not initialized",
-        )
+        raise RuntimeError("nav not initialized")
     goal = req.goal
     target_yaw = quat_to_yaw(goal.pose.orientation.z, goal.pose.orientation.w)
     # Heuristic: if orientation is the identity quaternion (z=0,w=1), the
@@ -122,20 +120,14 @@ def navigate(req: Navigate_Request) -> Navigate_Response:
     return Navigate_Response(accepted=True, run_id=run_id, detail=msg)
 
 
-@simple_nav.mcp("robonix/service/navigation/status")
+@simple_nav.mcp("robonix/service/navigation/navigate/status")
 def status(req: GetNavigationStatus_Request) -> GetNavigationStatus_Response:
     """Get current status of a navigation goal. Empty `run_id` = most recent."""
     if nav is None:
-        return GetNavigationStatus_Response(
-            known=False, state="FAILED", detail="nav not initialized",
-        )
+        raise RuntimeError("nav not initialized")
     s = nav.goal_status(req.run_id or None)
     if s is None:
-        return GetNavigationStatus_Response(
-            known=False,
-            state="FAILED",
-            detail="no active goal",
-        )
+        raise RuntimeError("no active goal")
     state = _executor_state(str(s.get("state", "unknown")))
     detail = str(s.get("detail", ""))
     return GetNavigationStatus_Response(
@@ -145,15 +137,17 @@ def status(req: GetNavigationStatus_Request) -> GetNavigationStatus_Response:
     )
 
 
-@simple_nav.mcp("robonix/service/navigation/cancel")
+@simple_nav.mcp("robonix/service/navigation/navigate/cancel")
 def cancel(req: CancelNavigation_Request) -> CancelNavigation_Response:
     """Cancel an active navigation goal. Empty `run_id` cancels the
     currently active goal. Idempotent."""
     if nav is None:
-        return CancelNavigation_Response(accepted=False, detail="nav not initialized")
+        raise RuntimeError("nav not initialized")
     ok = nav.cancel_goal(req.run_id or None)
+    if not ok:
+        raise RuntimeError("no active goal")
     return CancelNavigation_Response(
-        accepted=ok, detail="cancel requested" if ok else "no active goal",
+        accepted=True, detail="cancel requested",
     )
 
 
