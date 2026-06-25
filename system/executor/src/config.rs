@@ -44,10 +44,18 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_CONFIG_PATH")]
     pub config: Option<PathBuf>,
 
-    /// Log filter (env_logger syntax; e.g. `info`, `robonix_executor=debug`).
-    /// Default: `robonix_executor=info`. Falls back to `RUST_LOG` if unset.
+    /// Log level for this component (`debug`/`info`/`warn`/`error`). Sets the
+    /// scribe log-file floor; falls back to `SCRIBE_FILE_LEVEL` / `info`.
+    /// Normally arrives inside `--config-json`, not as a standalone flag.
     #[arg(long)]
     pub log: Option<String>,
+
+    /// The component's `system.executor` manifest block, serialized to JSON by
+    /// rbnx and passed as one arg (`--config-json '{…}'`). Parsed by the binary
+    /// itself — see `robonix_scribe::init_from_config`, which reads the `log`
+    /// key from it so the manifest's per-component level reaches the log.
+    #[arg(long)]
+    pub config_json: Option<String>,
 }
 
 #[derive(Default, Deserialize)]

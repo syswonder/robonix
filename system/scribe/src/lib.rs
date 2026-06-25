@@ -39,6 +39,28 @@ pub fn init(tag: &str) {
         .expect("robonix_scribe::init() called twice; set the tag once per process");
 }
 
+/// Initialise scribe with the process `tag` and apply the on-disk log level
+/// from a launch-config JSON — the system component's manifest config block
+/// that rbnx serialises and passes via `--config-json`. Reads the top-level
+/// `log` key (e.g. `{"log":"debug"}`); a valid level sets the file-sink floor
+/// for this process so the level actually reaches the log file (`rbnx logs`).
+///
+/// Use this instead of [`init`] in binaries launched with a config: the
+/// manifest's per-component `log:` had no effect before, because the level
+/// was parsed into a CLI flag the binary discarded. Absent / unparseable
+/// `log` falls back to the `SCRIBE_FILE_LEVEL` env / `Info` default.
+///
+/// Call once at startup, before the first log, on the main thread.
+pub fn init_from_config(tag: &str, config_json: Option<&str>) {
+    if let Some(level) = config_json
+        .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+        .and_then(|v| v.get("log").and_then(|l| l.as_str()).and_then(parse_level))
+    {
+        let _ = FILE_LEVEL_OVERRIDE.set(level);
+    }
+    init(tag);
+}
+
 /// Return the process-wide default tag, or `"_default"` if `init()` has
 /// not been called yet.
 #[doc(hidden)]
@@ -271,20 +293,33 @@ static FILE_SINK: LazyLock<Option<FileSink>> =
 
 // ── Level filter thresholds (read from env, lazy) ───────────────────
 
+/// Parse a level word (`debug`/`info`/`warn`/`warning`/`error`,
+/// case-insensitive). `None` for anything else.
+fn parse_level(s: &str) -> Option<Level> {
+    match s.to_lowercase().as_str() {
+        "debug" => Some(Level::Debug),
+        "info" => Some(Level::Info),
+        "warn" | "warning" => Some(Level::Warn),
+        "error" => Some(Level::Error),
+        _ => None,
+    }
+}
+
 /// Parse `SCRIBE_CONSOLE_LEVEL` / `SCRIBE_FILE_LEVEL` env var to a
 /// numeric floor.  Unrecognised values default to the given fallback.
 fn parse_level_env(key: &str, fallback: Level) -> Level {
     std::env::var(key)
         .ok()
-        .and_then(|s| match s.to_lowercase().as_str() {
-            "debug" => Some(Level::Debug),
-            "info" => Some(Level::Info),
-            "warn" | "warning" => Some(Level::Warn),
-            "error" => Some(Level::Error),
-            _ => None,
-        })
+        .as_deref()
+        .and_then(parse_level)
         .unwrap_or(fallback)
 }
+
+/// Per-process on-disk level override, set once by [`init_from_config`] from
+/// the launch config's `log` key. Takes precedence over `SCRIBE_FILE_LEVEL`
+/// when present, so a per-component `log:` in the deploy manifest actually
+/// controls that component's log file.
+static FILE_LEVEL_OVERRIDE: OnceLock<Level> = OnceLock::new();
 
 /// Minimum level for console (stderr) output.
 ///
@@ -323,7 +358,8 @@ pub fn log(level: Level, tag: &str, msg: &str) {
     // Only construct the timestamped record when at least one sink
     // accepts this level — avoid wasted clock syscalls for Debug.
     let console_ok = level >= *CONSOLE_MIN;
-    let file_ok = level >= *FILE_MIN;
+    let file_min = FILE_LEVEL_OVERRIDE.get().copied().unwrap_or(*FILE_MIN);
+    let file_ok = level >= file_min;
     if !console_ok && !file_ok {
         return;
     }
