@@ -56,7 +56,7 @@ unset ALL_PROXY all_proxy NO_PROXY no_proxy
 exec "$@"
 EOF2
 
-# ── TUNA mirrors for GFW-bound networks ─────────────────────────────
+# ── TUNA mirrors for domestic (CN) networks ─────────────────────────────
 RUN set -eux; \
     find /etc/apt/sources.list.d/ -maxdepth 1 \( -name '*.list' -o -name '*.sources' \) -print0 \
       | xargs -0 -r sed -i --follow-symlinks \
@@ -212,7 +212,7 @@ COPY _weights/mobile_sam.pt    /opt/models/mobile_sam.pt
 # mirror (HF_ENDPOINT, set above); openai's `clip` pulls from Azure's CDN
 # (openaipublic.azureedge.net), which is reachable directly from CN. No proxy
 # needed — keep HF_ENDPOINT pointed at hf-mirror.com instead of unsetting it
-# (unsetting sent open_clip to huggingface.co, which is GFW-blocked).
+# (unsetting sent open_clip to huggingface.co, which is unreachable from CN).
 RUN with-build-proxy sh <<'EOF'
 set -eux
 export HF_ENDPOINT=https://hf-mirror.com

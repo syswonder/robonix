@@ -81,7 +81,7 @@ huggingface-hub<1           # transformers/open_clip resolve weights via
 # does not exercise pytorch3d.
 # pytorch3d removed — scene uses voxel-overlap instead (see
 # perception_concept_graphs.py). The miropsota wheel was also pinned
-# to torch 2.5.1 and unreachable behind GFW.
+# to torch 2.5.1 and unreachable from CN.
 # concept-graphs's general_utils → vlm imports openai unconditionally,
 # even though we don't call any VLM helpers from our merge path. Add
 # it as a stub install so the slam module imports cleanly.
