@@ -161,7 +161,7 @@ fn is_terminal_executor_state(state: u32) -> bool {
 /// carry a concrete capability result; operator detail is only a fallback.
 fn executor_node_state_to_result(
     plan: &Plan,
-    ns: crate::pb::executor::RtdlNodeState,
+    ns: crate::pb::pilot::RtdlNodeState,
 ) -> CapabilityCallResult {
     if let Some(result) = ns.leaf_result {
         return result;

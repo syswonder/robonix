@@ -7,7 +7,7 @@ use crate::memory;
 use crate::pb::contracts::robonix_system_executor_execute_client::RobonixSystemExecutorExecuteClient;
 use crate::pb::pilot::{
     BatchResult, CapabilityCall, CapabilityCallResult, PilotEvent, PilotNodeState, Plan, RtdlNode,
-    SessionStatusEvent, Task, TaskStateEvent,
+    RtdlNodeState, SessionStatusEvent, Task, TaskStateEvent,
 };
 use crate::service::{self, PilotStreamBody, SessionState};
 use crate::vlm::{Message, VlmClient, VlmStreamItem};
@@ -147,13 +147,14 @@ enum ForestEvent {
     /// larger than the other variant's payload.
     NodeState {
         plan_id: String,
-        node_state: Box<crate::pb::executor::RtdlNodeState>,
+        node_state: Box<RtdlNodeState>,
     },
-    /// A tree finished (or its Execute stream ended/errored). Carries the
-    /// terminal capability results collected from the tree.
+    /// A tree finished (or its Execute stream ended/errored). Carries one
+    /// full `RtdlNodeState` record for every node that reached a terminal
+    /// state (leaf and non-leaf), collected from the tree.
     PlanDone {
         plan_id: String,
-        results: Vec<CapabilityCallResult>,
+        results: Vec<RtdlNodeState>,
         any_failed: bool,
     },
 }
@@ -168,7 +169,6 @@ async fn drive_plan(
     events_tx: mpsc::Sender<ForestEvent>,
 ) {
     let plan_id = plan.plan_id.clone();
-    let submitted = plan.clone();
     let mut stream = match client.execute(Request::new(plan)).await {
         Ok(resp) => resp.into_inner(),
         Err(e) => {
@@ -184,7 +184,7 @@ async fn drive_plan(
         }
     };
 
-    let mut results: Vec<CapabilityCallResult> = Vec::new();
+    let mut results: Vec<RtdlNodeState> = Vec::new();
     let mut any_failed = false;
     loop {
         match stream.message().await {
@@ -205,12 +205,14 @@ async fn drive_plan(
                             node_state: Box::new(ns.clone()),
                         })
                         .await;
+                    // Collect the full RtdlNodeState for every node that reaches
+                    // a terminal state (leaf and non-leaf). A non-success
+                    // terminal state marks the round as failed.
                     if is_terminal_executor_state(ns.state) {
-                        let r = executor_node_state_to_result(&submitted, ns);
-                        if !r.success {
+                        if ns.state != EXECUTOR_STATE_SUCCEEDED {
                             any_failed = true;
                         }
-                        results.push(r);
+                        results.push(ns);
                     }
                 }
             }
@@ -1412,37 +1414,6 @@ fn is_terminal_executor_state(state: u32) -> bool {
             | EXECUTOR_STATE_CANCELED
             | EXECUTOR_STATE_TIMEOUT
     )
-}
-
-/// Convert an Executor terminal node event into the result record shape exposed
-/// on `BatchResult`. `do` nodes carry the concrete capability call result in
-/// the event; the plan lookup is only a fallback for malformed or missing results.
-fn executor_node_state_to_result(
-    plan: &Plan,
-    ns: crate::pb::executor::RtdlNodeState,
-) -> CapabilityCallResult {
-    if let Some(result) = ns.leaf_result {
-        return result;
-    }
-    let call = plan
-        .nodes
-        .get(ns.node_index as usize)
-        .and_then(|node| node.call.as_ref());
-    let state = ns.state;
-    let success = state == EXECUTOR_STATE_SUCCEEDED;
-    let operator_detail = ns.operator_detail;
-    CapabilityCallResult {
-        call_id: call.map(|c| c.call_id.clone()).unwrap_or_default(),
-        provider_id: call.map(|c| c.provider_id.clone()).unwrap_or_default(),
-        contract_id: call.map(|c| c.contract_id.clone()).unwrap_or_default(),
-        success,
-        output: operator_detail.clone(),
-        error: if success {
-            String::new()
-        } else {
-            operator_detail
-        },
-    }
 }
 
 fn rtdl_result_to_messages(r: &CapabilityCallResult) -> history::ToolResultHistory {

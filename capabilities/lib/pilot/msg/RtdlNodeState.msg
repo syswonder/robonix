@@ -12,7 +12,7 @@ uint32 PAUSED=6
 # RTDL non-leaf node result, like sequence or parallel.
 string operator_detail
 # RTDL leaf node result.
-pilot/CapabilityCallResult leaf_result
+CapabilityCallResult leaf_result
 # Stable identifier copied from Plan.nodes[node_index].
 string op_id
 # Human-readable intent copied from Plan.nodes[node_index].
