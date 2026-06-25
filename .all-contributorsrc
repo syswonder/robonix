@@ -113,6 +113,15 @@
         "tool",
         "data"
       ]
+    },
+    {
+      "login": "ohhhHwH",
+      "name": "longyunhou",
+      "avatar_url": "https://avatars.githubusercontent.com/u/76088492?v=4",
+      "profile": "https://github.com/ohhhHwH",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitType": "docs"
