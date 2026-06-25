@@ -99,11 +99,20 @@ pub async fn run_until_terminal(
         {
             Ok(s) => s,
             Err(e) => {
-                warn!(
-                    "[executor] status poll failed for {}: {e:#}",
-                    call.contract_id
-                );
-                continue;
+                let error = format!("status poll failed for {}: {e:#}", call.contract_id);
+                warn!("[executor] {error}");
+                let result = failed_result(call, &error);
+                runtime
+                    .unregister_async_call(&node.plan_id, &call.call_id)
+                    .await;
+                let _ = tx
+                    .send(Ok(rtdl_wire::node_state_from_result(
+                        node,
+                        result.clone(),
+                        STATE_FAILED,
+                    )))
+                    .await;
+                return result;
             }
         };
 
@@ -184,28 +193,33 @@ pub fn parse_status_json(output: &str) -> (u32, String) {
         return (STATE_FAILED, error);
     };
 
-    (
-        parse_state_name(state_str),
-        v.get("detail")
-            .and_then(|x| x.as_str())
-            .unwrap_or_default()
-            .to_string(),
-    )
+    let detail = v
+        .get("detail")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    match parse_state_name(state_str) {
+        Some(state) => (state, detail),
+        None => {
+            let error = format!("status response has unknown state '{state_str}': {output}");
+            warn!("[executor] {error}");
+            (STATE_FAILED, error)
+        }
+    }
 }
 
-pub fn parse_state_name(s: &str) -> u32 {
+/// Convert status response state names into RTDL node state constants.
+pub fn parse_state_name(s: &str) -> Option<u32> {
     match s.to_uppercase().as_str() {
-        "PENDING" => rtdl_wire::STATE_PENDING,
-        "RUNNING" => STATE_RUNNING,
-        "SUCCEEDED" => STATE_SUCCEEDED,
-        "FAILED" => STATE_FAILED,
-        "CANCELED" | "CANCELLED" => STATE_CANCELED,
-        "TIMEOUT" => STATE_TIMEOUT,
-        "PAUSED" => rtdl_wire::STATE_PAUSED,
-        other => {
-            warn!("[executor] unknown status state '{other}', treating as RUNNING");
-            STATE_RUNNING
-        }
+        "PENDING" => Some(rtdl_wire::STATE_PENDING),
+        "RUNNING" => Some(STATE_RUNNING),
+        "SUCCEEDED" => Some(STATE_SUCCEEDED),
+        "FAILED" => Some(STATE_FAILED),
+        "CANCELED" | "CANCELLED" => Some(STATE_CANCELED),
+        "TIMEOUT" => Some(STATE_TIMEOUT),
+        "PAUSED" => Some(rtdl_wire::STATE_PAUSED),
+        _ => None,
     }
 }
 
@@ -235,6 +249,13 @@ fn terminal_result(
 }
 
 fn canceled_result(call: &CapabilityCall, error: &str) -> CapabilityCallResult {
+    failed_result(call, error)
+}
+
+/// Build a failed capability result for async control-plane failures.
+/// The original call identity is preserved so the terminal node event still
+/// correlates with the user-requested async capability, not the status poll.
+fn failed_result(call: &CapabilityCall, error: &str) -> CapabilityCallResult {
     CapabilityCallResult {
         call_id: call.call_id.clone(),
         provider_id: call.provider_id.clone(),
