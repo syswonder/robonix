@@ -11,6 +11,7 @@ use crate::pb::pilot::{CapabilityCall, Plan};
 use crate::plan_runtime::PlanRuntime;
 use crate::rtdl_wire::{self, NodeEventContext};
 use robonix_atlas::client::AtlasClient;
+use robonix_scribe::{info, warn};
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
@@ -179,7 +180,7 @@ fn execute_node(
                         Ok(child_failed) => any_failed |= child_failed,
                         Err(e) => {
                             any_failed = true;
-                            log::warn!("[executor] parallel branch task failed: {e}");
+                            warn!("[executor] parallel branch task failed: {e}");
                         }
                     }
                 }
@@ -209,7 +210,7 @@ fn execute_node(
                 execute_call(call, node_ctx, tx, atlas, provider_id, runtime).await
             }
             _ => {
-                log::warn!(
+                warn!(
                     "[executor] invalid node_kind={} reached after validation",
                     node.node_kind
                 );
@@ -266,11 +267,9 @@ async fn execute_call(
     provider_id: String,
     runtime: PlanRuntime,
 ) -> bool {
-    log::info!(
+    info!(
         "[executor] dispatching call_id={} provider='{}' contract='{}'",
-        call.call_id,
-        call.provider_id,
-        call.contract_id,
+        call.call_id, call.provider_id, call.contract_id,
     );
 
     let async_group = if call.provider_id == provider_id {
@@ -303,14 +302,12 @@ async fn execute_call(
     if result.success {
         let preview: String = result.output.chars().take(120).collect();
         let ellipsis = if result.output.len() > 120 { "..." } else { "" };
-        log::info!(
+        info!(
             "[executor] '{}' ok: {}{}",
-            call.contract_id,
-            preview,
-            ellipsis
+            call.contract_id, preview, ellipsis
         );
     } else {
-        log::warn!("[executor] '{}' failed: {}", call.contract_id, result.error);
+        warn!("[executor] '{}' failed: {}", call.contract_id, result.error);
     }
 
     failed

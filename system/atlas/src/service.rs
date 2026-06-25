@@ -11,7 +11,7 @@
 // implemented without a parallel state.
 
 use anyhow::{Context, Result};
-use log::{info, warn};
+use robonix_scribe::{info, warn};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;

@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
+use robonix_scribe::{debug, info, warn};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -171,7 +172,7 @@ async fn drive_plan(
     let mut stream = match client.execute(Request::new(plan)).await {
         Ok(resp) => resp.into_inner(),
         Err(e) => {
-            log::warn!("[pilot/forest] plan_id={plan_id} Execute RPC failed: {e}");
+            warn!("[pilot/forest] plan_id={plan_id} Execute RPC failed: {e}");
             let _ = events_tx
                 .send(ForestEvent::PlanDone {
                     plan_id,
@@ -215,7 +216,7 @@ async fn drive_plan(
             }
             Ok(None) => break,
             Err(e) => {
-                log::warn!("[pilot/forest] plan_id={plan_id} stream recv error: {e}");
+                warn!("[pilot/forest] plan_id={plan_id} stream recv error: {e}");
                 any_failed = true;
                 break;
             }
@@ -296,7 +297,7 @@ fn drain_steers(steer_rx: &mut mpsc::Receiver<Task>, history: &mut Vec<Message>)
         if text.is_empty() {
             continue;
         }
-        log::info!("[pilot/steer] mid-task input: {text}");
+        info!("[pilot/steer] mid-task input: {text}");
         history.push(Message::user(text));
         pulled = true;
     }
@@ -355,7 +356,7 @@ async fn compact_history(history: &mut Vec<Message>, vlm: &VlmClient) {
     )));
     compacted.extend_from_slice(&history[split..]);
     *history = compacted;
-    log::info!(
+    info!(
         "[pilot] compacted history {before} -> {} messages (was ~{total} chars)",
         history.len()
     );
@@ -419,7 +420,7 @@ pub async fn run_turn(
     }
 
     if task_is_session_end(task) {
-        log::info!("[pilot] session_end: invoking compact_memory if available");
+        info!("[pilot] session_end: invoking compact_memory if available");
         memory::try_compact(executor, atlas, consumer_id).await;
         let _ = tx
             .send(Ok(service::pack(
@@ -587,7 +588,7 @@ pub async fn run_turn(
                     if let Some(task) = steer {
                         let text = task.text.trim();
                         if !text.is_empty() {
-                            log::info!("[pilot/steer] mid-task input: {text}");
+                            info!("[pilot/steer] mid-task input: {text}");
                             history.push(Message::user(text));
                             history::trim(history, MAX_HISTORY);
                             // Re-plan now so the model can react (and decide
@@ -630,7 +631,7 @@ pub async fn run_turn(
                             {
                                 feed_results_into_history(history, std::slice::from_ref(r));
                             }
-                            log::debug!(
+                            debug!(
                                 "[pilot/forest] node_state plan_id={} node={} state={}",
                                 plan_id,
                                 node_state.node_index,
@@ -654,7 +655,7 @@ pub async fn run_turn(
                                     PilotStreamBody::BatchResult(batch),
                                 )))
                                 .await;
-                            log::info!(
+                            info!(
                                 "[pilot/forest] plan_id={plan_id} done (failed={any_failed}); replanning"
                             );
                             should_plan = true;
@@ -756,7 +757,7 @@ pub async fn run_turn(
             }
 
             let raw_content = content.unwrap_or_default();
-            log::debug!("raw_content: {}", raw_content);
+            debug!("raw_content: {}", raw_content);
             let parsed = parse_rtdl_assistant_response(&raw_content).with_context(|| {
                 format!(
                     "parse RTDL assistant response: {}",
@@ -771,12 +772,12 @@ pub async fn run_turn(
             } = match parsed {
                 Ok(env) => env,
                 Err(e) if correction.is_none() => {
-                    log::warn!("[pilot/rtdl] parse failed round={round}, retrying once: {e:#}");
+                    warn!("[pilot/rtdl] parse failed round={round}, retrying once: {e:#}");
                     correction = Some(build_rtdl_retry_prompt(&e, &raw_content, &display_caps));
                     continue;
                 }
                 Err(e) => {
-                    log::warn!(
+                    warn!(
                         "[pilot/rtdl] parse failed again round={round}, ending turn gracefully: {e:#}"
                     );
                     let plan_id = (plan_seq.load(Ordering::Relaxed) + 1).to_string();
@@ -820,11 +821,11 @@ pub async fn run_turn(
                     );
                 }
                 Err(e) if correction.is_none() => {
-                    log::warn!("[pilot/rtdl] expand failed round={round}, retrying once: {e:#}");
+                    warn!("[pilot/rtdl] expand failed round={round}, retrying once: {e:#}");
                     correction = Some(build_rtdl_retry_prompt(&e, &raw_content, &display_caps));
                 }
                 Err(e) => {
-                    log::warn!(
+                    warn!(
                         "[pilot/rtdl] expand failed again round={round}, ending turn gracefully: {e:#}"
                     );
                     let plan_id = (plan_seq.load(Ordering::Relaxed) + 1).to_string();
@@ -860,7 +861,7 @@ pub async fn run_turn(
         // Apply the task update now that we have a real expanded tree (recovery
         // breaks carry `None`). `None` keeps the standing task unchanged.
         if let Some(updated) = task_update {
-            log::info!(
+            info!(
                 "[pilot/rtdl] task_update goal='{}' status='{}'",
                 updated.goal,
                 updated.status
@@ -879,7 +880,7 @@ pub async fn run_turn(
         }
 
         let calls = plan_call_count(&graph);
-        log::info!(
+        info!(
             "[pilot/rtdl] round={} plan_id={} calls={}",
             round,
             graph.plan_id,
@@ -907,7 +908,7 @@ pub async fn run_turn(
             // to the wait arm.
             if forest.is_empty() && (task_done || current_task.is_none() || hit_cap) {
                 if hit_cap && !(task_done || current_task.is_none()) {
-                    log::warn!("[pilot] hit max tool rounds ({max_rounds}), stopping turn");
+                    warn!("[pilot] hit max tool rounds ({max_rounds}), stopping turn");
                 }
                 let _ = tx
                     .send(Ok(service::pack(
@@ -926,7 +927,7 @@ pub async fn run_turn(
                     .await;
             }
             if hit_cap {
-                log::warn!("[pilot] hit max tool rounds ({max_rounds}), stopping turn");
+                warn!("[pilot] hit max tool rounds ({max_rounds}), stopping turn");
                 break;
             }
             // should_plan stays false: wait for forest events (or, when the
@@ -961,13 +962,13 @@ pub async fn run_turn(
             },
         );
         tokio::spawn(drive_plan(graph, executor.graph.clone(), forest_tx.clone()));
-        log::info!(
+        info!(
             "[pilot/forest] dispatched plan_id={plan_id}; forest size now {}",
             forest.len()
         );
 
         if hit_cap {
-            log::warn!("[pilot] hit max tool rounds ({max_rounds}), stopping turn");
+            warn!("[pilot] hit max tool rounds ({max_rounds}), stopping turn");
             break;
         }
         // should_plan stays false: wait for this tree (and any others) to report.
@@ -1069,7 +1070,7 @@ fn build_rtdl_prompt(
         ));
     }
 
-    // log::debug!("[pilot/rtdl] rtdl prompt:\n{}", p);
+    // debug!("[pilot/rtdl] rtdl prompt:\n{}", p);
     Ok(p)
 }
 

@@ -35,7 +35,7 @@ def _import_ros():
     from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy  # type: ignore
     from rclpy.duration import Duration  # type: ignore
     from rclpy.time import Time  # type: ignore
-    from sensor_msgs.msg import Image, LaserScan, PointCloud2  # type: ignore
+    from sensor_msgs.msg import Image, LaserScan, PointCloud2, CameraInfo  # type: ignore
     from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped  # type: ignore
     from nav_msgs.msg import Odometry, OccupancyGrid  # type: ignore
     # tf2 is the authoritative source for `map → base_link` and
@@ -55,6 +55,7 @@ def _import_ros():
         "Time": Time,
         "Image": Image,
         "LaserScan": LaserScan,
+        "CameraInfo": CameraInfo,
         # mapping declares /rtabmap/cloud_map under
         # robonix/service/map/pointcloud — scene auto-classifies it
         # as kind=lidar3d. Without this import scene crashes the
@@ -263,11 +264,12 @@ class SubscribersHub:
                 history=HistoryPolicy.KEEP_LAST,
                 depth=1,
             )
-        elif spec.kind == "camera_extrinsics":
-            # Static camera mount transform (primitive/camera/extrinsics).
-            # Publisher emits once at startup; consumers must use
-            # TRANSIENT_LOCAL to pick up the cached value when scene
-            # starts after the camera primitive.
+        elif spec.kind in ("camera_extrinsics", "intrinsics"):
+            # Static camera mount transform (primitive/camera/extrinsics)
+            # or pinhole K (primitive/camera/intrinsics). Publisher emits
+            # once at startup; consumers must use TRANSIENT_LOCAL to pick
+            # up the cached value when scene starts after the camera
+            # primitive.
             qos = QoSProfile(
                 reliability=ReliabilityPolicy.RELIABLE,
                 durability=DurabilityPolicy.TRANSIENT_LOCAL,

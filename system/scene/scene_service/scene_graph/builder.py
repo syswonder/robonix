@@ -11,7 +11,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from ..state.object_registry import ObjectRegistry, SceneObject
 from .captioner import NodeCaptioner
@@ -103,12 +103,17 @@ class SceneGraphBuilder:
         relation_inferer: RelationInferer,
         store: SceneGraphStore,
         config: Optional[SceneGraphConfig] = None,
+        object_store: Any = None,
     ) -> None:
         self.registry = registry
         self.captioner = captioner
         self.relation_inferer = relation_inferer
         self.store = store
         self.cfg = config or SceneGraphConfig()
+        # Optional persistence layer (scene_service.persistence.ObjectStore).
+        # When set, each rebuild upserts the current stable objects so the
+        # registry can warm-restore after a restart. None disables persistence.
+        self.object_store = object_store
 
     async def rebuild_once(self) -> SceneGraphSnapshot:
         t0 = time.monotonic()
@@ -224,6 +229,20 @@ class SceneGraphBuilder:
         )
         self.store.save_snapshot(snapshot)
         self.store.flush_caches()
+
+        # 8. Persist current stable objects for warm restore. `nodes` is
+        # built from `stable` in order, so zip pairs each object with the
+        # caption just computed for it. Offloaded to a thread because the
+        # caption embedding + milvus write are synchronous and must not
+        # block the asyncio loop. Persistence errors are swallowed inside
+        # ObjectStore.persist — they never break a rebuild.
+        if self.object_store is not None and stable:
+            pairs = list(zip(stable, (n.caption for n in nodes)))
+            loop = asyncio.get_running_loop()
+            written = await loop.run_in_executor(
+                None, self.object_store.persist, pairs
+            )
+            log.debug("[scene-graph] persisted %d objects", written)
 
         dt = time.monotonic() - t0
         log.info(

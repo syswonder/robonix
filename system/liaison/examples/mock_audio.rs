@@ -27,6 +27,7 @@ use robonix_liaison::pb::contracts::{
         RobonixPrimitiveAudioSpeaker, RobonixPrimitiveAudioSpeakerServer,
     },
 };
+use robonix_scribe::{info, warn};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -110,7 +111,7 @@ impl RobonixPrimitiveAudioMic for MockMic {
         let (tx, rx) = mpsc::channel(64);
 
         tokio::spawn(async move {
-            log::info!(
+            info!(
                 "[mock-mic] streaming {} bytes ({:.1}s)",
                 pcm.len(),
                 pcm.len() as f32 / (SAMPLE_RATE as f32 * BYTES_PER_SAMPLE as f32),
@@ -127,7 +128,7 @@ impl RobonixPrimitiveAudioMic for MockMic {
                 }
                 tokio::time::sleep(Duration::from_millis(CHUNK_DURATION_MS)).await;
             }
-            log::info!("[mock-mic] stream complete");
+            info!("[mock-mic] stream complete");
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
@@ -160,7 +161,7 @@ impl RobonixPrimitiveAudioSpeaker for MockSpeaker {
 
         let out_path = if is_mp3 {
             let p = self.output_path.replace(".wav", ".mp3");
-            log::info!(
+            info!(
                 "[mock-speaker] received {} bytes MP3, writing to {p}",
                 pcm_buf.len()
             );
@@ -168,7 +169,7 @@ impl RobonixPrimitiveAudioSpeaker for MockSpeaker {
                 .map_err(|e| Status::internal(format!("write mp3: {e}")))?;
             p
         } else {
-            log::info!(
+            info!(
                 "[mock-speaker] received {} bytes PCM, writing WAV to {}",
                 pcm_buf.len(),
                 self.output_path
@@ -177,7 +178,7 @@ impl RobonixPrimitiveAudioSpeaker for MockSpeaker {
                 .map_err(|e| Status::internal(format!("write wav: {e}")))?;
             self.output_path.clone()
         };
-        log::info!("[mock-speaker] saved audio to {out_path}");
+        info!("[mock-speaker] saved audio to {out_path}");
 
         Ok(Response::new(()))
     }
@@ -185,7 +186,8 @@ impl RobonixPrimitiveAudioSpeaker for MockSpeaker {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    robonix_scribe::init("mock_audio");
+    info!("mock audio starting");
 
     let atlas = std::env::var("ROBONIX_ATLAS").unwrap_or_else(|_| "127.0.0.1:50051".to_string());
     let atlas_http = if atlas.starts_with("http") {
@@ -202,19 +204,19 @@ async fn main() -> Result<()> {
     let advertised = format!("127.0.0.1:{port}");
 
     let pcm_data = if let Ok(wav_path) = std::env::var("MOCK_WAV_INPUT") {
-        log::info!("[mock-audio] reading WAV from {wav_path}");
+        info!("[mock-audio] reading WAV from {wav_path}");
         Arc::new(read_wav_pcm(&wav_path)?)
     } else {
-        log::info!("[mock-audio] no MOCK_WAV_INPUT, generating 5s silence");
+        info!("[mock-audio] no MOCK_WAV_INPUT, generating 5s silence");
         Arc::new(generate_silence(5))
     };
     let output_path = std::env::var("MOCK_WAV_OUTPUT")
         .unwrap_or_else(|_| "/tmp/robonix_speaker_output.wav".to_string());
 
-    log::info!("[mock-audio] PCM buffer: {} bytes", pcm_data.len());
-    log::info!("[mock-audio] speaker output: {output_path}");
+    info!("[mock-audio] PCM buffer: {} bytes", pcm_data.len());
+    info!("[mock-audio] speaker output: {output_path}");
 
-    log::info!("[mock-audio] connecting to Atlas at {atlas_http}");
+    info!("[mock-audio] connecting to Atlas at {atlas_http}");
     let mut atlas =
         AtlasClient::connect_with_retry(&atlas_http, 10, Duration::from_secs(2)).await?;
     atlas.register_service(CAPABILITY_ID, NAMESPACE, "").await?;
@@ -244,7 +246,7 @@ async fn main() -> Result<()> {
             ),
         )
         .await?;
-    log::info!("[mock-audio] registered '{CAPABILITY_ID}', mic+speaker on :{port}");
+    info!("[mock-audio] registered '{CAPABILITY_ID}', mic+speaker on :{port}");
     eprintln!("mock-audio ready on :{port}");
 
     {
@@ -255,7 +257,7 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 if let Err(e) = hb.heartbeat(CAPABILITY_ID).await {
-                    log::warn!("heartbeat failed: {e:#}");
+                    warn!("heartbeat failed: {e:#}");
                 }
             }
         });

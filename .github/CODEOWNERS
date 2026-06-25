@@ -1,0 +1,32 @@
+# Auto-requested PR reviewers, by path. Derived from MAINTAINERS.md.
+#
+# GitHub requests review from the owner(s) of any path a PR touches.
+# NOTE: a code owner must have at least triage/write access to this repo,
+# otherwise GitHub silently skips the request.
+
+# Fallback: lead maintainer owns anything not matched below.
+*                          @enkerewpo
+
+# --- System components ---
+/system/atlas/             @enkerewpo
+/system/executor/          @kouweilee @1mujue
+/system/pilot/             @enkerewpo
+/system/liaison/           @kaileliu
+/system/scene/             @HeartLinked
+/system/soma/              @Chenyantt
+/system/sentinel/          @HustWolfzzb
+/system/scribe/            @ohhhHwH
+/system/vitals/            @AuYang261
+/system/keystone/          @kaileliu
+/system/nexus/             @ZZJJWarth
+# chronos: unassigned
+
+# --- Services ---
+/services/memsearch/       @ohhhHwH
+/services/speech/          @kaileliu
+/services/voiceprint/      @kaileliu
+
+# --- Tools & libraries ---
+/tools/rbnx/               @enkerewpo
+/tools/codegen/            @enkerewpo
+/pylib/robonix-api/        @enkerewpo

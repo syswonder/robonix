@@ -40,6 +40,7 @@ use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
 use crate::plan_runtime::PlanRuntime;
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
+use robonix_scribe::{debug, info};
 
 const CMD_ACTIVATE: u32 = 1;
 const DRIVER_ACTIVATE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -114,7 +115,7 @@ pub async fn dispatch(
 /// process (sticky cache).
 async fn ensure_skill_active(atlas: &mut AtlasClient, provider_id: &str) -> Result<()> {
     if already_activated(provider_id) {
-        log::debug!("[skill-activate] {provider_id}: already activated, skipping CMD_ACTIVATE");
+        debug!("[skill-activate] {provider_id}: already activated, skipping CMD_ACTIVATE");
         return Ok(());
     }
     let providers = atlas
@@ -122,27 +123,26 @@ async fn ensure_skill_active(atlas: &mut AtlasClient, provider_id: &str) -> Resu
         .await
         .with_context(|| format!("query_capabilities({provider_id})"))?;
     let Some(provider) = providers.into_iter().next() else {
-        log::info!(
+        info!(
             "[skill-activate] {provider_id}: not in atlas, letting connect_capability surface the error"
         );
         return Ok(());
     };
     if !is_skill_namespace(&provider.namespace) {
-        log::debug!(
+        debug!(
             "[skill-activate] {provider_id} (ns={}): not a skill, no CMD_ACTIVATE",
             provider.namespace
         );
         return Ok(());
     }
     if provider.state == atlas_pb::LifecycleState::StateActive as i32 {
-        log::info!("[skill-activate] {provider_id}: already ACTIVE per atlas, marking sticky");
+        info!("[skill-activate] {provider_id}: already ACTIVE per atlas, marking sticky");
         mark_activated(provider_id);
         return Ok(());
     }
-    log::info!(
+    info!(
         "[skill-activate] {provider_id} (ns={}, state={}): sending Driver(CMD_ACTIVATE)",
-        provider.namespace,
-        provider.state
+        provider.namespace, provider.state
     );
     let driver_contract = provider
         .capabilities

@@ -18,6 +18,7 @@
 // in favour of "capability"; "runtime" is "system".
 
 use anyhow::{Context, Result};
+use robonix_scribe::warn;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -151,7 +152,29 @@ struct LegacyNode {
     start: String,
 }
 
-pub fn detect_manifest_path(package_root: &Path) -> Result<PathBuf> {
+/// Locate a package's manifest file inside `package_root`.
+///
+/// `override_name` lets a deploy entry select a non-default manifest file
+/// (the `manifest:` field on a deploy `PackageEntry`) so one package can
+/// ship per-deployment-target variants — e.g. `package_manifest.yaml`
+/// (x86 + docker), `package_manifest.jetson-native.yaml`, and
+/// `package_manifest.jetson-docker.yaml`, each with its own build/start —
+/// without changing the manifest schema itself. When set, the named file
+/// MUST exist (a typo'd target should fail loud, not silently fall back to
+/// the default manifest and build the wrong thing). When `None`, the
+/// default `package_manifest.yaml` (then legacy) is used as before.
+pub fn detect_manifest_path(package_root: &Path, override_name: Option<&str>) -> Result<PathBuf> {
+    if let Some(name) = override_name {
+        let p = package_root.join(name);
+        if p.is_file() {
+            return Ok(p);
+        }
+        anyhow::bail!(
+            "manifest override `{name}` not found in {} — the deploy entry's \
+             `manifest:` field names a file the package does not ship",
+            package_root.display()
+        );
+    }
     let new_path = package_root.join(MANIFEST_FILE);
     if new_path.exists() {
         return Ok(new_path);
@@ -163,8 +186,11 @@ pub fn detect_manifest_path(package_root: &Path) -> Result<PathBuf> {
     anyhow::bail!("Package does not have {MANIFEST_FILE} (or legacy {LEGACY_MANIFEST_FILE})")
 }
 
-pub fn detect_and_load(package_root: &Path) -> Result<DetectedManifest> {
-    let path = detect_manifest_path(package_root)?;
+pub fn detect_and_load(
+    package_root: &Path,
+    override_name: Option<&str>,
+) -> Result<DetectedManifest> {
+    let path = detect_manifest_path(package_root, override_name)?;
     let manifest = load_from_path(&path)?;
     Ok(DetectedManifest { path, manifest })
 }
@@ -273,7 +299,7 @@ impl Manifest {
         }
 
         if self.is_legacy {
-            log::warn!(
+            warn!(
                 "package '{}' uses legacy manifest fields (package.id / nodes[] / \
                  build.script / robonix_manifest.yaml). These still work but are \
                  deprecated — migrate to the new spec (package_manifest.yaml with \

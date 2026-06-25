@@ -4,6 +4,7 @@
 use anyhow::Result;
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
+use robonix_scribe::warn;
 
 /// LLM-facing tool name = `<area>_<leaf>` of a contract_id, where
 /// `<area>` is the segment immediately before the leaf.
@@ -86,10 +87,9 @@ pub async fn discover(atlas: &mut AtlasClient) -> Result<Vec<(String, atlas_pb::
                 Some(atlas_pb::transport_params::Kind::Mcp(_))
             );
             if !has_mcp {
-                log::warn!(
+                warn!(
                     "[pilot/discovery] provider='{}' contract='{}' has no MCP params; skipping",
-                    provider.id,
-                    cap.contract_id
+                    provider.id, cap.contract_id
                 );
                 continue;
             }

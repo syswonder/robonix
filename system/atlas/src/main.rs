@@ -2,9 +2,9 @@
 // Author: wheatfox <wheatfox17@icloud.com>
 
 use clap::Parser;
-use log::{info, warn};
 use robonix_atlas::contract_registry::{ContractRegistry, resolve_capabilities_roots};
 use robonix_atlas::service::{AtlasRegistry, serve_atlas};
+use robonix_scribe::{info, warn};
 use std::sync::Arc;
 
 const DEFAULT_LISTEN: &str = "0.0.0.0:50051";
@@ -39,12 +39,13 @@ struct Args {
 async fn main() {
     let args = Args::parse();
 
-    let log_filter = args
-        .log
-        .or_else(|| std::env::var("RUST_LOG").ok())
-        .unwrap_or_else(|| "robonix_atlas=info".to_string());
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_filter)).init();
+    // Log level is no longer consumed — Scribe writes everything and
+    // filtering happens at read time (`rbnx logs --level`).  The CLI
+    // arg and RUST_LOG env are kept for backward compat with existing
+    // launch scripts.
+    let _ = args.log.or_else(|| std::env::var("RUST_LOG").ok());
 
+    robonix_scribe::init("atlas");
     info!("robonix-atlas starting (control plane)");
 
     let listen = args.listen.unwrap_or_else(|| DEFAULT_LISTEN.to_string());

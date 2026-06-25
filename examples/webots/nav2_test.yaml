@@ -1,0 +1,42 @@
+manifestVersion: 1
+name: nav2-webots-test
+
+# Minimal deploy to prove nav2_wrapper runs (in docker) and navigates the
+# webots Tiago. atlas + executor + chassis + lidar + mapping (provides /map)
+# + nav2. No scene/pilot/liaison/camera — nav2 navigation doesn't need them.
+system:
+  atlas:
+    listen: 127.0.0.1:50051
+    log: info
+  executor:
+    listen: 127.0.0.1:50061
+    log: info
+
+primitive:
+  - name: tiago_chassis
+    path: ./primitives/tiago_chassis
+  - name: tiago_lidar
+    path: ./primitives/tiago_lidar
+  # RGB-D camera so rtabmap can fuse images (visual loop closure + depth
+  # obstacle fill below the lidar plane).
+  - name: tiago_camera
+    path: ./primitives/tiago_camera
+
+service:
+  # mapping provides robonix/service/map/occupancy_grid (/map) for nav2's
+  # global costmap. rtabmap fuses 2D lidar + odom + RGB-D camera.
+  - name: mapping
+    url: https://github.com/enkerewpo/mapping_rbnx
+    branch: main
+    config:
+      algo: rtabmap
+      sensors: { lidar2d: true, odom: true, rgb: true, depth: true }
+
+  # nav2_wrapper — local path (docker target by default; the image
+  # robonix-nav2 must be built). params_profile: sim = webots-tuned tiago.
+  - name: nav2
+    path: /home/wheatfox/Documents/Code/robonix_slam_ws/nav2_wrapper_rbnx
+    config:
+      params_profile: sim
+      use_sim_time: true
+      action_wait_s: 90.0

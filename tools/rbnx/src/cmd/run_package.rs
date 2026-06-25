@@ -191,6 +191,8 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
         "Building",
         &format!("packages declared in {}", manifest_path.display()),
     );
+    // Notice (non-fatal) if any cloned remote provider is behind upstream.
+    super::check_remotes::report_outdated(manifest_path);
 
     // Collect (section, name, pkg_dir, url_to_clone) for every entry.
     struct Resolved {
@@ -198,6 +200,10 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
         name: String,
         pkg_dir: PathBuf,
         url_to_clone: Option<(String, Option<String>)>, // (url, branch)
+        // Deploy `manifest:` override — selects a per-target package
+        // manifest variant (e.g. package_manifest.jetson-native.yaml) so
+        // the right build path runs. None = default package_manifest.yaml.
+        manifest_override: Option<String>,
     }
     let mut entries: Vec<Resolved> = Vec::new();
     for section in &["primitive", "service", "skill"] {
@@ -216,18 +222,24 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
                 .get("branch")
                 .and_then(|v| v.as_str())
                 .map(String::from);
+            let manifest_override = entry
+                .get("manifest")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             match (local_path, url) {
                 (Some(p), _) => entries.push(Resolved {
                     section,
                     name,
                     pkg_dir: manifest_dir.join(p),
                     url_to_clone: None,
+                    manifest_override,
                 }),
                 (None, Some(u)) => entries.push(Resolved {
                     section,
                     name: name.clone(),
                     pkg_dir: cache_root.join(&name),
                     url_to_clone: Some((u.to_string(), branch)),
+                    manifest_override,
                 }),
                 (None, None) => {
                     output::warning(&format!(
@@ -272,6 +284,7 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
                 name: key_str.to_string(),
                 pkg_dir,
                 url_to_clone: None,
+                manifest_override: None,
             });
         }
     }
@@ -358,7 +371,7 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
         output::step(r.section, &r.name);
         let (pkg_name, version) = read_pkg_meta(&canon);
         let location = rel_to(&manifest_dir, &canon);
-        match build::build_local_package(&canon, clean) {
+        match build::build_local_package(&canon, clean, r.manifest_override.as_deref()) {
             Ok(()) => built.push(Row {
                 section: r.section,
                 name: r.name.clone(),
@@ -532,12 +545,13 @@ pub async fn execute_start(
     registry_endpoint: Option<&str>,
     config_file: Option<&Path>,
     set_overrides: &[String],
+    manifest_override: Option<&str>,
 ) -> Result<()> {
     let package_root = match spec {
         Some(s) => resolve_package_path_for_start(config, s)?,
         None => find_package_from_cwd()?,
     };
-    let detected = manifest::detect_and_load(&package_root)?;
+    let detected = manifest::detect_and_load(&package_root, manifest_override)?;
     let manifest = &detected.manifest;
     manifest.validate_and_summarize()?;
 
@@ -554,12 +568,13 @@ pub async fn execute_start(
     let materialized_cfg_json = build_start_config_json(config_file, set_overrides)?;
 
     // Per-package run logs live under <pkg>/rbnx-build/logs (gitignored,
-    // owned by the package itself). Earlier code put them in the parent
-    // dir's rbnx-boot/logs, which created stray empty `rbnx-boot/`
-    // directories sibling to the package whenever `rbnx start` ran from
-    // outside.
-    let log_dir = package_root.join("rbnx-build").join("logs");
-    let process_manager = ProcessManager::new(log_dir)?;
+    // owned by the package itself).  When `rbnx boot` spawns us, it sets
+    // $SCRIBE_LOG_DIR to the deploy log dir — respect that so boot-time
+    // logs stay under `rbnx-boot/logs/` for `rbnx logs` to find.
+    let log_dir = std::env::var("SCRIBE_LOG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| package_root.join("rbnx-build").join("logs"));
+    let process_manager = ProcessManager::new(log_dir.clone())?;
 
     output::action("Running", &manifest.package.name);
     output::sub_step(&format!("Atlas endpoint: {}", endpoint));
@@ -577,6 +592,7 @@ pub async fn execute_start(
 
     let mut env = std::collections::HashMap::new();
     env.insert("ROBONIX_ATLAS".to_string(), endpoint.clone());
+    env.insert("SCRIBE_LOG_DIR".to_string(), log_dir.display().to_string());
     if materialized_cfg_json.is_some() {
         output::sub_step("Config: will deliver via Driver(CMD_INIT) post-register");
     }
@@ -595,7 +611,7 @@ pub async fn execute_start(
 
     if !manifest.build.trim().is_empty() && !build::build_stamp_path(&package_root).exists() {
         output::sub_step("No rbnx-build/.rbnx-built — running package build first");
-        build::build_local_package(&package_root, false)?;
+        build::build_local_package(&package_root, false, manifest_override)?;
     }
 
     let exports = env

@@ -6,6 +6,7 @@
 use anyhow::Result;
 use clap::Parser;
 use robonix_cli::Config;
+use robonix_scribe::{info, warn};
 
 mod cmd;
 mod pb;
@@ -55,10 +56,16 @@ fn ensure_loopback_bypasses_proxy() {
 async fn main() -> Result<()> {
     ensure_loopback_bypasses_proxy();
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .filter_module("rustdds", log::LevelFilter::Off)
-        .filter_module("ros2_client", log::LevelFilter::Warn)
-        .init();
+    // Set Scribe console threshold to Error BEFORE the first scribe call
+    // triggers LazyLock init — otherwise CONSOLE_MIN defaults to Warn and
+    // Warn messages leak to the terminal during boot.
+    // Safety: no other threads exist yet (tokio runtime not started).
+    unsafe {
+        std::env::set_var("SCRIBE_CONSOLE_LEVEL", "error");
+    }
+
+    robonix_scribe::init("rbnx");
+    info!("rbnx starting");
 
     let cli = Cli::parse();
 
@@ -82,7 +89,7 @@ async fn main() -> Result<()> {
     }
 
     if let Err(e) = robonix_cli::PackageDatabase::sync(&config.package_storage_path) {
-        log::warn!("Package database sync failed: {}", e);
+        warn!("Package database sync failed: {}", e);
     }
 
     cmd::execute(cli.command, config).await?;
