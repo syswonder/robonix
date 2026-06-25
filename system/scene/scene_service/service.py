@@ -592,7 +592,16 @@ def _cam_info_to_intrinsics(msg: Any) -> Optional[_CamIntrinsics]:
     The except is narrow on purpose: a genuinely unexpected error should
     surface, not be swallowed as if intrinsics were merely missing."""
     try:
-        k = list(getattr(msg, "k", None) or getattr(msg, "K", []) or [])
+        # `k` is the row-major 3x3 intrinsics. rclpy delivers it as a numpy
+        # ndarray, so DON'T use `a or b` to pick the field — `bool(ndarray)`
+        # on a multi-element array raises ValueError ("truth value ...
+        # ambiguous"), which the except below would swallow as "no
+        # intrinsics", stalling perception forever on a perfectly valid K.
+        # Select the field with explicit None checks instead.
+        k_field = getattr(msg, "k", None)
+        if k_field is None:
+            k_field = getattr(msg, "K", None)
+        k = list(k_field) if k_field is not None else []
         w = int(getattr(msg, "width", 0))
         h = int(getattr(msg, "height", 0))
         if len(k) < 6 or min(k[0], k[4], k[2], k[5]) <= 0 or w <= 0 or h <= 0:
