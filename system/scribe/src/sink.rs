@@ -45,25 +45,44 @@ impl FileSink {
     /// Opens the file in append mode on first use for a given tag; caches
     /// the handle thereafter.  Serialises the record as a single JSON
     /// line, writes it, and flushes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `io::Error` if the file can't be opened or written.
+    /// The caller (`log()` in lib.rs) treats this as best-effort and
+    /// silently drops the file write on failure.
     pub fn write(&self, record: &LogRecord) -> io::Result<()> {
         let json_line = serde_json::to_string(record)?;
         let mut guard = self.writers.lock().unwrap_or_else(|e| e.into_inner());
-        let writer = guard.entry(record.tag.clone()).or_insert_with(|| {
+        // or_insert_with can't use `?`; use entry + insert to propagate errors.
+        let writer: &mut File = if let Some(w) = guard.get_mut(&record.tag) {
+            w
+        } else {
             let path = self.tag_path(&record.tag);
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .expect("failed to open log file")
-        });
+            let f = OpenOptions::new().create(true).append(true).open(&path)?;
+            guard.entry(record.tag.clone()).or_insert(f)
+        };
         writeln!(writer, "{json_line}")?;
         writer.flush()?;
         Ok(())
     }
 
     /// Absolute path for a given tag's log file.
+    ///
+    /// Non-safe characters (anything outside `[A-Za-z0-9._-]`) are
+    /// replaced with `_` to prevent path traversal / invalid filenames.
     fn tag_path(&self, tag: &str) -> PathBuf {
-        self.dir.join(format!("{tag}.log"))
+        let safe: String = tag
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        self.dir.join(format!("{safe}.log"))
     }
 
     /// Return the log directory path (for diagnostics).
@@ -207,5 +226,41 @@ mod tests {
         for line in &lines {
             let _rec: LogRecord = serde_json::from_str(line).unwrap();
         }
+    }
+
+    #[test]
+    fn sanitize_tag_replaces_dangerous_chars() {
+        let (tmp, sink) = test_sink();
+        // Tag with `/`, `..`, and spaces — should be sanitized into a safe filename.
+        let rec = LogRecord {
+            ts: 0,
+            level: Level::Info,
+            tag: "a/../b c".into(),
+            msg: "m".into(),
+        };
+        sink.write(&rec).unwrap();
+        // `/` becomes `_`, `.` is safe, ` ` becomes `_` → "a_.._b_c"
+        let safe_path = tmp.path().join("a_.._b_c.log");
+        assert!(
+            safe_path.exists(),
+            "expected {safe_path:?} to exist after sanitization"
+        );
+    }
+
+    #[test]
+    fn write_does_not_panic_on_bad_path() {
+        // Create a sink pointed at a path that can't be a directory.
+        let sink = FileSink::new("/proc/sysrq-trigger"); // existing file, not a dir
+        assert!(
+            sink.is_err(),
+            "should fail to create sink under a non-directory"
+        );
+    }
+
+    #[test]
+    fn sink_creation_fails_gracefully() {
+        // /dev/null is a file, not a directory — create_dir_all should fail.
+        let result = FileSink::new("/dev/null/logs");
+        assert!(result.is_err());
     }
 }

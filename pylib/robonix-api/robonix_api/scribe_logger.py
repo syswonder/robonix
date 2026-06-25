@@ -21,7 +21,7 @@ import threading
 import time
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Optional, TextIO
+from typing import Dict, Optional, TextIO  # noqa: UP035
 
 
 class Level(Enum):
@@ -98,12 +98,25 @@ def _format_json(ts_ns: int, level: Level, tag: str, msg: str) -> str:
     return json.dumps(rec, ensure_ascii=False)
 
 
-def _get_writer(tag: str) -> TextIO:
-    """Return (creating if needed) the append-mode file handle for *tag*."""
+def _sanitize_tag(tag: str) -> str:
+    """Replace non-safe characters to prevent path traversal."""
+    return "".join(c if c.isascii() and (c.isalnum() or c in "._-") else "_" for c in tag)
+
+
+def _get_writer(tag: str) -> Optional[TextIO]:
+    """Return (creating if needed) the append-mode file handle for *tag*.
+
+    Returns ``None`` if the log directory is unwritable or the file
+    can't be opened — the caller treats file writes as best-effort.
+    """
     global _writers  # noqa: PLW0603
     if tag not in _writers:
-        path = _log_dir / f"{tag}.log"
-        _writers[tag] = open(str(path), "a", encoding="utf-8")  # noqa: SIM115
+        safe = _sanitize_tag(tag)
+        path = _log_dir / f"{safe}.log"
+        try:
+            _writers[tag] = open(str(path), "a", encoding="utf-8")  # noqa: SIM115
+        except OSError:
+            _writers[tag] = None  # type: ignore[assignment]
     return _writers[tag]
 
 
@@ -134,8 +147,9 @@ def log(level: Level, tag: str, msg: str) -> None:
         json_line = _format_json(ts_ns, level, tag, msg)
         with _lock:
             writer = _get_writer(tag)
-            writer.write(json_line + "\n")
-            writer.flush()
+            if writer is not None:
+                writer.write(json_line + "\n")
+                writer.flush()
     except Exception:  # noqa: BLE001
         pass
 
