@@ -22,26 +22,33 @@ Robonix. Read once at session start; obey throughout.
 
 ## Project Structure & Module Organization
 
-Robonix is an **embodied AI operating system**: a monorepo with Rust binaries,
-Python service packages, capability contracts, and documentation. Rust code
-lives in `rust/crates/*`; shared protobuf sources are in `rust/proto/`. Python
-workspace packages are under `pylib/*` and `system/*`, managed by the root
-`pyproject.toml` and `uv.lock`. Capability schemas are TOML files under
-`capabilities/{primitive,service,system}/`. End-to-end examples live in
-`examples/`, Docker packaging in `docker/`, and the mdBook manual in
-`docs/src/`.
+Robonix is an **embodied AI operating system**: a monorepo with Rust system
+components, Python packages, capability contracts, IDL libraries, examples, and
+documentation. The Rust workspace lives at the repository root in `Cargo.toml`;
+current Rust members are `system/{atlas,executor,liaison,pilot}` and
+`tools/{rbnx,codegen}`. The twelve system component directories live under
+`system/`; several are documentation/planning components today, while
+`system/scene` is a Python package managed by uv. Python workspace packages are
+listed in the root `pyproject.toml`: shared libraries in `pylib/*`, reference
+services in `services/*`, and `system/scene`. Capability contracts are TOML
+files under `capabilities/{primitive,service,system}/`; reusable message and
+service IDL libraries live under `capabilities/lib/`. End-to-end and Webots
+examples live in `examples/`, Docker packaging in `docker/`, repo scripts in
+`scripts/`, image assets in
+`images/`, and the mdBook manual in `docs/src/`.
 
 ### Crate README maintenance
 
-When you add or change functionality in a crate under `rust/crates/*`, update
-that crate's `README.md` in the same contribution. If the crate has no
-`README.md`, add one. Each crate README should be concise and informative:
-what the package is, what it is for, and how to use it. For CLIs and similar
-tools, document subcommands, flags, and important environment variables.
+When you add or change functionality in a Rust workspace member under
+`system/*` or `tools/*`, update that member's `README.md` in the same
+contribution. If the member has no `README.md`, add one. Each README should be
+concise and informative: what the package is, what it is for, and how to use
+it. For CLIs and similar tools, document subcommands, flags, and important
+environment variables.
 
 ## Build, Test, and Development Commands
 
-Run Rust commands from `rust/` unless noted:
+Run Rust commands from the repository root unless noted:
 
 - `make build`: build all Rust workspace crates in debug mode.
 - `make release`: build all Rust crates with `--release`.
