@@ -1187,6 +1187,19 @@ fn system_cli_args(
 ) -> Vec<String> {
     let mut out = Vec::new();
     let map = cfg.and_then(|v| v.as_mapping());
+
+    // Pass the component's whole manifest config block as one JSON arg. The
+    // binary parses the keys it needs (e.g. scribe reads `log` via
+    // robonix_scribe::init_from_config), so new manifest keys flow through
+    // without per-key plumbing here. The typed flags below remain for the
+    // fields binaries still read individually.
+    if let Some(v) = cfg
+        && let Ok(json) = serde_json::to_string(v)
+    {
+        out.push("--config-json".into());
+        out.push(json);
+    }
+
     let s = |k: &str| -> Option<String> {
         map.and_then(|m| {
             m.get(serde_yaml::Value::String(k.into()))
