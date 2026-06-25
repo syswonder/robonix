@@ -60,7 +60,7 @@ logging.getLogger("absl").setLevel(logging.ERROR)
 
 # Transitional: also emit key lifecycle events through Scribe so the
 # unified `rbnx logs` tool can see them alongside other components.
-scribe_logger.info("service_memory", "memory service starting")
+scribe_logger.info("memory", "memory service starting")
 
 def _log_environment() -> None:
     """Print a compact environment summary at boot. Many of the reported
