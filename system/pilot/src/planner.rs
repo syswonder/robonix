@@ -5,6 +5,8 @@ use crate::discovery::{self, llm_name};
 use crate::history;
 use crate::memory;
 use crate::pb::contracts::robonix_system_executor_execute_client::RobonixSystemExecutorExecuteClient;
+use crate::pb::executor::rtdl_event::RtdlEventEnum;
+use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{
     BatchResult, CapabilityCall, CapabilityCallResult, PilotEvent, PilotNodeState, Plan, RtdlNode,
     RtdlNodeState, SessionStatusEvent, Task, TaskStateEvent,
@@ -36,12 +38,6 @@ type CapabilityTargetMap = HashMap<String, CapabilityTarget>;
 const RTDL_SEQUENCE: u32 = 0;
 const RTDL_PARALLEL: u32 = 1;
 const RTDL_DO: u32 = 2;
-const EXECUTOR_EVT_NODE_STATE: u32 = 1;
-const EXECUTOR_EVT_PLAN_COMPLETE: u32 = 2;
-const EXECUTOR_STATE_SUCCEEDED: u32 = 2;
-const EXECUTOR_STATE_FAILED: u32 = 3;
-const EXECUTOR_STATE_CANCELED: u32 = 4;
-const EXECUTOR_STATE_TIMEOUT: u32 = 5;
 
 struct DisplayCapability<'a> {
     display_name: String,
@@ -189,13 +185,13 @@ async fn drive_plan(
     loop {
         match stream.message().await {
             Ok(Some(event)) => {
-                if event.event_kind == EXECUTOR_EVT_PLAN_COMPLETE
+                if event.event_kind == RtdlEventEnum::PlanComplete as u32
                     && let Some(pc) = event.plan_complete
                 {
                     any_failed |= pc.any_failed;
                     continue;
                 }
-                if event.event_kind == EXECUTOR_EVT_NODE_STATE
+                if event.event_kind == RtdlEventEnum::NodeState as u32
                     && let Some(ns) = event.node_state
                 {
                     // Forward every node state for live viz.
@@ -209,7 +205,7 @@ async fn drive_plan(
                     // a terminal state (leaf and non-leaf). A non-success
                     // terminal state marks the round as failed.
                     if is_terminal_executor_state(ns.state) {
-                        if ns.state != EXECUTOR_STATE_SUCCEEDED {
+                        if ns.state != RtdlNodeStateEnum::Succeeded as u32 {
                             any_failed = true;
                         }
                         results.push(ns);
@@ -642,7 +638,7 @@ pub async fn run_turn(
                             // batch at tree completion, which avoids the per-node
                             // re-plan storms that plain "re-plan on every node"
                             // caused.
-                            if node_state.state == EXECUTOR_STATE_FAILED {
+                            if node_state.state == RtdlNodeStateEnum::Failed as u32 {
                                 should_plan = true;
                             }
                             debug!(
@@ -1408,11 +1404,11 @@ fn plan_call_count(plan: &Plan) -> usize {
 
 fn is_terminal_executor_state(state: u32) -> bool {
     matches!(
-        state,
-        EXECUTOR_STATE_SUCCEEDED
-            | EXECUTOR_STATE_FAILED
-            | EXECUTOR_STATE_CANCELED
-            | EXECUTOR_STATE_TIMEOUT
+        RtdlNodeStateEnum::try_from(state as i32),
+        Ok(RtdlNodeStateEnum::Succeeded
+            | RtdlNodeStateEnum::Failed
+            | RtdlNodeStateEnum::Canceled
+            | RtdlNodeStateEnum::Timeout)
     )
 }
 

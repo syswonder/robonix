@@ -6,12 +6,10 @@ use std::time::Duration;
 
 use crate::dispatch::{self, async_registry::AsyncGroup};
 use crate::pb::executor::RtdlEvent;
+use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
 use crate::plan_runtime::{PlanRuntime, RunningAsyncCall};
-use crate::rtdl_wire::{
-    self, NodeEventContext, STATE_CANCELED, STATE_FAILED, STATE_RUNNING, STATE_SUCCEEDED,
-    STATE_TIMEOUT,
-};
+use crate::rtdl_wire::{self, NodeEventContext};
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use tokio::sync::mpsc::Sender;
@@ -35,7 +33,7 @@ pub async fn run_until_terminal(
             .send(Ok(rtdl_wire::node_state_from_result(
                 node,
                 initial.clone(),
-                STATE_FAILED,
+                RtdlNodeStateEnum::Failed as u32,
             )))
             .await;
         return initial;
@@ -61,7 +59,7 @@ pub async fn run_until_terminal(
             .send(Ok(rtdl_wire::node_state_from_result(
                 node,
                 result.clone(),
-                STATE_CANCELED,
+                RtdlNodeStateEnum::Canceled as u32,
             )))
             .await;
         return result;
@@ -81,7 +79,7 @@ pub async fn run_until_terminal(
                 .send(Ok(rtdl_wire::node_state_from_result(
                     node,
                     result.clone(),
-                    STATE_CANCELED,
+                    RtdlNodeStateEnum::Canceled as u32,
                 )))
                 .await;
             return result;
@@ -107,7 +105,7 @@ pub async fn run_until_terminal(
                     .send(Ok(rtdl_wire::node_state_from_result(
                         node,
                         result.clone(),
-                        STATE_FAILED,
+                        RtdlNodeStateEnum::Failed as u32,
                     )))
                     .await;
                 return result;
@@ -182,13 +180,13 @@ pub fn extract_run_id(output: &str) -> String {
 pub fn parse_status_json(output: &str) -> (u32, String) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(output) else {
         warn!("[executor] status response is not valid JSON: {output}");
-        return (STATE_RUNNING, output.to_string());
+        return (RtdlNodeStateEnum::Running as u32, output.to_string());
     };
 
     let Some(state_str) = v.get("state").and_then(|s| s.as_str()) else {
         let error = format!("status response missing required 'state' field: {output}");
         warn!("[executor] {error}");
-        return (STATE_FAILED, error);
+        return (RtdlNodeStateEnum::Failed as u32, error);
     };
 
     let detail = v
@@ -202,7 +200,7 @@ pub fn parse_status_json(output: &str) -> (u32, String) {
         None => {
             let error = format!("status response has unknown state '{state_str}': {output}");
             warn!("[executor] {error}");
-            (STATE_FAILED, error)
+            (RtdlNodeStateEnum::Failed as u32, error)
         }
     }
 }
@@ -210,13 +208,13 @@ pub fn parse_status_json(output: &str) -> (u32, String) {
 /// Convert status response state names into RTDL node state constants.
 pub fn parse_state_name(s: &str) -> Option<u32> {
     match s.to_uppercase().as_str() {
-        "PENDING" => Some(rtdl_wire::STATE_PENDING),
-        "RUNNING" => Some(STATE_RUNNING),
-        "SUCCEEDED" => Some(STATE_SUCCEEDED),
-        "FAILED" => Some(STATE_FAILED),
-        "CANCELED" | "CANCELLED" => Some(STATE_CANCELED),
-        "TIMEOUT" => Some(STATE_TIMEOUT),
-        "PAUSED" => Some(rtdl_wire::STATE_PAUSED),
+        "PENDING" => Some(RtdlNodeStateEnum::Pending as u32),
+        "RUNNING" => Some(RtdlNodeStateEnum::Running as u32),
+        "SUCCEEDED" => Some(RtdlNodeStateEnum::Succeeded as u32),
+        "FAILED" => Some(RtdlNodeStateEnum::Failed as u32),
+        "CANCELED" | "CANCELLED" => Some(RtdlNodeStateEnum::Canceled as u32),
+        "TIMEOUT" => Some(RtdlNodeStateEnum::Timeout as u32),
+        "PAUSED" => Some(RtdlNodeStateEnum::Paused as u32),
         _ => None,
     }
 }
@@ -227,7 +225,7 @@ fn terminal_result(
     detail: &str,
     raw: &str,
 ) -> CapabilityCallResult {
-    let success = state == STATE_SUCCEEDED;
+    let success = state == RtdlNodeStateEnum::Succeeded as u32;
     CapabilityCallResult {
         call_id: call.call_id.clone(),
         provider_id: call.provider_id.clone(),
@@ -277,14 +275,14 @@ mod tests {
     #[test]
     fn parse_status_requires_state_field() {
         let (s, d) = parse_status_json(r#"{"state":"SUCCEEDED","detail":"done"}"#);
-        assert_eq!(s, STATE_SUCCEEDED);
+        assert_eq!(s, RtdlNodeStateEnum::Succeeded as u32);
         assert_eq!(d, "done");
     }
 
     #[test]
     fn parse_status_missing_state_fails() {
         let (s, d) = parse_status_json(r#"{"known":true,"terminal":false}"#);
-        assert_eq!(s, STATE_FAILED);
+        assert_eq!(s, RtdlNodeStateEnum::Failed as u32);
         assert!(d.contains("missing required 'state' field"));
     }
 }
