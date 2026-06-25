@@ -327,7 +327,9 @@ struct Spawned {
 }
 
 fn log_path(log_dir: &Path, name: &str) -> PathBuf {
-    log_dir.join(format!("{name}.log"))
+    // Same short stem Scribe uses for the file (see process::short_tag), so
+    // the path rbnx reports matches the file that actually gets written.
+    log_dir.join(format!("{}.log", robonix_cli::process::short_tag(name)))
 }
 
 async fn spawn_system_binary(
