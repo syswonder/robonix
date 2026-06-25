@@ -370,6 +370,10 @@ pub enum Commands {
         /// Output raw JSON lines instead of logcat-style rendering.
         #[arg(long)]
         json: bool,
+        /// List the distinct tags present in the logs (with record counts)
+        /// instead of printing records — handy for discovering `-t` values.
+        #[arg(long)]
+        list_tags: bool,
     },
 }
 
@@ -464,6 +468,7 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             level,
             follow,
             json,
-        } => logs::execute(log_dir, tag, level, follow, json).await,
+            list_tags,
+        } => logs::execute(log_dir, tag, level, follow, json, list_tags).await,
     }
 }
