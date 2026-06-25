@@ -568,12 +568,13 @@ pub async fn execute_start(
     let materialized_cfg_json = build_start_config_json(config_file, set_overrides)?;
 
     // Per-package run logs live under <pkg>/rbnx-build/logs (gitignored,
-    // owned by the package itself). Earlier code put them in the parent
-    // dir's rbnx-boot/logs, which created stray empty `rbnx-boot/`
-    // directories sibling to the package whenever `rbnx start` ran from
-    // outside.
-    let log_dir = package_root.join("rbnx-build").join("logs");
-    let process_manager = ProcessManager::new(log_dir)?;
+    // owned by the package itself).  When `rbnx boot` spawns us, it sets
+    // $SCRIBE_LOG_DIR to the deploy log dir — respect that so boot-time
+    // logs stay under `rbnx-boot/logs/` for `rbnx logs` to find.
+    let log_dir = std::env::var("SCRIBE_LOG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| package_root.join("rbnx-build").join("logs"));
+    let process_manager = ProcessManager::new(log_dir.clone())?;
 
     output::action("Running", &manifest.package.name);
     output::sub_step(&format!("Atlas endpoint: {}", endpoint));
@@ -591,6 +592,7 @@ pub async fn execute_start(
 
     let mut env = std::collections::HashMap::new();
     env.insert("ROBONIX_ATLAS".to_string(), endpoint.clone());
+    env.insert("SCRIBE_LOG_DIR".to_string(), log_dir.display().to_string());
     if materialized_cfg_json.is_some() {
         output::sub_step("Config: will deliver via Driver(CMD_INIT) post-register");
     }

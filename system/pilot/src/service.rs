@@ -12,6 +12,7 @@ use crate::planner::{self, ExecutorConn};
 use crate::vlm::{Message, VlmClient};
 use anyhow::Context;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
+use robonix_scribe::{debug, error};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
@@ -143,7 +144,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
             } else {
                 false
             };
-            log::debug!("[pilot] abort_turn task for session {id} (signaled={ok})");
+            debug!("[pilot] abort_turn task for session {id} (signaled={ok})");
             let (_tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(1);
             return Ok(Response::new(ReceiverStream::new(rx)));
         }
@@ -206,7 +207,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
             )
             .await
             {
-                log::error!("[pilot] turn error for session '{session_id}': {e:#}");
+                error!("[pilot] turn error for session '{session_id}': {e:#}");
                 let _ = tx.send(Err(Status::internal(e.to_string()))).await;
             }
 

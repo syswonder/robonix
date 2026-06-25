@@ -11,6 +11,7 @@ use crate::history::decode_string_output;
 use crate::pb::pilot::{CapabilityCall, Plan, RtdlNode};
 use crate::planner::ExecutorConn;
 use robonix_atlas::client::AtlasClient;
+use robonix_scribe::debug;
 use tonic::Request;
 use uuid::Uuid;
 
@@ -73,7 +74,7 @@ pub async fn prefetch(
         {
             let out = decode_string_output(&r.output);
             if r.success && !out.contains("No relevant memories") && !out.is_empty() {
-                log::debug!("[pilot] memory prefetch: {out}");
+                debug!("[pilot] memory prefetch: {out}");
                 return Some(out);
             }
             return None;
@@ -88,7 +89,7 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
     let providers = match discovery::discover(atlas).await {
         Ok(c) => c,
         Err(e) => {
-            log::debug!("[pilot] compact_memory: discovery failed: {e}");
+            debug!("[pilot] compact_memory: discovery failed: {e}");
             return;
         }
     };
@@ -125,9 +126,9 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
         {
             let out = decode_string_output(&r.output);
             if r.success {
-                log::debug!("[pilot] compact_memory: {out}");
+                debug!("[pilot] compact_memory: {out}");
             } else {
-                log::debug!("[pilot] compact_memory failed: {out}");
+                debug!("[pilot] compact_memory failed: {out}");
             }
             return;
         }
