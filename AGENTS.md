@@ -91,6 +91,10 @@ diagnostics, or maintainability outside the test.
   at a time during a rename. Read each file before editing. Pattern variables
   that look identical at the string level can have different types; blanket
   replace breaks tuple destructures and loop variables.
+- Do not hand-edit generated documentation under `docs/src/reference/`
+  (including `idl.md` and `contracts.md`). Update the source contracts / IDL /
+  codegen inputs, then regenerate docs with the project tooling when generated
+  reference pages need to change.
 - `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings`
   must be clean before any commit that touches Rust.
 - Don't commit without an end-to-end run when the change crosses process
