@@ -147,15 +147,50 @@ pub fn status_of(p: &RemoteProvider) -> RemoteStatus {
 
     // Deepen the fetch so HEAD..origin/branch is computable even on the
     // --depth 1 clones boot creates. 200 covers any realistic drift.
-    let fetched = Command::new("git")
-        .arg("-C")
-        .arg(&p.dir)
-        .args(["fetch", "--quiet", "--depth", "200", "origin", &branch])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    //
+    // HARD time bound: this freshness check is a best-effort, non-fatal
+    // notice, but a plain `git fetch` against an unreachable/slow remote
+    // can block on TCP connect for ~130s — and since boot/build call this
+    // for EVERY url-provider, an offline or throttled github stalls the
+    // whole boot before atlas even starts. Wrap in `timeout(1)` so a
+    // wedged fetch is abandoned in seconds and the check just reports
+    // "skipped". `http.lowSpeedLimit/Time` additionally kills a transfer
+    // that connects but then stalls mid-stream. If the `timeout` binary
+    // isn't present (e.g. non-coreutils host), fall back to a bare fetch.
+    let fetch_args = [
+        "-C",
+        p.dir.to_str().unwrap_or("."),
+        "-c",
+        "http.lowSpeedLimit=1000",
+        "-c",
+        "http.lowSpeedTime=8",
+        "fetch",
+        "--quiet",
+        "--depth",
+        "200",
+        "origin",
+        &branch,
+    ];
+    // github is frequently unreachable from CN networks, so keep this
+    // SHORT — the freshness notice is cosmetic and must never noticeably
+    // delay boot. 6s is plenty for a reachable remote; an unreachable one
+    // fails fast and the check is skipped.
+    let timed = Command::new("timeout")
+        .arg("6")
+        .arg("git")
+        .args(fetch_args)
+        .status();
+    let fetched = match timed {
+        Ok(s) => s.success(),
+        // `timeout` unavailable — fall back to a direct fetch.
+        Err(_) => Command::new("git")
+            .args(fetch_args)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false),
+    };
     if !fetched {
-        st.note = Some("git fetch failed (offline?) — skipped".into());
+        st.note = Some("git fetch timed out / failed (offline?) — skipped".into());
         return st;
     }
 
