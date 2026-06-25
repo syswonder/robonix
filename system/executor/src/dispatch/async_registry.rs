@@ -3,6 +3,7 @@
 
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
+use robonix_scribe::warn;
 
 #[derive(Debug, Clone)]
 pub struct AsyncGroup {
@@ -51,7 +52,7 @@ pub async fn resolve_async_group(
         .iter()
         .any(|c| c.contract_id == cancel_contract);
     if !has_cancel {
-        log::warn!(
+        warn!(
             "[executor] provider '{provider_id}' namespace '{ns}' has status but no cancel contract"
         );
     }

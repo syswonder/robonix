@@ -863,8 +863,7 @@ pub async fn run_turn(
         if let Some(updated) = task_update {
             info!(
                 "[pilot/rtdl] task_update goal='{}' status='{}'",
-                updated.goal,
-                updated.status
+                updated.goal, updated.status
             );
             let _ = tx
                 .send(Ok(service::pack(
@@ -882,9 +881,7 @@ pub async fn run_turn(
         let calls = plan_call_count(&graph);
         info!(
             "[pilot/rtdl] round={} plan_id={} calls={}",
-            round,
-            graph.plan_id,
-            calls
+            round, graph.plan_id, calls
         );
 
         // Narration enters history once; it streams to the client as a
