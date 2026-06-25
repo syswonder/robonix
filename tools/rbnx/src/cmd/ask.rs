@@ -22,6 +22,7 @@ use tonic::Request;
 use uuid::Uuid;
 
 use crate::pb::contracts::robonix_system_pilot_client::RobonixSystemPilotClient;
+use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{CapabilityCall, Plan, Task};
 
 // PilotEvent.event_kind discriminants — must mirror service.rs / .msg.
@@ -32,8 +33,6 @@ const EVT_STATUS: u32 = 3;
 const EVT_FINAL_TEXT: u32 = 4;
 
 const STATE_FAILED: u32 = 2;
-// RtdlNodeState.state == SUCCEEDED (see lib/pilot/msg/RtdlNodeState.msg).
-const NODE_STATE_SUCCEEDED: u32 = 2;
 const CONSUMER_ID: &str = "rbnx-cli/ask";
 
 pub async fn execute(server: &str, prompt: &str, json: bool) -> Result<()> {
@@ -163,7 +162,7 @@ pub async fn execute(server: &str, prompt: &str, json: bool) -> Result<()> {
                         last_was_chunk = false;
                     }
                     for r in &batch.results {
-                        let success = r.state == NODE_STATE_SUCCEEDED;
+                        let success = r.state == RtdlNodeStateEnum::Succeeded as u32;
                         // Leaf nodes carry a capability call result; non-leaf
                         // (sequence/parallel) nodes carry an operator detail.
                         let (label, body) = match r.leaf_result.as_ref() {

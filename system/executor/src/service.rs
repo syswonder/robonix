@@ -7,6 +7,7 @@ use crate::dispatch::{async_poll, async_registry};
 use crate::pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlans;
 use crate::pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecute;
 use crate::pb::executor::{CancelAllResponse, RtdlEvent};
+use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan};
 use crate::plan_runtime::PlanRuntime;
 use crate::rtdl_wire::{self, NodeEventContext};
@@ -108,7 +109,13 @@ fn execute_node(
         let node_ctx = node_event_context(&plan, node_index);
         if runtime.is_cancelled(&plan.plan_id).await {
             if is_operator_node(node.node_kind) {
-                send_operator_terminal(&tx, &node_ctx, rtdl_wire::STATE_CANCELED, "canceled").await;
+                send_operator_terminal(
+                    &tx,
+                    &node_ctx,
+                    RtdlNodeStateEnum::Canceled as u32,
+                    "canceled",
+                )
+                .await;
             }
             return true;
         }
@@ -137,11 +144,11 @@ fn execute_node(
                 }
                 let cancelled = cancelled || runtime.is_cancelled(&plan.plan_id).await;
                 let state = if cancelled {
-                    rtdl_wire::STATE_CANCELED
+                    RtdlNodeStateEnum::Canceled as u32
                 } else if any_failed {
-                    rtdl_wire::STATE_FAILED
+                    RtdlNodeStateEnum::Failed as u32
                 } else {
-                    rtdl_wire::STATE_SUCCEEDED
+                    RtdlNodeStateEnum::Succeeded as u32
                 };
                 let reason = if cancelled {
                     "canceled before remaining children could run"
@@ -186,11 +193,11 @@ fn execute_node(
                 }
                 let cancelled = runtime.is_cancelled(&plan.plan_id).await;
                 let state = if cancelled {
-                    rtdl_wire::STATE_CANCELED
+                    RtdlNodeStateEnum::Canceled as u32
                 } else if any_failed {
-                    rtdl_wire::STATE_FAILED
+                    RtdlNodeStateEnum::Failed as u32
                 } else {
-                    rtdl_wire::STATE_SUCCEEDED
+                    RtdlNodeStateEnum::Succeeded as u32
                 };
                 let reason = if cancelled {
                     "canceled"
@@ -292,7 +299,7 @@ async fn execute_call(
                 .send(Ok(rtdl_wire::node_state_from_result(
                     &node,
                     r.clone(),
-                    rtdl_wire::STATE_FAILED,
+                    RtdlNodeStateEnum::Failed as u32,
                 )))
                 .await;
             r
@@ -312,9 +319,9 @@ async fn execute_call(
         Ok(None) => {
             let r = crate::dispatch::dispatch(call, &provider_id, &mut atlas, &runtime).await;
             let state = if r.success {
-                rtdl_wire::STATE_SUCCEEDED
+                RtdlNodeStateEnum::Succeeded as u32
             } else {
-                rtdl_wire::STATE_FAILED
+                RtdlNodeStateEnum::Failed as u32
             };
             let _ = tx
                 .send(Ok(rtdl_wire::node_state_from_result(
@@ -456,9 +463,13 @@ fn visit_for_cycles(index: usize, plan: &Plan, colors: &mut [VisitColor]) -> Res
 
 #[cfg(test)]
 mod tests {
-    use super::{RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, send_operator_terminal, validate_plan};
+    use super::{
+        RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, RtdlNodeStateEnum, send_operator_terminal,
+        validate_plan,
+    };
+    use crate::pb::executor::rtdl_event::RtdlEventEnum;
     use crate::pb::pilot::{CapabilityCall, Plan, RtdlNode};
-    use crate::rtdl_wire::{EVT_NODE_STATE, NodeEventContext, STATE_SUCCEEDED};
+    use crate::rtdl_wire::NodeEventContext;
 
     fn call(id: &str) -> CapabilityCall {
         CapabilityCall {
@@ -595,14 +606,20 @@ mod tests {
             description: "run the ordered checks".to_string(),
         };
 
-        send_operator_terminal(&tx, &node, STATE_SUCCEEDED, "completed successfully").await;
+        send_operator_terminal(
+            &tx,
+            &node,
+            RtdlNodeStateEnum::Succeeded as u32,
+            "completed successfully",
+        )
+        .await;
 
         let event = rx.recv().await.unwrap().unwrap();
         let ns = event.node_state.unwrap();
-        assert_eq!(event.event_kind, EVT_NODE_STATE);
+        assert_eq!(event.event_kind, RtdlEventEnum::NodeState as u32);
         assert_eq!(ns.op_id, "op_1");
         assert_eq!(ns.description, "run the ordered checks");
-        assert_eq!(ns.state, STATE_SUCCEEDED);
+        assert_eq!(ns.state, RtdlNodeStateEnum::Succeeded as u32);
         assert!(ns.leaf_result.is_none());
         assert!(ns.operator_detail.contains("RTDL sequence op_id=op_1"));
     }

@@ -36,6 +36,7 @@ use pb::contracts::{
     robonix_system_pilot_client::RobonixSystemPilotClient,
 };
 use pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
+use pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use pb::pilot::{CapabilityCall, PilotEvent, Plan, Task};
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
@@ -65,8 +66,6 @@ const EVT_TASK_GRAPH: u32 = 1;
 const EVT_BATCH_RESULT: u32 = 2;
 const EVT_STATUS: u32 = 3;
 const EVT_FINAL_TEXT: u32 = 4;
-// RtdlNodeState.state == SUCCEEDED (see lib/pilot/msg/RtdlNodeState.msg).
-const NODE_STATE_SUCCEEDED: u32 = 2;
 
 // ── LiaisonPipeline ─────────────────────────────────────────────────────────
 //
@@ -344,7 +343,7 @@ async fn run_text_loop(pipeline: Arc<LiaisonPipeline>) -> Result<()> {
                                 let ok = r
                                     .results
                                     .iter()
-                                    .filter(|x| x.state == NODE_STATE_SUCCEEDED)
+                                    .filter(|x| x.state == RtdlNodeStateEnum::Succeeded as u32)
                                     .count();
                                 println!(
                                     "[round {}] results: {ok} ok, {} failed",

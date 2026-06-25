@@ -7,6 +7,8 @@
 // is. Missing providers are silently tolerated — memory is never load-bearing.
 
 use crate::discovery;
+use crate::pb::executor::rtdl_event::RtdlEventEnum;
+use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan, RtdlNode};
 use crate::planner::ExecutorConn;
 use robonix_atlas::client::AtlasClient;
@@ -16,11 +18,6 @@ use uuid::Uuid;
 
 const RTDL_SEQUENCE: u32 = 0;
 const RTDL_DO: u32 = 2;
-const EXECUTOR_EVT_NODE_STATE: u32 = 1;
-const EXECUTOR_STATE_SUCCEEDED: u32 = 2;
-const EXECUTOR_STATE_FAILED: u32 = 3;
-const EXECUTOR_STATE_CANCELED: u32 = 4;
-const EXECUTOR_STATE_TIMEOUT: u32 = 5;
 
 fn single_call_plan(plan_id: String, session_id: String, round: u32, call: CapabilityCall) -> Plan {
     Plan {
@@ -76,7 +73,7 @@ pub async fn prefetch(
         .ok()?
         .into_inner();
     while let Ok(Some(event)) = stream.message().await {
-        if event.event_kind == EXECUTOR_EVT_NODE_STATE
+        if event.event_kind == RtdlEventEnum::NodeState as u32
             && let Some(ns) = event.node_state
             && is_terminal_executor_state(ns.state)
         {
@@ -131,7 +128,7 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
         return;
     };
     while let Ok(Some(event)) = stream.message().await {
-        if event.event_kind == EXECUTOR_EVT_NODE_STATE
+        if event.event_kind == RtdlEventEnum::NodeState as u32
             && let Some(ns) = event.node_state
             && is_terminal_executor_state(ns.state)
         {
@@ -149,11 +146,11 @@ pub async fn try_compact(executor: &mut ExecutorConn, atlas: &mut AtlasClient, _
 
 fn is_terminal_executor_state(state: u32) -> bool {
     matches!(
-        state,
-        EXECUTOR_STATE_SUCCEEDED
-            | EXECUTOR_STATE_FAILED
-            | EXECUTOR_STATE_CANCELED
-            | EXECUTOR_STATE_TIMEOUT
+        RtdlNodeStateEnum::try_from(state as i32),
+        Ok(RtdlNodeStateEnum::Succeeded
+            | RtdlNodeStateEnum::Failed
+            | RtdlNodeStateEnum::Canceled
+            | RtdlNodeStateEnum::Timeout)
     )
 }
 
@@ -170,7 +167,7 @@ fn executor_node_state_to_result(
         .nodes
         .get(ns.node_index as usize)
         .and_then(|node| node.call.as_ref());
-    let success = ns.state == EXECUTOR_STATE_SUCCEEDED;
+    let success = ns.state == RtdlNodeStateEnum::Succeeded as u32;
     CapabilityCallResult {
         call_id: call.map(|c| c.call_id.clone()).unwrap_or_default(),
         provider_id: call.map(|c| c.provider_id.clone()).unwrap_or_default(),
