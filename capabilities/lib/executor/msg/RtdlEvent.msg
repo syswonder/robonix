@@ -1,5 +1,7 @@
-# event_kind: 0=plan_started 1=node_state 2=plan_complete
 uint32 event_kind
+uint32 PLAN_STARTED=0
+uint32 NODE_STATE=1
+uint32 PLAN_COMPLETE=2
 RtdlPlanStarted plan_started
 RtdlNodeState node_state
 RtdlPlanComplete plan_complete
