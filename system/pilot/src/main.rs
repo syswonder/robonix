@@ -31,22 +31,22 @@ mod vlm;
 use anyhow::{Context, Result};
 use clap::Parser;
 use config::{Args, PILOT_NAMESPACE, PilotConfig};
-use log::info;
 use pb::contracts::robonix_system_pilot_server::RobonixSystemPilotServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
+use robonix_scribe::{info, warn};
 use service::PilotServiceImpl;
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let parsed = Args::parse();
-    let log_filter = parsed
+    let _ = parsed
         .log
         .clone()
-        .or_else(|| std::env::var("RUST_LOG").ok())
-        .unwrap_or_else(|| "robonix_pilot=info".to_string());
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_filter)).init();
+        .or_else(|| std::env::var("RUST_LOG").ok());
+    robonix_scribe::init("pilot");
+    info!("robonix-pilot starting");
 
     let cfg = PilotConfig::resolve(parsed)?;
 
@@ -93,7 +93,7 @@ async fn main() -> Result<()> {
         .set_lifecycle_state(&cfg.id, atlas_pb::LifecycleState::StateActive, "")
         .await
     {
-        log::warn!("SetLifecycleState(ACTIVE) failed: {e:#}");
+        warn!("SetLifecycleState(ACTIVE) failed: {e:#}");
     }
 
     let vlm = vlm::VlmClient::new(&cfg.vlm);
@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 if let Err(e) = hb.heartbeat(&provider_id).await {
-                    log::warn!("heartbeat failed: {e:#}");
+                    warn!("heartbeat failed: {e:#}");
                 }
             }
         });
@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
     let svc = PilotServiceImpl::new(atlas, cfg.id.clone(), vlm);
 
     info!("RobonixSystemPilot gRPC on {listen_addr}");
-    eprintln!("robonix-pilot ready on {listen_addr}");
+    info!("robonix-pilot ready on {listen_addr}");
 
     tonic::transport::Server::builder()
         .add_service(RobonixSystemPilotServer::new(svc))

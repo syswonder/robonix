@@ -23,23 +23,23 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use config::{Args, EXECUTOR_NAMESPACE, ExecutorConfig};
 use dispatch::builtin::BUILTINS;
-use log::info;
 use pb::contracts::robonix_system_executor_cancel_all_plans_server::RobonixSystemExecutorCancelAllPlansServer;
 use pb::contracts::robonix_system_executor_execute_server::RobonixSystemExecutorExecuteServer;
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
+use robonix_scribe::{info, warn};
 use service::ExecutorServiceImpl;
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let parsed = Args::parse();
-    let log_filter = parsed
+    let _ = parsed
         .log
         .clone()
-        .or_else(|| std::env::var("RUST_LOG").ok())
-        .unwrap_or_else(|| "robonix_executor=info".to_string());
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_filter)).init();
+        .or_else(|| std::env::var("RUST_LOG").ok());
+    robonix_scribe::init("executor");
+    info!("robonix-executor starting");
 
     let cfg = ExecutorConfig::resolve(parsed)?;
 
@@ -126,7 +126,7 @@ async fn main() -> Result<()> {
         .set_lifecycle_state(&cfg.id, atlas_pb::LifecycleState::StateActive, "")
         .await
     {
-        log::warn!("SetLifecycleState(ACTIVE) failed: {e:#}");
+        warn!("SetLifecycleState(ACTIVE) failed: {e:#}");
     }
 
     // Atlas evicts providers after ~60s without a heartbeat. Send one every
@@ -140,7 +140,7 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 if let Err(e) = hb.heartbeat(&provider_id).await {
-                    log::warn!("heartbeat failed: {e:#}");
+                    warn!("heartbeat failed: {e:#}");
                 }
             }
         });
@@ -148,7 +148,7 @@ async fn main() -> Result<()> {
 
     let svc = ExecutorServiceImpl::new(atlas, cfg.id.clone());
     info!("executor gRPC on {listen_addr}");
-    eprintln!("robonix-executor ready on {listen_addr}");
+    info!("robonix-executor ready on {listen_addr}");
 
     tonic::transport::Server::builder()
         .add_service(RobonixSystemExecutorExecuteServer::new(svc.clone()))

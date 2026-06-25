@@ -12,6 +12,7 @@ use robonix_cli::Config;
 mod ask;
 mod build;
 mod chat;
+mod check_remotes;
 mod clean;
 mod codegen;
 mod config;
@@ -22,12 +23,14 @@ mod init;
 mod inspect;
 mod install;
 mod list;
+mod logs;
 mod package_new;
 mod path;
 mod run_package;
 mod setup;
 mod shutdown;
 mod teardown;
+mod update;
 mod validate;
 
 const DEFAULT_ENDPOINT: &str = "localhost:50051";
@@ -46,10 +49,11 @@ pub enum Commands {
         #[arg(long)]
         clean: bool,
     },
-    /// Start the package (runs its single top-level `start` shell block).
+    /// Start one package (runs its `start` block; blocks until it exits)
+    ///
     /// Defaults to the package containing the current directory when `-p`
-    /// is omitted. Blocks until the process exits. The pre-dev-packaging
-    /// `-n / --node` flag is gone — one package = one start body now.
+    /// is omitted. The pre-dev-packaging `-n / --node` flag is gone — one
+    /// package = one start body now.
     Start {
         /// Package path or installed name; relative paths use $RBNX_INVOCATION_CWD, else process cwd.
         /// If omitted, rbnx walks up from the current directory to find a package manifest.
@@ -72,10 +76,17 @@ pub enum Commands {
         /// is a bool); fall back to a string when JSON parsing fails.
         #[arg(short = 's', long = "set", value_name = "KEY=VALUE")]
         set: Vec<String>,
+        /// Package manifest filename to use instead of the default
+        /// `package_manifest.yaml`. Lets a package ship per-deployment-target
+        /// variants (e.g. `package_manifest.jetson-native.yaml`). `rbnx boot`
+        /// passes this through from a deploy entry's `manifest:` field.
+        #[arg(short = 'm', long)]
+        manifest: Option<String>,
     },
-    /// Boot the whole stack from a top-level `robonix_manifest.yaml` — system
-    /// services (atlas/executor/pilot/liaison/memory/vlm) plus every package
-    /// declared under `primitive`/`service`/`skill`. Blocks until Ctrl-C.
+    /// Boot the whole stack from a `robonix_manifest.yaml` (until Ctrl-C)
+    ///
+    /// Brings up the system services (atlas/executor/pilot/liaison/memory/vlm)
+    /// plus every package declared under `primitive`/`service`/`skill`.
     /// `rbnx deploy` is kept as an alias for back-compat.
     #[command(alias = "deploy")]
     Boot {
@@ -90,24 +101,39 @@ pub enum Commands {
         #[arg(long)]
         skip_system: bool,
     },
-    /// Tear down a stack previously brought up by `rbnx boot`. Reads the
-    /// per-manifest state file boot writes (`<manifest-dir>/rbnx-boot/state.json`)
-    /// to know which process groups + docker containers to kill, so the
-    /// host doesn't accumulate orphaned drivers when boot dies on an error
-    /// path or its parent shell window is closed.
+    /// Update remote (`url:`) providers to their latest upstream commit
+    ///
+    /// In a deploy dir (or with `-f <manifest>`) updates ALL cloned remote
+    /// providers; with `-p <dir>` (or inside a package checkout) updates just
+    /// that one. Shows an overview and asks for confirmation before pulling.
+    Update {
+        /// Update a single package checkout at this path.
+        #[arg(short = 'p', long)]
+        path: Option<PathBuf>,
+        /// Deploy manifest whose remote providers to update
+        /// (default: `./robonix_manifest.yaml`).
+        #[arg(short = 'f', long)]
+        file: Option<PathBuf>,
+    },
+    /// Tear down a stack previously brought up by `rbnx boot`
+    ///
+    /// Reads the per-manifest state file boot writes
+    /// (`<manifest-dir>/rbnx-boot/state.json`) to kill the right process
+    /// groups + docker containers, so the host doesn't accumulate orphaned
+    /// drivers when boot dies on an error path or its shell window is closed.
     Shutdown {
         /// Path to the deployment manifest (default: `./robonix_manifest.yaml`).
         #[arg(short = 'f', long, default_value = "robonix_manifest.yaml")]
         file: PathBuf,
     },
-    /// Drop build artifacts. Per-package: `rbnx clean -p <pkg>` removes
-    /// `<pkg>/rbnx-build/`. Per-deploy: `rbnx clean -f <manifest>` recurses
-    /// over every package the manifest references (path: + url: + system/*),
-    /// wipes each one's `rbnx-build/`, and clears the deploy's
-    /// `rbnx-boot/{logs,state.json}`. Pass `--cache` to also wipe
-    /// `rbnx-boot/cache/` (forces re-clone of url:-fetched packages on next
-    /// boot). Defaults to the package containing the current directory when
-    /// neither `-p` nor `-f` is given.
+    /// Drop build artifacts (`rbnx-build/`), per-package or per-deploy
+    ///
+    /// `rbnx clean -p <pkg>` removes `<pkg>/rbnx-build/`. `rbnx clean -f
+    /// <manifest>` recurses over every package the manifest references
+    /// (path: + url: + system/*), wipes each one's `rbnx-build/`, and clears
+    /// the deploy's `rbnx-boot/{logs,state.json}`. `--cache` also wipes
+    /// `rbnx-boot/cache/` (forces re-clone of url: packages). Defaults to the
+    /// package containing cwd when neither `-p` nor `-f` is given.
     Clean {
         /// Package path (defaults to walking up from cwd).
         #[arg(short = 'p', long)]
@@ -120,6 +146,11 @@ pub enum Commands {
         cache: bool,
     },
     /// Install a package from GitHub or local path
+    ///
+    /// Legacy system-installed-package tooling; superseded by deploy
+    /// manifests (`rbnx boot`/`build`). Hidden from the command list but
+    /// still functional.
+    #[command(hide = true)]
     Install {
         /// Install from GitHub (e.g. user/repo or https://github.com/user/repo)
         #[arg(long)]
@@ -128,15 +159,19 @@ pub enum Commands {
         #[arg(long)]
         path: Option<PathBuf>,
     },
-    /// List system-installed packages
+    /// List system-installed packages (legacy; hidden)
+    #[command(hide = true)]
     List,
-    /// Show details of a system-installed package
+    /// Show details of a system-installed package (legacy; hidden)
+    #[command(hide = true)]
     Info {
         /// Package name
         name: String,
     },
-    /// Validate a package manifest without building. If no path is given,
-    /// rbnx walks up from the current directory to find a package manifest.
+    /// Validate a package manifest without building
+    ///
+    /// If no path is given, rbnx walks up from the current directory to find
+    /// a package manifest.
     Validate {
         /// Package directory (relative paths use $RBNX_INVOCATION_CWD, else process cwd)
         path: Option<PathBuf>,
@@ -150,11 +185,12 @@ pub enum Commands {
         #[arg(short, long)]
         show: bool,
     },
-    /// Run codegen for a package (wraps robonix-codegen + grpc_tools.protoc).
-    /// Stages system protos under `<pkg>/rbnx-build/proto-staging/`, then emits
-    /// `<pkg>/proto_gen/` (and optional `<pkg>/robonix_mcp_types/`). Replaces the
-    /// copy-pasted boilerplate in package build.sh scripts. If `-p` is omitted,
-    /// rbnx walks up from the current directory to find a package manifest.
+    /// Run codegen for a package (proto + gRPC stubs + MCP types)
+    ///
+    /// Wraps robonix-codegen + grpc_tools.protoc: stages system protos under
+    /// `<pkg>/rbnx-build/proto-staging/`, then emits `<pkg>/proto_gen/` (and
+    /// optional `<pkg>/robonix_mcp_types/`). If `-p` is omitted, rbnx walks up
+    /// from the current directory to find a package manifest.
     Codegen {
         /// Package path (relative to $RBNX_INVOCATION_CWD, else process cwd)
         #[arg(short = 'p', long)]
@@ -177,30 +213,35 @@ pub enum Commands {
         out_dir: Option<PathBuf>,
     },
     /// Regenerate the mdBook contract + ROS IDL reference
-    /// (`docs/src/reference/{contracts,idl}.md`) from `capabilities/`. The
-    /// pages are auto-generated and version-stamped — run after changing any
-    /// contract or IDL so the browsable reference stays in sync.
+    ///
+    /// Rebuilds `docs/src/reference/{contracts,idl}.md` from `capabilities/`.
+    /// Auto-generated + version-stamped — run after changing any contract or
+    /// IDL so the browsable reference stays in sync.
     Docs {
         /// Output directory (default: `<root>/docs/src/reference`).
         #[arg(long)]
         out_dir: Option<PathBuf>,
     },
-    /// Register this directory as the robonix source tree (persists to ~/.robonix/config.yaml).
-    /// Call once from a cloned robonix repo so packages anywhere on disk can find capabilities/IDL.
+    /// Register this directory as the robonix source tree
+    ///
+    /// Persists to ~/.robonix/config.yaml. Call once from a cloned robonix
+    /// repo so packages anywhere on disk can find capabilities/IDL.
     Setup {
         /// Path to the robonix repo root (default: $RBNX_INVOCATION_CWD or process cwd).
         /// If the given path is a sub-directory, walks up to find the root.
         path: Option<PathBuf>,
     },
-    /// Print an absolute path rooted in the configured robonix source tree (for build scripts).
-    /// Keys: root, rust, capabilities, interfaces-lib, runtime-proto, robonix-api
+    /// Print an absolute path in the robonix source tree (for build scripts)
+    ///
+    /// Keys: root, rust, capabilities, interfaces-lib, runtime-proto, robonix-api.
     Path {
         /// Path key to resolve (see above).
         key: String,
     },
 
-    /// List all registered capabilities (one row per provider by default;
-    /// pass -v to expand the per-provider capability list, lspci -tv style)
+    /// List registered capabilities (one row per provider)
+    ///
+    /// Pass -v to expand the per-provider capability list, lspci -tv style.
     #[command(alias = "nodes")]
     Caps {
         /// robonix-atlas endpoint
@@ -214,9 +255,10 @@ pub enum Commands {
         #[arg(short = 'v', long)]
         verbose: bool,
     },
-    /// List atlas's loaded contract registry (every `<root>/capabilities/**/*.toml`
-    /// atlas parsed at startup). Pass -v for field-level schemas + source paths,
-    /// -p / --prefix to filter by namespace prefix.
+    /// List atlas's loaded contract registry
+    ///
+    /// Every `<root>/capabilities/**/*.toml` atlas parsed at startup. -v for
+    /// field-level schemas + source paths; -p/--prefix filters by namespace.
     Contracts {
         /// robonix-atlas endpoint
         #[arg(long, env = "ROBONIX_ATLAS", default_value = DEFAULT_ENDPOINT)]
@@ -293,11 +335,11 @@ pub enum Commands {
         path: Option<PathBuf>,
     },
 
-    /// One-shot non-interactive prompt — same gRPC path as `rbnx chat`
-    /// (atlas connect → SubmitTask → stream PilotEvent), but prints
-    /// events to stdout and exits when the stream closes. Useful for
-    /// scripted tests / CI / agent-driven runs where stdout is the
-    /// artifact.
+    /// One-shot non-interactive prompt to the agent (stdout, then exit)
+    ///
+    /// Same gRPC path as `rbnx chat` (atlas connect → SubmitTask → stream
+    /// PilotEvent) but prints events to stdout and exits when the stream
+    /// closes. Useful for scripted tests / CI / agent-driven runs.
     Ask {
         /// The user message to send to the pilot.
         prompt: String,
@@ -306,6 +348,26 @@ pub enum Commands {
         server: String,
         /// Emit one JSON object per pilot event on stdout (line-delimited).
         /// Default is human-readable text with tool-call summaries.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read Scribe JSON-lines log files and render them with optional
+    /// tag / level filtering.  Point at a log directory or read the
+    /// default `<manifest-dir>/rbnx-boot/logs`.
+    Logs {
+        /// Log directory (default: `./rbnx-boot/logs` or `$SCRIBE_LOG_DIR`).
+        #[arg(short = 'd', long)]
+        log_dir: Option<PathBuf>,
+        /// Filter to one or more tags (OR semantics).
+        #[arg(short = 't', long)]
+        tag: Vec<String>,
+        /// Minimum level to show (debug < info < warn < error).
+        #[arg(short = 'l', long)]
+        level: Option<String>,
+        /// Follow mode — keep reading new lines as they arrive (tail -f).
+        #[arg(short = 'f', long)]
+        follow: bool,
+        /// Output raw JSON lines instead of logcat-style rendering.
         #[arg(long)]
         json: bool,
     },
@@ -323,6 +385,7 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             endpoint,
             config: cfg_file,
             set,
+            manifest,
         } => {
             run_package::execute_start(
                 &config,
@@ -330,6 +393,7 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
                 endpoint.as_deref(),
                 cfg_file.as_deref(),
                 &set,
+                manifest.as_deref(),
             )
             .await
         }
@@ -338,6 +402,7 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             log_dir,
             skip_system,
         } => deploy::execute(config, file, log_dir, skip_system).await,
+        Commands::Update { path, file } => update::execute(config, path, file).await,
         Commands::Shutdown { file } => shutdown::execute(file).await,
         Commands::Clean {
             package,
@@ -393,5 +458,12 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             server,
             json,
         } => ask::execute(&server, &prompt, json).await,
+        Commands::Logs {
+            log_dir,
+            tag,
+            level,
+            follow,
+            json,
+        } => logs::execute(log_dir, tag, level, follow, json).await,
     }
 }

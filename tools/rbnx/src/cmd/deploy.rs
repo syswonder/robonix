@@ -35,10 +35,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncBufReadExt;
 use tokio::process::{Child, Command};
 use tokio::signal::unix::{SignalKind, signal};
 use tonic::Request;
 use tonic::transport::Endpoint;
+
+use robonix_scribe as scribe;
 
 use crate::pb::lifecycle::{DriverRequest, DriverResponse};
 
@@ -104,6 +107,15 @@ struct PackageEntry {
     /// `start` body as `RBNX_CAP_CONFIG_JSON`.
     #[serde(default)]
     config: serde_yaml::Value,
+    /// Optional package-manifest filename override. A package may ship
+    /// per-deployment-target manifests (e.g. `package_manifest.yaml` for
+    /// x86+docker, `package_manifest.jetson-native.yaml`,
+    /// `package_manifest.jetson-docker.yaml`), each with its own build/start.
+    /// This selects which one `rbnx build`/`boot` uses for THIS deployment;
+    /// the package-manifest schema itself is unchanged. Defaults to
+    /// `package_manifest.yaml`.
+    #[serde(default)]
+    manifest: Option<String>,
 }
 
 /// Compute a `PackageEntry`'s expected on-disk path. PURE — no I/O,
@@ -158,8 +170,11 @@ fn check_prerequisites(
     manifest_dir: &Path,
 ) -> Result<()> {
     use std::collections::BTreeMap;
-    let mut needs_clone: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
-    let mut needs_build: BTreeMap<String, PathBuf> = BTreeMap::new();
+    // value: (url, branch, manifest_override)
+    let mut needs_clone: BTreeMap<String, (String, Option<String>, Option<String>)> =
+        BTreeMap::new();
+    // value: (pkg_path, manifest_override)
+    let mut needs_build: BTreeMap<String, (PathBuf, Option<String>)> = BTreeMap::new();
     for entry in deploy
         .primitive
         .iter()
@@ -182,19 +197,22 @@ fn check_prerequisites(
         if !pkg_path.exists()
             && let Some(url) = entry.url.as_ref()
         {
-            needs_clone.insert(name.clone(), (url.clone(), entry.branch.clone()));
+            needs_clone.insert(
+                name.clone(),
+                (url.clone(), entry.branch.clone(), entry.manifest.clone()),
+            );
             continue;
         }
         let stamp = pkg_path.join("rbnx-build").join(".rbnx-built");
         if !stamp.exists() {
-            needs_build.insert(name, pkg_path);
+            needs_build.insert(name, (pkg_path, entry.manifest.clone()));
         }
     }
     if needs_clone.is_empty() && needs_build.is_empty() {
         return Ok(());
     }
     output::boot_section("prerequisites");
-    for (name, (url, branch)) in &needs_clone {
+    for (name, (url, branch, manifest_ov)) in &needs_clone {
         output::warning(&format!(
             "{name}: not in cache — `rbnx build` should run before `rbnx boot`. cloning inline."
         ));
@@ -215,14 +233,14 @@ fn check_prerequisites(
         // Newly-cloned package needs a build too.
         let stamp = dest.join("rbnx-build").join(".rbnx-built");
         if !stamp.exists() {
-            needs_build.insert(name.clone(), dest);
+            needs_build.insert(name.clone(), (dest, manifest_ov.clone()));
         }
     }
-    for (name, pkg_path) in &needs_build {
+    for (name, (pkg_path, manifest_ov)) in &needs_build {
         output::warning(&format!(
             "{name}: not built — `rbnx build` should run before `rbnx boot`. building inline."
         ));
-        crate::cmd::build::build_local_package(pkg_path, false)
+        crate::cmd::build::build_local_package(pkg_path, false, manifest_ov.as_deref())
             .with_context(|| format!("inline build of {name} at {} failed", pkg_path.display()))?;
     }
     Ok(())
@@ -318,22 +336,20 @@ async fn spawn_system_binary(
     bin: &str,
     args: &[String],
 ) -> Result<Spawned> {
-    let log = std::fs::File::create(log_path(log_dir, name))
-        .with_context(|| format!("failed to open log file for {name}"))?;
-    let err = log.try_clone()?;
-    // Run the installed binary directly. `cargo install` puts atlas /
-    // executor / pilot in $CARGO_HOME/bin (via `make install`); the user
-    // is expected to have run that. No `cargo run` here — that requires
-    // the source tree on disk and needlessly slows down deploy.
+    // Run the installed binary directly.  Stdout / stderr are piped
+    // through Scribe (tag = binary name, e.g. "executor") so nothing
+    // escapes to the terminal.  Structured logs from within the binary
+    // also go through Scribe via the `log` facade auto-init.
     let mut cmd = Command::new(bin);
     for a in args {
         cmd.arg(a);
     }
     cmd.stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(err))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("SCRIBE_LOG_DIR", log_dir)
         .process_group(0);
-    let child = cmd.spawn().with_context(|| {
+    let mut child = cmd.spawn().with_context(|| {
         format!(
             "failed to spawn system binary `{bin}` — is it installed (try `make install` from the rust/ workspace)?"
         )
@@ -341,10 +357,34 @@ async fn spawn_system_binary(
     let pid = child
         .id()
         .ok_or_else(|| anyhow::anyhow!("spawned `{bin}` but it had no pid"))?;
+
+    // Pipe stdout / stderr into Scribe so raw println!/eprintln! from the
+    // binary are captured alongside its structured logs.
+    let stdout = child.stdout.take().expect("stdout not piped");
+    let stderr = child.stderr.take().expect("stderr not piped");
+    let tag_out = name.to_string();
+    let tag_err = name.to_string();
+    tokio::spawn(async move {
+        let reader = tokio::io::BufReader::new(stdout);
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            scribe::info(&tag_out, &line);
+        }
+    });
+    tokio::spawn(async move {
+        let reader = tokio::io::BufReader::new(stderr);
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            // stderr is not always errors — Python logging defaults to
+            // stderr for INFO too.  Use `info` to avoid misrepresenting
+            // the actual severity.
+            scribe::info(&tag_err, &line);
+        }
+    });
     // Salient detail per builtin: port + role, redact long flag soup
     // (--capabilities path lists, --vlm-api-key, …). Full args are
-    // available in the package's log file; the boot line stays terse
-    // so users can scan the bring-up sequence at a glance.
+    // available in the log file; the boot line stays terse so users
+    // can scan the bring-up sequence at a glance.
     let detail = system_boot_detail(name, args);
     output::boot_ok(name, &detail);
     Ok(Spawned {
@@ -392,13 +432,11 @@ async fn spawn_package(
     std::fs::write(&cfg_file, &cfg_pretty)
         .with_context(|| format!("failed to write {}", cfg_file.display()))?;
 
-    let log = std::fs::File::create(log_path(log_dir, &log_name))
-        .with_context(|| format!("failed to open log for {log_name}"))?;
-    let err = log.try_clone()?;
-
     // Spawn `rbnx start -p <pkg>` via the currently-running rbnx binary
     // itself — i.e. argv[0] of the deploy process. This way deploy doesn't
     // need a cargo workspace on disk and version-skew is impossible.
+    // Stdout / stderr are piped through Scribe (tag = log_name, e.g.
+    // "service_mapping") so boot-time display stays clean.
     let rbnx_bin = std::env::current_exe()
         .context("could not resolve current rbnx binary path for `start` re-exec")?;
     // Per v0.1 layering: do NOT pass the config file path to the
@@ -415,11 +453,18 @@ async fn spawn_package(
         .arg(pkg_path.as_os_str())
         .env("RBNX_INSTANCE_NAME", &name)
         .env("RBNX_INVOCATION_CWD", manifest_dir)
+        .env("SCRIBE_LOG_DIR", log_dir)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(err))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .process_group(0);
-    let child = cmd.spawn().with_context(|| {
+    // Per-deployment-target package manifest selector (deploy entry's
+    // `manifest:` field) — `rbnx start` loads this file instead of the
+    // default package_manifest.yaml so the right start path runs.
+    if let Some(m) = entry.manifest.as_deref() {
+        cmd.arg("--manifest").arg(m);
+    }
+    let mut child = cmd.spawn().with_context(|| {
         format!(
             "failed to spawn package {name} via `{} start`",
             rbnx_bin.display()
@@ -428,6 +473,30 @@ async fn spawn_package(
     let pid = child
         .id()
         .ok_or_else(|| anyhow::anyhow!("spawned package '{name}' but it had no pid"))?;
+
+    // Pipe stdout / stderr into Scribe — tag = log_name so the file
+    // matches the old naming convention (e.g. "service_mapping.log").
+    let stdout = child.stdout.take().expect("stdout not piped");
+    let stderr = child.stderr.take().expect("stderr not piped");
+    let tag_out = log_name.clone();
+    let tag_err = log_name.clone();
+    tokio::spawn(async move {
+        let reader = tokio::io::BufReader::new(stdout);
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            scribe::info(&tag_out, &line);
+        }
+    });
+    tokio::spawn(async move {
+        let reader = tokio::io::BufReader::new(stderr);
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            // stderr is not always errors — Python logging defaults to
+            // stderr for INFO too.  Use `info` to avoid misrepresenting
+            // the actual severity.
+            scribe::info(&tag_err, &line);
+        }
+    });
     // No spawn line here — wait until provider registration and emit one
     // boot_ok with the provider_id so each component takes ONE line in the
     // boot log instead of three (spawn + waiting + registered).
@@ -465,6 +534,8 @@ pub async fn execute(
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
     let mut deploy: DeployManifest = serde_yaml::from_str(&raw)
         .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    // Notice (non-fatal) if any cloned remote provider is behind upstream.
+    super::check_remotes::report_outdated(&manifest_path);
     // Env expansion applies to both the top-level env block and all nested
     // scalar strings in system / primitive / service / skill configs.
     for v in deploy.system.values_mut() {
@@ -497,6 +568,16 @@ pub async fn execute(
     }
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
+
+    // SCRIBE_CONSOLE_LEVEL is set in main.rs before any scribe call.
+    // Set SCRIBE_LOG_DIR so boot-time scribe messages (bootstrap,
+    // child-process pipe forwarding) land in the deploy log dir rather
+    // than the default ./logs.
+    // Safety: called before any child spawns, no concurrent access.
+    unsafe {
+        std::env::set_var("SCRIBE_LOG_DIR", log_dir.as_os_str());
+    }
+
     let cache_root = manifest_dir.join("rbnx-boot").join("cache");
     let instances_dir = manifest_dir.join("rbnx-boot").join("instances");
     std::fs::create_dir_all(&instances_dir)
@@ -520,6 +601,18 @@ pub async fn execute(
             &deploy.name
         },
         &manifest_path.display().to_string(),
+    );
+    scribe::info(
+        "bootstrap",
+        &format!(
+            "booting {} from {}",
+            if deploy.name.is_empty() {
+                "robonix"
+            } else {
+                &deploy.name
+            },
+            manifest_path.display()
+        ),
     );
 
     let mut children: Vec<Spawned> = Vec::new();
@@ -712,6 +805,7 @@ pub async fn execute(
                     url: None,
                     branch: None,
                     config: value.clone(),
+                    manifest: None,
                 };
                 match spawn_and_init(
                     "system",
@@ -889,6 +983,7 @@ pub async fn execute(
         children.len(),
         log_dir.display()
     ));
+    scribe::info("bootstrap", "all components up — waiting for signal");
     output::sub_step("Ctrl-C to tear down (or run `rbnx shutdown` from another shell).");
 
     // Wait for SIGINT / SIGTERM, then shut children down.
@@ -899,6 +994,13 @@ pub async fn execute(
         _ = sigterm.recv() => {}
     }
     output::action("Stopping", &format!("{} child(ren)", children.len()));
+    scribe::info(
+        "bootstrap",
+        &format!(
+            "shutdown signal received, tearing down {} children",
+            children.len()
+        ),
+    );
     let providers = component_records(&children);
     teardown::teardown(&providers).await;
     // Best-effort wait so we get clean "exited" lines in our own log.

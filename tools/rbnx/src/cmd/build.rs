@@ -57,11 +57,18 @@ fn build_local(package_root: &Path, manifest: &manifest::Manifest, clean: bool) 
     Ok(())
 }
 
-pub fn build_local_package(path: &Path, clean: bool) -> Result<()> {
+/// Build the package at `path`. `manifest_override` selects a non-default
+/// package manifest file (deploy `manifest:` field) so a per-target variant
+/// builds its own Dockerfile / native path; `None` uses package_manifest.yaml.
+pub fn build_local_package(
+    path: &Path,
+    clean: bool,
+    manifest_override: Option<&str>,
+) -> Result<()> {
     let package_root = path
         .canonicalize()
         .with_context(|| format!("Failed to canonicalize package path {}", path.display()))?;
-    let detected = manifest::detect_and_load(&package_root)?;
+    let detected = manifest::detect_and_load(&package_root, manifest_override)?;
     build_local(&package_root, &detected.manifest, clean)
 }
 
@@ -73,6 +80,6 @@ pub async fn execute_local(path: PathBuf, clean: bool) -> Result<()> {
         "Building",
         &format!("local package at {}", package_root.display()),
     );
-    build_local_package(&package_root, clean)?;
+    build_local_package(&package_root, clean, None)?;
     Ok(())
 }

@@ -1,0 +1,20 @@
+[package]
+name = "robonix-scribe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Robonix Scribe: unified logging facade — one entry point, per-tag file sinks, console + structured output"
+
+[lib]
+name = "robonix_scribe"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3"

@@ -28,6 +28,10 @@ trap cleanup EXIT INT TERM
 docker rm -f "$CT" >/dev/null 2>&1 || true
 
 mkdir -p rbnx-build/data
+# Host-persisted scene state. Mounted at /data/robonix in the container so the
+# object-memory DB — and the scene-graph JSON caches, which otherwise die with
+# the --rm container — survive across boots.
+mkdir -p rbnx-build/data/robonix
 
 declare -a EXTRA_MOUNTS=()
 if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
@@ -65,10 +69,14 @@ exec docker run --rm \
     -e SCENE_GRAPH_MIN_OBSERVATIONS="${SCENE_GRAPH_MIN_OBSERVATIONS:-2}" \
     -e SCENE_GRAPH_MAX_OBJECTS="${SCENE_GRAPH_MAX_OBJECTS:-80}" \
     -e SCENE_GRAPH_MAX_LLM_RELATIONS_PER_CYCLE="${SCENE_GRAPH_MAX_LLM_RELATIONS_PER_CYCLE:-20}" \
+    -e SCENE_OBJECT_MEMORY_ENABLED="${SCENE_OBJECT_MEMORY_ENABLED:-true}" \
+    -e SCENE_OBJECT_MEMORY_DB="${SCENE_OBJECT_MEMORY_DB:-/data/robonix/scene_memory/objects.db}" \
+    -e SCENE_MAP_ID="${SCENE_MAP_ID:-default}" \
     -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
     -e CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
     -v "$(pwd)":/scene \
+    -v "$(pwd)/rbnx-build/data/robonix":/data/robonix \
     -v "$(rbnx path robonix-api)":/robonix-api:ro \
     "${EXTRA_MOUNTS[@]}" \
     "$IMG"

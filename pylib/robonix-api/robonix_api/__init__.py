@@ -56,6 +56,7 @@ from .atlas_types import (
     Ros2Params,
     Transport,
 )
+from . import scribe_logger
 from .capability import Primitive, Service, Skill
 from .result import Deferred, Err, Ok, Result
 from .tool import mcp_contract
@@ -92,6 +93,8 @@ del _bootstrap_codegen_paths_from_caller
 
 
 __all__ = [
+    # Unified logging facade.
+    "scribe_logger",
     # CapabilityProvider classes (three kinds).
     "Primitive", "Service", "Skill",
     # Global atlas singleton (uppercase per Python registry convention,
