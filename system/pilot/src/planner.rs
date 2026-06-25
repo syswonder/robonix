@@ -631,6 +631,18 @@ pub async fn run_turn(
                             {
                                 feed_results_into_history(history, std::slice::from_ref(r));
                             }
+                            // An error escalates to the VLM immediately rather than
+                            // waiting for the whole tree to finish (PlanDone): the
+                            // failure is already in context (a leaf result is fed
+                            // above), so re-plan now and let the model recover or
+                            // abort without blocking on still-running sibling
+                            // branches. Only failures escalate — successes still
+                            // batch at tree completion, which avoids the per-node
+                            // re-plan storms that plain "re-plan on every node"
+                            // caused.
+                            if node_state.state == EXECUTOR_STATE_FAILED {
+                                should_plan = true;
+                            }
                             debug!(
                                 "[pilot/forest] node_state plan_id={} node={} state={}",
                                 plan_id,
@@ -1234,6 +1246,19 @@ fn rtdl_recovery_final_text() -> String {
         .to_string()
 }
 
+/// Process-wide monotonic source of node `op_id`s. The LLM-emitted RTDL does
+/// not carry a usable op_id (it defaults to 0), so pilot assigns one itself
+/// while parsing: a globally-unique, auto-incrementing id starting at 1.
+/// "Global" = across every plan/round in this pilot process, so each node in
+/// the live task-graph forest is uniquely addressable for steering and result
+/// correlation — not merely unique within one plan.
+static OP_ID_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Allocate the next global op_id (1, 2, 3, …) as a decimal string.
+fn next_op_id() -> String {
+    (OP_ID_SEQ.fetch_add(1, Ordering::Relaxed) + 1).to_string()
+}
+
 fn expand_rtdl_to_plan(
     rtdl: &serde_json::Value,
     target_map: &CapabilityTargetMap,
@@ -1315,7 +1340,7 @@ fn expand_rtdl_node(
                 node_kind,
                 children: Vec::new(),
                 call: None,
-                op_id: format!("op_{node_index}"),
+                op_id: next_op_id(),
                 description,
             });
             let mut child_indices = Vec::with_capacity(children.len());
@@ -1363,7 +1388,7 @@ fn expand_rtdl_node(
                     contract_id,
                     args_json: serde_json::to_string(args)?,
                 }),
-                op_id: format!("op_{node_index}"),
+                op_id: next_op_id(),
                 description,
             });
             Ok(node_index)
