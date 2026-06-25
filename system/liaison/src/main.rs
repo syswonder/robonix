@@ -39,6 +39,7 @@ use pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
 use pb::pilot::{CapabilityCall, PilotEvent, Plan, Task};
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
+use robonix_scribe::{debug, info, warn};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -253,7 +254,7 @@ async fn drain_session_end(pipeline: &LiaisonPipeline, session_id: &str) {
             let mut stream = ReceiverStream::new(rx);
             while stream.next().await.is_some() {}
         }
-        Err(e) => log::debug!("[liaison/text] session_end: {e:#}"),
+        Err(e) => debug!("[liaison/text] session_end: {e:#}"),
     }
 }
 
@@ -389,12 +390,9 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let log_filter = args
-        .log
-        .clone()
-        .or_else(|| std::env::var("RUST_LOG").ok())
-        .unwrap_or_else(|| "robonix_liaison=info".to_string());
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_filter)).init();
+    let _ = args.log.clone().or_else(|| std::env::var("RUST_LOG").ok());
+    robonix_scribe::init("liaison");
+    info!("robonix-liaison starting");
 
     let atlas_endpoint = args.atlas.clone().unwrap_or_else(|| {
         env_first(
@@ -440,7 +438,7 @@ async fn main() -> Result<()> {
     let listen_port = listen_addr.port();
     let advertised = format!("127.0.0.1:{listen_port}");
 
-    log::info!("connecting to atlas at {atlas_http}");
+    info!("connecting to atlas at {atlas_http}");
     let mut atlas = AtlasClient::connect_with_retry(&atlas_http, 10, Duration::from_secs(2))
         .await
         .context("connect to atlas")?;
@@ -489,10 +487,10 @@ async fn main() -> Result<()> {
         )
         .await
     {
-        log::warn!("SetLifecycleState(ACTIVE) on {LIAISON_PROVIDER_ID} failed: {e:#}");
+        warn!("SetLifecycleState(ACTIVE) on {LIAISON_PROVIDER_ID} failed: {e:#}");
     }
-    log::info!("registered as '{LIAISON_PROVIDER_ID}', SystemLiaison gRPC on :{listen_port}");
-    eprintln!("robonix-liaison ready on :{listen_port}  (pilot_default={pilot_http})");
+    info!("registered as '{LIAISON_PROVIDER_ID}', SystemLiaison gRPC on :{listen_port}");
+    info!("robonix-liaison ready on :{listen_port}  (pilot_default={pilot_http})");
 
     {
         let mut hb = atlas.clone();
@@ -502,7 +500,7 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 if let Err(e) = hb.heartbeat(LIAISON_PROVIDER_ID).await {
-                    log::warn!("heartbeat failed: {e:#}");
+                    warn!("heartbeat failed: {e:#}");
                 }
             }
         });
@@ -513,7 +511,7 @@ async fn main() -> Result<()> {
 
     let source = std::env::var("ROBONIX_LIAISON_SOURCE").unwrap_or_default();
     let text_handle: Option<tokio::task::JoinHandle<Result<()>>> = if source == "text" {
-        log::info!("activating stdin text loop (headless mode)");
+        info!("activating stdin text loop (headless mode)");
         Some(tokio::spawn(run_text_loop(Arc::clone(&pipeline))))
     } else {
         None

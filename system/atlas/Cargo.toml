@@ -11,8 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-log.workspace = true
-env_logger.workspace = true
+robonix-scribe.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

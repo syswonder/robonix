@@ -51,6 +51,7 @@ use crate::pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
 use crate::pb::pilot::{PilotEvent, Task};
 use crate::pb::tts;
 use crate::pb::voiceprint;
+use robonix_scribe::warn;
 
 // ── Stable VoiceEvent kinds (mirror lib/system/liaison/msg/VoiceEvent.msg) ───
 
@@ -128,7 +129,7 @@ async fn resolve_endpoint(
         {
             Some(provider) => Some(provider),
             None => {
-                log::warn!(
+                warn!(
                     "[voice] pinned provider '{pin_provider_id}' for {contract_id} not in atlas; \
                      falling back to auto-pick. Available providers: {:?}",
                     providers.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()

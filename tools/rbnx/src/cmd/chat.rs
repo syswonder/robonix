@@ -28,6 +28,7 @@ use ratatui::{
 };
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
+use robonix_scribe::{info, warn};
 use std::cell::RefCell;
 use std::io;
 use std::rc::Rc;
@@ -114,7 +115,7 @@ pub async fn execute(server: &str) -> Result<()> {
     };
 
     let liaison_endpoint = if let Ok(ep) = std::env::var("ROBONIX_LIAISON_ENDPOINT") {
-        log::info!("using ROBONIX_LIAISON_ENDPOINT={ep}");
+        info!("using ROBONIX_LIAISON_ENDPOINT={ep}");
         if ep.starts_with("http") {
             ep
         } else {
@@ -122,7 +123,7 @@ pub async fn execute(server: &str) -> Result<()> {
         }
     } else {
         discover_liaison(&atlas_endpoint).await.unwrap_or_else(|e| {
-            log::warn!(
+            warn!(
                 "liaison discovery timed out ({e:#}), falling back to {DEFAULT_LIAISON_FALLBACK}"
             );
             DEFAULT_LIAISON_FALLBACK.to_string()
@@ -361,7 +362,7 @@ async fn pick_audio_settings(
         }
     }
     if let Err(e) = save_chat_config(&cfg) {
-        log::warn!("could not save chat config: {e:#}");
+        warn!("could not save chat config: {e:#}");
     }
     Ok((cfg, warnings))
 }
@@ -439,7 +440,7 @@ async fn try_pick(
     if !device_id.is_empty()
         && let Err(e) = call_select_device(atlas, &provider_id, kind, &device_id).await
     {
-        log::warn!("SelectAudioDevice on {provider_id} ({kind}={device_id}) failed: {e:#}");
+        warn!("SelectAudioDevice on {provider_id} ({kind}={device_id}) failed: {e:#}");
     }
 
     Ok(Some((provider_id, device_id)))
@@ -1241,7 +1242,7 @@ async fn run_audio_settings_page(
         speaker_device_id: (!page.speaker_device_id.is_empty()).then_some(page.speaker_device_id),
     };
     if let Err(e) = save_chat_config(&new_cfg) {
-        log::warn!("could not save chat config: {e:#}");
+        warn!("could not save chat config: {e:#}");
     }
     Ok(new_cfg)
 }

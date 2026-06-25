@@ -23,6 +23,7 @@ mod init;
 mod inspect;
 mod install;
 mod list;
+mod logs;
 mod package_new;
 mod path;
 mod run_package;
@@ -350,6 +351,26 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Read Scribe JSON-lines log files and render them with optional
+    /// tag / level filtering.  Point at a log directory or read the
+    /// default `<manifest-dir>/rbnx-boot/logs`.
+    Logs {
+        /// Log directory (default: `./rbnx-boot/logs` or `$SCRIBE_LOG_DIR`).
+        #[arg(short = 'd', long)]
+        log_dir: Option<PathBuf>,
+        /// Filter to one or more tags (OR semantics).
+        #[arg(short = 't', long)]
+        tag: Vec<String>,
+        /// Minimum level to show (debug < info < warn < error).
+        #[arg(short = 'l', long)]
+        level: Option<String>,
+        /// Follow mode — keep reading new lines as they arrive (tail -f).
+        #[arg(short = 'f', long)]
+        follow: bool,
+        /// Output raw JSON lines instead of logcat-style rendering.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub async fn execute(command: Commands, config: Config) -> Result<()> {
@@ -437,5 +458,12 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             server,
             json,
         } => ask::execute(&server, &prompt, json).await,
+        Commands::Logs {
+            log_dir,
+            tag,
+            level,
+            follow,
+            json,
+        } => logs::execute(log_dir, tag, level, follow, json).await,
     }
 }

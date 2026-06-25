@@ -6,14 +6,13 @@
 // gRPC after `ConnectCapability` returns endpoint + GrpcParams.
 
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
+use robonix_scribe::warn;
 
 #[allow(dead_code)]
 pub async fn execute(call: &CapabilityCall, endpoint: &str) -> CapabilityCallResult {
-    log::warn!(
+    warn!(
         "[grpc] provider='{}' contract='{}' (endpoint='{}') — gRPC dispatch not yet implemented",
-        call.provider_id,
-        call.contract_id,
-        endpoint
+        call.provider_id, call.contract_id, endpoint
     );
     CapabilityCallResult {
         call_id: call.call_id.clone(),
