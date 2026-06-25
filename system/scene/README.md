@@ -64,6 +64,9 @@ cd robonix/rust && make install      # rbnx + atlas + pilot + executor + codegen
 # Build the scene image once. Pulls torch+cu124 wheels and the
 # concept-graphs source; pre-fetches YOLO-World + MobileSAM .pt to
 # docker/_weights/ so the docker layer stays cache-friendly.
+#
+# Pick the ROS distro BEFORE this first build (default humble) — see
+# "ROS distro" below. e.g.  ROBONIX_SCENE_ROS_DISTRO=jazzy bash scripts/build.sh
 cd ../system/scene && bash scripts/build.sh
 
 # T1 — sim. Bring up Webots + chassis driver + camera + lidar in
@@ -118,6 +121,34 @@ If your camera frame isn't `head_front_camera_rgb_optical_frame`, override via e
 ```bash
 SCENE_CAMERA_FRAME=my_camera_optical bash scripts/start.sh
 ```
+
+## ROS distro
+
+Scene is the **only** Robonix component that consumes ROS topics to get its
+data, and it does **not** hard-pin a ROS 2 release. The distro is a
+build-time choice; the image base, the `ros-<distro>-*` apt packages, and the
+runtime `source /opt/ros/<distro>/setup.bash` all follow one variable.
+
+Supported (these have the `tf2` + `zenoh-bridge-dds` packages scene needs):
+**humble** (default, verified), **iron**, **jazzy**, **rolling**.
+
+Pick it with the **`ROBONIX_SCENE_ROS_DISTRO` environment variable**, set
+**before the first `rbnx build` / `scripts/build.sh`** — switching distro
+means rebuilding the image. `rbnx build` inherits your shell environment, so
+the variable reaches `build.sh` either way:
+
+```bash
+# via rbnx (the variable propagates through to scene's build.sh):
+ROBONIX_SCENE_ROS_DISTRO=jazzy rbnx build -p system/scene
+
+# or building the package directly:
+ROBONIX_SCENE_ROS_DISTRO=jazzy bash system/scene/scripts/build.sh
+```
+
+The chosen distro is echoed at build time (`[build] ROS distro: …`). At
+runtime the container sources that distro's `setup.bash`; nothing else in
+scene references a distro. Default builds (variable unset) are unchanged —
+plain `humble`.
 
 ## Configuration knobs (env vars)
 

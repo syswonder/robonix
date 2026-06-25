@@ -17,12 +17,16 @@
 # All three are siblings in the same shell; we trap on EXIT so that
 # Ctrl-C / SIGTERM tears the lot down together.
 
-# `set -u` is incompatible with /opt/ros/humble/setup.bash (it
-# references unset AMENT_TRACE_SETUP_FILES). Stick with -eo pipefail.
+# `set -u` is incompatible with ROS's setup.bash (it references unset
+# AMENT_TRACE_SETUP_FILES). Stick with -eo pipefail.
 set -eo pipefail
 
+# Source whichever ROS distro this image was built against. The ros base
+# image exports ROS_DISTRO; fall back to humble for safety. This is the
+# only ROS coupling in scene, and it follows the build-time ROS_DISTRO
+# arg — Robonix does not bind to a single ROS release.
 # shellcheck disable=SC1091
-source /opt/ros/humble/setup.bash
+source "/opt/ros/${ROS_DISTRO:-humble}/setup.bash"
 
 cd /scene
 
