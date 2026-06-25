@@ -1,0 +1,48 @@
+# Path -> component label config for actions/labeler@v5.
+# Applied to PRs by .github/workflows/pr-triage.yml.
+
+"comp:atlas":
+  - changed-files: [{ any-glob-to-any-file: "system/atlas/**" }]
+"comp:executor":
+  - changed-files: [{ any-glob-to-any-file: "system/executor/**" }]
+"comp:pilot":
+  - changed-files: [{ any-glob-to-any-file: "system/pilot/**" }]
+"comp:liaison":
+  - changed-files: [{ any-glob-to-any-file: "system/liaison/**" }]
+"comp:scene":
+  - changed-files: [{ any-glob-to-any-file: "system/scene/**" }]
+"comp:soma":
+  - changed-files: [{ any-glob-to-any-file: "system/soma/**" }]
+"comp:sentinel":
+  - changed-files: [{ any-glob-to-any-file: "system/sentinel/**" }]
+"comp:scribe":
+  - changed-files: [{ any-glob-to-any-file: "system/scribe/**" }]
+"comp:vitals":
+  - changed-files: [{ any-glob-to-any-file: "system/vitals/**" }]
+"comp:keystone":
+  - changed-files: [{ any-glob-to-any-file: "system/keystone/**" }]
+"comp:nexus":
+  - changed-files: [{ any-glob-to-any-file: "system/nexus/**" }]
+"comp:chronos":
+  - changed-files: [{ any-glob-to-any-file: "system/chronos/**" }]
+
+"comp:memory":
+  - changed-files: [{ any-glob-to-any-file: "services/memsearch/**" }]
+"comp:speech":
+  - changed-files: [{ any-glob-to-any-file: "services/speech/**" }]
+"comp:voiceprint":
+  - changed-files: [{ any-glob-to-any-file: "services/voiceprint/**" }]
+
+"comp:rbnx":
+  - changed-files: [{ any-glob-to-any-file: "tools/rbnx/**" }]
+"comp:codegen":
+  - changed-files: [{ any-glob-to-any-file: "tools/codegen/**" }]
+"comp:api":
+  - changed-files: [{ any-glob-to-any-file: "pylib/robonix-api/**" }]
+
+"comp:capabilities":
+  - changed-files: [{ any-glob-to-any-file: "capabilities/**" }]
+"comp:docs":
+  - changed-files: [{ any-glob-to-any-file: ["docs/**", "**/*.md"] }]
+"comp:ci":
+  - changed-files: [{ any-glob-to-any-file: ".github/**" }]

@@ -36,20 +36,20 @@ skills, and the planner discover and talk to each other; it owns identity,
 configuration, time, transport, logging, health, body model, scene model,
 execution, and safety as named, replaceable components.
 
-| Component                        | Responsibility                                                                          | Status (v0.1)        |
-| -------------------------------- | --------------------------------------------------------------------------------------- | -------------------- |
-| **[atlas](system/atlas/)**       | Capability discovery: the catalog of every registered capability and its contract       | Implemented          |
-| **[chronos](system/chronos/)**   | Unified time source with PTP / IEEE-1588 alignment across sensors and hosts             | Stub                 |
-| **[executor](system/executor/)** | Plan execution: validates Pilot plans and dispatches each step to capability providers  | Implemented          |
-| **[keystone](system/keystone/)** | Body identity, persistent configuration, and policy                                     | Stub                 |
-| **[liaison](system/liaison/)**   | Human–machine interaction gateway: chat, voice, and TUI                                 | Implemented          |
-| **[nexus](system/nexus/)**       | Transport libraries for gRPC / MCP / ROS 2 (a library, not a process)                   | Implemented          |
-| **[pilot](system/pilot/)**       | VLM-driven planning and decision making, memory, and world model                        | Implemented          |
-| **[scene](system/scene/)**       | Live environment estimate: object registry, semantic relations, and occupancy grid     | Implemented          |
-| **[scribe](system/scribe/)**     | Structured, persistent, replayable system journal for audit                             | Stub                 |
-| **[sentinel](system/sentinel/)** | Safety supervision over capability calls                                                | Merged into executor |
-| **[soma](system/soma/)**         | Body model: device topology and primitive abstraction                                   | Stub                 |
-| **[vitals](system/vitals/)**     | Liveness and health aggregation across all running components                           | Partial (via atlas)  |
+| Component                        | Responsibility                                                                          |
+| -------------------------------- | --------------------------------------------------------------------------------------- |
+| **[atlas](system/atlas/)**       | Capability registry and discovery: the catalog of every registered capability and its contract |
+| **[chronos](system/chronos/)**   | Unified clock and cross-sensor timestamp alignment (PTP / IEEE-1588)                     |
+| **[executor](system/executor/)** | RTDL plan execution and capability dispatch (`sequence` / `parallel` / `do`)             |
+| **[keystone](system/keystone/)** | User identity, persistent configuration, and access policy                              |
+| **[liaison](system/liaison/)**   | Human–machine interaction gateway: chat, voice, and TUI                                 |
+| **[nexus](system/nexus/)**       | Communication libraries for gRPC / MCP / ROS 2 (not a standalone process)               |
+| **[pilot](system/pilot/)**       | VLM-driven planning and decision loop; emits RTDL plans for the executor                 |
+| **[scene](system/scene/)**       | Live environment estimate: object registry, semantic relations, and occupancy grid     |
+| **[scribe](system/scribe/)**     | Structured, persistent, replayable system journal for audit                             |
+| **[sentinel](system/sentinel/)** | Rule-based safety gate checked before each capability dispatch                          |
+| **[soma](system/soma/)**         | Robot self-description (body model): device topology and primitive abstraction          |
+| **[vitals](system/vitals/)**     | Robot power and component-health monitoring                                             |
 
 On top of system, three open categories — provided as
 contracts (61 standard interfaces in `capabilities/`) and reference
@@ -119,6 +119,17 @@ Once `rbnx boot` reports the stack is up:
 # (3)
 rbnx caps          # list registered capabilities + interfaces
 rbnx chat          # interactive TUI chat with the pilot
+```
+
+Keeping upstream packages fresh: some providers in the manifest are cloned
+from upstream git repos (e.g. `mapping`, `nav2`, `explore` declared with
+`url:`). They are cloned once and reused, so they don't advance on their own.
+`rbnx boot` and `rbnx build` print a notice when a local clone is behind its
+remote; sync to the latest upstream commit with `rbnx update`:
+
+```bash
+rbnx update                  # update every remote provider in this deploy (asks y/N)
+rbnx update -p <package dir>  # or just one package
 ```
 
 Tear-down:

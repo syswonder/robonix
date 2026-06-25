@@ -106,7 +106,7 @@ impl PackageDatabase {
                     continue;
                 }
 
-                let manifest_path = match crate::manifest::detect_manifest_path(&path) {
+                let manifest_path = match crate::manifest::detect_manifest_path(&path, None) {
                     Ok(p) => p,
                     Err(_) => continue,
                 };

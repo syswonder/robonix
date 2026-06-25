@@ -117,7 +117,16 @@ class _Atlas:
             ep = self._endpoint or os.environ.get("ROBONIX_ATLAS", "127.0.0.1:50051")
             self._endpoint = ep
             self._pb = atlas_pb2
-            channel = grpc.insecure_channel(ep)
+            # Disable HTTP-proxy routing for the atlas channel. atlas is always
+            # local (127.0.0.1:50051); when the host shell exports
+            # http_proxy / https_proxy (e.g. a local proxy on :7892), gRPC would
+            # otherwise tunnel this connection through that proxy and fail at
+            # runtime ("Socket closed"), which silently breaks registration for
+            # every host-native package. Docker packages have a clean env and
+            # are unaffected; this makes host packages match.
+            channel = grpc.insecure_channel(
+                ep, options=[("grpc.enable_http_proxy", 0)]
+            )
             stub = atlas_pb2_grpc.AtlasStub(channel)
             self._channel = channel
             self._stub = stub
