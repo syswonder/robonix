@@ -1,43 +1,64 @@
 ---
 name: Bug Report
-about: Report a bug in the Robonix
+about: Report a bug in Robonix
 title: '[BUG] '
-labels: 'bug'
+labels: 'type:bug'
 assignees: ''
 
 ---
 
-## Bug Description
-Brief description of the issue.
+## Bug description
+A clear, one-paragraph description of what's wrong.
 
-## Component
+## Affected component
+Tick the closest match — maintainers confirm the final `comp:*` label.
 
-- [ ] **Managers** (Task, Maps, AI Model services)
-- [ ] **UI System**
-- [ ] **RIDL Executor**
-- [ ] **Skill Library**
-- [ ] **Primitive HAL** (Camera, Base, Arm, …)
-- [ ] **Libraries / ROS2** (stack, bindings)
+**System** (core OS services)
+- [ ] atlas (capability registry)
+- [ ] executor
+- [ ] pilot (planner / VLM)
+- [ ] liaison (voice / user I/O)
+- [ ] scene (semantic + spatial map)
+- [ ] sentinel (safety) / soma (body model) / scribe (logging) / chronos / keystone / vitals / nexus
+
+**Service** (scene-level capabilities)
+- [ ] mapping (`service/map`)
+- [ ] navigation
+- [ ] speech (ASR / TTS)
+- [ ] voiceprint
+- [ ] memory
+
+**Skill / Primitive**
+- [ ] skill: `__________` (e.g. explore)
+- [ ] primitive: `__________` (camera / chassis / lidar / audio / arm)
+
+**Tooling / cross-cutting**
+- [ ] rbnx (CLI) / codegen / robonix-api (pylib) / capabilities & contracts / docs / ci
 - [ ] Other / not sure
 
-## Steps to Reproduce
+## Steps to reproduce
 1. 
 2. 
 3. 
 
-## Expected Behavior
+## Expected behavior
 What should happen instead.
 
+## Actual behavior
+What actually happens. Include `rbnx caps` output if a provider is in ERROR.
+
 ## Environment
-- OS: [e.g. Ubuntu 22.04]
-- ROS2 Version: [e.g. Humble]
-- Rust Version: [e.g. 1.75]
-- Hardware: [e.g. robot base, camera, simulator]
+- OS / kernel: [e.g. Ubuntu 22.04, Linux 6.8 Jetson Thor]
+- rbnx version: [`rbnx --version`]
+- ROS 2 distro: [e.g. Humble] — only if a ROS-backed component is involved
+- Deployment: [ ] webots sim  [ ] real robot — manifest: [e.g. `examples/webots/robonix_manifest.yaml`]
+- Terminal (for `rbnx chat` / TUI issues): [e.g. VSCode integrated / gnome-terminal / TTY]
+- Hardware: [robot base, camera, mic, …]
 
-## Error Logs
+## Logs
 ```
-Paste relevant error messages here
+# relevant lines from rbnx-boot/logs/<component>.log, or `docker logs <container>`
 ```
 
-## Additional Context
-Any other relevant information.
+## Additional context
+Anything else — screenshots, related issues / PRs, suspected cause.
