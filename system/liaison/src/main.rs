@@ -65,6 +65,8 @@ const EVT_TASK_GRAPH: u32 = 1;
 const EVT_BATCH_RESULT: u32 = 2;
 const EVT_STATUS: u32 = 3;
 const EVT_FINAL_TEXT: u32 = 4;
+// RtdlNodeState.state == SUCCEEDED (see lib/pilot/msg/RtdlNodeState.msg).
+const NODE_STATE_SUCCEEDED: u32 = 2;
 
 // ── LiaisonPipeline ─────────────────────────────────────────────────────────
 //
@@ -339,7 +341,11 @@ async fn run_text_loop(pipeline: Arc<LiaisonPipeline>) -> Result<()> {
                         }
                         EVT_BATCH_RESULT => {
                             if let Some(ref r) = ev.batch_result {
-                                let ok = r.results.iter().filter(|x| x.success).count();
+                                let ok = r
+                                    .results
+                                    .iter()
+                                    .filter(|x| x.state == NODE_STATE_SUCCEEDED)
+                                    .count();
                                 println!(
                                     "[round {}] results: {ok} ok, {} failed",
                                     r.round,

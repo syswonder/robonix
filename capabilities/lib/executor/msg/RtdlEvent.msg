@@ -3,5 +3,5 @@ uint32 PLAN_STARTED=0
 uint32 NODE_STATE=1
 uint32 PLAN_COMPLETE=2
 RtdlPlanStarted plan_started
-RtdlNodeState node_state
+pilot/RtdlNodeState node_state
 RtdlPlanComplete plan_complete

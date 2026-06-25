@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Flat `RtdlEvent` (`lib/executor/msg/RtdlEvent.msg`).
 
-use crate::pb::executor::{RtdlEvent, RtdlNodeState, RtdlPlanComplete, RtdlPlanStarted};
-use crate::pb::pilot::CapabilityCallResult;
+use crate::pb::executor::{RtdlEvent, RtdlPlanComplete, RtdlPlanStarted};
+use crate::pb::pilot::{CapabilityCallResult, RtdlNodeState};
 
 pub const EVT_PLAN_STARTED: u32 = 0;
 pub const EVT_NODE_STATE: u32 = 1;

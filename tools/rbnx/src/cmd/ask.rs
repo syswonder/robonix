@@ -32,6 +32,8 @@ const EVT_STATUS: u32 = 3;
 const EVT_FINAL_TEXT: u32 = 4;
 
 const STATE_FAILED: u32 = 2;
+// RtdlNodeState.state == SUCCEEDED (see lib/pilot/msg/RtdlNodeState.msg).
+const NODE_STATE_SUCCEEDED: u32 = 2;
 const CONSUMER_ID: &str = "rbnx-cli/ask";
 
 pub async fn execute(server: &str, prompt: &str, json: bool) -> Result<()> {
@@ -91,12 +93,22 @@ pub async fn execute(server: &str, prompt: &str, json: bool) -> Result<()> {
                 "batch_result": event.batch_result.as_ref().map(|b| serde_json::json!({
                     "round": b.round,
                     "any_failed": b.any_failed,
+                    // One full per-node record (leaf and non-leaf); leaf nodes
+                    // carry the capability call result, operator nodes the detail.
                     "results": b.results.iter().map(|r| serde_json::json!({
-                        "call_id": r.call_id,
-                        "contract_id": r.contract_id,
-                        "success": r.success,
-                        "output": r.output,
-                        "error": r.error,
+                        "node_index": r.node_index,
+                        "node_kind": r.node_kind,
+                        "state": r.state,
+                        "op_id": r.op_id,
+                        "description": r.description,
+                        "operator_detail": r.operator_detail,
+                        "leaf_result": r.leaf_result.as_ref().map(|lr| serde_json::json!({
+                            "call_id": lr.call_id,
+                            "contract_id": lr.contract_id,
+                            "success": lr.success,
+                            "output": lr.output,
+                            "error": lr.error,
+                        })),
                     })).collect::<Vec<_>>(),
                 })),
                 "status": event.status.as_ref().map(|s| serde_json::json!({
@@ -151,15 +163,29 @@ pub async fn execute(server: &str, prompt: &str, json: bool) -> Result<()> {
                         last_was_chunk = false;
                     }
                     for r in &batch.results {
-                        let leaf = r
-                            .contract_id
-                            .rsplit_once('/')
-                            .map(|(_, l)| l.to_string())
-                            .unwrap_or_else(|| r.contract_id.clone());
-                        let summary =
-                            compact_one_line(if r.success { &r.output } else { &r.error }, 200);
-                        let mark = if r.success { "✓" } else { "✗" };
-                        writeln!(out, "  [{mark} {leaf}] {summary}")?;
+                        let success = r.state == NODE_STATE_SUCCEEDED;
+                        // Leaf nodes carry a capability call result; non-leaf
+                        // (sequence/parallel) nodes carry an operator detail.
+                        let (label, body) = match r.leaf_result.as_ref() {
+                            Some(lr) => (
+                                lr.contract_id
+                                    .rsplit_once('/')
+                                    .map(|(_, l)| l.to_string())
+                                    .unwrap_or_else(|| lr.contract_id.clone()),
+                                if lr.success {
+                                    lr.output.clone()
+                                } else {
+                                    lr.error.clone()
+                                },
+                            ),
+                            None if !r.description.is_empty() => {
+                                (r.description.clone(), r.operator_detail.clone())
+                            }
+                            None => (format!("node{}", r.node_index), r.operator_detail.clone()),
+                        };
+                        let summary = compact_one_line(&body, 200);
+                        let mark = if success { "✓" } else { "✗" };
+                        writeln!(out, "  [{mark} {label}] {summary}")?;
                     }
                     out.flush()?;
                 }
