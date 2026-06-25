@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # SPDX-License-Identifier: MulanPSL-2.0
-# system/scene container — ROS Humble base + scene's Python deps.
+# system/scene container — ROS 2 base + scene's Python deps.
 #
 # Why scene gets its own image (and isn't, say, exec'd into the
 # webots sim container): scene is a system service that should be
@@ -10,8 +10,17 @@
 # bus, which `--network host` gives us regardless of where the sim
 # is running.
 #
+# ROS distro is NOT hard-pinned: Robonix does not bind to a single ROS
+# release. Pick it with the `ROS_DISTRO` build arg (default `humble`); the
+# base image, the `ros-<distro>-*` apt packages, and the runtime
+# `source /opt/ros/<distro>/setup.bash` all follow it. Supported distros
+# (have the tf2 + zenoh-bridge packages scene needs): humble (default,
+# verified), iron, jazzy, rolling. Set it with
+# `ROBONIX_SCENE_ROS_DISTRO=iron rbnx build -p system/scene` (build.sh wires
+# the env var to this build arg) — see the scene README "ROS distro" section.
+#
 # Layout inside the image:
-#   /opt/ros/humble/...       ROS Humble (from base)
+#   /opt/ros/$ROS_DISTRO/...  ROS 2 (from base; $ROS_DISTRO set by the base)
 #   /scene                    package dir, bind-mounted at runtime
 #                             (so live edits don't need image rebuild)
 #   /entrypoint.sh            sources ros + execs scene_service.service
@@ -20,7 +29,11 @@
 # the first time, then reused. Rebuild only when this Dockerfile or
 # requirements/ change.
 
-FROM ros:humble-ros-base
+# Selects the base image AND (via the base's own ENV ROS_DISTRO) the apt
+# package names + the runtime setup.bash path. Override: --build-arg
+# ROS_DISTRO=iron (build.sh wires this from ROBONIX_SCENE_ROS_DISTRO).
+ARG ROS_DISTRO=humble
+FROM ros:${ROS_DISTRO}-ros-base
 
 # ── Build-time proxy helpers ──────────────────────────────────────
 # Usage:
@@ -87,10 +100,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
             python3-pip \
             python3-cv-bridge \
             python3-numpy \
-            ros-humble-tf2-ros \
-            ros-humble-tf-transformations \
-            ros-humble-rmw-zenoh-cpp \
-            ros-humble-zenoh-bridge-dds && \
+            ros-$ROS_DISTRO-tf2-ros \
+            ros-$ROS_DISTRO-tf-transformations \
+            ros-$ROS_DISTRO-rmw-zenoh-cpp \
+            ros-$ROS_DISTRO-zenoh-bridge-dds && \
         rm -rf /var/lib/apt/lists/* \
     '
 

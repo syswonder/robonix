@@ -108,6 +108,13 @@ bash examples/webots/sim/start.sh
 export VLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
 export VLM_API_KEY=sk-...
 export VLM_MODEL=gpt-5.5
+
+# scene is the only component that consumes ROS topics, and its ROS distro
+# is a build-time choice (default humble). To build it against another
+# distro, set this BEFORE the first `rbnx build` — supported: humble, iron,
+# jazzy, rolling. (Leave unset for the default.)
+# export ROBONIX_SCENE_ROS_DISTRO=jazzy
+
 cd examples/webots
 rbnx build       # first run pulls model weights + docker images, may take a while
 rbnx boot

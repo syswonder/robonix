@@ -40,6 +40,16 @@ BUILD="rbnx-build"
 CLEAN="${RBNX_BUILD_CLEAN:-}"
 IMG="${ROBONIX_SCENE_IMAGE:-robonix-scene}"
 
+# ROS distro the scene image is built against. Robonix does not bind to a
+# single ROS release: pick it here and the Dockerfile threads it through
+# the base image, the ros-<distro>-* apt packages, and the runtime
+# setup.bash. Supported: humble (default, verified), iron, jazzy, rolling.
+# Set it before the first build, e.g.
+#   ROBONIX_SCENE_ROS_DISTRO=iron rbnx build -p system/scene
+# (`rbnx build` inherits the shell environment, so the variable reaches this
+# script unchanged).
+ROS_DISTRO_BUILD="${ROBONIX_SCENE_ROS_DISTRO:-humble}"
+
 if [[ "$CLEAN" == "1" ]]; then
     echo "[build] clean: removing $BUILD"
     rm -rf "$BUILD"
@@ -133,8 +143,9 @@ if ! command -v docker >/dev/null 2>&1; then
     exit 1
 fi
 
-DOCKER_BUILD_FLAGS=(--network=host)
+DOCKER_BUILD_FLAGS=(--network=host --build-arg "ROS_DISTRO=${ROS_DISTRO_BUILD}")
 [[ "$CLEAN" == "1" ]] && DOCKER_BUILD_FLAGS+=(--no-cache)
+echo "[build] ROS distro: ${ROS_DISTRO_BUILD} (set ROBONIX_SCENE_ROS_DISTRO to change)"
 
 # Proxy → docker build-args.
 #
