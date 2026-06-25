@@ -263,9 +263,11 @@ static LOG_DIR: LazyLock<std::path::PathBuf> = LazyLock::new(|| {
         .unwrap_or_else(|_| std::path::PathBuf::from("./logs"))
 });
 
-/// Global file sink, initialised on first `log()` call.
-static FILE_SINK: LazyLock<FileSink> =
-    LazyLock::new(|| FileSink::new(LOG_DIR.as_path()).expect("failed to create scribe log dir"));
+/// Global file sink; `None` when the log directory can't be created
+/// (read-only filesystem, full disk, etc.).  When `None`, file writes
+/// are silently skipped — the process keeps running console-only.
+static FILE_SINK: LazyLock<Option<FileSink>> =
+    LazyLock::new(|| FileSink::new(LOG_DIR.as_path()).ok());
 
 // ── Level filter thresholds (read from env, lazy) ───────────────────
 
@@ -329,8 +331,8 @@ pub fn log(level: Level, tag: &str, msg: &str) {
     if console_ok {
         let _ = format::write_console(&record);
     }
-    if file_ok {
-        let _ = FILE_SINK.write(&record);
+    if file_ok && let Some(sink) = FILE_SINK.as_ref() {
+        let _ = sink.write(&record);
     }
 }
 
