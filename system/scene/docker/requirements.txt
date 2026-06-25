@@ -1,3 +1,5 @@
+# NOTE: This file is a BACKUP of requirements/ !!!
+
 # Scene-container Python deps. Subset of pyproject.toml's
 # [project.dependencies] minus what the base image already provides
 # (numpy / cv-bridge / rclpy / tf2_ros).
@@ -25,6 +27,12 @@ uvicorn
 httpx
 Pillow
 PyYAML
+# Object persistence (warm restore across restarts). Embedded milvus-lite,
+# its own scene-owned objects.db — same DB tech as system/memory's memsearch
+# but a separate file/process. 2.6.10 is excluded (broken upsert); system/
+# memory pulls pymilvus transitively (via memsearch), without an explicit pin.
+# pymilvus pulls milvus-lite on linux.
+pymilvus!=2.6.10,>=2.5.0
 
 # ── concept-graphs perception stack ──────────────────────────────
 # torch 2.5+/cu124 because cu118 wheels don't run on sm_120 (Blackwell);
@@ -73,7 +81,7 @@ huggingface-hub<1           # transformers/open_clip resolve weights via
 # does not exercise pytorch3d.
 # pytorch3d removed — scene uses voxel-overlap instead (see
 # perception_concept_graphs.py). The miropsota wheel was also pinned
-# to torch 2.5.1 and unreachable behind GFW.
+# to torch 2.5.1 and unreachable from CN.
 # concept-graphs's general_utils → vlm imports openai unconditionally,
 # even though we don't call any VLM helpers from our merge path. Add
 # it as a stub install so the slam module imports cleanly.
