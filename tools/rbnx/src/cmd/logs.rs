@@ -76,6 +76,53 @@ fn read_all(dir: &PathBuf, tags: &[String], min_level: u8, raw_json: bool) -> Re
     Ok(())
 }
 
+/// Scan every `*.log` in `dir` and print the distinct tags found, each with a
+/// record count, sorted by tag. Helps discover which `-t <tag>` values exist.
+/// Ignores the tag / level filters. When no Scribe records parse, says so
+/// (the files may be empty or in a pre-Scribe text format) rather than
+/// printing nothing.
+fn list_tags(dir: &PathBuf) -> Result<()> {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    let mut files = 0u64;
+    let mut parsed = 0u64;
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("log") {
+            continue;
+        }
+        files += 1;
+        let content = std::fs::read_to_string(&p)?;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(rec) = serde_json::from_str::<LogRecord>(line) {
+                parsed += 1;
+                *counts.entry(rec.tag).or_default() += 1;
+            }
+        }
+    }
+    if counts.is_empty() {
+        eprintln!(
+            "rbnx logs: no Scribe records in {} ({files} .log file(s) scanned). \
+             The files may be empty or in a pre-Scribe text format.",
+            dir.display()
+        );
+        return Ok(());
+    }
+    let width = counts.keys().map(String::len).max().unwrap_or(0);
+    for (tag, n) in &counts {
+        println!("{tag:<width$}  {n} records");
+    }
+    eprintln!(
+        "{} tag(s), {parsed} records across {files} file(s)",
+        counts.len()
+    );
+    Ok(())
+}
+
 /// Follow mode: open all `*.log` files, seek to end, and tail new lines.
 fn follow(dir: &PathBuf, tags: &[String], min_level: u8, raw_json: bool) -> Result<()> {
     use std::io::{BufRead, Seek, SeekFrom};
@@ -134,6 +181,7 @@ pub async fn execute(
     level: Option<String>,
     follow_mode: bool,
     raw_json: bool,
+    list_tags_mode: bool,
 ) -> Result<()> {
     let dir = log_dir.unwrap_or_else(|| {
         std::env::var("SCRIBE_LOG_DIR")
@@ -148,6 +196,10 @@ pub async fn execute(
         );
         eprintln!("Set SCRIBE_LOG_DIR or run from a deploy directory.");
         std::process::exit(1);
+    }
+
+    if list_tags_mode {
+        return list_tags(&dir);
     }
 
     let min_level = level.as_deref().map(level_floor).unwrap_or(0);
