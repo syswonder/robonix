@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Poll async MCP capabilities via sibling status contract until terminal state.
 
+use robonix_scribe::warn;
 use std::time::Duration;
 
 use crate::dispatch::{self, async_registry::AsyncGroup};
@@ -98,7 +99,7 @@ pub async fn run_until_terminal(
         {
             Ok(s) => s,
             Err(e) => {
-                log::warn!(
+                warn!(
                     "[executor] status poll failed for {}: {e:#}",
                     call.contract_id
                 );
@@ -173,13 +174,13 @@ pub fn extract_run_id(output: &str) -> String {
 /// Parse status MCP JSON: requires uppercase `state` enum; optional `detail` string.
 pub fn parse_status_json(output: &str) -> (u32, String) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(output) else {
-        log::warn!("[executor] status response is not valid JSON: {output}");
+        warn!("[executor] status response is not valid JSON: {output}");
         return (STATE_RUNNING, output.to_string());
     };
 
     let Some(state_str) = v.get("state").and_then(|s| s.as_str()) else {
         let error = format!("status response missing required 'state' field: {output}");
-        log::warn!("[executor] {error}");
+        warn!("[executor] {error}");
         return (STATE_FAILED, error);
     };
 
@@ -202,7 +203,7 @@ pub fn parse_state_name(s: &str) -> u32 {
         "TIMEOUT" => STATE_TIMEOUT,
         "PAUSED" => rtdl_wire::STATE_PAUSED,
         other => {
-            log::warn!("[executor] unknown status state '{other}', treating as RUNNING");
+            warn!("[executor] unknown status state '{other}', treating as RUNNING");
             STATE_RUNNING
         }
     }

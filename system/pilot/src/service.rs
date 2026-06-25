@@ -207,7 +207,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
             // empty stream; events keep flowing on that turn's original stream.
             let id = task.session_id.clone();
             let ok = existing.send(task).await.is_ok();
-            log::debug!("[pilot] steer task for session {id} (queued={ok})");
+            debug!("[pilot] steer task for session {id} (queued={ok})");
             let (_tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(1);
             return Ok(Response::new(ReceiverStream::new(rx)));
         }

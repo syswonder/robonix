@@ -4,6 +4,7 @@
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
+use robonix_scribe::warn;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -228,7 +229,7 @@ impl PlanRuntime {
         let snapshot = self.begin_cancel_all().await;
         for running in &snapshot.async_calls {
             if let Err(e) = cancel_async_call(self_provider_id, running, atlas).await {
-                log::warn!(
+                warn!(
                     "[executor] cancel_all_plans async cancel failed for {}: {e:#}",
                     running.call_id
                 );
