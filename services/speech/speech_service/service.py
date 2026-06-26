@@ -990,13 +990,13 @@ def speak(req: Speak_Request) -> Speak_Response:
     global _speak_tts
     text = (req.text or "").strip()
     if not text:
-        return Speak_Response(ok=False, detail="empty text")
+        raise RuntimeError("empty text")
 
     caps = ATLAS.find_capability(contract_id=_SPEAKER_CONTRACT, transport=Transport.GRPC)
     if req.target:
         caps = [c for c in caps if c.provider_id == req.target]
     if not caps:
-        return Speak_Response(ok=False, detail=f"no speaker provider (target={req.target!r})")
+        raise RuntimeError(f"no speaker provider (target={req.target!r})")
     cap = caps[0]
 
     if _speak_tts is None:

@@ -27,6 +27,13 @@ pub struct MsgField {
     pub description: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct MsgConstant {
+    pub name: String,
+    pub type_name: String,
+    pub value: i32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MsgTypeRef {
     /// Carries the canonical ROS primitive identifier as a string. Use
@@ -211,6 +218,7 @@ impl RosPrimitive {
 pub struct MsgSpec {
     pub package: String,
     pub name: String,
+    pub constants: Vec<MsgConstant>,
     pub fields: Vec<MsgField>,
 }
 
@@ -573,28 +581,29 @@ pub fn parse_srv_file(package: &str, name: &str, path: &Path) -> Result<SrvSpec>
 }
 
 fn parse_msg_section(package: &str, name: &str, src: &str) -> Result<MsgSpec> {
-    let fields = parse_fields_from_lines(package, src, None)?;
+    let (constants, fields) = parse_msg_members_from_lines(package, src, None)?;
     Ok(MsgSpec {
         package: package.to_string(),
         name: name.to_string(),
+        constants,
         fields,
     })
 }
 
-/// Single field-parsing pass shared between `parse_msg_file` and
+/// Single member-parsing pass shared between `parse_msg_file` and
 /// `parse_msg_section` (for srv request / response bodies). Captures:
 ///
-///   - constants (`int32 FOO = 42`) are skipped (current scope; could
-///     be promoted to first-class `MsgConstant` entries later)
+///   - integer constants (`int32 FOO = 42`) as first-class entries for proto enum generation
 ///   - trailing comments (`float64 x  # in metres`) → `field.description`
 ///   - `string<=N` upper bounds → `field.string_max_len`
 ///
 /// `path_hint` is used purely for error messages.
-fn parse_fields_from_lines(
+fn parse_msg_members_from_lines(
     package: &str,
     src: &str,
     path_hint: Option<&Path>,
-) -> Result<Vec<MsgField>> {
+) -> Result<(Vec<MsgConstant>, Vec<MsgField>)> {
+    let mut constants = Vec::new();
     let mut fields = Vec::new();
     for raw_line in src.lines() {
         // Split off the trailing comment (if any). The comment text
@@ -608,9 +617,15 @@ fn parse_fields_from_lines(
         if code.is_empty() {
             continue;
         }
-        // ROS constants like `int32 FOO=42` use `=`. Skip; constant
-        // promotion to first-class entries is deferred (B2).
-        if code.contains('=') {
+        if let Some(constant) = parse_constant_line(code).with_context(|| match path_hint {
+            Some(p) => format!(
+                "{RIDLC_ERR_PREFIX} invalid constant in '{}' at line '{}'",
+                p.display(),
+                code
+            ),
+            None => format!("{RIDLC_ERR_PREFIX} invalid constant at line '{code}'"),
+        })? {
+            constants.push(constant);
             continue;
         }
         let mut parts = code.split_whitespace();
@@ -641,7 +656,51 @@ fn parse_fields_from_lines(
             description: comment.to_string(),
         });
     }
-    Ok(fields)
+    Ok((constants, fields))
+}
+
+/// Parse ROS integer constants such as `uint32 NODE_STATE=1`.
+///
+/// Non-constant lines return `Ok(None)`. String and floating-point constants
+/// are intentionally ignored because protobuf enum values must be integers.
+fn parse_constant_line(code: &str) -> Result<Option<MsgConstant>> {
+    let Some((lhs, rhs)) = code.split_once('=') else {
+        return Ok(None);
+    };
+    let mut parts = lhs.split_whitespace();
+    let Some(type_name) = parts.next() else {
+        return Ok(None);
+    };
+    let Some(name) = parts.next() else {
+        return Ok(None);
+    };
+    let Some(primitive) = RosPrimitive::parse(type_name) else {
+        return Ok(None);
+    };
+    if !matches!(
+        primitive,
+        RosPrimitive::Byte
+            | RosPrimitive::Char
+            | RosPrimitive::Int8
+            | RosPrimitive::Uint8
+            | RosPrimitive::Int16
+            | RosPrimitive::Uint16
+            | RosPrimitive::Int32
+            | RosPrimitive::Uint32
+            | RosPrimitive::Int64
+            | RosPrimitive::Uint64
+    ) {
+        return Ok(None);
+    }
+    let value_text = rhs.split_whitespace().next().unwrap_or("").trim();
+    let value = value_text
+        .parse::<i32>()
+        .with_context(|| format!("constant '{name}' value '{value_text}' is not an i32"))?;
+    Ok(Some(MsgConstant {
+        name: name.to_string(),
+        type_name: type_name.to_string(),
+        value,
+    }))
 }
 
 pub fn infer_package_name(path: &Path) -> Option<String> {
@@ -664,10 +723,11 @@ pub fn parse_msg_file(package: &str, name: &str, path: &Path) -> Result<MsgSpec>
             path.display()
         )
     })?;
-    let fields = parse_fields_from_lines(package, &src, Some(path))?;
+    let (constants, fields) = parse_msg_members_from_lines(package, &src, Some(path))?;
     Ok(MsgSpec {
         package: package.to_string(),
         name: name.to_string(),
+        constants,
         fields,
     })
 }

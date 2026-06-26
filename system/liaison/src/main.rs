@@ -36,6 +36,7 @@ use pb::contracts::{
     robonix_system_pilot_client::RobonixSystemPilotClient,
 };
 use pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
+use pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use pb::pilot::{CapabilityCall, PilotEvent, Plan, Task};
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
@@ -339,7 +340,11 @@ async fn run_text_loop(pipeline: Arc<LiaisonPipeline>) -> Result<()> {
                         }
                         EVT_BATCH_RESULT => {
                             if let Some(ref r) = ev.batch_result {
-                                let ok = r.results.iter().filter(|x| x.success).count();
+                                let ok = r
+                                    .results
+                                    .iter()
+                                    .filter(|x| x.state == RtdlNodeStateEnum::Succeeded as u32)
+                                    .count();
                                 println!(
                                     "[round {}] results: {ok} ok, {} failed",
                                     r.round,

@@ -30,6 +30,7 @@ use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::{info, warn};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io;
 use std::rc::Rc;
 use tokio_stream::StreamExt;
@@ -59,6 +60,212 @@ enum Role {
     ToolCall,
     Status,
     Voice,
+}
+
+/// Live RTDL forest state for the right-side panel. Fed by `PilotEvent`
+/// task_state / plan / node_state / batch_result events; rendered every frame.
+#[derive(Default)]
+struct ForestView {
+    goal: String,
+    success_criterion: String,
+    status: String,
+    /// In-dispatch order; each is one RTDL tree of the current turn.
+    plans: Vec<PlanView>,
+}
+
+struct PlanView {
+    plan_id: String,
+    plan: crate::pb::pilot::Plan,
+    /// node_index → executor state (2=ok 3=fail 4=cancel …). Absent = pending.
+    node_states: HashMap<u32, u32>,
+    done: bool,
+    any_failed: bool,
+}
+
+impl ForestView {
+    /// Reset for a brand-new top-level turn (a fresh user message, not a steer).
+    fn begin_turn(&mut self) {
+        self.goal.clear();
+        self.success_criterion.clear();
+        self.status.clear();
+        self.plans.clear();
+    }
+
+    fn plan_mut(&mut self, plan_id: &str) -> Option<&mut PlanView> {
+        self.plans.iter_mut().find(|p| p.plan_id == plan_id)
+    }
+}
+
+/// The standard LLM-facing capability name, exactly as pilot presents it to
+/// the model and as the model emits it in `do.cap`: `provider_id.<area>_<leaf>`
+/// — e.g. `tiago_camera.camera_snapshot`, `tiago_lidar.lidar_snapshot`,
+/// `explore.explore_status`, `executor.builtin_read_file`. The `<area>_<leaf>`
+/// part mirrors `robonix_pilot::discovery::llm_name` (kept in sync here since
+/// rbnx-cli doesn't depend on the pilot crate); the `<area>` prefix is what
+/// disambiguates the shared `snapshot` / `status` leaves across providers.
+fn cap_short_name(provider_id: &str, contract_id: &str) -> String {
+    let mut segs = contract_id.rsplit('/');
+    let leaf = segs.next().unwrap_or(contract_id);
+    let area = segs.next().unwrap_or("");
+    let llm_name = if area.is_empty() {
+        leaf.to_string()
+    } else {
+        format!("{area}_{leaf}")
+    };
+    if provider_id.is_empty() {
+        llm_name
+    } else {
+        format!("{provider_id}.{llm_name}")
+    }
+}
+
+/// Compact one-line label for a `do` node: `provider.leaf(short args)`.
+/// Collapses whitespace/newlines (run_command args are whole shell scripts)
+/// and elides past ~48 chars so the tree stays readable in both the log and
+/// the panel.
+fn compact_call_label(provider_id: &str, contract_id: &str, args_json: &str) -> String {
+    let name = cap_short_name(provider_id, contract_id);
+    let flat = args_json.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX: usize = 48;
+    let total = flat.chars().count();
+    let shown = if total > MAX {
+        let head: String = flat.chars().take(MAX).collect();
+        format!("{head}… (+{} chars)", total - MAX)
+    } else {
+        flat
+    };
+    format!("{name}({shown})")
+}
+
+/// Glyph + style for one node given its executor state (None = pending).
+fn node_state_glyph(state: Option<u32>) -> (&'static str, Style) {
+    match state {
+        Some(1) => (
+            "▸",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Some(2) => ("✓", Style::default().fg(Color::Green)),
+        Some(3) => ("✗", Style::default().fg(Color::Red)),
+        Some(4) => ("⊘", Style::default().fg(Color::Magenta)),
+        Some(5) => ("⏱", Style::default().fg(Color::Red)),
+        Some(6) => ("⏸", Style::default().fg(Color::Blue)),
+        _ => ("·", Style::default().fg(Color::DarkGray)),
+    }
+}
+
+/// Render the whole forest panel (goal + status + every tree with per-node
+/// live state) as styled lines.
+fn forest_panel_lines(forest: &ForestView) -> Vec<Line<'static>> {
+    let header = |s: &str| {
+        Line::from(Span::styled(
+            s.to_string(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(header("Goal"));
+    lines.push(Line::from(if forest.goal.is_empty() {
+        "(none yet)".to_string()
+    } else {
+        forest.goal.clone()
+    }));
+    if !forest.success_criterion.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("done when: {}", forest.success_criterion),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    let (status_txt, status_style) = match forest.status.as_str() {
+        "done" => ("done", Style::default().fg(Color::Green)),
+        "in_progress" => ("in_progress", Style::default().fg(Color::Yellow)),
+        _ => ("—", Style::default().fg(Color::DarkGray)),
+    };
+    lines.push(Line::from(vec![
+        Span::raw("status: "),
+        Span::styled(status_txt.to_string(), status_style),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(header("Forest"));
+    if forest.plans.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(no trees yet)".to_string(),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for pv in &forest.plans {
+        let (marker, head_style) = if pv.done {
+            if pv.any_failed {
+                ("✗", Style::default().fg(Color::Red))
+            } else {
+                ("✓", Style::default().fg(Color::Green))
+            }
+        } else {
+            (
+                "▸",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker} plan {}", pv.plan_id),
+            head_style,
+        )));
+        forest_node_lines(pv, pv.plan.root_index as usize, "", true, true, &mut lines);
+    }
+    lines
+}
+
+fn forest_node_lines(
+    pv: &PlanView,
+    idx: usize,
+    prefix: &str,
+    is_root: bool,
+    is_last: bool,
+    out: &mut Vec<Line<'static>>,
+) {
+    if idx >= pv.plan.nodes.len() {
+        return;
+    }
+    let node = &pv.plan.nodes[idx];
+    let (glyph, style) = node_state_glyph(pv.node_states.get(&(idx as u32)).copied());
+    // Panel is a simple schematic: capability name only (no args), and bare
+    // operator labels. The full args live in the left-hand log tree.
+    let label = match node.node_kind {
+        0 => "sequence".to_string(),
+        1 => "parallel".to_string(),
+        _ => match node.call.as_ref() {
+            Some(c) => cap_short_name(&c.provider_id, &c.contract_id),
+            None => node.description.clone(),
+        },
+    };
+    let branch = if is_root {
+        String::new()
+    } else if is_last {
+        format!("{prefix}└─ ")
+    } else {
+        format!("{prefix}├─ ")
+    };
+    out.push(Line::from(vec![
+        Span::raw(branch),
+        Span::styled(format!("{glyph} "), style),
+        Span::styled(label, style),
+    ]));
+    let n = node.children.len();
+    for (i, child) in node.children.iter().enumerate() {
+        let child_prefix = if is_root {
+            String::new()
+        } else if is_last {
+            format!("{prefix}   ")
+        } else {
+            format!("{prefix}│  ")
+        };
+        forest_node_lines(pv, *child as usize, &child_prefix, false, i + 1 == n, out);
+    }
 }
 
 const DEFAULT_LIAISON_FALLBACK: &str = "http://127.0.0.1:50081";
@@ -1282,7 +1489,7 @@ async fn run_tui(
         role: Role::Status,
         text: format!(
             "Connected to Liaison at {liaison_endpoint} as {local_user}. \
-             Enter = send · Ctrl+V = voice (auto end on silence) · Ctrl+A = audio settings · Esc = abort turn · Ctrl+C = quit."
+             Enter = send · type + Enter mid-task = steer · Ctrl+V = voice (auto end on silence) · Ctrl+A = audio settings · Esc = abort turn · Ctrl+C = quit."
         ),
     });
     for w in audio_warnings {
@@ -1292,13 +1499,21 @@ async fn run_tui(
         });
     }
     let messages: Rc<RefCell<Vec<ChatMessage>>> = Rc::new(RefCell::new(initial));
+    let forest: Rc<RefCell<ForestView>> = Rc::new(RefCell::new(ForestView::default()));
     let mut input = String::new();
     let mut scroll: u16 = 0;
     let mut busy = false;
     let session_id = Uuid::new_v4().to_string();
 
     loop {
-        draw(terminal, &messages.borrow(), &input, scroll, busy)?;
+        draw(
+            terminal,
+            &messages.borrow(),
+            &forest.borrow(),
+            &input,
+            scroll,
+            busy,
+        )?;
 
         if event::poll(std::time::Duration::from_millis(50))?
             && let Event::Key(key) = event::read()?
@@ -1348,12 +1563,20 @@ async fn run_tui(
                     role: Role::Status,
                     text: "Ctrl+V — starting voice session…".to_string(),
                 });
-                draw(terminal, &messages.borrow(), &input, scroll, busy)?;
+                draw(
+                    terminal,
+                    &messages.borrow(),
+                    &forest.borrow(),
+                    &input,
+                    scroll,
+                    busy,
+                )?;
                 if let Err(e) = run_voice_session_with_esc_abort(
                     liaison_endpoint,
                     &session_id,
                     &local_user,
                     Rc::clone(&messages),
+                    &forest,
                     terminal,
                     &input,
                     &mut scroll,
@@ -1395,8 +1618,17 @@ async fn run_tui(
                         role: Role::User,
                         text: msg.clone(),
                     });
+                    // Fresh top-level task: reset the live forest panel.
+                    forest.borrow_mut().begin_turn();
                     busy = true;
-                    draw(terminal, &messages.borrow(), &input, scroll, busy)?;
+                    draw(
+                        terminal,
+                        &messages.borrow(),
+                        &forest.borrow(),
+                        &input,
+                        scroll,
+                        busy,
+                    )?;
 
                     match run_text_intent_with_esc_abort(
                         liaison_endpoint,
@@ -1404,6 +1636,7 @@ async fn run_tui(
                         &local_user,
                         &msg,
                         Rc::clone(&messages),
+                        &forest,
                         terminal,
                         &input,
                         &mut scroll,
@@ -1521,6 +1754,7 @@ async fn run_text_intent_with_esc_abort(
     user_id: &str,
     user_msg: &str,
     messages: Rc<RefCell<Vec<ChatMessage>>>,
+    forest: &Rc<RefCell<ForestView>>,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     input: &str,
     scroll: &mut u16,
@@ -1556,6 +1790,13 @@ async fn run_text_intent_with_esc_abort(
         }
     });
 
+    // Mid-task input: the user can keep typing while the turn runs. Enter sends
+    // the text as a steer (a new Task on the same session); pilot routes it to
+    // the running turn instead of starting a second one. The local buffer is
+    // separate from the idle-draft `input` so the two never collide.
+    let _ = input;
+    let mut steer_input = String::new();
+
     loop {
         tokio::select! {
             biased;
@@ -1563,15 +1804,15 @@ async fn run_text_intent_with_esc_abort(
                 match item {
                     None => break,
                     Some(Ok(event)) => {
-                        apply_pilot_event(&messages, &event)?;
-                        draw(terminal, &messages.borrow(), input, 0, true)?;
+                        apply_pilot_event(&messages, forest, &event)?;
+                        draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, 0, true)?;
                     }
                     Some(Err(e)) => {
                         messages.borrow_mut().push(ChatMessage {
                             role: Role::Status,
                             text: format!("Liaison stream error: {e}"),
                         });
-                        draw(terminal, &messages.borrow(), input, 0, true)?;
+                        draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, 0, true)?;
                         break;
                     }
                 }
@@ -1587,15 +1828,44 @@ async fn run_text_intent_with_esc_abort(
                                     text: "Esc — abort_turn sent (in-flight turn should stop)."
                                         .to_string(),
                                 });
-                                draw(terminal, &messages.borrow(), input, *scroll, true)?;
+                                draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, *scroll, true)?;
+                            }
+                            KeyCode::Enter => {
+                                let steer = steer_input.trim().to_string();
+                                steer_input.clear();
+                                if !steer.is_empty() {
+                                    messages.borrow_mut().push(ChatMessage {
+                                        role: Role::User,
+                                        text: format!("(steer) {steer}"),
+                                    });
+                                    if let Err(e) =
+                                        send_steer(liaison_endpoint, session_id, user_id, &steer)
+                                            .await
+                                    {
+                                        messages.borrow_mut().push(ChatMessage {
+                                            role: Role::Status,
+                                            text: format!("steer failed: {e:#}"),
+                                        });
+                                    }
+                                    *scroll = 0;
+                                    draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, *scroll, true)?;
+                                }
+                            }
+                            KeyCode::Char(c) => {
+                                steer_input.push(c);
+                                draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, *scroll, true)?;
+                            }
+                            KeyCode::Backspace => {
+                                steer_input.pop();
+                                draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, *scroll, true)?;
                             }
                             KeyCode::PageUp => {
                                 *scroll = scroll.saturating_add(5);
-                                draw(terminal, &messages.borrow(), input, *scroll, true)?;
+                                draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, *scroll, true)?;
                             }
                             KeyCode::PageDown => {
                                 *scroll = scroll.saturating_sub(5);
-                                draw(terminal, &messages.borrow(), input, *scroll, true)?;
+                                draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, *scroll, true)?;
                             }
                             _ => {}
                         }
@@ -1603,6 +1873,29 @@ async fn run_text_intent_with_esc_abort(
             }
         }
     }
+    Ok(())
+}
+
+/// Submit `text` as a mid-task steer on an already-running session. Pilot routes
+/// it to the live turn's steer queue and returns an empty stream, which we drain.
+async fn send_steer(
+    liaison_endpoint: &str,
+    session_id: &str,
+    user_id: &str,
+    text: &str,
+) -> Result<()> {
+    use crate::pb::contracts::robonix_system_liaison_submit_client::RobonixSystemLiaisonSubmitClient;
+
+    let mut client = RobonixSystemLiaisonSubmitClient::connect(liaison_endpoint.to_string())
+        .await
+        .context("failed to connect to Liaison for steer")?;
+    let task = build_text_task(session_id, user_id, text);
+    let mut stream = client
+        .submit_task(tonic::Request::new(task))
+        .await
+        .context("Liaison steer submit failed")?
+        .into_inner();
+    while stream.next().await.is_some() {}
     Ok(())
 }
 
@@ -1614,6 +1907,7 @@ async fn run_voice_session_with_esc_abort(
     session_id: &str,
     user_id: &str,
     messages: Rc<RefCell<Vec<ChatMessage>>>,
+    forest: &Rc<RefCell<ForestView>>,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     input: &str,
     scroll: &mut u16,
@@ -1673,15 +1967,15 @@ async fn run_voice_session_with_esc_abort(
                 match item {
                     None => break,
                     Some(Ok(event)) => {
-                        apply_voice_event(&messages, &event)?;
-                        draw(terminal, &messages.borrow(), input, 0, true)?;
+                        apply_voice_event(&messages, forest, &event)?;
+                        draw(terminal, &messages.borrow(), &forest.borrow(), input, 0, true)?;
                     }
                     Some(Err(e)) => {
                         messages.borrow_mut().push(ChatMessage {
                             role: Role::Status,
                             text: format!("Voice stream error: {e}"),
                         });
-                        draw(terminal, &messages.borrow(), input, 0, true)?;
+                        draw(terminal, &messages.borrow(), &forest.borrow(), input, 0, true)?;
                         break;
                     }
                 }
@@ -1696,15 +1990,15 @@ async fn run_voice_session_with_esc_abort(
                                     role: Role::Status,
                                     text: "Esc — abort_turn sent (Pilot stops; voice playback may still finish).".to_string(),
                                 });
-                                draw(terminal, &messages.borrow(), input, *scroll, true)?;
+                                draw(terminal, &messages.borrow(), &forest.borrow(), input, *scroll, true)?;
                             }
                             KeyCode::PageUp => {
                                 *scroll = scroll.saturating_add(5);
-                                draw(terminal, &messages.borrow(), input, *scroll, true)?;
+                                draw(terminal, &messages.borrow(), &forest.borrow(), input, *scroll, true)?;
                             }
                             KeyCode::PageDown => {
                                 *scroll = scroll.saturating_sub(5);
-                                draw(terminal, &messages.borrow(), input, *scroll, true)?;
+                                draw(terminal, &messages.borrow(), &forest.borrow(), input, *scroll, true)?;
                             }
                             _ => {}
                         }
@@ -1753,12 +2047,16 @@ fn voice_node_with_cfg(env_key: &str, cfg_value: Option<&str>) -> String {
 
 fn apply_pilot_event(
     messages: &Rc<RefCell<Vec<ChatMessage>>>,
+    forest: &Rc<RefCell<ForestView>>,
     event: &crate::pb::pilot::PilotEvent,
 ) -> Result<()> {
     // event_kind discriminants — see PilotEvent.msg.
     const EVT_TEXT_CHUNK: u32 = 0;
     const EVT_PLAN: u32 = 1;
+    const EVT_BATCH_RESULT: u32 = 2;
     const EVT_FINAL_TEXT: u32 = 4;
+    const EVT_NODE_STATE: u32 = 5;
+    const EVT_TASK_STATE: u32 = 6;
 
     let mut m = messages.borrow_mut();
     match event.event_kind {
@@ -1791,23 +2089,48 @@ fn apply_pilot_event(
             }
         }
         EVT_PLAN => {
-            // dev called this EVT_TASK_GRAPH with `event.task_graph` carrying
-            // tool_name + args_json. dev-packaging renamed the message to
-            // Plan/CapabilityCall; only contract_id + args_json are exposed,
-            // so we leaf-strip contract_id back into a tool-name lookalike to
-            // preserve the same `[r{round}] {name}({args})` line shape.
+            // Log the dispatched RTDL tree as ASCII (historical record) and add
+            // it to the live forest panel.
             if let Some(ref p) = event.plan {
-                for call in plan_calls(p) {
-                    let leaf = call
-                        .contract_id
-                        .rsplit_once('/')
-                        .map(|(_, l)| l.to_string())
-                        .unwrap_or_else(|| call.contract_id.clone());
-                    m.push(ChatMessage {
-                        role: Role::ToolCall,
-                        text: format!("[r{}] {}({})", p.round, leaf, call.args_json),
+                m.push(ChatMessage {
+                    role: Role::ToolCall,
+                    text: render_plan_tree(p),
+                });
+                let mut f = forest.borrow_mut();
+                if f.plan_mut(&p.plan_id).is_none() {
+                    f.plans.push(PlanView {
+                        plan_id: p.plan_id.clone(),
+                        plan: p.clone(),
+                        node_states: HashMap::new(),
+                        done: false,
+                        any_failed: false,
                     });
                 }
+            }
+        }
+        EVT_NODE_STATE => {
+            if let Some(ref ns) = event.node_state {
+                let mut f = forest.borrow_mut();
+                if let Some(pv) = f.plan_mut(&ns.plan_id) {
+                    pv.node_states.insert(ns.node_index, ns.state);
+                }
+            }
+        }
+        EVT_BATCH_RESULT => {
+            if let Some(ref b) = event.batch_result {
+                let mut f = forest.borrow_mut();
+                if let Some(pv) = f.plan_mut(&b.plan_id) {
+                    pv.done = true;
+                    pv.any_failed = b.any_failed;
+                }
+            }
+        }
+        EVT_TASK_STATE => {
+            if let Some(ref ts) = event.task_state {
+                let mut f = forest.borrow_mut();
+                f.goal = ts.goal.clone();
+                f.success_criterion = ts.success_criterion.clone();
+                f.status = ts.status.clone();
             }
         }
         _ => {}
@@ -1815,15 +2138,60 @@ fn apply_pilot_event(
     Ok(())
 }
 
-fn plan_calls(plan: &crate::pb::pilot::Plan) -> Vec<&crate::pb::pilot::CapabilityCall> {
-    plan.nodes
-        .iter()
-        .filter_map(|node| node.call.as_ref())
-        .collect()
+/// Render a `Plan` arena as an ASCII tree, e.g.
+/// ```text
+/// [plan 1]
+/// sequence: fetch water
+/// ├─ navigate(kitchen)
+/// └─ grasp(water cup)
+/// ```
+fn render_plan_tree(plan: &crate::pb::pilot::Plan) -> String {
+    let mut lines = vec![format!("[plan {}]", plan.plan_id)];
+    if (plan.root_index as usize) < plan.nodes.len() {
+        render_plan_node(plan, plan.root_index as usize, "", true, true, &mut lines);
+    }
+    lines.join("\n")
+}
+
+fn render_plan_node(
+    plan: &crate::pb::pilot::Plan,
+    idx: usize,
+    prefix: &str,
+    is_root: bool,
+    is_last: bool,
+    out: &mut Vec<String>,
+) {
+    let node = &plan.nodes[idx];
+    let label = match node.node_kind {
+        0 => format!("sequence: {}", node.description),
+        1 => format!("parallel: {}", node.description),
+        _ => match node.call.as_ref() {
+            Some(c) => compact_call_label(&c.provider_id, &c.contract_id, &c.args_json),
+            None => node.description.clone(),
+        },
+    };
+    if is_root {
+        out.push(label);
+    } else {
+        let branch = if is_last { "└─ " } else { "├─ " };
+        out.push(format!("{prefix}{branch}{label}"));
+    }
+    let n = node.children.len();
+    for (i, child) in node.children.iter().enumerate() {
+        let child_prefix = if is_root {
+            String::new()
+        } else if is_last {
+            format!("{prefix}   ")
+        } else {
+            format!("{prefix}│  ")
+        };
+        render_plan_node(plan, *child as usize, &child_prefix, false, i + 1 == n, out);
+    }
 }
 
 fn apply_voice_event(
     messages: &Rc<RefCell<Vec<ChatMessage>>>,
+    forest: &Rc<RefCell<ForestView>>,
     event: &crate::pb::liaison::VoiceEvent,
 ) -> Result<()> {
     // Mirror the kinds in voice.rs / VoiceEvent.msg
@@ -1874,7 +2242,7 @@ fn apply_voice_event(
         }
         KIND_PILOT => {
             if let Some(ref pe) = event.pilot {
-                apply_pilot_event(messages, pe)?;
+                apply_pilot_event(messages, forest, pe)?;
             }
         }
         KIND_TTS_STARTED => {
@@ -1914,6 +2282,7 @@ fn apply_voice_event(
 fn draw(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     messages: &[ChatMessage],
+    forest: &ForestView,
     input: &str,
     scroll: u16,
     busy: bool,
@@ -1921,6 +2290,9 @@ fn draw(
     terminal.draw(|f| {
         let area = f.area();
         let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).split(area);
+        // Split the body into chat (left) + live RTDL forest panel (right).
+        let body =
+            Layout::horizontal([Constraint::Min(24), Constraint::Length(46)]).split(chunks[0]);
 
         let mut lines: Vec<Line> = Vec::new();
         for msg in messages {
@@ -1967,7 +2339,7 @@ fn draw(
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(" Robonix{status} "));
-        let inner = block.inner(chunks[0]);
+        let inner = block.inner(body[0]);
 
         let text_only = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
         let total_lines = text_only.line_count(inner.width) as u16;
@@ -1982,11 +2354,25 @@ fn draw(
             .block(block)
             .wrap(Wrap { trim: false })
             .scroll((auto_scroll, 0));
-        f.render_widget(history, chunks[0]);
+        f.render_widget(history, body[0]);
+
+        // Right: live task + RTDL forest. Auto-scrolls to the bottom so the
+        // freshest trees stay visible.
+        let panel_block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Task / Forest ");
+        let panel_inner_h = panel_block.inner(body[1]).height;
+        let panel_lines = forest_panel_lines(forest);
+        let panel_scroll = (panel_lines.len() as u16).saturating_sub(panel_inner_h);
+        let panel = Paragraph::new(panel_lines)
+            .block(panel_block)
+            .wrap(Wrap { trim: false })
+            .scroll((panel_scroll, 0));
+        f.render_widget(panel, body[1]);
 
         let input_widget =
             Paragraph::new(input.to_string()).block(Block::default().borders(Borders::ALL).title(
-                " > Enter = send · Ctrl+V = voice (auto end) · Esc = abort · Ctrl+C = quit ",
+                " > Enter = send · type+Enter mid-task = steer · Esc = abort · Ctrl+C = quit ",
             ));
         f.render_widget(input_widget, chunks[1]);
     })?;

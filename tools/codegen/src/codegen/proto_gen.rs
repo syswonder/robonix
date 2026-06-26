@@ -12,7 +12,9 @@ use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::Path;
 
-use super::msg_parser::{MsgField, MsgResolver, MsgSpec, MsgTypeRef, RosPrimitive, SrvSpec};
+use super::msg_parser::{
+    MsgConstant, MsgField, MsgResolver, MsgSpec, MsgTypeRef, RosPrimitive, SrvSpec,
+};
 
 fn proto_primitive_type(p: &str) -> &'static str {
     // Single source of truth for primitive → proto3 mapping is
@@ -68,19 +70,71 @@ pub fn proto_package_name(ros_package: &str) -> String {
     format!("robonix.{}", ros_package)
 }
 
-fn emit_message(out: &mut String, spec: &MsgSpec) {
+fn emit_message(out: &mut String, spec: &MsgSpec) -> Result<()> {
     let _ = writeln!(out, "message {} {{", spec.name);
+    emit_enum(out, spec)?;
     for (i, field) in spec.fields.iter().enumerate() {
         let proto_type = proto_field_type(field, &spec.package);
         let _ = writeln!(out, "  {} {} = {};", proto_type, field.name, i + 1);
     }
     let _ = writeln!(out, "}}");
+    Ok(())
 }
 
-fn emit_srv_messages(out: &mut String, srv: &SrvSpec) {
-    emit_message(out, &srv.request);
+/// Emit one nested `MsgNameEnum` for integer constants declared by a `.msg`.
+///
+/// Regular fields keep their original proto scalar/message types; the enum is
+/// a generated namespace for constants, not a replacement for field types.
+fn emit_enum(out: &mut String, spec: &MsgSpec) -> Result<()> {
+    let Some(constants) = proto_enum_constants(&spec.constants) else {
+        return Ok(());
+    };
+    let _ = writeln!(out, "  enum {}Enum {{", spec.name);
+    for constant in constants {
+        let _ = writeln!(out, "    {} = {};", constant.name, constant.value);
+    }
+    let _ = writeln!(out, "  }}");
     let _ = writeln!(out);
-    emit_message(out, &srv.response);
+    Ok(())
+}
+
+/// Return constants in protobuf-valid enum order.
+///
+/// Proto3 requires the first enum value to be zero, while ROS messages may put
+/// a zero-valued constant later in the file. Messages without a zero-valued
+/// constant cannot be emitted as a proto3 enum and are skipped. Duplicate
+/// values are skipped instead of using `allow_alias`.
+fn proto_enum_constants(constants: &[MsgConstant]) -> Option<Vec<&MsgConstant>> {
+    if constants.is_empty()
+        || !constants.iter().any(|c| c.value == 0)
+        || has_duplicate_values(constants)
+    {
+        return None;
+    }
+    let mut ordered = Vec::with_capacity(constants.len());
+    if let Some(first_zero) = constants.iter().find(|c| c.value == 0) {
+        ordered.push(first_zero);
+    }
+    for constant in constants {
+        if constant.value != 0 || !std::ptr::eq(*ordered.first()?, constant) {
+            ordered.push(constant);
+        }
+    }
+    Some(ordered)
+}
+
+fn has_duplicate_values(constants: &[MsgConstant]) -> bool {
+    let mut seen = BTreeSet::new();
+    constants
+        .iter()
+        .any(|constant| !seen.insert(constant.value))
+}
+
+fn emit_srv_messages(out: &mut String, srv: &SrvSpec) -> Result<()> {
+    emit_message(out, &srv.request)?;
+    let _ = writeln!(out);
+    emit_message(out, &srv.response)?;
+    Ok(())
 }
 
 fn import_named_type(imports: &mut BTreeSet<String>, current_package: &str, tr: &MsgTypeRef) {
@@ -166,12 +220,12 @@ pub fn generate(
         }
 
         for spec in &specs {
-            emit_message(&mut out, spec);
+            emit_message(&mut out, spec)?;
             let _ = writeln!(out);
         }
 
         for srv in &srvs {
-            emit_srv_messages(&mut out, srv);
+            emit_srv_messages(&mut out, srv)?;
             let _ = writeln!(out);
         }
 
