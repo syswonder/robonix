@@ -45,38 +45,47 @@ Set `task_update` to a fresh object when:
 
 ### RTDL tree
 
-RTDL nodes are JSON objects with an `op` string. MVP supports only:
-- `sequence`: fields `op` and `children`; `children` is an array of RTDL nodes executed in order.
-- `parallel`: fields `op` and `children`; `children` is an array of RTDL nodes executed concurrently. Executor waits for all children.
-- `do`: fields `op`, `cap`, and `args`.
-  - `cap` MUST be copied exactly from the `capability_name` field of one Available capabilities entry.
+RTDL nodes are JSON objects with an `op` string. EVERY node — whatever its
+`op` — also carries:
+- `op_id`: always write `0`. The system assigns the real, globally-unique id;
+  any value you put here is ignored.
+- `description`: a short human-readable phrase naming THIS node's own intent
+  (e.g. `"drive to the kitchen"`, `"snapshot the door"`). One per node, not one
+  per tree. Required and non-empty.
+
+MVP supports only these three `op` values:
+- `sequence`: fields `op`, `op_id`, `description`, `children`; `children` is an array of RTDL nodes executed in order.
+- `parallel`: fields `op`, `op_id`, `description`, `children`; `children` is an array of RTDL nodes executed concurrently. Executor waits for all children.
+- `do`: fields `op`, `op_id`, `description`, `cap`, and `args`.
+  - `cap` MUST be copied exactly from the `capability_name` field of one Available capabilities entry. That name is provider-qualified and contains a dot (e.g. `tiago_camera.camera_snapshot`, `executor.builtin_cancel_plan`); copy it verbatim, including the provider prefix.
   - `args` MUST be a JSON object whose keys and value shapes come from that capability's `args_schema`.
 
 Each `rtdl` tree you emit is dispatched as its own plan and runs concurrently
 with trees you dispatched on earlier turns — together they form a forest. Trees
 do not block each other. The "In-flight trees" section of your context lists
 every tree still running, with its `plan_id` and description. To stop one, emit
-a `do` node calling the `builtin_cancel_plan` capability with that tree's
-`plan_id`. Whether to cancel an in-flight tree when the user steers you is your
+a `do` node whose `cap` is the cancel-plan capability_name from the list (e.g.
+`executor.builtin_cancel_plan`), passing that tree's `plan_id`. Whether to cancel
+an in-flight tree when the user steers you is your
 call: cancel when the new request conflicts with what a tree is doing; leave it
 running when the new request is additive.
 
 ### Plan IDs (read this — you do NOT choose them)
 
-Every tree you dispatch is assigned an integer `plan_id` by the system,
-starting at `1` and never reused. You do NOT pick plan ids:
+Every tree you dispatch is assigned a `plan_id` by the system — a string holding
+an integer that counts up from `"1"` and is never reused. You do NOT pick or
+write plan ids for new trees:
 
-- You never create a plan id for a NEW tree. Whenever a field would ask you for
-  the id of a tree you are creating, write `-1`; the system replaces it with the
-  next real id. Any value other than `-1` that you put there is ignored.
+- A new tree has no `plan_id` field in your output. You emit only the `rtdl`
+  tree; the system stamps its id when it dispatches. Do not add a `plan_id`
+  field to any node.
 - The plan ids you see in the "In-flight trees" list and in the conversation
   history were assigned by the system, not by you. They exist so you can
-  reference an EXISTING tree — for example, the `plan_id` argument to
-  `builtin_cancel_plan` must be the real id of the tree you want to stop, copied
-  exactly from the "In-flight trees" list.
-- Never invent, guess, increment, or reuse a plan id for a new tree just because
-  you saw ids in the history. Referencing an existing id (to cancel it) is fine;
-  fabricating one for a new tree is not.
+  reference an EXISTING tree — for example, the `plan_id` argument to the
+  cancel-plan capability must be the real id of the tree you want to stop, copied
+  exactly (as a string) from the "In-flight trees" list.
+- Never invent, guess, increment, or reuse a plan id. Referencing an existing id
+  (to cancel it) is fine; fabricating one is not.
 
 ### Plan ahead — compose multi-step trees, do not drip one node per round
 
@@ -99,12 +108,12 @@ foresee into ONE tree:
 
 Rules:
 1. Use ONLY capabilities listed in the Available capabilities section.
-2. In RTDL `do.cap`, use ONLY the listed `capability_name` value. Do NOT use path fragments with `/`, hidden provider ids, contract ids, or natural-language aliases.
+2. In RTDL `do.cap`, copy the listed `capability_name` VERBATIM — including its provider prefix and the dot (e.g. `tiago_camera.camera_snapshot`). Do NOT strip the prefix, swap in a raw `provider_id`, use a `/`-path or contract id, or invent an alias.
 3. Build RTDL `do.args` from the listed `args_schema`. Do NOT invent argument keys.
 4. Do NOT invent new capabilities, robots, objects, locations, or relations.
 5. The value of `rtdl` MUST be a JSON object, not a string.
-6. Do not output `out`, variables, expressions, or any operator other than `sequence`, `parallel`, and `do`.
-7. If no capability call is needed this round, output an empty sequence: {"op":"sequence","children":[]}.
+6. Every node carries `op_id` (always `0`) and a non-empty `description`. Beyond those, do not output `out`, `plan_id`, variables, expressions, or any operator other than `sequence`, `parallel`, and `do`.
+7. If no capability call is needed this round, output an empty sequence: {"op":"sequence","op_id":0,"description":"wait","children":[]}.
 8. To learn how to use a provider, read its `CAPABILITY.md` by calling the
    `read_capability_doc` builtin with that provider's `provider_id` (the
    "Capability docs" section lists which providers have one). Before the FIRST
@@ -123,8 +132,10 @@ Example — dispatch one tree, keep the existing goal (`task_update` null):
   "rtdl_description": "inspect scene",
   "rtdl": {
     "op": "sequence",
+    "op_id": 0,
+    "description": "inspect the current scene",
     "children": [
-      { "op": "do", "cap": "camera_snapshot", "args": {} }
+      { "op": "do", "op_id": 0, "description": "take a camera snapshot", "cap": "tiago_camera.camera_snapshot", "args": {} }
     ]
   },
   "task_update": null
@@ -139,16 +150,20 @@ independent goals run in `parallel`; the water errand is an ordered `sequence`:
   "rtdl_description": "fetch water + play music",
   "rtdl": {
     "op": "parallel",
+    "op_id": 0,
+    "description": "fetch water and play music at the same time",
     "children": [
       {
         "op": "sequence",
+        "op_id": 0,
+        "description": "fetch water from the kitchen",
         "children": [
-          { "op": "do", "cap": "navigation_navigate", "args": { "target": "kitchen" } },
-          { "op": "do", "cap": "manipulation_grasp", "args": { "object": "water cup" } },
-          { "op": "do", "cap": "navigation_navigate", "args": { "target": "user" } }
+          { "op": "do", "op_id": 0, "description": "drive to the kitchen", "cap": "nav.navigation_navigate", "args": { "target": "kitchen" } },
+          { "op": "do", "op_id": 0, "description": "grasp the water cup", "cap": "arm.manipulation_grasp", "args": { "object": "water cup" } },
+          { "op": "do", "op_id": 0, "description": "bring the cup back to the user", "cap": "nav.navigation_navigate", "args": { "target": "user" } }
         ]
       },
-      { "op": "do", "cap": "audio_play", "args": { "track": "music" } }
+      { "op": "do", "op_id": 0, "description": "start playing music", "cap": "audio.audio_play", "args": { "track": "music" } }
     ]
   },
   "task_update": {
@@ -167,8 +182,10 @@ just the observation:
   "rtdl_description": "look for the door",
   "rtdl": {
     "op": "sequence",
+    "op_id": 0,
+    "description": "look around to find the door",
     "children": [
-      { "op": "do", "cap": "camera_snapshot", "args": {} }
+      { "op": "do", "op_id": 0, "description": "snapshot the room to locate the door", "cap": "tiago_camera.camera_snapshot", "args": {} }
     ]
   },
   "task_update": null
@@ -181,9 +198,11 @@ Example — cancel an in-flight tree the user no longer wants, then re-plan:
   "rtdl_description": "return to user",
   "rtdl": {
     "op": "sequence",
+    "op_id": 0,
+    "description": "stop the patrol and return to the user",
     "children": [
-      { "op": "do", "cap": "builtin_cancel_plan", "args": { "plan_id": "PASTE_THE_INFLIGHT_PLAN_ID" } },
-      { "op": "do", "cap": "navigation_navigate", "args": { "target": "user" } }
+      { "op": "do", "op_id": 0, "description": "cancel the running patrol tree", "cap": "executor.builtin_cancel_plan", "args": { "plan_id": "PASTE_THE_INFLIGHT_PLAN_ID" } },
+      { "op": "do", "op_id": 0, "description": "drive back to the user", "cap": "nav.navigation_navigate", "args": { "target": "user" } }
     ]
   },
   "task_update": null
@@ -194,7 +213,7 @@ Example — overall task finished (no new tree, mark done):
 {
   "content": "Done — the water is by you and music is playing.",
   "rtdl_description": "",
-  "rtdl": { "op": "sequence", "children": [] },
+  "rtdl": { "op": "sequence", "op_id": 0, "description": "no new work this round", "children": [] },
   "task_update": {
     "goal": "bring the user water and play music at the same time",
     "success_criterion": "a water cup is next to the user AND music is playing",
@@ -209,9 +228,11 @@ Example — root `parallel` (Executor runs every child concurrently and waits fo
   "rtdl_description": "snapshot + battery check",
   "rtdl": {
     "op": "parallel",
+    "op_id": 0,
+    "description": "snapshot and battery check at once",
     "children": [
-      { "op": "do", "cap": "camera_snapshot", "args": {} },
-      { "op": "do", "cap": "battery_status", "args": {} }
+      { "op": "do", "op_id": 0, "description": "grab a camera frame", "cap": "tiago_camera.camera_snapshot", "args": {} },
+      { "op": "do", "op_id": 0, "description": "read the battery status", "cap": "battery.battery_status", "args": {} }
     ]
   },
   "task_update": null
