@@ -94,6 +94,17 @@ import robonix_contracts_pb2_grpc as contracts_grpc
 
 CI_MODE = os.environ.get("SPEECH_CI_MODE", "").strip() in ("1", "true", "yes")
 
+def check_torch_cuda():
+    import torch
+    log.info("Torch: %s", torch.__version__)
+    log.info("CUDA available: %s", torch.cuda.is_available())
+
+    if torch.cuda.is_available():
+        log.info("CUDA device count: %d", torch.cuda.device_count())
+        log.info("Device name: %s", torch.cuda.get_device_name(0))
+    else:
+        log.info("GPU unavailable")
+
 # -- ASR Backend (Whisper) ---------------------------------------------------
 
 class WhisperASRBackend:
@@ -644,6 +655,12 @@ class SpeechAsrStreamServicer(contracts_grpc.RobonixServiceSpeechAsrStreamServic
         dump_buf = bytearray() if dump_dir else None
         cache = {}
         chunk_count = 0
+        # Detect actual mic sample rate from the first chunk (data bytes ÷
+        # duration_s ÷ 2 for 16-bit mono). Falls back to 16000 if detection
+        # fails. Same approach as voice.rs — no env var needed.
+        # 16KHz is the default sample rate for the ASR backend, but we detect 
+        # the actual mic sample rate from the first chunk.
+        mic_sample_rate = 16000 
 
         # Paraformer streaming requires fixed chunk_stride-sample frames
         # (the chunk_size[1]*960 granularity). Clients (liaison) stream
@@ -665,12 +682,20 @@ class SpeechAsrStreamServicer(contracts_grpc.RobonixServiceSpeechAsrStreamServic
                     dump_buf.extend(chunk_data)
                 chunk_count += 1
 
-                # Adapt each chunk to 16kHz mono pcm_s16le using defaults
-                # (stream carries no AudioConfig, so assume pcm_s16le at 16kHz mono)
+                # Detect mic sample rate from the first chunk
+                if chunk_count == 1 and req.chunk and req.chunk.duration_s > 0 and len(chunk_data) >= 2:
+                    est = int(len(chunk_data) / (req.chunk.duration_s * 2) + 0.5)
+                    if est >= 8000:
+                        mic_sample_rate = est
+                        log.info("detected mic sample rate: %d Hz (from %dB / %.3fs)",
+                                 mic_sample_rate, len(chunk_data), req.chunk.duration_s)
+
+                # Adapt each chunk from mic's actual sample rate to 16kHz
+                # mono pcm_s16le. adapt_audio resamples when needed.
                 adapted, _ = adapt_audio(
                     chunk_data,
                     encoding="pcm_s16le",
-                    sample_rate=16000,
+                    sample_rate=mic_sample_rate,
                     channels=1,
                     bits_per_sample=16,
                     gain=input_gain,
@@ -1094,6 +1119,7 @@ def init(cfg):
 
 
 def main() -> int:
+    check_torch_cuda()
     speech.run()
     return 0
 
