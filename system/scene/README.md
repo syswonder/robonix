@@ -53,6 +53,64 @@ The metric pipeline is ConceptGraphs-style per-frame perception with 4 stages:
 
 Periodic cleanup (every 30 ticks) runs concept-graphs's `denoise_objects` + `filter_objects` + `merge_overlap_objects` so duplicates from edge-case detections eventually collapse.
 
+## Deployment targets (x86 / Jetson)
+
+Unlike the Rust system binaries (atlas / executor / pilot / liaison — one
+static binary, architecture-agnostic), scene ships a heavy Python + CUDA
+perception stack, so it is **platform-specific at both build and run time**.
+One repo covers three targets, picked by the per-target package manifest
+(`rbnx deploy` selects it via the deploy entry's `manifest:` field):
+
+| Target | manifest | torch source | how it runs |
+|---|---|---|---|
+| **x86-docker** (default) | `package_manifest.yaml` | cu128 x86 wheels baked into `docker/Dockerfile` | `docker run --gpus all` |
+| **jetson-docker** | `package_manifest.jetson-docker.yaml` | NVIDIA jetson-ai-lab wheels in `docker/Dockerfile.jetson` | `docker run --runtime nvidia` |
+| **jetson-native** | `package_manifest.jetson-native.yaml` | **host JetPack torch** (no image) | host `python3 -m scene_service.service` |
+
+`scripts/build.sh` branches on `RBNX_BUILD_TARGET`; `scripts/start.sh` branches
+on `ROBONIX_SCENE_FORCE` (`native`/`docker`, or auto from
+`ROBONIX_SCENE_PLATFORM=jetson_orin`). On most Jetsons **jetson-native is the
+recommended path** — it reuses the JetPack CUDA stack instead of building a
+multi-GB L4T image.
+
+### Jetson native prerequisites (install the JetPack CUDA stack)
+
+`jetson-native` does **not** install torch — it expects a CUDA-capable host
+python already has it, and only pip-installs scene's light pure-python deps
+(`pip install --user`) on top. On a fresh Jetson (JetPack 6 / L4T r36 /
+CUDA 12.6) install the GPU stack first:
+
+```bash
+# 1. ROS 2 Humble on the host (apt, from the ROS 2 repo) — scene needs it
+#    for tf2 + the message types. (Skip if already installed.)
+
+# 2. JetPack CUDA-enabled torch / torchvision from NVIDIA's Jetson index.
+#    The index tag matches your JetPack: jp6/cu126 here; use jp6/cu128 etc.
+#    if your JetPack ships a different CUDA. (apt install nvidia-jetpack
+#    provides the CUDA toolkit these wheels link against.)
+pip install --user --index-url https://pypi.jetson-ai-lab.dev/jp6/cu126 \
+    torch torchvision
+
+# 3. perception extras that have native aarch64 wheels
+pip install --user ultralytics open3d
+
+# verify CUDA is live before building scene
+python3 -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+#   → e.g.  2.10.0 True
+```
+
+Then build + run scene native (what `rbnx build`/`rbnx boot` do via the
+jetson-native manifest):
+
+```bash
+RBNX_BUILD_TARGET=jetson-native bash scripts/build.sh   # venv-free; pip --user the light deps
+ROBONIX_SCENE_FORCE=native     bash scripts/start.sh    # host python, host RMW (CycloneDDS)
+```
+
+> Native scene shares the **host RMW** (the ranger runs CycloneDDS) rather than
+> the container's FastRTPS, so it sees the live camera / pointcloud topics the
+> other native nodes publish. Set `ROBONIX_FORCE_CPU=1` to skip CUDA.
+
 ## Build + run
 
 ### Canonical Webots demo (sim + full stack)
