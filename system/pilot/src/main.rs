@@ -41,11 +41,9 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() -> Result<()> {
     let parsed = Args::parse();
-    let _ = parsed
-        .log
-        .clone()
-        .or_else(|| std::env::var("RUST_LOG").ok());
-    robonix_scribe::init("pilot");
+    // Apply the manifest's per-component `log:` level (delivered inside
+    // --config-json) to scribe's file sink before the first log line.
+    robonix_scribe::init_from_config("pilot", parsed.config_json.as_deref());
     info!("robonix-pilot starting");
 
     let cfg = PilotConfig::resolve(parsed)?;

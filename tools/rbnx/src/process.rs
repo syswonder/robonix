@@ -273,6 +273,8 @@ impl ProcessManager {
         // drown out the boot progress lines.
         let stdout = child.stdout.take().expect("stdout not piped");
         let stderr = child.stderr.take().expect("stderr not piped");
+        // Scribe tag + log-file stem = `std_name` (the provider_id) verbatim,
+        // matching `deploy::log_path`. No name mangling.
         let tag = std_name.to_string();
 
         let stdout_task = tokio::spawn(async move {

@@ -327,6 +327,8 @@ struct Spawned {
 }
 
 fn log_path(log_dir: &Path, name: &str) -> PathBuf {
+    // `name` is the provider_id — the exact Scribe tag, so `<name>.log` is the
+    // real file rbnx should point at. No name mangling.
     log_dir.join(format!("{name}.log"))
 }
 
@@ -418,7 +420,11 @@ async fn spawn_package(
     } else {
         entry.name.clone()
     };
-    let log_name = format!("{component}_{name}");
+    // Scribe tag + log-file stem = the provider_id (`entry.name`) verbatim.
+    // provider_id is unique per deploy (atlas enforces it), so no kind prefix
+    // is needed for disambiguation — `rbnx logs -t <provider_id>` and the file
+    // `<provider_id>.log` both key on the same name the user wrote.
+    let log_name = name.clone();
 
     // Write this instance's config to disk for boot's own bookkeeping
     // (debugging via `cat <instances>/<name>.json`, post-mortem
@@ -474,8 +480,8 @@ async fn spawn_package(
         .id()
         .ok_or_else(|| anyhow::anyhow!("spawned package '{name}' but it had no pid"))?;
 
-    // Pipe stdout / stderr into Scribe — tag = log_name so the file
-    // matches the old naming convention (e.g. "service_mapping.log").
+    // Pipe stdout / stderr into Scribe — tag = provider_id, so the file is
+    // `<provider_id>.log` (e.g. "mapping.log").
     let stdout = child.stdout.take().expect("stdout not piped");
     let stderr = child.stderr.take().expect("stderr not piped");
     let tag_out = log_name.clone();
@@ -1243,6 +1249,19 @@ fn system_cli_args(
 ) -> Vec<String> {
     let mut out = Vec::new();
     let map = cfg.and_then(|v| v.as_mapping());
+
+    // Pass the component's whole manifest config block as one JSON arg. The
+    // binary parses the keys it needs (e.g. scribe reads `log` via
+    // robonix_scribe::init_from_config), so new manifest keys flow through
+    // without per-key plumbing here. The typed flags below remain for the
+    // fields binaries still read individually.
+    if let Some(v) = cfg
+        && let Ok(json) = serde_json::to_string(v)
+    {
+        out.push("--config-json".into());
+        out.push(json);
+    }
+
     let s = |k: &str| -> Option<String> {
         map.and_then(|m| {
             m.get(serde_yaml::Value::String(k.into()))

@@ -29,23 +29,29 @@ struct Args {
     #[arg(long, env = "ROBONIX_ATLAS_CAPABILITIES", value_delimiter = ',')]
     capabilities: Vec<String>,
 
-    /// Log filter (env_logger syntax: `info`, `robonix_atlas=debug`, …).
-    /// Default: `robonix_atlas=info`. Also reads `RUST_LOG` if set.
+    /// Log level for this component (`debug`/`info`/`warn`/`error`). Sets the
+    /// scribe log-file floor; falls back to `SCRIBE_FILE_LEVEL` / `info`.
+    /// Normally arrives inside `--config-json`, not as a standalone flag.
     #[arg(long)]
     log: Option<String>,
+
+    /// The component's `system.atlas` manifest block, serialized to JSON by
+    /// rbnx and passed as one arg (`--config-json '{…}'`). Parsed by the binary
+    /// itself — see `robonix_scribe::init_from_config`, which reads the `log`
+    /// key from it so the manifest's per-component level reaches the log.
+    #[arg(long)]
+    config_json: Option<String>,
 }
 
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
 
-    // Log level is no longer consumed — Scribe writes everything and
-    // filtering happens at read time (`rbnx logs --level`).  The CLI
-    // arg and RUST_LOG env are kept for backward compat with existing
-    // launch scripts.
-    let _ = args.log.or_else(|| std::env::var("RUST_LOG").ok());
-
-    robonix_scribe::init("atlas");
+    // Apply the manifest's per-component `log:` level (delivered inside
+    // --config-json) to scribe's file sink before the first log line, so it
+    // controls what this component persists; `rbnx logs --level` still
+    // filters at read time.
+    robonix_scribe::init_from_config("atlas", args.config_json.as_deref());
     info!("robonix-atlas starting (control plane)");
 
     let listen = args.listen.unwrap_or_else(|| DEFAULT_LISTEN.to_string());
