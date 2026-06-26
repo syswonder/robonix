@@ -521,6 +521,7 @@ pub async fn execute(
     manifest_path: PathBuf,
     log_dir: Option<PathBuf>,
     skip_system: bool,
+    no_update_check: bool,
 ) -> Result<()> {
     let manifest_path = manifest_path
         .canonicalize()
@@ -534,8 +535,35 @@ pub async fn execute(
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
     let mut deploy: DeployManifest = serde_yaml::from_str(&raw)
         .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    // Banner + boot header FIRST, so the logo/version and what we're booting
+    // lead the output — before the (possibly slow) remote freshness check.
+    output::boot_banner();
+    output::boot_start(
+        if deploy.name.is_empty() {
+            "robonix"
+        } else {
+            &deploy.name
+        },
+        &manifest_path.display().to_string(),
+    );
+    scribe::info(
+        "bootstrap",
+        &format!(
+            "booting {} from {}",
+            if deploy.name.is_empty() {
+                "robonix"
+            } else {
+                &deploy.name
+            },
+            manifest_path.display()
+        ),
+    );
+
     // Notice (non-fatal) if any cloned remote provider is behind upstream.
-    super::check_remotes::report_outdated(&manifest_path);
+    // `--no-update-check` skips the per-package `git fetch` pass entirely.
+    if !no_update_check {
+        super::check_remotes::report_outdated(&manifest_path);
+    }
     // Env expansion applies to both the top-level env block and all nested
     // scalar strings in system / primitive / service / skill configs.
     for v in deploy.system.values_mut() {
@@ -593,28 +621,6 @@ pub async fn execute(
         }
     }
 
-    output::boot_banner();
-    output::boot_start(
-        if deploy.name.is_empty() {
-            "robonix"
-        } else {
-            &deploy.name
-        },
-        &manifest_path.display().to_string(),
-    );
-    scribe::info(
-        "bootstrap",
-        &format!(
-            "booting {} from {}",
-            if deploy.name.is_empty() {
-                "robonix"
-            } else {
-                &deploy.name
-            },
-            manifest_path.display()
-        ),
-    );
-
     let mut children: Vec<Spawned> = Vec::new();
     let state_path = teardown::state_path(&manifest_dir);
     let started_at_ms = std::time::SystemTime::now()
@@ -637,7 +643,17 @@ pub async fn execute(
     // stuck on a fresh clone.
     check_prerequisites(&deploy, &cache_root, &manifest_dir)?;
 
-    let outcome: Result<Vec<(String, String, String)>> = async {
+    // Install the SIGINT/SIGTERM handlers BEFORE bringup begins, not after.
+    // Bringup takes many seconds (git, spawns, waiting for ACTIVE); a Ctrl-C
+    // in that window used to hit the default disposition and kill rbnx
+    // outright, orphaning every child already spawned. Racing the bringup
+    // future against these streams lets us tear the partial stack down
+    // instead. (SIGKILL can't be trapped — only SIGINT/SIGTERM.) The same
+    // streams are reused for the post-boot idle wait further down.
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sigterm = signal(SignalKind::terminate())?;
+
+    let bringup = async {
         if !skip_system {
             output::boot_section("system");
             // System Rust binaries: launched in atlas → executor → pilot order.
@@ -937,8 +953,49 @@ pub async fn execute(
             }
         }
         Ok(failures)
+    };
+
+    // Race bringup against the signal streams. On a mid-boot signal the
+    // pinned future is dropped at the end of this scope (cancelling bringup
+    // at its current await point), which releases its `&mut children` borrow
+    // so we can tear down whatever was spawned so far.
+    let mut interrupted_during_boot = false;
+    let outcome: Result<Vec<(String, String, String)>> = {
+        tokio::pin!(bringup);
+        tokio::select! {
+            o = &mut bringup => o,
+            _ = sigint.recv() => { interrupted_during_boot = true; Ok(Vec::new()) }
+            _ = sigterm.recv() => { interrupted_during_boot = true; Ok(Vec::new()) }
+        }
+    };
+
+    if interrupted_during_boot {
+        output::action(
+            "Interrupted",
+            &format!("tearing down {} partial child(ren)", children.len()),
+        );
+        scribe::info(
+            "bootstrap",
+            &format!(
+                "boot interrupted by signal — tearing down {} partial children",
+                children.len()
+            ),
+        );
+        persist_state(
+            &state_path,
+            &manifest_path,
+            &atlas_endpoint,
+            started_at_ms,
+            &children,
+        );
+        let providers = component_records(&children);
+        teardown::teardown(&providers).await;
+        for sp in &mut children {
+            let _ = sp.child.wait().await;
+        }
+        let _ = std::fs::remove_file(&state_path);
+        return Ok(());
     }
-    .await;
 
     let failures = match outcome {
         Ok(failures) => failures,
@@ -986,9 +1043,8 @@ pub async fn execute(
     scribe::info("bootstrap", "all components up — waiting for signal");
     output::sub_step("Ctrl-C to tear down (or run `rbnx shutdown` from another shell).");
 
-    // Wait for SIGINT / SIGTERM, then shut children down.
-    let mut sigint = signal(SignalKind::interrupt())?;
-    let mut sigterm = signal(SignalKind::terminate())?;
+    // Wait for SIGINT / SIGTERM (reusing the streams installed before
+    // bringup), then shut children down.
     tokio::select! {
         _ = sigint.recv() => {}
         _ = sigterm.recv() => {}

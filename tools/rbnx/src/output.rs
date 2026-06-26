@@ -187,7 +187,7 @@ pub fn boot_fail(name: &str, detail: &str) {
 /// but skipped (not installed / disabled / out-of-scope on this host).
 pub fn boot_skip(name: &str, detail: &str) {
     println!(
-        "{} {}  {:<width$}  {}",
+        "\r\x1b[K{} {}  {:<width$}  {}",
         boot_now().cyan(),
         "[SKIP]".yellow(),
         name,
@@ -203,6 +203,21 @@ pub fn boot_note(name: &str, detail: &str) {
         "{} {}  {:<width$}  {}",
         boot_now().cyan(),
         "[ →  ]".cyan(),
+        name,
+        detail.dimmed(),
+        width = W_NAME,
+    );
+}
+
+/// `[  ssss.mmm] [ ↑ ] name              detail` — an update is available.
+/// Leading `\r\x1b[K` clears the in-place `boot_progress` spinner so the
+/// verdict lands cleanly. Yellow `↑` distinguishes "needs update" from the
+/// green `[ OK ]` "up to date" verdict.
+pub fn boot_update_avail(name: &str, detail: &str) {
+    println!(
+        "\r\x1b[K{} {}  {:<width$}  {}",
+        boot_now().cyan(),
+        "[ ↑  ]".yellow().bold(),
         name,
         detail.dimmed(),
         width = W_NAME,
