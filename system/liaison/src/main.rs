@@ -387,16 +387,26 @@ struct Args {
     #[arg(long = "pilot-endpoint")]
     pilot_endpoint: Option<String>,
 
-    /// Log filter (env_logger format). Defaults to $RUST_LOG, then "robonix_liaison=info".
+    /// Log level for this component (`debug`/`info`/`warn`/`error`). Sets the
+    /// scribe log-file floor; falls back to `SCRIBE_FILE_LEVEL` / `info`.
+    /// Normally arrives inside `--config-json`, not as a standalone flag.
     #[arg(long)]
     log: Option<String>,
+
+    /// The component's `system.liaison` manifest block, serialized to JSON by
+    /// rbnx and passed as one arg (`--config-json '{…}'`). Parsed by the binary
+    /// itself — see `robonix_scribe::init_from_config`, which reads the `log`
+    /// key from it so the manifest's per-component level reaches the log.
+    #[arg(long)]
+    config_json: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let _ = args.log.clone().or_else(|| std::env::var("RUST_LOG").ok());
-    robonix_scribe::init("liaison");
+    // Apply the manifest's per-component `log:` level (delivered inside
+    // --config-json) to scribe's file sink before the first log line.
+    robonix_scribe::init_from_config("liaison", args.config_json.as_deref());
     info!("robonix-liaison starting");
 
     let atlas_endpoint = args.atlas.clone().unwrap_or_else(|| {
