@@ -7,5 +7,5 @@ Plan plan
 BatchResult batch_result
 SessionStatusEvent status
 string final_text
-PilotNodeState node_state
+RtdlNodeState node_state
 TaskStateEvent task_state

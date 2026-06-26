@@ -8,8 +8,8 @@ use crate::pb::contracts::robonix_system_executor_execute_client::RobonixSystemE
 use crate::pb::executor::rtdl_event::RtdlEventEnum;
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{
-    BatchResult, CapabilityCall, CapabilityCallResult, PilotEvent, PilotNodeState, Plan, RtdlNode,
-    RtdlNodeState, SessionStatusEvent, Task, TaskStateEvent,
+    BatchResult, CapabilityCall, CapabilityCallResult, PilotEvent, Plan, RtdlNode, RtdlNodeState,
+    SessionStatusEvent, Task, TaskStateEvent,
 };
 use crate::service::{self, PilotStreamBody, SessionState};
 use crate::vlm::{Message, VlmClient, VlmStreamItem};
@@ -598,20 +598,11 @@ pub async fn run_turn(
                 ev = forest_rx.recv() => {
                     match ev {
                         Some(ForestEvent::NodeState { plan_id, node_state }) => {
-                            // Forward to the chat UI for the live forest highlight.
-                            let _ = tx
-                                .send(Ok(service::pack(
-                                    &session_id,
-                                    PilotStreamBody::NodeState(PilotNodeState {
-                                        plan_id: plan_id.clone(),
-                                        node_index: node_state.node_index,
-                                        node_kind: node_state.node_kind,
-                                        state: node_state.state,
-                                        op_id: node_state.op_id.clone(),
-                                        description: node_state.description.clone(),
-                                    }),
-                                )))
-                                .await;
+                            let mut ns = *node_state;
+                            // Carry the originating tree's id (the executor sets
+                            // this too, but be explicit so the live view always
+                            // correlates with the Plan already sent).
+                            ns.plan_id = plan_id.clone();
                             // Feed every node's result into context the moment it
                             // reaches a terminal state (2=SUCCEEDED 3=FAILED
                             // 4=CANCELED 5=TIMEOUT) so the model's view is always
@@ -624,8 +615,8 @@ pub async fn run_turn(
                             // tree-level feed in PlanDone is dropped to avoid
                             // double-feeding — every leaf result already arrives here.
                             const TERMINAL: [u32; 4] = [2, 3, 4, 5];
-                            if TERMINAL.contains(&node_state.state)
-                                && let Some(r) = node_state.leaf_result.as_ref()
+                            if TERMINAL.contains(&ns.state)
+                                && let Some(r) = ns.leaf_result.as_ref()
                             {
                                 feed_results_into_history(history, std::slice::from_ref(r));
                             }
@@ -638,15 +629,22 @@ pub async fn run_turn(
                             // batch at tree completion, which avoids the per-node
                             // re-plan storms that plain "re-plan on every node"
                             // caused.
-                            if node_state.state == RtdlNodeStateEnum::Failed as u32 {
+                            if ns.state == RtdlNodeStateEnum::Failed as u32 {
                                 should_plan = true;
                             }
                             debug!(
                                 "[pilot/forest] node_state plan_id={} node={} state={}",
-                                plan_id,
-                                node_state.node_index,
-                                node_state.state
+                                plan_id, ns.node_index, ns.state
                             );
+                            // Forward to the chat UI for the live forest highlight.
+                            // Moving `ns` last avoids cloning its (possibly large)
+                            // leaf_result on every node tick.
+                            let _ = tx
+                                .send(Ok(service::pack(
+                                    &session_id,
+                                    PilotStreamBody::NodeState(ns),
+                                )))
+                                .await;
                         }
                         Some(ForestEvent::PlanDone { plan_id, results, any_failed }) => {
                             forest.remove(&plan_id);
@@ -803,6 +801,15 @@ pub async fn run_turn(
                 }
             };
 
+            // Echo the model's literal `rtdl` tree so `rbnx logs -t pilot`
+            // shows exactly what the VLM emitted per node — including whether
+            // it filled `op_id` (expected: 0) and a node-level `description`
+            // per the RTDL protocol. This is the raw, pre-expansion payload.
+            info!(
+                "[pilot/rtdl] round={round} model rtdl: {}",
+                serde_json::to_string(&rtdl).unwrap_or_else(|_| "<unserializable>".into())
+            );
+
             // Tentative id: committed to `plan_seq` only if this round actually
             // dispatches a tree, so empty-rtdl rounds don't burn a plan id and
             // the ids stay contiguous with the trees the user sees and cancels.
@@ -821,6 +828,16 @@ pub async fn run_turn(
                 // expands — never on a recovery path, where it could falsely
                 // mark the turn done for a plan that never ran.
                 Ok(graph) => {
+                    // Per-node view of the expanded plan: the op_id is now the
+                    // pilot-assigned global id (the model's 0 is replaced), and
+                    // the description is the one that will reach executor/BATCH
+                    // (model-authored when present, else synthesized).
+                    for (i, n) in graph.nodes.iter().enumerate() {
+                        info!(
+                            "[pilot/rtdl]   node[{i}] kind={} op_id={} desc='{}'",
+                            n.node_kind, n.op_id, n.description
+                        );
+                    }
                     break (
                         assistant_content,
                         rtdl_description,
@@ -1027,23 +1044,27 @@ fn build_capability_target_map(display_caps: &[DisplayCapability<'_>]) -> Capabi
 const RTDL_PROTOCOL_REMINDER: &str = "## RTDL output (reminder — same format as your earlier turns)\n\
 Reply with exactly ONE JSON object, keys EXACTLY these four: \
 `content`, `rtdl_description`, `rtdl`, `task_update`. No other top-level keys.\n\
-`rtdl` is a tree; every node is EXACTLY one of:\n\
-- {\"op\":\"sequence\",\"children\":[ ...nodes... ]}   (run children in order)\n\
-- {\"op\":\"parallel\",\"children\":[ ...nodes... ]}   (run children concurrently)\n\
-- {\"op\":\"do\",\"cap\":\"<capability_name>\",\"args\":{ ... }}   (one capability call)\n\
+`rtdl` is a tree; every node carries `op_id` (always write `0`; the system \
+assigns the real id) and a short `description` of THIS node's intent, plus:\n\
+- {\"op\":\"sequence\",\"op_id\":0,\"description\":\"...\",\"children\":[ ...nodes... ]}   (run children in order)\n\
+- {\"op\":\"parallel\",\"op_id\":0,\"description\":\"...\",\"children\":[ ...nodes... ]}   (run children concurrently)\n\
+- {\"op\":\"do\",\"op_id\":0,\"description\":\"...\",\"cap\":\"<capability_name>\",\"args\":{ ... }}   (one capability call)\n\
 A capability name goes ONLY in a do node's `cap` — NEVER as an `op`. \
-Do NOT add any other fields to a node (no `plan_id`, no `out`, no `id`). \
-Use ONLY capability_name values from the list below; never invent names.\n\
+Beyond `op_id` and `description`, do NOT add other node fields (no `plan_id`, no `out`, no `id`). \
+Copy each `cap` EXACTLY from a capability_name in the list below (it is provider-qualified, \
+e.g. `tiago_camera.camera_snapshot`); never invent or shorten names.\n\
 `task_update`: null keeps the current goal, or {\"goal\",\"success_criterion\",\"status\"} with \
 status \"done\" only when the success_criterion verifiably holds AND no tree in the \
 \"In-flight trees\" list is still running (cancelling a tree does not make the task done — wait \
 for it to leave the list first).\n\
 Compose multi-step trees; don't drip one node per round. No new capability call this round = \
-{\"op\":\"sequence\",\"children\":[]}.\n\
-To stop a running tree, add a do node calling `builtin_cancel_plan` with the exact plan_id from \
-the In-flight trees list.\n\
+{\"op\":\"sequence\",\"op_id\":0,\"description\":\"wait\",\"children\":[]}.\n\
+To stop a running tree, add a do node whose `cap` is the list's cancel-plan capability_name \
+(e.g. `executor.builtin_cancel_plan`), passing the exact plan_id string from the In-flight trees list.\n\
 Example: {\"content\":\"listing\",\"rtdl_description\":\"list tmp\",\"rtdl\":{\"op\":\"sequence\",\
-\"children\":[{\"op\":\"do\",\"cap\":\"list_dir\",\"args\":{\"path\":\"/tmp\"}}]},\"task_update\":null}\n";
+\"op_id\":0,\"description\":\"list /tmp\",\"children\":[{\"op\":\"do\",\"op_id\":0,\
+\"description\":\"list the /tmp directory\",\"cap\":\"executor.builtin_list_dir\",\"args\":{\"path\":\"/tmp\"}}]},\
+\"task_update\":null}\n";
 
 /// Build the per-round protocol + capability catalog. `full_protocol` ships the
 /// complete spec (round 0); otherwise a one-line reminder. The capability
@@ -1285,16 +1306,59 @@ fn expand_rtdl_to_plan(
     })
 }
 
-/// Pick a node's `description`. The root node uses the LLM's tree label
-/// (`rtdl_description`) when it is non-empty; every other node — and an
-/// unlabelled root — falls back to a synthesized description. Executor's
-/// `validate_plan` requires a non-empty description on every node.
-fn node_description(path: &str, root_description: &str, synthesized: String) -> String {
-    if path == "$" && !root_description.is_empty() {
-        root_description.to_string()
-    } else {
-        synthesized
+/// Pick a node's `description`, in priority order:
+/// 1. the LLM's own per-node `description` field when present and non-empty;
+/// 2. the LLM's tree label (`rtdl_description`) for an otherwise-unlabelled root;
+/// 3. a synthesized fallback (e.g. `call camera_snapshot`).
+///
+/// The model is asked to author a node-level `description` for every node (see
+/// `rtdl_protocol.md`); the fallbacks keep a sloppy or older reply from failing
+/// the turn, since executor's `validate_plan` requires a non-empty description.
+fn pick_description(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    path: &str,
+    root_description: &str,
+    synthesized: String,
+) -> String {
+    if let Some(d) = obj.get("description").and_then(|x| x.as_str()) {
+        let d = d.trim();
+        if !d.is_empty() {
+            return d.to_string();
+        }
     }
+    if path == "$" && !root_description.is_empty() {
+        return root_description.to_string();
+    }
+    synthesized
+}
+
+/// Reject node fields outside the allowed set and require the structural ones.
+///
+/// `required` lists the keys an operator must carry beyond `op` (e.g.
+/// `children` for sequence/parallel; `cap` + `args` for do). `op_id` and
+/// `description` are always optional — the model emits them (op_id defaults to
+/// 0, which pilot ignores and reassigns), but a reply that omits them still
+/// parses. Any other key (`out`, `id`, `plan_id`, …) is an error.
+fn reject_unknown_node_keys(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    path: &str,
+    op: &str,
+    required: &[&str],
+) -> Result<()> {
+    const OPTIONAL: [&str; 2] = ["op_id", "description"];
+    for key in obj.keys() {
+        let known =
+            key == "op" || required.contains(&key.as_str()) || OPTIONAL.contains(&key.as_str());
+        if !known {
+            anyhow::bail!("{path}: {op} node has unexpected field `{key}`");
+        }
+    }
+    for req in required {
+        if !obj.contains_key(*req) {
+            anyhow::bail!("{path}: {op} node must contain `{req}`");
+        }
+    }
+    Ok(())
 }
 
 fn expand_rtdl_node(
@@ -1316,9 +1380,7 @@ fn expand_rtdl_node(
 
     match op {
         "sequence" | "parallel" => {
-            if obj.len() != 2 || !obj.contains_key("children") {
-                anyhow::bail!("{path}: {op} node must contain only `op` and `children`");
-            }
+            reject_unknown_node_keys(obj, path, op, &["children"])?;
             let children = obj
                 .get("children")
                 .and_then(|x| x.as_array())
@@ -1329,7 +1391,8 @@ fn expand_rtdl_node(
             } else {
                 RTDL_PARALLEL
             };
-            let description = node_description(
+            let description = pick_description(
+                obj,
                 path,
                 root_description,
                 format!("{op} of {} step(s)", children.len()),
@@ -1358,9 +1421,7 @@ fn expand_rtdl_node(
             Ok(node_index)
         }
         "do" => {
-            if obj.len() != 3 || !obj.contains_key("cap") || !obj.contains_key("args") {
-                anyhow::bail!("{path}: do node must contain only `op`, `cap`, and `args`");
-            }
+            reject_unknown_node_keys(obj, path, op, &["cap", "args"])?;
             let cap = obj
                 .get("cap")
                 .and_then(|x| x.as_str())
@@ -1376,7 +1437,7 @@ fn expand_rtdl_node(
             let call_index = *next_call;
             *next_call += 1;
             let node_index = nodes.len() as u32;
-            let description = node_description(path, root_description, format!("call {cap}"));
+            let description = pick_description(obj, path, root_description, format!("call {cap}"));
             nodes.push(RtdlNode {
                 node_kind: RTDL_DO,
                 children: Vec::new(),
@@ -1797,7 +1858,44 @@ mod tests {
             "out": { "image": "img" }
         });
         let err = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0, "").unwrap_err();
-        assert!(err.to_string().contains("only `op`, `cap`, and `args`"));
+        assert!(err.to_string().contains("unexpected field `out`"));
+    }
+
+    #[test]
+    fn rtdl_uses_model_node_description_over_synthesized() {
+        let mut targets = CapabilityTargetMap::new();
+        targets.insert(
+            "camera_snapshot".to_string(),
+            (
+                "cap-camera".to_string(),
+                "robonix/primitive/camera/snapshot".to_string(),
+            ),
+        );
+        // Every node carries op_id (always 0 — pilot reassigns) plus a
+        // model-authored node-level description.
+        let rtdl = json!({
+            "op": "sequence",
+            "op_id": 0,
+            "description": "inspect the doorway",
+            "children": [
+                {
+                    "op": "do",
+                    "op_id": 0,
+                    "description": "take a camera snapshot of the door",
+                    "cap": "camera_snapshot",
+                    "args": {}
+                }
+            ]
+        });
+        let plan = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 0, "").unwrap();
+        assert_eq!(plan.nodes[0].description, "inspect the doorway");
+        assert_eq!(
+            plan.nodes[1].description,
+            "take a camera snapshot of the door"
+        );
+        // The model's op_id=0 is ignored; pilot assigns non-empty unique ids.
+        assert!(!plan.nodes[0].op_id.is_empty());
+        assert_ne!(plan.nodes[0].op_id, plan.nodes[1].op_id);
     }
 
     #[test]

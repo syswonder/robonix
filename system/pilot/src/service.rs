@@ -8,7 +8,7 @@ use crate::pb::contracts::{
     robonix_system_pilot_server::RobonixSystemPilot,
 };
 use crate::pb::pilot::{
-    BatchResult, PilotEvent, PilotNodeState, Plan, SessionStatusEvent, Task, TaskStateEvent,
+    BatchResult, PilotEvent, Plan, RtdlNodeState, SessionStatusEvent, Task, TaskStateEvent,
 };
 use crate::planner::{self, ExecutorConn};
 use crate::vlm::{Message, VlmClient};
@@ -49,7 +49,7 @@ pub enum PilotStreamBody {
     Plan(Plan),
     BatchResult(BatchResult),
     Status(SessionStatusEvent),
-    NodeState(PilotNodeState),
+    NodeState(RtdlNodeState),
     TaskState(TaskStateEvent),
 }
 
