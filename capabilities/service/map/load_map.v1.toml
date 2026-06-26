@@ -1,0 +1,11 @@
+# Switch SLAM onto a previously-saved map (localization or resume-mapping),
+# optionally seeding an initial pose for fast relocalization.
+# ROS IDL: `lib/map/srv/LoadMap.srv` (map_id + mode + optional x/y/theta → ok + detail).
+[contract]
+id      = "robonix/service/map/load_map"
+version = "1"
+kind    = "service"
+idl     = "map/srv/LoadMap.srv"
+
+[mode]
+type = "rpc"
