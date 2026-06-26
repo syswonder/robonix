@@ -1,0 +1,11 @@
+# Snapshot the current SLAM map to disk under a stable map_id, so it can be
+# reloaded later (load_map) and shares its id with scene's semantic map.
+# ROS IDL: `lib/map/srv/SaveMap.srv` (map_id + note → ok + database_path + detail).
+[contract]
+id      = "robonix/service/map/save_map"
+version = "1"
+kind    = "service"
+idl     = "map/srv/SaveMap.srv"
+
+[mode]
+type = "rpc"
