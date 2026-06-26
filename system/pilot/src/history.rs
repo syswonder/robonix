@@ -126,16 +126,3 @@ pub fn sanitize_for_vlm(history: &[Message]) -> Vec<Message> {
     }
     out
 }
-
-/// Extract `std_msgs/String.data` from a tool's JSON output. Accepts either
-/// raw text (returned verbatim) or `{"data": "..."}`.
-pub fn decode_string_output(output: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(output)
-        .ok()
-        .and_then(|v| {
-            v.get("data")
-                .and_then(|x| x.as_str())
-                .map(ToString::to_string)
-        })
-        .unwrap_or_else(|| output.to_string())
-}

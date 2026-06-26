@@ -21,6 +21,8 @@
 // The grpc dispatch helper exists for future non-MCP contracts but is not
 // on the LLM-callable path today.
 
+pub mod async_poll;
+pub mod async_registry;
 pub mod builtin;
 pub mod grpc;
 pub mod mcp;
@@ -35,6 +37,7 @@ use tonic::transport::Endpoint;
 
 use crate::pb::lifecycle::{DriverRequest, DriverResponse};
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
+use crate::plan_runtime::PlanRuntime;
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::{debug, info};
@@ -74,9 +77,10 @@ pub async fn dispatch(
     call: &CapabilityCall,
     self_provider_id: &str,
     atlas: &mut AtlasClient,
+    runtime: &PlanRuntime,
 ) -> CapabilityCallResult {
     if call.provider_id == self_provider_id {
-        return builtin::execute(call).await;
+        return builtin::execute(call, runtime, self_provider_id, atlas).await;
     }
 
     if let Err(e) = ensure_skill_active(atlas, &call.provider_id).await {

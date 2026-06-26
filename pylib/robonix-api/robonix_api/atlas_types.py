@@ -87,6 +87,9 @@ class CapabilityProvider:
     kind: Kind
     namespace: str
     capability_md_path: str = ""
+    # CAPABILITY.md content as registered (portable; the path is debug
+    # provenance only). Empty when the provider shipped no markdown.
+    capability_md: str = ""
     last_heartbeat_ms: int = 0
     state: LifecycleState = LifecycleState.UNSPECIFIED
     state_detail: str = ""
@@ -189,6 +192,12 @@ def from_pb_provider(pb_rec) -> CapabilityProvider:
         kind=Kind(pb_rec.kind),
         namespace=pb_rec.namespace,
         capability_md_path=pb_rec.capability_md_path,
+        # `getattr` guard: a package built against an older atlas.proto ships
+        # a stale atlas_pb2 whose CapabilityProvider has no `capability_md`
+        # field. Atlas still sends it on the wire (forward-compatible), but
+        # accessing the attribute on the stale class raises AttributeError.
+        # Degrade to "" so mixed-version packages can still read atlas.
+        capability_md=getattr(pb_rec, "capability_md", ""),
         last_heartbeat_ms=int(pb_rec.last_heartbeat_ms),
         state=LifecycleState(pb_rec.state),
         state_detail=pb_rec.state_detail,

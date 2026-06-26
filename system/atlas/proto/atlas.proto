@@ -127,17 +127,22 @@ message RegisterRequest {
   // DeclareCapability MUST carry a contract_id under this prefix;
   // otherwise Atlas rejects with InvalidArgument.
   string namespace = 2;
-  // Absolute path to the package's CAPABILITY.md (long-form manual
-  // covering the whole CapabilityProvider -- the only place where a
-  // description of the CapabilityProvider as a whole lives; per-cap
-  // descriptions live on each Capability instead). Atlas records the
-  // path only; consumers (Pilot etc.) read the file off the local
-  // filesystem themselves. v1 assumes Atlas, every CapabilityProvider,
-  // and every consumer share a filesystem (single host); cross-host
-  // deployments need a separate "fetch CAPABILITY.md content" RPC
-  // we'll add when that ships.
+  // Absolute path to the package's CAPABILITY.md, in the *provider's own*
+  // filesystem namespace. Recorded for debugging only -- it is NOT
+  // portable: a provider running in a container reports a container path
+  // (e.g. "/explore/CAPABILITY.md") that Atlas and consumers on the host
+  // cannot open. Use `capability_md` (the content) instead.
   // Empty => no markdown for this CapabilityProvider.
   string capability_md_path = 3;
+  // The CAPABILITY.md *content* (full markdown text), read by the
+  // CapabilityProvider from its own filesystem at registration time --
+  // where `capability_md_path` is always valid, even when the provider
+  // runs in a container with a different mount layout than Atlas or its
+  // consumers. This is the cross-host / cross-container-safe channel the
+  // old `capability_md_path` comment anticipated: consumers (Pilot) use
+  // this text instead of trying to open the path themselves.
+  // Empty => no markdown for this CapabilityProvider.
+  string capability_md = 4;
 }
 message RegisterResponse { string id = 1; }
 
@@ -397,6 +402,10 @@ message CapabilityProvider {
   // Each Capability's provider_id / provider_kind equal this CapabilityProvider's
   // id / kind. The duplication is intentional -- see Capability above.
   repeated Capability capabilities = 8;
+  // CAPABILITY.md content (see RegisterRequest.capability_md). Consumers
+  // read this text rather than opening capability_md_path, which is only
+  // valid in the provider's own filesystem namespace.
+  string capability_md = 9;
 }
 
 // Discovery -- one Query RPC with a Kind filter. Python wrappers

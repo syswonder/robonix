@@ -22,6 +22,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let contracts_root = repo_root.join("capabilities");
     let proto_out = PathBuf::from(std::env::var("OUT_DIR")?);
 
+    clean_generated_proto_dir(&proto_out)?;
+
     println!("cargo:rerun-if-changed={}", idl_root.display());
     println!("cargo:rerun-if-changed={}", contracts_root.display());
     println!("cargo:rerun-if-changed=build.rs");
@@ -58,5 +60,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_client(true)
         .compile_protos(&proto_files, std::slice::from_ref(&proto_out))?;
 
+    Ok(())
+}
+
+/// Removes stale generated proto/Rust files from OUT_DIR before regenerating.
+///
+/// Side effect: deletes only files with `.proto` or `.rs` extensions in the
+/// current crate build output directory. This keeps renamed IDL packages from
+/// being compiled alongside their previous generated names during incremental
+/// builds and rust-analyzer checks.
+fn clean_generated_proto_dir(
+    proto_out: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !proto_out.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(proto_out)? {
+        let path = entry?.path();
+        let Some(ext) = path.extension().and_then(|x| x.to_str()) else {
+            continue;
+        };
+        if matches!(ext, "proto" | "rs") {
+            std::fs::remove_file(path)?;
+        }
+    }
     Ok(())
 }

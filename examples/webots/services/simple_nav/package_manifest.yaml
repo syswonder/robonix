@@ -5,8 +5,8 @@
 #
 # Capabilities (all over MCP, std_msgs/String JSON envelopes):
 #   robonix/service/navigation/navigate  → start a goto (target_x, target_y)
-#   robonix/service/navigation/status    → query current goal status
-#   robonix/service/navigation/cancel    → cancel the active goal
+#   robonix/service/navigation/navigate/status  → query current goal status
+#   robonix/service/navigation/navigate/cancel  → cancel the active goal
 manifestVersion: 1
 
 package:
@@ -22,5 +22,5 @@ start: bash scripts/start.sh
 
 capabilities:
   - name: robonix/service/navigation/navigate
-  - name: robonix/service/navigation/status
-  - name: robonix/service/navigation/cancel
+  - name: robonix/service/navigation/navigate/status
+  - name: robonix/service/navigation/navigate/cancel

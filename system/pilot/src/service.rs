@@ -4,10 +4,12 @@
 // `RobonixSystemPilot` gRPC handler (contract `robonix/system/pilot`).
 
 use crate::pb::contracts::{
-    robonix_system_executor_client::RobonixSystemExecutorClient,
+    robonix_system_executor_execute_client::RobonixSystemExecutorExecuteClient,
     robonix_system_pilot_server::RobonixSystemPilot,
 };
-use crate::pb::pilot::{BatchResult, PilotEvent, Plan, SessionStatusEvent, Task};
+use crate::pb::pilot::{
+    BatchResult, PilotEvent, Plan, RtdlNodeState, SessionStatusEvent, Task, TaskStateEvent,
+};
 use crate::planner::{self, ExecutorConn};
 use crate::vlm::{Message, VlmClient};
 use anyhow::Context;
@@ -15,7 +17,8 @@ use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_scribe::{debug, error};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, watch};
+use std::sync::atomic::AtomicU64;
+use tokio::sync::{Mutex, mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -37,6 +40,8 @@ pub const EVT_PLAN: u32 = 1;
 pub const EVT_BATCH_RESULT: u32 = 2;
 pub const EVT_STATUS: u32 = 3;
 pub const EVT_FINAL_TEXT: u32 = 4;
+pub const EVT_NODE_STATE: u32 = 5;
+pub const EVT_TASK_STATE: u32 = 6;
 
 pub enum PilotStreamBody {
     TextChunk(String),
@@ -44,6 +49,8 @@ pub enum PilotStreamBody {
     Plan(Plan),
     BatchResult(BatchResult),
     Status(SessionStatusEvent),
+    NodeState(RtdlNodeState),
+    TaskState(TaskStateEvent),
 }
 
 pub fn pack(session_id: &str, body: PilotStreamBody) -> PilotEvent {
@@ -72,6 +79,14 @@ pub fn pack(session_id: &str, body: PilotStreamBody) -> PilotEvent {
             e.event_kind = EVT_FINAL_TEXT;
             e.final_text = s;
         }
+        PilotStreamBody::NodeState(ns) => {
+            e.event_kind = EVT_NODE_STATE;
+            e.node_state = Some(ns);
+        }
+        PilotStreamBody::TaskState(ts) => {
+            e.event_kind = EVT_TASK_STATE;
+            e.task_state = Some(ts);
+        }
     }
     e
 }
@@ -94,6 +109,14 @@ pub struct PilotServiceImpl {
     /// Per-session cancellation senders. `abort_turn` Task signals this
     /// without holding the history lock.
     cancels: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    /// Per-session steer queues. A Task submitted while a turn is already
+    /// running for that session is pushed here as a mid-task steer instead of
+    /// starting a second turn; the running `run_turn` drains it.
+    steers: Arc<Mutex<HashMap<String, mpsc::Sender<Task>>>>,
+    /// Per-session RTDL plan-id counter. Monotonic, never reused, and shared
+    /// across every turn of the session so plan ids never reset to 1 on a new
+    /// message.
+    plan_seqs: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
 }
 
 impl PilotServiceImpl {
@@ -104,6 +127,8 @@ impl PilotServiceImpl {
             vlm,
             histories: Arc::new(Mutex::new(HashMap::new())),
             cancels: Arc::new(Mutex::new(HashMap::new())),
+            steers: Arc::new(Mutex::new(HashMap::new())),
+            plan_seqs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -111,6 +136,15 @@ impl PilotServiceImpl {
         let mut map = self.histories.lock().await;
         map.entry(session_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
+            .clone()
+    }
+
+    /// The session's shared, monotonic RTDL plan-id counter, created on first
+    /// use and persisted for the process lifetime so ids never reset per turn.
+    async fn get_or_create_plan_seq(&self, session_id: &str) -> Arc<AtomicU64> {
+        let mut map = self.plan_seqs.lock().await;
+        map.entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
             .clone()
     }
 }
@@ -153,7 +187,33 @@ impl RobonixSystemPilot for PilotServiceImpl {
             task.session_id = Uuid::new_v4().to_string();
         }
 
+        // Decide — under a single `steers` lock — whether this task is a mid-task
+        // steer for an already-live turn or the start of a new turn. Doing the
+        // check and the registration atomically prevents a check-then-insert race
+        // where two near-simultaneous submits for one session both start a turn.
+        let (steer_tx, steer_rx) = mpsc::channel::<Task>(32);
+        let existing_steer = {
+            let mut steers = self.steers.lock().await;
+            match steers.get(&task.session_id) {
+                Some(existing) => Some(existing.clone()),
+                None => {
+                    steers.insert(task.session_id.clone(), steer_tx.clone());
+                    None
+                }
+            }
+        };
+        if let Some(existing) = existing_steer {
+            // A turn is already live: hand this to its steer queue and return an
+            // empty stream; events keep flowing on that turn's original stream.
+            let id = task.session_id.clone();
+            let ok = existing.send(task).await.is_ok();
+            debug!("[pilot] steer task for session {id} (queued={ok})");
+            let (_tx, rx) = tokio::sync::mpsc::channel::<Result<PilotEvent, Status>>(1);
+            return Ok(Response::new(ReceiverStream::new(rx)));
+        }
+
         let history_arc = self.get_or_create_history(&task.session_id).await;
+        let plan_seq = self.get_or_create_plan_seq(&task.session_id).await;
         // what is tokio's tx and rx:
         // https://docs.rs/tokio/latest/tokio/sync/mpsc/struct.Sender.html
         // https://tokio.rs/tokio/tutorial/channels
@@ -164,9 +224,13 @@ impl RobonixSystemPilot for PilotServiceImpl {
         let vlm = self.vlm.clone();
         let session_id = task.session_id.clone();
         let cancels = Arc::clone(&self.cancels);
+        let steers = Arc::clone(&self.steers);
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
         cancels.lock().await.insert(session_id.clone(), cancel_tx);
+        // `steer_tx`/`steer_rx` were created above; the sender is already
+        // registered in `self.steers` under the atomic check, and `steer_rx`
+        // moves into the turn below to drain mid-task steers.
 
         tokio::spawn(async move {
             let _ = tx
@@ -190,6 +254,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
                         ))))
                         .await;
                     cancels.lock().await.remove(&session_id);
+                    steers.lock().await.remove(&session_id);
                     return;
                 }
             };
@@ -204,6 +269,8 @@ impl RobonixSystemPilot for PilotServiceImpl {
                 &provider_id,
                 &tx,
                 cancel_rx,
+                steer_rx,
+                plan_seq,
             )
             .await
             {
@@ -212,6 +279,7 @@ impl RobonixSystemPilot for PilotServiceImpl {
             }
 
             cancels.lock().await.remove(&session_id);
+            steers.lock().await.remove(&session_id);
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
@@ -224,12 +292,15 @@ async fn build_executor_conn(
     mut atlas: AtlasClient,
     consumer_id: &str,
 ) -> anyhow::Result<ExecutorConn> {
-    let (_, _, exec_ch) =
-        atlas_client::connect_to_capability(&mut atlas, consumer_id, "robonix/system/executor")
-            .await
-            .context("connect_to_capability robonix/system/executor")?;
+    let (_, _, exec_ch) = atlas_client::connect_to_capability(
+        &mut atlas,
+        consumer_id,
+        "robonix/system/executor/execute",
+    )
+    .await
+    .context("connect_to_capability robonix/system/executor/execute")?;
     Ok(ExecutorConn {
-        graph: RobonixSystemExecutorClient::new(exec_ch),
+        graph: RobonixSystemExecutorExecuteClient::new(exec_ch),
     })
 }
 

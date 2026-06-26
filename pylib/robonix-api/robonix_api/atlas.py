@@ -177,11 +177,35 @@ class _Atlas:
         return self._register(self._wire_stub.RegisterSkill, id, namespace, capability_md_path)
 
     def _register(self, rpc, id: str, namespace: str, capability_md_path: str) -> str:
-        resp = rpc(self._wire_pb.RegisterRequest(
+        # Read the CAPABILITY.md *content* here, in the provider's own
+        # process, where `capability_md_path` is always valid -- even when
+        # the provider runs in a container whose mount layout differs from
+        # atlas's or the consumers'. Atlas stores and serves this text;
+        # the path is registered too but only as debug provenance (no
+        # consumer resolves it). Read failures are non-fatal: registration
+        # still proceeds with empty content.
+        capability_md = ""
+        if capability_md_path:
+            try:
+                with open(capability_md_path, "r", encoding="utf-8") as fh:
+                    capability_md = fh.read()
+            except OSError as e:
+                log.warning("register %s: read CAPABILITY.md %r failed: %s",
+                            id, capability_md_path, e)
+        req = self._wire_pb.RegisterRequest(
             id=id,
             namespace=namespace,
             capability_md_path=capability_md_path,
-        ))
+        )
+        # Set `capability_md` only when the generated stub actually has the
+        # field. A package built against an older atlas.proto ships a stale
+        # atlas_pb2 without it; degrade gracefully (register without content)
+        # rather than raising, so mixed-version deployments still come up.
+        if capability_md and any(
+            f.name == "capability_md" for f in req.DESCRIPTOR.fields
+        ):
+            req.capability_md = capability_md
+        resp = rpc(req)
         return resp.id
 
     def unregister(self, id: str) -> bool:
