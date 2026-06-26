@@ -225,31 +225,51 @@ pub fn report_outdated(manifest_path: &Path) {
         return;
     }
 
+    // Each provider triggers a real `git fetch` (up to 6s on a slow/offline
+    // remote), serially. Show an in-place spinner per package while its fetch
+    // runs, then overwrite it with a definite verdict — `[ OK ] up to date`
+    // or `[ ↑ ] N behind …` — so nothing is left dangling on a `…`. Skip the
+    // whole phase with `rbnx boot --no-update-check`.
+    output::boot_section("checking remote providers for updates (skip: --no-update-check)");
     let mut outdated = Vec::new();
     for p in &remote {
+        output::boot_progress(&p.name, "fetching origin…", 0);
         let st = status_of(p);
         if st.outdated() {
+            let behind = match st.behind {
+                Some(n) => format!("{n} behind"),
+                None => "behind".to_string(),
+            };
+            output::boot_update_avail(
+                &p.name,
+                &format!(
+                    "{behind}; remote {} ({}): {}",
+                    st.remote_short, st.remote_date, st.remote_subject
+                ),
+            );
             outdated.push(st);
+        } else if let Some(note) = &st.note {
+            // Couldn't determine (offline / shallow / fetch failed) — say so
+            // plainly rather than implying it's up to date.
+            output::boot_skip(&p.name, note);
+        } else {
+            output::boot_ok(&p.name, "up to date");
         }
     }
+
+    // Final, unambiguous verdict line.
     if outdated.is_empty() {
+        output::sub_step(&format!(
+            "{} remote provider(s) up to date — nothing to update",
+            remote.len()
+        ));
         return;
     }
-
-    output::boot_section("remote providers — updates available");
-    for st in &outdated {
-        let behind = match st.behind {
-            Some(n) => format!("{n} behind"),
-            None => "behind".to_string(),
-        };
-        output::boot_note(
-            &st.name,
-            &format!(
-                "{behind}; remote {} ({}): {}",
-                st.remote_short, st.remote_date, st.remote_subject
-            ),
-        );
-    }
+    output::sub_step(&format!(
+        "{} of {} provider(s) have updates available:",
+        outdated.len(),
+        remote.len()
+    ));
     output::info(&format!(
         "update all:  rbnx update -f {}",
         manifest_path.display()

@@ -100,6 +100,11 @@ pub enum Commands {
         /// those are already running externally.
         #[arg(long)]
         skip_system: bool,
+        /// Skip the remote-provider freshness check (the per-package
+        /// `git fetch` pass that runs before boot). Use when offline or in a
+        /// hurry.
+        #[arg(long)]
+        no_update_check: bool,
     },
     /// Update remote (`url:`) providers to their latest upstream commit
     ///
@@ -401,7 +406,8 @@ pub async fn execute(command: Commands, config: Config) -> Result<()> {
             file,
             log_dir,
             skip_system,
-        } => deploy::execute(config, file, log_dir, skip_system).await,
+            no_update_check,
+        } => deploy::execute(config, file, log_dir, skip_system, no_update_check).await,
         Commands::Update { path, file } => update::execute(config, path, file).await,
         Commands::Shutdown { file } => shutdown::execute(file).await,
         Commands::Clean {
