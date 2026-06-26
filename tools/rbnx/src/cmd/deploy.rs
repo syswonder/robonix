@@ -327,9 +327,9 @@ struct Spawned {
 }
 
 fn log_path(log_dir: &Path, name: &str) -> PathBuf {
-    // Same short stem Scribe uses for the file (see process::short_tag), so
-    // the path rbnx reports matches the file that actually gets written.
-    log_dir.join(format!("{}.log", robonix_cli::process::short_tag(name)))
+    // `name` is the provider_id — the exact Scribe tag, so `<name>.log` is the
+    // real file rbnx should point at. No name mangling.
+    log_dir.join(format!("{name}.log"))
 }
 
 async fn spawn_system_binary(
@@ -420,7 +420,11 @@ async fn spawn_package(
     } else {
         entry.name.clone()
     };
-    let log_name = format!("{component}_{name}");
+    // Scribe tag + log-file stem = the provider_id (`entry.name`) verbatim.
+    // provider_id is unique per deploy (atlas enforces it), so no kind prefix
+    // is needed for disambiguation — `rbnx logs -t <provider_id>` and the file
+    // `<provider_id>.log` both key on the same name the user wrote.
+    let log_name = name.clone();
 
     // Write this instance's config to disk for boot's own bookkeeping
     // (debugging via `cat <instances>/<name>.json`, post-mortem
@@ -476,8 +480,8 @@ async fn spawn_package(
         .id()
         .ok_or_else(|| anyhow::anyhow!("spawned package '{name}' but it had no pid"))?;
 
-    // Pipe stdout / stderr into Scribe — tag = log_name so the file
-    // matches the old naming convention (e.g. "service_mapping.log").
+    // Pipe stdout / stderr into Scribe — tag = provider_id, so the file is
+    // `<provider_id>.log` (e.g. "mapping.log").
     let stdout = child.stdout.take().expect("stdout not piped");
     let stderr = child.stderr.take().expect("stderr not piped");
     let tag_out = log_name.clone();
