@@ -15,32 +15,6 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
-/// Derive a short, human-friendly log tag / file stem from a package's
-/// `std_name`. Used as the Scribe tag for captured child output and as the
-/// per-package log-file name, so `rbnx logs` shows `mapping` / `scene` /
-/// `tiago_camera` instead of the full `com.robonix.<kind>.<name>` id.
-///
-/// Rules: take the last dot-segment, then drop a leading kind prefix
-/// (`service_` / `system_` / `primitive_` / `skill_`):
-///   `com.robonix.service.mapping`      → `mapping`
-///   `com.robonix.example.tiago_camera` → `tiago_camera`
-///   `service_memory`                   → `memory`
-///   `atlas`                            → `atlas`
-///
-/// `deploy::log_path` MUST derive the same name so the file rbnx points at
-/// matches the file Scribe writes.
-pub fn short_tag(std_name: &str) -> String {
-    let last = std_name.rsplit('.').next().unwrap_or(std_name);
-    for prefix in ["service_", "system_", "primitive_", "skill_"] {
-        if let Some(rest) = last.strip_prefix(prefix)
-            && !rest.is_empty()
-        {
-            return rest.to_string();
-        }
-    }
-    last.to_string()
-}
-
 /// Information about a running process for a capability or skill
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessInfo {
@@ -299,11 +273,9 @@ impl ProcessManager {
         // drown out the boot progress lines.
         let stdout = child.stdout.take().expect("stdout not piped");
         let stderr = child.stderr.take().expect("stderr not piped");
-        // Short, human-friendly scribe tag (also the log-file stem) so
-        // `rbnx logs` shows `mapping` / `tiago_camera`, not the full
-        // `com.robonix.service.mapping` std_name. Keep `deploy::log_path` in
-        // sync (it derives the same name).
-        let tag = short_tag(std_name);
+        // Scribe tag + log-file stem = `std_name` (the provider_id) verbatim,
+        // matching `deploy::log_path`. No name mangling.
+        let tag = std_name.to_string();
 
         let stdout_task = tokio::spawn(async move {
             let reader = tokio::io::BufReader::new(stdout);
@@ -313,7 +285,7 @@ impl ProcessManager {
             }
         });
 
-        let tag2 = short_tag(std_name);
+        let tag2 = std_name.to_string();
         let stderr_task = tokio::spawn(async move {
             let reader = tokio::io::BufReader::new(stderr);
             let mut lines = reader.lines();
