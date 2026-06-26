@@ -15,6 +15,23 @@
 
 set -euo pipefail
 
+# ── Platform dispatch (same scheme as mapping_rbnx) ─────────────────────────
+#   ROBONIX_SCENE_FORCE=native|docker     explicit hard pin
+#   else auto: ROBONIX_SCENE_PLATFORM=jetson_orin → native, otherwise docker
+# native → scripts/start_native.sh (host venv + host JetPack torch, no docker).
+PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+is_native_platform() { case "$1" in jetson_orin|jetson*|orin*) return 0 ;; *) return 1 ;; esac }
+case "${ROBONIX_SCENE_FORCE:-}" in
+    native) MODE=native ;;
+    docker) MODE=docker ;;
+    "") if is_native_platform "${ROBONIX_SCENE_PLATFORM:-}"; then MODE=native; else MODE=docker; fi ;;
+    *) echo "[scene/start] ROBONIX_SCENE_FORCE=${ROBONIX_SCENE_FORCE} not in {native,docker}" >&2; exit 2 ;;
+esac
+echo "[scene/start] mode=${MODE} (FORCE=${ROBONIX_SCENE_FORCE:-} PLATFORM=${ROBONIX_SCENE_PLATFORM:-})"
+if [[ "$MODE" == "native" ]]; then
+    exec bash "${PKG}/scripts/start_native.sh"
+fi
+
 CT="${ROBONIX_SCENE_CONTAINER:-robonix_scene}"
 IMG="${ROBONIX_SCENE_IMAGE:-robonix-scene}"
 
@@ -43,8 +60,14 @@ fi
 # ROBONIX_FORCE_CPU=1. Without this flag the container sees CPU only
 # and CLIP/YOLO run ~5x slower.
 declare -a GPU_ARGS=()
-if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]] && command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
-    GPU_ARGS=(--gpus all)
+if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]]; then
+    if is_native_platform "${ROBONIX_SCENE_PLATFORM:-}" || [[ -e /etc/nv_tegra_release ]]; then
+        # Jetson / L4T: the container gets the GPU via the NVIDIA container
+        # runtime (which bind-mounts the host CUDA libs); `--gpus all` is x86.
+        GPU_ARGS=(--runtime nvidia)
+    elif command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        GPU_ARGS=(--gpus all)
+    fi
 fi
 
 exec docker run --rm \
