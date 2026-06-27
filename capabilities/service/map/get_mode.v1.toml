@@ -1,0 +1,10 @@
+# Read the SLAM mode (mapping | localization) currently in effect at runtime.
+# Complements switch_mode. ROS IDL: `lib/map/srv/GetMode.srv` ( -> ok + mode + detail).
+[contract]
+id      = "robonix/service/map/get_mode"
+version = "1"
+kind    = "service"
+idl     = "map/srv/GetMode.srv"
+
+[mode]
+type = "rpc"
