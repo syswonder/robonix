@@ -186,6 +186,18 @@ if [[ "$TARGET" == "jetson-native" ]]; then
             https://github.com/concept-graphs/concept-graphs.git "$CG"
     fi
     "$PY" -m pip install --user --no-deps -e "$CG" || echo "[build] warning: concept-graphs install failed"
+    # Pre-fetch the CLIP weights into the host HF cache (start_native points
+    # HF_HOME here). The docker path bakes these into the image; the native
+    # path must cache them now, since the runtime host may have no internet
+    # and perception silently degrades to "no objects" without them.
+    HFD="$PKG/rbnx-build/data/hf"
+    mkdir -p "$HFD/clip"
+    HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}" HF_HOME="$HFD" HF_HUB_DOWNLOAD_TIMEOUT=120 \
+        "$PY" -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')" \
+        || echo "[build] warning: open_clip weight prefetch failed (perception will degrade)"
+    HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}" \
+        "$PY" -c "import clip; clip.load('ViT-B/32', device='cpu', download_root='$HFD/clip')" \
+        || echo "[build] warning: openai-clip weight prefetch failed"
     "$PY" -c "import torch,torchvision,ultralytics; print('[build] torch',torch.__version__,'cuda',torch.cuda.is_available())" || true
     echo "[build] done (jetson-native)."
     exit 0
