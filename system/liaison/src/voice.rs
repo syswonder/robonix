@@ -51,7 +51,7 @@ use crate::pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
 use crate::pb::pilot::{PilotEvent, Task};
 use crate::pb::tts;
 use crate::pb::voiceprint;
-use robonix_scribe::warn;
+use robonix_scribe::{info, warn};
 
 // ── Stable VoiceEvent kinds (mirror lib/system/liaison/msg/VoiceEvent.msg) ───
 
@@ -261,6 +261,7 @@ async fn run_session(
         record_seconds.max(5)
     };
 
+    let t_cap = std::time::Instant::now();
     let (audio_pcm, transcript) = if mock {
         let canned = mock_transcript();
         let _ = tx
@@ -299,6 +300,21 @@ async fn run_session(
         .await?
     };
 
+    // [profile] record start → final transcript: covers mic-open + audio
+    // transfer + streaming ASR inference. Compare against the per-chunk mic
+    // timings above (transfer) and the speech service's [profile-asr] lines
+    // (inference) to see which dominates.
+    {
+        let secs = audio_pcm.len() as f64 / (DEFAULT_AUDIO_SAMPLE_RATE as f64 * 2.0);
+        info!(
+            "[profile] record→transcript {} ms (audio {:.2}s, {} pcm bytes, transcript {} chars)",
+            t_cap.elapsed().as_millis(),
+            secs,
+            audio_pcm.len(),
+            transcript.chars().count()
+        );
+    }
+
     if transcript.trim().is_empty() {
         anyhow::bail!("empty transcript — nothing to send to Pilot");
     }
@@ -331,6 +347,9 @@ async fn run_session(
     // Track whether we've already spoken at least one per-plan answer, so the
     // end-of-turn fallback below doesn't double-speak.
     let mut spoke_any = false;
+    // [profile] pilot round-trip (submit → first event → turn done).
+    let t_pilot = std::time::Instant::now();
+    let mut first_pilot_logged = false;
 
     let pilot_stream_result = async {
         let mut client = RobonixSystemPilotClient::connect(pilot_endpoint.clone())
@@ -346,6 +365,13 @@ async fn run_session(
             while let Some(item) = pilot_stream.next().await {
                 match item {
                     Ok(ev) => {
+                        if !first_pilot_logged {
+                            info!(
+                                "[profile] pilot: first event +{} ms (after transcript submit)",
+                                t_pilot.elapsed().as_millis()
+                            );
+                            first_pilot_logged = true;
+                        }
                         accumulate_text(&ev, &mut accumulated_text);
                         // Speak each plan's natural-language answer the moment it
                         // arrives (EVT_FINAL_TEXT = 4), rather than once at the end
@@ -370,6 +396,8 @@ async fn run_session(
                             .await;
                         if speak_now {
                             spoke_any = true;
+                            let t_tts = std::time::Instant::now();
+                            let say_chars = say.chars().count();
                             if let Err(e) = synthesize_and_play(
                                 &atlas,
                                 &req.tts_node_id,
@@ -389,6 +417,11 @@ async fn run_session(
                                     )))
                                     .await;
                             }
+                            info!(
+                                "[profile] tts+play +{} ms ({} chars spoken)",
+                                t_tts.elapsed().as_millis(),
+                                say_chars
+                            );
                         }
                     }
                     Err(e) => {
@@ -403,6 +436,12 @@ async fn run_session(
             anyhow::bail!("Pilot unreachable at {pilot_endpoint}: {e}");
         }
     }
+
+    info!(
+        "[profile] pilot: turn done +{} ms ({} chars of answer text)",
+        t_pilot.elapsed().as_millis(),
+        accumulated_text.chars().count()
+    );
 
     // 5. Fallback TTS: if the turn produced only streamed chunks (no
     // EVT_FINAL_TEXT was spoken per-result above), speak the accumulated text
@@ -508,6 +547,13 @@ async fn stream_capture_and_recognize(
     //   4. outer task drops asr_req_rx (server already returned FINAL)
     let pump_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(max_seconds as u64);
+        // [profile] mic transfer: t_pump=request start; first-chunk latency is
+        // the audio-source startup (e.g. macOS bridge over the network); the
+        // chunk count + total audio vs wall time shows transfer throughput.
+        let t_pump = tokio::time::Instant::now();
+        let mut n_chunks: u32 = 0u32;
+        let mut audio_s: f32 = 0.0;
+        let mut logged_first = false;
         let mut has_spoken = false;
         let mut silence_secs: f32 = 0.0;
         loop {
@@ -517,6 +563,15 @@ async fn stream_capture_and_recognize(
             let remaining = deadline - tokio::time::Instant::now();
             match tokio::time::timeout(remaining, mic_stream.message()).await {
                 Ok(Ok(Some(chunk))) => {
+                    if !logged_first {
+                        info!(
+                            "[profile] mic: first chunk +{} ms (audio-source startup / transfer)",
+                            t_pump.elapsed().as_millis()
+                        );
+                        logged_first = true;
+                    }
+                    n_chunks += 1;
+                    audio_s += chunk.duration_s.max(0.0);
                     let dur = chunk.duration_s.max(0.0);
                     let rms = pcm_rms_s16le(&chunk.data);
                     if rms >= VAD_SPEECH_RMS {
@@ -542,6 +597,12 @@ async fn stream_capture_and_recognize(
                 Err(_) => break,
             }
         }
+        let wall = t_pump.elapsed().as_millis();
+        info!(
+            "[profile] mic: pump done +{wall} ms, {n_chunks} chunks, {audio_s:.2}s audio \
+             (transfer realtime-factor {:.2}; >1 means audio arrived slower than realtime)",
+            (wall as f32 / 1000.0) / audio_s.max(0.001)
+        );
     });
 
     // FunASR docs: AsrAudioChunk + ASR backend reads its own audio_config
