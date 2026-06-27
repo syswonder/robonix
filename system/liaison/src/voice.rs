@@ -380,7 +380,11 @@ async fn run_session(
                         let speak_now = req.tts_enabled
                             && ev.event_kind == 4
                             && !ev.final_text.trim().is_empty();
-                        let say = if speak_now { ev.final_text.clone() } else { String::new() };
+                        let say = if speak_now {
+                            ev.final_text.clone()
+                        } else {
+                            String::new()
+                        };
                         let _ = tx
                             .send(Ok(VoiceEvent {
                                 event_kind: KIND_PILOT,
