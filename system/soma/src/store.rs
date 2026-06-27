@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub struct SomaStore {
@@ -20,6 +21,14 @@ pub struct RobotRecord {
     pub yaml_text: String,
     pub urdf_path: PathBuf,
     pub urdf_xml: String,
+}
+
+#[derive(Debug, Error)]
+pub enum StoreError {
+    #[error("unknown Soma robot_id '{0}'")]
+    NotFound(String),
+    #[error("robot_id is empty and no default_robot is configured")]
+    MissingDefaultRobot,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,7 +73,7 @@ impl SomaStore {
     }
 
     /// Get a robot by id; empty id selects the configured default or the only robot.
-    pub fn get(&self, robot_id: &str) -> Result<&RobotRecord> {
+    pub fn get(&self, robot_id: &str) -> std::result::Result<&RobotRecord, StoreError> {
         let trimmed = robot_id.trim();
         let id = if trimmed.is_empty() {
             self.resolve_default_robot()?
@@ -73,7 +82,7 @@ impl SomaStore {
         };
         self.robots
             .get(id)
-            .ok_or_else(|| anyhow::anyhow!("unknown Soma robot_id '{id}'"))
+            .ok_or_else(|| StoreError::NotFound(id.to_string()))
     }
 
     pub fn len(&self) -> usize {
@@ -84,19 +93,19 @@ impl SomaStore {
         self.robots.is_empty()
     }
 
-    fn resolve_default_robot(&self) -> Result<&str> {
+    fn resolve_default_robot(&self) -> std::result::Result<&str, StoreError> {
         if let Some(id) = &self.default_robot {
             return Ok(id);
         }
         if self.robots.len() == 1 {
-            return self
+            return Ok(self
                 .robots
                 .keys()
                 .next()
                 .map(String::as_str)
-                .context("no Soma robots loaded");
+                .expect("one robot is loaded"));
         }
-        bail!("robot_id is empty and no default_robot is configured")
+        Err(StoreError::MissingDefaultRobot)
     }
 }
 

@@ -5,7 +5,7 @@ use crate::pb::contracts::{
     robonix_system_soma_get_yaml_server::RobonixSystemSomaGetYaml,
 };
 use crate::pb::soma::{GetUrdfRequest, GetUrdfResponse, GetYamlRequest, GetYamlResponse};
-use crate::store::SomaStore;
+use crate::store::{SomaStore, StoreError};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
@@ -19,14 +19,10 @@ impl SomaService {
         Self { store }
     }
 
-    fn map_lookup_error(error: anyhow::Error) -> Status {
-        let msg = error.to_string();
-        if msg.contains("unknown Soma robot_id") {
-            Status::not_found(msg)
-        } else if msg.contains("robot_id is empty") {
-            Status::failed_precondition(msg)
-        } else {
-            Status::internal(msg)
+    fn map_lookup_error(error: StoreError) -> Status {
+        match error {
+            StoreError::NotFound(_) => Status::not_found(error.to_string()),
+            StoreError::MissingDefaultRobot => Status::failed_precondition(error.to_string()),
         }
     }
 }
