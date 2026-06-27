@@ -1,0 +1,9 @@
+# Return the URDF referenced by a Soma YAML file.
+[contract]
+id      = "robonix/system/soma/get_urdf"
+version = "1"
+kind    = "system"
+idl     = "soma/srv/GetUrdf.srv"
+
+[mode]
+type = "rpc"

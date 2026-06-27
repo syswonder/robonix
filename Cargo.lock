@@ -2900,6 +2900,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "robonix-soma"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "prost",
+ "protoc-bin-vendored",
+ "robonix-atlas",
+ "robonix-codegen",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
 name = "roxmltree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
