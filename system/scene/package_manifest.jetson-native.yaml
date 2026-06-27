@@ -6,8 +6,8 @@
 #           open3d come from the host JetPack stack (see the scene README
 #           "Jetson native prerequisites" for how to install them).
 #   start → ROBONIX_SCENE_FORCE=native scripts/start.sh → start_native.sh:
-#           runs scene_service on the host python, sharing the host RMW
-#           (CycloneDDS on the ranger) so it sees the live camera/pointcloud.
+#           runs scene_service on the host python, sharing the host RMW so it
+#           sees the live camera/pointcloud topics the other host nodes publish.
 #
 # Use this on a Jetson whose host already has ROS 2 Humble + a CUDA-enabled
 # python (the common JetPack setup). For a self-contained image instead, use

@@ -9,9 +9,9 @@
 # --system-site-packages so the heavy CUDA wheels come from the host JetPack
 # stack and only the light pure-python deps live in the venv.
 #
-# Unlike the docker path this does NOT force FastRTPS/no-shm: native scene must
-# share the host's RMW (the car runs CycloneDDS) to actually see the camera /
-# pointcloud topics published by the other native nodes.
+# Unlike the docker path this does NOT force a specific RMW / SHM profile:
+# native scene must share whatever RMW the other host nodes use so it actually
+# sees the camera / pointcloud topics they publish.
 set -euo pipefail
 
 PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
