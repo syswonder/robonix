@@ -104,12 +104,12 @@ jetson-native manifest):
 
 ```bash
 RBNX_BUILD_TARGET=jetson-native bash scripts/build.sh   # venv-free; pip --user the light deps
-ROBONIX_SCENE_FORCE=native     bash scripts/start.sh    # host python, host RMW (CycloneDDS)
+ROBONIX_SCENE_FORCE=native     bash scripts/start.sh    # host python, host RMW
 ```
 
-> Native scene shares the **host RMW** (the ranger runs CycloneDDS) rather than
-> the container's FastRTPS, so it sees the live camera / pointcloud topics the
-> other native nodes publish. Set `ROBONIX_FORCE_CPU=1` to skip CUDA.
+> Native scene shares the **host RMW** rather than forcing the container's own
+> RMW/SHM profile, so it sees the live camera / pointcloud topics the other
+> host nodes publish. Set `ROBONIX_FORCE_CPU=1` to skip CUDA.
 
 ## Build + run
 
