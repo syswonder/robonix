@@ -328,6 +328,9 @@ async fn run_session(
     );
 
     let mut accumulated_text = String::new();
+    // Track whether we've already spoken at least one per-plan answer, so the
+    // end-of-turn fallback below doesn't double-speak.
+    let mut spoke_any = false;
 
     let pilot_stream_result = async {
         let mut client = RobonixSystemPilotClient::connect(pilot_endpoint.clone())
@@ -344,6 +347,14 @@ async fn run_session(
                 match item {
                     Ok(ev) => {
                         accumulate_text(&ev, &mut accumulated_text);
+                        // Speak each plan's natural-language answer the moment it
+                        // arrives (EVT_FINAL_TEXT = 4), rather than once at the end
+                        // of the whole turn — so a multi-plan reply is voiced live,
+                        // result by result.
+                        let speak_now = req.tts_enabled
+                            && ev.event_kind == 4
+                            && !ev.final_text.trim().is_empty();
+                        let say = if speak_now { ev.final_text.clone() } else { String::new() };
                         let _ = tx
                             .send(Ok(VoiceEvent {
                                 event_kind: KIND_PILOT,
@@ -357,6 +368,28 @@ async fn run_session(
                                 timestamp_ms: now_ms(),
                             }))
                             .await;
+                        if speak_now {
+                            spoke_any = true;
+                            if let Err(e) = synthesize_and_play(
+                                &atlas,
+                                &req.tts_node_id,
+                                &req.speaker_node_id,
+                                &language,
+                                &say,
+                                &session_id,
+                                &tx,
+                            )
+                            .await
+                            {
+                                let _ = tx
+                                    .send(Ok(event_status(
+                                        KIND_TTS_DONE,
+                                        &session_id,
+                                        &format!("tts skipped: {e:#}"),
+                                    )))
+                                    .await;
+                            }
+                        }
                     }
                     Err(e) => {
                         anyhow::bail!("Pilot stream error: {e}");
@@ -371,8 +404,11 @@ async fn run_session(
         }
     }
 
-    // 5. Optional TTS playback (non-fatal on any error).
+    // 5. Fallback TTS: if the turn produced only streamed chunks (no
+    // EVT_FINAL_TEXT was spoken per-result above), speak the accumulated text
+    // once at the end. Non-fatal on any error.
     if req.tts_enabled
+        && !spoke_any
         && !accumulated_text.trim().is_empty()
         && let Err(e) = synthesize_and_play(
             &atlas,
