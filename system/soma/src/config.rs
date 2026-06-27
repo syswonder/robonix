@@ -56,8 +56,8 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_CONFIG_PATH")]
     pub config: Option<PathBuf>,
 
-    #[arg(long, env = "ROBONIX_SOMA_RBNX_BIN", default_value = "rbnx")]
-    pub rbnx_bin: String,
+    #[arg(long, env = "ROBONIX_SOMA_RBNX_BIN")]
+    pub rbnx_bin: Option<String>,
 
     #[arg(long)]
     pub log: Option<String>,
@@ -141,8 +141,11 @@ impl SomaConfig {
             robonix_root,
             default_robot: args.default_robot.or(file_cfg.default_robot),
             deployments,
-            start_packages: file_cfg.start_packages.unwrap_or(true),
-            rbnx_bin: file_cfg.rbnx_bin.unwrap_or(args.rbnx_bin),
+            start_packages: file_cfg.start_packages.unwrap_or(false),
+            rbnx_bin: args
+                .rbnx_bin
+                .or(file_cfg.rbnx_bin)
+                .unwrap_or_else(|| "rbnx".into()),
         })
     }
 }
@@ -244,7 +247,7 @@ mod tests {
             robonix_root: Some(repo_root()),
             deployments: vec![PathBuf::from("examples/test_ci")],
             config: None,
-            rbnx_bin: "rbnx".into(),
+            rbnx_bin: None,
             log: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
@@ -273,7 +276,7 @@ mod tests {
             robonix_root: None,
             deployments: vec![],
             config: Some(config_path),
-            rbnx_bin: "rbnx".into(),
+            rbnx_bin: None,
             log: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
@@ -299,7 +302,7 @@ mod tests {
             robonix_root: None,
             deployments: vec![],
             config: Some(config_path),
-            rbnx_bin: "rbnx".into(),
+            rbnx_bin: None,
             log: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
@@ -309,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn start_packages_defaults_to_true_when_config_omits_it() {
+    fn start_packages_defaults_to_false_when_config_omits_it() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let config_path = tmp.path().join("config.yaml");
         std::fs::write(&config_path, "robonix_root: .\ndeployments:\n  - .\n")
@@ -322,11 +325,54 @@ mod tests {
             robonix_root: None,
             deployments: vec![],
             config: Some(config_path),
-            rbnx_bin: "rbnx".into(),
+            rbnx_bin: None,
             log: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
-        assert!(cfg.start_packages);
+        assert!(!cfg.start_packages);
+    }
+
+    #[test]
+    fn cli_rbnx_bin_overrides_config_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            "robonix_root: .\ndeployments:\n  - .\nrbnx_bin: file-rbnx\n",
+        )
+        .expect("write config");
+        let args = Args {
+            atlas: None,
+            listen: None,
+            provider_id: None,
+            default_robot: None,
+            robonix_root: None,
+            deployments: vec![],
+            config: Some(config_path),
+            rbnx_bin: Some("cli-rbnx".into()),
+            log: None,
+        };
+        let cfg = SomaConfig::resolve(args).expect("resolve config");
+
+        assert_eq!(cfg.rbnx_bin, "cli-rbnx");
+    }
+
+    #[test]
+    fn rbnx_bin_defaults_when_unset() {
+        let args = Args {
+            atlas: None,
+            listen: None,
+            provider_id: None,
+            default_robot: None,
+            robonix_root: Some(repo_root()),
+            deployments: vec![PathBuf::from("examples/test_ci")],
+            config: None,
+            rbnx_bin: None,
+            log: None,
+        };
+        let cfg = SomaConfig::resolve(args).expect("resolve config");
+
+        assert_eq!(cfg.rbnx_bin, "rbnx");
     }
 
     #[test]
@@ -378,7 +424,7 @@ mod tests {
             robonix_root: None,
             deployments: vec![],
             config: Some(relative_config_path),
-            rbnx_bin: "rbnx".into(),
+            rbnx_bin: None,
             log: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
@@ -399,7 +445,7 @@ mod tests {
             robonix_root: None,
             deployments: vec![],
             config: Some(manifest_dir.join("config.yaml")),
-            rbnx_bin: "rbnx".into(),
+            rbnx_bin: None,
             log: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");

@@ -29,11 +29,23 @@ pub struct PackageStartupCheck {
 pub enum PackageStartupStatus {
     StartDisabled,
     MissingManifest,
-    Spawned { command: String, pid: Option<u32> },
+    Spawned { command: String },
     SpawnFailed { command: String, error: String },
 }
 
 impl StartupReport {
+    pub fn has_failures(&self) -> bool {
+        self.deployments.iter().any(|deployment| {
+            deployment.packages.iter().any(|package| {
+                matches!(
+                    package.status,
+                    PackageStartupStatus::MissingManifest
+                        | PackageStartupStatus::SpawnFailed { .. }
+                )
+            })
+        })
+    }
+
     /// Print a compact startup table to stderr so operators can inspect bring-up results.
     pub fn print_to_terminal(&self) {
         eprintln!();
@@ -59,12 +71,9 @@ impl StartupReport {
                         package.name,
                         package.package_manifest_path.display()
                     ),
-                    PackageStartupStatus::Spawned { command, pid } => eprintln!(
-                        "  [ OK ] {} {}: pid={} cmd={}",
-                        package.kind,
-                        package.name,
-                        pid.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
-                        command
+                    PackageStartupStatus::Spawned { command } => eprintln!(
+                        "  [ OK ] {} {}: cmd={}",
+                        package.kind, package.name, command
                     ),
                     PackageStartupStatus::SpawnFailed { command, error } => eprintln!(
                         "  [FAIL] {} {}: {} cmd={}",

@@ -47,6 +47,14 @@ cargo run -p robonix-soma -- --config ./soma.local.yaml
 At startup Soma reads every deployment, optionally runs each local primitive and
 skill package with `rbnx start -p <package_dir> --endpoint <atlas>`, prints a
 startup report, registers itself in Atlas, and serves gRPC on `listen`.
+Package startup is disabled by default. Set `start_packages: true` to have Soma
+launch local primitive and skill packages through `rbnx`'s process manager.
+Soma stops those packages on SIGINT/SIGTERM and fails startup when any package
+is missing its manifest or exits during the startup grace window.
+
+`--rbnx-bin` overrides `rbnx_bin` from the config file. `--log` sets Soma's
+scribe file level (`debug`, `info`, `warn`, or `error`); package stdout/stderr
+is written through scribe under `$SCRIBE_LOG_DIR` or `./logs`.
 
 ## gRPC API
 

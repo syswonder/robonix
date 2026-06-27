@@ -25,6 +25,9 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 robonix-atlas = { path = "../atlas" }
+robonix-cli = { path = "../../tools/rbnx" }
+robonix-scribe.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

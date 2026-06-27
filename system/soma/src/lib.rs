@@ -7,7 +7,6 @@ pub mod pb;
 pub mod report;
 pub mod service;
 pub mod store;
-pub mod supervisor;
 
 pub const GET_YAML_CONTRACT: &str = "robonix/system/soma/get_yaml";
 pub const GET_URDF_CONTRACT: &str = "robonix/system/soma/get_urdf";
