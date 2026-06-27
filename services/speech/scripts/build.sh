@@ -46,6 +46,36 @@ fi
 echo "[build] uv sync (pyproject.toml → $VENV)"
 VIRTUAL_ENV="$PKG/$VENV" uv sync --active --no-managed-python
 
+# ── 2b. Jetson: use the host's JetPack CUDA torch, not PyPI's ──────────────
+# On Jetson (aarch64), PyPI ships a torch built against a CUDA version that
+# does NOT match the JetPack driver (e.g. a cu130 wheel vs the CUDA 12.6
+# driver), so torch.cuda.is_available() is False and FunASR/Whisper silently
+# fall back to CPU — streaming ASR then emits each character with a long lag.
+# JetPack already provides a working CUDA torch on the host python; reuse it
+# by symlinking the torch family into this venv (all other deps stay from uv).
+# Generalised: resolve each module's dir from the host python, so it works
+# regardless of where JetPack / editable installs place them.
+# Disable with SPEECH_SKIP_JETSON_TORCH=1.
+if [[ -f /etc/nv_tegra_release && "${SPEECH_SKIP_JETSON_TORCH:-}" != "1" ]]; then
+    SP="$VENV/lib/python3.10/site-packages"
+    if ! "$VENV/bin/python" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
+        HOSTPY="${SPEECH_HOST_PYTHON:-python3}"
+        if "$HOSTPY" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
+            echo "[build] Jetson: venv torch is CPU-only — linking host JetPack CUDA torch"
+            for mod in torch torchaudio torchvision torchgen functorch torio; do
+                d="$("$HOSTPY" -c "import os,importlib.util as u; s=u.find_spec('$mod'); print(os.path.dirname(s.origin) if s and s.origin else '')" 2>/dev/null || true)"
+                [[ -n "$d" && -d "$d" ]] || continue
+                rm -rf "$SP/$mod" "$SP/$mod"-*.dist-info
+                ln -sfn "$d" "$SP/$mod"
+                echo "[build]   linked $mod ← $d"
+            done
+            "$VENV/bin/python" -c 'import torch; print("[build]   venv torch.cuda.is_available() =", torch.cuda.is_available())' || true
+        else
+            echo "[build] WARNING: on Jetson but host python has no CUDA torch; ASR will run on CPU (slow)." >&2
+        fi
+    fi
+fi
+
 # ── 3. Codegen (.proto + grpc stubs → rbnx-build/codegen/) ──────────────────
 FLAGS=(--mcp)
 [[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
