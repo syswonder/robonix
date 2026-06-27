@@ -350,6 +350,9 @@ async fn run_session(
     // [profile] pilot round-trip (submit → first event → turn done).
     let t_pilot = std::time::Instant::now();
     let mut first_pilot_logged = false;
+    // Per-narration-segment TTS buffer: text chunks accumulate here and flush
+    // to speech at each plan/batch/final boundary (see the stream loop below).
+    let mut seg = String::new();
 
     let pilot_stream_result = async {
         let mut client = RobonixSystemPilotClient::connect(pilot_endpoint.clone())
@@ -373,17 +376,24 @@ async fn run_session(
                             first_pilot_logged = true;
                         }
                         accumulate_text(&ev, &mut accumulated_text);
-                        // Speak each plan's natural-language answer the moment it
-                        // arrives (EVT_FINAL_TEXT = 4), rather than once at the end
-                        // of the whole turn — so a multi-plan reply is voiced live,
-                        // result by result.
-                        let speak_now = req.tts_enabled
-                            && ev.event_kind == 4
-                            && !ev.final_text.trim().is_empty();
-                        let say = if speak_now {
-                            ev.final_text.clone()
+                        // Speak each narration segment the moment it completes.
+                        // The model's per-plan answer streams as EVT_TEXT_CHUNK (0);
+                        // a PLAN (1) / BATCH_RESULT (2) / FINAL_TEXT (4) event marks
+                        // the end of that narration, so flush the buffered chunks to
+                        // TTS. This voices every plan's full answer live, instead of
+                        // only the tiny end-of-turn final_text.
+                        let kind = ev.event_kind;
+                        if kind == 0 {
+                            seg.push_str(&ev.text_chunk);
+                        }
+                        let is_boundary = matches!(kind, 1 | 2 | 4);
+                        let say = if is_boundary && req.tts_enabled && !seg.trim().is_empty() {
+                            Some(std::mem::take(&mut seg))
                         } else {
-                            String::new()
+                            if is_boundary {
+                                seg.clear();
+                            }
+                            None
                         };
                         let _ = tx
                             .send(Ok(VoiceEvent {
@@ -398,16 +408,16 @@ async fn run_session(
                                 timestamp_ms: now_ms(),
                             }))
                             .await;
-                        if speak_now {
+                        if let Some(s) = say {
                             spoke_any = true;
                             let t_tts = std::time::Instant::now();
-                            let say_chars = say.chars().count();
+                            let say_chars = s.chars().count();
                             if let Err(e) = synthesize_and_play(
                                 &atlas,
                                 &req.tts_node_id,
                                 &req.speaker_node_id,
                                 &language,
-                                &say,
+                                &s,
                                 &session_id,
                                 &tx,
                             )
@@ -447,18 +457,23 @@ async fn run_session(
         accumulated_text.chars().count()
     );
 
-    // 5. Fallback TTS: if the turn produced only streamed chunks (no
-    // EVT_FINAL_TEXT was spoken per-result above), speak the accumulated text
-    // once at the end. Non-fatal on any error.
+    // 5. Flush any trailing narration the loop buffered but never hit a
+    // boundary for (turn ended on chunks). Non-fatal on any error.
+    let tail = if !seg.trim().is_empty() {
+        std::mem::take(&mut seg)
+    } else if !spoke_any {
+        accumulated_text.clone()
+    } else {
+        String::new()
+    };
     if req.tts_enabled
-        && !spoke_any
-        && !accumulated_text.trim().is_empty()
+        && !tail.trim().is_empty()
         && let Err(e) = synthesize_and_play(
             &atlas,
             &req.tts_node_id,
             &req.speaker_node_id,
             &language,
-            &accumulated_text,
+            &tail,
             &session_id,
             &tx,
         )
