@@ -710,6 +710,7 @@ pub async fn execute(
                 ("executor", "robonix-executor"),
                 ("pilot", "robonix-pilot"),
                 ("liaison", "robonix-liaison"),
+                ("soma", "robonix-soma"),
             ];
             for (name, bin) in bin_map {
                 if !deploy.system.contains_key(*name) {
@@ -802,7 +803,7 @@ pub async fn execute(
         let mut failures: Vec<(String, String, String)> = Vec::new(); // (component, name, err)
 
         if !skip_system {
-            let builtin_names: &[&str] = &["atlas", "executor", "pilot", "liaison"];
+            let builtin_names: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma"];
             for (key, value) in &deploy.system {
                 if builtin_names.contains(&key.as_str()) {
                     continue;
@@ -1214,7 +1215,7 @@ fn system_listen(name: &str, cfg: Option<&serde_yaml::Value>) -> Option<String> 
         .get(serde_yaml::Value::String("listen".into()))?
         .as_str()?;
     let trimmed = s.trim();
-    if trimmed.is_empty() || !matches!(name, "atlas" | "executor" | "pilot" | "liaison") {
+    if trimmed.is_empty() || !matches!(name, "atlas" | "executor" | "pilot" | "liaison" | "soma") {
         return None;
     }
     Some(trimmed.to_string())
@@ -1242,6 +1243,7 @@ fn port_is_free(listen: &str) -> std::result::Result<(), anyhow::Error> {
     Ok(())
 }
 
+/// Translate supported `system:` manifest fields into CLI args for built-in binaries.
 fn system_cli_args(
     name: &str,
     cfg: Option<&serde_yaml::Value>,
@@ -1327,6 +1329,29 @@ fn system_cli_args(
             );
             push_pair(&mut out, "--pilot-endpoint", s("pilot_endpoint"));
             push_pair(&mut out, "--log", s("log"));
+        }
+        "soma" => {
+            push_pair(&mut out, "--listen", s("listen"));
+            push_pair(
+                &mut out,
+                "--atlas",
+                s("atlas").or_else(|| atlas_listen.map(str::to_string)),
+            );
+            push_pair(&mut out, "--provider-id", s("provider_id"));
+            push_pair(&mut out, "--default-robot", s("default_robot"));
+            push_pair(&mut out, "--config", s("config"));
+            push_pair(&mut out, "--rbnx-bin", s("rbnx_bin"));
+            push_pair(&mut out, "--log", s("log"));
+            if let Some(seq) = map
+                .and_then(|m| m.get(serde_yaml::Value::String("deployments".into())))
+                .and_then(|v| v.as_sequence())
+            {
+                for entry in seq {
+                    if let Some(path) = entry.as_str() {
+                        push_pair(&mut out, "--deployment", Some(path.to_string()));
+                    }
+                }
+            }
         }
         _ => {}
     }

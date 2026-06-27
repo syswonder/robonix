@@ -1,0 +1,36 @@
+[package]
+name = "robonix-soma"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Robonix Soma: raw body YAML and URDF service"
+
+[lib]
+name = "robonix_soma"
+path = "src/lib.rs"
+
+[[bin]]
+name = "robonix-soma"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+robonix-atlas = { path = "../atlas" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+robonix-codegen.workspace = true
+tonic-build.workspace = true
+tonic-prost-build.workspace = true
+protoc-bin-vendored.workspace = true
