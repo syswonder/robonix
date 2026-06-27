@@ -1,0 +1,12 @@
+# robonix/service/map/get_pose — read the robot's current pose in the MAP frame (RPC).
+# Returns x/y (metres) + theta (yaw, radians) in the SLAM map frame, taken from
+# the live pose the mapping service publishes. Read-only; complements
+# pose_estimate (which SEEDS a pose for relocalization). Use it to record a
+# named waypoint, report the robot's position, or branch on location.
+---
+bool ok
+float64 x
+float64 y
+float64 theta       # yaw, radians
+string frame_id     # map frame id (usually "map")
+string detail

@@ -1,0 +1,12 @@
+# Seed rtabmap with a known pose guess (map frame) so localization re-converges
+# — global relocalization / kidnapped-robot recovery. rtabmap refines the guess
+# to the true map pose via scan matching.
+# ROS IDL: `lib/map/srv/PoseEstimate.srv` (x/y/theta + optional cov → ok + detail).
+[contract]
+id      = "robonix/service/map/pose_estimate"
+version = "1"
+kind    = "service"
+idl     = "map/srv/PoseEstimate.srv"
+
+[mode]
+type = "rpc"

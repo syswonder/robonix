@@ -1,0 +1,13 @@
+# robonix/service/map/pose_estimate — seed rtabmap with a known pose (RPC).
+# Publishes an initial pose estimate so rtabmap's localization re-converges:
+# global relocalization, kidnapped-robot recovery, or "I know I'm roughly
+# here, go figure out exactly where". The pose is in the map frame, same as
+# load_map; rtabmap then refines it to the true map pose via scan/ICP matching.
+float64 x          # pose guess, map frame, meters
+float64 y          # pose guess, map frame, meters
+float64 theta      # yaw guess, map frame, radians
+float64 cov_xy     # optional 1-sigma position uncertainty, meters; 0 → default
+float64 cov_theta  # optional 1-sigma yaw uncertainty, radians; 0 → default
+---
+bool ok
+string detail      # human-readable status / error

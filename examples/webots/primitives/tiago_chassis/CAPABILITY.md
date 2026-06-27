@@ -1,3 +1,9 @@
+---
+provider: tiago_chassis
+kind: primitive
+description: Mobile differential-drive base — all movement during navigation, exploration, and search.
+---
+
 # Tiago chassis (`robonix/primitive/chassis`)
 
 The robot's mobile base. Use this for ALL movement during interactive

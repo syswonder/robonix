@@ -316,6 +316,9 @@ class FunASRStreamingBackend:
                 frames = wf.readframes(wf.getnframes())
                 audio = np.frombuffer(frames, dtype=np.int16)
 
+        import time as _time
+
+        _t0 = _time.perf_counter()
         results = self.model.generate(
             input=audio,
             cache=cache,
@@ -325,6 +328,13 @@ class FunASRStreamingBackend:
             decoder_chunk_look_back=1,
             disable_pbar=True,
             disable_log=True,
+        )
+        # [profile-asr] per-chunk FunASR inference time. Each chunk is ~0.6s of
+        # audio; infer_ms >> 600 means the model can't keep up in real time
+        # (e.g. running on CPU instead of GPU).
+        log.info(
+            "[profile-asr] chunk infer %.1f ms (%d samples, is_final=%s)",
+            (_time.perf_counter() - _t0) * 1000.0, int(audio.shape[0]), is_final,
         )
 
         outputs = []
