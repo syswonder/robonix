@@ -54,6 +54,19 @@ if [[ ! -d "$VENV" ]]; then
     uv venv "$VENV"
 fi
 
+# This venv's site-packages (robust to the python minor version).
+SITEPKG="$("$VENV/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))' 2>/dev/null || echo "$VENV/lib/python3.10/site-packages")"
+
+# Jetson rebuild safety: a prior build (step 2b) may have left host-torch
+# SYMLINKS in this venv. Remove them BEFORE uv sync — otherwise uv, seeing the
+# deleted dist-info, reinstalls torch and writes THROUGH the symlink into the
+# host's shared JetPack torch tree, corrupting the system torch. Re-linked below.
+if [[ -f /etc/nv_tegra_release ]]; then
+    for _m in torch torchaudio torchvision torchgen functorch torio; do
+        [[ -L "$SITEPKG/$_m" ]] && rm -f "$SITEPKG/$_m"
+    done
+fi
+
 # ── 2. uv sync (deps from pyproject.toml + workspace uv.lock) ──────────────
 echo "[build] uv sync (pyproject.toml → $VENV)"
 VIRTUAL_ENV="$PKG/$VENV" uv sync --active --no-managed-python
@@ -67,7 +80,7 @@ VIRTUAL_ENV="$PKG/$VENV" uv sync --active --no-managed-python
 # from the host python so it works regardless of install location.
 # Disable with VOICEPRINT_SKIP_JETSON_TORCH=1.
 if [[ -f /etc/nv_tegra_release && "${VOICEPRINT_SKIP_JETSON_TORCH:-}" != "1" ]]; then
-    SP="$VENV/lib/python3.10/site-packages"
+    SP="$SITEPKG"
     if ! "$VENV/bin/python" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
         HOSTPY="${VOICEPRINT_HOST_PYTHON:-python3}"
         if "$HOSTPY" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
