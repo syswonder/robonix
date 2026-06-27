@@ -1,3 +1,9 @@
+---
+provider: tiago_lidar
+kind: primitive
+description: Planar lidar — supplementary distance / range sensing near the base.
+---
+
 # Tiago lidar (`robonix/primitive/lidar`)
 
 Hokuyo planar lidar mounted near the base. Supplementary distance sensor.
