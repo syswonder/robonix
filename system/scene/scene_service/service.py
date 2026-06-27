@@ -528,6 +528,12 @@ async def _start_ros_ingest(
             # `primitive/camera/extrinsics`). tf2 is reserved for the
             # legacy fallback path.
             hub=hub,
+            # Detection cadence. The default 0.6 s keeps objects fresh but runs
+            # YOLO+CLIP on the GPU continuously; on a shared Jetson GPU that
+            # starves co-located GPU work (e.g. FunASR ASR), making voice slow.
+            # Raise SCENE_DETECT_PERIOD_S (e.g. 2.0) to free the GPU when running
+            # speech + perception together.
+            period_s=float(os.environ.get("SCENE_DETECT_PERIOD_S", "") or 0.6),
         )
         await detector.start()
         log.info("[scene] perception: ConceptGraphsDetector (rgb+depth)")

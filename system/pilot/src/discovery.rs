@@ -37,12 +37,42 @@ pub fn llm_name(contract_id: &str) -> String {
 
 /// One row per provider that registered a CAPABILITY.md, summarised for the
 /// LLM-facing "## Capability docs" block in pilot's system prompt. We expose
-/// only the `provider_id` (what the LLM passes to the `read_capability_doc`
-/// builtin) and `namespace` — never a filesystem path, which is not portable
-/// across the provider's / executor's mount namespaces.
+/// the `provider_id` (what the LLM passes to `read_capability_doc`), the
+/// package `kind` (so skills can be flagged read-first), and a one-line
+/// `description` lifted from the CAPABILITY.md frontmatter — enough for the
+/// model to judge relevance without reading the full manual. The internal
+/// `namespace` and any filesystem path are deliberately NOT exposed.
 pub struct CapDoc {
     pub provider_id: String,
-    pub namespace: String,
+    pub kind: String,
+    pub description: String,
+}
+
+/// Pull `kind` and `description` from a CAPABILITY.md YAML frontmatter block.
+///
+/// The package-level frontmatter is a leading `---` … `---` fence with simple
+/// `key: value` lines (single-line values — see the CAPABILITY.md format spec).
+/// Returns empty strings when there is no frontmatter or the keys are absent,
+/// which is non-fatal: the provider still appears in the index, just without a
+/// description until its CAPABILITY.md is updated.
+fn parse_frontmatter(md: &str) -> (String, String) {
+    let t = md.trim_start();
+    let Some(rest) = t.strip_prefix("---") else {
+        return (String::new(), String::new());
+    };
+    let Some(end) = rest.find("\n---") else {
+        return (String::new(), String::new());
+    };
+    let (mut kind, mut description) = (String::new(), String::new());
+    for line in rest[..end].lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("kind:") {
+            kind = v.trim().trim_matches('"').to_string();
+        } else if let Some(v) = line.strip_prefix("description:") {
+            description = v.trim().trim_matches('"').to_string();
+        }
+    }
+    (kind, description)
 }
 
 /// Returns a `CapDoc` per provider that registered non-empty CAPABILITY.md
@@ -57,9 +87,11 @@ pub async fn cap_md_index(atlas: &mut AtlasClient) -> Result<Vec<CapDoc>> {
         if provider.capability_md.trim().is_empty() {
             continue;
         }
+        let (kind, description) = parse_frontmatter(&provider.capability_md);
         out.push(CapDoc {
             provider_id: provider.id,
-            namespace: provider.namespace,
+            kind,
+            description,
         });
     }
     Ok(out)

@@ -1,0 +1,11 @@
+# Read the robot's current pose (x/y/theta) in the SLAM map frame.
+# Read-only; complements pose_estimate (which seeds a pose).
+# ROS IDL: `lib/map/srv/GetPose.srv` ( -> ok + x + y + theta + frame_id + detail).
+[contract]
+id      = "robonix/service/map/get_pose"
+version = "1"
+kind    = "service"
+idl     = "map/srv/GetPose.srv"
+
+[mode]
+type = "rpc"

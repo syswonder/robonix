@@ -54,9 +54,50 @@ if [[ ! -d "$VENV" ]]; then
     uv venv "$VENV"
 fi
 
+# This venv's site-packages (robust to the python minor version).
+SITEPKG="$("$VENV/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))' 2>/dev/null || echo "$VENV/lib/python3.10/site-packages")"
+
+# Jetson rebuild safety: a prior build (step 2b) may have left host-torch
+# SYMLINKS in this venv. Remove them BEFORE uv sync — otherwise uv, seeing the
+# deleted dist-info, reinstalls torch and writes THROUGH the symlink into the
+# host's shared JetPack torch tree, corrupting the system torch. Re-linked below.
+if [[ -f /etc/nv_tegra_release ]]; then
+    for _m in torch torchaudio torchvision torchgen functorch torio; do
+        [[ -L "$SITEPKG/$_m" ]] && rm -f "$SITEPKG/$_m"
+    done
+fi
+
 # ── 2. uv sync (deps from pyproject.toml + workspace uv.lock) ──────────────
 echo "[build] uv sync (pyproject.toml → $VENV)"
 VIRTUAL_ENV="$PKG/$VENV" uv sync --active --no-managed-python
+
+# ── 2b. Jetson: use the host's JetPack CUDA torch, not PyPI's ──────────────
+# On Jetson (aarch64), PyPI's torch is built against a CUDA version that does
+# NOT match the JetPack driver, so torch.cuda.is_available() is False and the
+# ECAPA-TDNN speaker model runs on CPU (slow enrol/identify). JetPack ships a
+# working CUDA torch on the host python; reuse it by symlinking the torch
+# family into this venv (other deps stay from uv). Resolve each module's dir
+# from the host python so it works regardless of install location.
+# Disable with VOICEPRINT_SKIP_JETSON_TORCH=1.
+if [[ -f /etc/nv_tegra_release && "${VOICEPRINT_SKIP_JETSON_TORCH:-}" != "1" ]]; then
+    SP="$SITEPKG"
+    if ! "$VENV/bin/python" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
+        HOSTPY="${VOICEPRINT_HOST_PYTHON:-python3}"
+        if "$HOSTPY" -c 'import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
+            echo "[build] Jetson: venv torch is CPU-only — linking host JetPack CUDA torch"
+            for mod in torch torchaudio torchvision torchgen functorch torio; do
+                d="$("$HOSTPY" -c "import os,importlib.util as u; s=u.find_spec('$mod'); print(os.path.dirname(s.origin) if s and s.origin else '')" 2>/dev/null || true)"
+                [[ -n "$d" && -d "$d" ]] || continue
+                rm -rf "$SP/$mod" "$SP/$mod"-*.dist-info
+                ln -sfn "$d" "$SP/$mod"
+                echo "[build]   linked $mod ← $d"
+            done
+            "$VENV/bin/python" -c 'import torch; print("[build]   venv torch.cuda.is_available() =", torch.cuda.is_available())' || true
+        else
+            echo "[build] WARNING: on Jetson but host python has no CUDA torch; running on CPU (slow)." >&2
+        fi
+    fi
+fi
 
 # ── 3. Pre-download ECAPA-TDNN weights (skip with SKIP_MODEL_DOWNLOAD=1) ───
 PY="$VENV/bin/python"
