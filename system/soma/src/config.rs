@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use serde::Deserialize;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 pub const DEFAULT_PROVIDER_ID: &str = "soma";
 pub const DEFAULT_ATLAS_ENDPOINT: &str = "127.0.0.1:50051";
@@ -98,6 +99,7 @@ struct FileConfig {
     #[serde(default)]
     default_robot: Option<String>,
     #[serde(default)]
+    #[serde(alias = "root")]
     robonix_root: Option<PathBuf>,
     #[serde(default)]
     deployments: Vec<DeploymentEntry>,
@@ -129,11 +131,20 @@ impl SomaConfig {
         // else still has to come through `--config <yaml>` for now.
         let json_cfg = parse_config_json(args.config_json.as_deref());
 
+        let rbnx_bin = args
+            .rbnx_bin
+            .clone()
+            .or_else(|| json_cfg.rbnx_bin.clone())
+            .or_else(|| file_cfg.rbnx_bin.clone())
+            .unwrap_or_else(|| "rbnx".into());
+
         let config_dir = args.config.as_deref().and_then(Path::parent);
         let robonix_root = resolve_robonix_root(
             args.robonix_root.clone(),
+            json_cfg.robonix_root.clone(),
             file_cfg.robonix_root.clone(),
             config_dir,
+            &rbnx_bin,
         )?;
         let mut deployments = if !args.deployments.is_empty() {
             // CLI --deployment wins over everything else.
@@ -199,11 +210,7 @@ impl SomaConfig {
             default_robot: args.default_robot.or(file_cfg.default_robot),
             deployments,
             start_packages,
-            rbnx_bin: args
-                .rbnx_bin
-                .or(json_cfg.rbnx_bin)
-                .or(file_cfg.rbnx_bin)
-                .unwrap_or_else(|| "rbnx".into()),
+            rbnx_bin,
         })
     }
 }
@@ -214,6 +221,11 @@ impl SomaConfig {
 /// soma knobs (e.g. logging) doesn't have to touch this struct.
 #[derive(Debug, Default, Deserialize)]
 struct JsonConfig {
+    /// Robonix source root. Accept both names because deploy manifests
+    /// commonly call this `root` (matching `rbnx path root`), while the
+    /// standalone soma YAML historically used `robonix_root`.
+    #[serde(default, alias = "root")]
+    robonix_root: Option<PathBuf>,
     #[serde(default)]
     start_packages: Option<bool>,
     #[serde(default)]
@@ -244,10 +256,15 @@ fn normalize_deployments(deployments: &mut [DeploymentConfig], robonix_root: &Pa
 
 fn resolve_robonix_root(
     cli_root: Option<PathBuf>,
+    json_root: Option<PathBuf>,
     file_root: Option<PathBuf>,
     config_dir: Option<&Path>,
+    rbnx_bin: &str,
 ) -> Result<PathBuf> {
     if let Some(root) = cli_root {
+        return absolute_root(root, None);
+    }
+    if let Some(root) = json_root {
         return absolute_root(root, None);
     }
     if let Some(root) = file_root {
@@ -260,7 +277,28 @@ fn resolve_robonix_root(
             return absolute_root(PathBuf::from(value), None);
         }
     }
+    if let Some(root) = rbnx_path_root(rbnx_bin) {
+        return absolute_root(root, None);
+    }
     find_robonix_root_from_cwd()
+}
+
+fn rbnx_path_root(rbnx_bin: &str) -> Option<PathBuf> {
+    let output = Command::new(rbnx_bin)
+        .arg("path")
+        .arg("root")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let root = stdout.lines().next()?.trim();
+    if root.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(root))
+    }
 }
 
 /// Resolve a Robonix root to an absolute syntactic path without requiring it to exist.
@@ -450,6 +488,76 @@ mod tests {
         assert!(!cfg.start_packages);
         assert_eq!(cfg.deployments.len(), 1);
         assert_eq!(cfg.deployments[0].path, deployment);
+    }
+
+    #[test]
+    fn config_json_root_alias_resolves_relative_deployments() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_json = serde_json::json!({
+            "root": tmp.path(),
+            "deployments": ["deploy"],
+        })
+        .to_string();
+        let args = Args {
+            atlas: None,
+            listen: None,
+            provider_id: None,
+            default_robot: None,
+            robonix_root: None,
+            deployments: vec![],
+            config: None,
+            rbnx_bin: None,
+            log: None,
+            config_json: Some(config_json),
+            start_packages: None,
+        };
+        let cfg = SomaConfig::resolve(args).expect("resolve config");
+
+        assert_eq!(cfg.robonix_root, tmp.path());
+        assert_eq!(cfg.deployments[0].path, tmp.path().join("deploy"));
+    }
+
+    #[test]
+    fn rbnx_path_root_fallback_resolves_relative_deployments() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("robonix");
+        let fake_bin = tmp.path().join("rbnx");
+        std::fs::write(
+            &fake_bin,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = path ] && [ \"$2\" = root ] && printf '%s\\n' '{}'\n",
+                root.display()
+            ),
+        )
+        .expect("write fake rbnx");
+        let mut perms = std::fs::metadata(&fake_bin)
+            .expect("fake metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bin, perms).expect("chmod fake rbnx");
+        let config_json = serde_json::json!({
+            "deployments": ["deploy"],
+        })
+        .to_string();
+        let args = Args {
+            atlas: None,
+            listen: None,
+            provider_id: None,
+            default_robot: None,
+            robonix_root: None,
+            deployments: vec![],
+            config: None,
+            rbnx_bin: Some(fake_bin.display().to_string()),
+            log: None,
+            config_json: Some(config_json),
+            start_packages: None,
+        };
+        let cfg = SomaConfig::resolve(args).expect("resolve config");
+
+        assert_eq!(cfg.robonix_root, root);
+        assert_eq!(cfg.deployments[0].path, tmp.path().join("robonix/deploy"));
     }
 
     #[test]
