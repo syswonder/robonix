@@ -59,8 +59,18 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_SOMA_RBNX_BIN")]
     pub rbnx_bin: Option<String>,
 
+    /// Log level for this component (`debug`/`info`/`warn`/`error`). Sets the
+    /// scribe log-file floor; falls back to `SCRIBE_FILE_LEVEL` / `info`.
+    /// Normally arrives inside `--config-json`, not as a standalone flag.
     #[arg(long)]
     pub log: Option<String>,
+
+    /// The component's `system.soma` manifest block, serialized to JSON by
+    /// rbnx and passed as one arg (`--config-json '{…}'`). Parsed by the binary
+    /// itself — see `robonix_scribe::init_from_config`, which reads the `log`
+    /// key from it so the manifest's per-component level reaches the log.
+    #[arg(long)]
+    pub config_json: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -249,6 +259,7 @@ mod tests {
             config: None,
             rbnx_bin: None,
             log: None,
+            config_json: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
         assert_eq!(cfg.default_robot.as_deref(), Some("demo"));
@@ -278,6 +289,7 @@ mod tests {
             config: Some(config_path),
             rbnx_bin: None,
             log: None,
+            config_json: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
         assert_eq!(cfg.deployments.len(), 1);
@@ -304,6 +316,7 @@ mod tests {
             config: Some(config_path),
             rbnx_bin: None,
             log: None,
+            config_json: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
         assert_eq!(cfg.robonix_root, tmp.path());
@@ -327,6 +340,7 @@ mod tests {
             config: Some(config_path),
             rbnx_bin: None,
             log: None,
+            config_json: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
         assert!(!cfg.start_packages);
@@ -351,6 +365,7 @@ mod tests {
             config: Some(config_path),
             rbnx_bin: Some("cli-rbnx".into()),
             log: None,
+            config_json: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
 
@@ -369,6 +384,7 @@ mod tests {
             config: None,
             rbnx_bin: None,
             log: None,
+            config_json: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
 
@@ -426,6 +442,7 @@ mod tests {
             config: Some(relative_config_path),
             rbnx_bin: None,
             log: None,
+            config_json: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
 
@@ -447,6 +464,7 @@ mod tests {
             config: Some(manifest_dir.join("config.yaml")),
             rbnx_bin: None,
             log: None,
+            config_json: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
         assert_eq!(cfg.robonix_root, repo_root());
