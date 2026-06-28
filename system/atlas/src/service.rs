@@ -440,9 +440,7 @@ impl AtlasRegistry {
                 "unknown provider_id: {provider_id}"
             )));
         }
-        let prev = state
-            .event_subscribers
-            .insert(provider_id.to_string(), tx);
+        let prev = state.event_subscribers.insert(provider_id.to_string(), tx);
         if prev.is_some() {
             warn!(
                 "[atlas] watch_provider '{provider_id}': replacing previous subscriber \
@@ -466,9 +464,7 @@ impl AtlasRegistry {
         };
         let state = self.inner.read().await;
         let Some(tx) = state.event_subscribers.get(provider_id) else {
-            warn!(
-                "[atlas] notify_provider '{provider_id}': no subscriber — event dropped"
-            );
+            warn!("[atlas] notify_provider '{provider_id}': no subscriber — event dropped");
             return false;
         };
         // Use `try_send` to keep `notify_provider` non-blocking even when
@@ -1132,9 +1128,9 @@ impl pb::atlas_server::Atlas for AtlasService {
         req: Request<pb::NotifyProviderRequest>,
     ) -> Result<Response<pb::NotifyProviderResponse>, Status> {
         let r = req.into_inner();
-        let event = r.event.ok_or_else(|| {
-            Status::invalid_argument("NotifyProvider: `event` field is required")
-        })?;
+        let event = r
+            .event
+            .ok_or_else(|| Status::invalid_argument("NotifyProvider: `event` field is required"))?;
         let delivered = self.registry.notify_event(&r.provider_id, event).await;
         Ok(Response::new(pb::NotifyProviderResponse { delivered }))
     }

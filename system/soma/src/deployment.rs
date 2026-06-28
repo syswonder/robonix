@@ -227,10 +227,7 @@ fn resolve_entry(
             return Err("package entry has neither `path` nor `url`".into());
         }
     };
-    let manifest_file = entry
-        .manifest
-        .as_deref()
-        .unwrap_or("package_manifest.yaml");
+    let manifest_file = entry.manifest.as_deref().unwrap_or("package_manifest.yaml");
     let package_manifest_path = package_dir.join(manifest_file);
     Ok(PackageLaunchTarget {
         kind,
@@ -268,9 +265,7 @@ mod tests {
         assert_eq!(record.primitives.len(), 1);
         let target = &record.primitives[0];
         assert!(
-            target
-                .package_dir
-                .ends_with("rbnx-boot/cache/remote_pkg"),
+            target.package_dir.ends_with("rbnx-boot/cache/remote_pkg"),
             "{}",
             target.package_dir.display()
         );
