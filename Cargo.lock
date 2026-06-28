@@ -2761,6 +2761,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "toml",
  "tonic",
  "tonic-build",
@@ -2905,6 +2906,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "nix 0.31.2",
  "prost",
  "protoc-bin-vendored",
  "robonix-atlas",
