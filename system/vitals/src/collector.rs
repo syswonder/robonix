@@ -86,9 +86,15 @@ struct ComponentJson {
 
 #[derive(Deserialize)]
 struct BodyComponentJson {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    parent_id: String,
     name: String,
     #[serde(default)]
     kind: String,
+    #[serde(default)]
+    model: String,
     temperature: f32,
     error_code: u32,
     enabled: bool,
@@ -176,6 +182,9 @@ impl CollectJson {
                         temperature: c.temperature,
                         error_code: c.error_code,
                         enabled: c.enabled,
+                        id: c.id,
+                        parent_id: c.parent_id,
+                        model: c.model,
                     })
                     .collect(),
             })

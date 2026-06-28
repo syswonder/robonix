@@ -10,7 +10,8 @@ use crate::body_threshold;
 use crate::pb::contracts::robonix_service_vitals_get_server::RobonixServiceVitalsGet;
 use crate::pb::contracts::robonix_service_vitals_stream_server::RobonixServiceVitalsStream;
 use crate::pb::vitals::{
-    GetVitalsRequest, GetVitalsResponse, PowerState, StreamVitalsRequest, VitalsSnapshot,
+    BodyComponent, GetVitalsRequest, GetVitalsResponse, PowerState, StreamVitalsRequest,
+    VitalsSnapshot,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -146,9 +147,10 @@ impl VitalsServiceImpl {
                     msg_display
                 );
                 for comp in &body.components {
+                    let component_name = body_component_display_name(comp);
                     log::info!(
                         "[vitals] {} ({}) enabled: {}, error_code: 0x{:02X}, temp: {:.0}°C",
-                        comp.name,
+                        component_name,
                         comp.kind,
                         comp.enabled,
                         comp.error_code,
@@ -195,7 +197,7 @@ impl VitalsServiceImpl {
                 }
 
                 for comp in &body.components {
-                    let component_key = format!("{}/{}", body_key, comp.name);
+                    let component_key = body_component_key(&body_key, comp);
                     let prev = state.prev_component.get(&component_key);
                     let prev_err = prev.map(|p| p.error_code).unwrap_or(0);
                     let prev_en = prev.map(|p| p.enabled).unwrap_or(true);
@@ -233,28 +235,30 @@ impl VitalsServiceImpl {
                         changed = true;
                     }
 
-                    // ── Temperature threshold check ──────────────────
-                    let (temp_health, temp_detail) =
-                        body_threshold::evaluate_temp(comp.temperature, model);
-                    let prev_temp = state
-                        .prev_component_temp
-                        .get(&component_key)
-                        .map(|t| t.health)
-                        .unwrap_or(body_threshold::HEALTH_OK);
-                    if temp_health != prev_temp {
-                        log::info!(
-                            "[vitals] {} temp health: {} → {} ({:.0}°C)",
-                            component_key,
-                            health_label(prev_temp),
-                            health_label(temp_health),
-                            comp.temperature
-                        );
-                        if temp_health == body_threshold::HEALTH_WARN
-                            || temp_health == body_threshold::HEALTH_ERROR
-                        {
-                            log::warn!("[vitals] ALERT: {} — {}", component_key, temp_detail);
+                    if is_joint_component(comp) {
+                        // ── Joint temperature threshold check ──────────
+                        let (temp_health, temp_detail) =
+                            body_threshold::evaluate_temp(comp.temperature, model);
+                        let prev_temp = state
+                            .prev_component_temp
+                            .get(&component_key)
+                            .map(|t| t.health)
+                            .unwrap_or(body_threshold::HEALTH_OK);
+                        if temp_health != prev_temp {
+                            log::info!(
+                                "[vitals] {} temp health: {} → {} ({:.0}°C)",
+                                component_key,
+                                health_label(prev_temp),
+                                health_label(temp_health),
+                                comp.temperature
+                            );
+                            if temp_health == body_threshold::HEALTH_WARN
+                                || temp_health == body_threshold::HEALTH_ERROR
+                            {
+                                log::warn!("[vitals] ALERT: {} — {}", component_key, temp_detail);
+                            }
+                            changed = true;
                         }
-                        changed = true;
                     }
                 }
             }
@@ -262,12 +266,14 @@ impl VitalsServiceImpl {
             // Persist body state for next diff.
             state.prev_body_state.insert(body_key.clone(), body.state);
             for comp in &body.components {
-                let component_key = format!("{}/{}", body_key, comp.name);
-                let (health, _) = body_threshold::evaluate_temp(comp.temperature, model);
-                state.prev_component_temp.insert(
-                    component_key.clone(),
-                    body_threshold::JointTempHealth { health },
-                );
+                let component_key = body_component_key(&body_key, comp);
+                if is_joint_component(comp) {
+                    let (health, _) = body_threshold::evaluate_temp(comp.temperature, model);
+                    state.prev_component_temp.insert(
+                        component_key.clone(),
+                        body_threshold::JointTempHealth { health },
+                    );
+                }
                 state.prev_component.insert(
                     component_key,
                     PrevComponentState {
@@ -366,6 +372,30 @@ fn body_state_label(s: u32) -> &'static str {
         2 => "ESTOP",
         _ => "UNKNOWN",
     }
+}
+
+fn body_component_key(body_key: &str, comp: &BodyComponent) -> String {
+    if !comp.id.trim().is_empty() {
+        comp.id.clone()
+    } else {
+        format!("{}/{}", body_key, body_component_display_name(comp))
+    }
+}
+
+fn body_component_display_name(comp: &BodyComponent) -> &str {
+    first_non_empty(&[comp.id.as_str(), comp.name.as_str()])
+}
+
+fn is_joint_component(comp: &BodyComponent) -> bool {
+    comp.kind.eq_ignore_ascii_case("joint")
+}
+
+fn first_non_empty<'a>(values: &[&'a str]) -> &'a str {
+    values
+        .iter()
+        .copied()
+        .find(|value| !value.trim().is_empty())
+        .unwrap_or("unknown")
 }
 
 fn monotonic_ns() -> i64 {

@@ -203,15 +203,15 @@ ALERT: body/arm_right/joint_1/fault/motor_overheat - mock joint_1 temperature is
 Joint enable changes:
 
 ```text
-arm/piper/joint_6 enabled: true -> false
-ALERT: arm/piper/joint_6 - disabled
+body/arm_right/joint_6 enabled: true -> false
+ALERT: body/arm_right/joint_6 - disabled
 ```
 
 Body state changes:
 
 ```text
-arm/piper body state: NORMAL -> FAULT
-ALERT: body arm/piper state=FAULT (active faults: overcurrent)
+arm_right/piper body state: NORMAL -> FAULT
+ALERT: body arm_right/piper state=FAULT (active faults: overcurrent)
 ```
 
 Snapshot summaries:
@@ -290,7 +290,15 @@ components
 bodies
 ```
 
-For the mock demo, `bodies` should include one arm body with model `piper`.
+For the mock demo, `bodies` should include root-child groups such as:
+
+```text
+computer_jetson / jetson_agx_orin
+arm_right / piper
+battery_main / mock_bms
+```
+
+Each group contains its child component-tree entries. For example, `computer_jetson` contains CPU and GPU, while `arm_right` contains the six joints.
 
 ## Stop
 
