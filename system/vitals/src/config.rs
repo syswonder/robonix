@@ -20,8 +20,9 @@ pub struct VitalsConfig {
     pub listen: String,
     pub id: String,
     pub collect_interval_ms: u64,
-    #[allow(dead_code)] // Phase 3 will load threshold rules from this path
     pub thresholds_path: PathBuf,
+    /// Body threshold file (joint temperatures, fault codes per model).
+    pub body_thresholds_path: PathBuf,
 }
 
 #[derive(Parser, Debug)]
@@ -46,9 +47,13 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_VITALS_COLLECT_INTERVAL_MS")]
     pub collect_interval_ms: Option<u64>,
 
-    /// Path to the YAML threshold table (e.g. thresholds/jetson_agx_orin.yaml).
+    /// Path to the board threshold YAML (e.g. thresholds/jetson_agx_orin.yaml).
     #[arg(long, env = "ROBONIX_VITALS_THRESHOLDS_PATH")]
     pub thresholds_path: Option<PathBuf>,
+
+    /// Path to the body threshold YAML (joint temps, fault codes per model).
+    #[arg(long, env = "ROBONIX_VITALS_BODY_THRESHOLDS_PATH")]
+    pub body_thresholds_path: Option<PathBuf>,
 
     /// Optional YAML config file (rbnx writes this; CLI/env still override).
     #[arg(long, env = "ROBONIX_CONFIG_PATH")]
@@ -72,6 +77,8 @@ struct FileConfig {
     collect_interval_ms: Option<u64>,
     #[serde(default)]
     thresholds_path: Option<PathBuf>,
+    #[serde(default)]
+    body_thresholds_path: Option<PathBuf>,
 }
 
 impl VitalsConfig {
@@ -81,10 +88,10 @@ impl VitalsConfig {
             None => FileConfig::default(),
         };
 
-        // Default thresholds path: <crate>/thresholds/jetson_agx_orin.yaml
-        let default_thresholds = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("thresholds")
-            .join("jetson_agx_orin.yaml");
+        // Default threshold paths: <crate>/thresholds/
+        let thresholds_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("thresholds");
+        let default_thresholds = thresholds_dir.join("jetson_agx_orin.yaml");
+        let default_body_thresholds = thresholds_dir.join("body.yaml");
 
         Ok(Self {
             atlas_endpoint: args
@@ -107,6 +114,10 @@ impl VitalsConfig {
                 .thresholds_path
                 .or(file_cfg.thresholds_path)
                 .unwrap_or(default_thresholds),
+            body_thresholds_path: args
+                .body_thresholds_path
+                .or(file_cfg.body_thresholds_path)
+                .unwrap_or(default_body_thresholds),
         })
     }
 }

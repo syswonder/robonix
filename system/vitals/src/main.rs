@@ -6,20 +6,19 @@
 //   2. Declares two gRPC capabilities:
 //      - robonix/service/vitals/get    (rpc: GetVitals → VitalsSnapshot)
 //      - robonix/service/vitals/stream (topic_out: StreamVitals → stream VitalsSnapshot)
-//   3. Auto-discovers scripts/:
-//      - board.py          → BoardCollector  (always, sysfs)
-//      - *_body.py         → BodyCollector   (zero or more, auto-discovered)
+//   3. Spawns a single Python subprocess (collect.py) that reads sysfs and
+//      optionally body SDK (Piper, etc.) and returns a unified JSON response.
 //   4. Starts the collect loop and serves both gRPC services on `listen`.
 //
-// In v0.1 vitals spawns Python subprocesses to read hardware.  When Soma is
-// ready, both board and body collectors become gRPC clients consuming Soma's
-// unified interfaces — the data structures stay the same.
+// In v0.1 vitals spawns a Python subprocess to read hardware.  When Soma is
+// ready, VitalsCollector becomes a gRPC client consuming Soma's unified
+// interface — the data structures stay the same.
 //
 // No Driver lifecycle handshake required — vitals is stateless monitoring that
 // starts reporting as soon as the gRPC server is up.
 
-mod board;
-mod body;
+mod body_threshold;
+mod collector;
 mod config;
 mod normalize;
 mod pb;
@@ -38,10 +37,9 @@ use service::VitalsServiceImpl;
 use std::time::Duration;
 use std::time::Instant;
 
-/// All the state needed by the collect loop to restart dead subprocesses.
+/// Script path + python binary for subprocess restart.
 struct ScriptPaths {
-    board: std::path::PathBuf,
-    bodies: Vec<std::path::PathBuf>,
+    script: std::path::PathBuf,
     python_bin: String,
 }
 
@@ -165,61 +163,33 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Python binary — shared by all subprocesses.
-    let python =
-        std::env::var("ROBONIX_VITALS_BODY_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    // Load body threshold rules (joint temperatures, fault codes per model).
+    // This is mandatory — startup fails without a valid body.yaml.
+    body_threshold::load_config(&cfg.body_thresholds_path)?;
+
+    // Python binary — shared by subprocess.
+    let python = std::env::var("ROBONIX_VITALS_PYTHON")
+        .or_else(|_| std::env::var("ROBONIX_VITALS_BODY_PYTHON"))
+        .unwrap_or_else(|_| "python3".to_string());
     let scripts_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts");
 
-    // ── Auto-discover scripts ────────────────────────────────────────────
-    // board.py is always required.  *_body.py scripts are auto-discovered;
-    // each script reports its own body_type / model in the JSON response.
+    // ── Unified script ──────────────────────────────────────────────────
+    // One script handles board (always) and body (optional, if hardware is
+    // connected).  Override via ROBONIX_VITALS_SCRIPT env var.
 
-    let board_script = scripts_dir.join("board.py");
+    let collect_script = std::env::var("ROBONIX_VITALS_SCRIPT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| scripts_dir.join("collect.py"));
 
-    // Scan for body scripts (*_body.py, excluding board.py itself).
-    let mut body_script_paths: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&scripts_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.ends_with("_body.py") {
-                body_script_paths.push(entry.path());
-            }
-        }
-    }
+    let mut collector = collector::VitalsCollector::new(
+        &collect_script.to_string_lossy(),
+        &python,
+    )
+    .context("init vitals collector")?;
+    info!("vitals collector ready");
 
-    // ── Board collector (always) ────────────────────────────────────────
-
-    let mut board_collector = board::BoardCollector::new(&board_script.to_string_lossy(), &python)
-        .context("init board collector")?;
-    info!("board collector ready");
-
-    // ── Body collectors (auto-discovered) ───────────────────────────────
-
-    let mut body_collectors: Vec<body::BodyCollector> = Vec::new();
-    for path in &body_script_paths {
-        match body::BodyCollector::new(&path.to_string_lossy(), &python) {
-            Ok(bc) => {
-                // Issue one collect to learn body_type / model.
-                info!(
-                    "body collector ready ({})",
-                    path.file_name().unwrap_or_default().to_string_lossy()
-                );
-                body_collectors.push(bc);
-            }
-            Err(e) => {
-                log::warn!(
-                    "[vitals] body script '{}' init failed: {e:#}",
-                    path.display()
-                );
-            }
-        }
-    }
-
-    // Paths needed inside the collect loop for subprocess restart.
     let script_paths = ScriptPaths {
-        board: board_script,
-        bodies: body_script_paths,
+        script: collect_script,
         python_bin: python,
     };
 
@@ -234,15 +204,15 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
 
-                // ── Board health ──────────────────────────────────────
-                let (power, readings) = board_collector.collect();
-                if !board_collector.is_alive() {
-                    log::warn!("[vitals] board script died, attempting restart");
-                    if let Err(e) = board_collector.restart(
-                        &script_paths.board.to_string_lossy(),
+                // ── Unified collect ─────────────────────────────────
+                let (power, readings, bodies) = collector.collect();
+                if !collector.is_alive() {
+                    log::warn!("[vitals] script died, attempting restart");
+                    if let Err(e) = collector.restart(
+                        &script_paths.script.to_string_lossy(),
                         &script_paths.python_bin,
                     ) {
-                        log::error!("[vitals] board restart failed: {e:#}");
+                        log::error!("[vitals] restart failed: {e:#}");
                     }
                 }
 
@@ -264,37 +234,11 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // ── Body health ──────────────────────────────────────
-                // In v0.1 there is at most one body; we take the first.
-                let body = if body_collectors.is_empty() {
-                    None
-                } else {
-                    let mut body_health = None;
-                    for (i, bc) in body_collectors.iter_mut().enumerate() {
-                        let bh = bc.collect();
-                        if !bc.is_alive() {
-                            let path = &script_paths
-                                .bodies
-                                .get(i)
-                                .map(|p| p.to_string_lossy().to_string())
-                                .unwrap_or_default();
-                            log::warn!("[vitals] body script died, attempting restart");
-                            if let Err(e) = bc.restart(path, &script_paths.python_bin) {
-                                log::error!("[vitals] body restart failed: {e:#}");
-                            }
-                        }
-                        if body_health.is_none() {
-                            body_health = Some(bh);
-                        }
-                    }
-                    body_health
-                };
-
                 let snapshot = crate::pb::vitals::VitalsSnapshot {
                     ts_ns: monotonic_ns(),
                     power: Some(power),
                     components,
-                    body,
+                    bodies,
                 };
 
                 svc.update_snapshot(snapshot).await;

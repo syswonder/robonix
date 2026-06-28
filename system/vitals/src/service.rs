@@ -6,6 +6,7 @@
 //
 // Phase 2: returns a hardcoded/mock snapshot.
 
+use crate::body_threshold;
 use crate::pb::contracts::robonix_service_vitals_get_server::RobonixServiceVitalsGet;
 use crate::pb::contracts::robonix_service_vitals_stream_server::RobonixServiceVitalsStream;
 use crate::pb::vitals::{
@@ -18,9 +19,9 @@ use tokio::sync::RwLock;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-/// Per-joint state for change detection.
+/// Per-component state for change detection.
 #[derive(Clone, Debug)]
-struct PrevJointState {
+struct PrevComponentState {
     error_code: u32,
     enabled: bool,
 }
@@ -33,11 +34,14 @@ struct VitalsState {
     broadcast_tx: tokio::sync::broadcast::Sender<VitalsSnapshot>,
     /// Previous health per component name, keyed by name.
     prev_health: HashMap<String, u32>,
-    /// Previous body-level state.
-    prev_body_state: u32,
-    /// Previous per-joint state (error_code, enabled), keyed by name.
-    /// Empty until the first body reading arrives.
-    prev_joint: HashMap<String, PrevJointState>,
+    /// Previous body-level state, keyed by "{body_type}/{model}".
+    prev_body_state: HashMap<String, u32>,
+    /// Previous per-component state (error_code, enabled), keyed by "{body_type}/{model}/{component_name}".
+    prev_component: HashMap<String, PrevComponentState>,
+    /// Previous per-component temperature health, keyed by "{body_type}/{model}/{component_name}".
+    prev_component_temp: HashMap<String, crate::body_threshold::JointTempHealth>,
+    /// Previous power state for voltage / battery change detection.
+    prev_power: Option<PowerState>,
     /// True until the first body reading — suppresses ALERTs on startup.
     first_body: bool,
 }
@@ -65,12 +69,14 @@ impl VitalsServiceImpl {
                         remaining_s: -1,
                     }),
                     components: vec![],
-                    body: None,
+                    bodies: vec![],
                 },
                 broadcast_tx,
                 prev_health: HashMap::new(),
-                prev_body_state: 0,
-                prev_joint: HashMap::new(),
+                prev_body_state: HashMap::new(),
+                prev_component: HashMap::new(),
+                prev_component_temp: HashMap::new(),
+                prev_power: None,
                 first_body: true,
             })),
             start_time: Instant::now(),
@@ -116,96 +122,215 @@ impl VitalsServiceImpl {
         }
 
         // ── Body health transition detection ──────────────────────────
-        if let Some(ref body) = snapshot.body {
+        // Per-body/per-joint keys mean old entries persist across ticks
+        // without needing a clear — stale entries just aren't looked up.
+
+        for body in &snapshot.bodies {
+            let model = body.model.as_str();
+            let body_key = format!("{}/{}", body.body_type, body.model);
+
+            let msg_display = if body.message.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", body.message)
+            };
+
             if state.first_body {
                 // First body reading — always log baseline at info level.
-                // ALERTs are suppressed here to avoid false positives when
-                // the hardware is momentarily unavailable at startup.
                 log::info!(
-                    "[vitals] body: {} ({}/{})",
+                    "[vitals] body: {} ({}/{}){}",
                     body_state_label(body.state),
                     body.body_type,
-                    body.model
+                    body.model,
+                    msg_display
                 );
-                for joint in &body.joints {
+                for comp in &body.components {
+                    let faults = body_threshold::decode_faults(model, comp.error_code);
                     log::info!(
-                        "[vitals] {} enabled: {}, error_code: 0x{:02X}, temp: {:.0}°C",
-                        joint.name,
-                        joint.enabled,
-                        joint.error_code,
-                        joint.temperature
+                        "[vitals] {} ({}) enabled: {}, error_code: 0x{:02X}{}, temp: {:.0}°C",
+                        comp.name,
+                        comp.kind,
+                        comp.enabled,
+                        comp.error_code,
+                        if faults.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" [{}]", faults.join(", "))
+                        },
+                        comp.temperature
                     );
                 }
                 changed = true;
             } else {
                 // Subsequent readings — log only on transition.
-                if body.state != state.prev_body_state {
-                    log::info!(
-                        "[vitals] body state: {} → {}",
-                        body_state_label(state.prev_body_state),
-                        body_state_label(body.state)
-                    );
-                    if body.state != 0 {
-                        log::warn!(
-                            "[vitals] ALERT: body {} ({}) state={}",
-                            body.body_type,
-                            body.model,
-                            body_state_label(body.state)
+
+                // Body-level state.
+                let prev_body_state = state.prev_body_state.get(&body_key).copied().unwrap_or(0);
+                if body.state != prev_body_state || !body.message.is_empty() {
+                    if body.state != prev_body_state {
+                        log::info!(
+                            "[vitals] {} body state: {} → {}{}",
+                            body_key,
+                            body_state_label(prev_body_state),
+                            body_state_label(body.state),
+                            msg_display
+                        );
+                        if body.state != 0 {
+                            log::warn!(
+                                "[vitals] ALERT: body {} state={}{}",
+                                body_key,
+                                body_state_label(body.state),
+                                msg_display
+                            );
+                        }
+                        changed = true;
+                    } else if !body.message.is_empty() {
+                        // Message changed while state stayed the same — info only.
+                        log::info!(
+                            "[vitals] {} message: {}{}",
+                            body_key,
+                            body.message,
+                            if prev_body_state != 0 {
+                                format!(" (state={})", body_state_label(body.state))
+                            } else {
+                                String::new()
+                            }
                         );
                     }
-                    changed = true;
                 }
-                for joint in &body.joints {
-                    let prev = state.prev_joint.get(&joint.name);
+
+                for comp in &body.components {
+                    let component_key = format!("{}/{}", body_key, comp.name);
+                    let prev = state.prev_component.get(&component_key);
                     let prev_err = prev.map(|p| p.error_code).unwrap_or(0);
                     let prev_en = prev.map(|p| p.enabled).unwrap_or(true);
-                    if joint.error_code != prev_err {
+
+                    // Error code changes.
+                    if comp.error_code != prev_err {
                         log::info!(
                             "[vitals] {} error_code: {} → {}",
-                            joint.name,
+                            component_key,
                             prev_err,
-                            joint.error_code
+                            comp.error_code
                         );
-                        if joint.error_code != 0 {
+                        if comp.error_code != 0 {
+                            let faults = body_threshold::decode_faults(model, comp.error_code);
                             log::warn!(
-                                "[vitals] ALERT: {} — error_code=0x{:02X}, temp={:.0}°C",
-                                joint.name,
-                                joint.error_code,
-                                joint.temperature
+                                "[vitals] ALERT: {} — {} (0x{:02X}), temp={:.0}°C",
+                                component_key,
+                                faults.join(", "),
+                                comp.error_code,
+                                comp.temperature
                             );
                         }
                         changed = true;
                     }
-                    if joint.enabled != prev_en {
+
+                    // Enable / disable changes.
+                    if comp.enabled != prev_en {
                         log::info!(
                             "[vitals] {} enabled: {} → {}",
-                            joint.name,
+                            component_key,
                             prev_en,
-                            joint.enabled
+                            comp.enabled
                         );
-                        if !joint.enabled {
-                            log::warn!("[vitals] ALERT: {} — disabled", joint.name);
+                        if !comp.enabled {
+                            log::warn!("[vitals] ALERT: {} — disabled", component_key);
+                        }
+                        changed = true;
+                    }
+
+                    // ── Temperature threshold check ──────────────────
+                    let (temp_health, temp_detail) =
+                        body_threshold::evaluate_temp(comp.temperature, model);
+                    let prev_temp = state
+                        .prev_component_temp
+                        .get(&component_key)
+                        .map(|t| t.health)
+                        .unwrap_or(body_threshold::HEALTH_OK);
+                    if temp_health != prev_temp {
+                        log::info!(
+                            "[vitals] {} temp health: {} → {} ({:.0}°C)",
+                            component_key,
+                            health_label(prev_temp),
+                            health_label(temp_health),
+                            comp.temperature
+                        );
+                        if temp_health == body_threshold::HEALTH_WARN
+                            || temp_health == body_threshold::HEALTH_ERROR
+                        {
+                            log::warn!("[vitals] ALERT: {} — {}", component_key, temp_detail);
                         }
                         changed = true;
                     }
                 }
             }
 
-            state.first_body = false;
-
             // Persist body state for next diff.
-            state.prev_body_state = body.state;
-            state.prev_joint.clear();
-            for joint in &body.joints {
-                state.prev_joint.insert(
-                    joint.name.clone(),
-                    PrevJointState {
-                        error_code: joint.error_code,
-                        enabled: joint.enabled,
+            state.prev_body_state.insert(body_key.clone(), body.state);
+            for comp in &body.components {
+                let component_key = format!("{}/{}", body_key, comp.name);
+                let (health, _) = body_threshold::evaluate_temp(comp.temperature, model);
+                state.prev_component_temp.insert(
+                    component_key.clone(),
+                    body_threshold::JointTempHealth { health },
+                );
+                state.prev_component.insert(
+                    component_key,
+                    PrevComponentState {
+                        error_code: comp.error_code,
+                        enabled: comp.enabled,
                     },
                 );
             }
         }
+
+        if !snapshot.bodies.is_empty() {
+            state.first_body = false;
+        }
+
+        // ── Power state change detection ──────────────────────────────
+        // Voltage and battery changes don't go through ComponentHealth, so we
+        // track them separately.  Without this, power-only changes (e.g. voltage
+        // sag) produce no log output and no StreamVitals push.
+        let power = snapshot.power.as_ref();
+        let prev_power = state.prev_power.as_ref();
+        let power_changed = match (power, prev_power) {
+            (Some(cur), Some(prev)) => {
+                (cur.voltage - prev.voltage).abs() > 0.05
+                    || cur.charging != prev.charging
+                    || (cur.battery_percent - prev.battery_percent).abs() > 0.5
+            }
+            (Some(_), None) => true,  // first snapshot, force log
+            _ => false,
+        };
+        if power_changed {
+            if let (Some(cur), Some(prev)) = (power, prev_power) {
+                if (cur.voltage - prev.voltage).abs() > 0.05 {
+                    log::info!(
+                        "[vitals] voltage: {:.2}V → {:.2}V",
+                        prev.voltage,
+                        cur.voltage
+                    );
+                }
+                if cur.charging != prev.charging {
+                    log::info!(
+                        "[vitals] charging: {} → {}",
+                        prev.charging,
+                        cur.charging
+                    );
+                }
+                if (cur.battery_percent - prev.battery_percent).abs() > 0.5 {
+                    log::info!(
+                        "[vitals] battery: {:.0}% → {:.0}%",
+                        prev.battery_percent,
+                        cur.battery_percent
+                    );
+                }
+            }
+            changed = true;
+        }
+        state.prev_power = power.cloned();
 
         // Only broadcast on state transitions to avoid flooding subscribers.
         if changed {
