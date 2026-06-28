@@ -927,6 +927,13 @@ pub async fn execute(
         // The deploy.primitive / deploy.skill fields stay in the
         // manifest schema because soma reads them; rbnx just doesn't
         // launch those processes any more.
+        if deploy.system.contains_key("soma") && !skip_system && !deploy.primitive.is_empty() {
+            output::boot_section("primitive");
+            for entry in &deploy.primitive {
+                output::boot_note(&entry.name, "delegated to soma stage 1");
+            }
+            wait_for_soma_stage1(&mut atlas, deploy.primitive.len()).await?;
+        }
 
         if !deploy.service.is_empty() {
             output::boot_section("service");
@@ -968,25 +975,12 @@ pub async fn execute(
         // for the skills that never started.
         if deploy.system.contains_key("soma") && !skip_system {
             output::boot_section("stage 2");
-            let event = robonix_atlas::client::stage_trigger_event("stage2");
-            match atlas.notify_provider("soma", event).await {
-                Ok(true) => {
-                    output::boot_ok("soma", "stage 2 trigger delivered");
-                }
-                Ok(false) => {
-                    output::boot_skip(
-                        "soma",
-                        "stage 2 trigger queued but soma had no live WatchProvider \
-                         subscriber — skills will not start until soma re-subscribes",
-                    );
-                }
-                Err(e) => {
-                    failures.push((
-                        "system".to_string(),
-                        "soma".to_string(),
-                        format!("notify stage 2 trigger: {e:#}"),
-                    ));
-                }
+            if let Err(e) = notify_soma_stage2(&mut atlas).await {
+                failures.push((
+                    "system".to_string(),
+                    "soma".to_string(),
+                    format!("notify stage 2 trigger: {e:#}"),
+                ));
             }
         }
         Ok(failures)
@@ -1596,6 +1590,102 @@ where
                 frame = frame.wrapping_add(1);
             }
         }
+    }
+}
+
+async fn wait_for_soma_stage1(atlas: &mut AtlasClient, primitive_count: usize) -> Result<()> {
+    const SPINNER_TICK: Duration = Duration::from_millis(100);
+    const POLLS_PER_TICK: usize = 5; // poll atlas every 500 ms
+    const SOMA_STAGE1_TIMEOUT: Duration = Duration::from_secs(180);
+    const SOMA_GET_YAML_CONTRACT: &str = "robonix/system/soma/get_yaml";
+
+    let started = Instant::now();
+    let deadline = started + SOMA_STAGE1_TIMEOUT;
+    let mut frame: usize = 0;
+    loop {
+        let elapsed_s = started.elapsed().as_secs_f32();
+        output::boot_progress(
+            "soma stage 1",
+            &format!("starting {primitive_count} primitive package(s)… {elapsed_s:>4.1}s"),
+            frame,
+        );
+        if frame.is_multiple_of(POLLS_PER_TICK) {
+            let providers = atlas
+                .query_capabilities("soma", SOMA_GET_YAML_CONTRACT, atlas_pb::Transport::Grpc)
+                .await
+                .context("wait for soma stage 1 readiness")?;
+            if let Some(soma) = providers.into_iter().find(|p| p.id == "soma") {
+                if soma.state == atlas_pb::LifecycleState::StateActive as i32 {
+                    output::boot_ok(
+                        "soma stage 1",
+                        &format!("{primitive_count} primitive package(s) handled by soma"),
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            output::boot_fail(
+                "soma stage 1",
+                &format!(
+                    "timeout after {:?}; service bring-up needs primitives ACTIVE first",
+                    SOMA_STAGE1_TIMEOUT
+                ),
+            );
+            anyhow::bail!(
+                "soma stage 1 did not become ACTIVE within {:?}; refusing to start service packages before primitives are ready",
+                SOMA_STAGE1_TIMEOUT
+            );
+        }
+        tokio::time::sleep(SPINNER_TICK).await;
+        frame = frame.wrapping_add(1);
+    }
+}
+
+async fn notify_soma_stage2(atlas: &mut AtlasClient) -> Result<()> {
+    const STAGE2_NOTIFY_TIMEOUT: Duration = Duration::from_secs(10);
+    const SPINNER_TICK: Duration = Duration::from_millis(100);
+    const POLLS_PER_TICK: usize = 5; // notify every 500 ms
+
+    let started = Instant::now();
+    let deadline = started + STAGE2_NOTIFY_TIMEOUT;
+    let mut frame: usize = 0;
+    let mut last_undelivered = false;
+    loop {
+        let elapsed_s = started.elapsed().as_secs_f32();
+        output::boot_progress(
+            "soma",
+            &format!("delivering stage 2 trigger… {elapsed_s:>4.1}s"),
+            frame,
+        );
+        if frame.is_multiple_of(POLLS_PER_TICK) {
+            let event = robonix_atlas::client::stage_trigger_event("stage2");
+            match atlas.notify_provider("soma", event).await {
+                Ok(true) => {
+                    output::boot_ok("soma", "stage 2 trigger delivered");
+                    return Ok(());
+                }
+                Ok(false) => {
+                    last_undelivered = true;
+                }
+                Err(e) => return Err(e).context("NotifyProvider('soma', stage2)"),
+            }
+        }
+        if Instant::now() >= deadline {
+            if last_undelivered {
+                output::boot_skip(
+                    "soma",
+                    "stage 2 trigger not delivered: no live WatchProvider subscriber",
+                );
+                return Ok(());
+            }
+            anyhow::bail!(
+                "stage 2 trigger was not delivered within {:?}",
+                STAGE2_NOTIFY_TIMEOUT
+            );
+        }
+        tokio::time::sleep(SPINNER_TICK).await;
+        frame = frame.wrapping_add(1);
     }
 }
 
