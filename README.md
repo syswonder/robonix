@@ -223,6 +223,7 @@ Standalone repos, cloned at boot via `url:` in the deploy manifest.
 | Package | What it does | Namespace |
 |---|---|---|
 | [`explore_rbnx`](https://github.com/enkerewpo/explore_rbnx) | Autonomous frontier room exploration | `robonix/skill/explore/*` |
+| [`greet_rbnx`](https://github.com/enkerewpo/greet_rbnx) | Greet passers-by — YOLO person detection → VLM line → speak | `robonix/skill/greet/*` |
 
 **Tools & deployments:**
 
