@@ -44,9 +44,14 @@ const KIND_BATTERY: u32 = 7;
 const KIND_COMPUTER: u32 = 8;
 const KIND_SENSOR: u32 = 9;
 const OP_ACTIVE: u32 = 4;
+// Safety aggregate-state constants per Soma SafetyState IDL.
 const SAFETY_NORMAL: u32 = 1;
-const SAFETY_FAULT: u32 = 2;
-const SAFETY_ESTOP: u32 = 3;
+#[allow(dead_code)]
+const SAFETY_REDUCED: u32 = 2;
+#[allow(dead_code)]
+const SAFETY_PROTECTIVE_STOP: u32 = 3;
+const SAFETY_ESTOP: u32 = 4;
+const SAFETY_FAULT: u32 = 5;
 const FAULT_WARN: u32 = 1;
 const FAULT_ERROR: u32 = 2;
 const ESTOP_RELEASED: u32 = 0;
@@ -126,8 +131,8 @@ impl PiperBridge {
     /// failure or if the JSON response cannot be parsed.
     async fn collect(&self) -> Option<PiperData> {
         let sub = self.sub.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut handle = sub.lock().unwrap();
+        match tokio::task::spawn_blocking(move || {
+            let mut handle = sub.lock().unwrap_or_else(|e| e.into_inner());
             let line = handle.collect_json()?;
             match serde_json::from_str::<PiperData>(&line) {
                 Ok(data) => Some(data),
@@ -138,8 +143,13 @@ impl PiperBridge {
             }
         })
         .await
-        .ok()
-        .flatten()
+        {
+            Ok(data) => data,
+            Err(e) => {
+                log::warn!("[mock_soma] piper bridge thread panicked: {e:#}");
+                None
+            }
+        }
     }
 }
 
@@ -168,13 +178,16 @@ impl MockSomaService {
     }
 
     async fn next_snapshot(&self) -> SomaHealthSnapshot {
-        let mut seq = self.seq.write().await;
-        *seq += 1;
+        let seq = {
+            let mut guard = self.seq.write().await;
+            *guard += 1;
+            *guard
+        };
         let piper_data = match &self.piper_bridge {
             Some(bridge) => bridge.collect().await,
             None => None,
         };
-        generate_snapshot(self.scenario, *seq, piper_data.as_ref())
+        generate_snapshot(self.scenario, seq, piper_data.as_ref())
     }
 }
 
@@ -233,9 +246,12 @@ pub async fn run_mock_soma(
             ),
         )
         .await?;
-    let _ = atlas
+    if let Err(e) = atlas
         .set_lifecycle_state(provider_id, atlas_pb::LifecycleState::StateActive, "")
-        .await;
+        .await
+    {
+        log::warn!("[mock_soma] SetLifecycleState(ACTIVE) failed: {e:#}");
+    }
     spawn_heartbeat(atlas.clone(), provider_id.to_string());
 
     // Optionally spawn Piper bridge subprocess for real hardware data.

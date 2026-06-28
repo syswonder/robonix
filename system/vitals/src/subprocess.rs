@@ -100,11 +100,18 @@ impl SubprocessHandle {
         }
     }
 
-    /// Replace the dead subprocess with a fresh one.
+    /// Replace the dead subprocess with a fresh one, preserving the original args.
     #[allow(dead_code)]
-    pub fn restart(&mut self, script: &str, python_bin: &str) -> anyhow::Result<()> {
-        let mut child = Command::new(python_bin)
-            .arg(script)
+    pub fn restart(&mut self, script: &str, python_bin: &str, args: &[&str]) -> anyhow::Result<()> {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+
+        let mut cmd = Command::new(python_bin);
+        cmd.arg(script);
+        for a in args {
+            cmd.arg(a);
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

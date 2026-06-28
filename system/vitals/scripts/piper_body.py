@@ -80,6 +80,11 @@ def _decode_faults(error_code: int) -> str:
 
 class PiperCollector:
     def __init__(self, can_port: str) -> None:
+        if not PIPER_AVAILABLE:
+            raise ImportError(
+                "piper_sdk is not installed. Install it in your Python environment "
+                "to use the Piper hardware bridge."
+            )
         self._piper = C_PiperInterface_V2(can_port)
         self._piper.ConnectPort()
 

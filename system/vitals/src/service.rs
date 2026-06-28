@@ -188,6 +188,7 @@ impl VitalsServiceImpl {
                                 String::new()
                             }
                         );
+                        changed = true;
                     }
                 }
 
@@ -323,6 +324,7 @@ fn health_label(h: u32) -> &'static str {
         0 => "OK",
         1 => "WARN",
         2 => "ERROR",
+        3 => "STALE",
         _ => "UNKNOWN",
     }
 }
