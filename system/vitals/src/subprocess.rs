@@ -64,16 +64,16 @@ impl SubprocessHandle {
     pub fn collect_json(&mut self) -> Option<String> {
         let cmd = serde_json::json!({"cmd": "collect"});
         if let Err(e) = writeln!(self.stdin, "{cmd}") {
-            log::warn!("[{}] write to script failed: {e:#}", self.label);
+            log::error!("[{}] write to script failed: {e:#}", self.label);
             return None;
         }
         if let Err(e) = self.stdin.flush() {
-            log::warn!("[{}] flush stdin failed: {e:#}", self.label);
+            log::error!("[{}] flush stdin failed: {e:#}", self.label);
             return None;
         }
         let mut line = String::new();
         if let Err(e) = self.reader.read_line(&mut line) {
-            log::warn!("[{}] read from script failed: {e:#}", self.label);
+            log::error!("[{}] read from script failed: {e:#}", self.label);
             return None;
         }
         let trimmed = line.trim().to_string();
