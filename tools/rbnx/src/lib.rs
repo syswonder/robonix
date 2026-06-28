@@ -6,8 +6,10 @@
 pub mod config;
 pub mod database;
 pub mod install;
+pub mod launch;
 pub mod manifest;
 pub mod output;
+pub mod pb;
 pub mod process;
 
 pub use config::{Config, SourcePathKey};
