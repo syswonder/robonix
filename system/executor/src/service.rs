@@ -9,7 +9,7 @@ use crate::pb::contracts::robonix_system_executor_execute_server::RobonixSystemE
 use crate::pb::executor::{CancelAllResponse, RtdlEvent};
 use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan};
-use crate::plan_runtime::PlanRuntime;
+use crate::plan_runtime::{PlanRuntime, StopWhen};
 use crate::rtdl_wire::{self, NodeEventContext};
 use robonix_atlas::client::AtlasClient;
 use robonix_scribe::{info, warn};
@@ -214,7 +214,50 @@ fn execute_node(
                     .call
                     .as_ref()
                     .expect("validated do node must contain call");
-                execute_call(call, node_ctx, tx, atlas, provider_id, runtime).await
+                let op_id = node.op_id.clone();
+                let mut atlas = atlas;
+                // on_enter stop point: cancel the whole plan the moment we reach
+                // this op, before its call runs. The DO node never executes.
+                if runtime
+                    .should_stop_at(&plan.plan_id, &op_id, StopWhen::OnEnter)
+                    .await
+                {
+                    runtime
+                        .trigger_stop(&plan.plan_id, &provider_id, &mut atlas)
+                        .await;
+                    let _ = tx
+                        .send(Ok(rtdl_wire::node_state(
+                            &node_ctx,
+                            RtdlNodeStateEnum::Canceled as u32,
+                            format!("stopped on entering op_id={op_id}: plan cancelled"),
+                            None,
+                        )))
+                        .await;
+                    return true;
+                }
+                // Keep a clone for the post-completion check; execute_call takes
+                // atlas by value.
+                let mut atlas_after = atlas.clone();
+                let failed = execute_call(
+                    call,
+                    node_ctx,
+                    tx,
+                    atlas,
+                    provider_id.clone(),
+                    runtime.clone(),
+                )
+                .await;
+                // on_complete stop point: cancel the whole plan right after this
+                // op finishes (its own node_state was already streamed).
+                if runtime
+                    .should_stop_at(&plan.plan_id, &op_id, StopWhen::OnComplete)
+                    .await
+                {
+                    runtime
+                        .trigger_stop(&plan.plan_id, &provider_id, &mut atlas_after)
+                        .await;
+                }
+                failed
             }
             _ => {
                 warn!(
