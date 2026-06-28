@@ -31,6 +31,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
+from . import scribe_logger
 from ._lifecycle_internal import _set_lifecycle_state
 from .atlas import ATLAS
 from .atlas_types import (
@@ -56,31 +57,6 @@ from .tool import mcp_contract
 
 log = logging.getLogger("robonix_api.capability")
 
-
-def _install_simple_logger() -> None:
-    """Replace `rich`-installed RichHandler (from fastmcp / uvicorn) with
-    a plain stderr handler. Idempotent.
-
-    Called from `_do_bootstrap()` (NOT at module import) so a bare
-    `import robonix_api` does not wipe the host application's logging
-    config — only kicks in when the caller actually decides to run a
-    Primitive / Service / Skill."""
-    if getattr(_install_simple_logger, "_done", False):
-        return
-    root = logging.getLogger()
-    for h in list(root.handlers):
-        root.removeHandler(h)
-    handler = logging.StreamHandler()
-    handler.setFormatter(
-        logging.Formatter(
-            fmt="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
-            datefmt="%H:%M:%S",
-        )
-    )
-    root.addHandler(handler)
-    if root.level == logging.NOTSET or root.level > logging.INFO:
-        root.setLevel(logging.INFO)
-    _install_simple_logger._done = True  # type: ignore[attr-defined]
 
 # Transport-ENUM <-> contract.mode compatibility matrix (best-effort
 # check at declare_capability time).
@@ -632,12 +608,14 @@ class _ProviderBase:
         raise NotImplementedError
 
     def _do_bootstrap(self) -> None:
-        # 0. swap the rich-installed RichHandler (if any) for our plain
-        # stderr handler. Deliberately deferred from import time so that
-        # `import robonix_api` is a no-op on the host application's
-        # logging — only kicks in once the caller is actually running a
-        # provider process.
-        _install_simple_logger()
+        # 0. Route ALL stdlib logging through Scribe under this provider's id
+        # (the same tag rbnx uses for its log file). This replaces any handler
+        # installed by imports — fastmcp/uvicorn's rich handler, a host app's
+        # own config — so the whole provider lifecycle (register, ready, Driver
+        # commands, on_init, ACTIVE) lands in `rbnx logs -t <id>` instead of a
+        # raw stderr that the unified log never sees. Deferred from import time
+        # so a bare `import robonix_api` does not touch the host's logging.
+        scribe_logger.install_stdlib_bridge(self.id)
 
         # 1. atlas register
         registered_ok = False
