@@ -69,6 +69,7 @@ impl RobonixSystemExecutorExecute for ExecutorServiceImpl {
             let plan_id = plan.plan_id.clone();
             let plan = Arc::new(plan);
             runtime.register_plan(&plan_id).await;
+            runtime.record_plan_ops(&plan).await;
             let _ = tx.send(Ok(rtdl_wire::plan_started(plan_id.clone()))).await;
             let any_failed = execute_node(
                 Arc::clone(&plan),
@@ -114,6 +115,7 @@ fn execute_node(
                     &node_ctx,
                     RtdlNodeStateEnum::Canceled as u32,
                     "canceled",
+                    &runtime,
                 )
                 .await;
             }
@@ -157,7 +159,7 @@ fn execute_node(
                 } else {
                     "completed successfully"
                 };
-                send_operator_terminal(&tx, &node_ctx, state, reason).await;
+                send_operator_terminal(&tx, &node_ctx, state, reason, &runtime).await;
                 any_failed || cancelled
             }
             RTDL_PARALLEL => {
@@ -206,7 +208,7 @@ fn execute_node(
                 } else {
                     "completed successfully"
                 };
-                send_operator_terminal(&tx, &node_ctx, state, reason).await;
+                send_operator_terminal(&tx, &node_ctx, state, reason, &runtime).await;
                 any_failed || cancelled
             }
             RTDL_DO => {
@@ -224,6 +226,9 @@ fn execute_node(
                 {
                     runtime
                         .trigger_stop(&plan.plan_id, &provider_id, &mut atlas)
+                        .await;
+                    runtime
+                        .record_op_state(&plan.plan_id, &op_id, RtdlNodeStateEnum::Canceled as u32)
                         .await;
                     let _ = tx
                         .send(Ok(rtdl_wire::node_state(
@@ -287,12 +292,14 @@ fn is_operator_node(node_kind: u32) -> bool {
     matches!(node_kind, RTDL_SEQUENCE | RTDL_PARALLEL)
 }
 
-/// Stream the terminal event for a non-leaf RTDL operator node.
+/// Stream the terminal event for a non-leaf RTDL operator node, and record the
+/// state so `get_plan_status` reflects it.
 async fn send_operator_terminal(
     tx: &Sender<Result<RtdlEvent, Status>>,
     node: &NodeEventContext,
     state: u32,
     reason: &str,
+    runtime: &PlanRuntime,
 ) {
     let op = match node.node_kind {
         RTDL_SEQUENCE => "sequence",
@@ -303,6 +310,9 @@ async fn send_operator_terminal(
         "RTDL {op} op_id={} {reason}: {}",
         node.op_id, node.description
     );
+    runtime
+        .record_op_state(&node.plan_id, &node.op_id, state)
+        .await;
     let _ = tx
         .send(Ok(rtdl_wire::operator_node_state(node, state, detail)))
         .await;
@@ -322,6 +332,16 @@ async fn execute_call(
         call.call_id, call.provider_id, call.contract_id,
     );
 
+    // Mark the op running so get_plan_status shows the in-flight node; the
+    // terminal state below (or async_poll for async caps) overwrites it.
+    runtime
+        .record_op_state(
+            &node.plan_id,
+            &node.op_id,
+            RtdlNodeStateEnum::Running as u32,
+        )
+        .await;
+
     let async_group = if call.provider_id == provider_id {
         Ok(None)
     } else {
@@ -338,6 +358,9 @@ async fn execute_call(
                 output: String::new(),
                 error,
             };
+            runtime
+                .record_op_state(&node.plan_id, &node.op_id, RtdlNodeStateEnum::Failed as u32)
+                .await;
             let _ = tx
                 .send(Ok(rtdl_wire::node_state_from_result(
                     &node,
@@ -366,6 +389,9 @@ async fn execute_call(
             } else {
                 RtdlNodeStateEnum::Failed as u32
             };
+            runtime
+                .record_op_state(&node.plan_id, &node.op_id, state)
+                .await;
             let _ = tx
                 .send(Ok(rtdl_wire::node_state_from_result(
                     &node,
@@ -507,8 +533,8 @@ fn visit_for_cycles(index: usize, plan: &Plan, colors: &mut [VisitColor]) -> Res
 #[cfg(test)]
 mod tests {
     use super::{
-        RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, RtdlNodeStateEnum, send_operator_terminal,
-        validate_plan,
+        PlanRuntime, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, RtdlNodeStateEnum,
+        send_operator_terminal, validate_plan,
     };
     use crate::pb::executor::rtdl_event::RtdlEventEnum;
     use crate::pb::pilot::{CapabilityCall, Plan, RtdlNode};
@@ -649,11 +675,13 @@ mod tests {
             description: "run the ordered checks".to_string(),
         };
 
+        let runtime = PlanRuntime::default();
         send_operator_terminal(
             &tx,
             &node,
             RtdlNodeStateEnum::Succeeded as u32,
             "completed successfully",
+            &runtime,
         )
         .await;
 

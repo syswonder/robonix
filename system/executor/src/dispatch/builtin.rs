@@ -83,6 +83,12 @@ pub async fn execute(
     if op == "stop_plan_at" {
         return runtime.stop_plan_at_builtin(call).await;
     }
+    if op == "get_plan_status" {
+        return runtime.get_plan_status_builtin(call).await;
+    }
+    if op == "get_all_plans" {
+        return runtime.get_all_plans_builtin(call).await;
+    }
     if op == "read_capability_doc" {
         return read_capability_doc(call, atlas).await;
     }
@@ -156,6 +162,16 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         op: "cancel_plan",
         description: "Cancellation for an in-flight RTDL plan by plan_id",
         input_schema_json: r#"{"type":"object","properties":{"plan_id":{"type":"string","description":"RTDL Plan.plan_id to cancel"},"wait_ms":{"type":"integer","minimum":0,"description":"Optional milliseconds to wait for the target plan to stop; default 5000"}},"required":["plan_id"]}"#,
+    },
+    BuiltinSpec {
+        op: "get_all_plans",
+        description: "List every in-flight RTDL plan with its plan_id, op_count, cancelled flag, and number of armed stop points. Call this to discover which plans are currently running, then inspect one with get_plan_status before stopping it. Takes no arguments.",
+        input_schema_json: r#"{"type":"object","properties":{}}"#,
+    },
+    BuiltinSpec {
+        op: "get_plan_status",
+        description: "Inspect an in-flight RTDL plan: returns its ops, each with op_id, kind, description, current state (pending/running/succeeded/failed/canceled/timeout/paused) and any armed stop_point. Call this to find the op_id and live progress of a running plan before issuing stop_plan_at or cancel_plan. Unknown/finished plans return running:false.",
+        input_schema_json: r#"{"type":"object","properties":{"plan_id":{"type":"string","description":"RTDL Plan.plan_id to inspect"}},"required":["plan_id"]}"#,
     },
     BuiltinSpec {
         op: "stop_plan_at",

@@ -283,8 +283,14 @@ fn build_forest_block(forest: &HashMap<String, TreeMeta>) -> String {
     let mut block = String::from(
         "\n\n## In-flight trees\n\
          These RTDL trees you dispatched earlier are still running concurrently. \
-         To stop one, call `builtin_cancel_plan` with its exact `plan_id` below \
-         (or `executor_cancel_all_plans` to stop everything at once). Cancel each \
+         To stop one immediately, call `builtin_cancel_plan` with its exact \
+         `plan_id` below (or `executor_cancel_all_plans` to stop everything at \
+         once). To stop a plan at a specific step instead of now, first call \
+         `builtin_get_plan_status` with its `plan_id` to read its ops (each op's \
+         `op_id`, description, and live state), then call `builtin_stop_plan_at` \
+         with that `plan_id`, the chosen `op_id`, and `when` (`on_enter` to stop \
+         before that op runs, `on_complete` to stop after it finishes) — this \
+         cancels the whole plan when execution reaches that op. Cancel/stop each \
          plan_id at most once — a cancel that returned is already stopping; do NOT \
          re-issue it. Only the plan_ids listed here are running; never cancel an id \
          not in this list. Do not reuse these ids for new trees. If an in-flight \

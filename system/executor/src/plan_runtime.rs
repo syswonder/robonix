@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 // Shared in-process state for Executor plan cancellation.
 
-use crate::pb::pilot::{CapabilityCall, CapabilityCallResult};
+use crate::pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
+use crate::pb::pilot::{CapabilityCall, CapabilityCallResult, Plan};
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::warn;
@@ -33,8 +34,22 @@ struct PlanRun {
     /// Set by the `stop_plan_at` builtin; read by the execution loop at each
     /// `do` node. At most one phase per op_id (a later set overwrites).
     stop_points: HashMap<String, StopWhen>,
+    /// Static op list snapshotted at register time (arena order), so
+    /// `get_plan_status` can report op_ids/descriptions the LLM can target.
+    ops: Vec<OpMeta>,
+    /// op_id → latest RTDL node state observed during execution. Absent = the
+    /// op has not started yet (reported as `pending`).
+    op_state: HashMap<String, u32>,
     /// Notifies `cancel_plan` waiters when this plan leaves the active table.
     done: Arc<Notify>,
+}
+
+/// One op's static identity, snapshotted from the plan arena at register time.
+#[derive(Clone)]
+struct OpMeta {
+    op_id: String,
+    description: String,
+    node_kind: u32,
 }
 
 /// When a stop point fires relative to its target op. "Stop" always means
@@ -97,9 +112,120 @@ impl PlanRuntime {
                 cancelled: false,
                 running_async: HashMap::new(),
                 stop_points: HashMap::new(),
+                ops: Vec::new(),
+                op_state: HashMap::new(),
                 done: Arc::new(Notify::new()),
             },
         );
+    }
+
+    /// Snapshot a plan's op list (arena order) so `get_plan_status` can report
+    /// the op_ids/descriptions the LLM may target. Called right after
+    /// `register_plan`. No-op if the plan is not in the active table.
+    pub async fn record_plan_ops(&self, plan: &Plan) {
+        let ops: Vec<OpMeta> = plan
+            .nodes
+            .iter()
+            .map(|n| OpMeta {
+                op_id: n.op_id.clone(),
+                description: n.description.clone(),
+                node_kind: n.node_kind,
+            })
+            .collect();
+        if let Some(run) = self.inner.lock().await.get_mut(&plan.plan_id) {
+            run.ops = ops;
+        }
+    }
+
+    /// Record the latest observed RTDL state for an op. Called by the execution
+    /// loop / async poller alongside every node_state event it streams, so
+    /// `get_plan_status` reflects live progress. No-op for unknown plans.
+    pub async fn record_op_state(&self, plan_id: &str, op_id: &str, state: u32) {
+        if let Some(run) = self.inner.lock().await.get_mut(plan_id) {
+            run.op_state.insert(op_id.to_string(), state);
+        }
+    }
+
+    /// Apply the `get_plan_status` builtin: return the plan's ops as JSON, each
+    /// with `op_id`, `kind`, `description`, current `state`, and any armed
+    /// `stop_point`. Lets the LLM inspect a running plan before issuing a
+    /// `stop_plan_at` (inspect first, then act). Unknown/finished plans report
+    /// `running:false` with an empty op list rather than erroring.
+    pub async fn get_plan_status_builtin(&self, call: &CapabilityCall) -> CapabilityCallResult {
+        #[derive(Deserialize)]
+        struct Args {
+            plan_id: String,
+        }
+        let args: Args = match serde_json::from_str(&call.args_json) {
+            Ok(a) => a,
+            Err(e) => return error_result(call, format!("invalid get_plan_status args: {e}")),
+        };
+        let plans = self.inner.lock().await;
+        let Some(run) = plans.get(&args.plan_id) else {
+            return ok_result(
+                call,
+                serde_json::json!({
+                    "plan_id": args.plan_id,
+                    "running": false,
+                    "note": "plan is not active (already finished or never existed)",
+                    "ops": [],
+                })
+                .to_string(),
+            );
+        };
+        let ops: Vec<serde_json::Value> = run
+            .ops
+            .iter()
+            .map(|op| {
+                let state = run
+                    .op_state
+                    .get(&op.op_id)
+                    .map(|s| state_label(*s))
+                    .unwrap_or("pending");
+                serde_json::json!({
+                    "op_id": op.op_id,
+                    "kind": kind_label(op.node_kind),
+                    "description": op.description,
+                    "state": state,
+                    "stop_point": run.stop_points.get(&op.op_id).map(when_label),
+                })
+            })
+            .collect();
+        ok_result(
+            call,
+            serde_json::json!({
+                "plan_id": args.plan_id,
+                "running": true,
+                "cancelled": run.cancelled,
+                "ops": ops,
+            })
+            .to_string(),
+        )
+    }
+
+    /// Apply the `get_all_plans` builtin: list every active RTDL plan with its
+    /// op count, cancelled flag, and number of armed stop points. Lets the LLM
+    /// discover which plans are running before inspecting one with
+    /// `get_plan_status`. Takes no args.
+    pub async fn get_all_plans_builtin(&self, call: &CapabilityCall) -> CapabilityCallResult {
+        let plans = self.inner.lock().await;
+        let mut entries: Vec<(&String, &PlanRun)> = plans.iter().collect();
+        entries.sort_by_key(|(id, _)| id.parse::<u64>().unwrap_or(u64::MAX));
+        let list: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|(id, run)| {
+                serde_json::json!({
+                    "plan_id": id,
+                    "op_count": run.ops.len(),
+                    "cancelled": run.cancelled,
+                    "stop_points": run.stop_points.len(),
+                })
+            })
+            .collect();
+        ok_result(
+            call,
+            serde_json::json!({ "count": list.len(), "plans": list }).to_string(),
+        )
     }
 
     /// Mark a plan complete, remove it from the active table, and notify waiters.
@@ -439,6 +565,38 @@ fn error_result(call: &CapabilityCall, error: String) -> CapabilityCallResult {
     }
 }
 
+/// Human-readable label for an RTDL node state (for `get_plan_status` JSON).
+fn state_label(state: u32) -> &'static str {
+    match RtdlNodeStateEnum::try_from(state as i32) {
+        Ok(RtdlNodeStateEnum::Pending) => "pending",
+        Ok(RtdlNodeStateEnum::Running) => "running",
+        Ok(RtdlNodeStateEnum::Succeeded) => "succeeded",
+        Ok(RtdlNodeStateEnum::Failed) => "failed",
+        Ok(RtdlNodeStateEnum::Canceled) => "canceled",
+        Ok(RtdlNodeStateEnum::Timeout) => "timeout",
+        Ok(RtdlNodeStateEnum::Paused) => "paused",
+        _ => "unknown",
+    }
+}
+
+/// Label an RTDL node kind (0=sequence, 1=parallel, 2=do).
+fn kind_label(node_kind: u32) -> &'static str {
+    match node_kind {
+        0 => "sequence",
+        1 => "parallel",
+        2 => "do",
+        _ => "unknown",
+    }
+}
+
+/// Label a stop-point phase for `get_plan_status` JSON.
+fn when_label(when: &StopWhen) -> &'static str {
+    match when {
+        StopWhen::OnEnter => "on_enter",
+        StopWhen::OnComplete => "on_complete",
+    }
+}
+
 /// Build a successful capability result for a builtin.
 fn ok_result(call: &CapabilityCall, output: String) -> CapabilityCallResult {
     CapabilityCallResult {
@@ -588,5 +746,89 @@ mod tests {
         let runtime = PlanRuntime::default();
         runtime.register_plan("p").await;
         assert!(!runtime.should_stop_at("p", "1", StopWhen::OnComplete).await);
+    }
+
+    fn status_call(args_json: &str) -> CapabilityCall {
+        CapabilityCall {
+            call_id: "c".into(),
+            provider_id: "executor".into(),
+            contract_id: "robonix/system/executor/builtin/get_plan_status".into(),
+            args_json: args_json.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_plan_status_reports_ops_states_and_stop_points() {
+        use crate::pb::pilot::{Plan, RtdlNode};
+        let runtime = PlanRuntime::default();
+        runtime.register_plan("p").await;
+        let plan = Plan {
+            plan_id: "p".into(),
+            session_id: "s".into(),
+            round: 0,
+            root_index: 0,
+            nodes: vec![
+                RtdlNode {
+                    node_kind: 0,
+                    children: vec![1],
+                    call: None,
+                    op_id: "1".into(),
+                    description: "sequence".into(),
+                },
+                RtdlNode {
+                    node_kind: 2,
+                    children: vec![],
+                    call: None,
+                    op_id: "2".into(),
+                    description: "take snapshot".into(),
+                },
+            ],
+        };
+        runtime.record_plan_ops(&plan).await;
+        runtime
+            .record_op_state("p", "2", RtdlNodeStateEnum::Running as u32)
+            .await;
+        runtime
+            .stop_plan_at_builtin(&stop_call(
+                r#"{"plan_id":"p","op_id":"2","when":"on_complete"}"#,
+            ))
+            .await;
+
+        let r = runtime
+            .get_plan_status_builtin(&status_call(r#"{"plan_id":"p"}"#))
+            .await;
+        assert!(r.success, "{}", r.error);
+        // op 2 is running with an armed stop point; op 1 hasn't started (pending).
+        assert!(r.output.contains(r#""op_id":"2""#));
+        assert!(r.output.contains(r#""state":"running""#));
+        assert!(r.output.contains(r#""state":"pending""#));
+        assert!(r.output.contains(r#""stop_point":"on_complete""#));
+        assert!(r.output.contains(r#""running":true"#));
+    }
+
+    #[tokio::test]
+    async fn get_all_plans_lists_active_plans() {
+        let runtime = PlanRuntime::default();
+        let empty = runtime.get_all_plans_builtin(&status_call("{}")).await;
+        assert!(empty.success);
+        assert!(empty.output.contains(r#""count":0"#));
+
+        runtime.register_plan("p1").await;
+        runtime.register_plan("p2").await;
+        let r = runtime.get_all_plans_builtin(&status_call("{}")).await;
+        assert!(r.success);
+        assert!(r.output.contains(r#""count":2"#));
+        assert!(r.output.contains(r#""plan_id":"p1""#));
+        assert!(r.output.contains(r#""plan_id":"p2""#));
+    }
+
+    #[tokio::test]
+    async fn get_plan_status_unknown_plan_reports_not_running() {
+        let runtime = PlanRuntime::default();
+        let r = runtime
+            .get_plan_status_builtin(&status_call(r#"{"plan_id":"missing"}"#))
+            .await;
+        assert!(r.success);
+        assert!(r.output.contains(r#""running":false"#));
     }
 }
