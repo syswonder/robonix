@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
             &cfg.mock_soma_id,
             &cfg.mock_soma_listen,
             &cfg.mock_soma_scenario,
+            cfg.mock_soma_interval_ms,
         )
         .await;
     }

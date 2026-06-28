@@ -77,13 +77,15 @@ impl MockScenario {
 #[derive(Clone)]
 struct MockSomaService {
     scenario: MockScenario,
+    interval: Duration,
     seq: Arc<RwLock<u64>>,
 }
 
 impl MockSomaService {
-    fn new(scenario: MockScenario) -> Self {
+    fn new(scenario: MockScenario, interval: Duration) -> Self {
         Self {
             scenario,
+            interval,
             seq: Arc::new(RwLock::new(0)),
         }
     }
@@ -100,8 +102,10 @@ pub async fn run_mock_soma(
     provider_id: &str,
     listen: &str,
     scenario_raw: &str,
+    interval_ms: u64,
 ) -> Result<()> {
     let scenario = MockScenario::parse(scenario_raw);
+    let interval = Duration::from_millis(interval_ms.max(1));
     let listen_addr: SocketAddr = listen
         .parse()
         .with_context(|| format!("invalid mock Soma listen address '{listen}'"))?;
@@ -145,16 +149,19 @@ pub async fn run_mock_soma(
         .await;
     spawn_heartbeat(atlas.clone(), provider_id.to_string());
 
-    let service = MockSomaService::new(scenario);
     log::info!(
-        "[mock_soma] scenario={} listening on {}",
+        "[mock_soma] scenario={} interval_ms={} listening on {}",
         scenario.as_str(),
+        interval.as_millis(),
         listen_addr
     );
     eprintln!(
-        "mock Soma ready on {listen_addr} scenario={}",
-        scenario.as_str()
+        "mock Soma ready on {listen_addr} scenario={} interval_ms={}",
+        scenario.as_str(),
+        interval.as_millis()
     );
+
+    let service = MockSomaService::new(scenario, interval);
 
     tonic::transport::Server::builder()
         .add_service(RobonixSystemSomaGetHealthServer::new(service.clone()))
@@ -211,7 +218,7 @@ impl RobonixSystemSomaHealth for MockSomaService {
         let service = self.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            let mut tick = tokio::time::interval(service.interval);
             tick.tick().await;
             loop {
                 tick.tick().await;
