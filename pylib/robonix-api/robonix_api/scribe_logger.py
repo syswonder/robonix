@@ -15,6 +15,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import threading
@@ -172,3 +173,70 @@ def warn(tag: str, msg: str) -> None:
 def error(tag: str, msg: str) -> None:
     """Convenience: :attr:`Level.ERROR`."""
     log(Level.ERROR, tag, msg)
+
+
+# ── stdlib `logging` → Scribe bridge ─────────────────────────────────
+
+_STDLIB_LEVEL_MAP: Dict[int, Level] = {
+    logging.DEBUG: Level.DEBUG,
+    logging.INFO: Level.INFO,
+    logging.WARNING: Level.WARN,
+    logging.ERROR: Level.ERROR,
+    logging.CRITICAL: Level.ERROR,
+}
+
+
+class _StdlibBridgeHandler(logging.Handler):
+    """A stdlib ``logging.Handler`` that re-emits every record into Scribe.
+
+    Carries a fixed component *tag* so any library's logging (the package's
+    own, plus transitive deps that use stdlib ``logging``) lands in that
+    component's ``rbnx logs -t <tag>`` stream. Best-effort: a failure to
+    forward never propagates back into the caller's logging path.
+    """
+
+    def __init__(self, tag: str) -> None:
+        super().__init__()
+        self._tag = tag
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level = _STDLIB_LEVEL_MAP.get(record.levelno, Level.INFO)
+            log(level, self._tag, record.getMessage())
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def install_stdlib_bridge(
+    tag: str,
+    *,
+    level: int = logging.INFO,
+    logger: Optional[logging.Logger] = None,
+    replace_stream_handlers: bool = True,
+) -> logging.Logger:
+    """Route stdlib ``logging`` through Scribe so packages need no own sink.
+
+    Attaches a :class:`_StdlibBridgeHandler` (tagged *tag*) to *logger*
+    (the root logger by default, so transitive-dependency logs are captured
+    too) and raises its level to *level*. When *replace_stream_handlers* is
+    true, existing ``StreamHandler``/``FileHandler`` instances on that logger
+    are removed first — this is what enforces the repo rule "no package owns a
+    log file or duplicate stdout sink; everything goes through Scribe" (Scribe
+    already mirrors to stderr itself). Idempotent: a second call with the same
+    tag does not stack handlers. Returns the configured logger.
+    """
+    target = logger if logger is not None else logging.getLogger()
+    target.setLevel(level)
+
+    if replace_stream_handlers:
+        for handler in list(target.handlers):
+            # StreamHandler covers stdout/stderr sinks; FileHandler (its
+            # subclass) covers any per-package log file. Our own bridge is a
+            # plain Handler, so it is never matched here.
+            if isinstance(handler, logging.StreamHandler):
+                target.removeHandler(handler)
+
+    if not any(isinstance(h, _StdlibBridgeHandler) for h in target.handlers):
+        target.addHandler(_StdlibBridgeHandler(tag))
+
+    return target
