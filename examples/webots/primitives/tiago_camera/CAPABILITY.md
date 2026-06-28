@@ -1,6 +1,4 @@
 ---
-provider: tiago_camera
-kind: primitive
 description: Head-mounted RGB + depth camera — primary perception sensor; snapshot the scene.
 ---
 
