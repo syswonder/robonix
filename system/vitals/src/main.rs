@@ -6,16 +6,18 @@
 //   2. Declares two gRPC capabilities:
 //      - robonix/service/vitals/get    (rpc: GetVitals → VitalsSnapshot)
 //      - robonix/service/vitals/stream (topic_out: StreamVitals → stream VitalsSnapshot)
-//   3. Starts the collect loop (periodic sysfs/hwmon/thermal reads).
+//   3. Starts the collect loop:
+//      - SysfsCollector: board-level (CPU/GPU/NVMe temp, voltage) via sysfs.
+//      - BodyCollector (optional): body-level (joint motors) via Python SDK bridge.
 //   4. Serves both gRPC services on `listen`.
 //
-// In v0.1 vitals reads sysfs directly. When Soma (the body system component)
-// is ready, hardware access will move there and vitals will consume from
-// Soma's unified health contract.
+// In v0.1 vitals reads hardware directly. When Soma is ready, both board and
+// body collectors become gRPC clients consuming Soma's unified interfaces.
 //
 // No Driver lifecycle handshake required — vitals is stateless monitoring that
 // starts reporting as soon as the gRPC server is up.
 
+mod body;
 mod collect;
 mod config;
 mod normalize;
@@ -160,10 +162,35 @@ async fn main() -> Result<()> {
     let collector = collect::SysfsCollector::new().context("init sysfs collector")?;
     info!("sysfs collector ready");
 
+    // Optional body collector — only spawned when --body-type is set.
+    let mut body_collector: Option<body::BodyCollector> = None;
+    if let (Some(body_type), Some(body_model)) = (&cfg.body_type, &cfg.body_model) {
+        let script_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("scripts")
+            .join(format!("{body_model}_body.py"));
+        let python =
+            std::env::var("ROBONIX_VITALS_BODY_PYTHON").unwrap_or_else(|_| "python3".to_string());
+        match body::BodyCollector::new(
+            body_type,
+            body_model,
+            &script_path.to_string_lossy(),
+            &python,
+        ) {
+            Ok(bc) => {
+                body_collector = Some(bc);
+                info!("body collector ready ({body_type}/{body_model})");
+            }
+            Err(e) => log::warn!("[vitals] body collector init failed: {e:#}"),
+        }
+    }
+
     // Spawn the collect loop.
     {
         let svc = svc.clone();
         let interval = Duration::from_millis(cfg.collect_interval_ms);
+        let script_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts");
+        let python =
+            std::env::var("ROBONIX_VITALS_BODY_PYTHON").unwrap_or_else(|_| "python3".to_string());
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(interval);
             tick.tick().await;
@@ -189,10 +216,31 @@ async fn main() -> Result<()> {
                     }
                 }
 
+                // Collect body health (if a body collector is active).
+                let body = match &mut body_collector {
+                    Some(bc) => {
+                        let bh = bc.collect();
+                        // If the subprocess died, try to restart once.
+                        if !bc.is_alive() {
+                            log::warn!("[vitals] body script died, attempting restart");
+                            if let Some(bm) = &cfg.body_model {
+                                let name = format!("{bm}_body.py");
+                                let path = script_path.join(&name);
+                                if let Err(e) = bc.restart(&path.to_string_lossy(), &python) {
+                                    log::error!("[vitals] body restart failed: {e:#}");
+                                }
+                            }
+                        }
+                        Some(bh)
+                    }
+                    None => None,
+                };
+
                 let snapshot = crate::pb::vitals::VitalsSnapshot {
                     ts_ns: monotonic_ns(),
                     power: Some(power),
                     components,
+                    body,
                 };
 
                 svc.update_snapshot(snapshot).await;
