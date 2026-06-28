@@ -107,6 +107,17 @@ Executor declares builtin MCP capabilities under
   `plan_id` (required) and `wait_ms` (optional, default 5000). Async capability
   calls receive cancel requests through `<contract_id>/cancel`; synchronous
   calls already in progress are allowed to return naturally.
+- `get_all_plans`: list every in-flight RTDL plan (no args). Returns each
+  `plan_id` with `op_count`, `cancelled`, and the number of armed `stop_points`.
+  The plan-list level of inspect-then-act: discover running plans, then drill in
+  with `get_plan_status`.
+- `get_plan_status`: inspect an in-flight RTDL plan. Args: `plan_id` (required).
+  Returns each op as JSON with `op_id`, `kind`, `description`, current `state`
+  (`pending`/`running`/`succeeded`/`failed`/`canceled`/`timeout`/`paused`) and
+  any armed `stop_point`. Lets the LLM read a running plan's structure + live
+  progress before issuing a `stop_plan_at` / `cancel_plan` (inspect first, then
+  act). Unknown or already-finished plans return `running:false` with an empty
+  op list.
 - `stop_plan_at`: arm a stop point on an in-flight RTDL plan — when execution
   reaches the node with the given `op_id`, the **whole plan is cancelled** (same
   teardown as `cancel_plan`). Args: `plan_id` (required), `op_id` (required), and
