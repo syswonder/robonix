@@ -1,0 +1,9 @@
+atlas_endpoint: 127.0.0.1:50051
+listen: 127.0.0.1:50091
+provider_id: soma
+robonix_root: ../../
+default_robot: test_ci_robot
+start_packages: false
+rbnx_bin: rbnx
+deployments:
+  - examples/test_ci
