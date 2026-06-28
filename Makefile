@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 # Robonix top-level Makefile. Orchestrates Cargo workspace build + install.
 #
-# The Cargo workspace lives at the repo root and references the 4 Rust system
-# components (system/{atlas,executor,liaison,pilot}) plus the 2 Rust dev tools
-# (tools/{rbnx,codegen}). Python system components (system/scene) and Python
+# The Cargo workspace lives at the repo root and references the 5 Rust system
+# components (system/{atlas,executor,liaison,pilot,vitals}) plus the 2 Rust dev
+# tools (tools/{rbnx,codegen}). Python system components (system/scene) and Python
 # reference services (services/*) are managed by uv from this same root.
 
 .PHONY: help build release install clean fmt check pyrightconfig \
-        build-atlas build-pilot build-executor build-liaison
+        build-atlas build-pilot build-executor build-liaison build-vitals
 .DEFAULT_GOAL := help
 
 BUILD_MODE ?= debug
@@ -23,7 +23,6 @@ help:
 	@echo "    make build-pilot     - Install robonix-pilot to ~/.cargo/bin"
 	@echo "    make build-executor  - Install robonix-executor to ~/.cargo/bin"
 	@echo "    make build-liaison   - Install robonix-liaison to ~/.cargo/bin"
-	@echo "    make build-health-primitive - Install robonix-health-primitive to ~/.cargo/bin"
 	@echo "    make build-vitals    - Install robonix-vitals to ~/.cargo/bin"
 	@echo ""
 	@echo "  Install:"
@@ -54,9 +53,6 @@ build-executor:
 build-liaison:
 	cargo install --force --path system/liaison  --bin robonix-liaison  $(CARGO_FLAGS)
 
-build-health-primitive:
-	cargo install --force --path system/health_primitive --bin robonix-health-primitive $(CARGO_FLAGS)
-
 build-vitals:
 	cargo install --force --path system/vitals   --bin robonix-vitals   $(CARGO_FLAGS)
 
@@ -73,7 +69,6 @@ install:
 	cargo install --force --path system/pilot    --bin robonix-pilot    $(CARGO_FLAGS)
 	cargo install --force --path system/executor --bin robonix-executor $(CARGO_FLAGS)
 	cargo install --force --path system/liaison  --bin robonix-liaison  $(CARGO_FLAGS)
-	cargo install --force --path system/health_primitive --bin robonix-health-primitive $(CARGO_FLAGS)
 	cargo install --force --path system/vitals   --bin robonix-vitals   $(CARGO_FLAGS)
 	cargo install --force --path tools/rbnx      --bin rbnx             $(CARGO_FLAGS)
 	@# Register this clone as the robonix source tree so packages anywhere
