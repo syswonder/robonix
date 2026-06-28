@@ -245,20 +245,27 @@ def init(cfg):
 
     def on_camera_info(msg, _topic=intrinsics_topic):
         global intrinsics_published
-        if intrinsics_pub is None or intrinsics_published:
+        if intrinsics_pub is None:
             return
-        # Validate K BEFORE latching: a TRANSIENT_LOCAL publish caches the
-        # last value, so latching a zero/partial CameraInfo would pin
-        # garbage and block a later good sample from winning. Skip until a
-        # populated frame arrives.
+        # Validate K before relaying: skip zero/partial CameraInfo so we
+        # never forward garbage K.
         k = list(msg.k) if hasattr(msg, "k") else list(getattr(msg, "K", []))
         if len(k) < 6 or k[0] <= 0 or k[4] <= 0:
             return
+        # Relay on EVERY frame, not once. Scene subscribes to the intrinsics
+        # contract with DURABILITY=VOLATILE (so it stays compatible with
+        # continuously-publishing real cameras like realsense). A volatile
+        # subscriber never receives a one-shot sample published before it
+        # connected — so a publish-once relay leaves scene "waiting for
+        # camera intrinsics" forever. Mirror a real camera: stream K
+        # continuously (K is static, so the cost is negligible; the publisher
+        # is still latched so any TRANSIENT_LOCAL consumer also gets it).
         intrinsics_pub.publish(msg)
-        intrinsics_published = True
-        print(f"[tiago_camera] published intrinsics: fx={k[0]:.1f} "
-              f"fy={k[4]:.1f} cx={k[2]:.1f} cy={k[5]:.1f} "
-              f"{msg.width}x{msg.height} -> {_topic}")
+        if not intrinsics_published:
+            intrinsics_published = True
+            print(f"[tiago_camera] publishing intrinsics: fx={k[0]:.1f} "
+                  f"fy={k[4]:.1f} cx={k[2]:.1f} cy={k[5]:.1f} "
+                  f"{msg.width}x{msg.height} -> {_topic}")
 
     tiago_camera.create_subscription(
         "robonix/primitive/camera/intrinsics",
