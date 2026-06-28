@@ -16,15 +16,31 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 pub struct SubprocessHandle {
     stdin: ChildStdin,
     reader: BufReader<std::process::ChildStdout>,
+    #[allow(dead_code)]
     child: Child,
     label: String,
 }
 
 impl SubprocessHandle {
     /// Spawn a Python script with its stdin/stdout piped.
+    #[allow(dead_code)]
     pub fn spawn(script: &str, python_bin: &str, label: &str) -> anyhow::Result<Self> {
-        let mut child = Command::new(python_bin)
-            .arg(script)
+        Self::spawn_with_args(script, python_bin, &[], label)
+    }
+
+    /// Spawn a Python script with extra CLI arguments (e.g. CAN port).
+    pub fn spawn_with_args(
+        script: &str,
+        python_bin: &str,
+        args: &[&str],
+        label: &str,
+    ) -> anyhow::Result<Self> {
+        let mut cmd = Command::new(python_bin);
+        cmd.arg(script);
+        for a in args {
+            cmd.arg(a);
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -69,6 +85,7 @@ impl SubprocessHandle {
     }
 
     /// Check whether the subprocess is still running.
+    #[allow(dead_code)]
     pub fn is_alive(&mut self) -> bool {
         match self.child.try_wait() {
             Ok(None) => true,
@@ -84,6 +101,7 @@ impl SubprocessHandle {
     }
 
     /// Replace the dead subprocess with a fresh one.
+    #[allow(dead_code)]
     pub fn restart(&mut self, script: &str, python_bin: &str) -> anyhow::Result<()> {
         let mut child = Command::new(python_bin)
             .arg(script)

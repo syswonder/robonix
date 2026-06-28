@@ -13,7 +13,6 @@ pub const VITALS_NAMESPACE: &str = "robonix/service/vitals";
 pub const DEFAULT_ATLAS_ENDPOINT: &str = "127.0.0.1:50051";
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:50091";
 pub const DEFAULT_MOCK_SOMA_LISTEN: &str = "127.0.0.1:50092";
-pub const DEFAULT_COLLECT_INTERVAL_MS: u64 = 1000;
 pub const DEFAULT_MOCK_SOMA_INTERVAL_MS: u64 = 10_000;
 
 #[derive(Debug, Clone)]
@@ -21,16 +20,19 @@ pub struct VitalsConfig {
     pub atlas_endpoint: String,
     pub listen: String,
     pub id: String,
-    pub collect_interval_ms: u64,
     pub thresholds_path: PathBuf,
-    /// Body threshold file (joint temperatures, fault codes per model).
-    pub body_thresholds_path: PathBuf,
     pub soma_endpoint: Option<String>,
     pub mock_soma: bool,
     pub mock_soma_id: String,
     pub mock_soma_listen: String,
     pub mock_soma_scenario: String,
     pub mock_soma_interval_ms: u64,
+    /// CAN port for real Piper hardware bridge (e.g. "can0"). Empty = synthetic data.
+    pub mock_soma_piper_can: Option<String>,
+    /// Python binary for the Piper bridge subprocess.
+    pub mock_soma_piper_python: String,
+    /// Path to piper_bridge.py.
+    pub mock_soma_piper_script: PathBuf,
 }
 
 #[derive(Parser, Debug)]
@@ -51,17 +53,9 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_VITALS_PROVIDER_ID")]
     pub id: Option<String>,
 
-    /// Sensor polling interval in milliseconds.
-    #[arg(long, env = "ROBONIX_VITALS_COLLECT_INTERVAL_MS")]
-    pub collect_interval_ms: Option<u64>,
-
-    /// Path to the board threshold YAML (e.g. thresholds/jetson_agx_orin.yaml).
+    /// Path to the board threshold YAML (e.g. thresholds/example_thresholds.yaml).
     #[arg(long, env = "ROBONIX_VITALS_THRESHOLDS_PATH")]
     pub thresholds_path: Option<PathBuf>,
-
-    /// Path to the body threshold YAML (joint temps, fault codes per model).
-    #[arg(long, env = "ROBONIX_VITALS_BODY_THRESHOLDS_PATH")]
-    pub body_thresholds_path: Option<PathBuf>,
 
     /// Optional Soma gRPC endpoint. When set, Vitals consumes SomaHealthSnapshot.
     #[arg(long, env = "ROBONIX_SOMA_ENDPOINT")]
@@ -87,6 +81,18 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_INTERVAL_MS")]
     pub mock_soma_interval_ms: Option<u64>,
 
+    /// CAN port for real Piper hardware (e.g. "can0"). Empty = fully synthetic mock data.
+    #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_PIPER_CAN")]
+    pub mock_soma_piper_can: Option<String>,
+
+    /// Python binary for the Piper bridge subprocess.
+    #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_PIPER_PYTHON")]
+    pub mock_soma_piper_python: Option<String>,
+
+    /// Path to piper_bridge.py script.
+    #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_PIPER_SCRIPT")]
+    pub mock_soma_piper_script: Option<PathBuf>,
+
     /// Optional YAML config file (rbnx writes this; CLI/env still override).
     #[arg(long, env = "ROBONIX_CONFIG_PATH")]
     pub config: Option<PathBuf>,
@@ -106,11 +112,7 @@ struct FileConfig {
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
-    collect_interval_ms: Option<u64>,
-    #[serde(default)]
     thresholds_path: Option<PathBuf>,
-    #[serde(default)]
-    body_thresholds_path: Option<PathBuf>,
     #[serde(default)]
     soma_endpoint: Option<String>,
     #[serde(default)]
@@ -121,6 +123,9 @@ struct FileConfig {
     mock_soma_scenario: Option<String>,
     #[serde(default)]
     mock_soma_interval_ms: Option<u64>,
+    mock_soma_piper_can: Option<String>,
+    mock_soma_piper_python: Option<String>,
+    mock_soma_piper_script: Option<PathBuf>,
 }
 
 impl VitalsConfig {
@@ -132,9 +137,7 @@ impl VitalsConfig {
 
         // Default threshold paths: <crate>/thresholds/
         let thresholds_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("thresholds");
-        let default_thresholds = thresholds_dir.join("jetson_agx_orin.yaml");
-        let default_body_thresholds = thresholds_dir.join("body.yaml");
-
+        let default_thresholds = thresholds_dir.join("example_thresholds.yaml");
         Ok(Self {
             atlas_endpoint: args
                 .atlas
@@ -148,18 +151,10 @@ impl VitalsConfig {
                 .id
                 .or(file_cfg.id)
                 .unwrap_or_else(|| DEFAULT_VITALS_PROVIDER_ID.to_string()),
-            collect_interval_ms: args
-                .collect_interval_ms
-                .or(file_cfg.collect_interval_ms)
-                .unwrap_or(DEFAULT_COLLECT_INTERVAL_MS),
             thresholds_path: args
                 .thresholds_path
                 .or(file_cfg.thresholds_path)
                 .unwrap_or(default_thresholds),
-            body_thresholds_path: args
-                .body_thresholds_path
-                .or(file_cfg.body_thresholds_path)
-                .unwrap_or(default_body_thresholds),
             soma_endpoint: args.soma_endpoint.or(file_cfg.soma_endpoint),
             mock_soma: args.mock_soma,
             mock_soma_id: args
@@ -178,6 +173,17 @@ impl VitalsConfig {
                 .mock_soma_interval_ms
                 .or(file_cfg.mock_soma_interval_ms)
                 .unwrap_or(DEFAULT_MOCK_SOMA_INTERVAL_MS),
+            mock_soma_piper_can: args.mock_soma_piper_can.or(file_cfg.mock_soma_piper_can),
+            mock_soma_piper_python: args
+                .mock_soma_piper_python
+                .or(file_cfg.mock_soma_piper_python)
+                .unwrap_or_else(|| "python3".to_string()),
+            mock_soma_piper_script: args
+                .mock_soma_piper_script
+                .or(file_cfg.mock_soma_piper_script)
+                .unwrap_or_else(|| {
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/piper_bridge.py")
+                }),
         })
     }
 }
