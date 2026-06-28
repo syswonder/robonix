@@ -216,7 +216,7 @@ Standalone repos, cloned at boot via `url:` in the deploy manifest.
 | Package | What it does | Namespace |
 |---|---|---|
 | [`mapping_rbnx`](https://github.com/enkerewpo/mapping_rbnx) | SLAM mapping (RTAB-Map + FAST-LIO2) | `robonix/service/map/*` |
-| [`nav2_wrapper_rbnx`](https://github.com/lhw2002426/nav2_wrapper_rbnx) | Navigation (Nav2 wrapper) | `robonix/service/navigation/*` |
+| [`nav2_wrapper_rbnx`](https://github.com/enkerewpo/nav2_wrapper_rbnx) | Navigation (Nav2 wrapper) | `robonix/service/navigation/*` |
 
 **Skills** — LLM-triggered composite tasks:
 
