@@ -25,7 +25,7 @@ robonix-vitals --log info
 # Terminal 1
 target/debug/robonix-atlas \
   --listen 127.0.0.1:50251 \
-  --capabilities /home/zzy/robonix/capabilities \
+  --capabilities /path/to/robonix/capabilities \
   --log robonix_atlas=info
 
 # Terminal 2: mock Soma publishes SomaHealthSnapshot.
