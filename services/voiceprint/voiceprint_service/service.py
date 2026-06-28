@@ -58,14 +58,13 @@ import robonix_contracts_pb2_grpc as pb_grpc  # type: ignore[import-not-found]
 # only mangles SERVICE names. Use the voiceprint_pb2 namespace for the
 # request/response dataclasses.
 import voiceprint_pb2 as vp  # type: ignore[import-not-found]
-from robonix_api import Service, Ok, Err  # noqa: E402
+from robonix_api import Service, Ok, Err, scribe_logger  # noqa: E402
 
 from voiceprint_service.engine import EcapaTdnnEngine
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="[voiceprint] %(asctime)s %(levelname)s %(message)s",
-)
+# Route all stdlib logging through Scribe so `rbnx logs -t voiceprint` sees the
+# full trace and the package owns no log file or stdout sink of its own.
+scribe_logger.install_stdlib_bridge("voiceprint")
 log = logging.getLogger("voiceprint_service")
 
 
