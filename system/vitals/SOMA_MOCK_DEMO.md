@@ -69,13 +69,14 @@ target/debug/robonix-vitals \
   --atlas 127.0.0.1:50251 \
   --mock-soma-listen 127.0.0.1:50292 \
   --mock-soma-scenario mixed \
+  --mock-soma-interval-ms 10000 \
   --log robonix_vitals=info
 ```
 
 Expected startup output:
 
 ```text
-mock Soma ready on 127.0.0.1:50292 scenario=mixed
+mock Soma ready on 127.0.0.1:50292 scenario=mixed interval_ms=10000
 ```
 
 This process registers:
@@ -163,6 +164,7 @@ fan_rpm = 1800
 ## Mock Scenarios
 
 Use `--mock-soma-scenario <scenario>` to select a scenario.
+Use `--mock-soma-interval-ms <ms>` to control how often the stream publishes a new snapshot. The default is `10000`, which is easier to follow in demos.
 
 ```text
 normal   all data stays mostly healthy

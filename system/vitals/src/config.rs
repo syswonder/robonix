@@ -14,6 +14,7 @@ pub const DEFAULT_ATLAS_ENDPOINT: &str = "127.0.0.1:50051";
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:50091";
 pub const DEFAULT_MOCK_SOMA_LISTEN: &str = "127.0.0.1:50092";
 pub const DEFAULT_COLLECT_INTERVAL_MS: u64 = 1000;
+pub const DEFAULT_MOCK_SOMA_INTERVAL_MS: u64 = 10_000;
 
 #[derive(Debug, Clone)]
 pub struct VitalsConfig {
@@ -29,6 +30,7 @@ pub struct VitalsConfig {
     pub mock_soma_id: String,
     pub mock_soma_listen: String,
     pub mock_soma_scenario: String,
+    pub mock_soma_interval_ms: u64,
 }
 
 #[derive(Parser, Debug)]
@@ -81,6 +83,10 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_SCENARIO")]
     pub mock_soma_scenario: Option<String>,
 
+    /// Mock Soma stream update interval in milliseconds.
+    #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_INTERVAL_MS")]
+    pub mock_soma_interval_ms: Option<u64>,
+
     /// Optional YAML config file (rbnx writes this; CLI/env still override).
     #[arg(long, env = "ROBONIX_CONFIG_PATH")]
     pub config: Option<PathBuf>,
@@ -113,6 +119,8 @@ struct FileConfig {
     mock_soma_listen: Option<String>,
     #[serde(default)]
     mock_soma_scenario: Option<String>,
+    #[serde(default)]
+    mock_soma_interval_ms: Option<u64>,
 }
 
 impl VitalsConfig {
@@ -166,6 +174,10 @@ impl VitalsConfig {
                 .mock_soma_scenario
                 .or(file_cfg.mock_soma_scenario)
                 .unwrap_or_else(|| "normal".to_string()),
+            mock_soma_interval_ms: args
+                .mock_soma_interval_ms
+                .or(file_cfg.mock_soma_interval_ms)
+                .unwrap_or(DEFAULT_MOCK_SOMA_INTERVAL_MS),
         })
     }
 }

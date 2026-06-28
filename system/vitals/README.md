@@ -34,6 +34,7 @@ target/debug/robonix-vitals \
   --atlas 127.0.0.1:50251 \
   --mock-soma-listen 127.0.0.1:50292 \
   --mock-soma-scenario mixed \
+  --mock-soma-interval-ms 10000 \
   --log robonix_vitals=info
 
 # Terminal 3: Vitals discovers Soma through Atlas and evaluates thresholds.
@@ -61,6 +62,7 @@ ROBONIX_ATLAS=127.0.0.1:50251 target/debug/rbnx caps -v
 | `--mock-soma` | `ROBONIX_VITALS_MOCK_SOMA` | `false` |
 | `--mock-soma-listen` | `ROBONIX_VITALS_MOCK_SOMA_LISTEN` | `127.0.0.1:50092` |
 | `--mock-soma-scenario` | `ROBONIX_VITALS_MOCK_SOMA_SCENARIO` | `normal` |
+| `--mock-soma-interval-ms` | `ROBONIX_VITALS_MOCK_SOMA_INTERVAL_MS` | `10000` |
 | `--config` | `ROBONIX_CONFIG_PATH` | — |
 | `--log` | `RUST_LOG` | `robonix_vitals=info` |
 
