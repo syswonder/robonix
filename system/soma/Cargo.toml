@@ -28,6 +28,7 @@ robonix-atlas = { path = "../atlas" }
 robonix-cli = { path = "../../tools/rbnx" }
 robonix-scribe.workspace = true
 thiserror.workspace = true
+nix = { version = "0.31", features = ["signal", "process"] }
 
 [dev-dependencies]
 tempfile = "3"

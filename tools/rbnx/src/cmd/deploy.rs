@@ -858,36 +858,17 @@ pub async fn execute(
             }
         }
 
-        if !deploy.primitive.is_empty() {
-            output::boot_section("primitive");
-        }
-        for e in &deploy.primitive {
-            match spawn_and_init(
-                "primitive",
-                e,
-                &log_dir,
-                &cache_root,
-                &instances_dir,
-                &manifest_dir,
-                &mut atlas,
-            )
-            .await
-            {
-                Ok(sp) => {
-                    children.push(sp);
-                    persist_state(
-                        &state_path,
-                        &manifest_path,
-                        &atlas_endpoint,
-                        started_at_ms,
-                        &children,
-                    );
-                }
-                Err(err) => {
-                    failures.push(("primitive".to_string(), e.name.clone(), format!("{err:#}")));
-                }
-            }
-        }
+        // primitive: handled by soma's stage 1 (kicked off when soma
+        //   starts up, finishes before soma declares get_yaml/get_urdf).
+        // skill:     handled by soma's stage 2 (kicked off by the
+        //   StageTrigger("stage2") we send below, after non-builtin
+        //   system services and service: entries have finished
+        //   bring-up — which is the earliest skills can safely talk
+        //   to executor/pilot/memory/scene from their MCP tools).
+        // The deploy.primitive / deploy.skill fields stay in the
+        // manifest schema because soma reads them; rbnx just doesn't
+        // launch those processes any more.
+
         if !deploy.service.is_empty() {
             output::boot_section("service");
         }
@@ -918,44 +899,34 @@ pub async fn execute(
                 }
             }
         }
-        // Skills are spawned at deploy time, same as services. The
-        // semantic distinction (skill = atomic intent invokable by
-        // pilot, service = always-on capability) is in the contract
-        // namespace (`robonix/skill/*` vs `robonix/service/*`), not
-        // in the lifecycle. Skills still need a long-lived process
-        // so their MCP tools are registered with atlas; pilot calls
-        // those tools on demand. Earlier the manifest had to put
-        // `explore` in `service:` as a workaround because skill: was
-        // "registered, not spawned" — that lied to consumers about
-        // what was actually running. Now skill: spawns the same way
-        // service: does, just kept distinct for documentation.
-        if !deploy.skill.is_empty() {
-            output::boot_section("skill");
-        }
-        for e in &deploy.skill {
-            match spawn_and_init(
-                "skill",
-                e,
-                &log_dir,
-                &cache_root,
-                &instances_dir,
-                &manifest_dir,
-                &mut atlas,
-            )
-            .await
-            {
-                Ok(sp) => {
-                    children.push(sp);
-                    persist_state(
-                        &state_path,
-                        &manifest_path,
-                        &atlas_endpoint,
-                        started_at_ms,
-                        &children,
+
+        // All system + service bring-up done; fire soma's stage 2
+        // trigger so it spawns + INITs the skill packages. Best
+        // effort: a soma that never went ACTIVE (or shut down
+        // between our checks and this NotifyProvider) is a deploy
+        // problem the operator already sees in earlier boot output;
+        // we log and continue rather than tearing everything down
+        // for the skills that never started.
+        if deploy.system.contains_key("soma") && !skip_system {
+            output::boot_section("stage 2");
+            let event = robonix_atlas::client::stage_trigger_event("stage2");
+            match atlas.notify_provider("soma", event).await {
+                Ok(true) => {
+                    output::boot_ok("soma", "stage 2 trigger delivered");
+                }
+                Ok(false) => {
+                    output::boot_skip(
+                        "soma",
+                        "stage 2 trigger queued but soma had no live WatchProvider \
+                         subscriber — skills will not start until soma re-subscribes",
                     );
                 }
-                Err(err) => {
-                    failures.push(("skill".to_string(), e.name.clone(), format!("{err:#}")));
+                Err(e) => {
+                    failures.push((
+                        "system".to_string(),
+                        "soma".to_string(),
+                        format!("notify stage 2 trigger: {e:#}"),
+                    ));
                 }
             }
         }
