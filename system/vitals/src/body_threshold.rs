@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 //
-// body_threshold — per-model joint temperature thresholds and fault-code
-// decoding for body health monitoring.
+// body_threshold — per-model joint temperature thresholds for body health
+// monitoring.
 //
 // Thresholds are loaded from a mandatory YAML file (thresholds/body.yaml)
 // at startup.  Startup fails if the file is missing or invalid.
+//
+// Fault code decoding is handled by the Python collector scripts — the
+// collector writes decoded fault labels into BodyHealth.message.  Vitals
+// only does temperature threshold evaluation here.
 
 use anyhow::Context;
 use std::path::Path;
@@ -18,19 +22,11 @@ pub const HEALTH_ERROR: u32 = 2;
 // ── YAML config types ────────────────────────────────────────────────────────
 
 #[derive(serde::Deserialize, Clone, Debug)]
-struct FaultEntry {
-    bit: u8,
-    label: String,
-}
-
-#[derive(serde::Deserialize, Clone, Debug)]
 struct ModelThresholds {
     #[serde(default)]
     temp_warn_c: Option<f32>,
     #[serde(default)]
     temp_error_c: Option<f32>,
-    #[serde(default)]
-    faults: Vec<FaultEntry>,
 }
 
 #[derive(serde::Deserialize, Clone, Debug)]
@@ -45,7 +41,6 @@ struct BodyYaml {
 pub struct JointThresholds {
     pub temp_warn_c: f32,
     pub temp_error_c: f32,
-    pub fault_labels: Vec<(u8, String)>,
 }
 
 // ── Global config ────────────────────────────────────────────────────────────
@@ -70,7 +65,7 @@ pub fn load_config(path: &Path) -> anyhow::Result<()> {
 
 // ── Threshold lookup ─────────────────────────────────────────────────────────
 
-/// Return the threshold table for a given body model.
+/// Return the temperature thresholds for a given body model.
 /// Must be called after load_config() — panics if thresholds are not loaded.
 pub fn thresholds_for(model: &str) -> JointThresholds {
     let cfg = CONFIG
@@ -86,28 +81,7 @@ pub fn thresholds_for(model: &str) -> JointThresholds {
             .temp_error_c
             .or(cfg.default.temp_error_c)
             .unwrap_or(75.0),
-        fault_labels: m.faults.iter().map(|f| (f.bit, f.label.clone())).collect(),
     }
-}
-
-// ── Fault decoding ───────────────────────────────────────────────────────────
-
-/// Decode a joint error_code bitmask into human-readable fault labels.
-pub fn decode_faults(model: &str, error_code: u32) -> Vec<String> {
-    if error_code == 0 {
-        return Vec::new();
-    }
-    let th = thresholds_for(model);
-    let mut labels: Vec<String> = Vec::new();
-    for (bit, label) in &th.fault_labels {
-        if error_code & (1u32 << bit) != 0 {
-            labels.push(label.clone());
-        }
-    }
-    if labels.is_empty() {
-        labels.push(format!("0x{:02X}", error_code));
-    }
-    labels
 }
 
 // ── Temperature evaluation ───────────────────────────────────────────────────
@@ -158,8 +132,6 @@ mod tests {
     use std::collections::HashMap;
 
     /// Initialize the global CONFIG with test data matching body.yaml.
-    /// Uses get_or_init so it's safe to call in every test — only the first
-    /// call actually runs the initializer; subsequent calls are no-ops.
     fn init_test_config() {
         let _ = CONFIG.get_or_init(|| {
             let mut models: HashMap<String, ModelThresholds> = HashMap::new();
@@ -168,15 +140,6 @@ mod tests {
                 ModelThresholds {
                     temp_warn_c: Some(60.0),
                     temp_error_c: Some(75.0),
-                    faults: vec![
-                        FaultEntry { bit: 0, label: "欠压".into() },
-                        FaultEntry { bit: 1, label: "电机过热".into() },
-                        FaultEntry { bit: 2, label: "过流".into() },
-                        FaultEntry { bit: 3, label: "驱动器过热".into() },
-                        FaultEntry { bit: 4, label: "碰撞".into() },
-                        FaultEntry { bit: 5, label: "驱动器故障".into() },
-                        FaultEntry { bit: 7, label: "堵转".into() },
-                    ],
                 },
             );
             models.insert(
@@ -184,12 +147,6 @@ mod tests {
                 ModelThresholds {
                     temp_warn_c: Some(60.0),
                     temp_error_c: Some(75.0),
-                    faults: vec![
-                        FaultEntry { bit: 0, label: "电压异常".into() },
-                        FaultEntry { bit: 2, label: "过热".into() },
-                        FaultEntry { bit: 3, label: "编码器故障".into() },
-                        FaultEntry { bit: 5, label: "过载".into() },
-                    ],
                 },
             );
             models.insert(
@@ -197,14 +154,12 @@ mod tests {
                 ModelThresholds {
                     temp_warn_c: Some(60.0),
                     temp_error_c: Some(75.0),
-                    faults: vec![],
                 },
             );
             BodyYaml {
                 default: ModelThresholds {
                     temp_warn_c: Some(60.0),
                     temp_error_c: Some(75.0),
-                    faults: vec![],
                 },
                 models,
             }
@@ -219,10 +174,6 @@ mod tests {
         let t = thresholds_for("piper");
         assert_eq!(t.temp_warn_c, 60.0);
         assert_eq!(t.temp_error_c, 75.0);
-        assert_eq!(t.fault_labels.len(), 7);
-        assert_eq!(t.fault_labels[0], (0, "欠压".into()));
-        assert_eq!(t.fault_labels[1], (1, "电机过热".into()));
-        assert_eq!(t.fault_labels[6], (7, "堵转".into()));
     }
 
     #[test]
@@ -231,7 +182,6 @@ mod tests {
         let t = thresholds_for("koch");
         assert_eq!(t.temp_warn_c, 60.0);
         assert_eq!(t.temp_error_c, 75.0);
-        assert_eq!(t.fault_labels.len(), 4);
     }
 
     #[test]
@@ -240,7 +190,6 @@ mod tests {
         let t = thresholds_for("go2");
         assert_eq!(t.temp_warn_c, 60.0);
         assert_eq!(t.temp_error_c, 75.0);
-        assert!(t.fault_labels.is_empty());
     }
 
     #[test]
@@ -249,7 +198,6 @@ mod tests {
         let t = thresholds_for("some_future_robot");
         assert_eq!(t.temp_warn_c, 60.0);
         assert_eq!(t.temp_error_c, 75.0);
-        assert!(t.fault_labels.is_empty());
     }
 
     // ── YAML loading ─────────────────────────────────────────────────────
@@ -264,24 +212,17 @@ models:
   testbot:
     temp_warn_c: 50.0
     temp_error_c: 65.0
-    faults:
-      - bit: 0
-        label: "故障A"
-      - bit: 1
-        label: "故障B"
 "#;
         let cfg: BodyYaml = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.default.temp_warn_c, Some(55.0));
         assert_eq!(cfg.default.temp_error_c, Some(70.0));
         let tb = &cfg.models["testbot"];
         assert_eq!(tb.temp_warn_c, Some(50.0));
-        assert_eq!(tb.faults.len(), 2);
-        assert_eq!(tb.faults[0].label, "故障A");
+        assert_eq!(tb.temp_error_c, Some(65.0));
     }
 
     #[test]
     fn test_yaml_parse_minimal() {
-        // Parse-only test — does NOT touch the global OnceLock.
         let yaml = r#"
 default:
   temp_warn_c: 55.0
@@ -292,52 +233,6 @@ models: {}
         assert_eq!(cfg.default.temp_warn_c, Some(55.0));
         assert_eq!(cfg.default.temp_error_c, Some(70.0));
         assert!(cfg.models.is_empty());
-    }
-
-    // ── decode_faults ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_decode_no_fault() {
-        init_test_config();
-        let faults = decode_faults("piper", 0);
-        assert!(faults.is_empty());
-    }
-
-    #[test]
-    fn test_decode_single_fault() {
-        init_test_config();
-        let faults = decode_faults("piper", 1 << 2);
-        assert_eq!(faults, vec!["过流"]);
-    }
-
-    #[test]
-    fn test_decode_multiple_faults() {
-        init_test_config();
-        let code = (1u32 << 0) | (1u32 << 2) | (1u32 << 7);
-        let faults = decode_faults("piper", code);
-        assert_eq!(faults, vec!["欠压", "过流", "堵转"]);
-    }
-
-    #[test]
-    fn test_decode_unknown_bit_falls_back_to_hex() {
-        init_test_config();
-        let faults = decode_faults("piper", 1 << 6);
-        assert_eq!(faults, vec!["0x40"]);
-    }
-
-    #[test]
-    fn test_decode_mixed_known_and_unknown() {
-        init_test_config();
-        let code = (1u32 << 1) | (1u32 << 6);
-        let faults = decode_faults("piper", code);
-        assert_eq!(faults, vec!["电机过热"]);
-    }
-
-    #[test]
-    fn test_decode_no_labels_for_model() {
-        init_test_config();
-        let faults = decode_faults("go2", 1 << 2);
-        assert_eq!(faults, vec!["0x04"]);
     }
 
     // ── evaluate_temp ───────────────────────────────────────────────────
@@ -384,7 +279,6 @@ models: {}
 
     #[test]
     fn test_evaluate_temp_unavailable_sensor() {
-        // No init_test_config() needed — returns early on temp < 0.
         let (health, detail) = evaluate_temp(-1.0, "piper");
         assert_eq!(health, HEALTH_OK);
         assert!(detail.is_empty());

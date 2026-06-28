@@ -52,6 +52,28 @@ ARM_STATUS_TO_STATE = {
     0x0F: 1,  # RESISTOR_OVER_TEMP → FAULT
 }
 
+# foc_status bit → fault label (from piper_sdk CAN protocol)
+FOC_FAULT_BITS: list[tuple[int, str]] = [
+    (0, "欠压"),
+    (1, "电机过热"),
+    (2, "过流"),
+    (3, "驱动器过热"),
+    (4, "碰撞"),
+    (5, "驱动器故障"),
+    (7, "堵转"),
+]
+
+
+def _decode_faults(error_code: int) -> str:
+    """Decode foc_status bitmask into a compact fault label string."""
+    if error_code == 0:
+        return ""
+    labels = [label for bit, label in FOC_FAULT_BITS if error_code & (1 << bit)]
+    if not labels:
+        return f"0x{error_code:02X}"
+    return ",".join(labels)
+
+
 # ---------------------------------------------------------------------------
 # Piper collector
 # ---------------------------------------------------------------------------
@@ -96,19 +118,25 @@ class PiperCollector:
 
         # Arm-level state
         state = 0  # NORMAL
-        message = ""
+        message_parts: list[str] = []
         try:
             status = self._piper.GetArmStatus()
             raw = status.arm_status.arm_status
             state = ARM_STATUS_TO_STATE.get(raw, 1)
         except Exception:
             state = 1  # FAULT on read failure
-            message = "arm_status read failed"
+            message_parts.append("arm_status read failed")
+
+        # Decode fault labels from per-component error_codes into message.
+        for comp in components:
+            if comp["error_code"] != 0:
+                label = _decode_faults(comp["error_code"])
+                message_parts.append(f"{comp['name']}:{label}")
 
         return {
             "body_type": "arm",
             "model": "piper",
             "state": state,
-            "message": message,
+            "message": "; ".join(message_parts),
             "components": components,
         }
