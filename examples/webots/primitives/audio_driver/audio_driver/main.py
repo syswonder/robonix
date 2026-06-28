@@ -37,7 +37,7 @@ import audio_pb2          # type: ignore  # noqa: E402  (codegen)
 import std_msgs_pb2       # type: ignore  # noqa: E402
 
 from audio_driver.alsa_utils import scan_alsa_devices, find_default_mic, find_default_speaker  # noqa: E402
-from audio_driver.mic_driver import MicDriver  # noqa: E402
+from audio_driver.mic_driver import MicDriver, probe_mic_sample_rate  # noqa: E402
 from audio_driver.speaker_driver import SpeakerDriver  # noqa: E402
 
 mic_driver: MicDriver | None = None
@@ -171,9 +171,11 @@ def select_device(request, context):
                 mic_driver.stop()
             except Exception:  # noqa: BLE001
                 pass
+        # Auto-probe hardware sample rate unless explicitly overridden
+        mic_rate = int(os.environ["AUDIO_MIC_SAMPLE_RATE"]) if "AUDIO_MIC_SAMPLE_RATE" in os.environ else probe_mic_sample_rate(new_id)
         mic_driver = MicDriver(
             device_id=new_id,
-            sample_rate=int(os.environ.get("AUDIO_MIC_SAMPLE_RATE", "16000")),
+            sample_rate=mic_rate,
             channels=int(os.environ.get("AUDIO_MIC_CHANNELS", "1")),
             bits_per_sample=int(os.environ.get("AUDIO_MIC_BITS", "16")),
             chunk_duration_s=int(os.environ.get("AUDIO_MIC_CHUNK_MS", "100")) / 1000.0,
@@ -234,9 +236,10 @@ def init(cfg):
         return Err("no ALSA capture or playback device available")
 
     if mic_dev_id is not None:
+        mic_rate = int(os.environ["AUDIO_MIC_SAMPLE_RATE"]) if "AUDIO_MIC_SAMPLE_RATE" in os.environ else probe_mic_sample_rate(mic_dev_id)
         mic_driver = MicDriver(
             device_id=mic_dev_id,
-            sample_rate=int(os.environ.get("AUDIO_MIC_SAMPLE_RATE", "16000")),
+            sample_rate=mic_rate,
             channels=int(os.environ.get("AUDIO_MIC_CHANNELS", "1")),
             bits_per_sample=int(os.environ.get("AUDIO_MIC_BITS", "16")),
             chunk_duration_s=int(os.environ.get("AUDIO_MIC_CHUNK_MS", "100")) / 1000.0,
