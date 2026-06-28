@@ -41,6 +41,8 @@ struct VitalsState {
     prev_component: HashMap<String, PrevComponentState>,
     /// Previous power state for voltage / battery change detection.
     prev_power: Option<PowerState>,
+    /// Previous body message per body key, to avoid re-logging identical messages.
+    prev_body_message: HashMap<String, String>,
     /// True until the first body reading — suppresses ALERTs on startup.
     first_body: bool,
 }
@@ -75,6 +77,7 @@ impl VitalsServiceImpl {
                 prev_body_state: HashMap::new(),
                 prev_component: HashMap::new(),
                 prev_power: None,
+                prev_body_message: HashMap::new(),
                 first_body: true,
             })),
             start_time: Instant::now(),
@@ -177,18 +180,25 @@ impl VitalsServiceImpl {
                         }
                         changed = true;
                     } else if !body.message.is_empty() {
-                        // Message changed while state stayed the same — info only.
-                        log::info!(
-                            "[vitals] {} message: {}{}",
-                            body_key,
-                            body.message,
-                            if prev_body_state != 0 {
-                                format!(" (state={})", body_state_label(body.state))
-                            } else {
-                                String::new()
-                            }
-                        );
-                        changed = true;
+                        // Only log when the message actually changed.
+                        let prev_msg = state
+                            .prev_body_message
+                            .get(&body_key)
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        if body.message != prev_msg {
+                            log::info!(
+                                "[vitals] {} message: {}{}",
+                                body_key,
+                                body.message,
+                                if prev_body_state != 0 {
+                                    format!(" (state={})", body_state_label(body.state))
+                                } else {
+                                    String::new()
+                                }
+                            );
+                            changed = true;
+                        }
                     }
                 }
 
@@ -235,6 +245,9 @@ impl VitalsServiceImpl {
 
             // Persist body state for next diff.
             state.prev_body_state.insert(body_key.clone(), body.state);
+            state
+                .prev_body_message
+                .insert(body_key.clone(), body.message.clone());
             for comp in &body.components {
                 let component_key = body_component_key(&body_key, comp);
                 state.prev_component.insert(
@@ -292,18 +305,21 @@ impl VitalsServiceImpl {
 
         // Only broadcast on state transitions to avoid flooding subscribers.
         if changed {
-            // One-line summary: "cpu:OK(38C) gpu:OK(39C) ..."
-            let summary: Vec<String> = snapshot
+            // One-line summary — only show non-OK components.
+            let non_ok: Vec<String> = snapshot
                 .components
                 .iter()
+                .filter(|c| c.health != 0)
                 .map(|c| format!("{}:{}({:.0})", c.name, health_label(c.health), c.value))
                 .collect();
-            let voltage_str = snapshot
-                .power
-                .as_ref()
-                .map(|p| format!("{:.1}V", p.voltage))
-                .unwrap_or_else(|| "?V".to_string());
-            log::info!("[vitals] {} | {}", voltage_str, summary.join(" "));
+            if !non_ok.is_empty() {
+                let voltage_str = snapshot
+                    .power
+                    .as_ref()
+                    .map(|p| format!("{:.1}V", p.voltage))
+                    .unwrap_or_else(|| "?V".to_string());
+                log::info!("[vitals] {} | {}", voltage_str, non_ok.join(" "));
+            }
             let _ = state.broadcast_tx.send(snapshot);
         }
     }
