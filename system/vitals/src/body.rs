@@ -3,119 +3,75 @@
 // body — read robot body (arm/dog joint motor) health data.
 //
 // v0.1 communicates with a Python subprocess that calls the hardware SDK
-// directly. When Soma is ready, this module becomes a thin gRPC client
-// consuming Soma's unified health interface — the BodyHealth struct stays
-// the same, only the transport changes.
+// directly.  BodyCollector learns body_type and model from the script's
+// JSON response — no CLI flags needed.
+//
+// When Soma is ready, BodyCollector becomes a gRPC client consuming Soma's
+// unified health interface — the data structures stay the same.
 
 use crate::pb::body::BodyHealth;
+use crate::subprocess::SubprocessHandle;
 use anyhow::Context;
 use serde::Deserialize;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
 
 // ── BodyCollector ──────────────────────────────────────────────────────────
 
 pub struct BodyCollector {
-    stdin: ChildStdin,
-    reader: BufReader<std::process::ChildStdout>,
-    _child: Child,
+    sub: SubprocessHandle,
+    /// Cached from the last successful collect; "unknown" until first response.
     body_type: String,
     model: String,
 }
 
 impl BodyCollector {
-    /// Spawn the Python bridge script. Returns an error if the script
-    /// cannot be started.
-    pub fn new(
-        body_type: &str,
-        model: &str,
-        script: &str,
-        python_bin: &str,
-    ) -> anyhow::Result<Self> {
-        let mut child = Command::new(python_bin)
-            .arg(script)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .with_context(|| format!("spawn body script '{script}' with '{python_bin}'"))?;
-
-        let stdin = child.stdin.take().context("capture body script stdin")?;
-        let stdout = child.stdout.take().context("capture body script stdout")?;
-        let reader = BufReader::new(stdout);
-
+    /// Spawn a Python body-script.  The script reports its own body_type and
+    /// model in every JSON response.
+    pub fn new(script: &str, python_bin: &str) -> anyhow::Result<Self> {
+        let label = format!(
+            "body/{}",
+            std::path::Path::new(script)
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+        );
+        let sub = SubprocessHandle::spawn(script, python_bin, &label)
+            .with_context(|| format!("spawn body script '{script}'"))?;
         Ok(Self {
-            stdin,
-            reader,
-            _child: child,
-            body_type: body_type.to_string(),
-            model: model.to_string(),
+            sub,
+            body_type: "unknown".to_string(),
+            model: "unknown".to_string(),
         })
     }
 
-    /// Send a collect command and parse the JSON response into a BodyHealth.
+    /// Send a collect command and return the parsed BodyHealth.
+    /// On the first successful response the cached body_type / model are
+    /// updated so that subsequent faults carry the right labels.
     pub fn collect(&mut self) -> BodyHealth {
-        // Issue the command.
-        let cmd = serde_json::json!({"cmd": "collect"});
-        if let Err(e) = writeln!(self.stdin, "{cmd}") {
-            log::warn!("[body] write to script failed: {e:#}");
-            return self.fault(&format!("write: {e:#}"));
-        }
-        if let Err(e) = self.stdin.flush() {
-            log::warn!("[body] flush stdin failed: {e:#}");
-            return self.fault(&format!("flush: {e:#}"));
-        }
-
-        // Read one JSON line back.
-        let mut line = String::new();
-        if let Err(e) = self.reader.read_line(&mut line) {
-            log::warn!("[body] read from script failed: {e:#}");
-            return self.fault(&format!("read: {e:#}"));
-        }
-        if line.trim().is_empty() {
-            log::warn!("[body] empty response from script");
-            return self.fault("empty response");
-        }
-
-        match serde_json::from_str::<BodyJson>(line.trim()) {
-            Ok(parsed) => parsed.into_body_health(&self.body_type, &self.model),
+        let line = match self.sub.collect_json() {
+            Some(l) => l,
+            None => return self.fault("subprocess I/O error"),
+        };
+        match serde_json::from_str::<BodyJson>(&line) {
+            Ok(parsed) => {
+                self.body_type = parsed.body_type.clone();
+                self.model = parsed.model.clone();
+                parsed.into_body_health()
+            }
             Err(e) => {
-                log::warn!("[body] parse JSON failed: {e:#} — raw: {}", line.trim());
+                log::warn!("[body] parse JSON failed: {e:#} — raw: {line}");
                 self.fault(&format!("parse: {e:#}"))
             }
         }
     }
 
-    /// Check if the subprocess is still alive.
+    /// Check whether the subprocess is still alive.
     pub fn is_alive(&mut self) -> bool {
-        match self._child.try_wait() {
-            Ok(None) => true,
-            Ok(Some(status)) => {
-                log::warn!("[body] script exited with {status}");
-                false
-            }
-            Err(e) => {
-                log::warn!("[body] try_wait failed: {e:#}");
-                false
-            }
-        }
+        self.sub.is_alive()
     }
 
-    /// Attempt to restart the subprocess after a crash.
+    /// Attempt to restart after a crash.
     pub fn restart(&mut self, script: &str, python_bin: &str) -> anyhow::Result<()> {
-        let mut child = Command::new(python_bin)
-            .arg(script)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .with_context(|| format!("restart body script '{script}'"))?;
-
-        self.stdin = child.stdin.take().context("capture body script stdin")?;
-        let stdout = child.stdout.take().context("capture body script stdout")?;
-        self.reader = BufReader::new(stdout);
-        self._child = child;
-        Ok(())
+        self.sub.restart(script, python_bin)
     }
 
     fn fault(&self, reason: &str) -> BodyHealth {
@@ -142,16 +98,20 @@ struct JointJson {
 #[derive(Deserialize)]
 struct BodyJson {
     #[serde(default)]
+    body_type: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
     state: u32,
     #[serde(default)]
     joints: Vec<JointJson>,
 }
 
 impl BodyJson {
-    fn into_body_health(self, body_type: &str, model: &str) -> BodyHealth {
+    fn into_body_health(self) -> BodyHealth {
         BodyHealth {
-            body_type: body_type.to_string(),
-            model: model.to_string(),
+            body_type: self.body_type,
+            model: self.model,
             state: self.state,
             joints: self
                 .joints

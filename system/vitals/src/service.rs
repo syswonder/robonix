@@ -117,56 +117,77 @@ impl VitalsServiceImpl {
 
         // ── Body health transition detection ──────────────────────────
         if let Some(ref body) = snapshot.body {
-            let is_first = state.first_body;
-
-            if body.state != state.prev_body_state {
+            if state.first_body {
+                // First body reading — always log baseline at info level.
+                // ALERTs are suppressed here to avoid false positives when
+                // the hardware is momentarily unavailable at startup.
                 log::info!(
-                    "[vitals] body state: {} → {}",
-                    body_state_label(state.prev_body_state),
-                    body_state_label(body.state)
+                    "[vitals] body: {} ({}/{})",
+                    body_state_label(body.state),
+                    body.body_type,
+                    body.model
                 );
-                if !is_first && body.state != 0 {
-                    log::warn!(
-                        "[vitals] ALERT: body {} ({}) state={}",
-                        body.body_type,
-                        body.model,
-                        body_state_label(body.state)
+                for joint in &body.joints {
+                    log::info!(
+                        "[vitals] {} enabled: {}, error_code: 0x{:02X}, temp: {:.0}°C",
+                        joint.name,
+                        joint.enabled,
+                        joint.error_code,
+                        joint.temperature
                     );
                 }
                 changed = true;
-            }
-            for joint in &body.joints {
-                let prev = state.prev_joint.get(&joint.name);
-                let prev_err = prev.map(|p| p.error_code).unwrap_or(0);
-                let prev_en = prev.map(|p| p.enabled).unwrap_or(true);
-                if joint.error_code != prev_err {
+            } else {
+                // Subsequent readings — log only on transition.
+                if body.state != state.prev_body_state {
                     log::info!(
-                        "[vitals] {} error_code: {} → {}",
-                        joint.name,
-                        prev_err,
-                        joint.error_code
+                        "[vitals] body state: {} → {}",
+                        body_state_label(state.prev_body_state),
+                        body_state_label(body.state)
                     );
-                    if !is_first && joint.error_code != 0 {
+                    if body.state != 0 {
                         log::warn!(
-                            "[vitals] ALERT: {} — error_code=0x{:02X}, temp={:.0}°C",
-                            joint.name,
-                            joint.error_code,
-                            joint.temperature
+                            "[vitals] ALERT: body {} ({}) state={}",
+                            body.body_type,
+                            body.model,
+                            body_state_label(body.state)
                         );
                     }
                     changed = true;
                 }
-                if joint.enabled != prev_en {
-                    log::info!(
-                        "[vitals] {} enabled: {} → {}",
-                        joint.name,
-                        prev_en,
-                        joint.enabled
-                    );
-                    if !is_first && !joint.enabled {
-                        log::warn!("[vitals] ALERT: {} — disabled", joint.name);
+                for joint in &body.joints {
+                    let prev = state.prev_joint.get(&joint.name);
+                    let prev_err = prev.map(|p| p.error_code).unwrap_or(0);
+                    let prev_en = prev.map(|p| p.enabled).unwrap_or(true);
+                    if joint.error_code != prev_err {
+                        log::info!(
+                            "[vitals] {} error_code: {} → {}",
+                            joint.name,
+                            prev_err,
+                            joint.error_code
+                        );
+                        if joint.error_code != 0 {
+                            log::warn!(
+                                "[vitals] ALERT: {} — error_code=0x{:02X}, temp={:.0}°C",
+                                joint.name,
+                                joint.error_code,
+                                joint.temperature
+                            );
+                        }
+                        changed = true;
                     }
-                    changed = true;
+                    if joint.enabled != prev_en {
+                        log::info!(
+                            "[vitals] {} enabled: {} → {}",
+                            joint.name,
+                            prev_en,
+                            joint.enabled
+                        );
+                        if !joint.enabled {
+                            log::warn!("[vitals] ALERT: {} — disabled", joint.name);
+                        }
+                        changed = true;
+                    }
                 }
             }
 

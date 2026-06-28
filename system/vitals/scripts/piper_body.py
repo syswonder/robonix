@@ -65,8 +65,6 @@ class PiperCollector:
     def __init__(self, can_port: str) -> None:
         self._piper = C_PiperInterface_V2(can_port)
         self._piper.ConnectPort()
-        # Enable all 6 motors
-        self._piper.EnableArm(7)
 
     def collect(self) -> dict[str, Any]:
         """Read Piper sensors and return a BodyHealth-compatible dict."""

@@ -15,9 +15,10 @@ actions are the responsibility of `sentinel`.
 ## Architecture
 
 ```
-sysfs / hwmon / thermal          body SDK (Piper/Go2/...)
+board.py (sysfs)                  body SDK (Piper/Go2/...)
       │                                │
-      │ SysfsCollector                 │ BodyCollector (Python subprocess)
+      │ BoardCollector                 │ BodyCollector
+      │ (Python subprocess)            │ (Python subprocess)
       ▼                                ▼
                     vitals
               (aggregate + threshold)
@@ -28,9 +29,9 @@ sysfs / hwmon / thermal          body SDK (Piper/Go2/...)
                     pilot
 ```
 
-In v0.1 vitals reads hardware directly. When **Soma** is ready, both collectors
-become gRPC clients consuming Soma's unified interfaces — the data structures
-stay the same.
+In v0.1 vitals spawns Python subprocesses to read hardware. When **Soma** is
+ready, both collectors become gRPC clients consuming Soma's unified interfaces
+— the data structures stay the same.
 
 ## Quick start
 
@@ -38,23 +39,28 @@ stay the same.
 # Board-only (Jetson):
 robonix-vitals --log info
 
-# Board + body (Piper arm via roboarm venv):
+# Board + body — just drop a *_body.py script in scripts/:
+#   scripts/piper_body.py  →  Piper arm
+#   scripts/go2_body.py    →  Go2 dog
+# vitals auto-discovers and launches them.  No CLI flags needed.
+
+# If body SDK requires a specific Python environment:
 ROBONIX_VITALS_BODY_PYTHON=/path/to/roboarm/.venv/bin/python3 \
-robonix-vitals --log info --body-type arm --body-model piper
+robonix-vitals --log info
 ```
 
 Typical output:
 
 ```
-[vitals] sysfs collector ready
-[vitals] body collector ready (arm/piper)
+[vitals] board collector ready
+[vitals] body collector ready (piper_body.py)
 [vitals] 19.8V | cpu:OK(35) tj:OK(36) nvme:OK(38) | arm[piper]:NORMAL
 ```
 
 ## Data flow
 
 ```
-SysfsCollector.collect()  →  PowerState + ComponentHealth[]  (board)
+BoardCollector.collect()  →  PowerState + ComponentHealth[]  (board)
 BodyCollector.collect()   →  BodyHealth                      (joints, optional)
                                          │
                                    normalize.rs (threshold check)
@@ -66,8 +72,8 @@ BodyCollector.collect()   →  BodyHealth                      (joints, optional
                        GetVitals (rpc)     StreamVitals (server_stream)
 ```
 
-- **collect.rs** (`SysfsCollector`) reads thermal zones, NVMe, and system voltage
-  from sysfs/hwmon.
+- **board.rs** (`BoardCollector`) spawns `board.py` to read thermal zones, NVMe, and
+  system voltage from sysfs. Communicates via stdin/stdout JSON.
 - **body.rs** (`BodyCollector`) spawns a Python subprocess that calls the body SDK
   (e.g. `piper_body.py` → `piper_sdk`). Communicates via stdin/stdout JSON.
 - **normalize.rs** compares readings against the YAML threshold table.
@@ -83,13 +89,16 @@ BodyCollector.collect()   →  BodyHealth                      (joints, optional
 | `--id` | `ROBONIX_VITALS_PROVIDER_ID` | `vitals` | Provider id |
 | `--collect-interval-ms` | `ROBONIX_VITALS_COLLECT_INTERVAL_MS` | `1000` | Poll interval (ms) |
 | `--thresholds-path` | `ROBONIX_VITALS_THRESHOLDS_PATH` | `<crate>/thresholds/jetson_agx_orin.yaml` | YAML threshold file |
-| `--body-type` | `ROBONIX_VITALS_BODY_TYPE` | — | Body type: `arm`, `dog`, etc. |
-| `--body-model` | `ROBONIX_VITALS_BODY_MODEL` | — | Body model: `piper`, `koch`, `go2` |
 | `--config` | `ROBONIX_CONFIG_PATH` | — | Optional YAML config file |
 | `--log` | `RUST_LOG` | `robonix_vitals=info` | Log filter |
 
-`ROBONIX_VITALS_BODY_PYTHON` env var overrides the Python binary for body
-scripts (default: `python3`).
+`ROBONIX_VITALS_BODY_PYTHON` env var overrides the Python binary for all
+subprocess scripts (default: `python3`).
+
+**Auto-discovery**: `board.py` is always launched from `scripts/`.  Any
+`*_body.py` scripts found in `scripts/` are auto-discovered and launched;
+each script reports its own `body_type` and `model`.  Startup failures
+are logged but do not prevent vitals from starting.
 
 ## Threshold file format
 
@@ -115,13 +124,15 @@ system/vitals/
   thresholds/
     jetson_agx_orin.yaml
   scripts/
+    board.py             # sysfs → JSON bridge (Python)
     piper_body.py        # Piper SDK → JSON bridge (Python)
   src/
     main.rs              # Atlas registration, gRPC serve, collect loop
     config.rs            # VitalsConfig
     service.rs           # VitalsServiceImpl: GetVitals + StreamVitals + change detection
-    collect.rs           # SysfsCollector: sysfs/hwmon/thermal
+    board.rs             # BoardCollector: Python subprocess → PowerState + RawReading
     body.rs              # BodyCollector: Python subprocess → BodyHealth
+    subprocess.rs        # SubprocessHandle: spawn, stdin/stdout JSON, restart
     normalize.rs         # evaluate() + load_thresholds() + unit tests
     pb.rs                # include!(contract_proto_modules.rs)
 ```
