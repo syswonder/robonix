@@ -23,8 +23,8 @@ jobs:
             // keyword -> { label, owner }. owner "" = label only (e.g. chronos).
             const ROUTES = [
               ["atlas",        { label: "comp:atlas",        owner: "enkerewpo" }],
-              ["executor",     { label: "comp:executor",     owner: "kouweilee" }],
-              ["rtdl",         { label: "comp:executor",     owner: "kouweilee" }],
+              ["executor",     { label: "comp:executor",     owner: "KouweiLee" }],
+              ["rtdl",         { label: "comp:executor",     owner: "KouweiLee" }],
               ["pilot",        { label: "comp:pilot",        owner: "enkerewpo" }],
               ["liaison",      { label: "comp:liaison",      owner: "kaileliu" }],
               ["scene",        { label: "comp:scene",        owner: "HeartLinked" }],
@@ -46,7 +46,16 @@ jobs:
             ];
 
             const issue = context.payload.issue;
-            const text = `${issue.title || ""}\n${issue.body || ""}`.toLowerCase();
+            // Only match component keywords from CHECKED task-list items
+            // ("- [x] ...") plus the title. The bug-report template lists
+            // EVERY component as an unchecked "- [ ]" box, so scanning the
+            // whole body matched every keyword and added every label + owner
+            // (issue #113). Unchecked boxes are ignored.
+            const checked = `${issue.body || ""}`
+              .split(/\r?\n/)
+              .filter((l) => /^\s*[-*]?\s*\[[xX]\]/.test(l))
+              .join("\n");
+            const text = `${issue.title || ""}\n${checked}`.toLowerCase();
 
             const labels = new Set();
             const owners = new Set();
