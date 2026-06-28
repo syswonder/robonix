@@ -4,12 +4,13 @@ Indexes markdown notes under AGENT_MEMORY_DIR with milvus-lite (ONNX
 embeddings). VLM credentials reused from pilot's env (VLM_BASE_URL /
 VLM_API_KEY / VLM_MODEL) so memory doesn't need a separate API key.
 
-Logging: every stdlib-logging line is also bridged into Scribe (see the
-`_ScribeBridge` handler below), so the full startup trace — phase markers,
-env summary, error causes — shows up in the unified `rbnx logs` /
-rbnx-boot/logs/memory.log, not just on stdout. Without that bridge a startup
-that stalls in phase 3 (embedding-model download / milvus-lite init) looked
-like total silence after "memory service starting" (issue #113).
+Logging: routed entirely through Scribe via
+`scribe_logger.install_stdlib_bridge("memory")`, so the full startup trace —
+phase markers, env summary, error causes, stack traces — shows up under
+`rbnx logs -t memory`, and the package owns no log file or stdout sink of its
+own. Without that bridge a startup that stalls in phase 3 (embedding-model
+download / milvus-lite init) looked like total silence after "memory service
+starting" (issue #113).
 """
 from __future__ import annotations
 
@@ -42,43 +43,17 @@ def _redact_url(url: str | None) -> str:
     netloc = f"{host}:{u.port}" if u.port else host
     return u._replace(netloc=netloc).geturl()
 
-# ── 0. Logging setup: stdout only, prefixed with [memsearch] for grep-ability.
-# We configure the root logger here BEFORE importing robonix_api / memsearch /
-# milvus, otherwise their imports may install their own handlers and we lose
-# control of the format. PYTHONUNBUFFERED=1 in start.sh ensures flush.
+# ── 0. Logging setup: route everything through Scribe.
+# Install the shared stdlib-logging → Scribe bridge on the root logger BEFORE
+# importing robonix_api / memsearch / milvus, so their imports' logging is
+# captured too. The bridge drops any stdout/file handlers and forwards every
+# record to Scribe under the "memory" tag, so `rbnx logs -t memory` sees the
+# whole startup trace and the package owns no log file of its own.
 _LOG_LEVEL = os.environ.get("MEMSEARCH_LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=getattr(logging, _LOG_LEVEL, logging.INFO),
-    format="%(asctime)s %(levelname)s [memsearch] %(message)s",
-    stream=sys.stdout,
-    force=True,  # override anything inherited from imports
+scribe_logger.install_stdlib_bridge(
+    "memory", level=getattr(logging, _LOG_LEVEL, logging.INFO)
 )
 log = logging.getLogger("memsearch")
-
-
-# Bridge every stdlib-logging record into Scribe so the unified `rbnx logs`
-# (memory.log) sees the whole startup trace — not just the one explicit
-# scribe_logger line. Records still go to stdout too (root handler from
-# basicConfig above); this only ADDS the scribe sink. Keeps cross-component
-# debugging in one place per the no-own-log-file rule.
-class _ScribeBridge(logging.Handler):
-    _FN = {
-        logging.DEBUG: scribe_logger.debug,
-        logging.INFO: scribe_logger.info,
-        logging.WARNING: scribe_logger.warn,
-        logging.ERROR: scribe_logger.error,
-        logging.CRITICAL: scribe_logger.error,
-    }
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            fn = self._FN.get(record.levelno, scribe_logger.info)
-            fn("memory", record.getMessage())
-        except Exception:  # noqa: BLE001
-            pass
-
-
-log.addHandler(_ScribeBridge())
 
 # Suppress verbose gRPC / absl warnings from milvus-lite. These dwarf the
 # real memsearch logs and make the file unreadable.
@@ -136,8 +111,7 @@ except Exception:
               "(check rbnx-build/codegen/{proto_gen,robonix_mcp_types} exist)")
     log.error("  - milvus-lite / onnxruntime wheel not available for this arch "
               "(Jetson aarch64 + Python 3.12 occasionally needs manual install)")
-    traceback.print_exc(file=sys.stdout)
-    sys.stdout.flush()
+    log.error("traceback:\n%s", traceback.format_exc())
     raise
 
 
@@ -185,8 +159,7 @@ except Exception as e:
     log.error("  - embedding model download blocked "
               "(first run needs network egress for HuggingFace; set HF_ENDPOINT "
               "or pre-stage models if behind a firewall)")
-    traceback.print_exc(file=sys.stdout)
-    sys.stdout.flush()
+    log.error("traceback:\n%s", traceback.format_exc())
     raise
 
 log.info("phase 4/4: registering MCP tools + awaiting Driver(CMD_INIT)")
@@ -256,8 +229,7 @@ async def compact(msg: Empty) -> String:
         # caller so any base_url / api_key fragments that the exception
         # string might have captured don't get echoed back over the wire.
         log.error("compact failed: %s: %s", type(e).__name__, e)
-        traceback.print_exc(file=sys.stdout)
-        sys.stdout.flush()
+        log.error("traceback:\n%s", traceback.format_exc())
         return String(data=f"Failed to compact memory ({type(e).__name__}).")
 
 
