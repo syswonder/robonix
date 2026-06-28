@@ -1,0 +1,32 @@
+[package]
+name = "robonix-health-primitive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Robonix Health Primitive: wraps robot sysfs/hwmon sensors behind unified gRPC contracts"
+
+[[bin]]
+name = "robonix-health-primitive"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tokio-stream = "0.1"
+tonic.workspace = true
+prost.workspace = true
+tonic-prost.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+log.workspace = true
+env_logger.workspace = true
+uuid.workspace = true
+robonix-atlas = { path = "../atlas" }
+
+[build-dependencies]
+robonix-codegen.workspace = true
+tonic-build.workspace = true
+tonic-prost-build.workspace = true
+protoc-bin-vendored.workspace = true

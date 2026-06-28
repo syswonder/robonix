@@ -1,0 +1,32 @@
+robot_model: "jetson_agx_orin"
+components:
+  - name: "cpu"
+    source: "thermal/cpu-thermal"
+    warn_above_c: 80.0
+    error_above_c: 90.0
+  - name: "gpu"
+    source: "thermal/gpu-thermal"
+    warn_above_c: 80.0
+    error_above_c: 90.0
+  - name: "tj"
+    source: "thermal/tj-thermal"
+    warn_above_c: 85.0
+    error_above_c: 95.0
+  - name: "soc012"
+    source: "thermal/soc012-thermal"
+    warn_above_c: 80.0
+    error_above_c: 85.0
+  - name: "soc345"
+    source: "thermal/soc345-thermal"
+    warn_above_c: 80.0
+    error_above_c: 85.0
+  - name: "nvme"
+    source: "hwmon/nvme"
+    warn_above_c: 70.0
+    error_above_c: 80.0
+  - name: "battery"
+    source: "battery"
+    warn_below_percent: 20.0
+    error_below_percent: 5.0
+    warn_below_voltage: 11.0
+    error_below_voltage: 10.0

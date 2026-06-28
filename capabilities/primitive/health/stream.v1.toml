@@ -1,0 +1,8 @@
+[contract]
+id      = "robonix/primitive/health/stream"
+version = "1"
+kind    = "primitive"
+idl     = "health/srv/StreamHealthState.srv"
+
+[mode]
+type = "rpc_server_stream"

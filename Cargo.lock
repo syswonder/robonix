@@ -2840,6 +2840,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "robonix-health-primitive"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "log",
+ "prost",
+ "protoc-bin-vendored",
+ "robonix-atlas",
+ "robonix-codegen",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "tonic-prost",
+ "tonic-prost-build",
+ "uuid",
+]
+
+[[package]]
 name = "robonix-liaison"
 version = "0.1.0"
 dependencies = [
@@ -2897,6 +2921,30 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "robonix-vitals"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "log",
+ "prost",
+ "protoc-bin-vendored",
+ "robonix-atlas",
+ "robonix-codegen",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "tonic-prost",
+ "tonic-prost-build",
+ "uuid",
 ]
 
 [[package]]
