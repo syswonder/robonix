@@ -4,7 +4,10 @@
 // output surface. Vitals keeps ownership of threshold judgement here.
 
 use crate::pb::contracts::robonix_system_soma_health_client::RobonixSystemSomaHealthClient;
-use crate::pb::soma::{ComponentStatus, Scalar, SomaHealthSnapshot, StreamHealthRequest};
+use crate::pb::soma::{
+    ActuatorState, ComponentStatus, PowerSourceState, Scalar, SomaHealthSnapshot,
+    StreamHealthRequest,
+};
 use crate::pb::vitals::{BodyComponent, BodyHealth, ComponentHealth, PowerState, VitalsSnapshot};
 use anyhow::{Context, Result};
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
@@ -369,7 +372,7 @@ pub fn snapshot_to_vitals(
         ts_ns,
         power: Some(power_state(snapshot)),
         components,
-        bodies: vec![body_health(snapshot)],
+        bodies: body_healths(snapshot),
     }
 }
 
@@ -598,8 +601,23 @@ fn power_state(snapshot: &SomaHealthSnapshot) -> PowerState {
     }
 }
 
-fn body_health(snapshot: &SomaHealthSnapshot) -> BodyHealth {
-    let (body_type, model) = body_identity(snapshot);
+fn body_healths(snapshot: &SomaHealthSnapshot) -> Vec<BodyHealth> {
+    let Some(root) = root_component(snapshot) else {
+        return Vec::new();
+    };
+    let mut bodies: Vec<BodyHealth> = snapshot
+        .components
+        .iter()
+        .filter(|component| component.parent_id == root.id)
+        .map(|component| body_health_for_component(snapshot, component))
+        .collect();
+    if bodies.is_empty() {
+        bodies.push(body_health_for_component(snapshot, root));
+    }
+    bodies
+}
+
+fn body_health_for_component(snapshot: &SomaHealthSnapshot, root: &ComponentStatus) -> BodyHealth {
     let mut state = 0;
     if snapshot
         .safety
@@ -611,90 +629,123 @@ fn body_health(snapshot: &SomaHealthSnapshot) -> BodyHealth {
     } else if snapshot
         .faults
         .iter()
-        .any(|f| f.active && f.severity >= FAULT_ERROR)
-        || snapshot.actuators.iter().any(|a| !a.communication_ok)
+        .any(|f| f.active && f.severity >= FAULT_ERROR && component_contains(root, &f.component_id))
+        || snapshot
+            .actuators
+            .iter()
+            .any(|a| !a.communication_ok && component_contains(root, &a.component_id))
     {
         state = 1;
     }
 
     BodyHealth {
-        body_type,
-        model,
+        body_type: component_type_name(root),
+        model: component_display_model(root, &snapshot.body_id),
         state,
-        message: body_message(snapshot),
-        components: snapshot
-            .actuators
-            .iter()
-            .map(|a| BodyComponent {
-                name: if a.joint_name.is_empty() {
-                    a.component_id.clone()
-                } else {
-                    a.joint_name.clone()
-                },
-                kind: "joint".to_string(),
-                temperature: scalar_value(a.motor_temp.as_ref()).unwrap_or(-1.0) as f32,
-                error_code: a.vendor_error_code,
-                enabled: a.torque_enabled,
-            })
-            .collect(),
+        message: body_message(snapshot, root),
+        components: body_components(snapshot, root),
     }
 }
 
-fn body_identity(snapshot: &SomaHealthSnapshot) -> (String, String) {
-    if let Some(component) = primary_actuator_owner(snapshot) {
-        return (
-            body_type_for_kind(component.kind).to_string(),
-            component_display_model(component, &snapshot.body_id),
-        );
-    }
-
-    if let Some(component) = snapshot
+fn root_component(snapshot: &SomaHealthSnapshot) -> Option<&ComponentStatus> {
+    snapshot
         .components
         .iter()
-        .find(|c| matches!(c.kind, KIND_ARM | KIND_LEG | KIND_BODY))
-    {
-        return (
-            body_type_for_kind(component.kind).to_string(),
-            component_display_model(component, &snapshot.body_id),
-        );
-    }
-
-    ("body".to_string(), first_non_empty(&[&snapshot.body_id]))
+        .find(|c| c.parent_id.is_empty())
+        .or_else(|| snapshot.components.iter().find(|c| c.kind == KIND_BODY))
 }
 
-fn primary_actuator_owner(snapshot: &SomaHealthSnapshot) -> Option<&ComponentStatus> {
-    for actuator in &snapshot.actuators {
-        let Some(actuator_component) = component_by_id(snapshot, &actuator.component_id) else {
-            continue;
-        };
-        if actuator_component.parent_id.is_empty() {
-            continue;
-        }
-        let Some(parent) = component_by_id(snapshot, &actuator_component.parent_id) else {
-            continue;
-        };
-        if matches!(parent.kind, KIND_ARM | KIND_LEG | KIND_BODY) {
-            return Some(parent);
-        }
-    }
-    None
-}
-
-fn component_by_id<'a>(
+fn actuator_by_component_id<'a>(
     snapshot: &'a SomaHealthSnapshot,
     component_id: &str,
-) -> Option<&'a ComponentStatus> {
-    snapshot.components.iter().find(|c| c.id == component_id)
+) -> Option<&'a ActuatorState> {
+    snapshot
+        .actuators
+        .iter()
+        .find(|a| a.component_id == component_id)
 }
 
-fn body_type_for_kind(kind: u32) -> &'static str {
+fn power_by_component_id<'a>(
+    snapshot: &'a SomaHealthSnapshot,
+    component_id: &str,
+) -> Option<&'a PowerSourceState> {
+    snapshot
+        .power_sources
+        .iter()
+        .find(|p| p.component_id == component_id)
+}
+
+fn body_components(snapshot: &SomaHealthSnapshot, root: &ComponentStatus) -> Vec<BodyComponent> {
+    snapshot
+        .components
+        .iter()
+        .filter(|component| component.id != root.id && component_contains(root, &component.id))
+        .map(|component| {
+            let actuator = actuator_by_component_id(snapshot, &component.id);
+            let power = power_by_component_id(snapshot, &component.id);
+            BodyComponent {
+                name: first_non_empty(&[&component.name, &component.id]),
+                kind: kind_label(component.kind).to_string(),
+                temperature: component_temperature(actuator, power),
+                error_code: actuator
+                    .map(|a| a.vendor_error_code)
+                    .or_else(|| power.map(|p| p.vendor_status_code))
+                    .unwrap_or(0),
+                enabled: component_enabled(component, actuator),
+                id: component.id.clone(),
+                parent_id: component.parent_id.clone(),
+                model: component.model.clone(),
+            }
+        })
+        .collect()
+}
+
+fn component_contains(root: &ComponentStatus, component_id: &str) -> bool {
+    component_id == root.id || component_id.starts_with(&format!("{}/", root.id))
+}
+
+fn component_temperature(
+    actuator: Option<&ActuatorState>,
+    power: Option<&PowerSourceState>,
+) -> f32 {
+    if let Some(actuator) = actuator
+        && let Some(temp) = scalar_value(actuator.motor_temp.as_ref())
+    {
+        return temp as f32;
+    }
+    if let Some(power) = power
+        && let Some(temp) = scalar_value(power.temperature.as_ref())
+    {
+        return temp as f32;
+    }
+    -1.0
+}
+
+fn component_enabled(component: &ComponentStatus, actuator: Option<&ActuatorState>) -> bool {
+    actuator
+        .map(|a| a.torque_enabled)
+        .unwrap_or(component.present && component.online)
+}
+
+fn component_type_name(component: &ComponentStatus) -> String {
+    let path_name = component.id.rsplit('/').next().unwrap_or("");
+    first_non_empty(&[path_name, &component.name, &component.model])
+}
+
+fn kind_label(kind: u32) -> &'static str {
     match kind {
+        KIND_BODY => "body",
         KIND_ARM => "arm",
         KIND_LEG => "leg",
+        KIND_JOINT => "joint",
         KIND_WHEEL => "wheel",
         KIND_GRIPPER => "gripper",
-        KIND_BODY => "body",
-        _ => "body",
+        KIND_BATTERY => "battery",
+        KIND_COMPUTER => "computer",
+        KIND_SENSOR => "sensor",
+        KIND_CONTROLLER => "controller",
+        KIND_END_EFFECTOR => "end_effector",
+        _ => "unknown",
     }
 }
 
@@ -711,17 +762,21 @@ fn first_non_empty(values: &[&str]) -> String {
         .to_string()
 }
 
-fn body_message(snapshot: &SomaHealthSnapshot) -> String {
+fn body_message(snapshot: &SomaHealthSnapshot, root: &ComponentStatus) -> String {
     let active_faults: Vec<&str> = snapshot
         .faults
         .iter()
-        .filter(|f| f.active)
+        .filter(|f| f.active && component_contains(root, &f.component_id))
         .map(|f| f.fault_id.as_str())
         .collect();
     if !active_faults.is_empty() {
         return format!("active faults: {}", active_faults.join(", "));
     }
-    if snapshot.actuators.iter().any(|a| !a.communication_ok) {
+    if snapshot
+        .actuators
+        .iter()
+        .any(|a| !a.communication_ok && component_contains(root, &a.component_id))
+    {
         return "actuator communication fault".to_string();
     }
     String::new()
@@ -790,12 +845,45 @@ mod tests {
     }
 
     #[test]
-    fn body_identity_uses_soma_component_model() {
+    fn body_health_groups_root_children() {
         let snapshot = generate_snapshot(MockScenario::Normal, 1);
         let vitals = snapshot_to_vitals(&snapshot, &default_thresholds(), 123);
-        let body = vitals.bodies.first().expect("body health");
-        assert_eq!(body.body_type, "arm");
-        assert_eq!(body.model, "piper");
+        assert_eq!(vitals.bodies.len(), 3);
+
+        let computer = vitals
+            .bodies
+            .iter()
+            .find(|body| body.body_type == "computer_jetson")
+            .expect("computer_jetson health");
+        assert_eq!(computer.model, "jetson_agx_orin");
+        assert!(
+            computer
+                .components
+                .iter()
+                .any(|c| c.id == "body/computer_jetson/cpu" && c.kind == "sensor")
+        );
+
+        let arm = vitals
+            .bodies
+            .iter()
+            .find(|body| body.body_type == "arm_right")
+            .expect("arm_right health");
+        assert_eq!(arm.model, "piper");
+        let joint = arm
+            .components
+            .iter()
+            .find(|c| c.id == "body/arm_right/joint_1")
+            .expect("joint_1 component");
+        assert_eq!(joint.parent_id, "body/arm_right");
+        assert_eq!(joint.model, "piper_motor");
+
+        let battery = vitals
+            .bodies
+            .iter()
+            .find(|body| body.body_type == "battery_main")
+            .expect("battery_main health");
+        assert_eq!(battery.model, "mock_bms");
+        assert!(battery.components.is_empty());
     }
 
     #[test]
