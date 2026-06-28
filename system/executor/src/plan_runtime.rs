@@ -34,6 +34,9 @@ struct PlanRun {
     /// Set by the `stop_plan_at` builtin; read by the execution loop at each
     /// `do` node. At most one phase per op_id (a later set overwrites).
     stop_points: HashMap<String, StopWhen>,
+    /// Plan-level description (the root node's description = the overall task),
+    /// so `get_all_plans` can tell the LLM what each running plan is.
+    description: String,
     /// Static op list snapshotted at register time (arena order), so
     /// `get_plan_status` can report op_ids/descriptions the LLM can target.
     ops: Vec<OpMeta>,
@@ -112,6 +115,7 @@ impl PlanRuntime {
                 cancelled: false,
                 running_async: HashMap::new(),
                 stop_points: HashMap::new(),
+                description: String::new(),
                 ops: Vec::new(),
                 op_state: HashMap::new(),
                 done: Arc::new(Notify::new()),
@@ -132,8 +136,14 @@ impl PlanRuntime {
                 node_kind: n.node_kind,
             })
             .collect();
+        let description = plan
+            .nodes
+            .get(plan.root_index as usize)
+            .map(|n| n.description.clone())
+            .unwrap_or_default();
         if let Some(run) = self.inner.lock().await.get_mut(&plan.plan_id) {
             run.ops = ops;
+            run.description = description;
         }
     }
 
@@ -216,6 +226,7 @@ impl PlanRuntime {
             .map(|(id, run)| {
                 serde_json::json!({
                     "plan_id": id,
+                    "description": run.description,
                     "op_count": run.ops.len(),
                     "cancelled": run.cancelled,
                     "stop_points": run.stop_points.len(),
@@ -813,13 +824,31 @@ mod tests {
         assert!(empty.success);
         assert!(empty.output.contains(r#""count":0"#));
 
+        use crate::pb::pilot::{Plan, RtdlNode};
         runtime.register_plan("p1").await;
+        runtime
+            .record_plan_ops(&Plan {
+                plan_id: "p1".into(),
+                session_id: "s".into(),
+                round: 0,
+                root_index: 0,
+                nodes: vec![RtdlNode {
+                    node_kind: 0,
+                    children: vec![],
+                    call: None,
+                    op_id: "1".into(),
+                    description: "drive to the kitchen".into(),
+                }],
+            })
+            .await;
         runtime.register_plan("p2").await;
         let r = runtime.get_all_plans_builtin(&status_call("{}")).await;
         assert!(r.success);
         assert!(r.output.contains(r#""count":2"#));
         assert!(r.output.contains(r#""plan_id":"p1""#));
         assert!(r.output.contains(r#""plan_id":"p2""#));
+        // p1's plan-level description (root node) is surfaced for the LLM.
+        assert!(r.output.contains(r#""description":"drive to the kitchen""#));
     }
 
     #[tokio::test]
