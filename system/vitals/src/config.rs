@@ -123,8 +123,11 @@ struct FileConfig {
     mock_soma_scenario: Option<String>,
     #[serde(default)]
     mock_soma_interval_ms: Option<u64>,
+    #[serde(default)]
     mock_soma_piper_can: Option<String>,
+    #[serde(default)]
     mock_soma_piper_python: Option<String>,
+    #[serde(default)]
     mock_soma_piper_script: Option<PathBuf>,
 }
 

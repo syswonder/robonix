@@ -36,6 +36,7 @@ const KIND_CONTROLLER: u32 = 10;
 const KIND_END_EFFECTOR: u32 = 11;
 
 const SAFETY_ESTOP: u32 = 4;
+const SAFETY_FAULT: u32 = 5;
 const FAULT_WARN: u32 = 1;
 const FAULT_ERROR: u32 = 2;
 const FAULT_CRITICAL: u32 = 3;
@@ -167,10 +168,24 @@ pub fn load_soma_thresholds(yaml_str: &str) -> Result<Vec<SomaThresholdRule>> {
     }
     let mut out = Vec::with_capacity(doc.rules.len());
     for rule in doc.rules {
+        let kind = match rule.selector.kind.as_deref() {
+            Some(raw) => {
+                let k = kind_from_name(raw);
+                if k.is_none() {
+                    log::warn!(
+                        "[vitals] threshold rule '{}': unrecognized kind '{}' — rule will not fire via kind selector",
+                        rule.id,
+                        raw
+                    );
+                }
+                k
+            }
+            None => None,
+        };
         out.push(SomaThresholdRule {
             id: rule.id,
             selector: SomaThresholdSelector {
-                kind: rule.selector.kind.as_deref().and_then(kind_from_name),
+                kind,
                 component_id: rule.selector.component_id,
                 component_id_glob: rule.selector.component_id_glob,
                 signal: rule.selector.signal,
@@ -561,6 +576,13 @@ fn evaluate_scalar(
     value: f64,
     threshold: Threshold,
 ) -> (u32, f64, String) {
+    if value.is_nan() {
+        return (
+            HEALTH_ERROR,
+            -1.0,
+            format!("{component_id} {signal} value is NaN"),
+        );
+    }
     if let Some(error) = threshold.error_above
         && value >= error
     {
@@ -649,9 +671,13 @@ fn body_health_for_component(snapshot: &SomaHealthSnapshot, root: &ComponentStat
     {
         state = 2;
     } else if snapshot
-        .faults
-        .iter()
-        .any(|f| f.active && f.severity >= FAULT_ERROR && component_contains(root, &f.component_id))
+        .safety
+        .as_ref()
+        .map(|s| s.aggregate_state == SAFETY_FAULT)
+        .unwrap_or(false)
+        || snapshot.faults.iter().any(|f| {
+            f.active && f.severity >= FAULT_ERROR && component_contains(root, &f.component_id)
+        })
         || snapshot
             .actuators
             .iter()
