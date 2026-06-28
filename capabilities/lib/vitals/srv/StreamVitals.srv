@@ -1,2 +1,2 @@
 ---
-VitalsSnapshot snapshot      # server_stream: 每次推送 1 帧
+VitalsSnapshot snapshot      # server_stream: one frame per push
