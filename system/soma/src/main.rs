@@ -25,12 +25,11 @@ const GET_URDF_TOML: &str = "capabilities/system/soma/get_urdf.v1.toml";
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    if let Some(level) = args.log.as_deref() {
-        unsafe {
-            std::env::set_var("SCRIBE_FILE_LEVEL", level);
-        }
-    }
-    robonix_scribe::init("soma");
+    // Apply the manifest's per-component `log:` level (delivered inside
+    // --config-json) to scribe's file sink before the first log line, so it
+    // controls what this component persists; `rbnx logs --level` still
+    // filters at read time.
+    robonix_scribe::init_from_config("soma", args.config_json.as_deref());
     info!("robonix-soma starting");
 
     let config = SomaConfig::resolve(args).context("resolve Soma config")?;
