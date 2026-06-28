@@ -1,0 +1,9 @@
+# Return raw Soma YAML for Pilot prompt construction.
+[contract]
+id      = "robonix/system/soma/get_yaml"
+version = "1"
+kind    = "system"
+idl     = "soma/srv/GetYaml.srv"
+
+[mode]
+type = "rpc"
