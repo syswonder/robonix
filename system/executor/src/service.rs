@@ -327,9 +327,19 @@ async fn execute_call(
     provider_id: String,
     runtime: PlanRuntime,
 ) -> bool {
+    // Log the args too (bounded) so the log shows what each call requested —
+    // essential for debugging plan-control builtins (stop_plan_at / cancel_plan)
+    // and any cap call. Truncated to keep large payloads (images, file content)
+    // from bloating the log.
+    let args_preview: String = call.args_json.chars().take(256).collect();
+    let args_ellipsis = if call.args_json.len() > 256 {
+        "…"
+    } else {
+        ""
+    };
     info!(
-        "[executor] dispatching call_id={} provider='{}' contract='{}'",
-        call.call_id, call.provider_id, call.contract_id,
+        "[executor] dispatching call_id={} provider='{}' contract='{}' args={}{}",
+        call.call_id, call.provider_id, call.contract_id, args_preview, args_ellipsis,
     );
 
     // Mark the op running so get_plan_status shows the in-flight node; the
@@ -405,8 +415,8 @@ async fn execute_call(
     let failed = !result.success;
 
     if result.success {
-        let preview: String = result.output.chars().take(120).collect();
-        let ellipsis = if result.output.len() > 120 { "..." } else { "" };
+        let preview: String = result.output.chars().take(512).collect();
+        let ellipsis = if result.output.len() > 512 { "..." } else { "" };
         info!(
             "[executor] '{}' ok: {}{}",
             call.contract_id, preview, ellipsis
