@@ -133,6 +133,18 @@ pub fn evaluate(reading: &RawReading, rule: &ThresholdRule) -> ComponentHealth {
         }
     }
 
+    // When OK, show the nearest warn threshold so logs have context
+    // (e.g. "cpu:OK(40) threshold=80" instead of "threshold=-1").
+    if health.health == HEALTH_OK && health.threshold < 0.0 {
+        if let Some(warn_c) = rule.warn_above_c {
+            health.threshold = warn_c;
+        } else if let Some(warn_v) = rule.warn_below_voltage {
+            health.threshold = warn_v;
+        } else if let Some(warn_pct) = rule.warn_below_percent {
+            health.threshold = warn_pct;
+        }
+    }
+
     health
 }
 

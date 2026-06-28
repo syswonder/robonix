@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""piper_body.py — Bridge between vitals (Rust) and Piper SDK (Python).
+"""piper_body.py — Piper SDK bridge (importable module).
 
-Reads JSON commands from stdin, writes JSON responses to stdout.  Designed
-as a long-running subprocess spawned by vitals' BodyCollector.
+Provides PiperCollector which reads joint motor health via piper_sdk CAN
+interface.  Intended to be imported by collect.py, not run standalone.
 
-Protocol (single-line JSON, newline-delimited):
-  ← {"cmd":"collect"}
-  → {"body_type":"arm","model":"piper","state":<int>,"joints":[...]}
+Protocol (PiperCollector.collect):
+  Returns {"body_type":"arm","model":"piper","state":<int>,"message":"",
+           "components":[{"name":"joint_1","kind":"joint",...}, ...]}
 
 Motor mapping: piper_sdk motor_1..6 → joint_1..6.
 Error codes, temperatures, and enable status come from low-speed CAN
@@ -15,11 +15,6 @@ feedback (~10 Hz).  Arm-level state is derived from the arm_status enum.
 
 from __future__ import annotations
 
-import json
-import os
-import sys
-import time
-import traceback
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -68,7 +63,7 @@ class PiperCollector:
 
     def collect(self) -> dict[str, Any]:
         """Read Piper sensors and return a BodyHealth-compatible dict."""
-        joints: list[dict[str, Any]] = []
+        components: list[dict[str, Any]] = []
         foc_statuses: list[int] = []
         temperatures: list[int] = []
         enables: list[bool] = []
@@ -91,8 +86,9 @@ class PiperCollector:
                 enables.append(False)
 
         for i in range(JOINT_COUNT):
-            joints.append({
+            components.append({
                 "name": JOINT_NAMES[i],
+                "kind": "joint",
                 "temperature": float(temperatures[i]),
                 "error_code": foc_statuses[i],
                 "enabled": enables[i],
@@ -100,87 +96,19 @@ class PiperCollector:
 
         # Arm-level state
         state = 0  # NORMAL
+        message = ""
         try:
             status = self._piper.GetArmStatus()
             raw = status.arm_status.arm_status
             state = ARM_STATUS_TO_STATE.get(raw, 1)
         except Exception:
             state = 1  # FAULT on read failure
+            message = "arm_status read failed"
 
         return {
             "body_type": "arm",
             "model": "piper",
             "state": state,
-            "joints": joints,
+            "message": message,
+            "components": components,
         }
-
-
-# ---------------------------------------------------------------------------
-# main — JSON command loop on stdin/stdout
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    can_port = os.environ.get("PIPER_CAN_PORT", "can0")
-
-    if not PIPER_AVAILABLE:
-        # No piper_sdk installed — return a FAULT body so vitals can still start.
-        fault: dict[str, Any] = {
-            "body_type": "arm",
-            "model": "piper",
-            "state": 1,
-            "joints": [
-                {"name": n, "temperature": -1.0, "error_code": 0, "enabled": False}
-                for n in JOINT_NAMES
-            ],
-        }
-        print(json.dumps(fault), flush=True)
-        print("[piper_body] piper_sdk not available — returning FAULT body", file=sys.stderr)
-        for line in sys.stdin:
-            try:
-                cmd = json.loads(line.strip())
-            except json.JSONDecodeError:
-                continue
-            if cmd.get("cmd") == "collect":
-                print(json.dumps(fault), flush=True)
-        return
-
-    # Connect
-    collector: PiperCollector | None = None
-    for attempt in range(5):
-        try:
-            collector = PiperCollector(can_port)
-            break
-        except Exception:
-            print(f"[piper_body] connect attempt {attempt + 1}/5 failed", file=sys.stderr)
-            time.sleep(2)
-    if collector is None:
-        print("[piper_body] could not connect to Piper arm", file=sys.stderr)
-        fault = {
-            "body_type": "arm", "model": "piper", "state": 1, "joints": [],
-        }
-        for line in sys.stdin:
-            cmd = json.loads(line.strip())
-            if cmd.get("cmd") == "collect":
-                print(json.dumps(fault), flush=True)
-        return
-
-    print("[piper_body] connected", file=sys.stderr, flush=True)
-
-    for line in sys.stdin:
-        try:
-            cmd = json.loads(line.strip())
-        except json.JSONDecodeError:
-            continue
-        if cmd.get("cmd") == "collect":
-            try:
-                result = collector.collect()
-            except Exception:
-                traceback.print_exc(file=sys.stderr)
-                result = {
-                    "body_type": "arm", "model": "piper", "state": 1, "joints": [],
-                }
-            print(json.dumps(result), flush=True)
-
-
-if __name__ == "__main__":
-    main()
