@@ -80,6 +80,9 @@ pub async fn execute(
             .cancel_plan_builtin(call, self_provider_id, atlas)
             .await;
     }
+    if op == "stop_plan_at" {
+        return runtime.stop_plan_at_builtin(call).await;
+    }
     if op == "read_capability_doc" {
         return read_capability_doc(call, atlas).await;
     }
@@ -115,7 +118,7 @@ async fn run(op: &str, args_json: &str) -> anyhow::Result<String> {
     }
 }
 
-/// Static metadata for the 5 builtin ops. Used by main.rs to declare them
+/// Static metadata for the builtin ops. Used by main.rs to declare them
 /// against atlas at startup so pilot can discover them like any other provider.
 pub struct BuiltinSpec {
     pub op: &'static str,
@@ -153,6 +156,11 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         op: "cancel_plan",
         description: "Cancellation for an in-flight RTDL plan by plan_id",
         input_schema_json: r#"{"type":"object","properties":{"plan_id":{"type":"string","description":"RTDL Plan.plan_id to cancel"},"wait_ms":{"type":"integer","minimum":0,"description":"Optional milliseconds to wait for the target plan to stop; default 5000"}},"required":["plan_id"]}"#,
+    },
+    BuiltinSpec {
+        op: "stop_plan_at",
+        description: "Set a stop point on an in-flight RTDL plan: when execution reaches the op with the given op_id, cancel the whole plan. Use 'on_complete' (default) to stop right after that op finishes, or 'on_enter' to stop the moment it is reached, before it runs. op_ids are the per-node identifiers shown in RTDL node_state events.",
+        input_schema_json: r#"{"type":"object","properties":{"plan_id":{"type":"string","description":"RTDL Plan.plan_id to set the stop point on"},"op_id":{"type":"string","description":"Node op_id at which to stop (cancel) the plan"},"when":{"type":"string","enum":["on_enter","on_complete"],"description":"on_enter = before the op runs; on_complete = after it finishes. Default on_complete."}},"required":["plan_id","op_id"]}"#,
     },
     BuiltinSpec {
         op: "read_capability_doc",

@@ -107,3 +107,11 @@ Executor declares builtin MCP capabilities under
   `plan_id` (required) and `wait_ms` (optional, default 5000). Async capability
   calls receive cancel requests through `<contract_id>/cancel`; synchronous
   calls already in progress are allowed to return naturally.
+- `stop_plan_at`: arm a stop point on an in-flight RTDL plan — when execution
+  reaches the node with the given `op_id`, the **whole plan is cancelled** (same
+  teardown as `cancel_plan`). Args: `plan_id` (required), `op_id` (required), and
+  `when` (optional, `on_complete` default): `on_enter` cancels the moment the op
+  is reached, before its call runs (the op never executes); `on_complete` cancels
+  right after the op's call finishes. `op_id`s are the per-node identifiers
+  surfaced in `RtdlNodeState` events. Setting a stop point on a plan that is no
+  longer active is a success no-op; an `op_id` that never executes never fires.
