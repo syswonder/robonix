@@ -113,7 +113,7 @@ export VLM_MODEL=gpt-5.5
 # is a build-time choice (default humble). To build it against another
 # distro, set this BEFORE the first `rbnx build` — supported: humble, iron,
 # jazzy, rolling. (Leave unset for the default.)
-# export ROBONIX_SCENE_ROS_DISTRO=jazzy
+# export ROBONIX_SCENE_ROS_DISTRO=humble
 
 cd examples/webots
 rbnx build       # first run pulls model weights + docker images, may take a while
