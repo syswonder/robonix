@@ -22,10 +22,6 @@ pub struct VitalsConfig {
     pub collect_interval_ms: u64,
     #[allow(dead_code)] // Phase 3 will load threshold rules from this path
     pub thresholds_path: PathBuf,
-    /// Body type for hardware health, e.g. "arm" / "dog". None = board-only.
-    pub body_type: Option<String>,
-    /// Body model e.g. "piper" / "koch" / "go2".
-    pub body_model: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -62,14 +58,6 @@ pub struct Args {
     /// Default: `robonix_vitals=info`. Falls back to `RUST_LOG` if unset.
     #[arg(long)]
     pub log: Option<String>,
-
-    /// Body type for hardware health (e.g. "arm", "dog"). Omit for board-only.
-    #[arg(long, env = "ROBONIX_VITALS_BODY_TYPE")]
-    pub body_type: Option<String>,
-
-    /// Body model (e.g. "piper", "koch", "go2").
-    #[arg(long, env = "ROBONIX_VITALS_BODY_MODEL")]
-    pub body_model: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -84,10 +72,6 @@ struct FileConfig {
     collect_interval_ms: Option<u64>,
     #[serde(default)]
     thresholds_path: Option<PathBuf>,
-    #[serde(default)]
-    body_type: Option<String>,
-    #[serde(default)]
-    body_model: Option<String>,
 }
 
 impl VitalsConfig {
@@ -123,8 +107,6 @@ impl VitalsConfig {
                 .thresholds_path
                 .or(file_cfg.thresholds_path)
                 .unwrap_or(default_thresholds),
-            body_type: args.body_type.or(file_cfg.body_type),
-            body_model: args.body_model.or(file_cfg.body_model),
         })
     }
 }
