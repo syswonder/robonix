@@ -665,10 +665,18 @@ pub async fn execute_start(
         None
     };
 
+    // Scribe tag = the per-INSTANCE provider id, never the package name. A
+    // single package (one `package.name`) can be deployed as N instances, each
+    // with a distinct provider id; tagging by package.name would collide them
+    // all into one log. `rbnx boot` passes the instance's provider id via
+    // RBNX_INSTANCE_NAME (the deploy manifest entry's `name`); fall back to
+    // package.name only for a bare standalone `rbnx start` with no instance.
+    let instance_name =
+        std::env::var("RBNX_INSTANCE_NAME").unwrap_or_else(|_| manifest.package.name.clone());
     let result = process_manager
         .start_process(
-            &manifest.package.name,
-            &manifest.package.name,
+            &instance_name,
+            &instance_name,
             "package",
             &package_root,
             &start_command,

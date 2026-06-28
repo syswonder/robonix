@@ -64,7 +64,13 @@ from concurrent import futures
 from pathlib import Path
 from typing import Optional
 
-logging.basicConfig(level=logging.INFO, format="[speech-service] %(levelname)s %(message)s")
+# Route all stdlib logging (this module + transitive deps) through Scribe so
+# `rbnx logs -t speech` sees everything and the package owns no log file or
+# stdout sink of its own. (robonix_api is pip-installed; only the proto stubs
+# need the sys.path bootstrap below.)
+from robonix_api import scribe_logger  # noqa: E402
+
+scribe_logger.install_stdlib_bridge("speech")
 log = logging.getLogger(__name__)
 
 # -- Proto stub resolution ---------------------------------------------------
