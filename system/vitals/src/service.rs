@@ -18,6 +18,13 @@ use tokio::sync::RwLock;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
+/// Per-joint state for change detection.
+#[derive(Clone, Debug)]
+struct PrevJointState {
+    error_code: u32,
+    enabled: bool,
+}
+
 /// Shared state: latest snapshot + broadcast channel for StreamVitals subscribers.
 /// Tracks per-component health to only push on state transitions (OK↔WARN↔ERROR).
 struct VitalsState {
@@ -26,6 +33,13 @@ struct VitalsState {
     broadcast_tx: tokio::sync::broadcast::Sender<VitalsSnapshot>,
     /// Previous health per component name, keyed by name.
     prev_health: HashMap<String, u32>,
+    /// Previous body-level state.
+    prev_body_state: u32,
+    /// Previous per-joint state (error_code, enabled), keyed by name.
+    /// Empty until the first body reading arrives.
+    prev_joint: HashMap<String, PrevJointState>,
+    /// True until the first body reading — suppresses ALERTs on startup.
+    first_body: bool,
 }
 
 /// VitalsServiceImpl — cheap to clone (Arc).
@@ -51,9 +65,13 @@ impl VitalsServiceImpl {
                         remaining_s: -1,
                     }),
                     components: vec![],
+                    body: None,
                 },
                 broadcast_tx,
                 prev_health: HashMap::new(),
+                prev_body_state: 0,
+                prev_joint: HashMap::new(),
+                first_body: true,
             })),
             start_time: Instant::now(),
         }
@@ -97,6 +115,77 @@ impl VitalsServiceImpl {
             state.prev_health.insert(comp.name.clone(), comp.health);
         }
 
+        // ── Body health transition detection ──────────────────────────
+        if let Some(ref body) = snapshot.body {
+            let is_first = state.first_body;
+
+            if body.state != state.prev_body_state {
+                log::info!(
+                    "[vitals] body state: {} → {}",
+                    body_state_label(state.prev_body_state),
+                    body_state_label(body.state)
+                );
+                if !is_first && body.state != 0 {
+                    log::warn!(
+                        "[vitals] ALERT: body {} ({}) state={}",
+                        body.body_type,
+                        body.model,
+                        body_state_label(body.state)
+                    );
+                }
+                changed = true;
+            }
+            for joint in &body.joints {
+                let prev = state.prev_joint.get(&joint.name);
+                let prev_err = prev.map(|p| p.error_code).unwrap_or(0);
+                let prev_en = prev.map(|p| p.enabled).unwrap_or(true);
+                if joint.error_code != prev_err {
+                    log::info!(
+                        "[vitals] {} error_code: {} → {}",
+                        joint.name,
+                        prev_err,
+                        joint.error_code
+                    );
+                    if !is_first && joint.error_code != 0 {
+                        log::warn!(
+                            "[vitals] ALERT: {} — error_code=0x{:02X}, temp={:.0}°C",
+                            joint.name,
+                            joint.error_code,
+                            joint.temperature
+                        );
+                    }
+                    changed = true;
+                }
+                if joint.enabled != prev_en {
+                    log::info!(
+                        "[vitals] {} enabled: {} → {}",
+                        joint.name,
+                        prev_en,
+                        joint.enabled
+                    );
+                    if !is_first && !joint.enabled {
+                        log::warn!("[vitals] ALERT: {} — disabled", joint.name);
+                    }
+                    changed = true;
+                }
+            }
+
+            state.first_body = false;
+
+            // Persist body state for next diff.
+            state.prev_body_state = body.state;
+            state.prev_joint.clear();
+            for joint in &body.joints {
+                state.prev_joint.insert(
+                    joint.name.clone(),
+                    PrevJointState {
+                        error_code: joint.error_code,
+                        enabled: joint.enabled,
+                    },
+                );
+            }
+        }
+
         // Only broadcast on state transitions to avoid flooding subscribers.
         if changed {
             // One-line summary: "cpu:OK(38C) gpu:OK(39C) ..."
@@ -131,6 +220,15 @@ fn health_label(h: u32) -> &'static str {
         0 => "OK",
         1 => "WARN",
         2 => "ERROR",
+        _ => "UNKNOWN",
+    }
+}
+
+fn body_state_label(s: u32) -> &'static str {
+    match s {
+        0 => "NORMAL",
+        1 => "FAULT",
+        2 => "ESTOP",
         _ => "UNKNOWN",
     }
 }

@@ -1,8 +1,8 @@
 # robonix-vitals — health monitoring
 
-Monitors robot power state and component health (temperature, voltage), normalises
-readings against per-robot-model threshold tables, and exposes the result via two
-gRPC capabilities:
+Monitors robot platform health (temperature, voltage) and body health (joint
+motors), normalises readings against threshold tables, and exposes the result
+via two gRPC capabilities:
 
 | contract | mode | transport | port | consumers |
 |-|-|-|-|-|
@@ -15,80 +15,81 @@ actions are the responsibility of `sentinel`.
 ## Architecture
 
 ```
-sysfs / hwmon / thermal
-      │
-      v
-vitals (50091)                         ← read sensors + normalise + threshold + report
-  robonix/service/vitals/get            ← gRPC rpc: GetVitals
-  robonix/service/vitals/stream         ← gRPC server_stream: StreamVitals
-      │
-      v
-pilot / sentinel / liaison
+sysfs / hwmon / thermal          body SDK (Piper/Go2/...)
+      │                                │
+      │ SysfsCollector                 │ BodyCollector (Python subprocess)
+      ▼                                ▼
+                    vitals
+              (aggregate + threshold)
+                      │
+          GetVitals / StreamVitals
+                      │
+                      ▼
+                    pilot
 ```
 
-In v0.1 vitals reads sysfs directly (`/sys/class/hwmon/*`, `/sys/class/thermal/*`).
-When **Soma** (the body system component) is ready, hardware access will move there
-and vitals will consume from Soma's unified health contract.
+In v0.1 vitals reads hardware directly. When **Soma** is ready, both collectors
+become gRPC clients consuming Soma's unified interfaces — the data structures
+stay the same.
 
 ## Quick start
 
 ```bash
-# make sure atlas active
-cargo run --release -p robonix-atlas -- --log info
-# run vitals if built
+# Board-only (Jetson):
 robonix-vitals --log info
-# or
-cargo run --release -p robonix-vitals -- --log info
+
+# Board + body (Piper arm via roboarm venv):
+ROBONIX_VITALS_BODY_PYTHON=/path/to/roboarm/.venv/bin/python3 \
+robonix-vitals --log info --body-type arm --body-model piper
 ```
 
 Typical output:
 
 ```
 [vitals] sysfs collector ready
-[vitals] 19.8V | cpu:OK(35) tj:OK(36) soc012:OK(36) soc345:OK(35) nvme:OK(38) battery:OK(-1)
+[vitals] body collector ready (arm/piper)
+[vitals] 19.8V | cpu:OK(35) tj:OK(36) nvme:OK(38) | arm[piper]:NORMAL
 ```
 
 ## Data flow
 
 ```
-SysfsCollector.collect()  →  (PowerState, Vec<RawReading>)
+SysfsCollector.collect()  →  PowerState + ComponentHealth[]  (board)
+BodyCollector.collect()   →  BodyHealth                      (joints, optional)
                                          │
                                    normalize.rs (threshold check)
                                          │
-                                    VitalsSnapshot (cached)
+                                    VitalsSnapshot
                                          │
                               ┌──────────┴──────────┐
                               v                     v
                        GetVitals (rpc)     StreamVitals (server_stream)
-                       returns cache       pushes on state transitions
 ```
 
-- **collect.rs** (`SysfsCollector`) reads thermal zones, NVMe temperature, and
-  system voltage from sysfs/hwmon, producing `(PowerState, Vec<RawReading>)`.
-  Thermal zone names are stripped of the `-thermal` suffix so they match
-  threshold rule names.
-- **normalize.rs** compares raw readings against the YAML threshold table and
-  produces `ComponentHealth` entries with OK / WARN / ERROR status.
+- **collect.rs** (`SysfsCollector`) reads thermal zones, NVMe, and system voltage
+  from sysfs/hwmon.
+- **body.rs** (`BodyCollector`) spawns a Python subprocess that calls the body SDK
+  (e.g. `piper_body.py` → `piper_sdk`). Communicates via stdin/stdout JSON.
+- **normalize.rs** compares readings against the YAML threshold table.
 - **service.rs** caches the latest `VitalsSnapshot`, serves `GetVitals`, and
-  broadcasts on `StreamVitals` only when a component health state transitions
-  (OK→WARN, WARN→ERROR, etc.). Steady-state temperature drift does **not**
-  trigger a push.
+  broadcasts on `StreamVitals` only on state transitions.
 
 ## CLI reference
 
-```
-robonix-vitals [FLAGS] [OPTIONS]
-```
-
-| Flag / Option | Env | Default | Description |
+| Flag | Env | Default | Description |
 |-|-|-|-|
-| `--atlas` | `ROBONIX_ATLAS_ENDPOINT` | `127.0.0.1:50051` | Atlas control-plane endpoint |
+| `--atlas` | `ROBONIX_ATLAS_ENDPOINT` | `127.0.0.1:50051` | Atlas endpoint |
 | `--listen` | `ROBONIX_VITALS_LISTEN` | `127.0.0.1:50091` | gRPC listen address |
-| `--id` | `ROBONIX_VITALS_PROVIDER_ID` | `vitals` | Provider id registered with Atlas |
-| `--collect-interval-ms` | `ROBONIX_VITALS_COLLECT_INTERVAL_MS` | `1000` | Sensor polling interval (ms) |
+| `--id` | `ROBONIX_VITALS_PROVIDER_ID` | `vitals` | Provider id |
+| `--collect-interval-ms` | `ROBONIX_VITALS_COLLECT_INTERVAL_MS` | `1000` | Poll interval (ms) |
 | `--thresholds-path` | `ROBONIX_VITALS_THRESHOLDS_PATH` | `<crate>/thresholds/jetson_agx_orin.yaml` | YAML threshold file |
-| `--config` | `ROBONIX_CONFIG_PATH` | — | Optional YAML config file (CLI/env override) |
-| `--log` | `RUST_LOG` | `robonix_vitals=info` | env\_logger filter |
+| `--body-type` | `ROBONIX_VITALS_BODY_TYPE` | — | Body type: `arm`, `dog`, etc. |
+| `--body-model` | `ROBONIX_VITALS_BODY_MODEL` | — | Body model: `piper`, `koch`, `go2` |
+| `--config` | `ROBONIX_CONFIG_PATH` | — | Optional YAML config file |
+| `--log` | `RUST_LOG` | `robonix_vitals=info` | Log filter |
+
+`ROBONIX_VITALS_BODY_PYTHON` env var overrides the Python binary for body
+scripts (default: `python3`).
 
 ## Threshold file format
 
@@ -96,17 +97,14 @@ robonix-vitals [FLAGS] [OPTIONS]
 robot_model: "jetson_agx_orin"
 components:
   - name: "cpu"
-    warn_above_c: 80.0                # °C — trigger WARN  (optional)
-    error_above_c: 90.0               # °C — trigger ERROR (optional)
+    warn_above_c: 80.0
+    error_above_c: 90.0
     # Battery-style rules (optional):
     # warn_below_percent: 20.0
     # error_below_percent: 5.0
     # warn_below_voltage: 11.0
     # error_below_voltage: 10.0
 ```
-
-Component `name` must match the thermal zone name with `-thermal` suffix
-stripped (e.g. `cpu-thermal` → `cpu`).
 
 ## Source layout
 
@@ -116,13 +114,16 @@ system/vitals/
   build.rs
   thresholds/
     jetson_agx_orin.yaml
+  scripts/
+    piper_body.py        # Piper SDK → JSON bridge (Python)
   src/
-    main.rs          # Atlas registration, gRPC serve, collect loop
-    config.rs        # VitalsConfig
-    service.rs       # VitalsServiceImpl: GetVitals + StreamVitals + state-change detection
-    collect.rs       # SysfsCollector: read sysfs/hwmon/thermal
-    normalize.rs     # evaluate() + load_thresholds() + unit tests
-    pb.rs            # include!(contract_proto_modules.rs)
+    main.rs              # Atlas registration, gRPC serve, collect loop
+    config.rs            # VitalsConfig
+    service.rs           # VitalsServiceImpl: GetVitals + StreamVitals + change detection
+    collect.rs           # SysfsCollector: sysfs/hwmon/thermal
+    body.rs              # BodyCollector: Python subprocess → BodyHealth
+    normalize.rs         # evaluate() + load_thresholds() + unit tests
+    pb.rs                # include!(contract_proto_modules.rs)
 ```
 
 ## Verifying
