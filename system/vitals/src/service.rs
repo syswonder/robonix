@@ -145,18 +145,12 @@ impl VitalsServiceImpl {
                     msg_display
                 );
                 for comp in &body.components {
-                    let faults = body_threshold::decode_faults(model, comp.error_code);
                     log::info!(
-                        "[vitals] {} ({}) enabled: {}, error_code: 0x{:02X}{}, temp: {:.0}°C",
+                        "[vitals] {} ({}) enabled: {}, error_code: 0x{:02X}, temp: {:.0}°C",
                         comp.name,
                         comp.kind,
                         comp.enabled,
                         comp.error_code,
-                        if faults.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" [{}]", faults.join(", "))
-                        },
                         comp.temperature
                     );
                 }
@@ -208,17 +202,15 @@ impl VitalsServiceImpl {
                     // Error code changes.
                     if comp.error_code != prev_err {
                         log::info!(
-                            "[vitals] {} error_code: {} → {}",
+                            "[vitals] {} error_code: 0x{:02X} → 0x{:02X}",
                             component_key,
                             prev_err,
                             comp.error_code
                         );
                         if comp.error_code != 0 {
-                            let faults = body_threshold::decode_faults(model, comp.error_code);
                             log::warn!(
-                                "[vitals] ALERT: {} — {} (0x{:02X}), temp={:.0}°C",
+                                "[vitals] ALERT: {} error_code=0x{:02X}, temp={:.0}°C",
                                 component_key,
-                                faults.join(", "),
                                 comp.error_code,
                                 comp.temperature
                             );

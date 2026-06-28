@@ -1,13 +1,9 @@
-# Per-model joint temperature thresholds and fault code definitions.
+# Per-model joint temperature thresholds.
 # This file is mandatory — vitals will refuse to start without a valid body.yaml.
 #
-# Convention:
-#   temp_warn_c  — joint temperature above this value is WARN (health=1)
-#   temp_error_c — joint temperature above this value is ERROR (health=2)
-#   faults[]     — bit → human-readable label for error_code bitmask decoding
-#
-# Unknown models use the "default" entry.
-# Unknown bits not listed in faults[] are reported as "0xNN".
+# Fault code decoding is handled by the Python collector scripts, not here.
+# Each body SDK knows its own hardware fault bit definitions; the collector
+# writes decoded fault labels into BodyHealth.message.
 
 default:
   temp_warn_c: 60.0
@@ -17,36 +13,11 @@ models:
   piper:
     temp_warn_c: 60.0
     temp_error_c: 75.0
-    faults:
-      - bit: 0
-        label: "欠压"
-      - bit: 1
-        label: "电机过热"
-      - bit: 2
-        label: "过流"
-      - bit: 3
-        label: "驱动器过热"
-      - bit: 4
-        label: "碰撞"
-      - bit: 5
-        label: "驱动器故障"
-      - bit: 7
-        label: "堵转"
 
   koch:
     temp_warn_c: 60.0
     temp_error_c: 75.0
-    faults:
-      - bit: 0
-        label: "电压异常"
-      - bit: 2
-        label: "过热"
-      - bit: 3
-        label: "编码器故障"
-      - bit: 5
-        label: "过载"
 
   go2:
     temp_warn_c: 60.0
     temp_error_c: 75.0
-    faults: []

@@ -47,6 +47,27 @@ COMPONENT_DEFS = [
 JOINT_COUNT = 6
 JOINT_NAMES = [f"joint_{i}" for i in range(1, JOINT_COUNT + 1)]
 
+# Piper foc_status bit → fault label (mirrors piper_body.py)
+FAULT_BITS: list[tuple[int, str]] = [
+    (0, "欠压"),
+    (1, "电机过热"),
+    (2, "过流"),
+    (3, "驱动器过热"),
+    (4, "碰撞"),
+    (5, "驱动器故障"),
+    (7, "堵转"),
+]
+
+
+def _decode_faults(error_code: int) -> str:
+    """Decode error_code bitmask into compact fault labels."""
+    if error_code == 0:
+        return ""
+    labels = [label for bit, label in FAULT_BITS if error_code & (1 << bit)]
+    if not labels:
+        return f"0x{error_code:02X}"
+    return ",".join(labels)
+
 
 def _board_components(
     collect_n: int, scenario: str, voltage: float
@@ -180,11 +201,17 @@ def collect(board_scenario: str, body_scenario: str | None, collect_n: int) -> d
 
     if body_scenario is not None and body_scenario in BODY_GENERATORS:
         components = BODY_GENERATORS[body_scenario](collect_n)
+        # Build message from any non-zero error_codes.
+        msg_parts = [
+            f"{c['name']}:{_decode_faults(c['error_code'])}"
+            for c in components
+            if c["error_code"] != 0
+        ]
         result["bodies"] = [{
             "body_type": "arm",
             "model": "piper",
             "state": 0,
-            "message": "",
+            "message": "; ".join(msg_parts),
             "components": components,
         }]
     else:
