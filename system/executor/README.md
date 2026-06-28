@@ -108,9 +108,10 @@ Executor declares builtin MCP capabilities under
   calls receive cancel requests through `<contract_id>/cancel`; synchronous
   calls already in progress are allowed to return naturally.
 - `get_all_plans`: list every in-flight RTDL plan (no args). Returns each
-  `plan_id` with `op_count`, `cancelled`, and the number of armed `stop_points`.
-  The plan-list level of inspect-then-act: discover running plans, then drill in
-  with `get_plan_status`.
+  `plan_id` with a short `description` of the task (the root node's description,
+  which carries the model's `rtdl_description`), `op_count`, `cancelled`, and the
+  number of armed `stop_points`. The plan-list level of inspect-then-act:
+  discover running plans, then drill in with `get_plan_status`.
 - `get_plan_status`: inspect an in-flight RTDL plan. Args: `plan_id` (required).
   Returns each op as JSON with `op_id`, `kind`, `description`, current `state`
   (`pending`/`running`/`succeeded`/`failed`/`canceled`/`timeout`/`paused`) and

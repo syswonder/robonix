@@ -165,7 +165,7 @@ pub const BUILTINS: &[BuiltinSpec] = &[
     },
     BuiltinSpec {
         op: "get_all_plans",
-        description: "List every in-flight RTDL plan with its plan_id, op_count, cancelled flag, and number of armed stop points. Call this to discover which plans are currently running, then inspect one with get_plan_status before stopping it. Takes no arguments.",
+        description: "List every in-flight RTDL plan with its plan_id, a short description of the task, op_count, cancelled flag, and number of armed stop points. Call this to discover which plans are currently running, then inspect one with get_plan_status before stopping it. Takes no arguments.",
         input_schema_json: r#"{"type":"object","properties":{}}"#,
     },
     BuiltinSpec {
