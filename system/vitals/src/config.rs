@@ -12,6 +12,7 @@ pub const DEFAULT_VITALS_PROVIDER_ID: &str = "vitals";
 pub const VITALS_NAMESPACE: &str = "robonix/service/vitals";
 pub const DEFAULT_ATLAS_ENDPOINT: &str = "127.0.0.1:50051";
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:50091";
+pub const DEFAULT_MOCK_SOMA_LISTEN: &str = "127.0.0.1:50092";
 pub const DEFAULT_COLLECT_INTERVAL_MS: u64 = 1000;
 
 #[derive(Debug, Clone)]
@@ -23,6 +24,11 @@ pub struct VitalsConfig {
     pub thresholds_path: PathBuf,
     /// Body threshold file (joint temperatures, fault codes per model).
     pub body_thresholds_path: PathBuf,
+    pub soma_endpoint: Option<String>,
+    pub mock_soma: bool,
+    pub mock_soma_id: String,
+    pub mock_soma_listen: String,
+    pub mock_soma_scenario: String,
 }
 
 #[derive(Parser, Debug)]
@@ -55,6 +61,26 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_VITALS_BODY_THRESHOLDS_PATH")]
     pub body_thresholds_path: Option<PathBuf>,
 
+    /// Optional Soma gRPC endpoint. When set, Vitals consumes SomaHealthSnapshot.
+    #[arg(long, env = "ROBONIX_SOMA_ENDPOINT")]
+    pub soma_endpoint: Option<String>,
+
+    /// Run this binary as a mock Soma server instead of Vitals.
+    #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA", default_value_t = false)]
+    pub mock_soma: bool,
+
+    /// Provider id used when --mock-soma registers with Atlas.
+    #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_ID")]
+    pub mock_soma_id: Option<String>,
+
+    /// Address the mock Soma gRPC services bind to.
+    #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_LISTEN")]
+    pub mock_soma_listen: Option<String>,
+
+    /// Mock Soma scenario: normal, ramp, fault, toggle, or mixed.
+    #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_SCENARIO")]
+    pub mock_soma_scenario: Option<String>,
+
     /// Optional YAML config file (rbnx writes this; CLI/env still override).
     #[arg(long, env = "ROBONIX_CONFIG_PATH")]
     pub config: Option<PathBuf>,
@@ -79,6 +105,14 @@ struct FileConfig {
     thresholds_path: Option<PathBuf>,
     #[serde(default)]
     body_thresholds_path: Option<PathBuf>,
+    #[serde(default)]
+    soma_endpoint: Option<String>,
+    #[serde(default)]
+    mock_soma_id: Option<String>,
+    #[serde(default)]
+    mock_soma_listen: Option<String>,
+    #[serde(default)]
+    mock_soma_scenario: Option<String>,
 }
 
 impl VitalsConfig {
@@ -118,6 +152,20 @@ impl VitalsConfig {
                 .body_thresholds_path
                 .or(file_cfg.body_thresholds_path)
                 .unwrap_or(default_body_thresholds),
+            soma_endpoint: args.soma_endpoint.or(file_cfg.soma_endpoint),
+            mock_soma: args.mock_soma,
+            mock_soma_id: args
+                .mock_soma_id
+                .or(file_cfg.mock_soma_id)
+                .unwrap_or_else(|| "mock-soma".to_string()),
+            mock_soma_listen: args
+                .mock_soma_listen
+                .or(file_cfg.mock_soma_listen)
+                .unwrap_or_else(|| DEFAULT_MOCK_SOMA_LISTEN.to_string()),
+            mock_soma_scenario: args
+                .mock_soma_scenario
+                .or(file_cfg.mock_soma_scenario)
+                .unwrap_or_else(|| "normal".to_string()),
         })
     }
 }

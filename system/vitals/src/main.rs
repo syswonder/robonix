@@ -20,9 +20,11 @@
 mod body_threshold;
 mod collector;
 mod config;
+mod mock_soma;
 mod normalize;
 mod pb;
 mod service;
+mod soma_ingest;
 mod subprocess;
 
 use anyhow::{Context, Result};
@@ -34,6 +36,7 @@ use pb::contracts::robonix_service_vitals_stream_server::RobonixServiceVitalsStr
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
 use service::VitalsServiceImpl;
+use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -54,6 +57,15 @@ async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_filter)).init();
 
     let cfg = VitalsConfig::resolve(parsed)?;
+    if cfg.mock_soma {
+        return mock_soma::run_mock_soma(
+            &cfg.atlas_endpoint,
+            &cfg.mock_soma_id,
+            &cfg.mock_soma_listen,
+            &cfg.mock_soma_scenario,
+        )
+        .await;
+    }
 
     info!("connecting to atlas at {}", cfg.atlas_endpoint);
     let mut atlas =
@@ -132,10 +144,100 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Body thresholds are used by the shared Vitals service for both Soma and
+    // Python collector snapshots.
+    body_threshold::load_config(&cfg.body_thresholds_path)?;
+
     // Build the shared service state.
     let svc = VitalsServiceImpl::new();
 
-    // Load threshold rules (optional — falls back to basic collection).
+    let soma_rules: Vec<soma_ingest::SomaThresholdRule> =
+        match std::fs::read_to_string(&cfg.thresholds_path) {
+            Ok(yaml_str) => match soma_ingest::load_soma_thresholds(&yaml_str) {
+                Ok(r) => {
+                    info!(
+                        "loaded {} Soma threshold rules from {}",
+                        r.len(),
+                        cfg.thresholds_path.display()
+                    );
+                    r
+                }
+                Err(e) => {
+                    log::warn!(
+                        "failed to parse Soma threshold file '{}': {e:#}; using defaults",
+                        cfg.thresholds_path.display()
+                    );
+                    soma_ingest::default_thresholds()
+                }
+            },
+            Err(_) => soma_ingest::default_thresholds(),
+        };
+
+    if let Some(mut stream) =
+        soma_ingest::open_soma_stream(&mut atlas, &cfg.id, cfg.soma_endpoint.as_deref()).await?
+    {
+        let svc_for_stream = svc.clone();
+        let rules_for_stream = soma_rules.clone();
+        tokio::spawn(async move {
+            loop {
+                match stream.message().await {
+                    Ok(Some(snapshot)) => {
+                        let vitals = soma_ingest::snapshot_to_vitals(
+                            &snapshot,
+                            &rules_for_stream,
+                            monotonic_ns(),
+                        );
+                        svc_for_stream.update_snapshot(vitals).await;
+                    }
+                    Ok(None) => {
+                        log::warn!("[vitals] Soma StreamHealth ended");
+                        break;
+                    }
+                    Err(e) => {
+                        log::warn!("[vitals] Soma StreamHealth error: {e:#}");
+                        break;
+                    }
+                }
+            }
+        });
+
+        info!("Vitals gRPC on {listen_addr} (Soma input)");
+        eprintln!("robonix-vitals ready on {listen_addr} (Soma input)");
+
+        tonic::transport::Server::builder()
+            .add_service(RobonixServiceVitalsGetServer::new(svc.clone()))
+            .add_service(RobonixServiceVitalsStreamServer::new(svc))
+            .serve(listen_addr)
+            .await
+            .context("vitals gRPC server failed")?;
+
+        return Ok(());
+    }
+
+    // Python binary — shared by subprocess.
+    let python = std::env::var("ROBONIX_VITALS_PYTHON")
+        .or_else(|_| std::env::var("ROBONIX_VITALS_BODY_PYTHON"))
+        .unwrap_or_else(|_| "python3".to_string());
+    let scripts_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts");
+
+    // ── Unified script ──────────────────────────────────────────────────
+    // One script handles board (always) and body (optional, if hardware is
+    // connected).  Override via ROBONIX_VITALS_SCRIPT env var.
+
+    let collect_script = std::env::var("ROBONIX_VITALS_SCRIPT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| scripts_dir.join("collect.py"));
+
+    let mut collector = collector::VitalsCollector::new(&collect_script.to_string_lossy(), &python)
+        .context("init vitals collector")?;
+    info!("vitals collector ready");
+
+    let script_paths = ScriptPaths {
+        script: collect_script,
+        python_bin: python,
+    };
+
+    // Load board threshold rules for the Python collector path.
     let rules: Vec<normalize::ThresholdRule> = match std::fs::read_to_string(&cfg.thresholds_path) {
         Ok(yaml_str) => match normalize::load_thresholds(&yaml_str) {
             Ok(r) => {
@@ -161,36 +263,6 @@ async fn main() -> Result<()> {
             );
             vec![]
         }
-    };
-
-    // Load body threshold rules (joint temperatures, fault codes per model).
-    // This is mandatory — startup fails without a valid body.yaml.
-    body_threshold::load_config(&cfg.body_thresholds_path)?;
-
-    // Python binary — shared by subprocess.
-    let python = std::env::var("ROBONIX_VITALS_PYTHON")
-        .or_else(|_| std::env::var("ROBONIX_VITALS_BODY_PYTHON"))
-        .unwrap_or_else(|_| "python3".to_string());
-    let scripts_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts");
-
-    // ── Unified script ──────────────────────────────────────────────────
-    // One script handles board (always) and body (optional, if hardware is
-    // connected).  Override via ROBONIX_VITALS_SCRIPT env var.
-
-    let collect_script = std::env::var("ROBONIX_VITALS_SCRIPT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| scripts_dir.join("collect.py"));
-
-    let mut collector = collector::VitalsCollector::new(
-        &collect_script.to_string_lossy(),
-        &python,
-    )
-    .context("init vitals collector")?;
-    info!("vitals collector ready");
-
-    let script_paths = ScriptPaths {
-        script: collect_script,
-        python_bin: python,
     };
 
     // ── Collect loop ────────────────────────────────────────────────────
@@ -261,5 +333,6 @@ async fn main() -> Result<()> {
 }
 
 fn monotonic_ns() -> i64 {
-    Instant::now().elapsed().as_nanos() as i64
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_nanos() as i64
 }

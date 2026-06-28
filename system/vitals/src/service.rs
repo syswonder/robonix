@@ -14,6 +14,7 @@ use crate::pb::vitals::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Instant;
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::ReceiverStream;
@@ -293,7 +294,7 @@ impl VitalsServiceImpl {
                     || cur.charging != prev.charging
                     || (cur.battery_percent - prev.battery_percent).abs() > 0.5
             }
-            (Some(_), None) => true,  // first snapshot, force log
+            (Some(_), None) => true, // first snapshot, force log
             _ => false,
         };
         if power_changed {
@@ -306,11 +307,7 @@ impl VitalsServiceImpl {
                     );
                 }
                 if cur.charging != prev.charging {
-                    log::info!(
-                        "[vitals] charging: {} → {}",
-                        prev.charging,
-                        cur.charging
-                    );
+                    log::info!("[vitals] charging: {} → {}", prev.charging, cur.charging);
                 }
                 if (cur.battery_percent - prev.battery_percent).abs() > 0.5 {
                     log::info!(
@@ -372,8 +369,8 @@ fn body_state_label(s: u32) -> &'static str {
 }
 
 fn monotonic_ns() -> i64 {
-    let now = Instant::now();
-    now.elapsed().as_nanos() as i64
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_nanos() as i64
 }
 
 #[tonic::async_trait]

@@ -59,7 +59,10 @@ pub fn load_config(path: &Path) -> anyhow::Result<()> {
         path.display(),
         cfg.models.len()
     );
-    CONFIG.set(cfg).map_err(|_| anyhow::anyhow!("body thresholds already loaded")).ok();
+    CONFIG
+        .set(cfg)
+        .map_err(|_| anyhow::anyhow!("body thresholds already loaded"))
+        .ok();
     Ok(())
 }
 
@@ -73,14 +76,8 @@ pub fn thresholds_for(model: &str) -> JointThresholds {
         .expect("body thresholds not loaded — call load_config() at startup");
     let m = cfg.models.get(model).unwrap_or(&cfg.default);
     JointThresholds {
-        temp_warn_c: m
-            .temp_warn_c
-            .or(cfg.default.temp_warn_c)
-            .unwrap_or(60.0),
-        temp_error_c: m
-            .temp_error_c
-            .or(cfg.default.temp_error_c)
-            .unwrap_or(75.0),
+        temp_warn_c: m.temp_warn_c.or(cfg.default.temp_warn_c).unwrap_or(60.0),
+        temp_error_c: m.temp_error_c.or(cfg.default.temp_error_c).unwrap_or(75.0),
     }
 }
 
@@ -301,7 +298,9 @@ models: {}
 
     #[test]
     fn test_joint_temp_health_clone() {
-        let h = JointTempHealth { health: HEALTH_WARN };
+        let h = JointTempHealth {
+            health: HEALTH_WARN,
+        };
         let h2 = h.clone();
         assert_eq!(h2.health, HEALTH_WARN);
     }

@@ -1,0 +1,41 @@
+uint8 HEALTH_OK=0
+uint8 HEALTH_WARN=1
+uint8 HEALTH_ERROR=2
+uint8 HEALTH_STALE=3
+uint8 HEALTH_UNKNOWN=4
+
+uint8 KIND_UNKNOWN=0
+uint8 KIND_BODY=1
+uint8 KIND_ARM=2
+uint8 KIND_LEG=3
+uint8 KIND_JOINT=4
+uint8 KIND_WHEEL=5
+uint8 KIND_GRIPPER=6
+uint8 KIND_BATTERY=7
+uint8 KIND_COMPUTER=8
+uint8 KIND_SENSOR=9
+uint8 KIND_CONTROLLER=10
+uint8 KIND_END_EFFECTOR=11
+
+uint8 OP_UNKNOWN=0
+uint8 OP_OFFLINE=1
+uint8 OP_POWERED_OFF=2
+uint8 OP_IDLE=3
+uint8 OP_ACTIVE=4
+uint8 OP_DEGRADED=5
+uint8 OP_PROTECTIVE_STOP=6
+uint8 OP_ESTOP=7
+uint8 OP_FAULT=8
+
+string id
+string parent_id
+uint8 kind
+string name
+string frame_id
+string model
+string serial
+uint8 health
+uint8 operational_state
+bool present
+bool online
+string detail
