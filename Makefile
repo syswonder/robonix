@@ -23,6 +23,8 @@ help:
 	@echo "    make build-pilot     - Install robonix-pilot to ~/.cargo/bin"
 	@echo "    make build-executor  - Install robonix-executor to ~/.cargo/bin"
 	@echo "    make build-liaison   - Install robonix-liaison to ~/.cargo/bin"
+	@echo "    make build-health-primitive - Install robonix-health-primitive to ~/.cargo/bin"
+	@echo "    make build-vitals    - Install robonix-vitals to ~/.cargo/bin"
 	@echo ""
 	@echo "  Install:"
 	@echo "    make install         - Install all binaries to ~/.cargo/bin and register this repo via rbnx setup"
@@ -52,6 +54,12 @@ build-executor:
 build-liaison:
 	cargo install --force --path system/liaison  --bin robonix-liaison  $(CARGO_FLAGS)
 
+build-health-primitive:
+	cargo install --force --path system/health_primitive --bin robonix-health-primitive $(CARGO_FLAGS)
+
+build-vitals:
+	cargo install --force --path system/vitals   --bin robonix-vitals   $(CARGO_FLAGS)
+
 fmt:
 	cargo fmt --all
 
@@ -65,6 +73,8 @@ install:
 	cargo install --force --path system/pilot    --bin robonix-pilot    $(CARGO_FLAGS)
 	cargo install --force --path system/executor --bin robonix-executor $(CARGO_FLAGS)
 	cargo install --force --path system/liaison  --bin robonix-liaison  $(CARGO_FLAGS)
+	cargo install --force --path system/health_primitive --bin robonix-health-primitive $(CARGO_FLAGS)
+	cargo install --force --path system/vitals   --bin robonix-vitals   $(CARGO_FLAGS)
 	cargo install --force --path tools/rbnx      --bin rbnx             $(CARGO_FLAGS)
 	@# Register this clone as the robonix source tree so packages anywhere
 	@# on disk can resolve capabilities/IDL via `rbnx path`. Updates
