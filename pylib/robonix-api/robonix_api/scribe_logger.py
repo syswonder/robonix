@@ -212,31 +212,34 @@ def install_stdlib_bridge(
     *,
     level: int = logging.INFO,
     logger: Optional[logging.Logger] = None,
-    replace_stream_handlers: bool = True,
+    replace_existing_handlers: bool = True,
 ) -> logging.Logger:
     """Route stdlib ``logging`` through Scribe so packages need no own sink.
 
-    Attaches a :class:`_StdlibBridgeHandler` (tagged *tag*) to *logger*
-    (the root logger by default, so transitive-dependency logs are captured
-    too) and raises its level to *level*. When *replace_stream_handlers* is
-    true, existing ``StreamHandler``/``FileHandler`` instances on that logger
-    are removed first — this is what enforces the repo rule "no package owns a
-    log file or duplicate stdout sink; everything goes through Scribe" (Scribe
-    already mirrors to stderr itself). Idempotent: a second call with the same
-    tag does not stack handlers. Returns the configured logger.
+    Attaches a :class:`_StdlibBridgeHandler` (tagged *tag*) to *logger* (the
+    root logger by default, so transitive-dependency logs are captured too) and
+    raises its level to *level*. When *replace_existing_handlers* is true,
+    every other handler already on that logger — ``StreamHandler`` (stdout/
+    stderr), ``FileHandler`` (a per-package log file), a ``rich`` handler from
+    fastmcp/uvicorn, anything — is removed first, so the bridge is the *only*
+    sink. This enforces the repo rule "no package owns a log file or duplicate
+    stdout sink; everything goes through Scribe" (Scribe already mirrors to
+    stderr itself, so console output is not lost).
+
+    Idempotent and re-taggable: exactly one bridge handler ever exists on the
+    logger, and the most recent call's *tag* wins (so the framework can re-tag
+    with the provider id at bootstrap after a package set a provisional tag at
+    import). Returns the configured logger.
     """
     target = logger if logger is not None else logging.getLogger()
     target.setLevel(level)
 
-    if replace_stream_handlers:
-        for handler in list(target.handlers):
-            # StreamHandler covers stdout/stderr sinks; FileHandler (its
-            # subclass) covers any per-package log file. Our own bridge is a
-            # plain Handler, so it is never matched here.
-            if isinstance(handler, logging.StreamHandler):
-                target.removeHandler(handler)
+    for handler in list(target.handlers):
+        if isinstance(handler, _StdlibBridgeHandler):
+            # Drop any prior bridge so the new tag replaces the old one.
+            target.removeHandler(handler)
+        elif replace_existing_handlers:
+            target.removeHandler(handler)
 
-    if not any(isinstance(h, _StdlibBridgeHandler) for h in target.handlers):
-        target.addHandler(_StdlibBridgeHandler(tag))
-
+    target.addHandler(_StdlibBridgeHandler(tag))
     return target
