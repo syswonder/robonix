@@ -6,7 +6,6 @@
 //
 // Phase 2: returns a hardcoded/mock snapshot.
 
-use crate::body_threshold;
 use crate::pb::contracts::robonix_service_vitals_get_server::RobonixServiceVitalsGet;
 use crate::pb::contracts::robonix_service_vitals_stream_server::RobonixServiceVitalsStream;
 use crate::pb::vitals::{
@@ -40,8 +39,6 @@ struct VitalsState {
     prev_body_state: HashMap<String, u32>,
     /// Previous per-component state (error_code, enabled), keyed by "{body_type}/{model}/{component_name}".
     prev_component: HashMap<String, PrevComponentState>,
-    /// Previous per-component temperature health, keyed by "{body_type}/{model}/{component_name}".
-    prev_component_temp: HashMap<String, crate::body_threshold::JointTempHealth>,
     /// Previous power state for voltage / battery change detection.
     prev_power: Option<PowerState>,
     /// True until the first body reading — suppresses ALERTs on startup.
@@ -77,7 +74,6 @@ impl VitalsServiceImpl {
                 prev_health: HashMap::new(),
                 prev_body_state: HashMap::new(),
                 prev_component: HashMap::new(),
-                prev_component_temp: HashMap::new(),
                 prev_power: None,
                 first_body: true,
             })),
@@ -105,8 +101,8 @@ impl VitalsServiceImpl {
                     comp.threshold
                 );
                 // Log non-OK states more prominently.
-                if comp.health == crate::normalize::HEALTH_WARN
-                    || comp.health == crate::normalize::HEALTH_ERROR
+                if comp.health == crate::soma_ingest::HEALTH_WARN
+                    || comp.health == crate::soma_ingest::HEALTH_ERROR
                 {
                     log::warn!("[vitals] ALERT: {} — {}", comp.name, comp.detail);
                 }
@@ -128,7 +124,6 @@ impl VitalsServiceImpl {
         // without needing a clear — stale entries just aren't looked up.
 
         for body in &snapshot.bodies {
-            let model = body.model.as_str();
             let body_key = format!("{}/{}", body.body_type, body.model);
 
             let msg_display = if body.message.is_empty() {
@@ -234,32 +229,6 @@ impl VitalsServiceImpl {
                         }
                         changed = true;
                     }
-
-                    if is_joint_component(comp) {
-                        // ── Joint temperature threshold check ──────────
-                        let (temp_health, temp_detail) =
-                            body_threshold::evaluate_temp(comp.temperature, model);
-                        let prev_temp = state
-                            .prev_component_temp
-                            .get(&component_key)
-                            .map(|t| t.health)
-                            .unwrap_or(body_threshold::HEALTH_OK);
-                        if temp_health != prev_temp {
-                            log::info!(
-                                "[vitals] {} temp health: {} → {} ({:.0}°C)",
-                                component_key,
-                                health_label(prev_temp),
-                                health_label(temp_health),
-                                comp.temperature
-                            );
-                            if temp_health == body_threshold::HEALTH_WARN
-                                || temp_health == body_threshold::HEALTH_ERROR
-                            {
-                                log::warn!("[vitals] ALERT: {} — {}", component_key, temp_detail);
-                            }
-                            changed = true;
-                        }
-                    }
                 }
             }
 
@@ -267,13 +236,6 @@ impl VitalsServiceImpl {
             state.prev_body_state.insert(body_key.clone(), body.state);
             for comp in &body.components {
                 let component_key = body_component_key(&body_key, comp);
-                if is_joint_component(comp) {
-                    let (health, _) = body_threshold::evaluate_temp(comp.temperature, model);
-                    state.prev_component_temp.insert(
-                        component_key.clone(),
-                        body_threshold::JointTempHealth { health },
-                    );
-                }
                 state.prev_component.insert(
                     component_key,
                     PrevComponentState {
@@ -384,10 +346,6 @@ fn body_component_key(body_key: &str, comp: &BodyComponent) -> String {
 
 fn body_component_display_name(comp: &BodyComponent) -> &str {
     first_non_empty(&[comp.id.as_str(), comp.name.as_str()])
-}
-
-fn is_joint_component(comp: &BodyComponent) -> bool {
-    comp.kind.eq_ignore_ascii_case("joint")
 }
 
 fn first_non_empty<'a>(values: &[&'a str]) -> &'a str {

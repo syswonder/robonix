@@ -235,6 +235,12 @@ pub fn default_thresholds() -> Vec<SomaThresholdRule> {
 /// Convert one Soma snapshot into the current VitalsSnapshot contract. The
 /// output keeps Vitals' existing fields stable while deriving health from
 /// Soma facts, active faults, and configured thresholds.
+///
+/// TODO(gap): TTL-based STALE detection is not yet implemented.
+///   Design doc §4.1 requires: when `soma_ts_ns + ttl_ms < now`, affected
+///   components should be marked HEALTH_STALE.  The snapshot carries `ttl_ms`
+///   but `snapshot_to_vitals` does not check it — a stale stream (e.g. Soma
+///   process hung) will keep reporting the last-known values indefinitely.
 pub fn snapshot_to_vitals(
     snapshot: &SomaHealthSnapshot,
     rules: &[SomaThresholdRule],
@@ -331,6 +337,16 @@ pub fn snapshot_to_vitals(
         );
     }
 
+    // NOTE(gap): Metrics are routed through the same threshold-evaluation
+    //   pipeline as typed actuator/power signals.  The design doc positions
+    //   Metric as extension data that "does not participate in core threshold
+    //   judgment," but in practice a Metric will be evaluated if a threshold
+    //   rule matches its (component_id/kind, name).  This is harmless when no
+    //   rule matches (the metric is silently skipped), but it means adding a
+    //   broad kind-based rule (e.g. SENSOR + "temperature") will also pull in
+    //   Metrics like fan_rpm or packet_loss if they happen to share the signal
+    //   name.  If this becomes noisy, consider a separate MetricThresholdRule
+    //   table or an explicit `evaluate_metrics: bool` flag per rule.
     for metric in &snapshot.metrics {
         let kind = component_kind
             .get(metric.component_id.as_str())
@@ -618,6 +634,12 @@ fn body_healths(snapshot: &SomaHealthSnapshot) -> Vec<BodyHealth> {
 }
 
 fn body_health_for_component(snapshot: &SomaHealthSnapshot, root: &ComponentStatus) -> BodyHealth {
+    // NOTE(gap): Only SafetyState.aggregate_state is checked here.
+    //   SafetyEndpointState[] (individual hardware/software/remote e-stops)
+    //   is present in the snapshot but not consumed per-endpoint.  The design
+    //   doc does not mandate per-endpoint health decisions, but an operator
+    //   debugging an e-stop trigger currently has to inspect raw snapshot data
+    //   rather than seeing which endpoint fired in the Vitals output.
     let mut state = 0;
     if snapshot
         .safety
@@ -834,7 +856,7 @@ mod tests {
 
     #[test]
     fn ramp_snapshot_crosses_joint_error_threshold() {
-        let snapshot = generate_snapshot(MockScenario::Ramp, 24);
+        let snapshot = generate_snapshot(MockScenario::Ramp, 24, None);
         let vitals = snapshot_to_vitals(&snapshot, &default_thresholds(), 123);
         let joint = vitals
             .components
@@ -846,7 +868,7 @@ mod tests {
 
     #[test]
     fn body_health_groups_root_children() {
-        let snapshot = generate_snapshot(MockScenario::Normal, 1);
+        let snapshot = generate_snapshot(MockScenario::Normal, 1, None);
         let vitals = snapshot_to_vitals(&snapshot, &default_thresholds(), 123);
         assert_eq!(vitals.bodies.len(), 3);
 
@@ -906,7 +928,7 @@ rules:
 "#,
         )
         .unwrap();
-        let snapshot = generate_snapshot(MockScenario::Normal, 1);
+        let snapshot = generate_snapshot(MockScenario::Normal, 1, None);
         let vitals = snapshot_to_vitals(&snapshot, &rules, 123);
         let joint = vitals
             .components

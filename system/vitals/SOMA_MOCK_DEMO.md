@@ -1,313 +1,193 @@
 # Vitals Soma Mock Demo
 
-This demo uses the Vitals binary in two roles:
+Vitals' `--mock-soma` starts a full mock Soma gRPC server in-process, streaming
+`SomaHealthSnapshot`. Vitals consumes its StreamHealth via loopback gRPC —
+**the processing pipeline is identical to production mode**. No real hardware
+or real Soma needed for development and debugging.
 
-- `mock Soma`: simulates the future Soma health provider.
-- `Vitals`: discovers Soma through Atlas, subscribes to Soma health snapshots, and converts them into Vitals health output.
+Optionally, with `--mock-soma-piper-can` specifying a CAN port, mock Soma spawns
+a `piper_bridge.py` subprocess to read real Piper joint data and replace synthetic data.
 
-It is useful when no real robot hardware or real Soma implementation is available.
+## Deployment topology
 
-## What This Demo Verifies
-
-The demo verifies this path:
-
-```text
-mock_soma.rs
-  generates SomaHealthSnapshot once per second
-        |
-        v
-Atlas
-  advertises robonix/system/soma/health
-        |
-        v
-Vitals
-  opens Soma health stream
-        |
-        v
-soma_ingest.rs
-  converts SomaHealthSnapshot into VitalsSnapshot
-        |
-        v
-service.rs
-  logs health changes, alerts, body state, and snapshot summaries
+```
+┌─────────────────────────────────────────────┐
+│ mock_soma.rs (in Vitals process)             │
+│   5 scenarios producing deterministic mock   │
+│   data                                       │
+│                                              │
+│   Optional: piper_bridge.py subprocess       │
+│   → real Piper CAN data merged into snapshot │
+│   gRPC server on :50092                      │
+└──────────────┬──────────────────────────────┘
+               │ StreamHealth (gRPC, loopback)
+               v
+┌─────────────────────────────────────────────┐
+│ Vitals (same process)                       │
+│   soma_ingest.rs: normalize + threshold eval │
+│   service.rs: GetVitals + StreamVitals       │
+│   gRPC server on :50091                      │
+└──────────────────────────────────────────────┘
 ```
 
-## Build
+## Quick start
 
-Run from the repository root:
-
-```bash
-cd /path/to/robonix
-
-cargo build -p robonix-atlas -p robonix-vitals -p robonix-cli
-```
-
-## Run
-
-Open three terminals.
-
-### Terminal 1: Atlas
+Three terminals to run the full health pipeline:
 
 ```bash
-cd /path/to/robonix
-
+# Terminal 1: Atlas
 target/debug/robonix-atlas \
   --listen 127.0.0.1:50251 \
-  --capabilities /path/to/robonix/capabilities \
-  --log robonix_atlas=info
-```
+  --capabilities /path/to/robonix/capabilities
 
-Atlas is the service registry. Both mock Soma and Vitals register themselves here.
-
-### Terminal 2: Mock Soma
-
-```bash
-cd /path/to/robonix
-
+# Terminal 2: mock Soma (scenarios: normal / ramp / fault / toggle / mixed)
 target/debug/robonix-vitals \
   --mock-soma \
   --atlas 127.0.0.1:50251 \
   --mock-soma-listen 127.0.0.1:50292 \
   --mock-soma-scenario mixed \
-  --mock-soma-interval-ms 10000 \
-  --log robonix_vitals=info
-```
+  --mock-soma-interval-ms 10000
 
-Expected startup output:
-
-```text
-mock Soma ready on 127.0.0.1:50292 scenario=mixed interval_ms=10000
-```
-
-This process registers:
-
-```text
-robonix/system/soma/get_health
-robonix/system/soma/health
-```
-
-### Terminal 3: Vitals
-
-```bash
-cd /path/to/robonix
-
+# Terminal 3: Vitals consuming the Soma health stream
 target/debug/robonix-vitals \
   --atlas 127.0.0.1:50251 \
   --listen 127.0.0.1:50291 \
-  --thresholds-path system/vitals/thresholds/soma_mock.yaml \
-  --log robonix_vitals=info
+  --thresholds-path system/vitals/thresholds/example_thresholds.yaml \
+  --log info
 ```
 
-Expected startup output:
+## Optional: real Piper hardware
 
-```text
-robonix-vitals ready on 127.0.0.1:50291 (Soma input)
+```bash
+target/debug/robonix-vitals \
+  --mock-soma \
+  --atlas 127.0.0.1:50251 \
+  --mock-soma-piper-can can0 \
+  --mock-soma-piper-python /path/to/roboarm/.venv/bin/python3 \
+  --mock-soma-interval-ms 500
 ```
 
-The third terminal should keep printing logs when health states change. That is expected.
+When `--mock-soma-piper-can` is set:
+- Spawns `piper_bridge.py` subprocess, reads real joint data via piper_sdk
+- Replaces matching ActuatorState by `joint_1..6` name
+- `PiperData.state` → SafetyState.aggregate_state
+- Non-zero error_code → appended FaultState
+- Without it, fully synthetic data is used
 
-## Simulated Robot
+## Mock scenarios
 
-The mock snapshot represents a small robot body with a Jetson computer, one Piper arm, and one main battery:
+| Scenario | Behavior |
+|----------|----------|
+| `normal` | All joint temps 36-41°C, communication OK, no faults |
+| `ramp` | joint_1 temp ramps linearly from 40°C to 88°C every 30s, crossing WARN(60°C)→ERROR(75°C) |
+| `fault` | joint_3 injected with overcurrent fault on 4 of every 8 cycles |
+| `toggle` | joint_6 torque_enabled toggles on 4 of every 8 cycles |
+| `mixed` | ramp + fault + toggle simultaneously |
 
-```text
+## Simulated robot
+
+The mock snapshot represents a small robot with a Jetson compute platform, Piper arm, and battery:
+
+```
 body
   computer_jetson
     cpu
     gpu
   arm_right
-    joint_1
-    joint_2
-    joint_3
-    joint_4
-    joint_5
-    joint_6
+    joint_1 .. joint_6
   battery_main
 ```
 
-Each joint publishes actuator data:
+Each joint publishes actuator data (position/velocity/effort/motor_temp/driver_temp etc.),
+the battery publishes soc/voltage/current/temperature, and Jetson publishes cpu/gpu temps and fan_rpm.
 
-```text
-position
-velocity
-effort
-current
-voltage
-motor_temp
-driver_temp
-torque_enabled
-communication_ok
-vendor_error_code
-status_flags
+## Expected log output
+
+Using the `mixed` scenario:
+
 ```
-
-The battery publishes:
-
-```text
-soc_percent = 76
-soh_percent = 96
-voltage = 24.2V
-current = -3.1A
-temperature = 32C
-remaining_s = 7200
-cycle_count = 142
-```
-
-The Jetson publishes:
-
-```text
-cpu temperature = 43C
-gpu temperature = 45C
-fan_rpm = 1800
-```
-
-## Mock Scenarios
-
-Use `--mock-soma-scenario <scenario>` to select a scenario.
-Use `--mock-soma-interval-ms <ms>` to control how often the stream publishes a new snapshot. The default is `10000`, which is easier to follow in demos.
-
-```text
-normal   all data stays mostly healthy
-ramp     joint_1 temperature rises and loops
-fault    joint_3 periodically reports communication and overcurrent faults
-toggle   joint_6 periodically becomes disabled
-mixed    enables ramp + fault + toggle
-```
-
-For demos, `mixed` is usually the most useful because it exercises temperature thresholds, explicit faults, and enable-state changes together.
-
-## Expected Observations
-
-With `mixed`, Vitals should report several kinds of events.
-
-Temperature threshold changes:
-
-```text
+# Temperature threshold changes
 body/arm_right/joint_1/motor_temp health: OK -> WARN
 body/arm_right/joint_1/motor_temp health: WARN -> ERROR
-body/arm_right/joint_1/driver_temp health: WARN -> ERROR
-```
 
-Explicit actuator faults:
-
-```text
-ALERT: body/arm_right/joint_3/communication - body/arm_right/joint_3 communication is not OK
-ALERT: body/arm_right/joint_3/vendor_error - body/arm_right/joint_3 vendor_error_code=0x4
-```
-
-Fault messages:
-
-```text
+# Explicit faults
 ALERT: body/arm_right/joint_3/fault/overcurrent - mock joint_3 overcurrent
-ALERT: body/arm_right/joint_1/fault/motor_overheat - mock joint_1 temperature is high
-```
 
-Joint enable changes:
-
-```text
+# Enable state changes
 body/arm_right/joint_6 enabled: true -> false
-ALERT: body/arm_right/joint_6 - disabled
-```
 
-Body state changes:
-
-```text
+# Body state changes
 arm_right/piper body state: NORMAL -> FAULT
-ALERT: body arm_right/piper state=FAULT (active faults: overcurrent)
+
+# Snapshot summary
+24.2V | body/arm_right/joint_1/motor_temp:OK(40) ...
 ```
 
-Snapshot summaries:
-
-```text
-24.2V | body/arm_right/joint_1/motor_temp:OK(40) body/arm_right/joint_1/driver_temp:OK(43) ...
-```
-
-The summary line is generated from `VitalsSnapshot.components`, not directly from raw Soma data. It shows the health result after Vitals has applied thresholds and explicit fault rules.
-
-## Thresholds
-
-The demo threshold file is:
-
-```text
-system/vitals/thresholds/soma_mock.yaml
-```
-
-It currently checks:
-
-```text
-joint motor temperature: WARN >= 60C, ERROR >= 75C
-joint driver temperature: WARN >= 70C, ERROR >= 85C
-battery state of charge: WARN <= 20%, ERROR <= 8%
-battery voltage: WARN <= 22V, ERROR <= 19V
-board temperature: WARN >= 80C, ERROR >= 90C
-```
-
-Fields such as `communication_ok = false`, `vendor_error_code != 0`, and active `fault_id` do not go through YAML thresholds. They are explicit hardware states and are converted into WARN or ERROR directly.
-
-## Inspect Registration
-
-In a fourth terminal:
+## Check registrations
 
 ```bash
-cd /path/to/robonix
-
 ROBONIX_ATLAS=127.0.0.1:50251 target/debug/rbnx caps -v
 ```
 
-Expected providers:
+Expected output:
 
-```text
+```
 mock-soma [ACTIVE] robonix/system/soma
 vitals [ACTIVE] robonix/service/vitals
 ```
 
-Inspect Soma contracts:
+## gRPC verification
 
 ```bash
-ROBONIX_ATLAS=127.0.0.1:50251 \
-target/debug/rbnx contracts -p robonix/system/soma -v
-```
-
-Expected Soma capabilities:
-
-```text
-robonix/system/soma/get_health
-robonix/system/soma/health
-```
-
-## Optional RPC Check
-
-If `grpcurl` is available:
-
-```bash
-grpcurl -plaintext -d '{}' 127.0.0.1:50291 \
+# Vitals side
+grpcurl -plaintext -d '{}' 127.0.0.1:50091 \
   robonix.contracts.RobonixServiceVitalsGet/GetVitals
+
+# Mock Soma side
+grpcurl -plaintext -d '{}' 127.0.0.1:50092 \
+  robonix.contracts.RobonixSystemSomaGetHealth/GetHealth
 ```
 
-The response should contain:
+## Threshold file
 
-```text
-power
-components
-bodies
+Uses `thresholds/example_thresholds.yaml` (Soma selector format):
+
+```yaml
+rules:
+  - id: "joint_motor_temp"
+    selector: { kind: "JOINT", signal: "motor_temp" }
+    warn_above: 60.0
+    error_above: 75.0
+    unit: "degC"
+  - id: "battery_soc"
+    selector: { kind: "BATTERY", signal: "soc_percent" }
+    warn_below: 20.0
+    error_below: 8.0
+    unit: "percent"
+  # ...
 ```
 
-For the mock demo, `bodies` should include root-child groups such as:
+`communication_ok = false`, `vendor_error_code != 0`, and active `fault_id` are
+not evaluated through YAML thresholds — they are converted to WARN/ERROR directly
+in `soma_ingest.rs`.
 
-```text
-computer_jetson / jetson_agx_orin
-arm_right / piper
-battery_main / mock_bms
+## CLI flags
+
+| Flag | Env var | Default |
+|------|---------|---------|
+| `--mock-soma` | `ROBONIX_VITALS_MOCK_SOMA` | `false` |
+| `--mock-soma-listen` | `ROBONIX_VITALS_MOCK_SOMA_LISTEN` | `127.0.0.1:50092` |
+| `--mock-soma-scenario` | `ROBONIX_VITALS_MOCK_SOMA_SCENARIO` | `normal` |
+| `--mock-soma-interval-ms` | `ROBONIX_VITALS_MOCK_SOMA_INTERVAL_MS` | `10000` |
+| `--mock-soma-piper-can` | `ROBONIX_VITALS_MOCK_SOMA_PIPER_CAN` | — |
+| `--mock-soma-piper-python` | `ROBONIX_VITALS_MOCK_SOMA_PIPER_PYTHON` | `python3` |
+| `--mock-soma-piper-script` | `ROBONIX_VITALS_MOCK_SOMA_PIPER_SCRIPT` | `<crate>/scripts/piper_bridge.py` |
+
+## Implementation files
+
 ```
-
-Each group contains its child component-tree entries. For example, `computer_jetson` contains CPU and GPU, while `arm_right` contains the six joints.
-
-## Stop
-
-Press `Ctrl-C` in the three running terminals:
-
-```text
-Vitals
-mock Soma
-Atlas
+system/vitals/src/mock_soma.rs     # MockSomaService + PiperBridge + generate_snapshot
+system/vitals/src/subprocess.rs    # SubprocessHandle (Piper subprocess management)
+system/vitals/scripts/piper_body.py      # PiperCollector (piper_sdk CAN reader)
+system/vitals/scripts/piper_bridge.py    # stdin/stdout JSON wrapper
 ```
