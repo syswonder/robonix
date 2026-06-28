@@ -142,9 +142,7 @@ impl PackageLauncher {
                 skipped,
             };
             for target in targets {
-                let status = self
-                    .bring_up_one(target, atlas, start_packages)
-                    .await;
+                let status = self.bring_up_one(target, atlas, start_packages).await;
                 deployment_report.packages.push(PackageStartupCheck {
                     kind: target.kind,
                     name: target.name.clone(),
@@ -233,14 +231,11 @@ impl PackageLauncher {
             // don't expect this for primitives or skills, but mirror
             // rbnx's "treat as ACTIVE" behaviour so a misclassified
             // entry doesn't bring boot down.
-            warn!(
-                "{who}: registered without a */driver capability — skipping INIT/ACTIVATE",
-            );
+            warn!("{who}: registered without a */driver capability — skipping INIT/ACTIVATE",);
             return PackageStartupStatus::Spawned { command };
         };
 
-        let config_json =
-            serde_json::to_string(&target.config).unwrap_or_else(|_| "{}".into());
+        let config_json = serde_json::to_string(&target.config).unwrap_or_else(|_| "{}".into());
 
         if let Err(e) = call_driver_cmd(
             atlas,
@@ -315,12 +310,16 @@ impl PackageLauncher {
         if let Some(m) = target.manifest_override.as_deref() {
             cmd.arg("--manifest").arg(m);
         }
-        let mut child = cmd
-            .spawn()
-            .with_context(|| format!("spawn '{} start -p {}'", self.rbnx_bin, target.package_dir.display()))?;
-        let pid = child
-            .id()
-            .ok_or_else(|| anyhow::anyhow!("spawned package '{}' but it had no pid", target.name))?;
+        let mut child = cmd.spawn().with_context(|| {
+            format!(
+                "spawn '{} start -p {}'",
+                self.rbnx_bin,
+                target.package_dir.display()
+            )
+        })?;
+        let pid = child.id().ok_or_else(|| {
+            anyhow::anyhow!("spawned package '{}' but it had no pid", target.name)
+        })?;
         let stdout = child.stdout.take().expect("stdout piped");
         let stderr = child.stderr.take().expect("stderr piped");
         let tag_out = target.name.clone();

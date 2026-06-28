@@ -59,6 +59,20 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_SOMA_RBNX_BIN")]
     pub rbnx_bin: Option<String>,
 
+    /// Force-enable primitive + skill bring-up regardless of file config
+    /// or `config_json`. Mostly there so an operator can recover a soma
+    /// that came up with `start_packages: false` without editing the
+    /// bundled YAML. Highest priority of the three sources (CLI > env >
+    /// config_json > file_cfg > default-true).
+    #[arg(
+        long = "start-packages",
+        env = "ROBONIX_SOMA_START_PACKAGES",
+        num_args = 0..=1,
+        require_equals = false,
+        default_missing_value = "true",
+    )]
+    pub start_packages: Option<bool>,
+
     /// Log level for this component (`debug`/`info`/`warn`/`error`). Sets the
     /// scribe log-file floor; falls back to `SCRIBE_FILE_LEVEL` / `info`.
     /// Normally arrives inside `--config-json`, not as a standalone flag.
@@ -108,13 +122,37 @@ impl SomaConfig {
             None => FileConfig::default(),
         };
 
+        // `--config-json` is the whole `system.soma:` manifest block as JSON.
+        // We grep three knobs out of it that have manifest-level overrides:
+        // `start_packages` (whether soma should bring primitives/skills up at
+        // all), the deployments list, and the rbnx binary path. Anything
+        // else still has to come through `--config <yaml>` for now.
+        let json_cfg = parse_config_json(args.config_json.as_deref());
+
         let config_dir = args.config.as_deref().and_then(Path::parent);
         let robonix_root = resolve_robonix_root(
             args.robonix_root.clone(),
             file_cfg.robonix_root.clone(),
             config_dir,
         )?;
-        let mut deployments = if args.deployments.is_empty() {
+        let mut deployments = if !args.deployments.is_empty() {
+            // CLI --deployment wins over everything else.
+            args.deployments
+                .into_iter()
+                .map(|path| DeploymentConfig { path })
+                .collect::<Vec<_>>()
+        } else if !json_cfg.deployments.is_empty() {
+            // Then the manifest's `system.soma.deployments:` block as
+            // delivered via `--config-json`. rbnx auto-injects the
+            // currently-deploying manifest dir here so soma doesn't need a
+            // bundled YAML to bring up the packages it just inherited.
+            json_cfg
+                .deployments
+                .iter()
+                .map(|p| DeploymentConfig { path: p.clone() })
+                .collect::<Vec<_>>()
+        } else {
+            // Last fallback: the optional `--config <yaml>` file.
             file_cfg
                 .deployments
                 .into_iter()
@@ -124,16 +162,25 @@ impl SomaConfig {
                     }
                 })
                 .collect::<Vec<_>>()
-        } else {
-            args.deployments
-                .into_iter()
-                .map(|path| DeploymentConfig { path })
-                .collect::<Vec<_>>()
         };
         normalize_deployments(&mut deployments, &robonix_root);
         if deployments.is_empty() {
-            bail!("missing Soma deployments: set --deployment or config deployments");
+            bail!(
+                "missing Soma deployments: set --deployment, system.soma.deployments \
+                 in the manifest, or config deployments"
+            );
         }
+
+        // Default-on. soma's whole reason to exist now is to bring
+        // primitive + skill packages up; setting it to false should be
+        // an explicit operator choice (test/CI, hand-debugging), not the
+        // accidental default that silently no-ops every spawn.
+        // Priority: CLI/env > config_json > file_cfg > default-true.
+        let start_packages = args
+            .start_packages
+            .or(json_cfg.start_packages)
+            .or(file_cfg.start_packages)
+            .unwrap_or(true);
 
         Ok(Self {
             atlas_endpoint: args
@@ -151,13 +198,33 @@ impl SomaConfig {
             robonix_root,
             default_robot: args.default_robot.or(file_cfg.default_robot),
             deployments,
-            start_packages: file_cfg.start_packages.unwrap_or(false),
+            start_packages,
             rbnx_bin: args
                 .rbnx_bin
+                .or(json_cfg.rbnx_bin)
                 .or(file_cfg.rbnx_bin)
                 .unwrap_or_else(|| "rbnx".into()),
         })
     }
+}
+
+/// Subset of `--config-json` (i.e. the manifest's `system.soma:` block
+/// serialised by rbnx) that soma needs to honour at config-resolution time.
+/// Unknown keys are ignored — extending the manifest schema for other
+/// soma knobs (e.g. logging) doesn't have to touch this struct.
+#[derive(Debug, Default, Deserialize)]
+struct JsonConfig {
+    #[serde(default)]
+    start_packages: Option<bool>,
+    #[serde(default)]
+    deployments: Vec<PathBuf>,
+    #[serde(default)]
+    rbnx_bin: Option<String>,
+}
+
+fn parse_config_json(raw: Option<&str>) -> JsonConfig {
+    raw.and_then(|j| serde_json::from_str(j).ok())
+        .unwrap_or_default()
 }
 
 fn load_yaml(path: &Path) -> Result<FileConfig> {
@@ -260,6 +327,7 @@ mod tests {
             rbnx_bin: None,
             log: None,
             config_json: None,
+            start_packages: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
         assert_eq!(cfg.default_robot.as_deref(), Some("demo"));
@@ -290,6 +358,7 @@ mod tests {
             rbnx_bin: None,
             log: None,
             config_json: None,
+            start_packages: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
         assert_eq!(cfg.deployments.len(), 1);
@@ -317,6 +386,7 @@ mod tests {
             rbnx_bin: None,
             log: None,
             config_json: None,
+            start_packages: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
         assert_eq!(cfg.robonix_root, tmp.path());
@@ -325,7 +395,11 @@ mod tests {
     }
 
     #[test]
-    fn start_packages_defaults_to_false_when_config_omits_it() {
+    fn start_packages_defaults_to_true_when_no_source_overrides_it() {
+        // soma's whole job is bringing up primitive + skill packages;
+        // omitting `start_packages` everywhere should leave that on.
+        // The explicit-false cases above (config file + manifest) still
+        // win when the operator opts out.
         let tmp = tempfile::tempdir().expect("tempdir");
         let config_path = tmp.path().join("config.yaml");
         std::fs::write(&config_path, "robonix_root: .\ndeployments:\n  - .\n")
@@ -341,9 +415,70 @@ mod tests {
             rbnx_bin: None,
             log: None,
             config_json: None,
+            start_packages: None,
+        };
+        let cfg = SomaConfig::resolve(args).expect("resolve config");
+        assert!(cfg.start_packages);
+    }
+
+    #[test]
+    fn config_json_overrides_default_start_packages() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let deployment = tmp.path().join("deploy");
+        std::fs::create_dir_all(&deployment).expect("create deploy dir");
+        std::fs::write(deployment.join("robonix_manifest.yaml"), "name: empty\n")
+            .expect("write manifest");
+        let config_json = serde_json::json!({
+            "start_packages": false,
+            "deployments": [deployment.to_string_lossy()],
+        })
+        .to_string();
+        let args = Args {
+            atlas: None,
+            listen: None,
+            provider_id: None,
+            default_robot: None,
+            robonix_root: Some(repo_root()),
+            deployments: vec![],
+            config: None,
+            rbnx_bin: None,
+            log: None,
+            config_json: Some(config_json),
+            start_packages: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
         assert!(!cfg.start_packages);
+        assert_eq!(cfg.deployments.len(), 1);
+        assert_eq!(cfg.deployments[0].path, deployment);
+    }
+
+    #[test]
+    fn cli_start_packages_overrides_config_json_false() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let deployment = tmp.path().join("deploy");
+        std::fs::create_dir_all(&deployment).expect("create deploy dir");
+        std::fs::write(deployment.join("robonix_manifest.yaml"), "name: empty\n")
+            .expect("write manifest");
+        let config_json = serde_json::json!({
+            "start_packages": false,
+            "deployments": [deployment.to_string_lossy()],
+        })
+        .to_string();
+        let args = Args {
+            atlas: None,
+            listen: None,
+            provider_id: None,
+            default_robot: None,
+            robonix_root: Some(repo_root()),
+            deployments: vec![],
+            config: None,
+            rbnx_bin: None,
+            log: None,
+            config_json: Some(config_json),
+            start_packages: Some(true),
+        };
+        let cfg = SomaConfig::resolve(args).expect("resolve config");
+        assert!(cfg.start_packages);
     }
 
     #[test]
@@ -366,6 +501,7 @@ mod tests {
             rbnx_bin: Some("cli-rbnx".into()),
             log: None,
             config_json: None,
+            start_packages: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
 
@@ -385,6 +521,7 @@ mod tests {
             rbnx_bin: None,
             log: None,
             config_json: None,
+            start_packages: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
 
@@ -443,6 +580,7 @@ mod tests {
             rbnx_bin: None,
             log: None,
             config_json: None,
+            start_packages: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
 
@@ -465,6 +603,7 @@ mod tests {
             rbnx_bin: None,
             log: None,
             config_json: None,
+            start_packages: None,
         };
         let cfg = SomaConfig::resolve(args).expect("resolve config");
         assert_eq!(cfg.robonix_root, repo_root());

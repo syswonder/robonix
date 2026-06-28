@@ -311,6 +311,40 @@ fn expand_yaml(v: &mut serde_yaml::Value) {
     }
 }
 
+/// Make sure `system.soma` exists in the manifest map AND has the two
+/// keys soma needs to actually bring primitive/skill packages up:
+///   * `deployments` — falls back to `[<manifest dir>]` so soma's
+///     deployment loader reads the same manifest rbnx is processing.
+///   * `start_packages` — falls back to `true`. soma's whole job in v2
+///     is to spawn primitives + skills; opting out is the unusual case.
+///
+/// Existing operator-supplied values for these keys are NEVER
+/// overwritten. We're filling holes, not overriding intent.
+fn ensure_soma_defaults(system: &mut HashMap<String, serde_yaml::Value>, manifest_dir: &Path) {
+    use serde_yaml::{Mapping, Value};
+    let entry = system
+        .entry("soma".to_string())
+        .or_insert_with(|| Value::Mapping(Mapping::new()));
+    // Promote a non-mapping value (`soma: ~`, `soma: true`, ...) to an
+    // empty mapping so we have somewhere to write defaults; operators
+    // who wrote `soma:` with no body almost certainly meant "yes,
+    // start soma, with defaults".
+    if !entry.is_mapping() {
+        *entry = Value::Mapping(Mapping::new());
+    }
+    let map = entry.as_mapping_mut().expect("just ensured mapping");
+    let k_deployments = Value::String("deployments".into());
+    if !map.contains_key(&k_deployments) {
+        let mut seq = serde_yaml::Sequence::new();
+        seq.push(Value::String(manifest_dir.display().to_string()));
+        map.insert(k_deployments, Value::Sequence(seq));
+    }
+    let k_start = Value::String("start_packages".into());
+    if !map.contains_key(&k_start) {
+        map.insert(k_start, Value::Bool(true));
+    }
+}
+
 // ── child-process helpers ───────────────────────────────────────────────
 
 struct Spawned {
@@ -582,6 +616,31 @@ pub async fn execute(
         .chain(deploy.skill.iter_mut())
     {
         expand_yaml(&mut e.config);
+    }
+
+    // soma owns primitive + skill bring-up (see
+    // docs/soma_two_stage_bringup.md). If the manifest declares ANY
+    // primitive or skill, we MUST start a soma — otherwise those
+    // packages are silently never spawned (boot looks "OK" because rbnx
+    // got through atlas/executor/pilot, but the robot stays dead).
+    //
+    // Two manifest patterns we want to keep working without forcing
+    // every existing deploy to add a `system.soma:` block:
+    //   1. manifest has primitive/skill, no system.soma at all
+    //      → inject a default soma block.
+    //   2. manifest has system.soma but didn't set deployments / didn't
+    //      set start_packages → fill in sane defaults (deployments =
+    //      [this manifest's dir], start_packages = true).
+    //
+    // Both branches route through `ensure_soma_defaults` so the rest of
+    // deploy.rs (spawning the soma binary in the builtin loop, sending
+    // the stage 2 trigger after service: bring-up) just sees a
+    // populated system.soma entry like any other.
+    //
+    // Existing operator-supplied values are NEVER overwritten — this
+    // hole-fills, it does not override intent.
+    if (!deploy.primitive.is_empty() || !deploy.skill.is_empty()) && !skip_system {
+        ensure_soma_defaults(&mut deploy.system, &manifest_dir);
     }
 
     let log_dir = log_dir.unwrap_or_else(|| manifest_dir.join("rbnx-boot").join("logs"));
@@ -1242,6 +1301,12 @@ fn system_cli_args(
                 .map(|s| s.to_string())
         })
     };
+    let b = |k: &str| -> Option<bool> {
+        map.and_then(|m| {
+            m.get(serde_yaml::Value::String(k.into()))
+                .and_then(|v| v.as_bool())
+        })
+    };
     let nested_str = |outer: &str, inner: &str| -> Option<String> {
         map.and_then(|m| m.get(serde_yaml::Value::String(outer.into())))
             .and_then(|v| v.as_mapping())
@@ -1313,6 +1378,13 @@ fn system_cli_args(
             push_pair(&mut out, "--config", s("config"));
             push_pair(&mut out, "--rbnx-bin", s("rbnx_bin"));
             push_pair(&mut out, "--log", s("log"));
+            if let Some(start_packages) = b("start_packages") {
+                push_pair(
+                    &mut out,
+                    "--start-packages",
+                    Some(start_packages.to_string()),
+                );
+            }
             if let Some(seq) = map
                 .and_then(|m| m.get(serde_yaml::Value::String("deployments".into())))
                 .and_then(|v| v.as_sequence())
