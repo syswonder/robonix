@@ -56,6 +56,7 @@ pub struct VitalsServiceImpl {
 }
 
 impl VitalsServiceImpl {
+    /// Create a new Vitals service with empty state and no subscribers.
     pub fn new() -> Self {
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(64);
         let now_ns = monotonic_ns();
@@ -405,7 +406,9 @@ impl RobonixServiceVitalsStream for VitalsServiceImpl {
             let state = self.state.read().await;
             // Send current snapshot immediately so the subscriber has initial state.
             let current = state.latest.clone();
-            let _ = tx.send(Ok(current)).await;
+            if tx.send(Ok(current)).await.is_err() {
+                log::warn!("[vitals] StreamVitals initial send failed (subscriber disconnected)");
+            }
             state.broadcast_tx.subscribe()
         };
 

@@ -14,9 +14,13 @@ use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use std::collections::HashMap;
 use tonic::transport::{Channel, Endpoint};
 
+/// Component health is nominal.
 pub const HEALTH_OK: u32 = 0;
+/// Component health is degraded but functional.
 pub const HEALTH_WARN: u32 = 1;
+/// Component health requires attention.
 pub const HEALTH_ERROR: u32 = 2;
+/// Component data is stale (sensor / stream timed out).
 pub const HEALTH_STALE: u32 = 3;
 
 const QUALITY_VALID: u32 = 0;
@@ -41,6 +45,7 @@ const FAULT_WARN: u32 = 1;
 const FAULT_ERROR: u32 = 2;
 const FAULT_CRITICAL: u32 = 3;
 
+/// One threshold evaluation rule keyed by a component selector + signal name.
 #[derive(Debug, Clone, Default)]
 pub struct SomaThresholdRule {
     #[allow(dead_code)] // Rule ids are kept for logging/debug output as the pipeline grows.
@@ -54,6 +59,8 @@ pub struct SomaThresholdRule {
     pub unit: String,
 }
 
+/// Identifies which components a threshold rule applies to. Priority:
+/// exact component_id (3) > component_id_glob (2) > kind (1).
 #[derive(Debug, Clone, Default)]
 pub struct SomaThresholdSelector {
     pub kind: Option<u32>,
@@ -78,9 +85,9 @@ struct ThresholdBounds {
     error_below: Option<f64>,
 }
 
-/// Open the Soma health stream, either from an explicit endpoint or via Atlas.
-/// Returns Ok(None) when Atlas discovery finds no provider and no explicit
-/// endpoint was supplied, allowing Vitals to fall back to Python collectors.
+/// Open the Soma health stream, either from an explicit endpoint or via Atlas
+/// discovery.  Returns `Ok(None)` when Atlas discovery finds no provider and
+/// no explicit endpoint was supplied, signalling that no Soma is available.
 pub async fn open_soma_stream(
     atlas: &mut AtlasClient,
     consumer_id: &str,
@@ -172,7 +179,7 @@ pub fn load_soma_thresholds(yaml_str: &str) -> Result<Vec<SomaThresholdRule>> {
             Some(raw) => {
                 let k = kind_from_name(raw);
                 if k.is_none() {
-                    log::warn!(
+                    log::error!(
                         "[vitals] threshold rule '{}': unrecognized kind '{}' — rule will not fire via kind selector",
                         rule.id,
                         raw
@@ -200,6 +207,7 @@ pub fn load_soma_thresholds(yaml_str: &str) -> Result<Vec<SomaThresholdRule>> {
     Ok(out)
 }
 
+/// Return the built-in Soma threshold rules used when no YAML file is found.
 pub fn default_thresholds() -> Vec<SomaThresholdRule> {
     vec![
         rule_kind(
@@ -384,7 +392,15 @@ pub fn snapshot_to_vitals(
         let health = match fault.severity {
             FAULT_CRITICAL | FAULT_ERROR => HEALTH_ERROR,
             FAULT_WARN => HEALTH_WARN,
-            _ => HEALTH_OK,
+            other => {
+                log::warn!(
+                    "[vitals] unknown fault severity {} for fault '{}' on {} — treating as ERROR",
+                    other,
+                    fault.fault_id,
+                    fault.component_id
+                );
+                HEALTH_ERROR
+            }
         };
         components.push(ComponentHealth {
             name: format!("{}/fault/{}", fault.component_id, fault.fault_id),
@@ -879,6 +895,7 @@ fn segment_matches(pattern: &str, value: &str) -> bool {
 mod tests {
     use super::*;
     use crate::mock_soma::{MockScenario, generate_snapshot};
+    use crate::pb::soma::FaultState;
 
     #[test]
     fn ramp_snapshot_crosses_joint_error_threshold() {
@@ -962,5 +979,56 @@ rules:
             .find(|c| c.name == "body/arm_right/joint_1/motor_temp")
             .expect("joint_1 motor temp health");
         assert_eq!(joint.health, HEALTH_WARN);
+    }
+
+    #[test]
+    fn unknown_fault_severity_maps_to_error() {
+        let snapshot = SomaHealthSnapshot {
+            faults: vec![FaultState {
+                component_id: "body/arm_right/joint_1".to_string(),
+                fault_id: "future_critical".to_string(),
+                severity: 99, // unknown severity from a newer Soma version
+                active: true,
+                clearable: false,
+                onset_ts_ns: 0,
+                vendor_code: 0,
+                vendor_code_text: String::new(),
+                message: String::new(),
+                attributes: vec![],
+                vendor_raw_json: String::new(),
+            }],
+            ..generate_snapshot(MockScenario::Normal, 1, None)
+        };
+        let vitals = snapshot_to_vitals(&snapshot, &default_thresholds(), 123);
+        let fault = vitals
+            .components
+            .iter()
+            .find(|c| c.name == "body/arm_right/joint_1/fault/future_critical")
+            .expect("fault component");
+        assert_eq!(
+            fault.health, HEALTH_ERROR,
+            "unknown fault severity must be treated as ERROR, not OK"
+        );
+    }
+
+    #[test]
+    fn kind_from_name_unknown_returns_none() {
+        assert_eq!(kind_from_name("UNICORN"), None);
+        assert_eq!(kind_from_name(""), None);
+    }
+
+    #[test]
+    fn kind_from_name_known_returns_value() {
+        assert_eq!(kind_from_name("JOINT"), Some(KIND_JOINT));
+        assert_eq!(kind_from_name("  joint  "), Some(KIND_JOINT));
+        assert_eq!(kind_from_name("BATTERY"), Some(KIND_BATTERY));
+    }
+
+    #[test]
+    fn glob_matches_exact_and_wildcard() {
+        assert!(glob_matches("body/arm_right/*", "body/arm_right/joint_1"));
+        assert!(!glob_matches("body/arm_right/*", "body/arm_left/joint_1"));
+        assert!(glob_matches("body/*/joint_1", "body/arm_right/joint_1"));
+        assert!(!glob_matches("body/*/joint_1", "body/arm_right/joint_2"));
     }
 }

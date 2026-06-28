@@ -156,7 +156,7 @@ async fn main() -> Result<()> {
                     r
                 }
                 Err(e) => {
-                    log::warn!(
+                    log::error!(
                         "failed to parse Soma threshold file '{}': {e:#}; using defaults",
                         cfg.thresholds_path.display()
                     );
@@ -171,24 +171,57 @@ async fn main() -> Result<()> {
     {
         let svc_for_stream = svc.clone();
         let rules_for_stream = soma_rules.clone();
+        let mut reconnect_atlas = atlas.clone();
+        let reconnect_consumer_id = cfg.id.clone();
+        let reconnect_soma_endpoint = cfg.soma_endpoint.clone();
         tokio::spawn(async move {
+            // Outer loop: reconnect on stream end or error.
             loop {
-                match stream.message().await {
-                    Ok(Some(snapshot)) => {
-                        let vitals = soma_ingest::snapshot_to_vitals(
-                            &snapshot,
-                            &rules_for_stream,
-                            monotonic_ns(),
-                        );
-                        svc_for_stream.update_snapshot(vitals).await;
+                // Inner loop: process stream messages.
+                loop {
+                    match stream.message().await {
+                        Ok(Some(snapshot)) => {
+                            let vitals = soma_ingest::snapshot_to_vitals(
+                                &snapshot,
+                                &rules_for_stream,
+                                monotonic_ns(),
+                            );
+                            svc_for_stream.update_snapshot(vitals).await;
+                        }
+                        Ok(None) => {
+                            log::error!("[vitals] Soma StreamHealth ended — reconnecting...");
+                            break;
+                        }
+                        Err(e) => {
+                            log::error!(
+                                "[vitals] Soma StreamHealth error: {e:#} — reconnecting..."
+                            );
+                            break;
+                        }
                     }
-                    Ok(None) => {
-                        log::warn!("[vitals] Soma StreamHealth ended");
-                        break;
-                    }
-                    Err(e) => {
-                        log::warn!("[vitals] Soma StreamHealth error: {e:#}");
-                        break;
+                }
+
+                // Reconnect with backoff.
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    match soma_ingest::open_soma_stream(
+                        &mut reconnect_atlas,
+                        &reconnect_consumer_id,
+                        reconnect_soma_endpoint.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(Some(new_stream)) => {
+                            log::info!("[vitals] reconnected to Soma StreamHealth");
+                            stream = new_stream;
+                            break;
+                        }
+                        Ok(None) => {
+                            log::warn!("[vitals] Soma still unavailable — retrying in 2s...");
+                        }
+                        Err(e) => {
+                            log::warn!("[vitals] reconnect failed: {e:#} — retrying in 2s...");
+                        }
                     }
                 }
             }

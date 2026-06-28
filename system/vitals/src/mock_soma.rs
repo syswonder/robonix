@@ -57,6 +57,7 @@ const FAULT_ERROR: u32 = 2;
 const ESTOP_RELEASED: u32 = 0;
 const ESTOP_TYPE_HARDWARE: u32 = 1;
 
+/// Determines the synthetic behaviour of the mock Soma server.
 #[derive(Clone, Copy, Debug)]
 pub enum MockScenario {
     Normal,
@@ -67,13 +68,20 @@ pub enum MockScenario {
 }
 
 impl MockScenario {
+    /// Parse a scenario from a CLI string. Unrecognized values map to Normal with a warning.
     pub fn parse(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
             "ramp" => Self::Ramp,
             "fault" => Self::Fault,
             "toggle" => Self::Toggle,
             "mixed" => Self::Mixed,
-            _ => Self::Normal,
+            other => {
+                log::warn!(
+                    "[mock_soma] unrecognized scenario '{}', using Normal",
+                    other
+                );
+                Self::Normal
+            }
         }
     }
 
@@ -137,7 +145,7 @@ impl PiperBridge {
             match serde_json::from_str::<PiperData>(&line) {
                 Ok(data) => Some(data),
                 Err(e) => {
-                    log::warn!("[mock_soma] piper bridge parse error: {e:#}");
+                    log::error!("[mock_soma] piper bridge parse error: {e:#}");
                     None
                 }
             }
@@ -146,7 +154,7 @@ impl PiperBridge {
         {
             Ok(data) => data,
             Err(e) => {
-                log::warn!("[mock_soma] piper bridge thread panicked: {e:#}");
+                log::error!("[mock_soma] piper bridge thread panicked: {e:#}");
                 None
             }
         }
@@ -198,6 +206,9 @@ pub struct PiperBridgeConfig {
     pub script: String,
 }
 
+/// Start a mock Soma gRPC server that registers with Atlas and serves
+/// StreamHealth + GetHealth.  Optionally spawns a Piper bridge subprocess
+/// for real hardware data merged into synthetic snapshots.
 pub async fn run_mock_soma(
     atlas_endpoint: &str,
     provider_id: &str,
@@ -364,6 +375,9 @@ impl RobonixSystemSomaHealth for MockSomaService {
     }
 }
 
+/// Generate one synthetic SomaHealthSnapshot for the given scenario + sequence
+/// number.  When `piper_data` is present, real Piper hardware readings replace
+/// synthetic actuator values for matching joint names.
 pub fn generate_snapshot(
     scenario: MockScenario,
     seq: u64,
@@ -694,4 +708,71 @@ fn monotonic_ns() -> i64 {
 #[allow(dead_code)]
 fn _health_ok() -> u32 {
     HEALTH_OK
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scenario_parse_known_variants() {
+        assert!(matches!(
+            MockScenario::parse("normal"),
+            MockScenario::Normal
+        ));
+        assert!(matches!(
+            MockScenario::parse("  Ramp  "),
+            MockScenario::Ramp
+        ));
+        assert!(matches!(MockScenario::parse("FAULT"), MockScenario::Fault));
+        assert!(matches!(
+            MockScenario::parse("Toggle"),
+            MockScenario::Toggle
+        ));
+        assert!(matches!(MockScenario::parse("MIXED"), MockScenario::Mixed));
+    }
+
+    #[test]
+    fn scenario_parse_unknown_defaults_to_normal() {
+        // Unknown input should map to Normal (with a warning log, not tested here).
+        assert!(matches!(
+            MockScenario::parse("nonexistent"),
+            MockScenario::Normal
+        ));
+        assert!(matches!(MockScenario::parse(""), MockScenario::Normal));
+    }
+
+    #[test]
+    fn normal_snapshot_has_three_bodies() {
+        let snapshot = generate_snapshot(MockScenario::Normal, 1, None);
+        // body + 3 root children + cpu + gpu + 6 joints = 12
+        assert_eq!(snapshot.components.len(), 12);
+        assert_eq!(snapshot.actuators.len(), 6);
+        assert_eq!(snapshot.faults.len(), 0);
+    }
+
+    #[test]
+    fn fault_scenario_produces_fault_at_sequence_4() {
+        let snapshot = generate_snapshot(MockScenario::Fault, 4, None);
+        assert!(!snapshot.faults.is_empty());
+        assert!(snapshot.faults.iter().any(|f| f.fault_id == "overcurrent"));
+        // joint_3 should have communication_ok = false
+        let j3 = snapshot
+            .actuators
+            .iter()
+            .find(|a| a.component_id == "body/arm_right/joint_3")
+            .unwrap();
+        assert!(!j3.communication_ok);
+    }
+
+    #[test]
+    fn toggle_scenario_disables_joint_6_at_sequence_4() {
+        let snapshot = generate_snapshot(MockScenario::Toggle, 4, None);
+        let j6 = snapshot
+            .actuators
+            .iter()
+            .find(|a| a.component_id == "body/arm_right/joint_6")
+            .unwrap();
+        assert!(!j6.torque_enabled);
+    }
 }
