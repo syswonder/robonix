@@ -54,13 +54,13 @@ ARM_STATUS_TO_STATE = {
 
 # foc_status bit → fault label (from piper_sdk CAN protocol)
 FOC_FAULT_BITS: list[tuple[int, str]] = [
-    (0, "欠压"),
-    (1, "电机过热"),
-    (2, "过流"),
-    (3, "驱动器过热"),
-    (4, "碰撞"),
-    (5, "驱动器故障"),
-    (7, "堵转"),
+    (0, "undervoltage"),
+    (1, "motor_overheat"),
+    (2, "overcurrent"),
+    (3, "driver_overheat"),
+    (4, "collision"),
+    (5, "driver_fault"),
+    (7, "stall"),
 ]
 
 

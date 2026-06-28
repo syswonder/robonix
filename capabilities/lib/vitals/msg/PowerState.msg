@@ -1,4 +1,4 @@
-float32 battery_percent      # 电量百分比 0-100, -1 表示无电池
-float32 voltage              # 电池/系统电压 (V), -1 未知
-bool charging                # 是否充电中
-int64 remaining_s            # 估计剩余可用秒数, -1 未知
+float32 battery_percent      # battery percentage 0-100, -1 if no battery
+float32 voltage              # battery/system voltage (V), -1 if unknown
+bool charging                # charging status
+int64 remaining_s            # estimated remaining seconds, -1 if unknown
