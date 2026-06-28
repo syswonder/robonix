@@ -43,16 +43,26 @@ _TAG_WIDTH = 24
 _lock: threading.Lock = threading.Lock()
 _log_dir: Optional[Path] = None
 _writers: Dict[str, TextIO] = {}
+# Whether to also mirror each record to stderr in console format. Suppressed
+# when an orchestrator (rbnx) provisioned $SCRIBE_LOG_DIR: rbnx already pipes
+# the process's stdout/stderr back into Scribe under the same tag, so a stderr
+# echo would be re-ingested and every line would appear twice in the per-tag
+# file. With SCRIBE_LOG_DIR set, the direct file write below is authoritative.
+# When unset (standalone dev, or a docker container whose in-container log dir
+# isn't collected) the echo stays on — there it is the only way the output
+# reaches a human or rbnx's pipe.
+_console_echo: bool = True
 
 
 def _ensure_init() -> None:
     """Lazily initialise log directory and internal state on first call."""
-    global _log_dir  # noqa: PLW0603
+    global _log_dir, _console_echo  # noqa: PLW0603
     if _log_dir is not None:
         return
     with _lock:
         if _log_dir is not None:
             return
+        _console_echo = "SCRIBE_LOG_DIR" not in os.environ
         _log_dir = Path(os.environ.get("SCRIBE_LOG_DIR", "./logs"))
         _log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -135,13 +145,14 @@ def log(level: Level, tag: str, msg: str) -> None:
 
     ts_ns = time.time_ns()
 
-    # console → stderr
-    try:
-        console_line = _format_console(ts_ns, level, tag, msg)
-        sys.stderr.write(console_line)
-        sys.stderr.flush()
-    except Exception:  # noqa: BLE001
-        pass
+    # console → stderr (skipped when rbnx owns the per-tag file; see _console_echo)
+    if _console_echo:
+        try:
+            console_line = _format_console(ts_ns, level, tag, msg)
+            sys.stderr.write(console_line)
+            sys.stderr.flush()
+        except Exception:  # noqa: BLE001
+            pass
 
     # file → $SCRIBE_LOG_DIR/{tag}.log
     try:
