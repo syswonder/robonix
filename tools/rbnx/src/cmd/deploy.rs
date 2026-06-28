@@ -767,9 +767,9 @@ pub async fn execute(
             let bin_map: &[(&str, &str)] = &[
                 ("atlas", "robonix-atlas"),
                 ("executor", "robonix-executor"),
+                ("soma", "robonix-soma"),
                 ("pilot", "robonix-pilot"),
                 ("liaison", "robonix-liaison"),
-                ("soma", "robonix-soma"),
             ];
             for (name, bin) in bin_map {
                 if !deploy.system.contains_key(*name) {
@@ -829,6 +829,24 @@ pub async fn execute(
                     &children,
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                if *name == "soma" {
+                    if !deploy.primitive.is_empty() {
+                        output::boot_section("primitive");
+                        for entry in &deploy.primitive {
+                            output::boot_note(&entry.name, "delegated to soma stage 1");
+                        }
+                    }
+                    let mut stage1_atlas = AtlasClient::connect_with_retry(
+                        &atlas_endpoint,
+                        20,
+                        Duration::from_millis(500),
+                    )
+                    .await
+                    .with_context(|| {
+                        format!("connect to atlas at '{atlas_endpoint}' for soma stage 1 wait")
+                    })?;
+                    wait_for_soma_stage1(&mut stage1_atlas, deploy.primitive.len()).await?;
+                }
             }
         } else {
             output::sub_step("Skipping system bring-up (--skip-system)");
@@ -927,14 +945,6 @@ pub async fn execute(
         // The deploy.primitive / deploy.skill fields stay in the
         // manifest schema because soma reads them; rbnx just doesn't
         // launch those processes any more.
-        if deploy.system.contains_key("soma") && !skip_system && !deploy.primitive.is_empty() {
-            output::boot_section("primitive");
-            for entry in &deploy.primitive {
-                output::boot_note(&entry.name, "delegated to soma stage 1");
-            }
-            wait_for_soma_stage1(&mut atlas, deploy.primitive.len()).await?;
-        }
-
         if !deploy.service.is_empty() {
             output::boot_section("service");
         }
@@ -1604,22 +1614,27 @@ async fn wait_for_soma_stage1(atlas: &mut AtlasClient, primitive_count: usize) -
     let mut frame: usize = 0;
     loop {
         let elapsed_s = started.elapsed().as_secs_f32();
-        output::boot_progress(
-            "soma stage 1",
-            &format!("starting {primitive_count} primitive package(s)… {elapsed_s:>4.1}s"),
-            frame,
-        );
+        let detail = if primitive_count == 0 {
+            format!("waiting for Soma gRPC readiness… {elapsed_s:>4.1}s")
+        } else {
+            format!("starting {primitive_count} primitive package(s)… {elapsed_s:>4.1}s")
+        };
+        output::boot_progress("soma stage 1", &detail, frame);
         if frame.is_multiple_of(POLLS_PER_TICK) {
             let providers = atlas
                 .query_capabilities("soma", SOMA_GET_YAML_CONTRACT, atlas_pb::Transport::Grpc)
                 .await
                 .context("wait for soma stage 1 readiness")?;
             if let Some(soma) = providers.into_iter().find(|p| p.id == "soma") {
-                if soma.state == atlas_pb::LifecycleState::StateActive as i32 {
-                    output::boot_ok(
-                        "soma stage 1",
-                        &format!("{primitive_count} primitive package(s) handled by soma"),
-                    );
+                if soma.state == atlas_pb::LifecycleState::StateActive as i32
+                    && soma_grpc_ready(atlas, SOMA_GET_YAML_CONTRACT).await
+                {
+                    let ready_detail = if primitive_count == 0 {
+                        "Soma gRPC ready".to_string()
+                    } else {
+                        format!("{primitive_count} primitive package(s) handled by soma")
+                    };
+                    output::boot_ok("soma stage 1", &ready_detail);
                     return Ok(());
                 }
             }
@@ -1640,6 +1655,33 @@ async fn wait_for_soma_stage1(atlas: &mut AtlasClient, primitive_count: usize) -
         tokio::time::sleep(SPINNER_TICK).await;
         frame = frame.wrapping_add(1);
     }
+}
+
+async fn soma_grpc_ready(atlas: &mut AtlasClient, contract_id: &str) -> bool {
+    let Ok((channel_id, endpoint, _params)) = atlas
+        .connect_capability(
+            DEPLOY_CONSUMER_ID,
+            "soma",
+            contract_id,
+            atlas_pb::Transport::Grpc,
+        )
+        .await
+    else {
+        return false;
+    };
+    let normalized = if endpoint.starts_with("http") {
+        endpoint
+    } else {
+        format!("http://{endpoint}")
+    };
+    let ready = match Endpoint::new(normalized.clone()) {
+        Ok(endpoint) => tokio::time::timeout(Duration::from_secs(1), endpoint.connect())
+            .await
+            .is_ok_and(|r| r.is_ok()),
+        Err(_) => false,
+    };
+    let _ = atlas.disconnect_capability(&channel_id).await;
+    ready
 }
 
 async fn notify_soma_stage2(atlas: &mut AtlasClient) -> Result<()> {
