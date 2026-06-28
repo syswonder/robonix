@@ -6,8 +6,12 @@
 //   2. Declares two gRPC capabilities:
 //      - robonix/service/vitals/get    (rpc: GetVitals → VitalsSnapshot)
 //      - robonix/service/vitals/stream (topic_out: StreamVitals → stream VitalsSnapshot)
-//   3. Starts the collect loop (periodic sysfs/hwmon reads).
+//   3. Starts the collect loop (periodic sysfs/hwmon/thermal reads).
 //   4. Serves both gRPC services on `listen`.
+//
+// In v0.1 vitals reads sysfs directly. When Soma (the body system component)
+// is ready, hardware access will move there and vitals will consume from
+// Soma's unified health contract.
 //
 // No Driver lifecycle handshake required — vitals is stateless monitoring that
 // starts reporting as soon as the gRPC server is up.
@@ -151,19 +155,10 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Discover the health primitive through Atlas. Vitals never reads
-    // sysfs directly — the primitive absorbs hardware differences behind
-    // the unified robonix/primitive/health/state contract.
-    let (_channel_id, _provider_id, channel) = robonix_atlas::client::connect_to_capability(
-        &mut atlas,
-        &cfg.id,
-        "robonix/primitive/health/state",
-    )
-    .await
-    .context("discover health primitive via Atlas")?;
-    info!("connected to health primitive via Atlas");
-
-    let mut collector = collect::GrpcCollector::new(channel);
+    // In v0.1 vitals reads sysfs directly. When Soma is ready, this will
+    // switch to Soma's unified health contract via Atlas discovery.
+    let collector = collect::SysfsCollector::new().context("init sysfs collector")?;
+    info!("sysfs collector ready");
 
     // Spawn the collect loop.
     {
@@ -174,13 +169,7 @@ async fn main() -> Result<()> {
             tick.tick().await;
             loop {
                 tick.tick().await;
-                let (power, readings) = match collector.collect().await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        log::warn!("[vitals] collect failed: {e:#}");
-                        continue;
-                    }
-                };
+                let (power, readings) = collector.collect();
 
                 let mut components = Vec::new();
                 if !rules.is_empty() {

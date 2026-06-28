@@ -12,7 +12,6 @@
 members = [
     "system/atlas",
     "system/executor",
-    "system/health_primitive",
     "system/liaison",
     "system/pilot",
     "system/scribe",

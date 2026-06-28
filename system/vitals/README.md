@@ -15,54 +15,43 @@ actions are the responsibility of `sentinel`.
 ## Architecture
 
 ```
-sysfs / hwmon
+sysfs / hwmon / thermal
       │
       v
-health_primitive (50092)               ← hardware abstraction
-  robonix/primitive/health/state        ← unified gRPC contract
-      │
-      │  Atlas discovery
-      v
-vitals (50091)                         ← normalise + threshold + report
-  robonix/service/vitals/get
-  robonix/service/vitals/stream
+vitals (50091)                         ← read sensors + normalise + threshold + report
+  robonix/service/vitals/get            ← gRPC rpc: GetVitals
+  robonix/service/vitals/stream         ← gRPC server_stream: StreamVitals
       │
       v
 pilot / sentinel / liaison
 ```
 
-Vitals does **not** read sysfs directly. It discovers a `health_primitive` provider
-through Atlas (`connect_to_capability`), then calls `GetHealthState` on the unified
-`robonix/primitive/health/state` contract. The primitive absorbs hardware differences;
-vitals only sees unified fields.
+In v0.1 vitals reads sysfs directly (`/sys/class/hwmon/*`, `/sys/class/thermal/*`).
+When **Soma** (the body system component) is ready, hardware access will move there
+and vitals will consume from Soma's unified health contract.
 
 ## Quick start
 
 ```bash
-# Terminal 1 — start the health primitive
-robonix-health-primitive --log info
-# Or
-cargo run --release -p robonix-health-primitive -- --log info
-
-# Terminal 2 — start vitals (discovers the primitive via Atlas)
+# make sure atlas active
+cargo run --release -p robonix-atlas -- --log info
+# run vitals if built
 robonix-vitals --log info
-# Or
+# or
 cargo run --release -p robonix-vitals -- --log info
 ```
 
 Typical output:
 
 ```
-[vitals] connected to health primitive via Atlas
+[vitals] sysfs collector ready
 [vitals] 19.8V | cpu:OK(35) tj:OK(36) soc012:OK(36) soc345:OK(35) nvme:OK(38) battery:OK(-1)
 ```
 
 ## Data flow
 
 ```
-health_primitive:GetHealthState  →  GrpcCollector.collect()
-                                         │
-                                    (PowerState, Vec<RawReading>)
+SysfsCollector.collect()  →  (PowerState, Vec<RawReading>)
                                          │
                                    normalize.rs (threshold check)
                                          │
@@ -74,8 +63,10 @@ health_primitive:GetHealthState  →  GrpcCollector.collect()
                        returns cache       pushes on state transitions
 ```
 
-- **collect.rs** (`GrpcCollector`) calls the health primitive via gRPC and
-  converts `HealthState` → `(PowerState, Vec<RawReading>)`.
+- **collect.rs** (`SysfsCollector`) reads thermal zones, NVMe temperature, and
+  system voltage from sysfs/hwmon, producing `(PowerState, Vec<RawReading>)`.
+  Thermal zone names are stripped of the `-thermal` suffix so they match
+  threshold rule names.
 - **normalize.rs** compares raw readings against the YAML threshold table and
   produces `ComponentHealth` entries with OK / WARN / ERROR status.
 - **service.rs** caches the latest `VitalsSnapshot`, serves `GetVitals`, and
@@ -114,9 +105,8 @@ components:
     # error_below_voltage: 10.0
 ```
 
-Component `name` must match the `name` field in the health primitive's
-`SensorReading`. Thermal zone names are stripped of the `-thermal` suffix
-by the primitive (e.g. `cpu-thermal` → `cpu`).
+Component `name` must match the thermal zone name with `-thermal` suffix
+stripped (e.g. `cpu-thermal` → `cpu`).
 
 ## Source layout
 
@@ -127,10 +117,10 @@ system/vitals/
   thresholds/
     jetson_agx_orin.yaml
   src/
-    main.rs          # Atlas registration, discovery, gRPC serve, collect loop
+    main.rs          # Atlas registration, gRPC serve, collect loop
     config.rs        # VitalsConfig
     service.rs       # VitalsServiceImpl: GetVitals + StreamVitals + state-change detection
-    collect.rs       # GrpcCollector: gRPC client for health primitive
+    collect.rs       # SysfsCollector: read sysfs/hwmon/thermal
     normalize.rs     # evaluate() + load_thresholds() + unit tests
     pb.rs            # include!(contract_proto_modules.rs)
 ```
@@ -142,7 +132,6 @@ cargo build -p robonix-vitals
 cargo clippy -p robonix-vitals -- -D warnings
 cargo test -p robonix-vitals
 
-# Must have health_primitive running first
 grpcurl -plaintext -d '{}' 127.0.0.1:50091 \
   robonix.contracts.RobonixServiceVitalsGet/GetVitals
 ```
