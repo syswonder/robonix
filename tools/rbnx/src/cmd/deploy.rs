@@ -370,7 +370,7 @@ async fn spawn_system_binary(
         let reader = tokio::io::BufReader::new(stdout);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            scribe::info(&tag_out, &line);
+            scribe::ingest(&tag_out, &line);
         }
     });
     tokio::spawn(async move {
@@ -380,7 +380,7 @@ async fn spawn_system_binary(
             // stderr is not always errors — Python logging defaults to
             // stderr for INFO too.  Use `info` to avoid misrepresenting
             // the actual severity.
-            scribe::info(&tag_err, &line);
+            scribe::ingest(&tag_err, &line);
         }
     });
     // Salient detail per builtin: port + role, redact long flag soup
@@ -490,7 +490,7 @@ async fn spawn_package(
         let reader = tokio::io::BufReader::new(stdout);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            scribe::info(&tag_out, &line);
+            scribe::ingest(&tag_out, &line);
         }
     });
     tokio::spawn(async move {
@@ -500,7 +500,7 @@ async fn spawn_package(
             // stderr is not always errors — Python logging defaults to
             // stderr for INFO too.  Use `info` to avoid misrepresenting
             // the actual severity.
-            scribe::info(&tag_err, &line);
+            scribe::ingest(&tag_err, &line);
         }
     });
     // No spawn line here — wait until provider registration and emit one
