@@ -170,7 +170,7 @@ pub const BUILTINS: &[BuiltinSpec] = &[
     },
     BuiltinSpec {
         op: "get_plan_status",
-        description: "Inspect an in-flight RTDL plan: returns its ops, each with op_id, kind, description, current state (pending/running/succeeded/failed/canceled/timeout/paused) and any armed stop_point. Call this to find the op_id and live progress of a running plan before issuing stop_plan_at or cancel_plan. Unknown/finished plans return running:false.",
+        description: "Inspect an in-flight RTDL plan: returns its ops, each with op_id, kind, description, current state (pending/running/succeeded/failed/canceled/timeout/paused) and any armed stop_point. Call this to find the op_id and live progress of a running plan before issuing stop_plan_at or cancel_plan. Errors if the plan is not active (stale/wrong id or already finished) — use get_all_plans to list running plans.",
         input_schema_json: r#"{"type":"object","properties":{"plan_id":{"type":"string","description":"RTDL Plan.plan_id to inspect"}},"required":["plan_id"]}"#,
     },
     BuiltinSpec {

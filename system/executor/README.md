@@ -117,8 +117,9 @@ Executor declares builtin MCP capabilities under
   (`pending`/`running`/`succeeded`/`failed`/`canceled`/`timeout`/`paused`) and
   any armed `stop_point`. Lets the LLM read a running plan's structure + live
   progress before issuing a `stop_plan_at` / `cancel_plan` (inspect first, then
-  act). Unknown or already-finished plans return `running:false` with an empty
-  op list.
+  act). Errors if the plan is not active (stale/wrong id or already finished) —
+  it is a query, so "not found" is an error; use `get_all_plans` to check which
+  plans are still running.
 - `stop_plan_at`: arm a stop point on an in-flight RTDL plan — when execution
   reaches the node with the given `op_id`, the **whole plan is cancelled** (same
   teardown as `cancel_plan`). Args: `plan_id` (required), `op_id` (required), and

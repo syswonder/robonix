@@ -159,8 +159,9 @@ impl PlanRuntime {
     /// Apply the `get_plan_status` builtin: return the plan's ops as JSON, each
     /// with `op_id`, `kind`, `description`, current `state`, and any armed
     /// `stop_point`. Lets the LLM inspect a running plan before issuing a
-    /// `stop_plan_at` (inspect first, then act). Unknown/finished plans report
-    /// `running:false` with an empty op list rather than erroring.
+    /// `stop_plan_at` (inspect first, then act). Errors when the plan is not in
+    /// the active table (stale/wrong id, or already finished) — it is a query,
+    /// so "not found" is an error; use `get_all_plans` to check liveness.
     pub async fn get_plan_status_builtin(&self, call: &CapabilityCall) -> CapabilityCallResult {
         #[derive(Deserialize)]
         struct Args {
@@ -172,15 +173,16 @@ impl PlanRuntime {
         };
         let plans = self.inner.lock().await;
         let Some(run) = plans.get(&args.plan_id) else {
-            return ok_result(
+            // A query for a specific plan that is not in the active table is an
+            // error (the id is stale or wrong) — unlike the cancel/stop
+            // commands, which are idempotent "ensure stopped" no-ops. Use
+            // get_all_plans to check whether a plan is still running.
+            return error_result(
                 call,
-                serde_json::json!({
-                    "plan_id": args.plan_id,
-                    "running": false,
-                    "note": "plan is not active (already finished or never existed)",
-                    "ops": [],
-                })
-                .to_string(),
+                format!(
+                    "get_plan_status: no active RTDL plan '{}' (it never existed or already finished/cancelled); call get_all_plans to list running plans",
+                    args.plan_id
+                ),
             );
         };
         let ops: Vec<serde_json::Value> = run
@@ -852,12 +854,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_plan_status_unknown_plan_reports_not_running() {
+    async fn get_plan_status_unknown_plan_errors() {
         let runtime = PlanRuntime::default();
         let r = runtime
             .get_plan_status_builtin(&status_call(r#"{"plan_id":"missing"}"#))
             .await;
-        assert!(r.success);
-        assert!(r.output.contains(r#""running":false"#));
+        assert!(!r.success);
+        assert!(r.error.contains("no active RTDL plan"));
     }
 }
