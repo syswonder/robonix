@@ -46,16 +46,11 @@ jobs:
             ];
 
             const issue = context.payload.issue;
-            // Only match component keywords from CHECKED task-list items
-            // ("- [x] ...") plus the title. The bug-report template lists
-            // EVERY component as an unchecked "- [ ]" box, so scanning the
-            // whole body matched every keyword and added every label + owner
-            // (issue #113). Unchecked boxes are ignored.
-            const checked = `${issue.body || ""}`
-              .split(/\r?\n/)
-              .filter((l) => /^\s*[-*]?\s*\[[xX]\]/.test(l))
-              .join("\n");
-            const text = `${issue.title || ""}\n${checked}`.toLowerCase();
+            // Match component keywords from the TITLE ONLY. The body lists
+            // every component (template checkboxes + prose), so scanning it
+            // stamped on every comp:* label + every owner (#113). The title
+            // is the one reliable signal; the body is ignored entirely.
+            const text = `${issue.title || ""}`.toLowerCase();
 
             const labels = new Set();
             const owners = new Set();
