@@ -15,8 +15,11 @@ use robonix_scribe::{info, warn};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
@@ -232,6 +235,15 @@ struct OpenChannel {
 pub(crate) struct State {
     providers: HashMap<String, CapabilityProviderState>,
     channels: HashMap<String, OpenChannel>,
+    /// Live `WatchProvider` subscriber for each `provider_id`. Atlas
+    /// `NotifyProvider` looks up the entry here and `try_send`s the event
+    /// onto the channel; a re-subscription replaces (and drops) any
+    /// previous sender for the same id, which closes the older stream
+    /// on the server side. Not serialised — these are runtime handles
+    /// with no debug-inspection value (and `mpsc::Sender` is not
+    /// `Serialize`).
+    #[serde(skip)]
+    event_subscribers: HashMap<String, mpsc::Sender<pb::ProviderEvent>>,
 }
 
 impl State {
@@ -242,6 +254,13 @@ impl State {
         let before = self.channels.len();
         self.channels.retain(|_, ch| ch.provider_id != provider_id);
         before - self.channels.len()
+    }
+
+    /// Drop the WatchProvider sender (if any) for `provider_id`. Called
+    /// when the provider unregisters / is evicted, so the consumer's
+    /// stream closes cleanly instead of pointing at a corpse.
+    fn drop_event_subscriber(&mut self, provider_id: &str) -> bool {
+        self.event_subscribers.remove(provider_id).is_some()
     }
 }
 
@@ -384,10 +403,98 @@ impl AtlasRegistry {
         let mut state = self.inner.write().await;
         let was_present = state.providers.remove(provider_id).is_some();
         let dropped = state.drop_channels_of(provider_id);
+        let sub_dropped = state.drop_event_subscriber(provider_id);
         info!(
-            "[atlas] unregister {provider_id} (was_present={was_present}, channels_dropped={dropped})"
+            "[atlas] unregister {provider_id} (was_present={was_present}, \
+             channels_dropped={dropped}, watch_subscriber_dropped={sub_dropped})"
         );
         was_present
+    }
+
+    /// Subscribe to the reverse event stream for `provider_id`. Returns
+    /// the receiver half of a fresh mpsc channel; the caller wraps it in
+    /// a `tonic::Stream` and hands it back as the gRPC response. Any
+    /// previous subscription for the same id is dropped (takeover
+    /// semantics) — the previous stream closes when its sender is
+    /// dropped on this call.
+    ///
+    /// Errors:
+    ///   * NotFound — `provider_id` is not currently registered. We
+    ///     refuse to allocate an event channel for an unknown id so
+    ///     `NotifyProvider` can't accidentally fan events into a
+    ///     never-claimed slot.
+    pub async fn subscribe_events(
+        &self,
+        provider_id: &str,
+    ) -> Result<mpsc::Receiver<pb::ProviderEvent>, Status> {
+        let provider_id = Self::require("provider_id", provider_id)?;
+        // Buffer 8 — events are rare control-plane messages (think
+        // "stage_trigger" at boot time), not data-plane traffic. If a
+        // subscriber falls behind 8 events deep, `try_send` will return
+        // Full and `NotifyProvider` will report delivered=false; the
+        // sender can decide whether to retry.
+        let (tx, rx) = mpsc::channel(8);
+        let mut state = self.inner.write().await;
+        if !state.providers.contains_key(provider_id) {
+            return Err(Status::not_found(format!(
+                "unknown provider_id: {provider_id}"
+            )));
+        }
+        let prev = state
+            .event_subscribers
+            .insert(provider_id.to_string(), tx);
+        if prev.is_some() {
+            warn!(
+                "[atlas] watch_provider '{provider_id}': replacing previous subscriber \
+                 (takeover); old stream will close"
+            );
+        } else {
+            info!("[atlas] watch_provider '{provider_id}': subscribed");
+        }
+        Ok(rx)
+    }
+
+    /// Push `event` onto the subscriber stream for `provider_id`. Returns
+    /// `true` iff a live subscriber existed AND the event was accepted
+    /// by its channel; `false` means nobody listening OR the channel
+    /// was full (slow consumer). Never returns an error for the
+    /// no-subscriber case — see proto comment on `NotifyProviderResponse`.
+    pub async fn notify_event(&self, provider_id: &str, event: pb::ProviderEvent) -> bool {
+        let provider_id = match Self::require("provider_id", provider_id) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        let state = self.inner.read().await;
+        let Some(tx) = state.event_subscribers.get(provider_id) else {
+            warn!(
+                "[atlas] notify_provider '{provider_id}': no subscriber — event dropped"
+            );
+            return false;
+        };
+        // Use `try_send` to keep `notify_provider` non-blocking even when
+        // the subscriber's channel filled up. A queue-full means the
+        // consumer fell behind, not that the event was lost forever —
+        // the caller can re-poll Atlas state and retry.
+        match tx.try_send(event) {
+            Ok(()) => {
+                info!("[atlas] notify_provider '{provider_id}': delivered");
+                true
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                warn!(
+                    "[atlas] notify_provider '{provider_id}': subscriber channel full \
+                     (slow consumer); event dropped"
+                );
+                false
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                warn!(
+                    "[atlas] notify_provider '{provider_id}': subscriber stream closed \
+                     between lookup and send; event dropped"
+                );
+                false
+            }
+        }
     }
 
     /// Update the provider's lifecycle state. Returns the previous value (or
@@ -837,8 +944,17 @@ impl AtlasService {
     }
 }
 
+/// The boxed `Stream` we hand back from `watch_provider`. Boxed because
+/// tonic-generated trait wants a single named type and the underlying
+/// `ReceiverStream<pb::ProviderEvent>` is easier to wrap behind a
+/// trait object than to thread through generics.
+type ProviderEventStream =
+    Pin<Box<dyn Stream<Item = Result<pb::ProviderEvent, Status>> + Send + 'static>>;
+
 #[tonic::async_trait]
 impl pb::atlas_server::Atlas for AtlasService {
+    type WatchProviderStream = ProviderEventStream;
+
     async fn register_primitive(
         &self,
         req: Request<pb::RegisterRequest>,
@@ -996,6 +1112,33 @@ impl pb::atlas_server::Atlas for AtlasService {
         Ok(Response::new(pb::InspectAtlasResponse { json }))
     }
 
+    async fn watch_provider(
+        &self,
+        req: Request<pb::WatchProviderRequest>,
+    ) -> Result<Response<Self::WatchProviderStream>, Status> {
+        let r = req.into_inner();
+        let rx = self.registry.subscribe_events(&r.provider_id).await?;
+        // ReceiverStream yields Ts; tonic wants Result<T, Status>. Lift
+        // each event into Ok(...) since the only way the stream ends is
+        // sender-drop (clean close), which closes the rx without an
+        // error value — exactly what tonic interprets as end-of-stream.
+        let mapped = ReceiverStream::new(rx).map(Ok);
+        let boxed: ProviderEventStream = Box::pin(mapped);
+        Ok(Response::new(boxed))
+    }
+
+    async fn notify_provider(
+        &self,
+        req: Request<pb::NotifyProviderRequest>,
+    ) -> Result<Response<pb::NotifyProviderResponse>, Status> {
+        let r = req.into_inner();
+        let event = r.event.ok_or_else(|| {
+            Status::invalid_argument("NotifyProvider: `event` field is required")
+        })?;
+        let delivered = self.registry.notify_event(&r.provider_id, event).await;
+        Ok(Response::new(pb::NotifyProviderResponse { delivered }))
+    }
+
     async fn query_contract(
         &self,
         req: Request<pb::QueryContractRequest>,
@@ -1087,9 +1230,10 @@ async fn eviction_loop(
                 provider.state_detail = format!("heartbeat lapsed > {timeout_ms}ms");
             }
             let dropped = state.drop_channels_of(id);
+            let sub_dropped = state.drop_event_subscriber(id);
             warn!(
                 "[atlas] '{id}' → TERMINATED (heartbeat lapsed > {timeout_ms}ms, \
-                 channels_dropped={dropped})"
+                 channels_dropped={dropped}, watch_subscriber_dropped={sub_dropped})"
             );
         }
 
@@ -1105,6 +1249,10 @@ async fn eviction_loop(
             .collect();
         for id in &stale {
             state.providers.remove(id);
+            // Also drop any lingering event subscriber slot — the provider
+            // record is gone, so any future NotifyProvider would be a
+            // ghost delivery into an unowned channel.
+            let _ = state.drop_event_subscriber(id);
             warn!("[atlas] '{id}' GC'd from registry (TERMINATED > {gc_after_ms}ms)");
         }
     }
