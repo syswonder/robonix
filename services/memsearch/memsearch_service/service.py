@@ -4,9 +4,12 @@ Indexes markdown notes under AGENT_MEMORY_DIR with milvus-lite (ONNX
 embeddings). VLM credentials reused from pilot's env (VLM_BASE_URL /
 VLM_API_KEY / VLM_MODEL) so memory doesn't need a separate API key.
 
-Logging: this module writes to stdout/stderr only. `rbnx boot` captures
-those into rbnx-boot/logs/system_memory.log automatically. No per-package
-log file — keeps cross-component debugging in one place.
+Logging: every stdlib-logging line is also bridged into Scribe (see the
+`_ScribeBridge` handler below), so the full startup trace — phase markers,
+env summary, error causes — shows up in the unified `rbnx logs` /
+rbnx-boot/logs/memory.log, not just on stdout. Without that bridge a startup
+that stalls in phase 3 (embedding-model download / milvus-lite init) looked
+like total silence after "memory service starting" (issue #113).
 """
 from __future__ import annotations
 
@@ -51,6 +54,31 @@ logging.basicConfig(
     force=True,  # override anything inherited from imports
 )
 log = logging.getLogger("memsearch")
+
+
+# Bridge every stdlib-logging record into Scribe so the unified `rbnx logs`
+# (memory.log) sees the whole startup trace — not just the one explicit
+# scribe_logger line. Records still go to stdout too (root handler from
+# basicConfig above); this only ADDS the scribe sink. Keeps cross-component
+# debugging in one place per the no-own-log-file rule.
+class _ScribeBridge(logging.Handler):
+    _FN = {
+        logging.DEBUG: scribe_logger.debug,
+        logging.INFO: scribe_logger.info,
+        logging.WARNING: scribe_logger.warn,
+        logging.ERROR: scribe_logger.error,
+        logging.CRITICAL: scribe_logger.error,
+    }
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            fn = self._FN.get(record.levelno, scribe_logger.info)
+            fn("memory", record.getMessage())
+        except Exception:  # noqa: BLE001
+            pass
+
+
+log.addHandler(_ScribeBridge())
 
 # Suppress verbose gRPC / absl warnings from milvus-lite. These dwarf the
 # real memsearch logs and make the file unreadable.
@@ -137,6 +165,9 @@ log.info("  milvus_uri = %s", MILVUS_URI)
 # model download, write permission on milvus_uri parent). Capture the
 # failure with enough context for someone reading the log to act.
 log.info("phase 3/4: constructing MemSearch (embedding=onnx, milvus_lite)")
+log.info("  (first run downloads the ONNX embedding model from HuggingFace — "
+         "this can take >60s on a cold/slow network and is the usual cause of "
+         "a boot register-timeout; pre-stage the model or raise the timeout)")
 try:
     mem = MemSearch(
         paths=[MEMORY_DIR],
