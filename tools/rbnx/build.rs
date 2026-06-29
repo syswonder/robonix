@@ -132,20 +132,11 @@ fn emit_build_metadata(repo_root: &std::path::Path) {
         .unwrap_or_else(|| "unknown".to_string());
     let builder = format!("{user}@{host}");
 
-    // Build time — UTC ISO-8601, second precision. SOURCE_DATE_EPOCH (the
-    // Reproducible Builds standard) overrides the wallclock for repro
-    // builds.
-    let build_time = if let Ok(s) = std::env::var("SOURCE_DATE_EPOCH")
-        && let Ok(secs) = s.parse::<i64>()
-    {
-        format_unix_utc(secs)
-    } else {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        format_unix_utc(secs)
-    };
+    // Build time in the build host's LOCAL timezone (e.g.
+    // 2026-06-29T09:09:22+0800), matching the usual kernel/dev banner — a bare
+    // UTC `Z` is confusing on a machine running local time. SOURCE_DATE_EPOCH
+    // (Reproducible Builds) still selects the instant when set.
+    let build_time = local_build_time();
 
     // Compiler version — `rustc -V` (e.g. "rustc 1.95.0 (abc123 2026-04-15)").
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
@@ -194,6 +185,38 @@ fn emit_build_metadata(repo_root: &std::path::Path) {
     }
     println!("cargo:rerun-if-env-changed=ROBONIX_GIT_SHA");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+}
+
+/// Build timestamp in the host's local timezone, e.g.
+/// `2026-06-29T09:09:22+0800`. Shells out to `date` so we get the host TZ
+/// without a tz crate in the build-deps (build.rs already shells to `hostname`
+/// / `rustc`). SOURCE_DATE_EPOCH selects the instant for reproducible builds;
+/// otherwise "now". Falls back to UTC via `format_unix_utc` if `date` is
+/// unavailable or non-GNU (e.g. the `-d@` form is GNU-specific).
+fn local_build_time() -> String {
+    let epoch = std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok());
+    let mut cmd = std::process::Command::new("date");
+    if let Some(secs) = epoch {
+        cmd.arg(format!("-d@{secs}"));
+    }
+    cmd.arg("+%Y-%m-%dT%H:%M:%S%z");
+    if let Some(out) = cmd.output().ok().filter(|o| o.status.success())
+        && let Ok(s) = String::from_utf8(out.stdout)
+    {
+        let t = s.trim().to_string();
+        if !t.is_empty() {
+            return t;
+        }
+    }
+    let secs = epoch.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    });
+    format_unix_utc(secs)
 }
 
 /// Format a unix epoch (seconds) as `YYYY-MM-DDTHH:MM:SSZ`. Lifted out
