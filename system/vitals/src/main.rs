@@ -53,6 +53,14 @@ async fn main() -> Result<()> {
                     python_bin: cfg.mock_soma_piper_python.clone(),
                     script: cfg.mock_soma_piper_script.to_string_lossy().to_string(),
                 });
+        let koch_config =
+            cfg.mock_soma_koch_port
+                .as_ref()
+                .map(|port| mock_soma::KochBridgeConfig {
+                    serial_port: port.clone(),
+                    python_bin: cfg.mock_soma_koch_python.clone(),
+                    script: cfg.mock_soma_koch_script.to_string_lossy().to_string(),
+                });
         return mock_soma::run_mock_soma(
             &cfg.atlas_endpoint,
             &cfg.mock_soma_id,
@@ -60,6 +68,7 @@ async fn main() -> Result<()> {
             &cfg.mock_soma_scenario,
             cfg.mock_soma_interval_ms,
             piper_config,
+            koch_config,
         )
         .await;
     }

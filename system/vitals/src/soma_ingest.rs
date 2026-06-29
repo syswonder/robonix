@@ -899,7 +899,7 @@ mod tests {
 
     #[test]
     fn ramp_snapshot_crosses_joint_error_threshold() {
-        let snapshot = generate_snapshot(MockScenario::Ramp, 24, None);
+        let snapshot = generate_snapshot(MockScenario::Ramp, 24, None, None);
         let vitals = snapshot_to_vitals(&snapshot, &default_thresholds(), 123);
         let joint = vitals
             .components
@@ -911,9 +911,9 @@ mod tests {
 
     #[test]
     fn body_health_groups_root_children() {
-        let snapshot = generate_snapshot(MockScenario::Normal, 1, None);
+        let snapshot = generate_snapshot(MockScenario::Normal, 1, None, None);
         let vitals = snapshot_to_vitals(&snapshot, &default_thresholds(), 123);
-        assert_eq!(vitals.bodies.len(), 3);
+        assert_eq!(vitals.bodies.len(), 4);
 
         let computer = vitals
             .bodies
@@ -928,19 +928,33 @@ mod tests {
                 .any(|c| c.id == "body/computer_jetson/cpu" && c.kind == "sensor")
         );
 
-        let arm = vitals
+        let arm_right = vitals
             .bodies
             .iter()
             .find(|body| body.body_type == "arm_right")
             .expect("arm_right health");
-        assert_eq!(arm.model, "piper");
-        let joint = arm
+        assert_eq!(arm_right.model, "piper");
+        let joint = arm_right
             .components
             .iter()
             .find(|c| c.id == "body/arm_right/joint_1")
             .expect("joint_1 component");
         assert_eq!(joint.parent_id, "body/arm_right");
         assert_eq!(joint.model, "piper_motor");
+
+        let arm_left = vitals
+            .bodies
+            .iter()
+            .find(|body| body.body_type == "arm_left")
+            .expect("arm_left health");
+        assert_eq!(arm_left.model, "koch");
+        let left_joint = arm_left
+            .components
+            .iter()
+            .find(|c| c.id == "body/arm_left/joint_1")
+            .expect("koch joint_1 component");
+        assert_eq!(left_joint.parent_id, "body/arm_left");
+        assert_eq!(left_joint.model, "dynamixel_motor");
 
         let battery = vitals
             .bodies
@@ -971,7 +985,7 @@ rules:
 "#,
         )
         .unwrap();
-        let snapshot = generate_snapshot(MockScenario::Normal, 1, None);
+        let snapshot = generate_snapshot(MockScenario::Normal, 1, None, None);
         let vitals = snapshot_to_vitals(&snapshot, &rules, 123);
         let joint = vitals
             .components
@@ -997,7 +1011,7 @@ rules:
                 attributes: vec![],
                 vendor_raw_json: String::new(),
             }],
-            ..generate_snapshot(MockScenario::Normal, 1, None)
+            ..generate_snapshot(MockScenario::Normal, 1, None, None)
         };
         let vitals = snapshot_to_vitals(&snapshot, &default_thresholds(), 123);
         let fault = vitals

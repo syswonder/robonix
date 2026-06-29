@@ -121,6 +121,71 @@ pub(crate) struct PiperData {
     pub components: Vec<PiperJointData>,
 }
 
+// ── Koch bridge ─────────────────────────────────────────────────────────
+
+/// Real Koch joint data from a Python subprocess (koch_bridge.py).
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct KochJointData {
+    pub name: String,
+    #[allow(dead_code)]
+    pub kind: String,
+    pub temperature: f64,
+    pub error_code: u32,
+    pub enabled: bool,
+}
+
+/// Data returned by KochCollector.collect() via the bridge subprocess.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct KochData {
+    #[allow(dead_code)]
+    pub body_type: String,
+    #[allow(dead_code)]
+    pub model: String,
+    pub state: u32,
+    pub message: String,
+    pub components: Vec<KochJointData>,
+}
+
+/// Manages a long-running `koch_bridge.py` subprocess for real Koch arm data.
+struct KochBridge {
+    sub: Arc<std::sync::Mutex<SubprocessHandle>>,
+}
+
+impl KochBridge {
+    fn new(script: &str, python_bin: &str, serial_port: &str) -> Result<Self> {
+        let sub =
+            SubprocessHandle::spawn_with_args(script, python_bin, &[serial_port], "koch-bridge")?;
+        Ok(Self {
+            sub: Arc::new(std::sync::Mutex::new(sub)),
+        })
+    }
+
+    /// Collect one reading from the Koch hardware. Returns None on I/O
+    /// failure or if the JSON response cannot be parsed.
+    async fn collect(&self) -> Option<KochData> {
+        let sub = self.sub.clone();
+        match tokio::task::spawn_blocking(move || {
+            let mut handle = sub.lock().unwrap_or_else(|e| e.into_inner());
+            let line = handle.collect_json()?;
+            match serde_json::from_str::<KochData>(&line) {
+                Ok(data) => Some(data),
+                Err(e) => {
+                    log::error!("[mock_soma] koch bridge parse error: {e:#}");
+                    None
+                }
+            }
+        })
+        .await
+        {
+            Ok(data) => data,
+            Err(e) => {
+                log::error!("[mock_soma] koch bridge thread panicked: {e:#}");
+                None
+            }
+        }
+    }
+}
+
 /// Manages a long-running `piper_bridge.py` subprocess for real Piper arm data.
 struct PiperBridge {
     sub: Arc<std::sync::Mutex<SubprocessHandle>>,
@@ -169,6 +234,7 @@ struct MockSomaService {
     interval: Duration,
     seq: Arc<RwLock<u64>>,
     piper_bridge: Option<Arc<PiperBridge>>,
+    koch_bridge: Option<Arc<KochBridge>>,
 }
 
 impl MockSomaService {
@@ -176,12 +242,14 @@ impl MockSomaService {
         scenario: MockScenario,
         interval: Duration,
         piper_bridge: Option<Arc<PiperBridge>>,
+        koch_bridge: Option<Arc<KochBridge>>,
     ) -> Self {
         Self {
             scenario,
             interval,
             seq: Arc::new(RwLock::new(0)),
             piper_bridge,
+            koch_bridge,
         }
     }
 
@@ -195,7 +263,11 @@ impl MockSomaService {
             Some(bridge) => bridge.collect().await,
             None => None,
         };
-        generate_snapshot(self.scenario, seq, piper_data.as_ref())
+        let koch_data = match &self.koch_bridge {
+            Some(bridge) => bridge.collect().await,
+            None => None,
+        };
+        generate_snapshot(self.scenario, seq, piper_data.as_ref(), koch_data.as_ref())
     }
 }
 
@@ -206,9 +278,16 @@ pub struct PiperBridgeConfig {
     pub script: String,
 }
 
+/// Configuration for the optional Koch hardware bridge.
+pub struct KochBridgeConfig {
+    pub serial_port: String,
+    pub python_bin: String,
+    pub script: String,
+}
+
 /// Start a mock Soma gRPC server that registers with Atlas and serves
-/// StreamHealth + GetHealth.  Optionally spawns a Piper bridge subprocess
-/// for real hardware data merged into synthetic snapshots.
+/// StreamHealth + GetHealth.  Optionally spawns Piper and/or Koch bridge
+/// subprocesses for real hardware data merged into synthetic snapshots.
 pub async fn run_mock_soma(
     atlas_endpoint: &str,
     provider_id: &str,
@@ -216,6 +295,7 @@ pub async fn run_mock_soma(
     scenario_raw: &str,
     interval_ms: u64,
     piper_config: Option<PiperBridgeConfig>,
+    koch_config: Option<KochBridgeConfig>,
 ) -> Result<()> {
     let scenario = MockScenario::parse(scenario_raw);
     let interval = Duration::from_millis(interval_ms.max(1));
@@ -290,21 +370,48 @@ pub async fn run_mock_soma(
         None => None,
     };
 
+    // Optionally spawn Koch bridge subprocess for real hardware data.
+    let koch_bridge = match koch_config {
+        Some(ref cfg) => {
+            log::info!(
+                "[mock_soma] starting koch bridge: {} {} port={}",
+                cfg.python_bin,
+                cfg.script,
+                cfg.serial_port
+            );
+            match KochBridge::new(&cfg.script, &cfg.python_bin, &cfg.serial_port) {
+                Ok(bridge) => {
+                    log::info!("[mock_soma] koch bridge connected");
+                    Some(Arc::new(bridge))
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[mock_soma] koch bridge failed: {e:#}; falling back to synthetic data"
+                    );
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+
     log::info!(
-        "[mock_soma] scenario={} interval_ms={} listening on {} piper={}",
+        "[mock_soma] scenario={} interval_ms={} listening on {} piper={} koch={}",
         scenario.as_str(),
         interval.as_millis(),
         listen_addr,
-        piper_bridge.is_some()
+        piper_bridge.is_some(),
+        koch_bridge.is_some()
     );
     eprintln!(
-        "mock Soma ready on {listen_addr} scenario={} interval_ms={} piper={}",
+        "mock Soma ready on {listen_addr} scenario={} interval_ms={} piper={} koch={}",
         scenario.as_str(),
         interval.as_millis(),
-        piper_bridge.is_some()
+        piper_bridge.is_some(),
+        koch_bridge.is_some()
     );
 
-    let service = MockSomaService::new(scenario, interval, piper_bridge);
+    let service = MockSomaService::new(scenario, interval, piper_bridge, koch_bridge);
 
     tonic::transport::Server::builder()
         .add_service(RobonixSystemSomaGetHealthServer::new(service.clone()))
@@ -376,12 +483,14 @@ impl RobonixSystemSomaHealth for MockSomaService {
 }
 
 /// Generate one synthetic SomaHealthSnapshot for the given scenario + sequence
-/// number.  When `piper_data` is present, real Piper hardware readings replace
-/// synthetic actuator values for matching joint names.
+/// number.  When `piper_data` / `koch_data` is present, real hardware readings
+/// replace synthetic actuator values for matching joint names on the
+/// corresponding arm.
 pub fn generate_snapshot(
     scenario: MockScenario,
     seq: u64,
     piper_data: Option<&PiperData>,
+    koch_data: Option<&KochData>,
 ) -> SomaHealthSnapshot {
     let now = monotonic_ns();
     let now_i64 = now as i64;
@@ -394,9 +503,9 @@ pub fn generate_snapshot(
             "body",
             "",
             KIND_BODY,
-            "Mock Ranger + Piper",
+            "Mock Ranger + Piper + Koch",
             "base_link",
-            "ranger_piper_v1",
+            "ranger_piper_koch_v1",
         ),
         component(
             "body/computer_jetson",
@@ -431,6 +540,14 @@ pub fn generate_snapshot(
             "piper",
         ),
         component(
+            "body/arm_left",
+            "body",
+            KIND_ARM,
+            "Koch arm",
+            "arm_left_base_link",
+            "koch",
+        ),
+        component(
             "body/battery_main",
             "body",
             KIND_BATTERY,
@@ -440,6 +557,7 @@ pub fn generate_snapshot(
         ),
     ];
 
+    // Piper arm joints (arm_right).
     for joint_idx in 1..=6 {
         components.push(component(
             &format!("body/arm_right/joint_{joint_idx}"),
@@ -451,8 +569,20 @@ pub fn generate_snapshot(
         ));
     }
 
-    // Build actuators: use real Piper data when available, fall back to synthetic.
-    let actuators: Vec<ActuatorState> = if let Some(pd) = piper_data {
+    // Koch arm joints (arm_left).
+    for joint_idx in 1..=6 {
+        components.push(component(
+            &format!("body/arm_left/joint_{joint_idx}"),
+            "body/arm_left",
+            KIND_JOINT,
+            &format!("joint_{joint_idx}"),
+            &format!("joint_{joint_idx}"),
+            "dynamixel_motor",
+        ));
+    }
+
+    // ── Piper actuators ────────────────────────────────────────────────
+    let piper_actuators: Vec<ActuatorState> = if let Some(pd) = piper_data {
         (1..=6)
             .map(|joint_idx| {
                 let component_id = format!("body/arm_right/joint_{joint_idx}");
@@ -503,11 +633,56 @@ pub fn generate_snapshot(
                     torque_enabled,
                     communication_ok,
                     vendor_error_code,
+                    "body/arm_right",
                 )
             })
             .collect()
     };
 
+    // ── Koch actuators ─────────────────────────────────────────────────
+    let koch_actuators: Vec<ActuatorState> = if let Some(kd) = koch_data {
+        (1..=6)
+            .map(|joint_idx| {
+                let component_id = format!("body/arm_left/joint_{joint_idx}");
+                let joint_name = format!("joint_{joint_idx}");
+                let kj = kd.components.iter().find(|c| c.name == joint_name);
+
+                let motor_temp = kj.map(|c| c.temperature).unwrap_or(-1.0);
+                let error_code = kj.map(|c| c.error_code).unwrap_or(0);
+                let enabled = kj.map(|c| c.enabled).unwrap_or(false);
+
+                ActuatorState {
+                    component_id,
+                    joint_name,
+                    position: Some(scalar(joint_idx as f64 * 0.04, "rad")),
+                    velocity: Some(scalar(0.0, "rad/s")),
+                    effort: Some(scalar(0.3 + joint_idx as f64 * 0.04, "Nm")),
+                    current: Some(scalar(0.5 + joint_idx as f64 * 0.02, "A")),
+                    voltage: Some(scalar(12.0, "V")),
+                    motor_temp: Some(scalar(motor_temp, "degC")),
+                    driver_temp: Some(scalar(motor_temp + 2.0, "degC")),
+                    torque_enabled: enabled,
+                    brake_engaged: false,
+                    communication_ok: kj.is_some(),
+                    vendor_mode: 0,
+                    vendor_error_code: error_code,
+                    status_flags: error_code,
+                }
+            })
+            .collect()
+    } else {
+        (1..=6)
+            .map(|joint_idx| {
+                let motor_temp = 32.0 + joint_idx as f64;
+                actuator(joint_idx, motor_temp, true, true, 0, "body/arm_left")
+            })
+            .collect()
+    };
+
+    let mut actuators = piper_actuators;
+    actuators.extend(koch_actuators);
+
+    // ── Faults ─────────────────────────────────────────────────────────
     let mut faults = Vec::new();
     if fault_enabled && seq % 8 >= 4 {
         faults.push(FaultState {
@@ -561,22 +736,69 @@ pub fn generate_snapshot(
         }
     }
 
-    // Build safety state from Piper arm status when available.
-    let safety_aggregate = match piper_data {
-        Some(pd) => match pd.state {
-            0 => SAFETY_NORMAL, // NORMAL
-            2 => SAFETY_ESTOP,  // EMERGENCY_STOP
-            _ => SAFETY_FAULT,  // any other → FAULT
-        },
-        None => SAFETY_NORMAL,
-    };
-    let safety_detail = piper_data.map(|pd| pd.message.clone()).unwrap_or_default();
+    // Merge faults from real Koch data.
+    if let Some(kd) = koch_data {
+        for kj in &kd.components {
+            if kj.error_code != 0 {
+                faults.push(FaultState {
+                    component_id: format!("body/arm_left/{}", kj.name),
+                    fault_id: "koch_hw_fault".to_string(),
+                    severity: FAULT_ERROR,
+                    active: true,
+                    clearable: true,
+                    onset_ts_ns: now_i64,
+                    vendor_code: kj.error_code,
+                    vendor_code_text: format!("0x{:02X}", kj.error_code),
+                    message: format!("{} hw_error=0x{:02X}", kj.name, kj.error_code),
+                    attributes: vec![],
+                    vendor_raw_json: String::new(),
+                });
+            }
+        }
+    }
+
+    // ── Safety state: take the worst of Piper and Koch ─────────────────
+    let mut safety_aggregate = SAFETY_NORMAL;
+
+    if let Some(pd) = piper_data {
+        let arm_safety = match pd.state {
+            0 => SAFETY_NORMAL,
+            2 => SAFETY_ESTOP,
+            _ => SAFETY_FAULT,
+        };
+        safety_aggregate = safety_aggregate.max(arm_safety);
+    }
+
+    if let Some(kd) = koch_data {
+        let arm_safety = if kd.state == 0 {
+            SAFETY_NORMAL
+        } else {
+            SAFETY_FAULT
+        };
+        safety_aggregate = safety_aggregate.max(arm_safety);
+    }
+
+    let mut safety_detail = String::new();
+    if let Some(pd) = piper_data
+        && !pd.message.is_empty()
+    {
+        safety_detail.push_str(&pd.message);
+    }
+    if let Some(kd) = koch_data
+        && !kd.message.is_empty()
+    {
+        if !safety_detail.is_empty() {
+            safety_detail.push_str("; ");
+        }
+        safety_detail.push_str(&kd.message);
+    }
+
     let motion_allowed = safety_aggregate == SAFETY_NORMAL;
     let motor_power_allowed = safety_aggregate == SAFETY_NORMAL;
 
     SomaHealthSnapshot {
         schema_version: SCHEMA_VERSION,
-        body_id: "mock_ranger_piper_01".to_string(),
+        body_id: "mock_ranger_piper_koch_01".to_string(),
         seq,
         source_ts_ns: now_i64,
         soma_ts_ns: now_i64,
@@ -664,9 +886,10 @@ fn actuator(
     torque_enabled: bool,
     communication_ok: bool,
     vendor_error_code: u32,
+    body_prefix: &str,
 ) -> ActuatorState {
     ActuatorState {
-        component_id: format!("body/arm_right/joint_{joint_idx}"),
+        component_id: format!("{body_prefix}/joint_{joint_idx}"),
         joint_name: format!("joint_{joint_idx}"),
         position: Some(scalar(joint_idx as f64 * 0.05, "rad")),
         velocity: Some(scalar(0.0, "rad/s")),
@@ -744,20 +967,35 @@ mod tests {
     }
 
     #[test]
-    fn normal_snapshot_has_three_bodies() {
-        let snapshot = generate_snapshot(MockScenario::Normal, 1, None);
-        // body + 3 root children + cpu + gpu + 6 joints = 12
-        assert_eq!(snapshot.components.len(), 12);
-        assert_eq!(snapshot.actuators.len(), 6);
+    fn normal_snapshot_has_both_arms() {
+        let snapshot = generate_snapshot(MockScenario::Normal, 1, None, None);
+        // body + computer_jetson + cpu + gpu + arm_right + arm_left + battery_main = 7
+        // + 6 right joints + 6 left joints = 19
+        assert_eq!(snapshot.components.len(), 19);
+        // 6 Piper actuators + 6 Koch actuators = 12
+        assert_eq!(snapshot.actuators.len(), 12);
         assert_eq!(snapshot.faults.len(), 0);
+        // Verify both arms are represented.
+        assert!(
+            snapshot
+                .actuators
+                .iter()
+                .any(|a| a.component_id == "body/arm_right/joint_1")
+        );
+        assert!(
+            snapshot
+                .actuators
+                .iter()
+                .any(|a| a.component_id == "body/arm_left/joint_1")
+        );
     }
 
     #[test]
     fn fault_scenario_produces_fault_at_sequence_4() {
-        let snapshot = generate_snapshot(MockScenario::Fault, 4, None);
+        let snapshot = generate_snapshot(MockScenario::Fault, 4, None, None);
         assert!(!snapshot.faults.is_empty());
         assert!(snapshot.faults.iter().any(|f| f.fault_id == "overcurrent"));
-        // joint_3 should have communication_ok = false
+        // joint_3 on arm_right should have communication_ok = false
         let j3 = snapshot
             .actuators
             .iter()
@@ -768,7 +1006,7 @@ mod tests {
 
     #[test]
     fn toggle_scenario_disables_joint_6_at_sequence_4() {
-        let snapshot = generate_snapshot(MockScenario::Toggle, 4, None);
+        let snapshot = generate_snapshot(MockScenario::Toggle, 4, None, None);
         let j6 = snapshot
             .actuators
             .iter()

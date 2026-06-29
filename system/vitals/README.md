@@ -1,6 +1,6 @@
 # robonix-vitals
 
-Monitors robot onboard health (CPU/GPU/NVMe temperature, voltage) and body (joint motors), evaluates thresholds, and reports via gRPC.
+Monitors robot onboard health (CPU/GPU/NVMe temperature, voltage) and body (joint motors), evaluates thresholds, and reports via gRPC. Supports Piper (CAN bus) and Koch (Dynamixel serial) arms via hardware bridge subprocesses.
 
 Vitals consumes the unified health stream from Soma (real or mock). Without Soma, Vitals exits with an error.
 
@@ -20,43 +20,53 @@ Start mock Soma + Vitals across three terminals to run the full health pipeline:
 
 ```bash
 # Terminal 1: Atlas
-target/debug/robonix-atlas \
-  --listen 127.0.0.1:50251 \
-  --capabilities /path/to/robonix/capabilities
+cargo run --release -p robonix-atlas -- --log info
 
 # Terminal 2: mock Soma (scenarios: normal / ramp / fault / toggle / mixed)
-target/debug/robonix-vitals \
+cargo run --release -p robonix-vitals -- --log info \
   --mock-soma \
-  --atlas 127.0.0.1:50251 \
-  --mock-soma-listen 127.0.0.1:50292 \
   --mock-soma-scenario ramp \
   --mock-soma-interval-ms 1000
 
 # Terminal 3: Vitals consuming the Soma health stream
-target/debug/robonix-vitals \
-  --atlas 127.0.0.1:50251 \
-  --listen 127.0.0.1:50291 \
-  --thresholds-path system/vitals/thresholds/example_thresholds.yaml \
-  --log info
-
-# Check registrations
-ROBONIX_ATLAS=127.0.0.1:50251 target/debug/rbnx caps -v
+cargo run --release -p robonix-vitals -- --log info
 ```
 
 ### Mock Soma with real Piper hardware
 
-When `--mock-soma-piper-can` is set, mock Soma spawns a `piper_bridge.py` subprocess to read real Piper joint data and replace synthetic data:
+When `--mock-soma-piper-can` is set, mock Soma spawns a `piper_bridge.py` subprocess to read real Piper joint data and merge it into synthetic snapshots:
 
 ```bash
-target/debug/robonix-vitals \
+target/debug/robonix-vitals --log info \
   --mock-soma \
-  --atlas 127.0.0.1:50251 \
   --mock-soma-piper-can can0 \
   --mock-soma-piper-python /path/to/roboarm/.venv/bin/python3 \
-  --mock-soma-piper-interval-ms 500
+  --mock-soma-interval-ms 1000
 ```
 
-Without `--mock-soma-piper-can`, fully synthetic data is used.
+Without `--mock-soma-piper-can`, fully synthetic Piper data is used.
+
+### Mock Soma with real Koch hardware
+
+When `--mock-soma-koch-port` is set, mock Soma spawns a `koch_bridge.py` subprocess to read real Koch (Dynamixel) joint data via the serial port:
+
+```bash
+target/debug/robonix-vitals --log info \
+  --mock-soma \
+  --mock-soma-koch-port /dev/ttyUSB0 \
+  --mock-soma-koch-python /path/to/roboarm/.venv/bin/python3 \
+  --mock-soma-interval-ms 1000
+```
+
+Piper and Koch bridges can be used together for dual-arm setups:
+
+```bash
+target/debug/robonix-vitals --log info \
+  --mock-soma \
+  --mock-soma-piper-can can0 \
+  --mock-soma-koch-port /dev/ttyUSB0 \
+  --mock-soma-interval-ms 1000
+```
 
 ## CLI flags
 
@@ -74,6 +84,9 @@ Without `--mock-soma-piper-can`, fully synthetic data is used.
 | `--mock-soma-piper-can` | `ROBONIX_VITALS_MOCK_SOMA_PIPER_CAN` | — (empty = synthetic data) |
 | `--mock-soma-piper-python` | `ROBONIX_VITALS_MOCK_SOMA_PIPER_PYTHON` | `python3` |
 | `--mock-soma-piper-script` | `ROBONIX_VITALS_MOCK_SOMA_PIPER_SCRIPT` | `<crate>/scripts/piper_bridge.py` |
+| `--mock-soma-koch-port` | `ROBONIX_VITALS_MOCK_SOMA_KOCH_PORT` | — (empty = synthetic data) |
+| `--mock-soma-koch-python` | `ROBONIX_VITALS_MOCK_SOMA_KOCH_PYTHON` | `python3` |
+| `--mock-soma-koch-script` | `ROBONIX_VITALS_MOCK_SOMA_KOCH_SCRIPT` | `<crate>/scripts/koch_bridge.py` |
 | `--config` | `ROBONIX_CONFIG_PATH` | — |
 | `--log` | `RUST_LOG` | `robonix_vitals=info` |
 

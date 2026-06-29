@@ -40,6 +40,12 @@ pub struct VitalsConfig {
     pub mock_soma_piper_python: String,
     /// Path to piper_bridge.py.
     pub mock_soma_piper_script: PathBuf,
+    /// Serial port for real Koch hardware bridge (e.g. "/dev/ttyUSB0"). Empty = synthetic data.
+    pub mock_soma_koch_port: Option<String>,
+    /// Python binary for the Koch bridge subprocess.
+    pub mock_soma_koch_python: String,
+    /// Path to koch_bridge.py.
+    pub mock_soma_koch_script: PathBuf,
 }
 
 #[derive(Parser, Debug)]
@@ -100,6 +106,18 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_PIPER_SCRIPT")]
     pub mock_soma_piper_script: Option<PathBuf>,
 
+    /// Serial port for real Koch hardware (e.g. "/dev/ttyUSB0"). Empty = synthetic data.
+    #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_KOCH_PORT")]
+    pub mock_soma_koch_port: Option<String>,
+
+    /// Python binary for the Koch bridge subprocess.
+    #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_KOCH_PYTHON")]
+    pub mock_soma_koch_python: Option<String>,
+
+    /// Path to koch_bridge.py script.
+    #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_KOCH_SCRIPT")]
+    pub mock_soma_koch_script: Option<PathBuf>,
+
     /// Optional YAML config file (rbnx writes this; CLI/env still override).
     #[arg(long, env = "ROBONIX_CONFIG_PATH")]
     pub config: Option<PathBuf>,
@@ -136,6 +154,12 @@ struct FileConfig {
     mock_soma_piper_python: Option<String>,
     #[serde(default)]
     mock_soma_piper_script: Option<PathBuf>,
+    #[serde(default)]
+    mock_soma_koch_port: Option<String>,
+    #[serde(default)]
+    mock_soma_koch_python: Option<String>,
+    #[serde(default)]
+    mock_soma_koch_script: Option<PathBuf>,
 }
 
 impl VitalsConfig {
@@ -195,6 +219,17 @@ impl VitalsConfig {
                 .or(file_cfg.mock_soma_piper_script)
                 .unwrap_or_else(|| {
                     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/piper_bridge.py")
+                }),
+            mock_soma_koch_port: args.mock_soma_koch_port.or(file_cfg.mock_soma_koch_port),
+            mock_soma_koch_python: args
+                .mock_soma_koch_python
+                .or(file_cfg.mock_soma_koch_python)
+                .unwrap_or_else(|| "python3".to_string()),
+            mock_soma_koch_script: args
+                .mock_soma_koch_script
+                .or(file_cfg.mock_soma_koch_script)
+                .unwrap_or_else(|| {
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/koch_bridge.py")
                 }),
         })
     }
