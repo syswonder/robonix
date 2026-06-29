@@ -99,19 +99,20 @@ if [[ -f /etc/nv_tegra_release && "${VOICEPRINT_SKIP_JETSON_TORCH:-}" != "1" ]];
     fi
 fi
 
-# ── 3. Pre-download ECAPA-TDNN weights (skip with SKIP_MODEL_DOWNLOAD=1) ───
+# ── 3. Pre-warm ECAPA-TDNN weights from ModelScope (skip with SKIP_MODEL_DOWNLOAD=1) ─
+# Fetch from ModelScope, not HuggingFace: hf_hub's metadata HEAD only follows
+# same-host redirects, and the reachable hf-mirror.com bounces resolve/main to
+# huggingface.co with a cross-host 308 that no hf_hub version follows, so every
+# HF path fails on CN networks. ModelScope's SDK has no such issue (it's also
+# where the speech service pulls FunASR). This populates ~/.cache/modelscope so
+# the service loads offline at startup; engine.py resolves the same repo.
 PY="$VENV/bin/python"
-: "${HF_ENDPOINT:=https://hf-mirror.com}"
-export HF_ENDPOINT
 if [[ "${SKIP_MODEL_DOWNLOAD:-}" != "1" ]]; then
-    echo "[build] downloading ECAPA-TDNN weights → $MODELS"
+    echo "[build] pre-warming ECAPA-TDNN weights from ModelScope → ~/.cache/modelscope"
     "$PY" -c "
-from speechbrain.inference.speaker import SpeakerRecognition
-SpeakerRecognition.from_hparams(
-    source='speechbrain/spkrec-ecapa-voxceleb',
-    savedir='$MODELS/spkrec-ecapa-voxceleb',
-    run_opts={'device': 'cpu'},
-)
+from modelscope.hub.snapshot_download import snapshot_download
+d = snapshot_download('speechbrain/spkrec-ecapa-voxceleb')
+print('[build] ModelScope snapshot:', d)
 " || echo "[build] WARNING: ECAPA-TDNN download failed; service will retry at startup."
 else
     echo "[build] SKIP_MODEL_DOWNLOAD=1 — skipping ECAPA-TDNN download."

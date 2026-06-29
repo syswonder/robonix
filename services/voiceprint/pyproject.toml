@@ -26,6 +26,11 @@ dependencies = [
     "numpy>=1.24,<2",
     "soundfile>=0.12",
     "huggingface-hub>=0.20",
+    # ModelScope supplies the ECAPA-TDNN weights (speechbrain/spkrec-ecapa-voxceleb).
+    # We fetch from ModelScope instead of HuggingFace because hf_hub's metadata
+    # HEAD can't follow hf-mirror.com's cross-host redirect on CN networks. See
+    # engine.py:_resolve_source and scripts/build.sh.
+    "modelscope>=1.9",
 ]
 
 [tool.uv]
