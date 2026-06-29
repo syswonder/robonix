@@ -965,4 +965,195 @@ mod tests {
             .unwrap();
         assert!(!j6.torque_enabled);
     }
+
+    /// Run every scenario through a few sequences and verify expected invariants.
+    #[test]
+    fn all_scenarios_produce_valid_snapshots() {
+        for scenario in [
+            MockScenario::Normal,
+            MockScenario::Ramp,
+            MockScenario::Fault,
+            MockScenario::Toggle,
+            MockScenario::Mixed,
+        ] {
+            for seq in 1..=12 {
+                let s = generate_snapshot(scenario, seq, None);
+                // Every snapshot must have 12 components and exactly 6 actuators.
+                assert_eq!(
+                    s.components.len(),
+                    12,
+                    "{} seq={}: expected 12 components, got {}",
+                    scenario.as_str(),
+                    seq,
+                    s.components.len()
+                );
+                assert_eq!(
+                    s.actuators.len(),
+                    6,
+                    "{} seq={}: expected 6 actuators, got {}",
+                    scenario.as_str(),
+                    seq,
+                    s.actuators.len()
+                );
+                // Arm component must be present.
+                assert!(
+                    s.components.iter().any(|c| c.id == "body/arm"),
+                    "{} seq={}: missing body/arm",
+                    scenario.as_str(),
+                    seq
+                );
+                // All 6 joints present.
+                for j in 1..=6 {
+                    assert!(
+                        s.actuators
+                            .iter()
+                            .any(|a| a.component_id == format!("body/arm/joint_{j}")),
+                        "{} seq={}: missing joint_{}",
+                        scenario.as_str(),
+                        seq,
+                        j
+                    );
+                }
+                // All snapshots must have a valid schema_version and body_id.
+                assert!(!s.body_id.is_empty());
+                assert!(s.schema_version > 0);
+                assert!(s.power_sources.len() == 1);
+                assert!(s.safety.is_some());
+            }
+        }
+    }
+
+    /// Normal: no faults at any sequence, all joints OK.
+    #[test]
+    fn normal_scenario_never_produces_faults() {
+        for seq in 1..=20 {
+            let s = generate_snapshot(MockScenario::Normal, seq, None);
+            assert!(s.faults.is_empty(), "Normal seq={}: unexpected faults", seq);
+            for a in &s.actuators {
+                assert!(a.communication_ok, "Normal seq={}: comm not ok", seq);
+                assert!(a.torque_enabled, "Normal seq={}: disabled", seq);
+            }
+            assert_eq!(s.safety.as_ref().unwrap().aggregate_state, SAFETY_NORMAL);
+        }
+    }
+
+    /// Ramp: joint_1 temp ramps up, eventually exceeding WARN (60°C) and ERROR (75°C).
+    #[test]
+    fn ramp_scenario_joint_1_temp_increases() {
+        let t1 = generate_snapshot(MockScenario::Ramp, 1, None)
+            .actuators
+            .iter()
+            .find(|a| a.component_id == "body/arm/joint_1")
+            .unwrap()
+            .motor_temp
+            .as_ref()
+            .unwrap()
+            .value;
+        let t22 = generate_snapshot(MockScenario::Ramp, 22, None)
+            .actuators
+            .iter()
+            .find(|a| a.component_id == "body/arm/joint_1")
+            .unwrap()
+            .motor_temp
+            .as_ref()
+            .unwrap()
+            .value;
+        let t30 = generate_snapshot(MockScenario::Ramp, 30, None)
+            .actuators
+            .iter()
+            .find(|a| a.component_id == "body/arm/joint_1")
+            .unwrap()
+            .motor_temp
+            .as_ref()
+            .unwrap()
+            .value;
+        // joint_1 temp should increase from seq 1 to 22.
+        assert!(t22 > t1, "ramp temp should rise: t1={t1}, t22={t22}");
+        // By seq 30 (end of ramp cycle), temp should be near peak (~88°C).
+        assert!(t30 > 75.0, "ramp seq=30 should exceed ERROR threshold: {t30}");
+        // Seq 31 restarts ramp (seq 1 is 40+1.6*0=40, seq 31 wraps same way).
+        let t31 = generate_snapshot(MockScenario::Ramp, 31, None)
+            .actuators
+            .iter()
+            .find(|a| a.component_id == "body/arm/joint_1")
+            .unwrap()
+            .motor_temp
+            .as_ref()
+            .unwrap()
+            .value;
+        assert!(t31 < 42.0, "ramp seq=31 should reset: {t31}");
+    }
+
+    /// Fault: joint_3 gets overcurrent fault and communication failure on seq 4..7, 12..15, etc.
+    #[test]
+    fn fault_scenario_joint_3_toggles_periodically() {
+        for seq in 1..=20 {
+            let s = generate_snapshot(MockScenario::Fault, seq, None);
+            let j3 = s
+                .actuators
+                .iter()
+                .find(|a| a.component_id == "body/arm/joint_3")
+                .unwrap();
+            let fault_expected = seq % 8 >= 4;
+            assert_eq!(
+                !j3.communication_ok,
+                fault_expected,
+                "Fault seq={}: j3 comm_ok should be {}",
+                seq,
+                !fault_expected
+            );
+            if fault_expected {
+                assert!(
+                    s.faults.iter().any(|f| f.fault_id == "overcurrent"),
+                    "Fault seq={}: missing overcurrent fault",
+                    seq
+                );
+            }
+        }
+    }
+
+    /// Toggle: joint_6 torque_enabled toggles off on seq 4..7, 12..15, etc.
+    #[test]
+    fn toggle_scenario_joint_6_toggles_periodically() {
+        for seq in 1..=20 {
+            let s = generate_snapshot(MockScenario::Toggle, seq, None);
+            let j6 = s
+                .actuators
+                .iter()
+                .find(|a| a.component_id == "body/arm/joint_6")
+                .unwrap();
+            let disabled_expected = seq % 8 >= 4;
+            assert_eq!(
+                !j6.torque_enabled,
+                disabled_expected,
+                "Toggle seq={}: j6 enabled should be {}",
+                seq,
+                !disabled_expected
+            );
+        }
+    }
+
+    /// Mixed: ramp + fault + toggle simultaneously.
+    #[test]
+    fn mixed_scenario_combines_all_behaviors() {
+        // Seq 4: fault active + toggle disabled + ramp building up.
+        let s4 = generate_snapshot(MockScenario::Mixed, 4, None);
+        assert!(s4.faults.iter().any(|f| f.fault_id == "overcurrent"));
+        let j3 = s4
+            .actuators
+            .iter()
+            .find(|a| a.component_id == "body/arm/joint_3")
+            .unwrap();
+        assert!(!j3.communication_ok);
+        let j6 = s4
+            .actuators
+            .iter()
+            .find(|a| a.component_id == "body/arm/joint_6")
+            .unwrap();
+        assert!(!j6.torque_enabled);
+
+        // Seq 2: no faults, no toggle, ramp at early stage.
+        let s2 = generate_snapshot(MockScenario::Mixed, 2, None);
+        assert!(s2.faults.is_empty());
+    }
 }
