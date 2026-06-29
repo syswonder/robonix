@@ -167,11 +167,30 @@ fn emit_build_metadata(repo_root: &std::path::Path) {
     println!("cargo:rustc-env=ROBONIX_RUSTC={rustc_ver}");
     println!("cargo:rustc-env=ROBONIX_TARGET={target}");
 
-    // Rerun if any of these inputs change. The repo's HEAD ref is the
-    // most useful signal — covers commits and branch switches.
-    let head = repo_root.join(".git").join("HEAD");
+    // Rerun if the repo's commit changes. Watching only `.git/HEAD` is NOT
+    // enough: on a branch, HEAD stays "ref: refs/heads/<branch>" across
+    // commits — the file that actually changes is the ref it points to (and
+    // `.git/logs/HEAD`). Without these the embedded sha/build-time go stale
+    // after committing on the same branch (the binary recompiles from changed
+    // sources, but build.rs is not re-run, so the banner shows an old commit).
+    let git_dir = repo_root.join(".git");
+    let head = git_dir.join("HEAD");
     if head.exists() {
         println!("cargo:rerun-if-changed={}", head.display());
+        if let Ok(contents) = std::fs::read_to_string(&head)
+            && let Some(refpath) = contents.strip_prefix("ref:").map(str::trim)
+        {
+            let ref_file = git_dir.join(refpath);
+            if ref_file.exists() {
+                println!("cargo:rerun-if-changed={}", ref_file.display());
+            }
+        }
+    }
+    // logs/HEAD updates on every commit / checkout / reset — reliable catch-all
+    // (also covers the packed-refs case where the loose ref file is absent).
+    let logs_head = git_dir.join("logs").join("HEAD");
+    if logs_head.exists() {
+        println!("cargo:rerun-if-changed={}", logs_head.display());
     }
     println!("cargo:rerun-if-env-changed=ROBONIX_GIT_SHA");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
