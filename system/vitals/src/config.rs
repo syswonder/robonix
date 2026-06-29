@@ -20,6 +20,38 @@ pub const DEFAULT_LISTEN: &str = "127.0.0.1:50091";
 pub const DEFAULT_MOCK_SOMA_LISTEN: &str = "127.0.0.1:50092";
 /// Default mock Soma stream update interval in milliseconds.
 pub const DEFAULT_MOCK_SOMA_INTERVAL_MS: u64 = 10_000;
+/// Default Python binary for hardware bridge subprocesses.
+pub const DEFAULT_BRIDGE_PYTHON: &str = "python3";
+
+/// Mock Soma arm data source: fully synthetic, or real hardware via bridge.
+#[derive(Debug, Clone)]
+pub enum MockArmConfig {
+    /// Fully synthetic arm data — no bridge subprocess.
+    Synthetic,
+    /// Real Piper arm via piper_sdk on a CAN bus.
+    Piper {
+        can_port: String,
+        python_bin: String,
+        script: PathBuf,
+    },
+    /// Real Koch arm via dynamixel_sdk on a serial port.
+    Koch {
+        serial_port: String,
+        python_bin: String,
+        script: PathBuf,
+    },
+}
+
+impl MockArmConfig {
+    /// Short label for logging / display.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Synthetic => "synthetic",
+            Self::Piper { .. } => "piper",
+            Self::Koch { .. } => "koch",
+        }
+    }
+}
 
 /// Resolved Vitals configuration: compiled defaults < YAML < CLI/env.
 #[derive(Debug, Clone)]
@@ -34,18 +66,8 @@ pub struct VitalsConfig {
     pub mock_soma_listen: String,
     pub mock_soma_scenario: String,
     pub mock_soma_interval_ms: u64,
-    /// CAN port for real Piper hardware bridge (e.g. "can0"). Empty = synthetic data.
-    pub mock_soma_piper_can: Option<String>,
-    /// Python binary for the Piper bridge subprocess.
-    pub mock_soma_piper_python: String,
-    /// Path to piper_bridge.py.
-    pub mock_soma_piper_script: PathBuf,
-    /// Serial port for real Koch hardware bridge (e.g. "/dev/ttyUSB0"). Empty = synthetic data.
-    pub mock_soma_koch_port: Option<String>,
-    /// Python binary for the Koch bridge subprocess.
-    pub mock_soma_koch_python: String,
-    /// Path to koch_bridge.py.
-    pub mock_soma_koch_script: PathBuf,
+    /// Mock arm data source (default: Synthetic).
+    pub mock_soma_arm: MockArmConfig,
 }
 
 #[derive(Parser, Debug)]
@@ -94,25 +116,25 @@ pub struct Args {
     #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_INTERVAL_MS")]
     pub mock_soma_interval_ms: Option<u64>,
 
-    /// CAN port for real Piper hardware (e.g. "can0"). Empty = fully synthetic mock data.
+    /// Mock arm data source: synthetic (default), piper, or koch.
+    #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_ARM")]
+    pub mock_soma_arm: Option<String>,
+
+    /// CAN port for real Piper hardware (e.g. "can0"). Only used with --mock-soma-arm=piper.
     #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_PIPER_CAN")]
     pub mock_soma_piper_can: Option<String>,
 
-    /// Python binary for the Piper bridge subprocess.
-    #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_PIPER_PYTHON")]
-    pub mock_soma_piper_python: Option<String>,
+    /// Serial port for real Koch hardware (e.g. "/dev/ttyUSB0"). Only used with --mock-soma-arm=koch.
+    #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_KOCH_PORT")]
+    pub mock_soma_koch_port: Option<String>,
+
+    /// Python binary for hardware bridge subprocesses.
+    #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_BRIDGE_PYTHON")]
+    pub mock_soma_bridge_python: Option<String>,
 
     /// Path to piper_bridge.py script.
     #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_PIPER_SCRIPT")]
     pub mock_soma_piper_script: Option<PathBuf>,
-
-    /// Serial port for real Koch hardware (e.g. "/dev/ttyUSB0"). Empty = synthetic data.
-    #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_KOCH_PORT")]
-    pub mock_soma_koch_port: Option<String>,
-
-    /// Python binary for the Koch bridge subprocess.
-    #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_KOCH_PYTHON")]
-    pub mock_soma_koch_python: Option<String>,
 
     /// Path to koch_bridge.py script.
     #[arg(long, env = "ROBONIX_VITALS_MOCK_SOMA_KOCH_SCRIPT")]
@@ -149,15 +171,15 @@ struct FileConfig {
     #[serde(default)]
     mock_soma_interval_ms: Option<u64>,
     #[serde(default)]
+    mock_soma_arm: Option<String>,
+    #[serde(default)]
     mock_soma_piper_can: Option<String>,
-    #[serde(default)]
-    mock_soma_piper_python: Option<String>,
-    #[serde(default)]
-    mock_soma_piper_script: Option<PathBuf>,
     #[serde(default)]
     mock_soma_koch_port: Option<String>,
     #[serde(default)]
-    mock_soma_koch_python: Option<String>,
+    mock_soma_bridge_python: Option<String>,
+    #[serde(default)]
+    mock_soma_piper_script: Option<PathBuf>,
     #[serde(default)]
     mock_soma_koch_script: Option<PathBuf>,
 }
@@ -171,9 +193,65 @@ impl VitalsConfig {
             None => FileConfig::default(),
         };
 
-        // Default threshold paths: <crate>/thresholds/
         let thresholds_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("thresholds");
         let default_thresholds = thresholds_dir.join("example_thresholds.yaml");
+
+        let arm_kind = args
+            .mock_soma_arm
+            .or(file_cfg.mock_soma_arm)
+            .unwrap_or_else(|| "synthetic".to_string());
+
+        let bridge_python = args
+            .mock_soma_bridge_python
+            .or(file_cfg.mock_soma_bridge_python)
+            .unwrap_or_else(|| DEFAULT_BRIDGE_PYTHON.to_string());
+
+        let mock_soma_arm = match arm_kind.trim().to_ascii_lowercase().as_str() {
+            "piper" => {
+                let can = args
+                    .mock_soma_piper_can
+                    .or(file_cfg.mock_soma_piper_can)
+                    .unwrap_or_else(|| "can0".to_string());
+                let script = args
+                    .mock_soma_piper_script
+                    .or(file_cfg.mock_soma_piper_script)
+                    .unwrap_or_else(|| {
+                        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/piper_bridge.py")
+                    });
+                MockArmConfig::Piper {
+                    can_port: can,
+                    python_bin: bridge_python,
+                    script,
+                }
+            }
+            "koch" => {
+                let port = args
+                    .mock_soma_koch_port
+                    .or(file_cfg.mock_soma_koch_port)
+                    .unwrap_or_else(|| "/dev/ttyUSB0".to_string());
+                let script = args
+                    .mock_soma_koch_script
+                    .or(file_cfg.mock_soma_koch_script)
+                    .unwrap_or_else(|| {
+                        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/koch_bridge.py")
+                    });
+                MockArmConfig::Koch {
+                    serial_port: port,
+                    python_bin: bridge_python,
+                    script,
+                }
+            }
+            other => {
+                if other != "synthetic" {
+                    log::warn!(
+                        "[vitals] unrecognized --mock-soma-arm '{}', using synthetic",
+                        other
+                    );
+                }
+                MockArmConfig::Synthetic
+            }
+        };
+
         Ok(Self {
             atlas_endpoint: args
                 .atlas
@@ -209,28 +287,7 @@ impl VitalsConfig {
                 .mock_soma_interval_ms
                 .or(file_cfg.mock_soma_interval_ms)
                 .unwrap_or(DEFAULT_MOCK_SOMA_INTERVAL_MS),
-            mock_soma_piper_can: args.mock_soma_piper_can.or(file_cfg.mock_soma_piper_can),
-            mock_soma_piper_python: args
-                .mock_soma_piper_python
-                .or(file_cfg.mock_soma_piper_python)
-                .unwrap_or_else(|| "python3".to_string()),
-            mock_soma_piper_script: args
-                .mock_soma_piper_script
-                .or(file_cfg.mock_soma_piper_script)
-                .unwrap_or_else(|| {
-                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/piper_bridge.py")
-                }),
-            mock_soma_koch_port: args.mock_soma_koch_port.or(file_cfg.mock_soma_koch_port),
-            mock_soma_koch_python: args
-                .mock_soma_koch_python
-                .or(file_cfg.mock_soma_koch_python)
-                .unwrap_or_else(|| "python3".to_string()),
-            mock_soma_koch_script: args
-                .mock_soma_koch_script
-                .or(file_cfg.mock_soma_koch_script)
-                .unwrap_or_else(|| {
-                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/koch_bridge.py")
-                }),
+            mock_soma_arm,
         })
     }
 }
@@ -271,18 +328,36 @@ mod tests {
     }
 
     #[test]
-    fn args_piper_bridge_flags() {
+    fn args_piper_arm_flags() {
         let args = Args::try_parse_from([
             "robonix-vitals",
             "--mock-soma",
+            "--mock-soma-arm",
+            "piper",
             "--mock-soma-piper-can",
             "can0",
-            "--mock-soma-piper-python",
+            "--mock-soma-bridge-python",
             "/usr/bin/python3",
         ])
-        .expect("parse piper bridge args");
+        .expect("parse piper arm args");
+        assert_eq!(args.mock_soma_arm.unwrap(), "piper");
         assert_eq!(args.mock_soma_piper_can.unwrap(), "can0");
-        assert_eq!(args.mock_soma_piper_python.unwrap(), "/usr/bin/python3");
+        assert_eq!(args.mock_soma_bridge_python.unwrap(), "/usr/bin/python3");
+    }
+
+    #[test]
+    fn args_koch_arm_flags() {
+        let args = Args::try_parse_from([
+            "robonix-vitals",
+            "--mock-soma",
+            "--mock-soma-arm",
+            "koch",
+            "--mock-soma-koch-port",
+            "/dev/ttyUSB0",
+        ])
+        .expect("parse koch arm args");
+        assert_eq!(args.mock_soma_arm.unwrap(), "koch");
+        assert_eq!(args.mock_soma_koch_port.unwrap(), "/dev/ttyUSB0");
     }
 
     #[test]
@@ -296,6 +371,7 @@ mod tests {
         assert_eq!(cfg.mock_soma_interval_ms, DEFAULT_MOCK_SOMA_INTERVAL_MS);
         assert!(cfg.soma_endpoint.is_none());
         assert!(!cfg.mock_soma);
+        assert!(matches!(cfg.mock_soma_arm, MockArmConfig::Synthetic));
     }
 
     #[test]
@@ -314,5 +390,39 @@ mod tests {
         assert_eq!(cfg.id, "custom-vitals");
         assert_eq!(cfg.listen, "0.0.0.0:9999");
         assert_eq!(cfg.soma_endpoint.unwrap(), "10.0.0.1:50092");
+    }
+
+    #[test]
+    fn resolve_piper_arm_config() {
+        let args = Args::try_parse_from([
+            "robonix-vitals",
+            "--mock-soma-arm",
+            "piper",
+            "--mock-soma-piper-can",
+            "can1",
+        ])
+        .unwrap();
+        let cfg = VitalsConfig::resolve(args).expect("resolve piper arm");
+        match &cfg.mock_soma_arm {
+            MockArmConfig::Piper { can_port, .. } => assert_eq!(can_port, "can1"),
+            other => panic!("expected Piper, got {:?}", other.label()),
+        }
+    }
+
+    #[test]
+    fn resolve_koch_arm_config() {
+        let args = Args::try_parse_from([
+            "robonix-vitals",
+            "--mock-soma-arm",
+            "koch",
+            "--mock-soma-koch-port",
+            "/dev/ttyUSB1",
+        ])
+        .unwrap();
+        let cfg = VitalsConfig::resolve(args).expect("resolve koch arm");
+        match &cfg.mock_soma_arm {
+            MockArmConfig::Koch { serial_port, .. } => assert_eq!(serial_port, "/dev/ttyUSB1"),
+            other => panic!("expected Koch, got {:?}", other.label()),
+        }
     }
 }
