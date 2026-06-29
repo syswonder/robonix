@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
             atlas_pb::Transport::Grpc,
             &advertised,
             atlas_client::grpc_params(
-                "capabilities/service/vitals/get.v1.toml",
+                "capabilities/system/vitals/get.v1.toml",
                 "robonix.contracts.RobonixServiceVitalsGet",
                 "/robonix.contracts.RobonixServiceVitalsGet/GetVitals",
             ),
@@ -110,7 +110,7 @@ async fn main() -> Result<()> {
             atlas_pb::Transport::Grpc,
             &advertised,
             atlas_client::grpc_params(
-                "capabilities/service/vitals/stream.v1.toml",
+                "capabilities/system/vitals/stream.v1.toml",
                 "robonix.contracts.RobonixServiceVitalsStream",
                 "/robonix.contracts.RobonixServiceVitalsStream/StreamVitals",
             ),
