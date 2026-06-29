@@ -899,21 +899,21 @@ mod tests {
 
     #[test]
     fn ramp_snapshot_crosses_joint_error_threshold() {
-        let snapshot = generate_snapshot(MockScenario::Ramp, 24, None, None);
+        let snapshot = generate_snapshot(MockScenario::Ramp, 24, None);
         let vitals = snapshot_to_vitals(&snapshot, &default_thresholds(), 123);
         let joint = vitals
             .components
             .iter()
-            .find(|c| c.name == "body/arm_right/joint_1/motor_temp")
+            .find(|c| c.name == "body/arm/joint_1/motor_temp")
             .expect("joint_1 motor temp health");
         assert_eq!(joint.health, HEALTH_ERROR);
     }
 
     #[test]
     fn body_health_groups_root_children() {
-        let snapshot = generate_snapshot(MockScenario::Normal, 1, None, None);
+        let snapshot = generate_snapshot(MockScenario::Normal, 1, None);
         let vitals = snapshot_to_vitals(&snapshot, &default_thresholds(), 123);
-        assert_eq!(vitals.bodies.len(), 4);
+        assert_eq!(vitals.bodies.len(), 3);
 
         let computer = vitals
             .bodies
@@ -928,33 +928,19 @@ mod tests {
                 .any(|c| c.id == "body/computer_jetson/cpu" && c.kind == "sensor")
         );
 
-        let arm_right = vitals
+        let arm = vitals
             .bodies
             .iter()
-            .find(|body| body.body_type == "arm_right")
-            .expect("arm_right health");
-        assert_eq!(arm_right.model, "piper");
-        let joint = arm_right
+            .find(|body| body.body_type == "arm")
+            .expect("arm health");
+        assert_eq!(arm.model, "mock_arm");
+        let joint = arm
             .components
             .iter()
-            .find(|c| c.id == "body/arm_right/joint_1")
+            .find(|c| c.id == "body/arm/joint_1")
             .expect("joint_1 component");
-        assert_eq!(joint.parent_id, "body/arm_right");
-        assert_eq!(joint.model, "piper_motor");
-
-        let arm_left = vitals
-            .bodies
-            .iter()
-            .find(|body| body.body_type == "arm_left")
-            .expect("arm_left health");
-        assert_eq!(arm_left.model, "koch");
-        let left_joint = arm_left
-            .components
-            .iter()
-            .find(|c| c.id == "body/arm_left/joint_1")
-            .expect("koch joint_1 component");
-        assert_eq!(left_joint.parent_id, "body/arm_left");
-        assert_eq!(left_joint.model, "dynamixel_motor");
+        assert_eq!(joint.parent_id, "body/arm");
+        assert_eq!(joint.model, "mock_motor");
 
         let battery = vitals
             .bodies
@@ -978,19 +964,19 @@ rules:
     error_above: 95.0
   - id: exact
     selector:
-      component_id: "body/arm_right/joint_1"
+      component_id: "body/arm/joint_1"
       signal: "motor_temp"
     warn_above: 36.0
     error_above: 50.0
 "#,
         )
         .unwrap();
-        let snapshot = generate_snapshot(MockScenario::Normal, 1, None, None);
+        let snapshot = generate_snapshot(MockScenario::Normal, 1, None);
         let vitals = snapshot_to_vitals(&snapshot, &rules, 123);
         let joint = vitals
             .components
             .iter()
-            .find(|c| c.name == "body/arm_right/joint_1/motor_temp")
+            .find(|c| c.name == "body/arm/joint_1/motor_temp")
             .expect("joint_1 motor temp health");
         assert_eq!(joint.health, HEALTH_WARN);
     }
@@ -999,7 +985,7 @@ rules:
     fn unknown_fault_severity_maps_to_error() {
         let snapshot = SomaHealthSnapshot {
             faults: vec![FaultState {
-                component_id: "body/arm_right/joint_1".to_string(),
+                component_id: "body/arm/joint_1".to_string(),
                 fault_id: "future_critical".to_string(),
                 severity: 99, // unknown severity from a newer Soma version
                 active: true,
@@ -1011,13 +997,13 @@ rules:
                 attributes: vec![],
                 vendor_raw_json: String::new(),
             }],
-            ..generate_snapshot(MockScenario::Normal, 1, None, None)
+            ..generate_snapshot(MockScenario::Normal, 1, None)
         };
         let vitals = snapshot_to_vitals(&snapshot, &default_thresholds(), 123);
         let fault = vitals
             .components
             .iter()
-            .find(|c| c.name == "body/arm_right/joint_1/fault/future_critical")
+            .find(|c| c.name == "body/arm/joint_1/fault/future_critical")
             .expect("fault component");
         assert_eq!(
             fault.health, HEALTH_ERROR,
@@ -1040,9 +1026,9 @@ rules:
 
     #[test]
     fn glob_matches_exact_and_wildcard() {
-        assert!(glob_matches("body/arm_right/*", "body/arm_right/joint_1"));
-        assert!(!glob_matches("body/arm_right/*", "body/arm_left/joint_1"));
-        assert!(glob_matches("body/*/joint_1", "body/arm_right/joint_1"));
-        assert!(!glob_matches("body/*/joint_1", "body/arm_right/joint_2"));
+        assert!(glob_matches("body/arm/*", "body/arm/joint_1"));
+        assert!(!glob_matches("body/leg/*", "body/arm/joint_1"));
+        assert!(glob_matches("body/*/joint_1", "body/arm/joint_1"));
+        assert!(!glob_matches("body/*/joint_1", "body/arm/joint_2"));
     }
 }

@@ -5,9 +5,10 @@ Vitals' `--mock-soma` starts a full mock Soma gRPC server in-process, streaming
 **the processing pipeline is identical to production mode**. No real hardware
 or real Soma needed for development and debugging.
 
-Optionally, with `--mock-soma-piper-can` (CAN port) or `--mock-soma-koch-port`
-(serial port), mock Soma spawns `piper_bridge.py` / `koch_bridge.py` subprocesses
-to read real Piper / Koch arm joint data and replace synthetic data.
+Optionally, `--mock-soma-arm` selects a hardware backend: `synthetic` (default),
+`piper` (CAN bus via piper_sdk), or `koch` (Dynamixel serial via dynamixel_sdk).
+When a real backend is chosen, mock Soma spawns the corresponding bridge
+subprocess to read real joint data and merge it into the synthetic snapshot.
 
 ## Deployment topology
 
@@ -17,11 +18,8 @@ to read real Piper / Koch arm joint data and replace synthetic data.
 │   5 scenarios producing deterministic mock   │
 │   data                                       │
 │                                              │
-│                                              │
-│   Optional: piper_bridge.py subprocess       │
-│   → real Piper CAN data merged into snapshot │
-│   Optional: koch_bridge.py subprocess        │
-│   → real Koch Dynamixel data merged in       │
+│   Optional: hardware bridge subprocess       │
+│   → real arm data merged into snapshot       │
 │   gRPC server on :50092                      │
 └──────────────┬──────────────────────────────┘
                │ StreamHealth (gRPC, loopback)
@@ -68,17 +66,17 @@ target/debug/robonix-vitals \
 target/debug/robonix-vitals \
   --mock-soma \
   --atlas 127.0.0.1:50251 \
+  --mock-soma-arm piper \
   --mock-soma-piper-can can0 \
-  --mock-soma-piper-python /path/to/roboarm/.venv/bin/python3 \
+  --mock-soma-bridge-python /path/to/roboarm/.venv/bin/python3 \
   --mock-soma-interval-ms 500
 ```
 
-When `--mock-soma-piper-can` is set:
+When `--mock-soma-arm=piper`:
 - Spawns `piper_bridge.py` subprocess, reads real joint data via piper_sdk
-- Replaces matching ActuatorState by `joint_1..6` name on `body/arm_right`
+- Replaces matching ActuatorState by `joint_1..6` name on `body/arm`
 - `PiperData.state` → SafetyState.aggregate_state
 - Non-zero error_code → appended FaultState
-- Without it, fully synthetic Piper data is used
 
 ### Koch arm (Dynamixel serial)
 
@@ -86,19 +84,17 @@ When `--mock-soma-piper-can` is set:
 target/debug/robonix-vitals \
   --mock-soma \
   --atlas 127.0.0.1:50251 \
+  --mock-soma-arm koch \
   --mock-soma-koch-port /dev/ttyUSB0 \
-  --mock-soma-koch-python /path/to/roboarm/.venv/bin/python3 \
+  --mock-soma-bridge-python /path/to/roboarm/.venv/bin/python3 \
   --mock-soma-interval-ms 500
 ```
 
-When `--mock-soma-koch-port` is set:
+When `--mock-soma-arm=koch`:
 - Spawns `koch_bridge.py` subprocess, reads real joint data via dynamixel_sdk
-- Replaces matching ActuatorState by `joint_1..6` name on `body/arm_left`
+- Replaces matching ActuatorState by `joint_1..6` name on `body/arm`
 - `KochData.state` → SafetyState.aggregate_state (NORMAL=0, FAULT=1)
 - Non-zero Hardware_Error_Status → appended FaultState
-- Without it, fully synthetic Koch data is used
-
-Both bridges can be used simultaneously for dual-arm setups.
 
 ## Mock scenarios
 
@@ -112,16 +108,14 @@ Both bridges can be used simultaneously for dual-arm setups.
 
 ## Simulated robot
 
-The mock snapshot represents a small robot with a Jetson compute platform, Piper arm (right), Koch arm (left), and battery:
+The mock snapshot represents a small robot with a Jetson compute platform, one arm, and battery:
 
 ```
 body
   computer_jetson
     cpu
     gpu
-  arm_right (Piper, CAN)
-    joint_1 .. joint_6
-  arm_left (Koch, Dynamixel)
+  arm (model varies by --mock-soma-arm)
     joint_1 .. joint_6
   battery_main
 ```
@@ -129,29 +123,31 @@ body
 Each joint publishes actuator data (position/velocity/effort/motor_temp/driver_temp etc.),
 the battery publishes soc/voltage/current/temperature, and Jetson publishes cpu/gpu temps and fan_rpm.
 
+The arm component model depends on the selected backend:
+- `synthetic` → `mock_arm` / `mock_motor`
+- `piper` → `piper` / `piper_motor`
+- `koch` → `koch` / `dynamixel_motor`
+
 ## Expected log output
 
 Using the `mixed` scenario:
 
 ```
 # Temperature threshold changes
-body/arm_right/joint_1/motor_temp health: OK -> WARN
-body/arm_right/joint_1/motor_temp health: WARN -> ERROR
+body/arm/joint_1/motor_temp health: OK -> WARN
+body/arm/joint_1/motor_temp health: WARN -> ERROR
 
 # Explicit faults
-ALERT: body/arm_right/joint_3/fault/overcurrent - mock joint_3 overcurrent
+ALERT: body/arm/joint_3/fault/overcurrent - mock joint_3 overcurrent
 
 # Enable state changes
-body/arm_right/joint_6 enabled: true -> false
+body/arm/joint_6 enabled: true -> false
 
 # Body state changes
-arm_right/piper body state: NORMAL -> FAULT
-
-# Koch arm body
-arm_left/koch body state: NORMAL (first reading)
+arm/mock_arm body state: NORMAL -> FAULT
 
 # Snapshot summary
-24.2V | body/arm_right/joint_1/motor_temp:OK(40) ...
+24.2V | body/arm/joint_1/motor_temp:OK(40) ...
 ```
 
 ## Check registrations
@@ -210,17 +206,17 @@ in `soma_ingest.rs`.
 | `--mock-soma-listen` | `ROBONIX_VITALS_MOCK_SOMA_LISTEN` | `127.0.0.1:50092` |
 | `--mock-soma-scenario` | `ROBONIX_VITALS_MOCK_SOMA_SCENARIO` | `normal` |
 | `--mock-soma-interval-ms` | `ROBONIX_VITALS_MOCK_SOMA_INTERVAL_MS` | `10000` |
-| `--mock-soma-piper-can` | `ROBONIX_VITALS_MOCK_SOMA_PIPER_CAN` | — |
-| `--mock-soma-piper-python` | `ROBONIX_VITALS_MOCK_SOMA_PIPER_PYTHON` | `python3` |
+| `--mock-soma-arm` | `ROBONIX_VITALS_MOCK_SOMA_ARM` | `synthetic` |
+| `--mock-soma-piper-can` | `ROBONIX_VITALS_MOCK_SOMA_PIPER_CAN` | `can0` (when arm=piper) |
+| `--mock-soma-koch-port` | `ROBONIX_VITALS_MOCK_SOMA_KOCH_PORT` | `/dev/ttyUSB0` (when arm=koch) |
+| `--mock-soma-bridge-python` | `ROBONIX_VITALS_MOCK_SOMA_BRIDGE_PYTHON` | `python3` |
 | `--mock-soma-piper-script` | `ROBONIX_VITALS_MOCK_SOMA_PIPER_SCRIPT` | `<crate>/scripts/piper_bridge.py` |
-| `--mock-soma-koch-port` | `ROBONIX_VITALS_MOCK_SOMA_KOCH_PORT` | — |
-| `--mock-soma-koch-python` | `ROBONIX_VITALS_MOCK_SOMA_KOCH_PYTHON` | `python3` |
 | `--mock-soma-koch-script` | `ROBONIX_VITALS_MOCK_SOMA_KOCH_SCRIPT` | `<crate>/scripts/koch_bridge.py` |
 
 ## Implementation files
 
 ```
-system/vitals/src/mock_soma.rs     # MockSomaService + PiperBridge + KochBridge + generate_snapshot
+system/vitals/src/mock_soma.rs     # MockSomaService + ArmBridge + generate_snapshot
 system/vitals/src/subprocess.rs    # SubprocessHandle (bridge subprocess management)
 system/vitals/scripts/piper_bridge.py    # PiperCollector + stdin/stdout JSON wrapper
 system/vitals/scripts/koch_bridge.py     # KochCollector + stdin/stdout JSON wrapper

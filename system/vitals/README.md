@@ -32,39 +32,25 @@ cargo run --release -p robonix-vitals -- --log info \
 cargo run --release -p robonix-vitals -- --log info
 ```
 
-### Mock Soma with real Piper hardware
+### Mock Soma with real hardware
 
-When `--mock-soma-piper-can` is set, mock Soma spawns a `piper_bridge.py` subprocess to read real Piper joint data and merge it into synthetic snapshots:
+Use `--mock-soma-arm` to select the hardware backend (default: `synthetic`):
 
 ```bash
-target/debug/robonix-vitals --log info \
+# Piper arm via CAN bus
+robonix-vitals --log info \
   --mock-soma \
+  --mock-soma-arm piper \
   --mock-soma-piper-can can0 \
-  --mock-soma-piper-python /path/to/roboarm/.venv/bin/python3 \
+  --mock-soma-bridge-python /path/to/roboarm/.venv/bin/python3 \
   --mock-soma-interval-ms 1000
-```
 
-Without `--mock-soma-piper-can`, fully synthetic Piper data is used.
-
-### Mock Soma with real Koch hardware
-
-When `--mock-soma-koch-port` is set, mock Soma spawns a `koch_bridge.py` subprocess to read real Koch (Dynamixel) joint data via the serial port:
-
-```bash
-target/debug/robonix-vitals --log info \
+# Koch arm via Dynamixel serial
+robonix-vitals --log info \
   --mock-soma \
+  --mock-soma-arm koch \
   --mock-soma-koch-port /dev/ttyUSB0 \
-  --mock-soma-koch-python /path/to/roboarm/.venv/bin/python3 \
-  --mock-soma-interval-ms 1000
-```
-
-Piper and Koch bridges can be used together for dual-arm setups:
-
-```bash
-target/debug/robonix-vitals --log info \
-  --mock-soma \
-  --mock-soma-piper-can can0 \
-  --mock-soma-koch-port /dev/ttyUSB0 \
+  --mock-soma-bridge-python /path/to/roboarm/.venv/bin/python3 \
   --mock-soma-interval-ms 1000
 ```
 
@@ -81,11 +67,11 @@ target/debug/robonix-vitals --log info \
 | `--mock-soma-listen` | `ROBONIX_VITALS_MOCK_SOMA_LISTEN` | `127.0.0.1:50092` |
 | `--mock-soma-scenario` | `ROBONIX_VITALS_MOCK_SOMA_SCENARIO` | `normal` |
 | `--mock-soma-interval-ms` | `ROBONIX_VITALS_MOCK_SOMA_INTERVAL_MS` | `10000` |
-| `--mock-soma-piper-can` | `ROBONIX_VITALS_MOCK_SOMA_PIPER_CAN` | — (empty = synthetic data) |
-| `--mock-soma-piper-python` | `ROBONIX_VITALS_MOCK_SOMA_PIPER_PYTHON` | `python3` |
+| `--mock-soma-arm` | `ROBONIX_VITALS_MOCK_SOMA_ARM` | `synthetic` |
+| `--mock-soma-piper-can` | `ROBONIX_VITALS_MOCK_SOMA_PIPER_CAN` | `can0` (when arm=piper) |
+| `--mock-soma-koch-port` | `ROBONIX_VITALS_MOCK_SOMA_KOCH_PORT` | `/dev/ttyUSB0` (when arm=koch) |
+| `--mock-soma-bridge-python` | `ROBONIX_VITALS_MOCK_SOMA_BRIDGE_PYTHON` | `python3` |
 | `--mock-soma-piper-script` | `ROBONIX_VITALS_MOCK_SOMA_PIPER_SCRIPT` | `<crate>/scripts/piper_bridge.py` |
-| `--mock-soma-koch-port` | `ROBONIX_VITALS_MOCK_SOMA_KOCH_PORT` | — (empty = synthetic data) |
-| `--mock-soma-koch-python` | `ROBONIX_VITALS_MOCK_SOMA_KOCH_PYTHON` | `python3` |
 | `--mock-soma-koch-script` | `ROBONIX_VITALS_MOCK_SOMA_KOCH_SCRIPT` | `<crate>/scripts/koch_bridge.py` |
 | `--config` | `ROBONIX_CONFIG_PATH` | — |
 | `--log` | `RUST_LOG` | `robonix_vitals=info` |

@@ -45,30 +45,13 @@ async fn main() -> Result<()> {
 
     let cfg = VitalsConfig::resolve(parsed)?;
     if cfg.mock_soma {
-        let piper_config =
-            cfg.mock_soma_piper_can
-                .as_ref()
-                .map(|can| mock_soma::PiperBridgeConfig {
-                    can_port: can.clone(),
-                    python_bin: cfg.mock_soma_piper_python.clone(),
-                    script: cfg.mock_soma_piper_script.to_string_lossy().to_string(),
-                });
-        let koch_config =
-            cfg.mock_soma_koch_port
-                .as_ref()
-                .map(|port| mock_soma::KochBridgeConfig {
-                    serial_port: port.clone(),
-                    python_bin: cfg.mock_soma_koch_python.clone(),
-                    script: cfg.mock_soma_koch_script.to_string_lossy().to_string(),
-                });
         return mock_soma::run_mock_soma(
             &cfg.atlas_endpoint,
             &cfg.mock_soma_id,
             &cfg.mock_soma_listen,
             &cfg.mock_soma_scenario,
             cfg.mock_soma_interval_ms,
-            piper_config,
-            koch_config,
+            cfg.mock_soma_arm.clone(),
         )
         .await;
     }
