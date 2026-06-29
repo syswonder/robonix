@@ -1049,6 +1049,9 @@ fn build_capability_target_map(display_caps: &[DisplayCapability<'_>]) -> Capabi
 const RTDL_PROTOCOL_REMINDER: &str = "## RTDL output (reminder — same format as your earlier turns)\n\
 Reply with exactly ONE JSON object, keys EXACTLY these four: \
 `content`, `rtdl_description`, `rtdl`, `task_update`. No other top-level keys.\n\
+The whole reply MUST begin with `{` and end with `}` — no prose, narration, or \
+markdown fences before or after it; put any user-facing text inside `content`, never outside the object. \
+Every value must be a literal JSON number or string.\n\
 `rtdl` is a tree; every node carries `op_id` (always write `0`; the system \
 assigns the real id) and a short `description` of THIS node's intent, plus:\n\
 - {\"op\":\"sequence\",\"op_id\":0,\"description\":\"...\",\"children\":[ ...nodes... ]}   (run children in order)\n\
@@ -1058,8 +1061,10 @@ A capability name goes ONLY in a do node's `cap` — NEVER as an `op`. \
 Beyond `op_id` and `description`, do NOT add other node fields (no `plan_id`, no `out`, no `id`). \
 Copy each `cap` EXACTLY from a capability_name in the list below (it is provider-qualified, \
 e.g. `tiago_camera.camera_snapshot`); never invent or shorten names.\n\
-`task_update`: null keeps the current goal, or {\"goal\",\"success_criterion\",\"status\"} with \
-status \"done\" only when the success_criterion verifiably holds AND no tree in the \
+`task_update`: null keeps the current goal (use null when you are not changing the task this round — \
+NOT an object with null fields), or {\"goal\",\"success_criterion\",\"status\"} where status is the \
+string \"in_progress\" or \"done\" (never null), set to \
+\"done\" only when the success_criterion verifiably holds AND no tree in the \
 \"In-flight trees\" list is still running (cancelling a tree does not make the task done — wait \
 for it to leave the list first).\n\
 Compose multi-step trees; don't drip one node per round. No new capability call this round = \
@@ -1128,12 +1133,60 @@ struct RtdlEnvelope {
 /// `content`, `rtdl_description`, `rtdl`, and `task_update`. See
 /// `rtdl_protocol.md` for the field contract.
 ///
+/// Extract the first balanced top-level JSON object from `raw`, ignoring any
+/// prose before or after it (e.g. a narration line the model emitted before the
+/// JSON, or a trailing comment). Returns the `{...}` slice, or `None` if there
+/// is no `{` or no matching close brace.
+///
+/// Brace depth is counted only outside JSON string literals, so braces inside
+/// strings don't affect it. Scanning by bytes is UTF-8-safe here because `{`,
+/// `}`, `"`, and `\` are all ASCII and never collide with multibyte
+/// continuation bytes (which are all >= 0x80).
+fn extract_json_object(raw: &str) -> Option<&str> {
+    let bytes = raw.as_bytes();
+    let start = bytes.iter().position(|&b| b == b'{')?;
+    let mut depth = 0usize;
+    let mut in_str = false;
+    let mut escaped = false;
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_str = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&raw[start..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Tolerates a prose preamble or trailing commentary around the JSON object
+/// (a common model habit, e.g. a narration line then the JSON on the next
+/// line) by extracting the first balanced `{...}` before parsing; the raw
+/// string is used unchanged when no object is found, so a genuinely
+/// JSON-less reply still surfaces the original parse error.
+///
 /// Fails if `raw` is not valid JSON, the root is not an object, the key set is
 /// not exactly those four, `content` / `rtdl_description` are not strings,
 /// `rtdl` is not an object, or `task_update` is neither `null` nor a valid task
 /// object.
 fn parse_rtdl_assistant_response(raw: &str) -> Result<RtdlEnvelope> {
-    let v: serde_json::Value = serde_json::from_str(raw)?;
+    let candidate = extract_json_object(raw).unwrap_or(raw);
+    let v: serde_json::Value = serde_json::from_str(candidate)?;
     let obj = v
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("assistant response must be a JSON object"))?;
@@ -1226,7 +1279,9 @@ fn build_rtdl_retry_prompt(
          Previous response preview: {}\n\n\
          Fix the RTDL error and retry the same user request exactly once. If the error \
          mentions an unknown capability, do not repeat that capability. Return ONLY a JSON object \
-         with exactly `content`, `rtdl_description`, `rtdl`, and `task_update`. Use only \
+         with exactly `content`, `rtdl_description`, `rtdl`, and `task_update`. The reply MUST begin \
+         with `{{` and end with `}}`: no prose, narration, or markdown fences before or after it (put \
+         any user-facing text inside `content`). Use only \
          capability_name values from this list; do not invent provider names, method names, or \
          aliases:\n",
         raw_preview(raw_content)
@@ -1772,8 +1827,9 @@ while you wait for an in-flight tree). Do NOT mark the task `done` until it is
 mod tests {
     use super::{
         CapabilityTargetMap, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, TaskState, expand_rtdl_to_plan,
-        format_plan_summary, parse_rtdl_assistant_response, parse_task_update, rtdl_node_kind_name,
-        rtdl_recovery_final_text, rtdl_state_name, skip_memory_prefetch, task_is_session_end,
+        extract_json_object, format_plan_summary, parse_rtdl_assistant_response, parse_task_update,
+        rtdl_node_kind_name, rtdl_recovery_final_text, rtdl_state_name, skip_memory_prefetch,
+        task_is_session_end,
     };
     use crate::pb::pilot::Task;
     use serde_json::json;
@@ -1883,6 +1939,27 @@ mod tests {
                 status: "in_progress".into(),
             })
         );
+    }
+
+    #[test]
+    fn rtdl_response_tolerates_prose_preamble() {
+        // Observed real failure: the model narrates a line, then emits the JSON
+        // on the next line. The leading prose must be stripped, not rejected.
+        let env = parse_rtdl_assistant_response(
+            "Let me take a photo to check the scene, then turn left.\n{\"content\":\"on it\",\"rtdl_description\":\"turn\",\"rtdl\":{\"op\":\"sequence\",\"children\":[]},\"task_update\":null}",
+        )
+        .unwrap();
+        assert_eq!(env.content, "on it");
+        assert!(env.task_update.is_none());
+    }
+
+    #[test]
+    fn extract_json_object_skips_prose_and_braces_in_strings() {
+        // Leading prose dropped; a `}` inside a string value does not end it.
+        let got = extract_json_object("hi: {\"a\":\"x}y\",\"b\":1} trailing");
+        assert_eq!(got, Some("{\"a\":\"x}y\",\"b\":1}"));
+        // No object at all → None, so the caller still hits the real parse error.
+        assert_eq!(extract_json_object("no json here"), None);
     }
 
     #[test]
