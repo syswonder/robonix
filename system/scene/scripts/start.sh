@@ -61,12 +61,26 @@ fi
 # and CLIP/YOLO run ~5x slower.
 declare -a GPU_ARGS=()
 if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]]; then
+    # NVIDIA_DRIVER_CAPABILITIES=all is REQUIRED: with just `--gpus all` (or
+    # `--runtime nvidia`) and the capability unset, the NVIDIA runtime injects
+    # only "utility" — nvidia-smi works but the CUDA compute libs are NOT
+    # mounted, so torch.cuda.is_available() is False and ConceptGraphs silently
+    # falls back to CPU (~5x slower). Requesting all caps (compute+utility+
+    # graphics) makes CUDA actually available.
     if is_native_platform "${ROBONIX_SCENE_PLATFORM:-}" || [[ -e /etc/nv_tegra_release ]]; then
         # Jetson / L4T: the container gets the GPU via the NVIDIA container
         # runtime (which bind-mounts the host CUDA libs); `--gpus all` is x86.
-        GPU_ARGS=(--runtime nvidia)
+        GPU_ARGS=(--runtime nvidia -e NVIDIA_DRIVER_CAPABILITIES=all)
     elif command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
-        GPU_ARGS=(--gpus all)
+        GPU_ARGS=(--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all)
+    fi
+    # Forward CUDA_VISIBLE_DEVICES ONLY when explicitly set (e.g. to pin one
+    # GPU). The old unconditional `-e CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}`
+    # passed it EMPTY when unset on the host — which tells CUDA "no GPUs" and
+    # disabled the GPU even though --gpus all had mounted it (torch.cuda → False
+    # while nvidia-smi still worked). Omitting it lets all mounted GPUs show.
+    if [[ ${#GPU_ARGS[@]} -gt 0 && -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+        GPU_ARGS+=(-e "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}")
     fi
 fi
 
@@ -96,7 +110,6 @@ exec docker run --rm \
     -e SCENE_OBJECT_MEMORY_DB="${SCENE_OBJECT_MEMORY_DB:-/data/robonix/scene_memory/objects.db}" \
     -e SCENE_MAP_ID="${SCENE_MAP_ID:-default}" \
     -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
-    -e CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
     -v "$(pwd)":/scene \
     -v "$(pwd)/rbnx-build/data/robonix":/data/robonix \
