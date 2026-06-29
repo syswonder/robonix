@@ -238,7 +238,7 @@ pub async fn run_mock_soma(
             atlas_pb::Transport::Grpc,
             &advertised,
             atlas_client::grpc_params(
-                "capabilities/service/soma/get_health.v1.toml",
+                "capabilities/system/soma/get_health.v1.toml",
                 "robonix.contracts.RobonixSystemSomaGetHealth",
                 "/robonix.contracts.RobonixSystemSomaGetHealth/GetHealth",
             ),
@@ -251,7 +251,7 @@ pub async fn run_mock_soma(
             atlas_pb::Transport::Grpc,
             &advertised,
             atlas_client::grpc_params(
-                "capabilities/service/soma/health.v1.toml",
+                "capabilities/system/soma/health.v1.toml",
                 "robonix.contracts.RobonixSystemSomaHealth",
                 "/robonix.contracts.RobonixSystemSomaHealth/StreamHealth",
             ),
