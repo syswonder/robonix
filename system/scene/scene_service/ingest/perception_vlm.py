@@ -109,6 +109,12 @@ class VLMObjectDetector:
         self.base_url = (os.environ.get("VLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
         self.api_key = os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
         self.model = os.environ.get("VLM_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-5.5"
+        # Shared VLM-wide reasoning knob. Opt-in: unset/empty → the field is
+        # omitted entirely, so non-reasoning models and strict OpenAI-compatible
+        # endpoints (which 400 on an unsupported param) are unaffected. Set
+        # VLM_REASONING_EFFORT=minimal to keep a reasoning VLM_MODEL (e.g.
+        # doubao-seed-2-1-pro) fast (~2 s, no thinking); minimal|low|medium|high.
+        self.reasoning_effort = os.environ.get("VLM_REASONING_EFFORT", "").strip()
         if not self.api_key:
             log.warning("[scene-vlm] VLM_API_KEY not set; perception will be inert")
 
@@ -179,6 +185,8 @@ class VLMObjectDetector:
             ],
             "temperature": 0.0,
         }
+        if self.reasoning_effort:
+            body["reasoning_effort"] = self.reasoning_effort
         async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.post(url, json=body, headers=headers)
             if r.status_code >= 400:
