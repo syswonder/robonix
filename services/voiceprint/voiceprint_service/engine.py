@@ -16,6 +16,16 @@ import wave
 from pathlib import Path
 from typing import Optional
 
+# ModelScope repo holding a complete mirror of speechbrain/spkrec-ecapa-voxceleb
+# (hyperparams.yaml + all .ckpt + label_encoder.txt). We fetch the weights from
+# ModelScope rather than HuggingFace because huggingface_hub's metadata HEAD only
+# follows same-host redirects, and the reachable hf-mirror.com bounces
+# resolve/main to huggingface.co with a cross-host 308 that no hf_hub version
+# follows — so every HF path fails on CN networks. ModelScope's SDK has no such
+# issue (it's also where the speech service pulls FunASR). Pulled once into the
+# local ModelScope cache; build.sh pre-warms it so runtime startup is offline.
+_MODELSCOPE_ID = "speechbrain/spkrec-ecapa-voxceleb"
+
 import numpy as np
 import torch
 import torchaudio
@@ -41,19 +51,33 @@ class EcapaTdnnEngine:
 
     def __init__(self, device: Optional[str] = None, savedir: Optional[Path] = None) -> None:
         # Imported lazily so unit tests that monkey-patch the engine do not
-        # need to drag in speechbrain just to import this module.
+        # need to drag in speechbrain / modelscope just to import this module.
         from speechbrain.inference.speaker import SpeakerRecognition
 
         self.device = _resolve_device(device)
         self.savedir = Path(savedir) if savedir else _DEFAULT_SAVEDIR
         self.savedir.mkdir(parents=True, exist_ok=True)
-        log.info("Loading ECAPA-TDNN on %s (savedir=%s)", self.device, self.savedir)
+        # Resolve the model from ModelScope (returns a local snapshot dir with
+        # the full repo). Passing that dir as `source` makes speechbrain read
+        # every weight locally — it never touches HuggingFace. The snapshot is
+        # cached after the first pull (build.sh pre-warms it).
+        source = self._resolve_source()
+        log.info("Loading ECAPA-TDNN on %s (source=%s, savedir=%s)", self.device, source, self.savedir)
         self.model = SpeakerRecognition.from_hparams(
-            source="speechbrain/spkrec-ecapa-voxceleb",
+            source=source,
             savedir=str(self.savedir),
             run_opts={"device": self.device},
         )
         log.info("ECAPA-TDNN loaded (embedding_dim=192)")
+
+    @staticmethod
+    def _resolve_source() -> str:
+        # Returns a local directory holding the ECAPA-TDNN repo, fetched from
+        # ModelScope (cached under ~/.cache/modelscope). speechbrain's
+        # from_hparams reads weights directly from this dir, so no HF fetch.
+        from modelscope.hub.snapshot_download import snapshot_download
+
+        return snapshot_download(_MODELSCOPE_ID)
 
     # -- public extraction -------------------------------------------------
 
