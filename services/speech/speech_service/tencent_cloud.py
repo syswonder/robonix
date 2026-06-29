@@ -79,6 +79,24 @@ class TencentRealtimeASRBackend:
         self.recv_timeout_s = float(os.environ.get("TENCENT_ASR_RECV_TIMEOUT", "0.05"))
         log.info("Tencent ASR initialized (engine=%s)", self.engine)
 
+    def recognize(
+        self,
+        audio_data: bytes,
+        encoding: str = "pcm_s16le",
+        sample_rate: int = 16000,
+        language: str = "",
+    ) -> dict:
+        """Recognize a complete utterance by reusing the Tencent stream API."""
+        _ = (encoding, sample_rate, language)
+        transcript = ""
+        confidence = 0.0
+        for event in self.recognize_stream(self._chunk_pcm(audio_data)):
+            text = event.get("text", "")
+            if text:
+                transcript += text
+                confidence = float(event.get("confidence", confidence))
+        return {"text": transcript.strip(), "confidence": confidence}
+
     def recognize_stream(self, pcm_chunks: Iterator[bytes]) -> Iterator[dict]:
         url = self._signed_url()
         last_text = ""
@@ -148,6 +166,10 @@ class TencentRealtimeASRBackend:
             f"wss://{self.host}/asr/v2/{self.creds.appid}?"
             f"{query}&signature={quote(signature, safe='')}"
         )
+
+    def _chunk_pcm(self, audio_data: bytes) -> Iterator[bytes]:
+        for i in range(0, len(audio_data), self.chunk_bytes):
+            yield audio_data[i : i + self.chunk_bytes]
 
     def _drain_results(self, ws) -> Iterator[dict]:
         while True:
