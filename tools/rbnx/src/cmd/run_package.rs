@@ -237,7 +237,9 @@ fn build_deploy_manifest(manifest_path: &Path, config: &Config, clean: bool) -> 
                 (None, Some(u)) => entries.push(Resolved {
                     section,
                     name: name.clone(),
-                    pkg_dir: cache_root.join(&name),
+                    // Cache dir = git repo name (one clone per repo), not the
+                    // per-instance provider id. See deploy::repo_dir_name.
+                    pkg_dir: cache_root.join(super::deploy::repo_dir_name(u)),
                     url_to_clone: Some((u.to_string(), branch)),
                     manifest_override,
                 }),

@@ -124,6 +124,23 @@ struct PackageEntry {
 /// been cloned yet). Use `entry_path_exists_on_disk` to check
 /// presence; use the public `cmd::fetch::clone_remote_packages`
 /// (called from `rbnx build`) to actually populate the cache.
+/// Cache directory name for a url-remote package: the git REPO name (last path
+/// segment of the url, minus `.git`), NOT the per-instance provider id.
+///
+/// A single repo can back several providers/instances in one manifest (each
+/// with its own `name`/provider_id); they must share ONE clone. Keying the
+/// cache dir by `name` would clone the same repo once per instance — and the
+/// directory wouldn't reflect what was actually cloned. Key it by the repo.
+pub(crate) fn repo_dir_name(url: &str) -> String {
+    url.trim_end_matches('/')
+        .trim_end_matches(".git")
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("pkg")
+        .to_string()
+}
+
 fn resolve_entry_path(
     entry: &PackageEntry,
     cache_root: &Path,
@@ -131,18 +148,7 @@ fn resolve_entry_path(
 ) -> Result<PathBuf> {
     match (&entry.path, &entry.url) {
         (Some(p), None) => Ok(manifest_dir.join(p)),
-        (None, Some(url)) => {
-            let name = if entry.name.is_empty() {
-                url.trim_end_matches(".git")
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("pkg")
-                    .to_string()
-            } else {
-                entry.name.clone()
-            };
-            Ok(cache_root.join(&name))
-        }
+        (None, Some(url)) => Ok(cache_root.join(repo_dir_name(url))),
         (Some(_), Some(_)) => {
             anyhow::bail!("package entry has both `path` and `url`; pick one")
         }
@@ -216,7 +222,7 @@ fn check_prerequisites(
         output::warning(&format!(
             "{name}: not in cache — `rbnx build` should run before `rbnx boot`. cloning inline."
         ));
-        let dest = cache_root.join(name);
+        let dest = cache_root.join(repo_dir_name(url));
         std::fs::create_dir_all(cache_root)?;
         let mut clone = std::process::Command::new("git");
         clone.arg("clone").arg("--depth").arg("1");
