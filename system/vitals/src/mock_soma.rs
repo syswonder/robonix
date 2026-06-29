@@ -384,6 +384,7 @@ pub fn generate_snapshot(
     piper_data: Option<&PiperData>,
 ) -> SomaHealthSnapshot {
     let now = monotonic_ns();
+    let now_i64 = now as i64;
     let ramp_enabled = matches!(scenario, MockScenario::Ramp | MockScenario::Mixed);
     let fault_enabled = matches!(scenario, MockScenario::Fault | MockScenario::Mixed);
     let toggle_enabled = matches!(scenario, MockScenario::Toggle | MockScenario::Mixed);
@@ -515,7 +516,7 @@ pub fn generate_snapshot(
             severity: FAULT_ERROR,
             active: true,
             clearable: true,
-            onset_ts_ns: now,
+            onset_ts_ns: now_i64,
             vendor_code: 0x04,
             vendor_code_text: "mock_overcurrent".to_string(),
             message: "mock joint_3 overcurrent".to_string(),
@@ -530,7 +531,7 @@ pub fn generate_snapshot(
             severity: FAULT_WARN,
             active: true,
             clearable: false,
-            onset_ts_ns: now,
+            onset_ts_ns: now_i64,
             vendor_code: 0x02,
             vendor_code_text: "mock_motor_overheat".to_string(),
             message: "mock joint_1 temperature is high".to_string(),
@@ -549,7 +550,7 @@ pub fn generate_snapshot(
                     severity: FAULT_ERROR,
                     active: true,
                     clearable: true,
-                    onset_ts_ns: now,
+                    onset_ts_ns: now_i64,
                     vendor_code: pj.error_code,
                     vendor_code_text: format!("0x{:02X}", pj.error_code),
                     message: format!("{} foc_status=0x{:02X}", pj.name, pj.error_code),
@@ -577,8 +578,8 @@ pub fn generate_snapshot(
         schema_version: SCHEMA_VERSION,
         body_id: "mock_ranger_piper_01".to_string(),
         seq,
-        source_ts_ns: now,
-        soma_ts_ns: now,
+        source_ts_ns: now_i64,
+        soma_ts_ns: now_i64,
         ttl_ms: 1500,
         components,
         actuators,
@@ -700,9 +701,9 @@ fn scalar(value: f64, unit: &str) -> Scalar {
     }
 }
 
-fn monotonic_ns() -> i64 {
+fn monotonic_ns() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_nanos() as i64
+    START.get_or_init(Instant::now).elapsed().as_nanos() as u64
 }
 
 #[allow(dead_code)]
