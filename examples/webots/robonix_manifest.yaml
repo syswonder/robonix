@@ -59,9 +59,22 @@ primitive:
       # example place holders
       update_rate: 10
       frame_id: lidar
+  # ── audio mic/speaker source ─────────────────────────────────────────────
+  # Default: local ALSA via audio_driver. liaison/speech resolve
+  # robonix/primitive/audio/{mic,speaker} from whichever single provider is
+  # active here.
   - name: audio_driver
     path: ./primitives/audio_driver
     config: {}
+  # macOS-bridge variant (opt-in): relays mic/speaker over a WebSocket from a
+  # macOS box across the LAN. To use it, comment out the audio_driver block
+  # above and uncomment this one, then point host at the Mac's address and run
+  # mac_server/server.py (or server_web.py) on it.
+  # - name: audio_macos_bridge
+  #   path: ./primitives/audio_macos_bridge
+  #   config:
+  #     host: 100.78.199.22       # macOS tailscale address
+  #     port: 60000
 
 # after booted all the primitives, start the services
 service:
@@ -72,6 +85,28 @@ service:
     path: ../../services/memsearch
     config:
       backend: sqlite
+
+  # speech — ASR + TTS. Provides robonix/service/speech/asr_stream + tts that
+  # liaison's voice loop connects to. Captures mic through the
+  # robonix/primitive/audio/mic primitive, which `audio_driver` (primitive
+  # section above) provides — so voice runs fully local on this host's ALSA
+  # mic. The macOS-bridge variant lives in robonix_manifest.macos_debug.yaml.
+  # disable_whisper => FunASR-only (Paraformer) streaming ASR path.
+  - name: speech
+    path: ../../services/speech
+    config:
+      disable_whisper: true
+      funasr_device: cuda
+      tts_voice: zh-CN-XiaoxiaoNeural
+
+  # voiceprint — ECAPA-TDNN speaker identification. Provides
+  # robonix/service/voiceprint/{identify,enroll,list}: liaison's voice gate
+  # stamps each Task with the identified user_id, and `rbnx chat`'s user
+  # modal enrolls/lists speakers. Config is env-driven (port 50092,
+  # threshold 0.25, device auto) so the manifest block stays empty.
+  - name: voiceprint
+    path: ../../services/voiceprint
+    config: {}
 
   # mapping_rbnx — SLAM service. Listed FIRST because simple_nav
   # depends on `service/map/occupancy_grid` and rbnx-cli currently
