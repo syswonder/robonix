@@ -1,0 +1,11 @@
+system/pilot/src/planner.rs
+  h_9f1ebe31af207f 1052-1054,1064-1067,1136-1182,1188-1189,1282-1284,1830,1944-1962
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "10c300c9520b30d63bf5048907d4653e2068ddb4",
+  "prompts": {},
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
