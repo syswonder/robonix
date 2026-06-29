@@ -267,7 +267,7 @@ pub fn default_thresholds() -> Vec<SomaThresholdRule> {
 pub fn snapshot_to_vitals(
     snapshot: &SomaHealthSnapshot,
     rules: &[SomaThresholdRule],
-    ts_ns: i64,
+    ts_ns: u64,
 ) -> VitalsSnapshot {
     let component_kind: HashMap<&str, u32> = snapshot
         .components

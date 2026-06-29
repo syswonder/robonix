@@ -375,9 +375,9 @@ fn first_non_empty<'a>(values: &[&'a str]) -> &'a str {
         .unwrap_or("unknown")
 }
 
-fn monotonic_ns() -> i64 {
+fn monotonic_ns() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_nanos() as i64
+    START.get_or_init(Instant::now).elapsed().as_nanos() as u64
 }
 
 #[tonic::async_trait]
