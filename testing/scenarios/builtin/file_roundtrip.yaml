@@ -1,0 +1,23 @@
+# Executor builtins (always available, no hardware): write -> read -> list.
+name: file_roundtrip
+task: "ci-test: write a file, read it back, and list the dir"
+steps:
+  - status: in_progress
+    rtdl_description: write probe file
+    caps:
+      - match: builtin_write_file
+        args: {path: ci_probe.txt, content: "robonix ci probe alpha-7"}
+  - status: in_progress
+    rtdl_description: read it back
+    caps:
+      - match: builtin_read_file
+        args: {path: ci_probe.txt}
+  - status: in_progress
+    rtdl_description: list /tmp
+    caps:
+      - match: builtin_list_dir
+        args: {path: .}
+  - status: done
+expect_contracts: [executor/builtin/write_file, executor/builtin/read_file, executor/builtin/list_dir]
+expect_args: [ci_probe, alpha-7]
+expect_min_rounds: 3

@@ -1,0 +1,298 @@
+# Robonix full-stack testing — real Webots sim + real components + fake VLM.
+#
+# Runs on the self-hosted GPU runner (label `robonix-testing`, pinned to one GPU
+# via the runner's own CUDA_VISIBLE_DEVICES). Cheap checks (fmt/clippy/build/unit)
+# live in ci.yml on GitHub-hosted runners and gate every PR; THIS workflow is the
+# heavy GPU e2e and is deliberately NOT exposed to untrusted PR code.
+#
+# ─────────────────────────── SECURITY (read first) ───────────────────────────
+# A self-hosted runner executes whatever the triggering ref contains — and
+# `rbnx build` runs each package's build.sh + Dockerfiles. So a fork PR that
+# auto-ran here would be arbitrary code execution on our box. Controls:
+#
+#  1. Triggers below are TRUSTED ONLY: `push` to dev/main (already-merged =
+#     reviewed) and manual `workflow_dispatch`. A PR runs the GPU job ONLY when
+#     a maintainer adds the `safe-to-test` label after auditing the diff — the
+#     `if:` on the job enforces that. There is no bare `on: pull_request` that
+#     runs fork code unattended, and we never use `pull_request_target`.
+#  2. Also turn ON in repo settings: Actions → Fork pull request workflows →
+#     "Require approval for all external contributors".
+#  3. `permissions: contents: read` — the job gets a read-only GITHUB_TOKEN.
+#     The e2e uses a FAKE VLM and needs NO real secrets; keep the runner
+#     secret-free. Do not add repo secrets to this workflow.
+#  4. Run the runner as a DEDICATED unprivileged user (not a human account with
+#     SSH keys / access to other users' data), ideally with `--ephemeral`
+#     registration or each job in a throwaway container, so a compromised job
+#     can't persist or read neighbouring state.
+#  5. Protect this file via CODEOWNERS so a PR can't weaken the gating.
+
+name: testing
+
+on:
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+  # Lets the ChatOps bot (ci-bot.yml) invoke this whole pipeline on an
+  # authorized `@robonix-ci test` comment and read back the result summary.
+  workflow_call:
+    inputs:
+      ref:
+        description: "git ref to test (defaults to the triggering ref)"
+        type: string
+        required: false
+    outputs:
+      result:
+        description: "PASS/FAIL summary line from the harness"
+        value: ${{ jobs.gpu-e2e.outputs.result }}
+
+permissions:
+  contents: read
+
+concurrency:
+  # One GPU e2e at a time per ref; a new push cancels the superseded run.
+  group: testing-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Gate 1: cheap, GitHub-hosted, untrusted-safe ──────────────────────────
+  # Scans the ref for forbidden high-risk operations BEFORE anything runs on the
+  # self-hosted GPU box. gpu-e2e `needs:` this, so a dirty diff never reaches the
+  # 5090 — and because it runs on push(dev/main) too, it gates merged code as
+  # well. No `environment:` here, so it never blocks normal contributor CI.
+  security-gate:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Empty on push/PR/dispatch (checkout uses the triggering ref); set to
+          # the PR head SHA when the ChatOps bot invokes this via workflow_call.
+          ref: ${{ inputs.ref }}
+      - name: Forbidden-operation scan (build.sh / workflows / Dockerfiles / py)
+        run: |
+          set -euo pipefail
+          # Patterns that must never execute on the shared GPU host. Extend as
+          # needed; keep in sync with examples/webots/TROUBLESHOOTING.md red lines.
+          PAT='nvidia-smi[^|]*(--gpu-reset|--reset|(^| )-r( |$))|rmmod[[:space:]]+nvidia|modprobe[[:space:]]+nvidia|(curl|wget)[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(ba)?sh|/dev/tcp/|[^a-z]nc[[:space:]]+.*-e|base64[[:space:]]+-d[^|]*\|[^|]*sh'
+          if grep -rInE "$PAT" --include='*.sh' --include='*.yml' --include='*.yaml' \
+                 --include='*.py' --include='Dockerfile*' . ; then
+            echo "::error::forbidden high-risk pattern — needs manual maintainer review"; exit 1
+          fi
+          echo "forbidden-operation scan clean"
+      - name: Secret scan
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" zricethezav/gitleaks:latest \
+            detect --source=/repo --no-banner --redact \
+            || { echo "::error::possible secret in diff"; exit 1; }
+
+  # ── Gate 2: the GPU e2e itself ────────────────────────────────────────────
+  gpu-e2e:
+    needs: security-gate
+    outputs:
+      result: ${{ steps.scenarios.outputs.result }}
+    # Per-run MANUAL approval: this Environment must have "Required reviewers"
+    # configured in repo settings. The job pauses BEFORE it is assigned to the
+    # self-hosted runner until a maintainer clicks Approve — so untrusted PR
+    # code never touches the 5090 unattended (push to dev/main pauses too).
+    environment: gpu-e2e
+    # Belt-and-suspenders: also require the `safe-to-test` label on PRs.
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'issue_comment' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
+    runs-on: [self-hosted, robonix-testing]
+    timeout-minutes: 90
+    env:
+      # ── Build-env fixes for this box (see examples/webots/TROUBLESHOOTING.md) ──
+      # GitHub git clone is blocked on CN networks → mirror.
+      GIT_MIRROR_INSTEADOF: "true"
+      # codegen grpcio-tools MUST match the runtime grpcio pinned by packages
+      # (1.80.0) or RegisterService fails with a version-skew error.
+      GRPCIO_PIN: "1.80.0"
+      # ── Per-run isolation (coexist with interactive users on the shared box) ──
+      RUN_ID: "${{ github.run_id }}"
+      ROS_DOMAIN_ID: "91"
+      ROBONIX_SIM_NETWORK: "bridge"
+      ROBONIX_SIM_IPC: "private"
+      ROBONIX_SIM_XDISPLAY: ":49"
+      WEBOTS_HEADLESS_MODE: "nvidia"
+      WEBOTS_STREAM: "1"
+
+    steps:
+      - name: Harden runner — restrict egress to an allowlist
+        uses: step-security/harden-runner@v2
+        with:
+          # Start in 'audit' to learn the real egress set from the first runs,
+          # then switch to 'block' and trim allowed-endpoints to exactly these.
+          egress-policy: audit
+          # disable-telemetry: true
+          allowed-endpoints: >
+            ghfast.top:443
+            github.com:443
+            objects.githubusercontent.com:443
+            pypi.org:443
+            files.pythonhosted.org:443
+            pypi.tuna.tsinghua.edu.cn:443
+            www.modelscope.cn:443
+            modelscope.cn:443
+            registry-1.docker.io:443
+            auth.docker.io:443
+            production.cloudflare.docker.com:443
+
+      - name: Preflight — GPU health (read-only; abort on Xid, never reset)
+        run: |
+          # NEVER nvidia-smi --gpu-reset / rmmod / driver writes (RTX 5090 GSP
+          # fragility). Read-only check; a dirty GPU is an infra failure, not a
+          # test failure — bail and let a human recover.
+          nvidia-smi -q >/dev/null || { echo "::error::nvidia-smi unhealthy"; exit 1; }
+          if dmesg 2>/dev/null | grep -qi 'NVRM: Xid'; then
+            echo "::warning::Xid in dmesg — GPU may be degraded"; fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Toolchain + build-env (idempotent)
+        run: |
+          set -euo pipefail
+          command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+          # github unreachable for git clone here → route through mirror.
+          git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
+          # codegen tools pinned to the runtime grpcio version.
+          python3 -m pip install --user "grpcio-tools==${GRPCIO_PIN}" "grpcio==${GRPCIO_PIN}"
+          # testing harness (fake VLM + scenario runner) parses YAML scenarios.
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user pyyaml
+          # point rbnx at THIS checkout (config is per-user; restore not needed
+          # on a dedicated runner). Use the freshly-built codegen, not a stale
+          # ~/.cargo/bin one.
+          make install   # rbnx + atlas + executor + pilot + liaison + codegen → ~/.cargo/bin
+          rbnx setup "$PWD"
+
+      - name: Build deploy (in-repo + remote upstream HEAD) + provenance
+        working-directory: examples/webots
+        run: |
+          set -euo pipefail
+          rbnx build
+          # provenance: record exactly which upstream commit each remote built from
+          for d in rbnx-boot/cache/*/; do
+            [ -d "$d/.git" ] && echo "$(basename "$d") @ $(git -C "$d" rev-parse --short HEAD) $(git -C "$d" log -1 --format=%s)"
+          done | tee "$RUNNER_TEMP/remote-provenance.txt"
+
+      - name: Bring up isolated Webots sim (own container/display/net/domain)
+        working-directory: examples/webots/sim
+        env:
+          ROBONIX_SIM_CONTAINER: "ci-${{ github.run_id }}-sim"
+          ROBONIX_SIM_PROJECT:   "ci-${{ github.run_id }}"
+          ROBONIX_SIM_STREAM_PORT: "2234"
+          ROBONIX_SIM_VIEWER_PORT: "9080"
+          NVIDIA_DRIVER_CAPABILITIES: "graphics,display,utility,compute"
+        run: |
+          set -euo pipefail
+          : > "$RUNNER_TEMP/xauth"; export ROBONIX_HOST_XAUTH="$RUNNER_TEMP/xauth" DISPLAY=:49
+          docker compose -f compose.yaml -f compose.gpu.yaml -f compose.stream.yaml up --build -d
+          # robot publishes /scanner /odom /head_front_camera/* within ~15s.
+          # Use the env var (not a templated expression) inside shell.
+          for i in $(seq 1 40); do
+            n=$(docker exec "$ROBONIX_SIM_CONTAINER" bash -c 'source /opt/ros/humble/setup.bash 2>/dev/null && ros2 topic list 2>/dev/null | grep -c /scanner' 2>/dev/null || echo 0)
+            [ "${n:-0}" -ge 1 ] && { echo "sim up"; break; }
+            sleep 4
+          done
+
+      - name: Start fake VLM (deterministic RTDL planner)
+        working-directory: examples/webots
+        run: |
+          set -euo pipefail
+          # OpenAI-compatible endpoint that scripts pilot's planning via the RTDL
+          # envelope. Bound to localhost; pilot dials it instead of a real VLM.
+          python3 "$GITHUB_WORKSPACE/testing/fake_vlm/server.py" \
+            --port 18080 >"$RUNNER_TEMP/fake_vlm.log" 2>&1 &
+          echo "FAKE_VLM_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 20); do
+            curl -fsS --noproxy '*' http://127.0.0.1:18080/v1/models >/dev/null 2>&1 && break
+            sleep 0.5
+          done
+
+      - name: Boot robonix (real components, fake VLM) + wait for caps
+        working-directory: examples/webots
+        env:
+          VLM_BASE_URL: "http://127.0.0.1:18080/v1"
+          VLM_API_KEY: "fake-ci-key"
+          VLM_MODEL: "fake-vlm"
+          no_proxy: "127.0.0.1,localhost"
+          NO_PROXY: "127.0.0.1,localhost"
+        run: |
+          set -euo pipefail
+          # boot is the deploy supervisor (foreground); run it detached and poll
+          # atlas until the expected providers register. ROS talks to the sim
+          # container over the isolated bridge network from the bringup step.
+          nohup rbnx boot --no-update-check >"$RUNNER_TEMP/rbnx-boot.log" 2>&1 &
+          echo "RBNX_BOOT_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 60); do
+            if rbnx caps --server 127.0.0.1:50051 2>/dev/null | grep -qiE 'camera|lidar'; then
+              echo "providers registered"; break
+            fi
+            sleep 5
+          done
+          rbnx caps --server 127.0.0.1:50051 || true
+
+      - name: Run interface / RPC contract tests (atlas + pilot)
+        env:
+          ROBONIX_ATLAS: "127.0.0.1:50051"
+          no_proxy: "127.0.0.1,localhost"
+          NO_PROXY: "127.0.0.1,localhost"
+        run: python3 "$GITHUB_WORKSPACE/testing/run_interfaces.py" --server 127.0.0.1:50051
+
+      - name: Run capability + flow scenarios (dispatch, results, fault recovery)
+        id: scenarios
+        env:
+          ROBONIX_ATLAS: "127.0.0.1:50051"
+          no_proxy: "127.0.0.1,localhost"
+          NO_PROXY: "127.0.0.1,localhost"
+        run: |
+          set -o pipefail
+          python3 "$GITHUB_WORKSPACE/testing/run.py" --server 127.0.0.1:50051 \
+            --summary-json "$GITHUB_WORKSPACE/testing/logs/summary.json" | tee "$RUNNER_TEMP/scenarios.out"
+          # Surface the one-line RESULT for the reusable-workflow output / bot.
+          echo "result=$(grep '^RESULT:' "$RUNNER_TEMP/scenarios.out" | tail -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Dump sim container + ROS logs (record everything)
+        if: always()
+        env:
+          ROBONIX_SIM_CONTAINER: "ci-${{ github.run_id }}-sim"
+        run: |
+          # Capture the sim/webots container stdout and the in-container ROS
+          # logs so a failure leaves a full trace alongside the scribe logs.
+          mkdir -p "$RUNNER_TEMP/sim-logs"
+          docker logs "$ROBONIX_SIM_CONTAINER" >"$RUNNER_TEMP/sim-logs/webots.stdout.log" 2>&1 || true
+          docker exec "$ROBONIX_SIM_CONTAINER" bash -c 'tar c -C /root/.ros log 2>/dev/null' \
+            2>/dev/null | tar x -C "$RUNNER_TEMP/sim-logs" 2>/dev/null || true
+          # rbnx caps snapshot at end-of-run for post-mortem.
+          rbnx caps --server 127.0.0.1:50051 --json >"$RUNNER_TEMP/sim-logs/caps.final.json" 2>&1 || true
+
+      - name: Teardown — ONLY this run's resources
+        if: always()
+        run: |
+          # never touch other users' containers/processes; match on the run-id
+          # prefix. $RUN_ID is the GitHub-assigned numeric id (job-level env).
+          rbnx shutdown 2>/dev/null || true
+          [ -n "${RBNX_BOOT_PID:-}" ] && kill "${RBNX_BOOT_PID}" 2>/dev/null || true
+          [ -n "${FAKE_VLM_PID:-}" ] && kill "${FAKE_VLM_PID}" 2>/dev/null || true
+          docker ps -aq --filter "name=ci-${RUN_ID}-" | xargs -r docker rm -f
+          docker compose -p "ci-${RUN_ID}" down 2>/dev/null || true
+
+      - name: Collect logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testing-logs-${{ github.run_id }}
+          path: |
+            examples/webots/rbnx-boot/logs/
+            testing/logs/
+            ${{ runner.temp }}/remote-provenance.txt
+            ${{ runner.temp }}/fake_vlm.log
+            ${{ runner.temp }}/rbnx-boot.log
+            ${{ runner.temp }}/sim-logs/
+          if-no-files-found: ignore

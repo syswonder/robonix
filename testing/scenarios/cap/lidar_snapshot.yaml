@@ -1,0 +1,15 @@
+# Exercise the lidar primitive's on-demand point-cloud frame (real sensor cloud).
+name: lidar_snapshot
+task: "ci-test: capture one lidar point-cloud snapshot"
+steps:
+  - content: Capturing a lidar snapshot.
+    rtdl_description: lidar snapshot
+    status: in_progress
+    caps:
+      - match: lidar_snapshot
+        args: {}
+        description: grab one point-cloud frame
+  - content: Point cloud captured.
+    status: done
+expect_contracts:
+  - lidar/snapshot

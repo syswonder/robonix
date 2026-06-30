@@ -1,0 +1,15 @@
+# Exercise the camera primitive's on-demand RGB frame (real Webots image).
+name: camera_snapshot
+task: "ci-test: capture one rgb camera snapshot from the robot"
+steps:
+  - content: Capturing an RGB snapshot.
+    rtdl_description: camera snapshot
+    status: in_progress
+    caps:
+      - match: camera_snapshot
+        args: {}
+        description: grab one RGB frame
+  - content: Snapshot captured.
+    status: done
+expect_contracts:
+  - camera/snapshot

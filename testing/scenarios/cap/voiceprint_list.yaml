@@ -1,0 +1,15 @@
+# Exercise the voiceprint service's read path (no enrollment needed).
+name: voiceprint_list
+task: "ci-test: list the enrolled voiceprints"
+steps:
+  - content: Listing enrolled voiceprints.
+    rtdl_description: voiceprint list
+    status: in_progress
+    caps:
+      - match: voiceprint_list
+        args: {}
+        description: list enrolled speakers
+  - content: Listed.
+    status: done
+expect_contracts:
+  - voiceprint/list
