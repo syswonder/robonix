@@ -123,6 +123,12 @@ jobs:
       GRPCIO_PIN: "1.80.0"
       # ── Per-run isolation (coexist with interactive users on the shared box) ──
       RUN_ID: "${{ github.run_id }}"
+      # Pin CI to the runner's reserved 5090. Without this, torch/Webots may
+      # default to GPU0/1, which are often occupied by interactive workloads.
+      CUDA_VISIBLE_DEVICES: "2"
+      ROBONIX_GPU_ID: "2"
+      NVIDIA_VISIBLE_DEVICES: "2"
+      SPEECH_CI_MODE: "1"
       ROS_DOMAIN_ID: "91"
       ROBONIX_SIM_NETWORK: "bridge"
       ROBONIX_SIM_IPC: "private"
@@ -171,9 +177,72 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive
 
+      - name: Prepare per-run isolation env
+        run: |
+          set -euo pipefail
+          suffix=$((RUN_ID % 1000))
+          atlas_port=$((19000 + suffix))
+          executor_port=$((20000 + suffix))
+          pilot_port=$((21000 + suffix))
+          liaison_port=$((22000 + suffix))
+          fake_vlm_port=$((18000 + suffix))
+          stream_port=$((23000 + suffix))
+          viewer_port=$((24000 + suffix))
+          mapping_port=$((25000 + suffix))
+          nav2_port=$((26000 + suffix))
+          scene_web_port=$((27000 + suffix))
+          ros_domain_id=$((90 + (RUN_ID % 100)))
+          xdisplay=$((1000 + suffix))
+
+          if [ -S "/tmp/.X11-unix/X${xdisplay}" ]; then
+            x_pids=$(ps -eo pid=,args= | awk -v d=":${xdisplay}" '$0 ~ /(Xorg|Xvfb)/ && index($0, d) {print $1}' | sort -u)
+            if [ -n "$x_pids" ]; then
+              echo "::error::per-run X display already in use: :${xdisplay}"
+              exit 1
+            fi
+            echo "removing stale per-run X socket: /tmp/.X11-unix/X${xdisplay}"
+            rm -f "/tmp/.X11-unix/X${xdisplay}"
+          fi
+
+          {
+            echo "ATLAS_PORT=$atlas_port"
+            echo "EXECUTOR_PORT=$executor_port"
+            echo "PILOT_PORT=$pilot_port"
+            echo "LIAISON_PORT=$liaison_port"
+            echo "FAKE_VLM_PORT=$fake_vlm_port"
+            echo "MAPPING_GRPC_PORT=$mapping_port"
+            echo "NAV2_DRIVER_PORT=$nav2_port"
+            echo "SCENE_WEB_PORT=$scene_web_port"
+            echo "ROBONIX_CI_ATLAS=127.0.0.1:$atlas_port"
+            echo "ROBONIX_ATLAS=127.0.0.1:$atlas_port"
+            echo "ROBONIX_SIM_STREAM_PORT=$stream_port"
+            echo "ROBONIX_SIM_VIEWER_PORT=$viewer_port"
+            echo "ROBONIX_SIM_CONTAINER=ci-${RUN_ID}-sim"
+            echo "ROBONIX_SIM_PROJECT=ci-${RUN_ID}"
+            echo "ROBONIX_SIM_XDISPLAY=:$xdisplay"
+            echo "ROBONIX_MAPPING_CONTAINER=ci-${RUN_ID}-mapping"
+            echo "ROBONIX_NAV2_CONTAINER=ci-${RUN_ID}-nav2"
+            echo "ROBONIX_EXPLORE_CONTAINER=ci-${RUN_ID}-explore"
+            echo "ROBONIX_SCENE_CONTAINER=ci-${RUN_ID}-scene"
+            echo "AGENT_MEMORY_DIR=/tmp/robonix-ci-${RUN_ID}/agent_memory"
+            echo "AGENT_MILVUS_URI=/tmp/robonix-ci-${RUN_ID}/agent_milvus.db"
+            echo "ROS_DOMAIN_ID=$ros_domain_id"
+            echo "ROBONIX_GPU_ID=${ROBONIX_GPU_ID}"
+            echo "NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES}"
+          } >> "$GITHUB_ENV"
+
+          for port in "$atlas_port" "$executor_port" "$pilot_port" "$liaison_port" "$fake_vlm_port" "$stream_port" "$viewer_port" "$mapping_port" "$nav2_port" "$scene_web_port"; do
+            if ss -ltn "sport = :$port" | grep -q LISTEN; then
+              echo "::error::per-run port already in use: $port"
+              exit 1
+            fi
+          done
+
       - name: Toolchain + build-env (idempotent)
         run: |
           set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
           # Keep the mirror rewrite for rbnx build remote provider clones.
           git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
@@ -201,29 +270,40 @@ jobs:
       - name: Bring up isolated Webots sim (own container/display/net/domain)
         working-directory: examples/webots/sim
         env:
-          ROBONIX_SIM_CONTAINER: "ci-${{ github.run_id }}-sim"
-          ROBONIX_SIM_PROJECT:   "ci-${{ github.run_id }}"
           NVIDIA_DRIVER_CAPABILITIES: "graphics,display,utility,compute"
         run: |
           set -euo pipefail
-          export ROBONIX_SIM_STREAM_PORT=$((23000 + (RUN_ID % 1000)))
-          export ROBONIX_SIM_VIEWER_PORT=$((24000 + (RUN_ID % 1000)))
           : > "$RUNNER_TEMP/xauth"; export ROBONIX_HOST_XAUTH="$RUNNER_TEMP/xauth" DISPLAY=:49
-          docker compose -f compose.yaml -f compose.gpu.yaml -f compose.stream.yaml up --build -d
+          docker compose -p "$ROBONIX_SIM_PROJECT" -f compose.yaml -f compose.gpu.yaml -f compose.stream.yaml up --build -d
           # robot publishes /scanner /odom /head_front_camera/* within ~15s.
-          # Use the env var (not a templated expression) inside shell.
           for i in $(seq 1 40); do
-            n=$(docker exec "$ROBONIX_SIM_CONTAINER" bash -c 'source /opt/ros/humble/setup.bash 2>/dev/null && ros2 topic list 2>/dev/null | grep -c /scanner' 2>/dev/null || echo 0)
-            [ "${n:-0}" -ge 1 ] && { echo "sim up"; break; }
+            if docker exec "$ROBONIX_SIM_CONTAINER" bash -lc 'source /opt/ros/humble/setup.bash 2>/dev/null && ros2 topic list 2>/dev/null | grep -qx /scanner' 2>/dev/null; then
+              echo "sim up"
+              break
+            fi
+            if [ "$i" -eq 40 ]; then
+              echo "::error::sim did not expose /scanner"
+              docker logs "$ROBONIX_SIM_CONTAINER" | tail -200 || true
+              exit 1
+            fi
             sleep 4
           done
+          sim_gateway=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{if .Gateway}}{{println .Gateway}}{{end}}{{end}}' "$ROBONIX_SIM_CONTAINER" | head -n1)
+          if [ -z "$sim_gateway" ]; then
+            echo "::error::cannot determine sim bridge gateway"
+            exit 1
+          fi
+          {
+            echo "ROBONIX_SIM_ATLAS=${sim_gateway}:${ATLAS_PORT}"
+            echo "NO_PROXY=127.0.0.1,localhost,${sim_gateway}"
+            echo "no_proxy=127.0.0.1,localhost,${sim_gateway}"
+          } >> "$GITHUB_ENV"
+          echo "sim gateway: $sim_gateway"
 
       - name: Start fake VLM (deterministic RTDL planner)
         working-directory: examples/webots
         run: |
           set -euo pipefail
-          FAKE_VLM_PORT=$((18000 + (RUN_ID % 1000)))
-          echo "FAKE_VLM_PORT=$FAKE_VLM_PORT" >> "$GITHUB_ENV"
           # OpenAI-compatible endpoint that scripts pilot's planning via the RTDL
           # envelope. Bound to a per-run localhost port; pilot dials it instead
           # of a real VLM.
@@ -240,26 +320,37 @@ jobs:
         env:
           VLM_API_KEY: "fake-ci-key"
           VLM_MODEL: "fake-vlm"
-          no_proxy: "127.0.0.1,localhost,172.17.0.1"
         run: |
           set -euo pipefail
-          atlas_port=$((19000 + (RUN_ID % 1000)))
-          executor_port=$((20000 + (RUN_ID % 1000)))
-          pilot_port=$((21000 + (RUN_ID % 1000)))
-          liaison_port=$((22000 + (RUN_ID % 1000)))
-          export ROBONIX_CI_ATLAS="127.0.0.1:${atlas_port}"
-          export ROBONIX_SIM_ATLAS="172.17.0.1:${atlas_port}"
           export VLM_BASE_URL="http://127.0.0.1:${FAKE_VLM_PORT}/v1"
-          echo "ROBONIX_CI_ATLAS=$ROBONIX_CI_ATLAS" >> "$GITHUB_ENV"
-          echo "ROBONIX_SIM_ATLAS=$ROBONIX_SIM_ATLAS" >> "$GITHUB_ENV"
-          ATLAS_PORT=$atlas_port EXECUTOR_PORT=$executor_port PILOT_PORT=$pilot_port LIAISON_PORT=$liaison_port \
-            python3 - <<'PY'
+          mkdir -p "$AGENT_MEMORY_DIR"
+          python3 - <<'PY'
           import os
           from pathlib import Path
 
           text = Path("robonix_manifest.yaml").read_text()
+          env_keys = [
+              "ROBONIX_SIM_ATLAS",
+              "ROBONIX_MAPPING_CONTAINER",
+              "ROBONIX_NAV2_CONTAINER",
+              "ROBONIX_EXPLORE_CONTAINER",
+              "ROBONIX_SCENE_CONTAINER",
+              "MAPPING_GRPC_PORT",
+              "NAV2_DRIVER_PORT",
+              "SCENE_WEB_PORT",
+              "AGENT_MEMORY_DIR",
+              "AGENT_MILVUS_URI",
+              "ROS_DOMAIN_ID",
+              "CUDA_VISIBLE_DEVICES",
+              "ROBONIX_GPU_ID",
+              "NVIDIA_VISIBLE_DEVICES",
+              "SPEECH_CI_MODE",
+          ]
+          env_block = "\n".join(f"  {key}: {os.environ[key]!r}" for key in env_keys)
+          text = text.replace("env:\n\n# boot", f"env:\n{env_block}\n\n# boot")
           replacements = {
               "0.0.0.0:50051": f"0.0.0.0:{os.environ['ATLAS_PORT']}",
+              "127.0.0.1:50051": f"127.0.0.1:{os.environ['ATLAS_PORT']}",
               "127.0.0.1:50061": f"127.0.0.1:{os.environ['EXECUTOR_PORT']}",
               "127.0.0.1:50071": f"127.0.0.1:{os.environ['PILOT_PORT']}",
               "127.0.0.1:50081": f"127.0.0.1:{os.environ['LIAISON_PORT']}",
@@ -273,13 +364,39 @@ jobs:
           # container over the isolated bridge network from the bringup step.
           nohup rbnx boot -f robonix_manifest.ci.generated.yaml >"$RUNNER_TEMP/rbnx-boot.log" 2>&1 &
           echo "RBNX_BOOT_PID=$!" >> "$GITHUB_ENV"
-          for i in $(seq 1 60); do
-            if rbnx caps --server "$ROBONIX_CI_ATLAS" 2>/dev/null | grep -qiE 'camera|lidar'; then
-              echo "providers registered"; break
+          required_caps='robonix/primitive/camera/snapshot robonix/primitive/lidar/snapshot robonix/service/map/save_map robonix/service/memory/save robonix/service/memory/search robonix/service/speech/speak robonix/service/voiceprint/list'
+          required_active='tiago_camera tiago_lidar mapping memory speech voiceprint'
+          for i in $(seq 1 120); do
+            if rbnx caps -v --server "$ROBONIX_CI_ATLAS" >"$RUNNER_TEMP/caps.wait.txt" 2>&1; then
+              missing=0
+              for cap in $required_caps; do
+                if ! grep -q "$cap" "$RUNNER_TEMP/caps.wait.txt"; then
+                  missing=1
+                  break
+                fi
+              done
+              if [ "$missing" -eq 0 ]; then
+                for provider in $required_active; do
+                  if ! grep -q "^● ${provider} \[ACTIVE\]" "$RUNNER_TEMP/caps.wait.txt"; then
+                    missing=1
+                    break
+                  fi
+                done
+              fi
+              if [ "$missing" -eq 0 ]; then
+                echo "required providers active"
+                break
+              fi
+            fi
+            if [ "$i" -eq 120 ]; then
+              echo "::error::required providers did not register"
+              cat "$RUNNER_TEMP/caps.wait.txt" || true
+              tail -240 "$RUNNER_TEMP/rbnx-boot.log" || true
+              exit 1
             fi
             sleep 5
           done
-          rbnx caps --server "$ROBONIX_CI_ATLAS" || true
+          rbnx caps -v --server "$ROBONIX_CI_ATLAS" || true
 
       - name: Run interface / RPC contract tests (atlas + pilot)
         env:
@@ -319,11 +436,47 @@ jobs:
         run: |
           # never touch other users' containers/processes; match on the run-id
           # prefix. $RUN_ID is the GitHub-assigned numeric id (job-level env).
-          rbnx shutdown 2>/dev/null || true
+          rbnx shutdown --server "${ROBONIX_CI_ATLAS:-127.0.0.1:50051}" 2>/dev/null || true
           [ -n "${RBNX_BOOT_PID:-}" ] && kill "${RBNX_BOOT_PID}" 2>/dev/null || true
           [ -n "${FAKE_VLM_PID:-}" ] && kill "${FAKE_VLM_PID}" 2>/dev/null || true
+          for port in "${ATLAS_PORT:-}" "${EXECUTOR_PORT:-}" "${PILOT_PORT:-}" "${LIAISON_PORT:-}" "${FAKE_VLM_PORT:-}" "${ROBONIX_SIM_STREAM_PORT:-}" "${ROBONIX_SIM_VIEWER_PORT:-}" "${MAPPING_GRPC_PORT:-}" "${NAV2_DRIVER_PORT:-}" "${SCENE_WEB_PORT:-}"; do
+            [ -z "$port" ] && continue
+            pids=$(ss -ltnp 2>/dev/null | awk -v p=":$port" '$0 ~ p { while (match($0, /pid=[0-9]+/)) { print substr($0, RSTART+4, RLENGTH-4); $0=substr($0, RSTART+RLENGTH) } }' | sort -u)
+            [ -n "$pids" ] && kill $pids 2>/dev/null || true
+          done
           docker ps -aq --filter "name=ci-${RUN_ID}-" | xargs -r docker rm -f
-          docker compose -p "ci-${RUN_ID}" down 2>/dev/null || true
+          if [ -n "${ROBONIX_SIM_XDISPLAY:-}" ]; then
+            xnum="${ROBONIX_SIM_XDISPLAY#:}"
+            if [ -n "$xnum" ] && [ -S "/tmp/.X11-unix/X${xnum}" ]; then
+              x_pids=$(ps -eo pid=,args= | awk -v d=":${xnum}" '$0 ~ /(Xorg|Xvfb)/ && index($0, d) {print $1}' | sort -u)
+              if [ -z "$x_pids" ]; then
+                docker exec "${ROBONIX_SIM_CONTAINER:-ci-${RUN_ID}-sim}" rm -f "/tmp/.X11-unix/X${xnum}" >/dev/null 2>&1 || true
+                if [ -S "/tmp/.X11-unix/X${xnum}" ]; then
+                  docker run --rm -v /tmp/.X11-unix:/tmp/.X11-unix:rw --entrypoint rm "${ROBONIX_SIM_CONTAINER:-ci-${RUN_ID}-sim}" -f "/tmp/.X11-unix/X${xnum}" >/dev/null 2>&1 || true
+                fi
+              fi
+            fi
+          fi
+          rm -rf "/tmp/robonix-ci-${RUN_ID}"
+          (cd examples/webots/sim && docker compose -p "ci-${RUN_ID}" down --remove-orphans -v) 2>/dev/null || true
+          if [ -n "${ROBONIX_SIM_XDISPLAY:-}" ]; then
+            xnum="${ROBONIX_SIM_XDISPLAY#:}"
+            for _ in $(seq 1 30); do
+              [ -n "$xnum" ] || break
+              x_pids=$(ps -eo pid=,args= | awk -v d=":${xnum}" '$0 ~ /(Xorg|Xvfb)/ && index($0, d) {print $1}' | sort -u)
+              [ -n "$x_pids" ] && kill $x_pids >/dev/null 2>&1 || true
+              if [ -S "/tmp/.X11-unix/X${xnum}" ]; then
+                docker run --rm -v /tmp/.X11-unix:/tmp/.X11-unix:rw --entrypoint rm "${ROBONIX_SIM_CONTAINER:-ci-${RUN_ID}-sim}" -f "/tmp/.X11-unix/X${xnum}" >/dev/null 2>&1 || true
+              fi
+              [ -S "/tmp/.X11-unix/X${xnum}" ] || break
+              sleep 1
+            done
+            if [ -n "$xnum" ] && [ -S "/tmp/.X11-unix/X${xnum}" ]; then
+              echo "::error::stale per-run X socket remains: /tmp/.X11-unix/X${xnum}"
+              exit 1
+            fi
+          fi
+          docker volume ls -q --filter "name=ci-${RUN_ID}_" | xargs -r docker volume rm -f >/dev/null 2>&1 || true
 
       - name: Collect logs
         if: always()

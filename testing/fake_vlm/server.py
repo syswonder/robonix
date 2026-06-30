@@ -19,9 +19,9 @@ everything from the request body):
    contract wording.
 2. Read the FIRST ``user`` message text — that is the task prompt. Look up the
    scenario whose ``task`` equals it.
-3. Count ``assistant`` messages already in history = the current round index.
-   Serve ``scenario.steps[round]``; past the end, serve a terminal "done"
-   envelope so a turn can never hang.
+3. Count user messages in history = the current round index. Pilot feeds each
+   round's capability results back as additional user messages, so the first
+   call has one user message (round 0).
 4. Stream the envelope JSON back as Server-Sent Events, then ``finish_reason:
    stop`` and ``[DONE]``.
 

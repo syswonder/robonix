@@ -22,6 +22,7 @@ spins up).
 from __future__ import annotations
 
 import os
+import subprocess
 import threading
 import time
 from io import BytesIO
@@ -192,6 +193,25 @@ def publish_extrinsics_when_ready(base_frame: str, cam_frame: str, topic: str) -
           f"{base_frame}→{cam_frame} not resolvable.")
 
 
+def topic_has_sample(topic: str, timeout_s: float) -> bool:
+    """Return true if ROS CLI can read one sample from a topic.
+
+    This is a fallback for CI boots where the shared rclpy sentinel subscription
+    misses a callback even though Webots is already publishing frames.
+    """
+    timeout = max(1, int(timeout_s))
+    try:
+        proc = subprocess.run(
+            ["timeout", str(timeout), "ros2", "topic", "echo", "--once", topic, "--field", "header"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return proc.returncode == 0
+
+
 # ── lifecycle ────────────────────────────────────────────────────────────────
 @tiago_camera.on_init
 def init(cfg):
@@ -293,9 +313,16 @@ def init(cfg):
         daemon=True,
     ).start()
 
-    # gate INIT on first RGB arriving — same generosity as before.
-    if not tiago_camera.wait_for_topic(rgb_topic, "Image", sentinel_timeout):
-        return Err(f"no RGB on {rgb_topic} within {sentinel_timeout:.1f}s")
+    # Gate INIT on first RGB arriving. Keep the in-process rclpy sentinel, but
+    # fall back to a short ROS CLI sample check so a missed transient callback
+    # does not leave CI stuck with an ERROR camera while Webots is publishing.
+    rclpy_wait_s = min(sentinel_timeout, 20.0)
+    if not tiago_camera.wait_for_topic(rgb_topic, "Image", rclpy_wait_s):
+        fallback_wait_s = max(1.0, min(30.0, sentinel_timeout - rclpy_wait_s))
+        if not topic_has_sample(rgb_topic, fallback_wait_s):
+            waited = rclpy_wait_s + fallback_wait_s
+            return Err(f"no RGB on {rgb_topic} within {waited:.1f}s")
+        print(f"[tiago_camera] RGB sample confirmed via ros2 CLI fallback on {rgb_topic}")
 
     # data interfaces are ready — declare them on atlas
     tiago_camera.declare_ros2_topic("robonix/primitive/camera/rgb",   rgb_topic,   qos="best_effort")

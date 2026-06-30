@@ -26,7 +26,7 @@ steps:
     caps:
       - match: memory_save
         args:
-          content: {data: "ci-flow recovered fact: beacon bravo-2"}
+          data: "ci-flow recovered fact: beacon bravo-2"
         description: recovery save with valid args
   - status: done
     content: Recovered from the failed attempt and saved the fact.
