@@ -41,8 +41,15 @@ docker exec -i -d "$SIM_CT" bash -lc "
         --frame-id 'Astra depth' --child-frame-id head_front_camera_depth_optical_frame
 " &>/dev/null
 
+# Cross-host wiring for an isolated (bridge-network) sim — see tiago_chassis
+# start.sh for the rationale. ROBONIX_SIM_ATLAS = atlas reachable from inside the
+# container; ROBONIX_ADVERTISE_HOST = the container's own IP (no `ip` cmd inside
+# to self-resolve). Both empty on a host-network sim, where 127.0.0.1 works.
+SIM_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$SIM_CT" 2>/dev/null || true)"
+
 docker exec -i \
-  -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
+  -e ROBONIX_ATLAS="${ROBONIX_SIM_ATLAS:-${ROBONIX_ATLAS:-127.0.0.1:50051}}" \
+  -e ROBONIX_ADVERTISE_HOST="${ROBONIX_ADVERTISE_HOST:-$SIM_IP}" \
   -e ROBONIX_PKG_HOST_DIR="$(cd "$(dirname "$0")/.." && pwd)" \
   -e TIAGO_RGB_TOPIC="${TIAGO_RGB_TOPIC:-/head_front_camera/rgb/image_raw}" \
   -e TIAGO_DEPTH_TOPIC="${TIAGO_DEPTH_TOPIC:-/head_front_camera/depth_registered/image_raw}" \
