@@ -69,14 +69,21 @@ jobs:
           # Empty on push/PR/dispatch (checkout uses the triggering ref); set to
           # the PR head SHA when the ChatOps bot invokes this via workflow_call.
           ref: ${{ inputs.ref }}
-      - name: Forbidden-operation scan (build.sh / workflows / Dockerfiles / py)
+      - name: Forbidden-operation scan (build.sh / Dockerfiles / drivers)
         run: |
           set -euo pipefail
-          # Patterns that must never execute on the shared GPU host. Extend as
-          # needed; keep in sync with examples/webots/TROUBLESHOOTING.md red lines.
-          PAT='nvidia-smi[^|]*(--gpu-reset|--reset|(^| )-r( |$))|rmmod[[:space:]]+nvidia|modprobe[[:space:]]+nvidia|(curl|wget)[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(ba)?sh|/dev/tcp/|[^a-z]nc[[:space:]]+.*-e|base64[[:space:]]+-d[^|]*\|[^|]*sh'
-          if grep -rInE "$PAT" --include='*.sh' --include='*.yml' --include='*.yaml' \
-                 --include='*.py' --include='Dockerfile*' . ; then
+          # Patterns that must never execute on the shared GPU host. We scan the
+          # code that actually RUNS on the self-hosted runner — package build.sh,
+          # Dockerfiles, and Python drivers — NOT the workflow YAML (it defines
+          # these very patterns, would self-match, and is CODEOWNERS-protected)
+          # and NOT docs/markdown (TROUBLESHOOTING.md lists them as red lines).
+          # Unambiguous red lines only: GPU destruction + reverse shells. The
+          # "pipe-a-download-to-a-shell" risk is covered by the harden-runner
+          # egress allowlist, and flagging it false-positives on every legit
+          # installer (rustup/uv), so it is intentionally not matched here.
+          PAT='nvidia-smi[^|]*(--gpu-reset|--reset|(^| )-r( |$))|rmmod[[:space:]]+nvidia|modprobe[[:space:]]+nvidia|/dev/tcp/|[^a-z]nc[[:space:]]+.*-e[[:space:]]|base64[[:space:]]+-d[^|]*\|[^|]*sh'
+          if grep -rInE "$PAT" --include='*.sh' --include='*.py' --include='Dockerfile*' \
+                 --exclude-dir='.git' --exclude-dir='.github' . ; then
             echo "::error::forbidden high-risk pattern — needs manual maintainer review"; exit 1
           fi
           echo "forbidden-operation scan clean"
