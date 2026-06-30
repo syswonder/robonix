@@ -132,7 +132,6 @@ jobs:
       ROS_DOMAIN_ID: "91"
       ROBONIX_SIM_NETWORK: "bridge"
       ROBONIX_SIM_IPC: "private"
-      ROBONIX_SIM_XDISPLAY: ":49"
       WEBOTS_HEADLESS_MODE: "nvidia"
       WEBOTS_STREAM: "1"
 
@@ -165,6 +164,26 @@ jobs:
           nvidia-smi -q >/dev/null || { echo "::error::nvidia-smi unhealthy"; exit 1; }
           if dmesg 2>/dev/null | grep -qi 'NVRM: Xid'; then
             echo "::warning::Xid in dmesg — GPU may be degraded"; fi
+
+      - name: Reset self-hosted workspace before checkout
+        run: |
+          set -euo pipefail
+          case "${GITHUB_WORKSPACE:-}" in
+            /home/*/actions-runner/_work/*/*) ;;
+            *) echo "::error::refusing to reset unexpected workspace: ${GITHUB_WORKSPACE:-<unset>}"; exit 1 ;;
+          esac
+          mkdir -p "$GITHUB_WORKSPACE"
+          sudo -n chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+          if ! find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null; then
+            if ! docker image inspect busybox:latest >/dev/null 2>&1; then
+              echo "::error::workspace has non-removable residue and busybox:latest is unavailable"
+              exit 1
+            fi
+            timeout 60s docker run --rm --network none \
+              -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:rw" \
+              -w "$GITHUB_WORKSPACE" \
+              busybox:latest sh -c 'find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +'
+          fi
 
       - uses: actions/checkout@v4
         with:
@@ -201,7 +220,14 @@ jobs:
               exit 1
             fi
             echo "removing stale per-run X socket: /tmp/.X11-unix/X${xdisplay}"
-            rm -f "/tmp/.X11-unix/X${xdisplay}"
+            rm -f "/tmp/.X11-unix/X${xdisplay}" 2>/dev/null || sudo -n rm -f "/tmp/.X11-unix/X${xdisplay}" 2>/dev/null || true
+            if [ -S "/tmp/.X11-unix/X${xdisplay}" ] && docker image inspect busybox:latest >/dev/null 2>&1; then
+              timeout 10s docker run --rm --network none -v /tmp/.X11-unix:/tmp/.X11-unix:rw busybox:latest rm -f "/tmp/.X11-unix/X${xdisplay}" >/dev/null 2>&1 || true
+            fi
+            if [ -S "/tmp/.X11-unix/X${xdisplay}" ]; then
+              echo "::error::could not remove stale per-run X socket: /tmp/.X11-unix/X${xdisplay}"
+              exit 1
+            fi
           fi
 
           {
@@ -444,17 +470,28 @@ jobs:
             pids=$(ss -ltnp 2>/dev/null | awk -v p=":$port" '$0 ~ p { while (match($0, /pid=[0-9]+/)) { print substr($0, RSTART+4, RLENGTH-4); $0=substr($0, RSTART+RLENGTH) } }' | sort -u)
             [ -n "$pids" ] && kill $pids 2>/dev/null || true
           done
+          remove_x_socket() {
+            local xnum="$1"
+            local socket="/tmp/.X11-unix/X${xnum}"
+            [ -n "$xnum" ] || return 0
+            [ -S "$socket" ] || return 0
+            rm -f "$socket" 2>/dev/null || true
+            [ -S "$socket" ] || return 0
+            sudo -n rm -f "$socket" 2>/dev/null || true
+            [ -S "$socket" ] || return 0
+            docker exec "${ROBONIX_SIM_CONTAINER:-ci-${RUN_ID}-sim}" rm -f "$socket" >/dev/null 2>&1 || true
+            [ -S "$socket" ] || return 0
+            if docker image inspect busybox:latest >/dev/null 2>&1; then
+              timeout 10s docker run --rm --network none -v /tmp/.X11-unix:/tmp/.X11-unix:rw busybox:latest rm -f "$socket" >/dev/null 2>&1 || true
+            fi
+          }
+
           docker ps -aq --filter "name=ci-${RUN_ID}-" | xargs -r docker rm -f
           if [ -n "${ROBONIX_SIM_XDISPLAY:-}" ]; then
             xnum="${ROBONIX_SIM_XDISPLAY#:}"
-            if [ -n "$xnum" ] && [ -S "/tmp/.X11-unix/X${xnum}" ]; then
-              x_pids=$(ps -eo pid=,args= | awk -v d=":${xnum}" '$0 ~ /(Xorg|Xvfb)/ && index($0, d) {print $1}' | sort -u)
-              if [ -z "$x_pids" ]; then
-                docker exec "${ROBONIX_SIM_CONTAINER:-ci-${RUN_ID}-sim}" rm -f "/tmp/.X11-unix/X${xnum}" >/dev/null 2>&1 || true
-                if [ -S "/tmp/.X11-unix/X${xnum}" ]; then
-                  docker run --rm -v /tmp/.X11-unix:/tmp/.X11-unix:rw --entrypoint rm "${ROBONIX_SIM_CONTAINER:-ci-${RUN_ID}-sim}" -f "/tmp/.X11-unix/X${xnum}" >/dev/null 2>&1 || true
-                fi
-              fi
+            x_pids=$(ps -eo pid=,args= | awk -v d=":${xnum}" '$0 ~ /(Xorg|Xvfb)/ && index($0, d) {print $1}' | sort -u)
+            if [ -z "$x_pids" ]; then
+              remove_x_socket "$xnum"
             fi
           fi
           rm -rf "/tmp/robonix-ci-${RUN_ID}"
@@ -465,9 +502,7 @@ jobs:
               [ -n "$xnum" ] || break
               x_pids=$(ps -eo pid=,args= | awk -v d=":${xnum}" '$0 ~ /(Xorg|Xvfb)/ && index($0, d) {print $1}' | sort -u)
               [ -n "$x_pids" ] && kill $x_pids >/dev/null 2>&1 || true
-              if [ -S "/tmp/.X11-unix/X${xnum}" ]; then
-                docker run --rm -v /tmp/.X11-unix:/tmp/.X11-unix:rw --entrypoint rm "${ROBONIX_SIM_CONTAINER:-ci-${RUN_ID}-sim}" -f "/tmp/.X11-unix/X${xnum}" >/dev/null 2>&1 || true
-              fi
+              remove_x_socket "$xnum"
               [ -S "/tmp/.X11-unix/X${xnum}" ] || break
               sleep 1
             done
