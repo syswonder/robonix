@@ -1,0 +1,26 @@
+# Exercise the memory service save + search RPCs in one tree (two calls).
+name: memory_roundtrip
+task: "ci-test: remember a fact and then search for it"
+steps:
+  - content: Saving a fact, then searching for it.
+    rtdl_description: memory save + search
+    status: in_progress
+    caps:
+      # std_msgs/String args wrap as {data: ...} (confirmed from the live MCP
+      # catalog: skill/service String fields render as a nested {data} object).
+      - match: memory_save
+        args:
+          content: {data: "ci-fact: the test beacon is alpha-7"}
+        description: persist a fact
+      - match: memory_search
+        args:
+          query: {data: test beacon}
+        description: recall the fact
+  - content: Saved and recalled.
+    status: done
+expect_contracts:
+  - memory/save
+  - memory/search
+expect_args:
+  - alpha-7
+  - test beacon

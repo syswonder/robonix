@@ -1,0 +1,14 @@
+# Exercise the speech service speak RPC (the MCP-facing tool; `tts` is an
+# internal contract not advertised to the planner). target="" = first speaker.
+name: speech_speak
+task: "ci-test: announce a short phrase out loud"
+steps:
+  - status: in_progress
+    rtdl_description: speak
+    caps:
+      - match: speech_speak
+        args: {target: "", text: "robonix continuous integration test"}
+        description: synthesize and play speech
+  - status: done
+expect_contracts: [speech/speak]
+expect_args: ["continuous integration test"]

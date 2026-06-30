@@ -1,0 +1,38 @@
+# Multi-step task flow (happy path): observe -> remember -> recall.
+# Each step is its own planning round, so this exercises the pilot planner
+# loop end-to-end across several rounds against real Webots sensor data.
+name: patrol_observe
+task: "ci-flow: look around, note what you see, then recall the note"
+steps:
+  - status: in_progress
+    rtdl_description: capture
+    content: Capturing a snapshot at the waypoint.
+    caps:
+      - match: camera_snapshot
+        args: {}
+        description: observe the surroundings
+  - status: in_progress
+    rtdl_description: remember
+    content: Recording the observation.
+    caps:
+      - match: memory_save
+        args:
+          content: {data: "ci-flow observation: snapshot captured at waypoint 1"}
+        description: persist the observation
+  - status: in_progress
+    rtdl_description: recall
+    content: Recalling the observation.
+    caps:
+      - match: memory_search
+        args:
+          query: {data: waypoint 1}
+        description: recall the observation
+  - status: done
+    content: Observed, recorded, and recalled.
+expect_contracts:
+  - camera/snapshot
+  - memory/save
+  - memory/search
+expect_args:
+  - waypoint 1
+expect_min_rounds: 3
