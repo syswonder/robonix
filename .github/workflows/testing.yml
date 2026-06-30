@@ -221,7 +221,14 @@ jobs:
           VLM_BASE_URL: "http://127.0.0.1:18080/v1"
           VLM_API_KEY: "fake-ci-key"
           VLM_MODEL: "fake-vlm"
-          no_proxy: "127.0.0.1,localhost"
+          no_proxy: "127.0.0.1,localhost,172.17.0.1"
+          # Cross-host wiring for the isolated (bridge-network) sim: the tiago
+          # drivers are docker-exec'd INTO the sim container and must reach the
+          # host atlas + advertise an address the host executor can dial back.
+          # rbnx hands providers a host-localhost atlas the bridge container
+          # can't reach, so point them at the docker bridge gateway. The driver
+          # start.sh auto-computes its own container IP for ROBONIX_ADVERTISE_HOST.
+          ROBONIX_SIM_ATLAS: "172.17.0.1:50051"
         run: |
           set -euo pipefail
           # boot is the deploy supervisor (foreground); run it detached and poll

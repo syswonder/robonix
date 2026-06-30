@@ -28,8 +28,21 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Cross-host wiring for an isolated (bridge-network) sim: the driver runs INSIDE
+# the sim container but registers with an atlas on the host, and the host
+# executor must dial the driver's MCP endpoint back.
+#  - ROBONIX_SIM_ATLAS: atlas address reachable FROM the container (the bridge
+#    gateway, e.g. 172.17.0.1:50151). rbnx overrides ROBONIX_ATLAS to a host
+#    localhost value the container can't reach, so this takes precedence.
+#  - ROBONIX_ADVERTISE_HOST: the container's own IP, so it advertises an MCP URL
+#    the host executor can reach. The container has no `ip` cmd to self-resolve,
+#    so compute it host-side. Both default empty on a host-network sim, where
+#    127.0.0.1 already works for both directions.
+SIM_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$SIM_CT" 2>/dev/null || true)"
+
 docker exec -i \
-  -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
+  -e ROBONIX_ATLAS="${ROBONIX_SIM_ATLAS:-${ROBONIX_ATLAS:-127.0.0.1:50051}}" \
+  -e ROBONIX_ADVERTISE_HOST="${ROBONIX_ADVERTISE_HOST:-$SIM_IP}" \
   -e ROBONIX_PKG_HOST_DIR="$(cd "$(dirname "$0")/.." && pwd)" \
   -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api" \
   "$SIM_CT" \
