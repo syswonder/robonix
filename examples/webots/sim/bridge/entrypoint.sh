@@ -97,7 +97,7 @@ XCONF
   export DISPLAY=$NVIDIA_DISPLAY
   local renderer
   renderer=$(glxinfo -B 2>/dev/null | awk -F'string: ' '/OpenGL renderer/ {print $2; exit}')
-  echo "[entrypoint] Xorg :48 up, renderer=$renderer"
+  echo "[entrypoint] Xorg ${NVIDIA_DISPLAY} up, renderer=$renderer"
   if ! echo "$renderer" | grep -qi nvidia; then
     echo "[entrypoint] WARN: renderer is not NVIDIA — webots will still be slow"
     return 1
@@ -106,10 +106,10 @@ XCONF
 }
 
 start_xvfb() {
-  Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -nolisten unix &
-  export DISPLAY=:99
+  Xvfb "$NVIDIA_DISPLAY" -screen 0 1920x1080x24 -nolisten tcp &
+  export DISPLAY="$NVIDIA_DISPLAY"
   sleep 1
-  echo "[entrypoint] Xvfb :99 (CPU render)"
+  echo "[entrypoint] Xvfb ${NVIDIA_DISPLAY} (CPU render)"
 }
 
 case "${WEBOTS_HEADLESS_MODE:-host}" in

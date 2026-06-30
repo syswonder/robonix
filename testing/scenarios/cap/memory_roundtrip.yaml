@@ -6,15 +6,15 @@ steps:
     rtdl_description: memory save + search
     status: in_progress
     caps:
-      # std_msgs/String args wrap as {data: ...} (confirmed from the live MCP
-      # catalog: skill/service String fields render as a nested {data} object).
+      # memsearch registers MCP handlers directly as std_msgs/String, so the
+      # planner-facing args are the message fields themselves: {data: ...}.
       - match: memory_save
         args:
-          content: {data: "ci-fact: the test beacon is alpha-7"}
+          data: "ci-fact: the test beacon is alpha-7"
         description: persist a fact
       - match: memory_search
         args:
-          query: {data: test beacon}
+          data: test beacon
         description: recall the fact
   - content: Saved and recalled.
     status: done

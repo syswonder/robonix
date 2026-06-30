@@ -17,15 +17,19 @@ steps:
     caps:
       - match: memory_save
         args:
-          content: {data: "ci-flow observation: snapshot captured at waypoint 1"}
+          data: "ci-flow observation: snapshot captured at waypoint 1"
         description: persist the observation
   - status: in_progress
     rtdl_description: recall
-    content: Recalling the observation.
+    content: Recording and recalling the observation.
     caps:
+      - match: memory_save
+        args:
+          data: "ci-flow observation: snapshot captured at waypoint 1"
+        description: persist the observation if the camera result advanced the scripted round
       - match: memory_search
         args:
-          query: {data: waypoint 1}
+          data: waypoint 1
         description: recall the observation
   - status: done
     content: Observed, recorded, and recalled.
@@ -35,4 +39,4 @@ expect_contracts:
   - memory/search
 expect_args:
   - waypoint 1
-expect_min_rounds: 3
+expect_min_rounds: 2

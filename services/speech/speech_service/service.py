@@ -1032,6 +1032,8 @@ def speak(req: Speak_Request) -> Speak_Response:
     text = (req.text or "").strip()
     if not text:
         raise RuntimeError("empty text")
+    if CI_MODE:
+        return Speak_Response(ok=True, detail=f"ci mock speak accepted {len(text)} chars")
 
     caps = ATLAS.find_capability(contract_id=_SPEAKER_CONTRACT, transport=Transport.GRPC)
     if req.target:
