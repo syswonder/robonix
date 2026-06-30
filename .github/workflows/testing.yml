@@ -164,21 +164,29 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
+      - name: Init submodules through mirror
+        run: |
+          set -euo pipefail
+          git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
+          git submodule sync --recursive
+          git submodule update --init --recursive
+
       - name: Toolchain + build-env (idempotent)
         run: |
           set -euo pipefail
           command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
-          # github unreachable for git clone here → route through mirror.
+          # Keep the mirror rewrite for rbnx build remote provider clones.
           git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
           # codegen tools pinned to the runtime grpcio version.
           python3 -m pip install --user "grpcio-tools==${GRPCIO_PIN}" "grpcio==${GRPCIO_PIN}"
           # testing harness (fake VLM + scenario runner) parses YAML scenarios.
           python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user pyyaml
-          # point rbnx at THIS checkout (config is per-user; restore not needed
-          # on a dedicated runner). Use the freshly-built codegen, not a stale
-          # ~/.cargo/bin one.
-          make install   # rbnx + atlas + executor + pilot + liaison + codegen → ~/.cargo/bin
-          rbnx setup "$PWD"
+          # Build and use binaries from THIS checkout. Do not mutate or trust the
+          # runner user's ~/.cargo/bin; this is a shared Webots host.
+          cargo build --workspace
+          echo "$PWD/target/debug" >> "$GITHUB_PATH"
+          echo "ROBONIX_CODEGEN_BIN=$PWD/target/debug/robonix-codegen" >> "$GITHUB_ENV"
+          "$PWD/target/debug/rbnx" setup "$PWD"
 
       - name: Build deploy (in-repo + remote upstream HEAD) + provenance
         working-directory: examples/webots
