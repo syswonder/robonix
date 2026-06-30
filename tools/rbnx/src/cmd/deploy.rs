@@ -404,15 +404,20 @@ async fn spawn_system_binary(
     })
 }
 
+struct PackageSpawnEnv<'a> {
+    log_dir: &'a Path,
+    cache_root: &'a Path,
+    instances_dir: &'a Path,
+    manifest_dir: &'a Path,
+    atlas_endpoint: &'a str,
+}
+
 async fn spawn_package(
-    log_dir: &Path,
-    cache_root: &Path,
-    instances_dir: &Path,
     component: &str,
     entry: &PackageEntry,
-    manifest_dir: &Path,
+    env: &PackageSpawnEnv<'_>,
 ) -> Result<Spawned> {
-    let pkg_path = resolve_entry_path(entry, cache_root, manifest_dir)?;
+    let pkg_path = resolve_entry_path(entry, env.cache_root, env.manifest_dir)?;
     let pkg_path = pkg_path
         .canonicalize()
         .with_context(|| format!("package path not found: {}", pkg_path.display()))?;
@@ -440,7 +445,7 @@ async fn spawn_package(
     // it as an env var to the spawned `rbnx start`.
     let cfg_json = serde_json::to_value(&entry.config).unwrap_or(serde_json::Value::Null);
     let cfg_pretty = serde_json::to_string_pretty(&cfg_json).unwrap_or_else(|_| "{}".into());
-    let cfg_file = instances_dir.join(format!("{name}.json"));
+    let cfg_file = env.instances_dir.join(format!("{name}.json"));
     std::fs::write(&cfg_file, &cfg_pretty)
         .with_context(|| format!("failed to write {}", cfg_file.display()))?;
 
@@ -459,13 +464,22 @@ async fn spawn_package(
     // `entry.config` higher in this module — and atlas-side bookkeeping;
     // the provider never sees it.
     let _ = &cfg_file; // kept for debug / inspection; not exported
+    // Tell the provider which atlas to register with — derived from the
+    // manifest's `system.atlas.listen`, NOT the hard default 127.0.0.1:50051.
+    // Without this an alt-port deploy (e.g. an isolated CI run) leaves every
+    // provider dialing 50051 and failing to register. A bind-all listen
+    // (0.0.0.0) is rewritten to a dialable loopback for the provider; an
+    // in-container driver further overrides this via ROBONIX_SIM_ATLAS.
+    let provider_atlas = env.atlas_endpoint.replacen("0.0.0.0", "127.0.0.1", 1);
     let mut cmd = Command::new(&rbnx_bin);
     cmd.arg("start")
         .arg("-p")
         .arg(pkg_path.as_os_str())
+        .arg("--endpoint")
+        .arg(&provider_atlas)
         .env("RBNX_INSTANCE_NAME", &name)
-        .env("RBNX_INVOCATION_CWD", manifest_dir)
-        .env("SCRIBE_LOG_DIR", log_dir)
+        .env("RBNX_INVOCATION_CWD", env.manifest_dir)
+        .env("SCRIBE_LOG_DIR", env.log_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -647,6 +661,13 @@ pub async fn execute(
         .and_then(|v| v.as_str())
         .unwrap_or("127.0.0.1:50051")
         .to_string();
+    let spawn_env = PackageSpawnEnv {
+        log_dir: &log_dir,
+        cache_root: &cache_root,
+        instances_dir: &instances_dir,
+        manifest_dir: &manifest_dir,
+        atlas_endpoint: &atlas_endpoint,
+    };
 
     // Boot is responsible for spawning + atlas registration ONLY.
     // Fetching (git clone of url-remote pkgs) and building are
@@ -835,17 +856,7 @@ pub async fn execute(
                     config: value.clone(),
                     manifest: None,
                 };
-                match spawn_and_init(
-                    "system",
-                    &entry,
-                    &log_dir,
-                    &cache_root,
-                    &instances_dir,
-                    &manifest_dir,
-                    &mut atlas,
-                )
-                .await
-                {
+                match spawn_and_init("system", &entry, &spawn_env, &mut atlas).await {
                     Ok(sp) => {
                         children.push(sp);
                         persist_state(
@@ -867,17 +878,7 @@ pub async fn execute(
             output::boot_section("primitive");
         }
         for e in &deploy.primitive {
-            match spawn_and_init(
-                "primitive",
-                e,
-                &log_dir,
-                &cache_root,
-                &instances_dir,
-                &manifest_dir,
-                &mut atlas,
-            )
-            .await
-            {
+            match spawn_and_init("primitive", e, &spawn_env, &mut atlas).await {
                 Ok(sp) => {
                     children.push(sp);
                     persist_state(
@@ -897,17 +898,7 @@ pub async fn execute(
             output::boot_section("service");
         }
         for e in &deploy.service {
-            match spawn_and_init(
-                "service",
-                e,
-                &log_dir,
-                &cache_root,
-                &instances_dir,
-                &manifest_dir,
-                &mut atlas,
-            )
-            .await
-            {
+            match spawn_and_init("service", e, &spawn_env, &mut atlas).await {
                 Ok(sp) => {
                     children.push(sp);
                     persist_state(
@@ -938,17 +929,7 @@ pub async fn execute(
             output::boot_section("skill");
         }
         for e in &deploy.skill {
-            match spawn_and_init(
-                "skill",
-                e,
-                &log_dir,
-                &cache_root,
-                &instances_dir,
-                &manifest_dir,
-                &mut atlas,
-            )
-            .await
-            {
+            match spawn_and_init("skill", e, &spawn_env, &mut atlas).await {
                 Ok(sp) => {
                     children.push(sp);
                     persist_state(
@@ -1349,10 +1330,7 @@ fn system_cli_args(
 async fn spawn_and_init(
     component: &str,
     entry: &PackageEntry,
-    log_dir: &Path,
-    cache_root: &Path,
-    instances_dir: &Path,
-    manifest_dir: &Path,
+    spawn_env: &PackageSpawnEnv<'_>,
     atlas: &mut AtlasClient,
 ) -> Result<Spawned> {
     let before: HashSet<String> = atlas
@@ -1363,15 +1341,7 @@ async fn spawn_and_init(
         .map(|r| r.id)
         .collect();
 
-    let sp = spawn_package(
-        log_dir,
-        cache_root,
-        instances_dir,
-        component,
-        entry,
-        manifest_dir,
-    )
-    .await?;
+    let sp = spawn_package(component, entry, spawn_env).await?;
     let pkg_label = sp.name.clone();
 
     // One package = one provider. After spawn, the new provider_id is whatever
@@ -1394,7 +1364,8 @@ async fn spawn_and_init(
     };
 
     let (provider_id, driver_contract) =
-        match wait_for_registration(atlas, &before, &pkg_label, component, log_dir).await {
+        match wait_for_registration(atlas, &before, &pkg_label, component, spawn_env.log_dir).await
+        {
             Ok(v) => v,
             Err(e) => {
                 reap();
@@ -1408,7 +1379,7 @@ async fn spawn_and_init(
     // beats letting downstream consumers fail with cryptic
     // "no provider for X" errors.
     if provider_id != entry.name {
-        let log_file = log_path(log_dir, &pkg_label);
+        let log_file = log_path(spawn_env.log_dir, &pkg_label);
         output::boot_fail(
             short_label(&pkg_label, component),
             &format!(

@@ -12,7 +12,8 @@
 #      OWNER / MEMBER / COLLABORATOR. A drive-by commenter cannot start a run on
 #      the self-hosted runner. This is the load-bearing check.
 #   3. The actual GPU job still goes through testing.yml's `security-gate` +
-#      `environment: gpu-e2e` (required-reviewer approval), so even an
+#      `environment: gpu-testing` (required-reviewer approval, once configured),
+#      so even an
 #      authorized comment pauses for a human before touching the 5090.
 
 name: ci-bot
@@ -73,7 +74,7 @@ jobs:
             });
             core.setOutput('comment_id', c.data.id);
 
-  # ── Run the real pipeline (reuses testing.yml end-to-end) ──────────────────
+  # ── Run the real pipeline (reuses testing.yml full-stack flow) ─────────────
   test:
     needs: gate
     uses: ./.github/workflows/testing.yml

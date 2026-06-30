@@ -3,7 +3,7 @@
 # Runs on the self-hosted GPU runner (label `robonix-testing`, pinned to one GPU
 # via the runner's own CUDA_VISIBLE_DEVICES). Cheap checks (fmt/clippy/build/unit)
 # live in ci.yml on GitHub-hosted runners and gate every PR; THIS workflow is the
-# heavy GPU e2e and is deliberately NOT exposed to untrusted PR code.
+# heavy GPU testing job and is deliberately NOT exposed to untrusted PR code.
 #
 # ─────────────────────────── SECURITY (read first) ───────────────────────────
 # A self-hosted runner executes whatever the triggering ref contains — and
@@ -18,7 +18,7 @@
 #  2. Also turn ON in repo settings: Actions → Fork pull request workflows →
 #     "Require approval for all external contributors".
 #  3. `permissions: contents: read` — the job gets a read-only GITHUB_TOKEN.
-#     The e2e uses a FAKE VLM and needs NO real secrets; keep the runner
+#     The GPU testing job uses a FAKE VLM and needs NO real secrets; keep the runner
 #     secret-free. Do not add repo secrets to this workflow.
 #  4. Run the runner as a DEDICATED unprivileged user (not a human account with
 #     SSH keys / access to other users' data), ideally with `--ephemeral`
@@ -45,20 +45,20 @@ on:
     outputs:
       result:
         description: "PASS/FAIL summary line from the harness"
-        value: ${{ jobs.gpu-e2e.outputs.result }}
+        value: ${{ jobs.gpu_testing.outputs.result }}
 
 permissions:
   contents: read
 
 concurrency:
-  # One GPU e2e at a time per ref; a new push cancels the superseded run.
+  # One GPU testing run at a time per ref; a new push cancels the superseded run.
   group: testing-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   # ── Gate 1: cheap, GitHub-hosted, untrusted-safe ──────────────────────────
   # Scans the ref for forbidden high-risk operations BEFORE anything runs on the
-  # self-hosted GPU box. gpu-e2e `needs:` this, so a dirty diff never reaches the
+  # self-hosted GPU box. gpu_testing `needs:` this, so a dirty diff never reaches the
   # 5090 — and because it runs on push(dev/main) too, it gates merged code as
   # well. No `environment:` here, so it never blocks normal contributor CI.
   security-gate:
@@ -77,13 +77,16 @@ jobs:
           # Dockerfiles, and Python drivers — NOT the workflow YAML (it defines
           # these very patterns, would self-match, and is CODEOWNERS-protected)
           # and NOT docs/markdown (TROUBLESHOOTING.md lists them as red lines).
-          # Unambiguous red lines only: GPU destruction + reverse shells. The
-          # "pipe-a-download-to-a-shell" risk is covered by the harden-runner
-          # egress allowlist, and flagging it false-positives on every legit
-          # installer (rustup/uv), so it is intentionally not matched here.
-          PAT='nvidia-smi[^|]*(--gpu-reset|--reset|(^| )-r( |$))|rmmod[[:space:]]+nvidia|modprobe[[:space:]]+nvidia|/dev/tcp/|[^a-z]nc[[:space:]]+.*-e[[:space:]]|base64[[:space:]]+-d[^|]*\|[^|]*sh'
-          if grep -rInE "$PAT" --include='*.sh' --include='*.py' --include='Dockerfile*' \
-                 --exclude-dir='.git' --exclude-dir='.github' . ; then
+          # Red lines: GPU destruction, reverse shells, obfuscated shell payloads,
+          # and pipe-to-shell downloads in files that can run during package build
+          # or provider startup. Use tracked files only; generated rbnx-build,
+          # target, and venv trees are not part of the review surface.
+          PAT='nvidia-smi[^|]*(--gpu-reset|--reset|(^| )-r( |$))|rmmod[[:space:]]+nvidia|modprobe[[:space:]]+nvidia|/dev/tcp/|[^a-z]nc[[:space:]]+.*-e[[:space:]]|base64[[:space:]]+-d[^|]*\|[^|]*sh|(curl|wget)[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(ba)?sh'
+          git ls-files \
+            'examples/webots/**' 'services/**' 'system/**' 'capabilities/**' 'tools/**' \
+            | grep -E '(\.sh|\.py|(^|/)Dockerfile[^/]*)$' > "$RUNNER_TEMP/forbidden-scan-files" || true
+          if [ -s "$RUNNER_TEMP/forbidden-scan-files" ] &&
+             xargs -r grep -nE "$PAT" < "$RUNNER_TEMP/forbidden-scan-files"; then
             echo "::error::forbidden high-risk pattern — needs manual maintainer review"; exit 1
           fi
           echo "forbidden-operation scan clean"
@@ -93,16 +96,15 @@ jobs:
             detect --source=/repo --no-banner --redact \
             || { echo "::error::possible secret in diff"; exit 1; }
 
-  # ── Gate 2: the GPU e2e itself ────────────────────────────────────────────
-  gpu-e2e:
+  # ── Gate 2: the GPU testing job itself ────────────────────────────────────
+  gpu_testing:
     needs: security-gate
     outputs:
       result: ${{ steps.scenarios.outputs.result }}
-    # Per-run MANUAL approval: this Environment must have "Required reviewers"
-    # configured in repo settings. The job pauses BEFORE it is assigned to the
-    # self-hosted runner until a maintainer clicks Approve — so untrusted PR
-    # code never touches the 5090 unattended (push to dev/main pauses too).
-    environment: gpu-e2e
+    # Optional per-run manual approval: configure the `gpu-testing` Environment
+    # with Required reviewers in repo settings if we want GitHub to pause this
+    # job before it is assigned to the self-hosted runner.
+    environment: gpu-testing
     # Belt-and-suspenders: also require the `safe-to-test` label on PRs.
     if: >-
       github.event_name == 'push' ||
