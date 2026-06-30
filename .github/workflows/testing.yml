@@ -222,13 +222,12 @@ jobs:
           VLM_API_KEY: "fake-ci-key"
           VLM_MODEL: "fake-vlm"
           no_proxy: "127.0.0.1,localhost"
-          NO_PROXY: "127.0.0.1,localhost"
         run: |
           set -euo pipefail
           # boot is the deploy supervisor (foreground); run it detached and poll
           # atlas until the expected providers register. ROS talks to the sim
           # container over the isolated bridge network from the bringup step.
-          nohup rbnx boot --no-update-check >"$RUNNER_TEMP/rbnx-boot.log" 2>&1 &
+          nohup rbnx boot >"$RUNNER_TEMP/rbnx-boot.log" 2>&1 &
           echo "RBNX_BOOT_PID=$!" >> "$GITHUB_ENV"
           for i in $(seq 1 60); do
             if rbnx caps --server 127.0.0.1:50051 2>/dev/null | grep -qiE 'camera|lidar'; then
@@ -242,7 +241,6 @@ jobs:
         env:
           ROBONIX_ATLAS: "127.0.0.1:50051"
           no_proxy: "127.0.0.1,localhost"
-          NO_PROXY: "127.0.0.1,localhost"
         run: python3 "$GITHUB_WORKSPACE/testing/run_interfaces.py" --server 127.0.0.1:50051
 
       - name: Run capability + flow scenarios (dispatch, results, fault recovery)
@@ -250,7 +248,6 @@ jobs:
         env:
           ROBONIX_ATLAS: "127.0.0.1:50051"
           no_proxy: "127.0.0.1,localhost"
-          NO_PROXY: "127.0.0.1,localhost"
         run: |
           set -o pipefail
           python3 "$GITHUB_WORKSPACE/testing/run.py" --server 127.0.0.1:50051 \
