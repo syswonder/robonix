@@ -100,8 +100,19 @@ jobs:
           script: |
             const fs = require('fs');
             const outcome = '${{ needs.test.result }}';  // success / failure / cancelled
+            // The artifact preserves the upload path (testing/logs/summary.json),
+            // so locate it rather than assuming a flat layout.
+            const findSummary = (dir) => {
+              for (const e of fs.existsSync(dir) ? fs.readdirSync(dir, {withFileTypes: true}) : []) {
+                const p = `${dir}/${e.name}`;
+                if (e.isDirectory()) { const r = findSummary(p); if (r) return r; }
+                else if (e.name === 'summary.json') return p;
+              }
+              return null;
+            };
             let summary = null;
-            try { summary = JSON.parse(fs.readFileSync('dl/summary.json', 'utf8')); } catch (e) {}
+            const sp = findSummary('dl');
+            try { if (sp) summary = JSON.parse(fs.readFileSync(sp, 'utf8')); } catch (e) {}
 
             let lines = ['<!-- robonix-ci-status -->'];
             if (summary) {
