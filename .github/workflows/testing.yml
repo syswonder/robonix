@@ -203,11 +203,11 @@ jobs:
         env:
           ROBONIX_SIM_CONTAINER: "ci-${{ github.run_id }}-sim"
           ROBONIX_SIM_PROJECT:   "ci-${{ github.run_id }}"
-          ROBONIX_SIM_STREAM_PORT: "2234"
-          ROBONIX_SIM_VIEWER_PORT: "9080"
           NVIDIA_DRIVER_CAPABILITIES: "graphics,display,utility,compute"
         run: |
           set -euo pipefail
+          export ROBONIX_SIM_STREAM_PORT=$((23000 + (RUN_ID % 1000)))
+          export ROBONIX_SIM_VIEWER_PORT=$((24000 + (RUN_ID % 1000)))
           : > "$RUNNER_TEMP/xauth"; export ROBONIX_HOST_XAUTH="$RUNNER_TEMP/xauth" DISPLAY=:49
           docker compose -f compose.yaml -f compose.gpu.yaml -f compose.stream.yaml up --build -d
           # robot publishes /scanner /odom /head_front_camera/* within ~15s.
