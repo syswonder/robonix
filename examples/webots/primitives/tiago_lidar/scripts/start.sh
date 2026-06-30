@@ -4,14 +4,19 @@
 # See tiago_chassis/scripts/start.sh for trap-discipline rationale.
 set -euo pipefail
 
-if ! docker ps --format '{{.Names}}' | grep -qx robonix_tiago_sim; then
-  echo "[tiago_lidar] error: sim container 'robonix_tiago_sim' is not running."
+# Sim container name — overridable via ROBONIX_SIM_CONTAINER for isolated
+# CI / parallel deploys. Default keeps single-deploy behaviour. See
+# tiago_chassis/scripts/start.sh for the full rationale.
+SIM_CT="${ROBONIX_SIM_CONTAINER:-robonix_tiago_sim}"
+
+if ! docker ps --format '{{.Names}}' | grep -qx "$SIM_CT"; then
+  echo "[tiago_lidar] error: sim container '$SIM_CT' is not running."
   echo "              Bring it up first:  bash examples/webots/sim/start.sh"
   exit 1
 fi
 
 cleanup() {
-  docker exec robonix_tiago_sim pkill -9 -f 'lidar_driver|scan_normalize' 2>/dev/null || true
+  docker exec "$SIM_CT" pkill -9 -f 'lidar_driver|scan_normalize' 2>/dev/null || true
   kill -- "-$$" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
@@ -32,7 +37,7 @@ docker exec -i \
   -e TIAGO_SCAN_TOPIC="$OUT_TOPIC" \
   -e TIAGO_SCAN_RAW_TOPIC="$RAW_TOPIC" \
   -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api" \
-  robonix_tiago_sim \
+  "$SIM_CT" \
   bash -lc "
     set -eo pipefail
     source /opt/ros/humble/setup.bash

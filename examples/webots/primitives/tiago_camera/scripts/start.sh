@@ -4,14 +4,19 @@
 # See tiago_chassis/scripts/start.sh for trap-discipline rationale.
 set -euo pipefail
 
-if ! docker ps --format '{{.Names}}' | grep -qx robonix_tiago_sim; then
-  echo "[tiago_camera] error: sim container 'robonix_tiago_sim' is not running."
+# Sim container name — overridable via ROBONIX_SIM_CONTAINER for isolated
+# CI / parallel deploys. Default keeps single-deploy behaviour. See
+# tiago_chassis/scripts/start.sh for the full rationale.
+SIM_CT="${ROBONIX_SIM_CONTAINER:-robonix_tiago_sim}"
+
+if ! docker ps --format '{{.Names}}' | grep -qx "$SIM_CT"; then
+  echo "[tiago_camera] error: sim container '$SIM_CT' is not running."
   echo "                Bring it up first:  bash examples/webots/sim/start.sh"
   exit 1
 fi
 
 cleanup() {
-  docker exec robonix_tiago_sim pkill -9 -f 'camera_driver|static_transform_publisher.*head_front_camera' 2>/dev/null || true
+  docker exec "$SIM_CT" pkill -9 -f 'camera_driver|static_transform_publisher.*head_front_camera' 2>/dev/null || true
   kill -- "-$$" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
@@ -23,13 +28,13 @@ trap cleanup EXIT INT TERM
 # fusion) fails. We publish identity static TFs `Astra rgb` → optical frame
 # so the names line up. Compensation lives here (camera primitive) — never
 # in mapping/scene.
-docker exec -i -d robonix_tiago_sim bash -lc "
+docker exec -i -d "$SIM_CT" bash -lc "
     source /opt/ros/humble/setup.bash
     exec ros2 run tf2_ros static_transform_publisher \
         --x 0 --y 0 --z 0 --yaw 0 --pitch 0 --roll 0 \
         --frame-id 'Astra rgb' --child-frame-id head_front_camera_rgb_optical_frame
 " &>/dev/null
-docker exec -i -d robonix_tiago_sim bash -lc "
+docker exec -i -d "$SIM_CT" bash -lc "
     source /opt/ros/humble/setup.bash
     exec ros2 run tf2_ros static_transform_publisher \
         --x 0 --y 0 --z 0 --yaw 0 --pitch 0 --roll 0 \
@@ -44,7 +49,7 @@ docker exec -i \
   -e TIAGO_RGB_FRAME_ID="${TIAGO_RGB_FRAME_ID:-head_front_camera_rgb_optical_frame}" \
   -e TIAGO_DEPTH_FRAME_ID="${TIAGO_DEPTH_FRAME_ID:-head_front_camera_depth_optical_frame}" \
   -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api" \
-  robonix_tiago_sim \
+  "$SIM_CT" \
   bash -lc 'set -eo pipefail
             source /opt/ros/humble/setup.bash
             OVL=/robonix_pkgs/primitives/tiago_camera/rbnx-build/codegen/ros2_idl/install/setup.bash

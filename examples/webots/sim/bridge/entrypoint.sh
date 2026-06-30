@@ -31,7 +31,12 @@ source /opt/ros/humble/setup.bash
 source /colcon_ws/install/setup.bash
 set -u
 
-NVIDIA_DISPLAY=:48
+# Display number is overridable via ROBONIX_SIM_XDISPLAY so two sim containers
+# can run on one host without colliding on the same Xorg socket / logfile (a CI
+# runner alongside an interactive user). Default :48 preserves single-tenant
+# behaviour. XNUM is the bare number used for the /tmp/.X11-unix/X<n> socket.
+NVIDIA_DISPLAY="${ROBONIX_SIM_XDISPLAY:-:48}"
+XNUM="${NVIDIA_DISPLAY#:}"
 
 start_nvidia_xorg() {
   # Pick the GPU with the most free memory and translate its PCI BusID
@@ -78,15 +83,15 @@ EndSection
 XCONF
 
   Xorg "$NVIDIA_DISPLAY" -config /tmp/xorg-nvidia.conf \
-       -noreset -nolisten tcp -logfile /tmp/Xorg.48.log &
+       -noreset -nolisten tcp -logfile "/tmp/Xorg.${XNUM}.log" &
   local i
   for i in $(seq 1 30); do
-    [ -S /tmp/.X11-unix/X48 ] && break
+    [ -S "/tmp/.X11-unix/X${XNUM}" ] && break
     sleep 0.5
   done
-  if ! [ -S /tmp/.X11-unix/X48 ]; then
-    echo "[entrypoint] Xorg :48 failed; last 40 lines of /tmp/Xorg.48.log:"
-    tail -40 /tmp/Xorg.48.log 2>&1 || true
+  if ! [ -S "/tmp/.X11-unix/X${XNUM}" ]; then
+    echo "[entrypoint] Xorg ${NVIDIA_DISPLAY} failed; last 40 lines of /tmp/Xorg.${XNUM}.log:"
+    tail -40 "/tmp/Xorg.${XNUM}.log" 2>&1 || true
     return 1
   fi
   export DISPLAY=$NVIDIA_DISPLAY
