@@ -233,6 +233,7 @@ expect_leaves:
   - contract: robonix/system/scene/list_objects
     success: true
     output:
+      text_regex: '"label":\s*"(?!robot")[^"]+"'
       jsonpath:
         - path: $.objects
           min_length: 1

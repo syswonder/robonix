@@ -22,6 +22,7 @@ spins up).
 from __future__ import annotations
 
 import os
+import math
 import subprocess
 import threading
 import time
@@ -212,6 +213,30 @@ def topic_has_sample(topic: str, timeout_s: float) -> bool:
     return proc.returncode == 0
 
 
+def _cfg_float(cfg: dict, key: str, env_key: str, default: float = 0.0) -> float:
+    value = cfg.get(key)
+    if value is None:
+        value = os.environ.get(env_key)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _cfg_int(cfg: dict, key: str, env_key: str, default: int) -> int:
+    value = cfg.get(key)
+    if value is None:
+        value = os.environ.get(env_key)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 # ── lifecycle ────────────────────────────────────────────────────────────────
 @tiago_camera.on_init
 def init(cfg):
@@ -230,6 +255,9 @@ def init(cfg):
     cam_frame = cfg.get("cam_frame") or os.environ.get(
         "TIAGO_RGB_FRAME_ID", "head_front_camera_rgb_optical_frame")
     sentinel_timeout = float(cfg.get("sentinel_timeout_s", 60.0))
+    intrinsics_source_timeout_s = _cfg_float(
+        cfg, "camera_info_source_timeout_s", "TIAGO_CAMERA_INFO_SOURCE_TIMEOUT_S", 3.0
+    )
 
     # subscribe RGB + depth (we own both contracts; declare manually below)
     tiago_camera.create_subscription("robonix/primitive/camera/rgb",
@@ -251,17 +279,43 @@ def init(cfg):
         daemon=True,
     ).start()
 
-    # latched intrinsics relay: subscribe to the camera's own CameraInfo
-    # and republish the first sample on the contract topic (latched, so
-    # scene gets the cached K even though webots only streams it live).
-    # K is static, so we publish once and ignore the rest — see
-    # `on_camera_info`. declare=False on the source sub: the publisher
-    # above already declares the `intrinsics` capability on atlas.
+    # Intrinsics contract publisher. Prefer the camera's own CameraInfo stream
+    # when present. Webots' Tiago camera plugin publishes images but not a
+    # CameraInfo topic, so this primitive also supports deployment-provided K
+    # from its package config and republishes it on the same contract.
     from sensor_msgs.msg import CameraInfo  # type: ignore
     intrinsics_pub = tiago_camera.create_publisher(
         "robonix/primitive/camera/intrinsics",
         topic=intrinsics_topic, msg_type=CameraInfo, qos="latched",
     )
+    intrinsics_state = {"camera_info_seen": False, "configured_logged": False}
+
+    def configured_camera_info() -> tuple[CameraInfo | None, list[float]]:
+        width = _cfg_int(cfg, "width", "TIAGO_CAMERA_WIDTH", 640)
+        height = _cfg_int(cfg, "height", "TIAGO_CAMERA_HEIGHT", 480)
+        fx = _cfg_float(cfg, "fx", "TIAGO_CAMERA_FX")
+        fy = _cfg_float(cfg, "fy", "TIAGO_CAMERA_FY")
+        cx = _cfg_float(cfg, "cx", "TIAGO_CAMERA_CX", width / 2.0)
+        cy = _cfg_float(cfg, "cy", "TIAGO_CAMERA_CY", height / 2.0)
+        if fx <= 0 or fy <= 0:
+            horizontal_fov = _cfg_float(
+                cfg, "horizontal_fov_rad", "TIAGO_CAMERA_HORIZONTAL_FOV_RAD"
+            )
+            if horizontal_fov > 0:
+                fx = width / (2.0 * math.tan(horizontal_fov / 2.0))
+                fy = fx if fy <= 0 else fy
+        if min(width, height, fx, fy, cx, cy) <= 0:
+            return None, []
+        msg = CameraInfo()
+        msg.header.frame_id = cam_frame
+        msg.width = width
+        msg.height = height
+        msg.distortion_model = "plumb_bob"
+        msg.d = []
+        msg.k = [fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0]
+        msg.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        msg.p = [fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
+        return msg, [fx, fy, cx, cy]
 
     def on_camera_info(msg, _topic=intrinsics_topic):
         global intrinsics_published
@@ -272,6 +326,7 @@ def init(cfg):
         k = list(msg.k) if hasattr(msg, "k") else list(getattr(msg, "K", []))
         if len(k) < 6 or k[0] <= 0 or k[4] <= 0:
             return
+        intrinsics_state["camera_info_seen"] = True
         # Relay on EVERY frame, not once. Scene subscribes to the intrinsics
         # contract with DURABILITY=VOLATILE (so it stays compatible with
         # continuously-publishing real cameras like realsense). A volatile
@@ -287,11 +342,36 @@ def init(cfg):
                   f"fy={k[4]:.1f} cx={k[2]:.1f} cy={k[5]:.1f} "
                   f"{msg.width}x{msg.height} -> {_topic}")
 
+    def publish_configured_intrinsics() -> None:
+        global intrinsics_published
+        deadline = time.monotonic() + max(0.0, intrinsics_source_timeout_s)
+        while time.monotonic() < deadline:
+            if intrinsics_state["camera_info_seen"]:
+                return
+            time.sleep(0.1)
+        configured, k = configured_camera_info()
+        if configured is None:
+            print("[tiago_camera] WARN: no usable CameraInfo source and no "
+                  "configured camera intrinsics")
+            return
+        while not intrinsics_state["camera_info_seen"]:
+            if intrinsics_pub is not None:
+                intrinsics_pub.publish(configured)
+                intrinsics_published = True
+                if not intrinsics_state["configured_logged"]:
+                    intrinsics_state["configured_logged"] = True
+                    print(f"[tiago_camera] publishing configured intrinsics: "
+                          f"fx={k[0]:.1f} fy={k[1]:.1f} cx={k[2]:.1f} "
+                          f"cy={k[3]:.1f} {configured.width}x{configured.height} "
+                          f"-> {intrinsics_topic}")
+            time.sleep(1.0)
+
     tiago_camera.create_subscription(
         "robonix/primitive/camera/intrinsics",
         topic=camera_info_topic, msg_type="CameraInfo",
         callback=on_camera_info, qos="best_effort", declare=False,
     )
+    threading.Thread(target=publish_configured_intrinsics, daemon=True).start()
 
     # Give-up watchdog: if no usable CameraInfo lands on `camera_info_topic`
     # the intrinsics contract is advertised but never publishes, and scene
