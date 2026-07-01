@@ -1,8 +1,10 @@
 # Soma - raw body YAML and URDF service
 
-Soma loads one or more deployment directories, caches each deployment's raw
-`soma.yaml` and referenced URDF text, then exposes them to other Robonix
-components over gRPC.
+Soma loads a single robot's `soma.yaml` and referenced URDF, then exposes them
+to other Robonix components over gRPC. `rbnx boot` reads the same
+`robonix_manifest.yaml` to decide which primitive and skill packages to run;
+Soma spawns them through `rbnx start` in two stages (see
+`docs/soma_two_stage_bringup.md`).
 
 Soma v2 does not render or interpret a self-description. Pilot calls
 `robonix/system/soma/get_yaml` to receive the original YAML string, and other
@@ -11,50 +13,51 @@ XML string.
 
 ## Config
 
+Soma v2 uses a flat, four-key schema. Every field is required.
+
 ```yaml
-atlas_endpoint: 127.0.0.1:50051
-listen: 127.0.0.1:50091
-provider_id: soma
-robonix_root: ../../
-default_robot: test_ci_robot
-start_packages: false
-rbnx_bin: rbnx
-deployments:
-  - examples/test_ci
+atlas_endpoint: 127.0.0.1:50051   # atlas gRPC endpoint
+listen:         127.0.0.1:50091   # soma's own gRPC listen address
+provider_id:    soma              # atlas provider_id
+robot_yaml:     ./soma.yaml       # path to the single robot's soma.yaml
 ```
 
-Relative `robonix_root` is resolved from the config file directory. Relative
-`deployments` entries are then resolved from that Robonix root. For example,
-when the config file is `system/soma/config.yaml`, `robonix_root: ../../` and
-`deployments: [examples/test_ci]` point at `<repo>/examples/test_ci` no matter
-which directory `cargo run -p robonix-soma -- --config <path>` is launched from.
+Relative paths in `robot_yaml` are resolved from the config file's directory.
+Fields can also be supplied on the CLI (`--atlas`, `--listen`, `--provider-id`,
+`--robot-yaml`); CLI flags win over config-file values. `rbnx boot` uses this
+CLI mode — it does not write a soma config file on disk.
 
-If `robonix_root` is omitted, Soma tries `ROBONIX_SOURCE_PATH`, `ROBONIX_ROOT`,
-then searches upward from the current directory for the Robonix repository root.
-
-Each deployment directory must contain:
-
-- `robonix_manifest.yaml`
-- `soma.yaml` or compatible names such as `robonix.soma.yaml`
-- the URDF file referenced by `urdf.path`
+The robot's `soma.yaml` and any files it references (URDF, package
+`robonix_manifest.yaml` for stage 1/2 bring-up) must live somewhere Soma can
+read at startup.
 
 ## Run
+
+Direct invocation for local testing:
 
 ```bash
 cargo run -p robonix-soma -- --config ./soma.local.yaml
 ```
 
-At startup Soma reads every deployment, optionally runs each local primitive and
-skill package with `rbnx start -p <package_dir> --endpoint <atlas>`, prints a
-startup report, registers itself in Atlas, and serves gRPC on `listen`.
-Package startup is disabled by default. Set `start_packages: true` to have Soma
-launch local primitive and skill packages through `rbnx`'s process manager.
-Soma stops those packages on SIGINT/SIGTERM and fails startup when any package
-is missing its manifest or exits during the startup grace window.
+Or with an inline config JSON blob (what `rbnx boot` uses):
 
-`--rbnx-bin` overrides `rbnx_bin` from the config file. `--log` sets Soma's
-scribe file level (`debug`, `info`, `warn`, or `error`); package stdout/stderr
-is written through scribe under `$SCRIBE_LOG_DIR` or `./logs`.
+```bash
+robonix-soma \
+  --atlas 127.0.0.1:50051 \
+  --listen 127.0.0.1:50091 \
+  --provider-id soma \
+  --robot-yaml /path/to/robot/soma.yaml
+```
+
+At startup Soma parses the robot YAML, loads the referenced URDF, spawns
+primitive packages via `rbnx start` (stage 1), registers itself in Atlas, and
+serves gRPC on `listen`. Skill packages are held until `rbnx boot` writes
+`stage2\n` into the pipe on `$ROBONIX_SOMA_STAGE_FD` (stage 2). Soma stops
+every package it launched on SIGINT/SIGTERM.
+
+`--log` sets Soma's scribe file level (`debug`, `info`, `warn`, or `error`);
+package stdout/stderr is written through scribe under `$SCRIBE_LOG_DIR` or
+`./logs`.
 
 ## gRPC API
 

@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: MulanPSL-2.0
+//
+// Startup report for one soma bring-up stage. Flat: soma serves one
+// deployment, so the report is one deployment's worth of package
+// checks plus the manifest's skipped list. The v1 shape carried a
+// `Vec<DeploymentStartupReport>`; the reviewer flagged that as
+// speculative generality, so we've collapsed it.
 
 use crate::deployment::{PackageKind, SkippedPackage};
 use std::path::PathBuf;
 
 #[derive(Debug, Default)]
 pub struct StartupReport {
-    pub deployments: Vec<DeploymentStartupReport>,
-}
-
-#[derive(Debug)]
-pub struct DeploymentStartupReport {
     pub deployment_path: PathBuf,
     pub manifest_path: PathBuf,
     pub packages: Vec<PackageStartupCheck>,
+    /// Manifest-level skipped entries (e.g. `service:` blocks soma
+    /// hands off to rbnx). Populated once by stage 1; stage 2's
+    /// report leaves this empty.
     pub skipped: Vec<SkippedPackage>,
 }
 
@@ -27,7 +31,6 @@ pub struct PackageStartupCheck {
 
 #[derive(Debug)]
 pub enum PackageStartupStatus {
-    StartDisabled,
     MissingManifest,
     Spawned { command: String },
     SpawnFailed { command: String, error: String },
@@ -35,14 +38,11 @@ pub enum PackageStartupStatus {
 
 impl StartupReport {
     pub fn has_failures(&self) -> bool {
-        self.deployments.iter().any(|deployment| {
-            deployment.packages.iter().any(|package| {
-                matches!(
-                    package.status,
-                    PackageStartupStatus::MissingManifest
-                        | PackageStartupStatus::SpawnFailed { .. }
-                )
-            })
+        self.packages.iter().any(|package| {
+            matches!(
+                package.status,
+                PackageStartupStatus::MissingManifest | PackageStartupStatus::SpawnFailed { .. }
+            )
         })
     }
 
@@ -50,43 +50,37 @@ impl StartupReport {
     pub fn print_to_terminal(&self) {
         eprintln!();
         eprintln!("========== Soma startup report ==========");
-        for deployment in &self.deployments {
+        eprintln!(
+            "deployment: {}  manifest: {}",
+            self.deployment_path.display(),
+            self.manifest_path.display()
+        );
+        if self.packages.is_empty() && self.skipped.is_empty() {
+            eprintln!("  no primitive/skill packages declared");
+        }
+        for package in &self.packages {
+            match &package.status {
+                PackageStartupStatus::MissingManifest => eprintln!(
+                    "  [FAIL] {} {}: missing {}",
+                    package.kind,
+                    package.name,
+                    package.package_manifest_path.display()
+                ),
+                PackageStartupStatus::Spawned { command } => eprintln!(
+                    "  [ OK ] {} {}: cmd={}",
+                    package.kind, package.name, command
+                ),
+                PackageStartupStatus::SpawnFailed { command, error } => eprintln!(
+                    "  [FAIL] {} {}: {} cmd={}",
+                    package.kind, package.name, error, command
+                ),
+            }
+        }
+        for skipped in &self.skipped {
             eprintln!(
-                "deployment: {}  manifest: {}",
-                deployment.deployment_path.display(),
-                deployment.manifest_path.display()
+                "  [SKIP] {} {}: {}",
+                skipped.kind, skipped.name, skipped.reason
             );
-            if deployment.packages.is_empty() && deployment.skipped.is_empty() {
-                eprintln!("  no primitive/skill packages declared");
-            }
-            for package in &deployment.packages {
-                match &package.status {
-                    PackageStartupStatus::StartDisabled => eprintln!(
-                        "  [SKIP] {} {}: package startup disabled",
-                        package.kind, package.name
-                    ),
-                    PackageStartupStatus::MissingManifest => eprintln!(
-                        "  [FAIL] {} {}: missing {}",
-                        package.kind,
-                        package.name,
-                        package.package_manifest_path.display()
-                    ),
-                    PackageStartupStatus::Spawned { command } => eprintln!(
-                        "  [ OK ] {} {}: cmd={}",
-                        package.kind, package.name, command
-                    ),
-                    PackageStartupStatus::SpawnFailed { command, error } => eprintln!(
-                        "  [FAIL] {} {}: {} cmd={}",
-                        package.kind, package.name, error, command
-                    ),
-                }
-            }
-            for skipped in &deployment.skipped {
-                eprintln!(
-                    "  [SKIP] {} {}: {}",
-                    skipped.kind, skipped.name, skipped.reason
-                );
-            }
         }
         eprintln!("=========================================");
         eprintln!();

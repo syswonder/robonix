@@ -4,7 +4,7 @@
 //
 // Stage 1 (`spawn_primitives`, called at soma startup, BEFORE soma
 // advertises its gRPC service to atlas):
-//   For each `primitive:` entry in every deployment manifest:
+//   For each `primitive:` entry in the deployment manifest:
 //     1. snapshot atlas's current provider set
 //     2. spawn `rbnx start -p <pkg>` as a child process
 //     3. wait for the new provider to register on atlas
@@ -13,8 +13,9 @@
 //        / actuators that must be live before any skill or pilot
 //        plan can touch them.
 //
-// Stage 2 (`spawn_skills`, called after atlas notifies soma via
-// `WatchProvider` that `rbnx boot` has finished system bring-up):
+// Stage 2 (`spawn_skills`, called after rbnx signals soma over a
+// private inherited pipe that `rbnx boot` has finished system
+// bring-up):
 //   Same dance, except we stop at INIT — skills park at INACTIVE and
 //   the executor sends CMD_ACTIVATE on first MCP call (lazy-activate).
 //   This matches the executor's existing FSM contract; the only
@@ -27,19 +28,16 @@
 // primitive + skill now; rbnx still owns the system services in
 // between. If soma tried to boot skills inline at startup, the
 // executor wouldn't be up yet to receive `CMD_ACTIVATE` calls into
-// the skill's MCP server later. Atlas's reverse notification
-// (`WatchProvider("soma")` + `NotifyProvider("soma", stage_trigger=
-// "stage2")` from rbnx after non-builtin system bring-up completes)
-// is the bridge.
+// the skill's MCP server later. rbnx's private stage-trigger pipe (an
+// os_pipe write-end kept in rbnx, read-end dup2'd onto a known fd in
+// soma at spawn time) is the bridge.
 //
 // All the lifecycle plumbing (`wait_for_registration_core`,
 // `call_driver_cmd`, the timeouts) is reused from `robonix_cli::launch`
 // so soma and rbnx CAN'T drift on FSM semantics.
 
-use crate::deployment::{DeploymentStore, PackageKind, PackageLaunchTarget};
-use crate::report::{
-    DeploymentStartupReport, PackageStartupCheck, PackageStartupStatus, StartupReport,
-};
+use crate::deployment::{Deployment, PackageKind, PackageLaunchTarget};
+use crate::report::{PackageStartupCheck, PackageStartupStatus, StartupReport};
 use anyhow::{Context, Result};
 use robonix_atlas::client::AtlasClient;
 use robonix_cli::launch::{
@@ -55,9 +53,14 @@ use tokio::io::AsyncBufReadExt;
 use tokio::process::Command as TokioCommand;
 use tokio::task::JoinHandle;
 
+/// Binary name soma execs to spawn each primitive/skill package. Kept
+/// as a constant (not a config field) because there is exactly one
+/// rbnx co-installed with each soma — if that ever changes it's a
+/// deployment-tooling problem, not a soma runtime knob.
+const RBNX_BIN: &str = "rbnx";
+
 pub struct PackageLauncher {
     manager: Arc<ProcessManager>,
-    rbnx_bin: String,
     atlas_endpoint: String,
     log_dir: PathBuf,
     /// Track every async pipe-forwarding task we spawn so `stop_all`
@@ -69,21 +72,16 @@ pub struct PackageLauncher {
 impl PackageLauncher {
     /// Build a launcher that spawns packages via `rbnx start -p` and
     /// drives their Driver(CMD_*) lifecycle through `atlas`.
-    pub fn new(
-        log_dir: PathBuf,
-        rbnx_bin: impl Into<String>,
-        atlas_endpoint: impl Into<String>,
-    ) -> Result<Self> {
+    pub fn new(log_dir: PathBuf, atlas_endpoint: impl Into<String>) -> Result<Self> {
         Ok(Self {
             manager: Arc::new(ProcessManager::new(log_dir.clone())?),
-            rbnx_bin: rbnx_bin.into(),
             atlas_endpoint: atlas_endpoint.into(),
             log_dir,
             tasks: Vec::new(),
         })
     }
 
-    /// Stage 1: spawn every primitive declared in every deployment,
+    /// Stage 1: spawn every primitive declared in the deployment,
     /// run Driver(CMD_INIT) then Driver(CMD_ACTIVATE), and return a
     /// report. Best-effort: a failure on one primitive is recorded
     /// but does NOT abort bring-up of the rest — pilot can still
@@ -91,67 +89,59 @@ impl PackageLauncher {
     /// in the printed report.
     pub async fn spawn_primitives(
         &mut self,
-        deployments: &DeploymentStore,
+        deployment: &Deployment,
         atlas: &mut AtlasClient,
-        start_packages: bool,
     ) -> StartupReport {
-        self.run_stage(deployments, atlas, start_packages, PackageKind::Primitive)
+        self.run_stage(deployment, atlas, PackageKind::Primitive)
             .await
     }
 
-    /// Stage 2: spawn every skill declared in every deployment and
+    /// Stage 2: spawn every skill declared in the deployment and
     /// run Driver(CMD_INIT) only — skills park at INACTIVE waiting
     /// for the executor to send CMD_ACTIVATE on first MCP call.
     pub async fn spawn_skills(
         &mut self,
-        deployments: &DeploymentStore,
+        deployment: &Deployment,
         atlas: &mut AtlasClient,
-        start_packages: bool,
     ) -> StartupReport {
-        self.run_stage(deployments, atlas, start_packages, PackageKind::Skill)
-            .await
+        self.run_stage(deployment, atlas, PackageKind::Skill).await
     }
 
     async fn run_stage(
         &mut self,
-        deployments: &DeploymentStore,
+        deployment: &Deployment,
         atlas: &mut AtlasClient,
-        start_packages: bool,
         kind: PackageKind,
     ) -> StartupReport {
-        let mut report = StartupReport::default();
-        for deployment in deployments.records() {
-            let targets: &[PackageLaunchTarget] = match kind {
-                PackageKind::Primitive => &deployment.primitives,
-                PackageKind::Skill => &deployment.skills,
-            };
-            // Only carry per-stage targets in the per-deployment
-            // report so the stage 1 / stage 2 prints don't conflate
-            // primitives and skills. `skipped` belongs to the
-            // deployment as a whole; emit it once with stage 1 (the
-            // first call) and as an empty list with stage 2.
-            let skipped = if kind == PackageKind::Primitive {
-                deployment.skipped.clone()
-            } else {
-                Vec::new()
-            };
-            let mut deployment_report = DeploymentStartupReport {
-                deployment_path: deployment.deployment_path.clone(),
-                manifest_path: deployment.manifest_path.clone(),
-                packages: Vec::new(),
-                skipped,
-            };
-            for target in targets {
-                let status = self.bring_up_one(target, atlas, start_packages).await;
-                deployment_report.packages.push(PackageStartupCheck {
-                    kind: target.kind,
-                    name: target.name.clone(),
-                    package_dir: target.package_dir.clone(),
-                    package_manifest_path: target.package_manifest_path.clone(),
-                    status,
-                });
-            }
-            report.deployments.push(deployment_report);
+        let targets: &[PackageLaunchTarget] = match kind {
+            PackageKind::Primitive => &deployment.primitives,
+            PackageKind::Skill => &deployment.skills,
+        };
+        // Only carry per-stage targets in the per-deployment
+        // report so the stage 1 / stage 2 prints don't conflate
+        // primitives and skills. `skipped` belongs to the
+        // deployment as a whole; emit it once with stage 1 (the
+        // first call) and as an empty list with stage 2.
+        let skipped = if kind == PackageKind::Primitive {
+            deployment.skipped.clone()
+        } else {
+            Vec::new()
+        };
+        let mut report = StartupReport {
+            deployment_path: deployment.deployment_path.clone(),
+            manifest_path: deployment.manifest_path.clone(),
+            packages: Vec::new(),
+            skipped,
+        };
+        for target in targets {
+            let status = self.bring_up_one(target, atlas).await;
+            report.packages.push(PackageStartupCheck {
+                kind: target.kind,
+                name: target.name.clone(),
+                package_dir: target.package_dir.clone(),
+                package_manifest_path: target.package_manifest_path.clone(),
+                status,
+            });
         }
         report
     }
@@ -160,11 +150,7 @@ impl PackageLauncher {
         &mut self,
         target: &PackageLaunchTarget,
         atlas: &mut AtlasClient,
-        start_packages: bool,
     ) -> PackageStartupStatus {
-        if !start_packages {
-            return PackageStartupStatus::StartDisabled;
-        }
         // Surface the most common "you forgot to run `rbnx build`"
         // failure with the actual missing path so the operator
         // doesn't have to spelunk through logs to figure out which
@@ -294,7 +280,7 @@ impl PackageLauncher {
     /// registration). The manager still owns log-file orchestration
     /// via its log_dir, which we share through the constructor.
     async fn spawn_child(&mut self, target: &PackageLaunchTarget) -> Result<u32> {
-        let mut cmd = TokioCommand::new(&self.rbnx_bin);
+        let mut cmd = TokioCommand::new(RBNX_BIN);
         cmd.arg("start")
             .arg("-p")
             .arg(target.package_dir.as_os_str())
@@ -313,7 +299,7 @@ impl PackageLauncher {
         let mut child = cmd.spawn().with_context(|| {
             format!(
                 "spawn '{} start -p {}'",
-                self.rbnx_bin,
+                RBNX_BIN,
                 target.package_dir.display()
             )
         })?;
@@ -384,7 +370,7 @@ impl PackageLauncher {
     pub fn command_line(&self, target: &PackageLaunchTarget) -> String {
         format!(
             "{} start -p {} --endpoint {}",
-            self.rbnx_bin,
+            RBNX_BIN,
             target.package_dir.display(),
             self.atlas_endpoint
         )
@@ -400,8 +386,8 @@ mod tests {
     /// The command passes `-p` directly and avoids rebasing through invocation cwd.
     fn command_line_uses_package_path_without_invocation_cwd_override() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let launcher = PackageLauncher::new(tmp.path().join("logs"), "rbnx", "127.0.0.1:50051")
-            .expect("launcher");
+        let launcher =
+            PackageLauncher::new(tmp.path().join("logs"), "127.0.0.1:50051").expect("launcher");
         let target = PackageLaunchTarget {
             kind: PackageKind::Primitive,
             name: "demo".into(),

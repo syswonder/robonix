@@ -2,7 +2,7 @@
 [contract]
 id      = "robonix/system/soma/get_yaml"
 version = "1"
-kind    = "system"
+kind    = "service"
 idl     = "soma/srv/GetYaml.srv"
 
 [mode]
