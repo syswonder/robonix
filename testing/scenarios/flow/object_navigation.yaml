@@ -11,7 +11,7 @@ steps:
       - cap: explore.explore_explore
         args: {area_hint: "ci local room", timeout_s: 8.0, max_speed_m_s: 0.1}
         description: run a bounded exploration pass
-  - time_s: 12.0
+  - time_s: 45.0
     status: in_progress
     rtdl_description: list scene objects during explored state
     caps:

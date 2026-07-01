@@ -527,7 +527,10 @@ jobs:
             fi
           }
 
-          docker ps -aq --filter "name=ci-${RUN_ID}-" | xargs -r docker rm -f
+          docker ps -aq --filter "name=ci-${RUN_ID}-" | while read -r cid; do
+            [ -n "$cid" ] || continue
+            docker rm -f "$cid" >/dev/null 2>&1 || true
+          done
           if [ -n "${ROBONIX_SIM_XDISPLAY:-}" ]; then
             xnum="${ROBONIX_SIM_XDISPLAY#:}"
             x_pids=$(ps -eo pid=,args= | awk -v d=":${xnum}" '$0 ~ /(Xorg|Xvfb)/ && index($0, d) {print $1}' | sort -u)
@@ -552,7 +555,10 @@ jobs:
               exit 1
             fi
           fi
-          docker volume ls -q --filter "name=ci-${RUN_ID}_" | xargs -r docker volume rm -f >/dev/null 2>&1 || true
+          docker volume ls -q --filter "name=ci-${RUN_ID}_" | while read -r vid; do
+            [ -n "$vid" ] || continue
+            docker volume rm -f "$vid" >/dev/null 2>&1 || true
+          done
 
       - name: Generate test report
         if: always()

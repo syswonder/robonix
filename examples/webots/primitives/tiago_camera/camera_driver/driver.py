@@ -40,7 +40,14 @@ latest_rgb_jpeg: bytes | None = None
 latest_depth_jpeg: bytes | None = None
 extrinsics_pub = None  # rclpy publisher for the latched TF
 intrinsics_pub = None  # rclpy publisher for the latched CameraInfo
-intrinsics_published = False  # publish K once; intrinsics are static
+intrinsics_published = False  # true after the first valid K sample is published
+
+DEFAULT_WEBOTS_TIAGO_WIDTH = 640
+DEFAULT_WEBOTS_TIAGO_HEIGHT = 480
+DEFAULT_WEBOTS_TIAGO_FX = 554.0
+DEFAULT_WEBOTS_TIAGO_FY = 554.0
+DEFAULT_WEBOTS_TIAGO_CX = DEFAULT_WEBOTS_TIAGO_WIDTH / 2.0
+DEFAULT_WEBOTS_TIAGO_CY = DEFAULT_WEBOTS_TIAGO_HEIGHT / 2.0
 
 
 # ── image conversion ─────────────────────────────────────────────────────────
@@ -241,6 +248,7 @@ def _cfg_int(cfg: dict, key: str, env_key: str, default: int) -> int:
 @tiago_camera.on_init
 def init(cfg):
     global extrinsics_pub, intrinsics_pub
+    cfg = cfg or {}
     rgb_topic = cfg.get("rgb_topic") or os.environ.get(
         "TIAGO_RGB_TOPIC", "/head_front_camera/rgb/image_raw")
     depth_topic = cfg.get("depth_topic") or os.environ.get(
@@ -256,7 +264,10 @@ def init(cfg):
         "TIAGO_RGB_FRAME_ID", "head_front_camera_rgb_optical_frame")
     sentinel_timeout = float(cfg.get("sentinel_timeout_s", 60.0))
     intrinsics_source_timeout_s = _cfg_float(
-        cfg, "camera_info_source_timeout_s", "TIAGO_CAMERA_INFO_SOURCE_TIMEOUT_S", 3.0
+        cfg, "camera_info_source_timeout_s", "TIAGO_CAMERA_INFO_SOURCE_TIMEOUT_S", 1.0
+    )
+    intrinsics_publish_interval_s = _cfg_float(
+        cfg, "intrinsics_publish_interval_s", "TIAGO_CAMERA_INTRINSICS_PUBLISH_INTERVAL_S", 0.5
     )
 
     # subscribe RGB + depth (we own both contracts; declare manually below)
@@ -291,12 +302,12 @@ def init(cfg):
     intrinsics_state = {"camera_info_seen": False, "configured_logged": False}
 
     def configured_camera_info() -> tuple[CameraInfo | None, list[float]]:
-        width = _cfg_int(cfg, "width", "TIAGO_CAMERA_WIDTH", 640)
-        height = _cfg_int(cfg, "height", "TIAGO_CAMERA_HEIGHT", 480)
-        fx = _cfg_float(cfg, "fx", "TIAGO_CAMERA_FX")
-        fy = _cfg_float(cfg, "fy", "TIAGO_CAMERA_FY")
-        cx = _cfg_float(cfg, "cx", "TIAGO_CAMERA_CX", width / 2.0)
-        cy = _cfg_float(cfg, "cy", "TIAGO_CAMERA_CY", height / 2.0)
+        width = _cfg_int(cfg, "width", "TIAGO_CAMERA_WIDTH", DEFAULT_WEBOTS_TIAGO_WIDTH)
+        height = _cfg_int(cfg, "height", "TIAGO_CAMERA_HEIGHT", DEFAULT_WEBOTS_TIAGO_HEIGHT)
+        fx = _cfg_float(cfg, "fx", "TIAGO_CAMERA_FX", DEFAULT_WEBOTS_TIAGO_FX)
+        fy = _cfg_float(cfg, "fy", "TIAGO_CAMERA_FY", DEFAULT_WEBOTS_TIAGO_FY)
+        cx = _cfg_float(cfg, "cx", "TIAGO_CAMERA_CX", DEFAULT_WEBOTS_TIAGO_CX)
+        cy = _cfg_float(cfg, "cy", "TIAGO_CAMERA_CY", DEFAULT_WEBOTS_TIAGO_CY)
         if fx <= 0 or fy <= 0:
             horizontal_fov = _cfg_float(
                 cfg, "horizontal_fov_rad", "TIAGO_CAMERA_HORIZONTAL_FOV_RAD"
@@ -364,7 +375,7 @@ def init(cfg):
                           f"fx={k[0]:.1f} fy={k[1]:.1f} cx={k[2]:.1f} "
                           f"cy={k[3]:.1f} {configured.width}x{configured.height} "
                           f"-> {intrinsics_topic}")
-            time.sleep(1.0)
+            time.sleep(max(0.1, intrinsics_publish_interval_s))
 
     tiago_camera.create_subscription(
         "robonix/primitive/camera/intrinsics",
