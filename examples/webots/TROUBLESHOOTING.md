@@ -51,8 +51,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh   # adds ~/.local/bin
 
 ### `git clone https://github.com/… : Failed to connect to github.com port 443: Connection timed out`
 `rbnx build` clones the remote providers (`mapping_rbnx`, `nav2_wrapper_rbnx`,
-`explore_rbnx`) from GitHub. On CN networks `git clone github.com` often times
-out even when release downloads work. Route git through a mirror:
+`explore_rbnx`) from GitHub. Some runners can time out on direct GitHub clone
+traffic even when release downloads work. Route git through the configured
+mirror:
 
 ```bash
 git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"

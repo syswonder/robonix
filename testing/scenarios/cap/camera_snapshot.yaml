@@ -12,4 +12,8 @@ steps:
   - content: Snapshot captured.
     status: done
 expect_contracts:
-  - camera/snapshot
+  - robonix/primitive/camera/snapshot
+expect_outputs:
+  - '"height": 480'
+  - '"width": 640'
+  - '"encoding": "jpeg"'

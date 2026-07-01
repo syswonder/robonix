@@ -10,5 +10,9 @@ steps:
         args: {target: "", text: "robonix continuous integration test"}
         description: synthesize and play speech
   - status: done
-expect_contracts: [speech/speak]
+expect_contracts:
+  - robonix/service/speech/speak
 expect_args: ["continuous integration test"]
+expect_outputs:
+  - '"ok": true'
+  - ci mock speak accepted

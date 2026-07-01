@@ -1,0 +1,36 @@
+# Exercise frontier exploration skill lifecycle without waiting for a long run:
+# start -> status -> cancel. Empty run_id targets the most recent task.
+name: explore_smoke
+task: "ci-test: start a short autonomous explore run, check status, then cancel it"
+steps:
+  - time_s: 0.0
+    status: in_progress
+    rtdl_description: start explore
+    caps:
+      - match: explore_explore
+        args: {area_hint: "ci local room", timeout_s: 5.0, max_speed_m_s: 0.1}
+        description: start a bounded exploration task
+  - time_s: 8.0
+    status: in_progress
+    rtdl_description: poll and cancel explore
+    caps:
+      - match: explore_status
+        args: {run_id: ""}
+        description: poll the most recent exploration task
+      - match: explore_cancel
+        args: {run_id: ""}
+        description: cancel the bounded exploration task
+  - status: done
+expect_contracts:
+  - robonix/skill/explore/explore/status
+  - robonix/skill/explore/explore/cancel
+expect_args:
+  - ci local room
+expect_leaf_failure:
+  - robonix/skill/explore/explore
+expect_outputs:
+  - '"known": true'
+  - '"state": "TIMEOUT"'
+  - '"frontiers_left"'
+  - hit 5.0s ceiling
+expect_min_rounds: 2

@@ -72,7 +72,7 @@ RUN sed -i 's|</body>|<script>document.getElementById("IP-input").value="ws://"+
     /usr/local/webots/resources/web/streaming_viewer/index.html
 
 # Pre-populate Webots asset cache. Without this, Webots fetches ~100 files from
-# raw.githubusercontent.com at first run — often blocked or painfully slow.
+# raw.githubusercontent.com at first run, which is slow and less reproducible.
 # The seed tarball is exported from a successful run; see scripts/update-webots-seed.sh.
 COPY bridge/webots_assets_seed.tar.gz /tmp/webots_seed.tar.gz
 RUN mkdir -p /root/.cache/Cyberbotics/Webots \

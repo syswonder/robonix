@@ -13,6 +13,7 @@ subprocess wrappers, returns ready. The streaming handlers below pick
 the module-level drivers up the first time a client connects.
 
 Env vars:
+  AUDIO_CI_MODE                when 1, use ALSA null for CI without real hardware
   AUDIO_MIC_DEVICE             override mic ALSA device id (e.g. "hw:2,0")
   AUDIO_MIC_SAMPLE_RATE        Hz (default 16000)
   AUDIO_MIC_CHANNELS           default 1
@@ -47,6 +48,15 @@ speaker_driver: SpeakerDriver | None = None
 # read back by ListAudioDevices.current_*_id.
 current_input_id: str = ""
 current_output_id: str = ""
+
+
+def _audio_ci_mode() -> bool:
+    """True when CI should use a user-space ALSA null device."""
+    return os.environ.get("AUDIO_CI_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _ci_audio_device_id() -> str:
+    return os.environ.get("AUDIO_CI_ALSA_DEVICE", "null").strip() or "null"
 
 
 # ── streaming handlers ─────────────────────────────────────────────────────
@@ -108,6 +118,17 @@ def speaker_stream(request_iterator, context):
 
 def _scan_audio_devices_proto():
     """Run the ALSA scan and convert each entry to AudioDevice proto."""
+    if _audio_ci_mode():
+        dev_id = _ci_audio_device_id()
+        return [audio_pb2.AudioDevice(
+            id=dev_id,
+            name="CI ALSA null device",
+            kind="duplex",
+            is_default=True,
+            channels=1,
+            note="AUDIO_CI_MODE user-space ALSA null device",
+        )]
+
     devs = []
     default_mic = find_default_mic(scan_alsa_devices())
     default_spk = find_default_speaker(scan_alsa_devices())
@@ -149,8 +170,16 @@ def select_device(request, context):
             ok=False, error=f"kind must be 'input' or 'output', got '{kind}'")
 
     requested = request.id
-    # "" means revert to default; otherwise ensure the id exists.
-    if requested:
+    # "" means revert to default; otherwise ensure the id exists. In CI mode,
+    # the user-space ALSA null plugin is intentionally synthetic and will not
+    # appear in `arecord -l` / `aplay -l`.
+    if _audio_ci_mode():
+        ci_id = _ci_audio_device_id()
+        if requested and requested != ci_id:
+            return audio_pb2.SelectAudioDevice_Response(
+                ok=False, error=f"unknown CI {kind} id '{requested}'")
+        new_id = ci_id
+    elif requested:
         valid = {d.device_id for d in scan_alsa_devices()
                  if (d.is_input if kind == "input" else d.is_output)}
         if requested not in valid:
@@ -158,8 +187,11 @@ def select_device(request, context):
                 ok=False, error=f"unknown {kind} id '{requested}'")
         new_id = requested
     else:
-        info = find_default_mic(scan_alsa_devices()) if kind == "input" \
-               else find_default_speaker(scan_alsa_devices())
+        info = (
+            find_default_mic(scan_alsa_devices())
+            if kind == "input"
+            else find_default_speaker(scan_alsa_devices())
+        )
         if info is None:
             return audio_pb2.SelectAudioDevice_Response(
                 ok=False, error=f"no default {kind} device")
@@ -200,6 +232,26 @@ def init(cfg):
     come up if neither a mic nor a speaker is available, so atlas defers
     instead of advertising dead interfaces."""
     global mic_driver, speaker_driver, current_input_id, current_output_id
+
+    if _audio_ci_mode():
+        dev_id = _ci_audio_device_id()
+        log.info("AUDIO_CI_MODE enabled: using ALSA device %s for mic and speaker", dev_id)
+        mic_driver = MicDriver(
+            device_id=os.environ.get("AUDIO_MIC_DEVICE", dev_id).strip() or dev_id,
+            sample_rate=int(os.environ.get("AUDIO_MIC_SAMPLE_RATE", "16000")),
+            channels=int(os.environ.get("AUDIO_MIC_CHANNELS", "1")),
+            bits_per_sample=int(os.environ.get("AUDIO_MIC_BITS", "16")),
+            chunk_duration_s=int(os.environ.get("AUDIO_MIC_CHUNK_MS", "100")) / 1000.0,
+        )
+        speaker_driver = SpeakerDriver(
+            device_id=os.environ.get("AUDIO_SPEAKER_DEVICE", dev_id).strip() or dev_id,
+            sample_rate=int(os.environ.get("AUDIO_SPEAKER_SAMPLE_RATE", "24000")),
+            channels=int(os.environ.get("AUDIO_SPEAKER_CHANNELS", "1")),
+            bits_per_sample=int(os.environ.get("AUDIO_SPEAKER_BITS", "16")),
+        )
+        current_input_id = mic_driver.device_id
+        current_output_id = speaker_driver.device_id
+        return Ok()
 
     devices = scan_alsa_devices()
     for d in devices:

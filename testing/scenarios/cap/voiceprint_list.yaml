@@ -12,4 +12,7 @@ steps:
   - content: Listed.
     status: done
 expect_contracts:
-  - voiceprint/list
+  - robonix/service/voiceprint/list
+expect_outputs:
+  - users_json
+  - count
