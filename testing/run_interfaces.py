@@ -209,24 +209,32 @@ def check_audio(server: str) -> list[str]:
         if not devices:
             fails.append("audio list_devices returned no devices")
         ids = {d.id for d in devices}
-        ci_device = os.environ.get("AUDIO_CI_ALSA_DEVICE", "null")
-        if ci_device not in ids:
-            fails.append(f"audio list_devices did not expose CI device {ci_device!r}; got {sorted(ids)}")
-        if resp.current_input_id != ci_device or resp.current_output_id != ci_device:
+        expected_input = os.environ.get("AUDIO_MIC_DEVICE", "").strip()
+        expected_output = os.environ.get("AUDIO_SPEAKER_DEVICE", "").strip()
+        if expected_input and expected_input not in ids:
+            fails.append(f"audio list_devices did not expose configured input {expected_input!r}; got {sorted(ids)}")
+        if expected_output and expected_output not in ids:
+            fails.append(f"audio list_devices did not expose configured output {expected_output!r}; got {sorted(ids)}")
+        if expected_input and resp.current_input_id != expected_input:
             fails.append(
-                f"audio current ids not pinned to {ci_device!r}: "
-                f"input={resp.current_input_id!r}, output={resp.current_output_id!r}"
+                f"audio current input is {resp.current_input_id!r}, expected {expected_input!r}"
+            )
+        if expected_output and resp.current_output_id != expected_output:
+            fails.append(
+                f"audio current output is {resp.current_output_id!r}, expected {expected_output!r}"
             )
 
         select_ch = open_contract("robonix/primitive/audio/select_device")
         select_stub = audio_grpc_class(contracts_grpc, "SelectDeviceStub")(select_ch)
-        for kind in ("input", "output"):
+        for kind, device_id in (("input", expected_input), ("output", expected_output)):
+            if not device_id:
+                continue
             sel = select_stub.SelectAudioDevice(
-                audio_pb2.SelectAudioDevice_Request(kind=kind, id=ci_device),
+                audio_pb2.SelectAudioDevice_Request(kind=kind, id=device_id),
                 timeout=10,
             )
             if not sel.ok:
-                fails.append(f"audio select_device {kind}={ci_device!r} rejected: {sel.error}")
+                fails.append(f"audio select_device {kind}={device_id!r} rejected: {sel.error}")
 
         mic_ch = open_contract("robonix/primitive/audio/mic")
         mic_stub = audio_grpc_class(contracts_grpc, "MicStub")(mic_ch)

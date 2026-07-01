@@ -1,37 +1,37 @@
-# Exception injection on a builtin: read a file that is NEVER created (leaf
-# fails) -> recover by writing+reading a SEPARATE file. Asserts the injected
-# failure occurred AND the task still reached done (pilot replan-on-failure).
-#
-# The fault path must stay absent across re-runs, so it is distinct from the
-# recovery path (which the recovery step creates) — otherwise a prior run's
-# recovery file would make the "missing file" read succeed and the fault never
-# fire. Idempotent by construction.
+# Exception injection on a builtin: read a file that is never created, then
+# recover by writing and reading a separate fallback file.
 name: fault_recovery_builtin
 task: "ci-flow: read a missing file, recovering by using a fallback file"
 steps:
   - status: in_progress
-    rtdl_description: faulty read (injected — file never exists)
+    rtdl_description: faulty read
     caps:
-      - match: builtin_read_file
+      - cap: executor.builtin_read_file
         args: {path: ci_never_created.txt}
   - status: in_progress
-    rtdl_description: recover (write a fallback file)
+    rtdl_description: recover by writing fallback
     caps:
-      - match: builtin_write_file
+      - cap: executor.builtin_write_file
         args: {path: ci_recovered.txt, content: "recovered charlie-3"}
   - status: in_progress
-    rtdl_description: read the fallback
+    rtdl_description: read fallback
     caps:
-      - match: builtin_read_file
+      - cap: executor.builtin_read_file
         args: {path: ci_recovered.txt}
   - status: done
-expect_contracts:
-  - robonix/system/executor/builtin/read_file
-  - robonix/system/executor/builtin/write_file
-expect_args: [charlie-3]
-expect_leaf_failure:
-  - robonix/system/executor/builtin/read_file
 expect_min_rounds: 2
 expect_final_done: true
-expect_outputs:
-  - recovered charlie-3
+expect_leaves:
+  - contract: robonix/system/executor/builtin/read_file
+    success: false
+    args: {path: ci_never_created.txt}
+    output:
+      error_regex: "No such file"
+  - contract: robonix/system/executor/builtin/write_file
+    success: true
+    args: {path: ci_recovered.txt, content: "recovered charlie-3"}
+  - contract: robonix/system/executor/builtin/read_file
+    success: true
+    args: {path: ci_recovered.txt}
+    output:
+      text_equals: "recovered charlie-3"

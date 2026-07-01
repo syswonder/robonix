@@ -5,11 +5,12 @@ steps:
   - status: in_progress
     rtdl_description: echo marker
     caps:
-      - match: builtin_run_command
+      - cap: executor.builtin_run_command
         args: {command: "echo robonix-ci-marker-bravo"}
   - status: done
-expect_contracts:
-  - robonix/system/executor/builtin/run_command
-expect_args: [robonix-ci-marker-bravo]
-expect_outputs:
-  - robonix-ci-marker-bravo
+expect_leaves:
+  - contract: robonix/system/executor/builtin/run_command
+    success: true
+    args: {command: "echo robonix-ci-marker-bravo"}
+    output:
+      text_regex: "^robonix-ci-marker-bravo\\n?$"

@@ -1,18 +1,67 @@
-# Object-based navigation composition: scene returns a safe approach pose for
-# the CI table fixture, then navigation receives the matching map-frame goal.
+# Object-based navigation composition against the live sim:
+# explore briefly, list real scene objects, compute a safe approach pose for a
+# detected object, then pass that pose to navigation.
 name: object_navigation
-task: "ci-flow: find the ci table object and navigate near it"
+task: "ci-flow: explore, choose a detected object, and navigate near it"
 steps:
-  - status: in_progress
-    rtdl_description: resolve object approach pose
+  - time_s: 0.0
+    status: in_progress
+    rtdl_description: explore before object navigation
     caps:
-      - match: scene_goal_near
-        args: {object_id: "scene.object.ci_table_001"}
-        description: compute an approach pose near the CI table
+      - cap: explore.explore_explore
+        args: {area_hint: "ci local room", timeout_s: 8.0, max_speed_m_s: 0.1}
+        description: run a bounded exploration pass
+  - time_s: 12.0
+    status: in_progress
+    rtdl_description: list scene objects during explored state
+    caps:
+      - cap: scene.scene_list_objects
+        args: {}
+        description: return the current scene object registry
+  - status: in_progress
+    rtdl_description: resolve detected object approach pose
+    caps:
+      - cap: scene.scene_goal_near
+        args:
+          object_id:
+            from_result:
+              contains: objects
+              field: objects[].id
+              where:
+                label_not: robot
+                id_prefix: scene.object.
+        description: compute an approach pose near the selected real object
+  - status: in_progress
+    rtdl_description: retry detected object approach pose after scene feedback
+    caps:
+      - cap: scene.scene_goal_near
+        args:
+          object_id:
+            from_result:
+              contains: objects
+              field: objects[].id
+              where:
+                label_not: robot
+                id_prefix: scene.object.
+        description: retry computing an approach pose near the selected real object
+  - status: in_progress
+    rtdl_description: final retry detected object approach pose after scene feedback
+    caps:
+      - cap: scene.scene_goal_near
+        args:
+          object_id:
+            from_result:
+              contains: objects
+              field: objects[].id
+              where:
+                label_not: robot
+                id_prefix: scene.object.
+        description: final retry computing an approach pose near the selected real object
   - status: in_progress
     rtdl_description: navigate to object approach pose
     caps:
-      - match: navigation_navigate
+      - cap: nav2.navigation_navigate
+        once: true
         args:
           goal:
             header:
@@ -22,25 +71,180 @@ steps:
               position:
                 x:
                   from_result:
-                    contract: robonix/system/scene/goal_near
+                    contains: reachable
                     field: x
+                    where: {reachable: true}
+                    transform: float
                 y:
                   from_result:
-                    contract: robonix/system/scene/goal_near
+                    contains: reachable
                     field: y
+                    where: {reachable: true}
+                    transform: float
                 z: 0.0
-              orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+              orientation:
+                x: 0.0
+                y: 0.0
+                z:
+                  from_result:
+                    contains: reachable
+                    field: yaw
+                    where: {reachable: true}
+                    transform: sin_half
+                w:
+                  from_result:
+                    contains: reachable
+                    field: yaw
+                    where: {reachable: true}
+                    transform: cos_half
         description: send the object-derived approach pose to navigation
+  - status: in_progress
+    rtdl_description: retry navigation after approach pose feedback
+    caps:
+      - cap: nav2.navigation_navigate
+        once: true
+        args:
+          goal:
+            header:
+              stamp: {sec: 0, nanosec: 0}
+              frame_id: map
+            pose:
+              position:
+                x:
+                  from_result:
+                    contains: reachable
+                    field: x
+                    where: {reachable: true}
+                    transform: float
+                y:
+                  from_result:
+                    contains: reachable
+                    field: y
+                    where: {reachable: true}
+                    transform: float
+                z: 0.0
+              orientation:
+                x: 0.0
+                y: 0.0
+                z:
+                  from_result:
+                    contains: reachable
+                    field: yaw
+                    where: {reachable: true}
+                    transform: sin_half
+                w:
+                  from_result:
+                    contains: reachable
+                    field: yaw
+                    where: {reachable: true}
+                    transform: cos_half
+        description: retry the object-derived approach pose after feedback is available
+  - status: in_progress
+    rtdl_description: retry navigation after delayed approach pose feedback
+    caps:
+      - cap: nav2.navigation_navigate
+        once: true
+        args:
+          goal:
+            header:
+              stamp: {sec: 0, nanosec: 0}
+              frame_id: map
+            pose:
+              position:
+                x:
+                  from_result:
+                    contains: reachable
+                    field: x
+                    where: {reachable: true}
+                    transform: float
+                y:
+                  from_result:
+                    contains: reachable
+                    field: y
+                    where: {reachable: true}
+                    transform: float
+                z: 0.0
+              orientation:
+                x: 0.0
+                y: 0.0
+                z:
+                  from_result:
+                    contains: reachable
+                    field: yaw
+                    where: {reachable: true}
+                    transform: sin_half
+                w:
+                  from_result:
+                    contains: reachable
+                    field: yaw
+                    where: {reachable: true}
+                    transform: cos_half
+        description: retry the object-derived approach pose after delayed feedback is available
+  - status: in_progress
+    rtdl_description: final navigation retry after approach pose feedback
+    caps:
+      - cap: nav2.navigation_navigate
+        once: true
+        args:
+          goal:
+            header:
+              stamp: {sec: 0, nanosec: 0}
+              frame_id: map
+            pose:
+              position:
+                x:
+                  from_result:
+                    contains: reachable
+                    field: x
+                    where: {reachable: true}
+                    transform: float
+                y:
+                  from_result:
+                    contains: reachable
+                    field: y
+                    where: {reachable: true}
+                    transform: float
+                z: 0.0
+              orientation:
+                x: 0.0
+                y: 0.0
+                z:
+                  from_result:
+                    contains: reachable
+                    field: yaw
+                    where: {reachable: true}
+                    transform: sin_half
+                w:
+                  from_result:
+                    contains: reachable
+                    field: yaw
+                    where: {reachable: true}
+                    transform: cos_half
+        description: final retry of the object-derived approach pose
   - status: done
-expect_contracts:
-  - robonix/system/scene/goal_near
-  - robonix/service/navigation/navigate
-expect_args:
-  - scene.object.ci_table_001
-  - '"x":0.5'
-expect_outputs:
-  - '"reachable": true'
-  - approach pose for 'ci_table'
-  - '"state": "SUCCEEDED"'
-  - succeeded
-expect_min_rounds: 2
+expect_min_rounds: 4
+expect_final_done: true
+expect_leaves:
+  - contract: robonix/skill/explore/explore
+    success: false
+    args: {area_hint: "ci local room", timeout_s: 8.0, max_speed_m_s: 0.1}
+    output:
+      error_regex: "hit 8\\.0s ceiling"
+  - contract: robonix/system/scene/list_objects
+    success: true
+    output:
+      jsonpath:
+        - path: $.objects
+          min_length: 1
+        - path: $.objects[].id
+          exists: true
+          prefix: scene.object.
+  - contract: robonix/system/scene/goal_near
+    success: true
+    output:
+      json: {reachable: true}
+      text_regex: "approach pose for"
+  - contract: robonix/service/navigation/navigate
+    success: true
+    output:
+      json: {state: SUCCEEDED}

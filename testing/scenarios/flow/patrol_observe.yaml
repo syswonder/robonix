@@ -1,6 +1,4 @@
-# Multi-step task flow (happy path): observe -> remember -> recall.
-# Each step is its own planning round, so this exercises the pilot planner
-# loop end-to-end across several rounds against real Webots sensor data.
+# Multi-step task flow: observe -> remember -> recall.
 name: patrol_observe
 task: "ci-flow: look around, note what you see, then recall the note"
 steps:
@@ -8,14 +6,14 @@ steps:
     rtdl_description: capture
     content: Capturing a snapshot at the waypoint.
     caps:
-      - match: camera_snapshot
+      - cap: tiago_camera.camera_snapshot
         args: {}
         description: observe the surroundings
   - status: in_progress
     rtdl_description: remember
     content: Recording the observation.
     caps:
-      - match: memory_save
+      - cap: memory.memory_save
         args:
           data: "ci-flow observation: snapshot captured at waypoint 1"
         description: persist the observation
@@ -23,23 +21,31 @@ steps:
     rtdl_description: recall
     content: Recording and recalling the observation.
     caps:
-      - match: memory_save
+      - cap: memory.memory_save
         args:
           data: "ci-flow observation: snapshot captured at waypoint 1"
         description: persist the observation if the camera result advanced the scripted round
-      - match: memory_search
+      - cap: memory.memory_search
         args:
           data: waypoint 1
         description: recall the observation
   - status: done
     content: Observed, recorded, and recalled.
-expect_contracts:
-  - robonix/primitive/camera/snapshot
-  - robonix/service/memory/save
-  - robonix/service/memory/search
-expect_args:
-  - waypoint 1
 expect_min_rounds: 2
-expect_outputs:
-  - '"encoding": "jpeg"'
-  - 'ci-flow observation: snapshot captured at waypoint 1'
+expect_leaves:
+  - contract: robonix/primitive/camera/snapshot
+    success: true
+    output:
+      json: {encoding: jpeg}
+  - contract: robonix/service/memory/save
+    success: true
+    args:
+      data: "ci-flow observation: snapshot captured at waypoint 1"
+    output:
+      json: {data: "Memory saved and indexed."}
+  - contract: robonix/service/memory/search
+    success: true
+    args:
+      data: waypoint 1
+    output:
+      text_regex: "ci-flow observation: snapshot captured at waypoint 1"

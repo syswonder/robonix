@@ -1,42 +1,33 @@
-# Exception injection + recovery flow.
-#
-# Round 0 calls memory_save with NO `content` — the required field is missing,
-# so the MCP layer rejects it and the leaf genuinely fails. Pilot's
-# replan-on-failure path then fires; round 1 (scripted recovery) re-issues the
-# call with valid args; round 2 declares the task done. We assert that the fault
-# WAS observed (a failed memory/save leaf) AND that the task still reached done
-# without a FAILED status — i.e. the system recovers from a real tool failure.
-#
-# If the generated schema makes `content` optional (so round 0 unexpectedly
-# succeeds), switch the injected fault to memory_search with an empty `query`,
-# or any other required-arg omission visible in the first-run catalog log.
+# Exception injection + recovery flow for memory.
 name: fault_recovery
 task: "ci-flow: save a fact, recovering if the first attempt is rejected"
 steps:
   - status: in_progress
-    rtdl_description: faulty save (injected fault — missing required content)
-    content: Attempting to save (this attempt is intentionally malformed).
+    rtdl_description: faulty save
+    content: Attempting to save with an intentionally malformed request.
     caps:
-      - match: memory_save
+      - cap: memory.memory_save
         args: {}
-        description: intentionally-invalid save to trigger a leaf failure
+        description: intentionally invalid save to trigger a leaf failure
   - status: in_progress
     rtdl_description: recover
     content: First attempt failed; retrying with valid content.
     caps:
-      - match: memory_save
+      - cap: memory.memory_save
         args:
           data: "ci-flow recovered fact: beacon bravo-2"
         description: recovery save with valid args
   - status: done
     content: Recovered from the failed attempt and saved the fact.
-expect_contracts:
-  - robonix/service/memory/save
-expect_args:
-  - bravo-2
-expect_leaf_failure:
-  - robonix/service/memory/save
 expect_min_rounds: 2
 expect_final_done: true
-expect_outputs:
-  - Memory saved and indexed
+expect_leaves:
+  - contract: robonix/service/memory/save
+    success: false
+    args: {}
+  - contract: robonix/service/memory/save
+    success: true
+    args:
+      data: "ci-flow recovered fact: beacon bravo-2"
+    output:
+      json: {data: "Memory saved and indexed."}

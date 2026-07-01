@@ -6,13 +6,16 @@ steps:
     rtdl_description: voiceprint list
     status: in_progress
     caps:
-      - match: voiceprint_list
+      - cap: voiceprint.voiceprint_list
         args: {}
         description: list enrolled speakers
   - content: Listed.
     status: done
-expect_contracts:
-  - robonix/service/voiceprint/list
-expect_outputs:
-  - users_json
-  - count
+expect_leaves:
+  - contract: robonix/service/voiceprint/list
+    success: true
+    output:
+      text_regex: "\"users_json\""
+      jsonpath:
+        - path: $.count
+          exists: true

@@ -49,7 +49,7 @@ Environment variables:
   ROBONIX_ATLAS      Atlas control-plane address (default: localhost:50051)
   SPEECH_PORT        gRPC listen port, 0 = auto-pick (default: 0)
   SPEECH_BIND_ADDR   gRPC bind address (default: 0.0.0.0)
-  SPEECH_CI_MODE     Set to 1 for mock backends (no GPU/model needed)
+  SPEECH_BACKEND     Set to mock for local mock backends (no GPU/model needed)
 """
 import io
 import json
@@ -96,9 +96,9 @@ import speech_pb2
 import audio_pb2  # for AudioChunk (lib/primitive/audio/msg/AudioChunk.msg)
 import robonix_contracts_pb2_grpc as contracts_grpc
 
-# -- CI mock mode ------------------------------------------------------------
+# -- Explicit mock mode ------------------------------------------------------
 
-CI_MODE = os.environ.get("SPEECH_CI_MODE", "").strip() in ("1", "true", "yes")
+MOCK_MODE = os.environ.get("SPEECH_BACKEND", "").strip().lower() == "mock"
 
 def check_torch_cuda():
     import torch
@@ -212,14 +212,14 @@ class WhisperASRBackend:
 
 
 class MockASRBackend:
-    """CI mock ASR -- returns a fixed canned response, no model loaded.
+    """Mock ASR -- returns a fixed canned response, no model loaded.
 
-    Activated when SPEECH_CI_MODE=1. Useful for testing the gRPC layer
+    Activated when SPEECH_BACKEND=mock. Useful for testing the gRPC layer
     without requiring GPU or model weights.
     """
 
     def recognize(self, audio_bytes: bytes, encoding: str, sample_rate: int, language: str) -> dict:
-        return {"text": "[ci-mock] hello world", "confidence": 1.0}
+        return {"text": "[mock] hello world", "confidence": 1.0}
 
 
 # -- ASR Backend (FunASR Paraformer streaming) --------------------------------
@@ -365,13 +365,13 @@ class FunASRStreamingBackend:
 
 
 class MockASRStreamingBackend:
-    """CI mock streaming ASR -- returns empty results during streaming,
+    """Mock streaming ASR -- returns empty results during streaming,
     canned result on is_final. No model loaded.
     """
 
     def recognize_chunk(self, audio_chunk, cache, is_final=False, encoding="pcm_s16le", sample_rate=16000):
         if is_final:
-            return [{"text": "[ci-mock-stream] hello world", "confidence": 1.0}]
+            return [{"text": "[mock-stream] hello world", "confidence": 1.0}]
         return [{"text": "", "confidence": 0.0}]
 
 
@@ -491,8 +491,8 @@ class EdgeTTSBackend:
 
 
 class MockTTSBackend:
-    """CI mock TTS -- returns a minimal valid WAV file (silence).
-    Activated when SPEECH_CI_MODE=1.
+    """Mock TTS -- returns a minimal valid WAV file (silence).
+    Activated when SPEECH_BACKEND=mock.
     """
 
     async def synthesize(self, text: str, voice: str = "", speed: float = 1.0) -> bytes:
@@ -802,7 +802,7 @@ class SpeechTtsServicer(contracts_grpc.RobonixServiceSpeechTtsServicer):
             context.set_details(
                 "TTS backend not available. "
                 "Edge TTS requires network access to Microsoft Cognitive Services. "
-                "Check your network connection or set SPEECH_CI_MODE=1 for testing."
+                "Check network/model access or set SPEECH_BACKEND=mock for local mock testing."
             )
             return tts_pb2.Synthesize_Response()
 
@@ -972,7 +972,7 @@ def _try_backend(name: str, factory):
 # gate which engines come up. Each servicer's Recognize/Synthesize
 # already returns UNAVAILABLE when its backend is None, which covers
 # the small window between gRPC server start and Driver(CMD_INIT).
-log.info("Starting speech service (ci_mode=%s)", CI_MODE)
+log.info("Starting speech service (mock_mode=%s)", MOCK_MODE)
 _dialog_manager = DialogManager()
 _asr_servicer        = SpeechAsrServicer(None)
 _asr_stream_servicer = SpeechAsrStreamServicer(None)
@@ -1032,9 +1032,6 @@ def speak(req: Speak_Request) -> Speak_Response:
     text = (req.text or "").strip()
     if not text:
         raise RuntimeError("empty text")
-    if CI_MODE:
-        return Speak_Response(ok=True, detail=f"ci mock speak accepted {len(text)} chars")
-
     caps = ATLAS.find_capability(contract_id=_SPEAKER_CONTRACT, transport=Transport.GRPC)
     if req.target:
         caps = [c for c in caps if c.provider_id == req.target]
@@ -1105,7 +1102,7 @@ def init(cfg):
         os.environ.get("SPEECH_DISABLE_WHISPER", "").strip() in ("1", "true", "yes"),
     ))
 
-    if CI_MODE:
+    if MOCK_MODE:
         asr = MockASRBackend()
         asr_stream = MockASRStreamingBackend()
         tts = MockTTSBackend()
@@ -1130,7 +1127,7 @@ def init(cfg):
 
     if not any([asr, asr_stream, tts]):
         return Err(
-            "all backends failed; set SPEECH_CI_MODE=1 for mocks or fix "
+            "all backends failed; set SPEECH_BACKEND=mock for local mock testing or fix "
             "model / network issues (see backend errors above)"
         )
     return Ok()

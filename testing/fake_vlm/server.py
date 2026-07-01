@@ -13,10 +13,9 @@ everything from the request body):
 
 1. Parse the advertised capability catalog out of the **system** message.
    Pilot renders it as ``- capability_name: <provider>.<area>_<leaf>`` lines
-   (planner.rs build_rtdl_prompt). Scenarios reference caps by a short
-   substring (e.g. ``camera_snapshot``); we resolve it to the exact advertised
-   name at request time, so scenarios stay decoupled from provider_id / exact
-   contract wording.
+   (planner.rs build_rtdl_prompt). Scenarios must reference that exact
+   provider-qualified planner capability name, for example
+   ``scene.scene_list_objects``.
 2. Read the FIRST ``user`` message text — that is the task prompt. Look up the
    scenario whose ``task`` equals it.
 3. Count user messages in history = the current round index. Pilot feeds each
@@ -33,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 import time
@@ -66,23 +66,10 @@ def advertised_caps(messages: list[dict]) -> list[str]:
     return list(seen)
 
 
-def resolve_cap(match: str, caps: list[str]) -> str | None:
-    """Resolve a scenario's short cap matcher to an exact advertised name.
-
-    Prefers an exact ``provider.area_leaf`` match, then a suffix match on the
-    part after the dot, then a plain substring. Returns None if nothing
-    advertised matches — the runner then sees the cap was never invoked and
-    fails the scenario, which is the correct signal ("expected tool absent").
-    """
-    if match in caps:
-        return match
-    for c in caps:
-        leaf = c.split(".", 1)[-1]
-        if leaf == match:
-            return c
-    for c in caps:
-        if match in c:
-            return c
+def resolve_cap(cap: str, caps: list[str]) -> str | None:
+    """Resolve a scenario cap to an exact advertised planner capability name."""
+    if cap in caps:
+        return cap
     return None
 
 
@@ -159,7 +146,98 @@ def _find_field(value: object, field: str):
     return None
 
 
-def _lookup_result_field(messages: list[dict], contract: str, field: str):
+def _matches_where(value: object, where: dict) -> bool:
+    if not where:
+        return True
+    if not isinstance(value, dict):
+        return False
+    for key, expected in where.items():
+        if key == "label_not":
+            if value.get("label") == expected or value.get("cls") == expected:
+                return False
+        elif key == "label_in":
+            labels = set(expected if isinstance(expected, list) else [expected])
+            if value.get("label") not in labels and value.get("cls") not in labels:
+                return False
+        elif key == "id_prefix":
+            if not str(value.get("id", value.get("object_id", ""))).startswith(str(expected)):
+                return False
+        elif key == "id_contains":
+            if str(expected) not in str(value.get("id", value.get("object_id", ""))):
+                return False
+        elif value.get(key) != expected:
+            return False
+    return True
+
+
+def _extract_path(value: object, path: str, where: dict | None = None):
+    if isinstance(value, str) and value.strip().startswith(("{", "[")):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if not path:
+        return value
+    cur: object = value
+    for token in path.split("."):
+        if token.endswith("[]"):
+            key = token[:-2]
+            if not isinstance(cur, dict) or not isinstance(cur.get(key), list):
+                return None
+            chosen = None
+            for item in cur[key]:
+                if _matches_where(item, where or {}):
+                    chosen = item
+                    break
+            if chosen is None:
+                return None
+            cur = chosen
+            continue
+        if isinstance(cur, dict):
+            if token in cur:
+                cur = cur[token]
+            elif token == "id" and "object_id" in cur:
+                cur = cur["object_id"]
+            elif token == "label" and "cls" in cur:
+                cur = cur["cls"]
+            else:
+                return None
+        else:
+            return None
+    return cur
+
+
+def _apply_transform(value: object, transform: str) -> object:
+    if not transform:
+        return value
+    if transform == "sin_half":
+        return math.sin(float(value) / 2.0)
+    if transform == "cos_half":
+        return math.cos(float(value) / 2.0)
+    if transform == "float":
+        return float(value)
+    if transform == "int":
+        return int(value)
+    if transform == "str":
+        return str(value)
+    raise ValueError(f"unknown from_result transform {transform!r}")
+
+
+def _node_matches(value: object, contract: str, contains: str) -> bool:
+    if contract and _contains_text(value, contract):
+        return True
+    if contains and _contains_text(value, contains):
+        return True
+    return not contract and not contains
+
+
+def _lookup_result_field(
+    messages: list[dict],
+    contract: str,
+    field: str,
+    contains: str = "",
+    where: dict | None = None,
+):
     parts: list[str] = []
     for m in messages:
         if m.get("role") != "user":
@@ -173,10 +251,12 @@ def _lookup_result_field(messages: list[dict], contract: str, field: str):
     values = _json_values_from_text(user_text)
     for value in reversed(values):
         for node in reversed(list(_walk_json(value))):
-            if contract and not _contains_text(node, contract):
+            found = _extract_path(node, field, where) if "." in field or "[]" in field else _find_field(node, field)
+            if found is None:
                 continue
-            found = _find_field(node, field)
-            if found is not None:
+            if where and "." not in field and "[]" not in field and isinstance(node, dict) and not _matches_where(node, where):
+                continue
+            if _node_matches(node, contract, contains):
                 return found
     return None
 
@@ -188,21 +268,36 @@ def resolve_arg_refs(value: object, messages: list[dict], unresolved_refs: list[
         if isinstance(ref, dict):
             contract = str(ref.get("contract", ""))
             field = str(ref.get("field", ""))
-            found = _lookup_result_field(messages, contract, field)
+            contains = str(ref.get("contains", ""))
+            where = ref.get("where")
+            if where is not None and not isinstance(where, dict):
+                unresolved_refs.append(f"{contract}:{field}: invalid where")
+                return ref.get("default")
+            found = _lookup_result_field(messages, contract, field, contains, where)
             if found is None:
                 unresolved_refs.append(f"{contract}:{field}")
                 return ref.get("default")
-            return found
+            try:
+                return _apply_transform(found, str(ref.get("transform", "")))
+            except Exception as exc:  # noqa: BLE001
+                unresolved_refs.append(f"{contract}:{field}: {exc}")
+                return ref.get("default")
         return {k: resolve_arg_refs(v, messages, unresolved_refs) for k, v in value.items()}
     if isinstance(value, list):
         return [resolve_arg_refs(v, messages, unresolved_refs) for v in value]
     return value
 
 
-def build_envelope(step: dict, caps: list[str], messages: list[dict], unresolved: list[str]) -> dict:
+def build_envelope(
+    step: dict,
+    caps: list[str],
+    messages: list[dict],
+    unresolved: list[str],
+    once_seen: set[str] | None = None,
+) -> dict:
     """Turn a scenario step into a 4-key RTDL envelope pilot will accept.
 
-    A step lists ``caps`` (each {match, args, description?}); we wrap the
+    A step lists ``caps`` (each {cap, args, description?}); we wrap the
     resolved do-nodes in a sequence. An empty cap list yields the canonical
     "wait" tree. ``status`` drives task completion: "done" ends the turn.
     Unresolved matchers are recorded (caller logs them) and dropped, so the
@@ -211,12 +306,20 @@ def build_envelope(step: dict, caps: list[str], messages: list[dict], unresolved
     children = []
     unresolved_refs: list[str] = []
     for spec in step.get("caps", []):
-        cap = resolve_cap(spec["match"], caps)
-        if cap is None:
-            unresolved.append(spec["match"])
+        wanted = spec["cap"]
+        if spec.get("once") and once_seen is not None and wanted in once_seen:
             continue
+        cap = resolve_cap(wanted, caps)
+        if cap is None:
+            unresolved.append(wanted)
+            continue
+        before = len(unresolved_refs)
         args = resolve_arg_refs(spec.get("args", {}), messages, unresolved_refs)
-        children.append(do_node(cap, args, spec.get("description", spec["match"])))
+        if len(unresolved_refs) > before:
+            continue
+        children.append(do_node(cap, args, spec.get("description", wanted)))
+        if spec.get("once") and once_seen is not None:
+            once_seen.add(wanted)
     unresolved.extend(f"from_result {ref}" for ref in unresolved_refs)
 
     rtdl = {
@@ -263,6 +366,7 @@ class Handler(BaseHTTPRequestHandler):
     # set by main(): {task_text: scenario_dict}
     scenarios: dict[str, dict] = {}
     timeline_starts: dict[str, float] = {}
+    once_seen: dict[str, set[str]] = {}
 
     def log_message(self, *_args):  # noqa: D401 - silence default stderr spam
         """Suppress the default per-request access log."""
@@ -313,19 +417,26 @@ class Handler(BaseHTTPRequestHandler):
         else:
             if rounds == 0:
                 self.timeline_starts[scenario["name"]] = time.monotonic()
+                self.once_seen[scenario["name"]] = set()
             steps = scenario.get("steps", [])
             if rounds < len(steps):
                 unresolved: list[str] = []
                 step = steps[rounds]
                 self._apply_timeline_delay(scenario, step, rounds)
-                envelope = build_envelope(step, caps, messages, unresolved)
+                envelope = build_envelope(
+                    step,
+                    caps,
+                    messages,
+                    unresolved,
+                    self.once_seen.setdefault(scenario["name"], set()),
+                )
                 if unresolved:
                     self._emit(
                         f"scenario {scenario['name']!r} round {rounds}: "
                         f"UNRESOLVED caps {unresolved} (advertised: {caps})"
                     )
                 else:
-                    called = [c.get("match") for c in step.get("caps", [])]
+                    called = [c.get("cap") for c in step.get("caps", [])]
                     self._emit(f"scenario {scenario['name']!r} round {rounds}: caps {called}")
             else:
                 envelope = terminal_envelope("scripted steps complete")

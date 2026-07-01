@@ -90,11 +90,12 @@ assistant returns exactly one JSON object in `content` with four keys:
 ```
 
 The fake server reads the capability **catalog out of pilot's system prompt**
-(`- capability_name: tiago_camera.camera_snapshot`), so scenarios reference a
-cap by a short matcher (`camera_snapshot`) and the server resolves it to the
-exact provider-qualified name at request time. Round index = number of
-additional `user` result messages already in history; the server serves
-`steps[round]` and a terminal `done` envelope past the end.
+(`- capability_name: tiago_camera.camera_snapshot`). Scenarios must reference
+the exact provider-qualified planner capability name, such as
+`tiago_camera.camera_snapshot` or `scene.scene_list_objects`; the fake VLM does
+not do suffix or substring resolution. Round index = number of additional
+`user` result messages already in history; the server serves `steps[round]` and
+a terminal `done` envelope past the end.
 
 Timing is modeled inside `steps`, similar to timeline/marble tests: `time_s`
 sets an absolute offset from the first planning round and `delay_s` sleeps
@@ -109,13 +110,14 @@ The scenario YAML grammar is defined in `SCENARIO_SPEC.md`. In short:
 
 - `steps` is a scripted timeline of fake-VLM RTDL rounds.
 - `steps[].time_s` and `steps[].delay_s` model blank time inside the timeline.
-- `steps[].caps[].match` selects planner-advertised capability names.
+- `steps[].caps[].cap` selects exact planner-advertised capability names.
 - `steps[].caps[].args` may use `from_result` to feed a previous leaf output
   field into a later capability argument.
-- `expect_contracts` and `expect_leaf_failure` must use exact full
-  `robonix/...` runtime contract ids.
-- `expect_outputs` asserts semantic runtime output, not just that a tool was
-  called.
+- `expect_leaves` binds each assertion to one exact `robonix/...` runtime
+  contract id, expected success state, optional args subset, and optional output
+  checks.
+- Failed leaves are errors unless the scenario explicitly expects that leaf with
+  `success: false`.
 
 **Exception injection** is done purely in the scenario: a step calls a real
 capability with invalid args (e.g. a required field omitted) so the leaf
