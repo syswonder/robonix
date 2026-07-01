@@ -139,7 +139,7 @@ jobs:
     if: >-
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'issue_comment' ||
+      github.event_name == 'workflow_call' ||
       (github.event_name == 'pull_request' &&
        contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
     runs-on: [self-hosted, robonix-testing]
