@@ -481,41 +481,48 @@ async def _start_ros_ingest(
                 return None
             return msg
 
-        # Camera intrinsics come *only* from the live
-        # `primitive/camera/intrinsics` contract — the real per-deployment
-        # K, exactly as extrinsics come from the camera's tf2/URDF rather
-        # than a scene-side env var. Back-projection scales every point by
-        # fx/fy, so a wrong guess silently misplaces objects; we therefore
-        # return None when no usable K is available and let the detector
-        # *wait* (it logs "waiting for camera intrinsics") instead of
-        # grounding perception on a default.
-        intrinsics_logged = {"ok": False, "bad": False}
+        # Prefer the live `primitive/camera/intrinsics` contract. Some
+        # simulator deployments have a stable, reviewed camera calibration but
+        # no reliable CameraInfo stream; those may opt in via
+        # `intrinsics_fallback` in the scene config. This still runs the real
+        # RGB-D ConceptGraphs path; it only supplies K for back-projection when
+        # the contract has not delivered a usable sample yet.
+        intrinsics_fallback = _scene_intrinsics_fallback(config.get("intrinsics_fallback"))
+        intrinsics_logged = {"ok": False, "bad": False, "fallback": False}
 
         def _cam_info() -> Optional[_CamIntrinsics]:
-            if not hub.has("intrinsics"):
-                return None
-            msg, stamp, _ = hub.latest("intrinsics")
-            if msg is None or stamp <= 0.0:
-                return None
-            k = _cam_info_to_intrinsics(msg)
-            if k is not None:
-                if not intrinsics_logged["ok"]:
-                    log.info(
-                        "[scene] camera intrinsics from contract: "
+            if hub.has("intrinsics"):
+                msg, stamp, _ = hub.latest("intrinsics")
+                if msg is not None and stamp > 0.0:
+                    k = _cam_info_to_intrinsics(msg)
+                    if k is not None:
+                        if not intrinsics_logged["ok"]:
+                            log.info(
+                                "[scene] camera intrinsics from contract: "
+                                "fx=%.1f fy=%.1f cx=%.1f cy=%.1f %dx%d",
+                                k.fx, k.fy, k.cx, k.cy, k.width, k.height,
+                            )
+                            intrinsics_logged["ok"] = True
+                        return k
+                    # Contract is published but the CameraInfo K is zero/garbage —
+                    # distinct from "no contract"; warn once so a miscalibrated
+                    # publisher is visible rather than silently stalling perception.
+                    if not intrinsics_logged["bad"]:
+                        log.warning(
+                            "[scene] intrinsics contract published but CameraInfo K "
+                            "is unusable — detector will use configured fallback if available"
+                        )
+                        intrinsics_logged["bad"] = True
+            if intrinsics_fallback is not None:
+                source, k = intrinsics_fallback
+                if not intrinsics_logged["fallback"]:
+                    log.warning(
+                        "[scene] camera intrinsics fallback: %s "
                         "fx=%.1f fy=%.1f cx=%.1f cy=%.1f %dx%d",
-                        k.fx, k.fy, k.cx, k.cy, k.width, k.height,
+                        source, k.fx, k.fy, k.cx, k.cy, k.width, k.height,
                     )
-                    intrinsics_logged["ok"] = True
+                    intrinsics_logged["fallback"] = True
                 return k
-            # Contract is published but the CameraInfo K is zero/garbage —
-            # distinct from "no contract"; warn once so a miscalibrated
-            # publisher is visible rather than silently stalling perception.
-            if not intrinsics_logged["bad"]:
-                log.warning(
-                    "[scene] intrinsics contract published but CameraInfo K "
-                    "is unusable — detector will wait for valid intrinsics"
-                )
-                intrinsics_logged["bad"] = True
             return None
 
         detector = ConceptGraphsDetector(
@@ -587,6 +594,63 @@ async def _start_ros_ingest(
         )
 
     return hub, detector, bg_tasks
+
+
+def _scene_intrinsics_fallback(raw: Any) -> Optional[tuple[str, _CamIntrinsics]]:
+    """Return an explicitly configured intrinsics fallback for simulator deploys.
+
+    Real hardware should publish `primitive/camera/intrinsics`. The fallback is
+    opt-in because an unreviewed K silently moves 3D objects. Webots Tiago is a
+    stable simulator camera, so the example manifest can provide the same K used
+    by the camera primitive.
+    """
+    if raw in (None, "", False):
+        return None
+    if isinstance(raw, str):
+        source = raw
+        cfg: dict[str, Any] = {}
+    elif isinstance(raw, dict):
+        cfg = raw
+        source = str(cfg.get("source") or cfg.get("name") or "configured")
+    else:
+        log.warning("[scene] ignoring invalid intrinsics_fallback=%r", raw)
+        return None
+    if source.lower() in {"none", "disabled", "false"}:
+        return None
+    defaults = _CamIntrinsics() if source == "webots_tiago" else _CamIntrinsics(
+        width=0, height=0, fx=0.0, fy=0.0, cx=0.0, cy=0.0
+    )
+
+    def _num(name: str, default: float) -> float:
+        value = cfg.get(name) if isinstance(cfg, dict) else None
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _integer(name: str, default: int) -> int:
+        value = cfg.get(name) if isinstance(cfg, dict) else None
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    k = _CamIntrinsics(
+        width=_integer("width", defaults.width),
+        height=_integer("height", defaults.height),
+        fx=_num("fx", defaults.fx),
+        fy=_num("fy", defaults.fy),
+        cx=_num("cx", defaults.cx),
+        cy=_num("cy", defaults.cy),
+    )
+    if min(k.width, k.height, k.fx, k.fy, k.cx, k.cy) <= 0:
+        log.warning("[scene] ignoring incomplete intrinsics_fallback=%r", raw)
+        return None
+    return source, k
 
 
 def _cam_info_to_intrinsics(msg: Any) -> Optional[_CamIntrinsics]:
