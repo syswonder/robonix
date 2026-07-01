@@ -2,7 +2,7 @@
 [contract]
 id      = "robonix/system/soma/get_urdf"
 version = "1"
-kind    = "system"
+kind    = "service"
 idl     = "soma/srv/GetUrdf.srv"
 
 [mode]

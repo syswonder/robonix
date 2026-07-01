@@ -5,24 +5,23 @@ use crate::pb::contracts::{
     robonix_system_soma_get_yaml_server::RobonixSystemSomaGetYaml,
 };
 use crate::pb::soma::{GetUrdfRequest, GetUrdfResponse, GetYamlRequest, GetYamlResponse};
-use crate::store::{SomaStore, StoreError};
+use crate::store::{SomaBody, StoreError};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 #[derive(Debug)]
 pub struct SomaService {
-    store: Arc<SomaStore>,
+    body: Arc<SomaBody>,
 }
 
 impl SomaService {
-    pub fn new(store: Arc<SomaStore>) -> Self {
-        Self { store }
+    pub fn new(body: Arc<SomaBody>) -> Self {
+        Self { body }
     }
 
     fn map_lookup_error(error: StoreError) -> Status {
         match error {
             StoreError::NotFound(_) => Status::not_found(error.to_string()),
-            StoreError::MissingDefaultRobot => Status::failed_precondition(error.to_string()),
         }
     }
 }
@@ -34,13 +33,13 @@ impl RobonixSystemSomaGetYaml for SomaService {
         request: Request<GetYamlRequest>,
     ) -> Result<Response<GetYamlResponse>, Status> {
         let req = request.into_inner();
-        let robot = self
-            .store
-            .get(&req.robot_id)
+        let body = self
+            .body
+            .resolve(&req.robot_id)
             .map_err(Self::map_lookup_error)?;
         Ok(Response::new(GetYamlResponse {
-            robot_id: robot.robot_id.clone(),
-            yaml_text: robot.yaml_text.clone(),
+            robot_id: body.robot_id.clone(),
+            yaml_text: body.yaml_text.clone(),
         }))
     }
 }
@@ -52,13 +51,13 @@ impl RobonixSystemSomaGetUrdf for SomaService {
         request: Request<GetUrdfRequest>,
     ) -> Result<Response<GetUrdfResponse>, Status> {
         let req = request.into_inner();
-        let robot = self
-            .store
-            .get(&req.robot_id)
+        let body = self
+            .body
+            .resolve(&req.robot_id)
             .map_err(Self::map_lookup_error)?;
         Ok(Response::new(GetUrdfResponse {
-            robot_id: robot.robot_id.clone(),
-            urdf_xml: robot.urdf_xml.clone(),
+            robot_id: body.robot_id.clone(),
+            urdf_xml: body.urdf_xml.clone(),
         }))
     }
 }
@@ -66,7 +65,6 @@ impl RobonixSystemSomaGetUrdf for SomaService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DeploymentConfig, SomaConfig};
     use crate::pb::contracts::{
         robonix_system_soma_get_urdf_client::RobonixSystemSomaGetUrdfClient,
         robonix_system_soma_get_urdf_server::RobonixSystemSomaGetUrdfServer,
@@ -76,26 +74,16 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_stream::wrappers::TcpListenerStream;
 
-    fn fixture_store() -> Arc<SomaStore> {
-        let deployment = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    fn fixture_body() -> Arc<SomaBody> {
+        let yaml_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("examples/test_ci");
-        let config = SomaConfig {
-            atlas_endpoint: "127.0.0.1:50051".into(),
-            listen: "127.0.0.1:50091".into(),
-            provider_id: "soma".into(),
-            robonix_root: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
-            default_robot: Some("test_ci_robot".into()),
-            deployments: vec![DeploymentConfig { path: deployment }],
-            start_packages: false,
-            rbnx_bin: "rbnx".into(),
-        };
-        Arc::new(SomaStore::load(&config).expect("load fixture store"))
+            .join("examples/test_ci/soma.yaml");
+        Arc::new(SomaBody::load(&yaml_path).expect("load fixture body"))
     }
 
     #[tokio::test]
     async fn get_yaml_returns_raw_text() {
-        let service = SomaService::new(fixture_store());
+        let service = SomaService::new(fixture_body());
         let response = service
             .get_yaml(Request::new(GetYamlRequest {
                 robot_id: "test_ci_robot".into(),
@@ -109,7 +97,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_urdf_returns_xml_text() {
-        let service = SomaService::new(fixture_store());
+        let service = SomaService::new(fixture_body());
         let response = service
             .get_urdf(Request::new(GetUrdfRequest {
                 robot_id: "".into(),
@@ -123,7 +111,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_robot_maps_to_not_found() {
-        let service = SomaService::new(fixture_store());
+        let service = SomaService::new(fixture_body());
         let status = service
             .get_yaml(Request::new(GetYamlRequest {
                 robot_id: "missing".into(),
@@ -137,7 +125,7 @@ mod tests {
     async fn grpc_clients_call_yaml_and_urdf_services() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
-        let service = Arc::new(SomaService::new(fixture_store()));
+        let service = Arc::new(SomaService::new(fixture_body()));
         tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(RobonixSystemSomaGetYamlServer::from_arc(Arc::clone(

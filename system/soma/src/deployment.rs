@@ -17,19 +17,18 @@
 // inline — rbnx build owns that — but we do surface a clear error
 // when the cache dir or build sentinel is missing so the operator
 // knows to run rbnx build first.
+//
+// One `Deployment` per soma process. The v1 shape carried a
+// `Vec<DeploymentRecord>` behind a store; the reviewer flagged that as
+// speculative generality — rbnx spawns exactly one soma per boot
+// against exactly one deployment dir, so we now load it directly.
 
-use crate::config::SomaConfig;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
-pub struct DeploymentStore {
-    deployments: Vec<DeploymentRecord>,
-}
-
-#[derive(Debug, Clone)]
-pub struct DeploymentRecord {
+pub struct Deployment {
     pub deployment_path: PathBuf,
     pub manifest_path: PathBuf,
     pub primitives: Vec<PackageLaunchTarget>,
@@ -106,25 +105,7 @@ struct ManifestEntry {
     config: serde_yaml::Value,
 }
 
-impl DeploymentStore {
-    /// Load all deployment manifests from config and collect primitive/skill package targets.
-    pub fn load(config: &SomaConfig) -> Result<Self> {
-        let mut deployments = Vec::new();
-        for deployment in &config.deployments {
-            deployments.push(
-                DeploymentRecord::load(&deployment.path)
-                    .with_context(|| format!("load deployment '{}'", deployment.path.display()))?,
-            );
-        }
-        Ok(Self { deployments })
-    }
-
-    pub fn records(&self) -> &[DeploymentRecord] {
-        &self.deployments
-    }
-}
-
-impl DeploymentRecord {
+impl Deployment {
     /// Read one robonix_manifest.yaml and resolve primitive/skill package paths
     /// (both `path:` and `url:` cache locations).
     pub fn load(deployment_path: &Path) -> Result<Self> {
@@ -248,22 +229,27 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("examples/test_ci");
-        let record = DeploymentRecord::load(&root).expect("load deployment");
-        assert!(record.primitives.iter().any(|p| p.name == "test_primitive"));
-        assert!(record.skills.iter().any(|p| p.name == "test_skills"));
-        assert!(record.skipped.iter().any(|p| p.kind == "service"));
+        let deployment = Deployment::load(&root).expect("load deployment");
+        assert!(
+            deployment
+                .primitives
+                .iter()
+                .any(|p| p.name == "test_primitive")
+        );
+        assert!(deployment.skills.iter().any(|p| p.name == "test_skills"));
+        assert!(deployment.skipped.iter().any(|p| p.kind == "service"));
     }
 
     #[test]
     fn url_entry_resolves_under_rbnx_boot_cache() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let deployment = tmp.path().join("deploy");
-        std::fs::create_dir_all(&deployment).expect("create deploy dir");
+        let deployment_dir = tmp.path().join("deploy");
+        std::fs::create_dir_all(&deployment_dir).expect("create deploy dir");
         let manifest = "primitive:\n  - name: remote_pkg\n    url: https://example.test/foo.git\n";
-        std::fs::write(deployment.join("robonix_manifest.yaml"), manifest).expect("write");
-        let record = DeploymentRecord::load(&deployment).expect("load");
-        assert_eq!(record.primitives.len(), 1);
-        let target = &record.primitives[0];
+        std::fs::write(deployment_dir.join("robonix_manifest.yaml"), manifest).expect("write");
+        let deployment = Deployment::load(&deployment_dir).expect("load");
+        assert_eq!(deployment.primitives.len(), 1);
+        let target = &deployment.primitives[0];
         assert!(
             target.package_dir.ends_with("rbnx-boot/cache/remote_pkg"),
             "{}",

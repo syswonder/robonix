@@ -424,64 +424,6 @@ impl AtlasClient {
             .with_context(|| format!("ListContracts prefix='{namespace_prefix}'"))?;
         Ok(resp.into_inner().contracts)
     }
-
-    // ── Reverse notifications ──────────────────────────────────────────────
-
-    /// Subscribe to the reverse event stream for `provider_id`. The
-    /// returned `Streaming<ProviderEvent>` yields events that some other
-    /// component sent via `notify_provider(provider_id, ...)`. The
-    /// stream ends cleanly when:
-    ///   * Atlas drops the subscriber (provider unregistered, heartbeat
-    ///     lapsed, or another caller re-subscribed for the same id with
-    ///     takeover semantics), or
-    ///   * the underlying gRPC channel breaks.
-    ///
-    /// The caller polls `stream.message().await` in a task and matches
-    /// on `event.kind` to handle each variant.
-    pub async fn watch_provider(
-        &mut self,
-        provider_id: &str,
-    ) -> Result<tonic::Streaming<pb::ProviderEvent>> {
-        let resp = self
-            .inner
-            .watch_provider(pb::WatchProviderRequest {
-                provider_id: provider_id.to_string(),
-            })
-            .await
-            .with_context(|| format!("WatchProvider '{provider_id}'"))?;
-        Ok(resp.into_inner())
-    }
-
-    /// Send a reverse event to `provider_id`. Returns `true` iff Atlas
-    /// had a live subscriber and the event was queued; `false` means
-    /// nobody listening (NOT an error — see proto comment on
-    /// `NotifyProviderResponse`). For convenience this helper takes
-    /// the `ProviderEvent` directly; use the constructors below for
-    /// each known variant.
-    pub async fn notify_provider(
-        &mut self,
-        provider_id: &str,
-        event: pb::ProviderEvent,
-    ) -> Result<bool> {
-        let resp = self
-            .inner
-            .notify_provider(pb::NotifyProviderRequest {
-                provider_id: provider_id.to_string(),
-                event: Some(event),
-            })
-            .await
-            .with_context(|| format!("NotifyProvider '{provider_id}'"))?;
-        Ok(resp.into_inner().delivered)
-    }
-}
-
-/// Build a `ProviderEvent::StageTrigger { stage_name }` payload.
-pub fn stage_trigger_event(stage_name: impl Into<String>) -> pb::ProviderEvent {
-    pb::ProviderEvent {
-        kind: Some(pb::provider_event::Kind::StageTrigger(pb::StageTrigger {
-            stage_name: stage_name.into(),
-        })),
-    }
 }
 
 /// gRPC-only convenience: pick the first Capability matching `contract_id`

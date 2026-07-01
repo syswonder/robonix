@@ -12,13 +12,20 @@
 //     later. (In practice primitives are sensor drivers and don't
 //     need soma data; the ordering just preserves the invariant
 //     "soma is ACTIVE only after its primitives are.")
-//   * Stage 2, gated on atlas's WatchProvider stream firing
-//     `StageTrigger("stage2")`: spawn every skill, run only
-//     Driver(CMD_INIT) (executor sends CMD_ACTIVATE on first MCP
-//     call). rbnx boot sends the trigger after all non-builtin
-//     system services (memory / speech / scene / mapping / pilot /
-//     liaison) have finished registering, which is the earliest
-//     skills can safely declare their MCP tools.
+//   * Stage 2, gated on rbnx writing `stage2\n` down a private pipe
+//     that rbnx inherited onto a known fd of soma at spawn time:
+//     spawn every skill, run only Driver(CMD_INIT) (executor sends
+//     CMD_ACTIVATE on first MCP call). rbnx boot sends the trigger
+//     after all non-builtin system services (memory / speech / scene
+//     / mapping / pilot / liaison) have finished registering, which
+//     is the earliest skills can safely declare their MCP tools.
+//
+// The stage trigger travels as an unnamed pipe, NOT over atlas —
+// atlas is a system-wide registry and shouldn't grow public RPCs
+// (`WatchProvider` / `NotifyProvider`) that exist purely for rbnx ↔
+// soma coordination. Keeping the trigger private also fixes the
+// v1 race where soma had to subscribe to atlas BEFORE rbnx published
+// the event, which was fragile in slow CI.
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -26,26 +33,32 @@ use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
 use robonix_scribe::{info, warn};
 use robonix_soma::config::{Args, SomaConfig};
-use robonix_soma::deployment::DeploymentStore;
+use robonix_soma::deployment::Deployment;
 use robonix_soma::launcher::PackageLauncher;
 use robonix_soma::pb::contracts::{
     robonix_system_soma_get_urdf_server::RobonixSystemSomaGetUrdfServer,
     robonix_system_soma_get_yaml_server::RobonixSystemSomaGetYamlServer,
 };
 use robonix_soma::service::SomaService;
-use robonix_soma::store::SomaStore;
+use robonix_soma::store::SomaBody;
 use robonix_soma::{GET_URDF_CONTRACT, GET_YAML_CONTRACT, SOMA_NAMESPACE};
+use std::os::fd::{FromRawFd, RawFd};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::signal::unix::{SignalKind, signal};
 
 const GET_YAML_TOML: &str = "capabilities/system/soma/get_yaml.v1.toml";
 const GET_URDF_TOML: &str = "capabilities/system/soma/get_urdf.v1.toml";
-/// `ProviderEvent::StageTrigger { stage_name }` value rbnx sends to
-/// kick soma's stage 2 bring-up. Must match the literal in rbnx's
-/// `cmd::deploy.rs` — they're a contract pair, not configurable per
-/// deployment.
+/// Line rbnx writes to the stage-trigger pipe to release soma's
+/// stage 2. Match this exactly in rbnx's `cmd::deploy.rs` — they're
+/// a contract pair, not configurable per deployment.
 const STAGE2_TRIGGER: &str = "stage2";
+/// Environment variable rbnx sets on the soma child to communicate
+/// which inherited fd carries the stage trigger. Absent = we skip
+/// stage 2 (hand-launch / test scenario); we log loudly so an operator
+/// running soma standalone knows skills won't come up automatically.
+const STAGE_FD_ENV: &str = "ROBONIX_SOMA_STAGE_FD";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -58,18 +71,21 @@ async fn main() -> Result<()> {
     info!("robonix-soma starting");
 
     let config = SomaConfig::resolve(args).context("resolve Soma config")?;
-    let deployments = DeploymentStore::load(&config).context("load deployment manifests")?;
-    let store = Arc::new(SomaStore::load(&config).context("load Soma YAML/URDF data")?);
+    let deployment = Deployment::load(config.manifest_dir()).context("load deployment manifest")?;
+    let body = Arc::new(SomaBody::load(&config.robot_yaml).context("load Soma YAML/URDF data")?);
+
+    // Take the stage-trigger fd BEFORE we spawn any children. `rbnx`
+    // dup2's the pipe read-end onto a known fd on soma at fork time
+    // and sets the env; if we forget to consume it here, our own
+    // process fd inheritance would leak it into every rbnx grandchild
+    // (each package spawn is a fresh fork+exec).
+    let stage_fd = take_stage_fd_from_env();
 
     let log_dir = std::env::var("SCRIBE_LOG_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("./logs"));
-    let mut launcher = PackageLauncher::new(
-        log_dir,
-        config.rbnx_bin.clone(),
-        config.atlas_endpoint.clone(),
-    )
-    .context("create package process manager")?;
+    let mut launcher = PackageLauncher::new(log_dir, config.atlas_endpoint.clone())
+        .context("create package process manager")?;
 
     let atlas_http = normalize_endpoint(&config.atlas_endpoint);
     let mut atlas = AtlasClient::connect_with_retry(&atlas_http, 10, Duration::from_secs(2))
@@ -81,9 +97,7 @@ async fn main() -> Result<()> {
     // soma's own capabilities, so a downstream consumer asking
     // "is the chassis primitive ready?" never sees soma ACTIVE
     // without its primitives ACTIVE.
-    let stage1_report = launcher
-        .spawn_primitives(&deployments, &mut atlas, config.start_packages)
-        .await;
+    let stage1_report = launcher.spawn_primitives(&deployment, &mut atlas).await;
     stage1_report.print_to_terminal();
     if stage1_report.has_failures() {
         // A primitive boot failure is fatal for soma — pilot can't
@@ -168,41 +182,32 @@ async fn main() -> Result<()> {
     };
 
     // ── Stage 2 watcher ──────────────────────────────────────────────
-    // Subscribe to atlas's reverse-notification stream BEFORE rbnx is
-    // done with non-builtin system bring-up — atlas queues events
-    // even if soma isn't watching yet, but only AFTER the subscriber
-    // is registered is delivery guaranteed (see
-    // `service::AtlasRegistry::notify_event`). Doing this right after
-    // we go ACTIVE means we own the subscription slot for our
-    // provider_id; any later subscriber would displace us (takeover
-    // semantics). That's the right ordering: rbnx waits to send the
-    // trigger until non-builtin system bring-up finishes, by which
-    // point we've been ACTIVE+subscribed for tens of seconds.
+    // Consume the stage-trigger pipe on a background task. We started
+    // reading BEFORE going ACTIVE so rbnx can't publish faster than we
+    // subscribe (unnamed pipes buffer; a `stage2\n` write while we're
+    // mid-registration just waits for us in the kernel).
     let stage2_launcher = Arc::new(tokio::sync::Mutex::new(launcher));
-    let stage2_atlas = atlas.clone();
-    let stage2_deployments = deployments.clone();
-    let stage2_provider_id = config.provider_id.clone();
-    let stage2_start_packages = config.start_packages;
+    let stage2_deployment = deployment.clone();
+    let mut stage2_atlas = atlas.clone();
     let stage2_task = tokio::spawn({
         let launcher = Arc::clone(&stage2_launcher);
         async move {
-            if let Err(e) = run_stage2(
-                stage2_atlas,
-                &stage2_provider_id,
-                stage2_deployments,
-                launcher,
-                stage2_start_packages,
-            )
-            .await
-            {
+            let Some(fd) = stage_fd else {
+                warn!(
+                    "{STAGE_FD_ENV} not set; stage 2 skill bring-up disabled \
+                     (hand-launched? soma expects rbnx to inherit a pipe)"
+                );
+                return;
+            };
+            if let Err(e) = run_stage2(fd, stage2_deployment, launcher, &mut stage2_atlas).await {
                 warn!("stage 2 (skill bring-up) failed: {e:#}");
             }
         }
     });
 
-    let svc = Arc::new(SomaService::new(store));
+    let svc = Arc::new(SomaService::new(body));
     info!(
-        "robonix-soma ready on {}  (robots loaded, provider_id={})",
+        "robonix-soma ready on {}  (robot loaded, provider_id={})",
         config.listen, config.provider_id
     );
     let shutdown = shutdown_signal(heartbeat_failure);
@@ -212,72 +217,96 @@ async fn main() -> Result<()> {
         .serve_with_shutdown(listen_addr, shutdown)
         .await;
     // Always abort the stage-2 watcher before tearing down children,
-    // so its `watch_provider` stream doesn't try to reconnect while
-    // atlas is going away.
+    // so its pipe read doesn't come back and try to reuse a torn-down
+    // launcher.
     stage2_task.abort();
     stage2_launcher.lock().await.stop_all().await?;
     serve_result?;
     Ok(())
 }
 
-/// Wait for `StageTrigger("stage2")` over the atlas WatchProvider
-/// stream, then run skill bring-up exactly once. Returning early
-/// (stream closed before trigger, RPC failure, …) means stage 2 is
-/// skipped — log loudly so the operator knows, but don't kill soma:
+/// Read `ROBONIX_SOMA_STAGE_FD` and REMOVE it so subsequent child
+/// spawns don't inherit the (misleading) env. Returns `None` if the
+/// var is unset or malformed — callers log and skip stage 2 in that
+/// case.
+fn take_stage_fd_from_env() -> Option<RawFd> {
+    let raw = std::env::var(STAGE_FD_ENV).ok()?;
+    // SAFETY: single-threaded startup path; we haven't spawned any
+    // futures yet.
+    // `remove_var` marked unsafe on some platforms; wrap for safety.
+    unsafe {
+        std::env::remove_var(STAGE_FD_ENV);
+    }
+    match raw.parse::<RawFd>() {
+        Ok(fd) if fd >= 0 => Some(fd),
+        _ => {
+            warn!("{STAGE_FD_ENV}='{raw}' is not a valid non-negative fd");
+            None
+        }
+    }
+}
+
+/// Block on the stage-trigger pipe until we read `stage2\n`, then run
+/// stage-2 skill bring-up exactly once. A malformed / early-close
+/// pipe is a "skip stage 2" event (log loudly, don't crash) — the
 /// primitives are up and pilot can still poke at them, which is
 /// strictly better than tearing the whole deploy down.
 async fn run_stage2(
-    mut atlas: AtlasClient,
-    provider_id: &str,
-    deployments: robonix_soma::deployment::DeploymentStore,
+    fd: RawFd,
+    deployment: Deployment,
     launcher: Arc<tokio::sync::Mutex<PackageLauncher>>,
-    start_packages: bool,
+    atlas: &mut AtlasClient,
 ) -> Result<()> {
-    use robonix_atlas::pb::provider_event::Kind as EventKind;
-    let mut stream = atlas
-        .watch_provider(provider_id)
-        .await
-        .with_context(|| format!("watch_provider('{provider_id}') for stage 2 trigger"))?;
-    info!("stage 2 watcher armed; waiting for StageTrigger('{STAGE2_TRIGGER}')");
+    // Take ownership of the raw fd so tokio can close it on drop.
+    // SAFETY: rbnx guarantees this fd is a live, owned pipe read-end
+    // in this process (dup2'd at fork), no other code touches it.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    // Non-blocking mode is required for tokio's AsyncFd wrapper.
+    set_nonblocking(&file).context("mark stage-trigger fd non-blocking")?;
+    let async_file = tokio::fs::File::from_std(file);
+    let mut reader = BufReader::new(async_file);
+    info!("stage 2 watcher armed on fd {fd}; waiting for '{STAGE2_TRIGGER}' line");
+    let mut line = String::new();
     loop {
-        let msg = match stream.message().await {
-            Ok(Some(event)) => event,
-            Ok(None) => {
-                warn!(
-                    "atlas closed the WatchProvider stream for '{provider_id}' before stage 2 trigger"
-                );
-                return Ok(());
-            }
-            Err(e) => {
-                anyhow::bail!("WatchProvider stream error: {e}");
-            }
-        };
-        match msg.kind {
-            Some(EventKind::StageTrigger(t)) if t.stage_name == STAGE2_TRIGGER => {
-                info!("stage 2 trigger received; starting skill bring-up");
-                break;
-            }
-            Some(EventKind::StageTrigger(t)) => {
-                // Unknown stage names are ignored, not fatal — keeps
-                // soma forward-compatible with future stages rbnx
-                // might add.
-                warn!("ignoring unknown StageTrigger('{}')", t.stage_name);
-            }
-            None => {
-                warn!("received empty ProviderEvent; ignoring");
-            }
+        line.clear();
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .context("read stage-trigger pipe")?;
+        if n == 0 {
+            warn!("stage-trigger pipe closed by rbnx before '{STAGE2_TRIGGER}'");
+            return Ok(());
         }
+        let trimmed = line.trim();
+        if trimmed == STAGE2_TRIGGER {
+            info!("stage 2 trigger received; starting skill bring-up");
+            break;
+        }
+        // Unknown lines are ignored, not fatal — keeps soma
+        // forward-compatible with future stages rbnx might add.
+        warn!("ignoring unknown stage-trigger line '{trimmed}'");
     }
     let mut launcher = launcher.lock().await;
-    let report = launcher
-        .spawn_skills(&deployments, &mut atlas, start_packages)
-        .await;
+    let report = launcher.spawn_skills(&deployment, atlas).await;
     report.print_to_terminal();
     if report.has_failures() {
         warn!("stage 2 finished with one or more skill failures (see report)");
     } else {
         info!("stage 2 (skill bring-up) complete");
     }
+    Ok(())
+}
+
+/// Set `O_NONBLOCK` on the file. Needed so tokio can drive read
+/// readiness via epoll instead of blocking a worker thread.
+fn set_nonblocking(file: &std::fs::File) -> anyhow::Result<()> {
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
+    use std::os::fd::AsFd;
+    let borrowed = file.as_fd();
+    let bits = fcntl(borrowed, FcntlArg::F_GETFL).context("fcntl F_GETFL on stage-trigger fd")?;
+    let mut flags = OFlag::from_bits_truncate(bits);
+    flags.insert(OFlag::O_NONBLOCK);
+    fcntl(borrowed, FcntlArg::F_SETFL(flags)).context("fcntl F_SETFL on stage-trigger fd")?;
     Ok(())
 }
 

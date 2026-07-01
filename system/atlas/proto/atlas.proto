@@ -531,71 +531,6 @@ message ListContractsResponse { repeated ContractDescriptor contracts = 1; }
 message InspectAtlasRequest {}
 message InspectAtlasResponse { string json = 1; }
 
-// -- Reverse notifications (provider event stream) ---------------------------
-//
-// Atlas has historically been pull-only: providers push state via
-// SetLifecycleState / Heartbeat, consumers pull via Query / ConnectCapability.
-// The boot orchestrator (Soma) needs a reverse path — rbnx finishes
-// bringing up the rest of the system services and then has to tell Soma
-// "ok, go run your stage-2 skill bring-up now". This pair of RPCs gives
-// any registered provider a way to subscribe to events targeted at its
-// own provider_id, and gives anyone with an Atlas channel a way to send
-// such events.
-//
-// Design notes:
-//   * One stream per provider_id. Re-subscribing replaces the previous
-//     stream (the old stream's server side is dropped, the underlying
-//     mpsc closes, the previous client sees the stream end).
-//   * `NotifyProvider` is fire-and-forget from the wire's point of view:
-//     it returns `delivered=true` if Atlas had a live subscriber for the
-//     target id and the event was queued onto its channel, otherwise
-//     `false`. No error is returned for "nobody listening" — that's a
-//     legitimate state, not a failure, because the caller may want to
-//     notify-then-poll-later and skip retries when nobody is around.
-//   * Events are intentionally a small closed `oneof`. We start with one
-//     variant (`StageTrigger`) and extend the oneof when new control-
-//     plane signals show up. This keeps the wire stable: every variant
-//     is `tag + payload`, and unknown variants on old binaries are
-//     silently ignored by prost (which is the right behavior — a node
-//     too old to understand a new event ignores it instead of crashing).
-//   * No persistence. If the subscriber isn't connected at NotifyProvider
-//     time, the event drops on the floor. The caller (rbnx) gates on
-//     `set_lifecycle_state(ACTIVE)` to know the target is alive AND
-//     subscribed before notifying.
-
-message StageTrigger {
-  // Free-form stage name. Convention: `stage1`, `stage2`, … Soma uses
-  // `stage2` to mean "the rest of the system services are up, go run
-  // your skill INIT pass now."
-  string stage_name = 1;
-}
-
-message ProviderEvent {
-  oneof kind {
-    StageTrigger stage_trigger = 1;
-  }
-}
-
-message WatchProviderRequest {
-  // The provider_id this subscriber is registered as. Must already be
-  // registered via Register{Primitive,Service,Skill}; otherwise Atlas
-  // returns NotFound.
-  string provider_id = 1;
-}
-
-message NotifyProviderRequest {
-  // Target provider's id.
-  string provider_id = 1;
-  ProviderEvent event = 2;
-}
-message NotifyProviderResponse {
-  // True iff Atlas had a live WatchProvider subscriber for `provider_id`
-  // and the event was queued onto its channel. False = no subscriber was
-  // around (target hasn't called WatchProvider yet, or its stream
-  // already disconnected). NOT an error — see message comment above.
-  bool delivered = 1;
-}
-
 service Atlas {
   // Registration -- one RPC per CapabilityProvider kind.
   rpc RegisterPrimitive(RegisterRequest) returns (RegisterResponse);
@@ -629,11 +564,4 @@ service Atlas {
 
   // Debug.
   rpc InspectAtlas(InspectAtlasRequest) returns (InspectAtlasResponse);
-
-  // Reverse notifications. See the messages above for design notes.
-  // WatchProvider is a server-streaming RPC; the server keeps the stream
-  // open until either the subscriber disconnects, the same provider_id
-  // re-subscribes (takeover), or the provider unregisters.
-  rpc WatchProvider(WatchProviderRequest) returns (stream ProviderEvent);
-  rpc NotifyProvider(NotifyProviderRequest) returns (NotifyProviderResponse);
 }
