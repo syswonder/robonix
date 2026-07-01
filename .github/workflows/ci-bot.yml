@@ -16,14 +16,17 @@
 #      so even an
 #      authorized comment pauses for a human before touching the 5090.
 
-name: ci-bot
+name: Robonix CI Bot
 
 on:
   issue_comment:
     types: [created]
 
 permissions:
+  actions: read
   contents: read
+  pages: write
+  id-token: write
   pull-requests: write
   issues: write
 
@@ -34,6 +37,7 @@ concurrency:
 jobs:
   # ── Parse + authorize the command; open/refresh the status comment ─────────
   gate:
+    name: Authorize CI command
     if: >-
       github.event.issue.pull_request &&
       startsWith(github.event.comment.body, '@robonix-ci test') &&
@@ -41,9 +45,16 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       pr_ref: ${{ steps.pr.outputs.ref }}
+      pr_number: ${{ steps.pr.outputs.number }}
+      pr_title: ${{ steps.pr.outputs.title }}
+      pr_author: ${{ steps.pr.outputs.author }}
+      pr_url: ${{ steps.pr.outputs.url }}
+      pr_head_ref: ${{ steps.pr.outputs.head_ref }}
+      pr_head_repo: ${{ steps.pr.outputs.head_repo }}
+      triggered_by: ${{ steps.pr.outputs.triggered_by }}
       comment_id: ${{ steps.say.outputs.comment_id }}
     steps:
-      - name: React + resolve PR head ref
+      - name: Acknowledge command and resolve PR head
         id: pr
         uses: actions/github-script@v7
         with:
@@ -57,14 +68,21 @@ jobs:
               pull_number: context.payload.issue.number,
             });
             core.setOutput('ref', pr.data.head.sha);
-      - name: Post "running" status comment
+            core.setOutput('number', String(pr.data.number));
+            core.setOutput('title', pr.data.title || '');
+            core.setOutput('author', pr.data.user?.login || '');
+            core.setOutput('url', pr.data.html_url || '');
+            core.setOutput('head_ref', pr.data.head.ref || '');
+            core.setOutput('head_repo', pr.data.head.repo?.full_name || '');
+            core.setOutput('triggered_by', context.payload.comment.user.login || '');
+      - name: Create running status comment
         id: say
         uses: actions/github-script@v7
         with:
           script: |
             const body = [
               '<!-- robonix-ci-status -->',
-              '### 🤖 robonix CI — running…',
+              '### Robonix Webots CI - running',
               `Triggered by @${context.payload.comment.user.login} on \`${{ steps.pr.outputs.ref }}\`.`,
               `[Live logs](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
             ].join('\n');
@@ -76,26 +94,158 @@ jobs:
 
   # ── Run the real pipeline (reuses testing.yml full-stack flow) ─────────────
   test:
+    name: Run Webots integration tests
     needs: gate
     uses: ./.github/workflows/testing.yml
     with:
       ref: ${{ needs.gate.outputs.pr_ref }}
+      pr_number: ${{ needs.gate.outputs.pr_number }}
+      pr_title: ${{ needs.gate.outputs.pr_title }}
+      pr_author: ${{ needs.gate.outputs.pr_author }}
+      pr_url: ${{ needs.gate.outputs.pr_url }}
+      pr_head_ref: ${{ needs.gate.outputs.pr_head_ref }}
+      pr_head_repo: ${{ needs.gate.outputs.pr_head_repo }}
+      triggered_by: ${{ needs.gate.outputs.triggered_by }}
     secrets: inherit
 
-  # ── Edit the status comment with the result + failing cases + log pointer ──
-  report:
+  # ── Publish a direct, browser-openable HTML report on GitHub Pages ─────────
+  publish_report:
+    name: Publish report site
     needs: [gate, test]
     if: always() && needs.gate.result == 'success'
     runs-on: ubuntu-22.04
+    concurrency:
+      group: webots-report-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.publish_url.outputs.report_url }}
+    outputs:
+      report_url: ${{ steps.publish_url.outputs.report_url }}
     steps:
-      - name: Download harness summary (best-effort)
+      - name: Checkout trusted report generator
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Download test artifacts
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
           pattern: testing-logs-*
           path: dl
           merge-multiple: true
-      - name: Update status comment
+
+      - name: Restore existing report site
+        uses: actions/cache/restore@v4
+        with:
+          path: public
+          key: webots-report-pages-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            webots-report-pages-
+
+      - name: Build report page
+        env:
+          REPORT_PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
+          REPORT_PR_TITLE: ${{ needs.gate.outputs.pr_title }}
+          REPORT_PR_AUTHOR: ${{ needs.gate.outputs.pr_author }}
+          REPORT_PR_URL: ${{ needs.gate.outputs.pr_url }}
+          REPORT_PR_HEAD_REF: ${{ needs.gate.outputs.pr_head_ref }}
+          REPORT_PR_HEAD_REPO: ${{ needs.gate.outputs.pr_head_repo }}
+          REPORT_TRIGGERED_BY: ${{ needs.gate.outputs.triggered_by }}
+          REPORT_COMMENT_ID: ${{ needs.gate.outputs.comment_id }}
+        run: |
+          set -euo pipefail
+          report_id="${{ github.run_id }}"
+          report_dir="public/reports/runs/${report_id}"
+          expected_base_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+          expected_report_url="${expected_base_url}/reports/runs/${report_id}/"
+          rm -rf "$report_dir"
+          mkdir -p "$report_dir"
+
+          if [ -f dl/testing/logs/summary.json ] && [ -f testing/report.py ]; then
+            args=(
+              --summary-json dl/testing/logs/summary.json
+              --out-dir "$report_dir"
+              --metadata "report_id=${report_id}"
+              --metadata "report_url=${expected_report_url}"
+              --metadata "status_comment_id=${REPORT_COMMENT_ID:-}"
+              --metadata "pr_number=${REPORT_PR_NUMBER:-}"
+              --metadata "pr_title=${REPORT_PR_TITLE:-}"
+              --metadata "pr_author=${REPORT_PR_AUTHOR:-}"
+              --metadata "pr_url=${REPORT_PR_URL:-}"
+              --metadata "pr_head_ref=${REPORT_PR_HEAD_REF:-}"
+              --metadata "pr_head_repo=${REPORT_PR_HEAD_REPO:-}"
+              --metadata "triggered_by=${REPORT_TRIGGERED_BY:-}"
+            )
+            [ -f dl/report-metadata.json ] && args+=(--metadata-json dl/report-metadata.json)
+            [ -d dl/testing/logs ] && args+=(--log-root "testing/logs=dl/testing/logs")
+            [ -d dl/examples/webots/rbnx-boot/logs ] && args+=(--log-root "boot_logs=dl/examples/webots/rbnx-boot/logs")
+            [ -d dl/examples/webots/logs ] && args+=(--log-root "provider_logs=dl/examples/webots/logs")
+            [ -d dl/system/scene/logs ] && args+=(--log-root "scene_logs=dl/system/scene/logs")
+            [ -d dl/cache-provider-logs ] && args+=(--log-root "cache_provider_logs=dl/cache-provider-logs")
+            [ -d dl/sim-logs ] && args+=(--log-root "sim_logs=dl/sim-logs")
+            [ -f dl/fake_vlm.log ] && args+=(--log-file "fake_vlm.log=dl/fake_vlm.log")
+            [ -f dl/rbnx-boot.log ] && args+=(--log-file "rbnx-boot.log=dl/rbnx-boot.log")
+            [ -f dl/remote-provenance.txt ] && args+=(--log-file "remote-provenance.txt=dl/remote-provenance.txt")
+            args+=(--max-log-bytes 524288 --max-total-log-bytes 12582912)
+            python3 testing/report.py "${args[@]}"
+          else
+            printf '%s\n' \
+              '<!doctype html><meta charset="utf-8"><title>Robonix Webots CI Report</title>' \
+              '<body><h1>Robonix Webots CI Report</h1><p>No report artifact was available for this run.</p></body>' \
+              > "$report_dir/index.html"
+          fi
+
+          printf '%s\n' \
+            '<!doctype html>' \
+            '<meta charset="utf-8">' \
+            "<meta http-equiv=\"refresh\" content=\"0; url=reports/runs/${report_id}/\">" \
+            '<title>Robonix Webots CI Reports</title>' \
+            "<a href=\"reports/runs/${report_id}/\">Latest Robonix Webots CI report</a>" \
+            > public/index.html
+
+      - name: Save report site cache
+        uses: actions/cache/save@v4
+        with:
+          path: public
+          key: webots-report-pages-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Set report URL
+        id: publish_url
+        run: |
+          set -euo pipefail
+          page_url="${{ steps.deployment.outputs.page_url }}"
+          page_url="${page_url%/}"
+          echo "report_url=${page_url}/reports/runs/${{ github.run_id }}/" >> "$GITHUB_OUTPUT"
+
+  # ── Edit the status comment with the result + failing cases + log pointer ──
+  report:
+    name: Publish PR status comment
+    needs: [gate, test, publish_report]
+    if: always() && needs.gate.result == 'success'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download test report artifact
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: testing-logs-*
+          path: dl
+          merge-multiple: true
+      - name: Update PR status comment
         uses: actions/github-script@v7
         with:
           script: |
@@ -116,23 +266,32 @@ jobs:
             try { if (sp) summary = JSON.parse(fs.readFileSync(sp, 'utf8')); } catch (e) {}
 
             let lines = ['<!-- robonix-ci-status -->'];
+            const cell = (v) => String(v ?? '')
+              .replace(/\r?\n/g, ' ')
+              .replace(/\|/g, '\\|')
+              .replace(/@/g, '@\u200b')
+              .slice(0, 300);
+            const detail = (v) => String(v ?? '')
+              .replace(/\r?\n/g, ' ')
+              .replace(/@/g, '@\u200b')
+              .slice(0, 500);
             if (summary) {
               const pct = Math.round(summary.rate * 100);
               const icon = summary.failed === 0 ? '✅' : '❌';
               lines.push(`### ${icon} robonix CI — ${summary.passed}/${summary.total} passed (${pct}%)`);
               lines.push('');
-              lines.push('| layer | case | result | rounds |');
-              lines.push('|-------|------|--------|--------|');
+              lines.push('| suite | scenario | result | rounds |');
+              lines.push('|-------|----------|--------|--------|');
               for (const s of summary.scenarios) {
                 const mark = s.passed ? '✅' : '❌';
-                lines.push(`| ${s.family} | ${s.name} | ${mark} | ${s.rounds} |`);
+                lines.push(`| ${cell(s.family)} | ${cell(s.name)} | ${mark} | ${cell(s.rounds)} |`);
               }
               const fails = summary.scenarios.filter(s => !s.passed);
               if (fails.length) {
                 lines.push('', '<details><summary>Failure details</summary>', '');
                 for (const s of fails) {
-                  lines.push(`- **${s.family}/${s.name}** (\`${s.log}\`)`);
-                  for (const f of (s.failures || [])) lines.push(`  - ${f}`);
+                  lines.push(`- **${detail(s.family)}/${detail(s.name)}** (\`${detail(s.log)}\`)`);
+                  for (const f of (s.failures || [])) lines.push(`  - ${detail(f)}`);
                 }
                 lines.push('</details>');
               }
@@ -142,7 +301,10 @@ jobs:
               lines.push('No machine-readable summary was produced (the run may have failed before the scenario step).');
             }
             lines.push('');
-            lines.push(`Logs: artifact \`testing-logs-*\` on [this run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}).`);
+            const reportUrl = '${{ needs.publish_report.outputs.report_url }}';
+            if (reportUrl) lines.push(`Report: [open HTML report](${reportUrl}).`);
+            else lines.push(`Report: download artifact \`testing-logs-*\` from [this run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) and open \`testing/report/index.html\`.`);
+            lines.push('Raw logs: scenario JSONL, provider logs, simulator logs, final caps, and boot logs are in the same artifact.');
 
             await github.rest.issues.updateComment({
               owner: context.repo.owner, repo: context.repo.repo,

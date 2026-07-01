@@ -25,8 +25,13 @@ steps:
       - match: builtin_read_file
         args: {path: ci_recovered.txt}
   - status: done
-expect_contracts: [executor/builtin/read_file, executor/builtin/write_file]
+expect_contracts:
+  - robonix/system/executor/builtin/read_file
+  - robonix/system/executor/builtin/write_file
 expect_args: [charlie-3]
-expect_leaf_failure: [executor/builtin/read_file]
+expect_leaf_failure:
+  - robonix/system/executor/builtin/read_file
 expect_min_rounds: 2
 expect_final_done: true
+expect_outputs:
+  - recovered charlie-3

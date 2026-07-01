@@ -268,7 +268,11 @@ class ObjectRegistry:
         Caller must hold the lock."""
         flipped = 0
         for obj in self._objects.values():
-            if obj.missing or obj.attributes.get("is_robot"):
+            if (
+                obj.missing
+                or obj.attributes.get("is_robot")
+                or obj.attributes.get("source") == "ci_fixture"
+            ):
                 continue
             if (now - obj.last_seen) > self.grace_period_s:
                 obj.missing = True

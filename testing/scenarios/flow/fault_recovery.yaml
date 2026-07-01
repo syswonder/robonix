@@ -31,10 +31,12 @@ steps:
   - status: done
     content: Recovered from the failed attempt and saved the fact.
 expect_contracts:
-  - memory/save
+  - robonix/service/memory/save
 expect_args:
   - bravo-2
 expect_leaf_failure:
-  - memory/save
+  - robonix/service/memory/save
 expect_min_rounds: 2
 expect_final_done: true
+expect_outputs:
+  - Memory saved and indexed

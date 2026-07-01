@@ -19,8 +19,11 @@ steps:
   - content: Saved and recalled.
     status: done
 expect_contracts:
-  - memory/save
-  - memory/search
+  - robonix/service/memory/save
+  - robonix/service/memory/search
 expect_args:
   - alpha-7
   - test beacon
+expect_outputs:
+  - Memory saved and indexed
+  - 'ci-fact: the test beacon is alpha-7'

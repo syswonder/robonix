@@ -18,6 +18,12 @@ steps:
       - match: builtin_list_dir
         args: {path: .}
   - status: done
-expect_contracts: [executor/builtin/write_file, executor/builtin/read_file, executor/builtin/list_dir]
+expect_contracts:
+  - robonix/system/executor/builtin/write_file
+  - robonix/system/executor/builtin/read_file
+  - robonix/system/executor/builtin/list_dir
 expect_args: [ci_probe, alpha-7]
 expect_min_rounds: 3
+expect_outputs:
+  - robonix ci probe alpha-7
+  - ci_probe.txt

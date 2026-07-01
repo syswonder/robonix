@@ -14,6 +14,9 @@ steps:
   - content: Map saved.
     status: done
 expect_contracts:
-  - map/save_map
+  - robonix/service/map/save_map
 expect_args:
   - ci_test_map
+expect_outputs:
+  - '"ok": true'
+  - '"map_id": "ci_test_map"'

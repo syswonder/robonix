@@ -1,0 +1,46 @@
+# Object-based navigation composition: scene returns a safe approach pose for
+# the CI table fixture, then navigation receives the matching map-frame goal.
+name: object_navigation
+task: "ci-flow: find the ci table object and navigate near it"
+steps:
+  - status: in_progress
+    rtdl_description: resolve object approach pose
+    caps:
+      - match: scene_goal_near
+        args: {object_id: "scene.object.ci_table_001"}
+        description: compute an approach pose near the CI table
+  - status: in_progress
+    rtdl_description: navigate to object approach pose
+    caps:
+      - match: navigation_navigate
+        args:
+          goal:
+            header:
+              stamp: {sec: 0, nanosec: 0}
+              frame_id: map
+            pose:
+              position:
+                x:
+                  from_result:
+                    contract: robonix/system/scene/goal_near
+                    field: x
+                y:
+                  from_result:
+                    contract: robonix/system/scene/goal_near
+                    field: y
+                z: 0.0
+              orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+        description: send the object-derived approach pose to navigation
+  - status: done
+expect_contracts:
+  - robonix/system/scene/goal_near
+  - robonix/service/navigation/navigate
+expect_args:
+  - scene.object.ci_table_001
+  - '"x":0.5'
+expect_outputs:
+  - '"reachable": true'
+  - approach pose for 'ci_table'
+  - '"state": "SUCCEEDED"'
+  - succeeded
+expect_min_rounds: 2

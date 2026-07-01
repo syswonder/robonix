@@ -12,4 +12,7 @@ steps:
   - content: Point cloud captured.
     status: done
 expect_contracts:
-  - lidar/snapshot
+  - robonix/primitive/lidar/snapshot
+expect_outputs:
+  - '"frame_id": "hokuyo"'
+  - '"ranges"'

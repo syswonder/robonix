@@ -6,7 +6,7 @@ Pilot talks to an OpenAI-compatible ``/v1/chat/completions`` endpoint in
 protocol: the assistant must return ONE JSON object in ``content`` (NOT OpenAI
 ``tool_calls`` — pilot hard-errors on tool_calls in RTDL mode). This server
 replaces a real VLM so planning is fully deterministic: every task maps to a
-scripted sequence of RTDL envelopes.
+scripted timeline of RTDL envelopes.
 
 How a request is served (the server is effectively stateless — it derives
 everything from the request body):
@@ -22,7 +22,8 @@ everything from the request body):
 3. Count user messages in history = the current round index. Pilot feeds each
    round's capability results back as additional user messages, so the first
    call has one user message (round 0).
-4. Stream the envelope JSON back as Server-Sent Events, then ``finish_reason:
+4. Honor optional per-step timeline timing (``time_s`` or ``delay_s``).
+5. Stream the envelope JSON back as Server-Sent Events, then ``finish_reason:
    stop`` and ``[DONE]``.
 
 No third-party deps (stdlib only) so CI needs no extra pip install for the VLM.
@@ -93,7 +94,112 @@ def do_node(cap: str, args: dict, description: str) -> dict:
     return {"op": "do", "op_id": 0, "description": description, "cap": cap, "args": args}
 
 
-def build_envelope(step: dict, caps: list[str], unresolved: list[str]) -> dict:
+def _json_values_from_text(text: str) -> list[object]:
+    """Best-effort extraction of JSON objects embedded in pilot user messages."""
+    values: list[object] = []
+    decoder = json.JSONDecoder()
+    i = 0
+    while i < len(text):
+        if text[i] not in "[{":
+            i += 1
+            continue
+        try:
+            value, end = decoder.raw_decode(text[i:])
+        except json.JSONDecodeError:
+            i += 1
+            continue
+        values.append(value)
+        i += max(1, end)
+    return values
+
+
+def _walk_json(value: object):
+    yield value
+    if isinstance(value, dict):
+        for child in value.values():
+            if isinstance(child, str) and child.strip().startswith(("{", "[")):
+                try:
+                    child = json.loads(child)
+                except json.JSONDecodeError:
+                    pass
+            yield from _walk_json(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_json(child)
+
+
+def _contains_text(value: object, needle: str) -> bool:
+    if isinstance(value, str):
+        return needle in value
+    if isinstance(value, dict):
+        return any(_contains_text(k, needle) or _contains_text(v, needle) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_contains_text(v, needle) for v in value)
+    return False
+
+
+def _find_field(value: object, field: str):
+    if isinstance(value, str) and value.strip().startswith(("{", "[")):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if isinstance(value, dict):
+        if field in value:
+            return value[field]
+        for child in value.values():
+            found = _find_field(child, field)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_field(child, field)
+            if found is not None:
+                return found
+    return None
+
+
+def _lookup_result_field(messages: list[dict], contract: str, field: str):
+    parts: list[str] = []
+    for m in messages:
+        if m.get("role") != "user":
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            parts.extend(p.get("text", "") for p in content if p.get("type") == "text")
+    user_text = "\n".join(parts)
+    values = _json_values_from_text(user_text)
+    for value in reversed(values):
+        for node in reversed(list(_walk_json(value))):
+            if contract and not _contains_text(node, contract):
+                continue
+            found = _find_field(node, field)
+            if found is not None:
+                return found
+    return None
+
+
+def resolve_arg_refs(value: object, messages: list[dict], unresolved_refs: list[str]) -> object:
+    """Resolve scenario args of the form {from_result: {contract, field}}."""
+    if isinstance(value, dict):
+        ref = value.get("from_result")
+        if isinstance(ref, dict):
+            contract = str(ref.get("contract", ""))
+            field = str(ref.get("field", ""))
+            found = _lookup_result_field(messages, contract, field)
+            if found is None:
+                unresolved_refs.append(f"{contract}:{field}")
+                return ref.get("default")
+            return found
+        return {k: resolve_arg_refs(v, messages, unresolved_refs) for k, v in value.items()}
+    if isinstance(value, list):
+        return [resolve_arg_refs(v, messages, unresolved_refs) for v in value]
+    return value
+
+
+def build_envelope(step: dict, caps: list[str], messages: list[dict], unresolved: list[str]) -> dict:
     """Turn a scenario step into a 4-key RTDL envelope pilot will accept.
 
     A step lists ``caps`` (each {match, args, description?}); we wrap the
@@ -103,12 +209,15 @@ def build_envelope(step: dict, caps: list[str], unresolved: list[str]) -> dict:
     plan still parses but the scenario will fail its coverage assertion.
     """
     children = []
+    unresolved_refs: list[str] = []
     for spec in step.get("caps", []):
         cap = resolve_cap(spec["match"], caps)
         if cap is None:
             unresolved.append(spec["match"])
             continue
-        children.append(do_node(cap, spec.get("args", {}), spec.get("description", spec["match"])))
+        args = resolve_arg_refs(spec.get("args", {}), messages, unresolved_refs)
+        children.append(do_node(cap, args, spec.get("description", spec["match"])))
+    unresolved.extend(f"from_result {ref}" for ref in unresolved_refs)
 
     rtdl = {
         "op": "sequence",
@@ -153,6 +262,7 @@ def terminal_envelope(note: str) -> dict:
 class Handler(BaseHTTPRequestHandler):
     # set by main(): {task_text: scenario_dict}
     scenarios: dict[str, dict] = {}
+    timeline_starts: dict[str, float] = {}
 
     def log_message(self, *_args):  # noqa: D401 - silence default stderr spam
         """Suppress the default per-request access log."""
@@ -201,17 +311,21 @@ class Handler(BaseHTTPRequestHandler):
             self._emit(f"no scenario matched user text {user_text[:80]!r}; ending turn")
             envelope = terminal_envelope("no scripted scenario; nothing to do")
         else:
+            if rounds == 0:
+                self.timeline_starts[scenario["name"]] = time.monotonic()
             steps = scenario.get("steps", [])
             if rounds < len(steps):
                 unresolved: list[str] = []
-                envelope = build_envelope(steps[rounds], caps, unresolved)
+                step = steps[rounds]
+                self._apply_timeline_delay(scenario, step, rounds)
+                envelope = build_envelope(step, caps, messages, unresolved)
                 if unresolved:
                     self._emit(
                         f"scenario {scenario['name']!r} round {rounds}: "
                         f"UNRESOLVED caps {unresolved} (advertised: {caps})"
                     )
                 else:
-                    called = [c.get("match") for c in steps[rounds].get("caps", [])]
+                    called = [c.get("match") for c in step.get("caps", [])]
                     self._emit(f"scenario {scenario['name']!r} round {rounds}: caps {called}")
             else:
                 envelope = terminal_envelope("scripted steps complete")
@@ -242,6 +356,29 @@ class Handler(BaseHTTPRequestHandler):
         if not hits:
             return None
         return max(hits, key=lambda s: len(s["task"]))
+
+    def _apply_timeline_delay(self, scenario: dict, step: dict, round_index: int) -> None:
+        """Sleep to model blank timeline spans inside a scenario.
+
+        ``time_s`` is an absolute time offset from scenario start. ``delay_s`` is
+        a relative sleep before serving this step. The harness is a real
+        Webots/ROS integration test, so this intentionally uses wall-clock time
+        rather than a fake clock.
+        """
+        delay = 0.0
+        if "time_s" in step:
+            start = self.timeline_starts.setdefault(scenario["name"], time.monotonic())
+            target = start + float(step["time_s"])
+            delay = max(0.0, target - time.monotonic())
+        elif "delay_s" in step:
+            delay = max(0.0, float(step["delay_s"]))
+        if delay <= 0.0:
+            return
+        self._emit(
+            f"scenario {scenario['name']!r} round {round_index}: "
+            f"timeline sleep {delay:.3f}s"
+        )
+        time.sleep(delay)
 
     def _stream_envelope(self, model: str, envelope: dict):
         """Stream the envelope JSON as one content chunk, then stop + [DONE]."""

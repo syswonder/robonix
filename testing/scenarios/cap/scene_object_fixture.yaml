@@ -1,0 +1,21 @@
+# Exercise scene object recognition/output in CI. SCENE_CI_MODE seeds a
+# deterministic table object so this asserts the scene API path instead of
+# depending on external detector/model downloads.
+name: scene_object_fixture
+task: "ci-test: list the detected scene objects"
+steps:
+  - content: Listing scene objects.
+    rtdl_description: scene list objects
+    status: in_progress
+    caps:
+      - match: scene_list_objects
+        args: {}
+        description: return the current scene object registry
+  - content: Scene objects listed.
+    status: done
+expect_contracts:
+  - robonix/system/scene/list_objects
+expect_outputs:
+  - scene.object.ci_table_001
+  - ci_table
+  - table

@@ -49,6 +49,7 @@ from .state import (
     ObjectRegistry,
     Pose3D,
     RelationEngine,
+    SceneObject,
 )
 from .state.object_registry import now_unix
 
@@ -325,6 +326,32 @@ class _SelfTracker:
 
 
 # ── Stale-tick: flip missing flag after grace period ───────────────────────
+
+
+def _scene_ci_mode() -> bool:
+    return os.environ.get("SCENE_CI_MODE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+async def _seed_ci_scene_fixture(registry: ObjectRegistry) -> None:
+    if not _scene_ci_mode():
+        return
+    now = now_unix()
+    obj = SceneObject(
+        object_id="scene.object.ci_table_001",
+        cls="ci_table",
+        pose=Pose3D(x=1.0, y=0.0, z=0.4, yaw=0.0, frame_id="map"),
+        bbox=BBox3D(size_x=0.8, size_y=0.6, size_z=0.8, frame_id="map"),
+        confidence=1.0,
+        first_seen=now,
+        last_seen=now,
+        observation_count=2,
+        missing=False,
+        attributes={"source": "ci_fixture", "is_robot": False, "movable": False},
+    )
+    async with registry.lock():
+        registry.restore_object(obj)
+    log.info("[scene-ci] seeded object %s", obj.object_id)
+
 async def _stale_tick(registry: ObjectRegistry, *, period_s: float = 1.0) -> None:
     while True:
         async with registry.lock():
@@ -786,6 +813,7 @@ async def _run() -> None:
 
     # Wire state.
     registry = ObjectRegistry(grace_period_s=5.0)
+    await _seed_ci_scene_fixture(registry)
     relations = RelationEngine(registry, period_s=1.0)
     await relations.start()
     self_tracker = _SelfTracker(registry)
@@ -862,6 +890,11 @@ async def _run() -> None:
             input_schema_json=schema,
         )
     log.info("scene declared 5 MCP tools at %s", scene.mcp_endpoint)
+
+    if _scene_ci_mode():
+        log.info("[scene-ci] CI mode active; skipping ROS ingest, perception, scene graph, and web UI")
+        await asyncio.Event().wait()
+        return
 
     # ROS2 ingest hub + downstream consumers (self-pose, perception).
     # _start_ros_ingest still wants a raw atlas stub for QueryCapabilities;

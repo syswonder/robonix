@@ -72,6 +72,23 @@ def collect_leaf_results(events: list[dict]) -> list[dict]:
     return out
 
 
+def leaf_matches(leaf: dict, matcher: str) -> bool:
+    return leaf.get("contract_id", "") == matcher
+
+
+def validate_contract_matchers(scenario: dict) -> list[str]:
+    errs: list[str] = []
+    for field in ("expect_contracts", "expect_leaf_failure"):
+        for matcher in scenario.get(field, []):
+            if not isinstance(matcher, str) or not matcher.startswith("robonix/"):
+                errs.append(f"{field} entry must be a full robonix/... contract id: {matcher!r}")
+    return errs
+
+
+def successful_output_blob(leaves: list[dict]) -> str:
+    return "\n".join(str(lr.get("output", "")) for lr in leaves if lr.get("success", False))
+
+
 def count_rounds(events: list[dict]) -> int:
     """Number of planning rounds = number of EVT_PLAN events."""
     return sum(1 for ev in events if ev.get("plan"))
@@ -87,13 +104,14 @@ def check_scenario(scenario: dict, events: list[dict], exit_code: int) -> list[s
 
     Beyond the cap-level checks, flow scenarios may declare:
       expect_min_rounds   — at least this many planning rounds (multi-step).
-      expect_leaf_failure — contract substrings whose leaf is EXPECTED to fail
+      expect_leaf_failure — full contract ids whose leaf is EXPECTED to fail
                             (the injected fault); such a failure is not counted
                             against the run, and its absence IS a failure.
       expect_final_done   — require the turn to end without a FAILED status
                             (default true; the whole point of fault recovery).
     """
     fails: list[str] = []
+    fails.extend(validate_contract_matchers(scenario))
     calls = collect_calls(events)
     contracts = [c.get("contract_id", "") for c in calls]
     args_blob = " ".join(c.get("args_json", "") for c in calls)
@@ -102,15 +120,22 @@ def check_scenario(scenario: dict, events: list[dict], exit_code: int) -> list[s
 
     if scenario.get("expect_final_done", True) and final_failed(events):
         fails.append("pilot reported FAILED but expect_final_done")
-    if exit_code != 0 and not expect_fail:
+    if exit_code != 0:
         fails.append(f"rbnx ask exit={exit_code}")
 
     for want in scenario.get("expect_contracts", []):
-        if not any(want in c for c in contracts):
-            fails.append(f"expected contract ~{want!r}, dispatched: {contracts}")
+        if want not in contracts:
+            fails.append(f"expected contract {want!r}, dispatched: {contracts}")
+        if not any(leaf_matches(lr, want) and lr.get("success", False) for lr in leaves):
+            fails.append(f"expected successful leaf result for {want!r}")
     for want in scenario.get("expect_args", []):
         if want not in args_blob:
             fails.append(f"expected arg ~{want!r} in: {args_blob}")
+
+    output_blob = successful_output_blob(leaves)
+    for want in scenario.get("expect_outputs", []):
+        if want not in output_blob:
+            fails.append(f"expected output ~{want!r} in successful leaf outputs")
 
     rounds = count_rounds(events)
     if rounds < scenario.get("expect_min_rounds", 0):
@@ -118,14 +143,14 @@ def check_scenario(scenario: dict, events: list[dict], exit_code: int) -> list[s
 
     # Injected faults: each expect_leaf_failure matcher must have a failed leaf.
     for want in expect_fail:
-        if not any((not lr.get("success", True)) and want in lr.get("contract_id", "") for lr in leaves):
-            fails.append(f"expected an INJECTED failure on ~{want!r}, none observed")
+        if not any((not lr.get("success", True)) and leaf_matches(lr, want) for lr in leaves):
+            fails.append(f"expected an INJECTED failure on {want!r}, none observed")
 
     # Unexpected failures: a failed leaf whose contract is not an expected fault.
     if not scenario.get("allow_leaf_failure", False):
         for lr in leaves:
             cid = lr.get("contract_id", "")
-            if not lr.get("success", False) and not any(w in cid for w in expect_fail):
+            if not lr.get("success", False) and not any(w == cid for w in expect_fail):
                 fails.append(f"unexpected leaf failure {cid}: {lr.get('error', '')[:160]}")
     return fails
 
@@ -161,8 +186,28 @@ def main() -> int:
         log_path = LOG_DIR / f"{family}.{name}.jsonl"
         try:
             events, code = run_ask(args.rbnx, scenario["task"], args.server, args.timeout, log_path)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             print(f"  TIMEOUT after {args.timeout}s (log: {log_path.name})")
+            stdout = exc.stdout or ""
+            stderr = exc.stderr or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode("utf-8", errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", errors="replace")
+            log_path.write_text(
+                f"$ {args.rbnx} ask {scenario['task']} --json --server {args.server}\n"
+                f"# timeout={args.timeout}s\n# --- stdout ---\n{stdout}\n"
+                f"# --- stderr ---\n{stderr}\n"
+            )
+            results.append({
+                "name": name,
+                "family": family,
+                "passed": False,
+                "rounds": 0,
+                "dispatched": [],
+                "failures": [f"timeout after {args.timeout}s"],
+                "log": log_path.name,
+            })
             failed.append(name)
             continue
 

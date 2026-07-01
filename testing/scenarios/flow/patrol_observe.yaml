@@ -34,9 +34,12 @@ steps:
   - status: done
     content: Observed, recorded, and recalled.
 expect_contracts:
-  - camera/snapshot
-  - memory/save
-  - memory/search
+  - robonix/primitive/camera/snapshot
+  - robonix/service/memory/save
+  - robonix/service/memory/search
 expect_args:
   - waypoint 1
 expect_min_rounds: 2
+expect_outputs:
+  - '"encoding": "jpeg"'
+  - 'ci-flow observation: snapshot captured at waypoint 1'
