@@ -57,13 +57,20 @@ const CMD_SHUTDOWN: u32 = 3;
 // How long to wait for a freshly spawned package to register its driver
 // capability with atlas before giving up.
 const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
-// How long Driver(CMD_INIT) is given to return.
-// 90s gives generous slack for slow-warming sensors (webots's camera
-// can take 30-50s to start publishing on cold boot). Primitive
-// driver-side waits should still be < this so they own their own
-// timeout semantics rather than racing the CLI deadline.
-const DRIVER_INIT_TIMEOUT: Duration = Duration::from_secs(90);
+// Default Driver(CMD_INIT) deadline. Webots CI can override this with
+// ROBONIX_DRIVER_INIT_TIMEOUT_S for real stacks whose lifecycle bringup may
+// exceed 90s on a cold self-hosted runner.
+const DEFAULT_DRIVER_INIT_TIMEOUT: Duration = Duration::from_secs(90);
 const DEPLOY_CONSUMER_ID: &str = "rbnx-cli/deploy";
+
+fn driver_init_timeout() -> Duration {
+    std::env::var("ROBONIX_DRIVER_INIT_TIMEOUT_S")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_DRIVER_INIT_TIMEOUT)
+}
 
 // ── Deploy manifest schema (subset used by this orchestrator) ───────────
 
@@ -1546,6 +1553,7 @@ async fn call_driver_cmd(
         format!("http://{endpoint}")
     };
     let result = async {
+        let driver_timeout = driver_init_timeout();
         let channel = Endpoint::new(normalized.clone())
             .with_context(|| format!("invalid driver endpoint '{normalized}'"))?
             .connect()
@@ -1560,7 +1568,7 @@ async fn call_driver_cmd(
         grpc.ready().await.with_context(|| "gRPC ready")?;
         let codec: tonic_prost::ProstCodec<DriverRequest, DriverResponse> = Default::default();
         let resp = tokio::time::timeout(
-            DRIVER_INIT_TIMEOUT,
+            driver_timeout,
             grpc.unary(
                 Request::new(DriverRequest {
                     command: cmd,
@@ -1573,8 +1581,8 @@ async fn call_driver_cmd(
         .await
         .map_err(|_| {
             anyhow::anyhow!(
-                "Driver(CMD_{cmd_name}) timed out after {:?}",
-                DRIVER_INIT_TIMEOUT
+                "Driver(CMD_{cmd_name}) timed out after {}s",
+                driver_timeout.as_secs()
             )
         })?
         .with_context(|| format!("Driver(CMD_{cmd_name}) RPC failed"))?;

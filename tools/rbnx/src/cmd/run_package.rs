@@ -698,8 +698,18 @@ pub async fn execute_start(
 }
 
 const CMD_INIT_DELIVERY: u32 = 0;
+const DEFAULT_DRIVER_INIT_TIMEOUT: Duration = Duration::from_secs(90);
 const CAP_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+fn driver_init_timeout() -> Duration {
+    std::env::var("ROBONIX_DRIVER_INIT_TIMEOUT_S")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_DRIVER_INIT_TIMEOUT)
+}
 
 /// Wait for the new provider (any provider not in `before`) to appear in atlas with a
 /// `*/driver` gRPC capability, then call Driver(CMD_INIT, config_json). One
@@ -800,6 +810,7 @@ async fn call_driver_init(
         format!("http://{endpoint}")
     };
     let result = async {
+        let driver_timeout = driver_init_timeout();
         let channel = Endpoint::new(normalized.clone())
             .with_context(|| format!("invalid driver endpoint '{normalized}'"))?
             .connect()
@@ -814,7 +825,7 @@ async fn call_driver_init(
         grpc.ready().await.context("gRPC ready")?;
         let codec: tonic_prost::ProstCodec<DriverRequest, DriverResponse> = Default::default();
         let resp = tokio::time::timeout(
-            Duration::from_secs(90),
+            driver_timeout,
             grpc.unary(
                 Request::new(DriverRequest {
                     command: CMD_INIT_DELIVERY,
@@ -825,7 +836,12 @@ async fn call_driver_init(
             ),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("Driver(CMD_INIT) timed out after 90s"))?
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Driver(CMD_INIT) timed out after {}s",
+                driver_timeout.as_secs()
+            )
+        })?
         .context("Driver(CMD_INIT) RPC failed")?;
         Ok::<_, anyhow::Error>(resp.into_inner())
     }

@@ -150,7 +150,7 @@ service:
     config:
       params_profile: sim
       use_sim_time: true
-      action_wait_s: 90.0
+      action_wait_s: 240.0
 
 # after booted all the services, register the skills (but don't activate them now)
 skill:
