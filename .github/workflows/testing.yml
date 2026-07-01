@@ -159,16 +159,10 @@ jobs:
       CUDA_VISIBLE_DEVICES: "2"
       ROBONIX_GPU_ID: "2"
       NVIDIA_VISIBLE_DEVICES: "2"
-      SPEECH_CI_MODE: "1"
-      AUDIO_CI_MODE: "1"
-      AUDIO_CI_ALSA_DEVICE: "null"
-      SCENE_CI_MODE: "1"
-      SCENE_OBJECT_MEMORY_ENABLED: "false"
-      SCENE_GRAPH_ENABLED: "false"
+      AUDIO_MIC_DEVICE: "null"
+      AUDIO_SPEAKER_DEVICE: "null"
       SCENE_GRAPH_INTERVAL_SEC: "1"
       SCENE_GRAPH_MIN_OBSERVATIONS: "1"
-      SCENE_GRAPH_CAPTION_ENABLED: "false"
-      SCENE_GRAPH_RELATION_ENABLED: "false"
       ROBONIX_SIM_NETWORK: "bridge"
       ROBONIX_SIM_IPC: "private"
       WEBOTS_HEADLESS_MODE: "nvidia"
@@ -409,16 +403,10 @@ jobs:
               "CUDA_VISIBLE_DEVICES",
               "ROBONIX_GPU_ID",
               "NVIDIA_VISIBLE_DEVICES",
-              "SPEECH_CI_MODE",
-              "AUDIO_CI_MODE",
-              "AUDIO_CI_ALSA_DEVICE",
-              "SCENE_CI_MODE",
-              "SCENE_OBJECT_MEMORY_ENABLED",
-              "SCENE_GRAPH_ENABLED",
+              "AUDIO_MIC_DEVICE",
+              "AUDIO_SPEAKER_DEVICE",
               "SCENE_GRAPH_INTERVAL_SEC",
               "SCENE_GRAPH_MIN_OBSERVATIONS",
-              "SCENE_GRAPH_CAPTION_ENABLED",
-              "SCENE_GRAPH_RELATION_ENABLED",
           ]
           env_block = "\n".join(f"  {key}: {os.environ[key]!r}" for key in env_keys)
           text = text.replace("env:\n\n# boot", f"env:\n{env_block}\n\n# boot")

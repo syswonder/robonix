@@ -1,29 +1,37 @@
-# Executor builtins (always available, no hardware): write -> read -> list.
+# Executor builtins: write -> read -> list, with exact leaf-level assertions.
 name: file_roundtrip
 task: "ci-test: write a file, read it back, and list the dir"
 steps:
   - status: in_progress
     rtdl_description: write probe file
     caps:
-      - match: builtin_write_file
+      - cap: executor.builtin_write_file
         args: {path: ci_probe.txt, content: "robonix ci probe alpha-7"}
   - status: in_progress
     rtdl_description: read it back
     caps:
-      - match: builtin_read_file
+      - cap: executor.builtin_read_file
         args: {path: ci_probe.txt}
   - status: in_progress
-    rtdl_description: list /tmp
+    rtdl_description: list working dir
     caps:
-      - match: builtin_list_dir
+      - cap: executor.builtin_list_dir
         args: {path: .}
   - status: done
-expect_contracts:
-  - robonix/system/executor/builtin/write_file
-  - robonix/system/executor/builtin/read_file
-  - robonix/system/executor/builtin/list_dir
-expect_args: [ci_probe, alpha-7]
 expect_min_rounds: 3
-expect_outputs:
-  - robonix ci probe alpha-7
-  - ci_probe.txt
+expect_leaves:
+  - contract: robonix/system/executor/builtin/write_file
+    success: true
+    args: {path: ci_probe.txt, content: "robonix ci probe alpha-7"}
+    output:
+      text_regex: "^wrote [0-9]+ bytes to .*/ci_probe\\.txt$"
+  - contract: robonix/system/executor/builtin/read_file
+    success: true
+    args: {path: ci_probe.txt}
+    output:
+      text_equals: "robonix ci probe alpha-7"
+  - contract: robonix/system/executor/builtin/list_dir
+    success: true
+    args: {path: .}
+    output:
+      text_regex: "(?m)^file ci_probe\\.txt$"

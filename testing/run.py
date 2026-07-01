@@ -72,21 +72,126 @@ def collect_leaf_results(events: list[dict]) -> list[dict]:
     return out
 
 
-def leaf_matches(leaf: dict, matcher: str) -> bool:
-    return leaf.get("contract_id", "") == matcher
+def parse_args_json(call: dict) -> object:
+    try:
+        return json.loads(call.get("args_json", "{}"))
+    except json.JSONDecodeError:
+        return {}
 
 
-def validate_contract_matchers(scenario: dict) -> list[str]:
+def parse_leaf_output(leaf: dict) -> object:
+    output = leaf.get("output", "")
+    if isinstance(output, (dict, list)):
+        return output
+    if not isinstance(output, str):
+        return output
+    text = output.strip()
+    if not text.startswith(("{", "[")):
+        return output
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return output
+
+
+def contains_subset(actual: object, expected: object) -> bool:
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return False
+        return all(k in actual and contains_subset(actual[k], v) for k, v in expected.items())
+    if isinstance(expected, list):
+        if not isinstance(actual, list) or len(actual) < len(expected):
+            return False
+        return all(contains_subset(a, e) for a, e in zip(actual, expected))
+    return actual == expected
+
+
+def json_path_values(value: object, path: str) -> list[object]:
+    if not path.startswith("$."):
+        return []
+    current = [value]
+    for token in path[2:].split("."):
+        next_values: list[object] = []
+        is_array = token.endswith("[]")
+        key = token[:-2] if is_array else token
+        for item in current:
+            if not isinstance(item, dict) or key not in item:
+                continue
+            child = item[key]
+            if is_array:
+                if isinstance(child, list):
+                    next_values.extend(child)
+            else:
+                next_values.append(child)
+        current = next_values
+    return current
+
+
+def check_output_clause(leaf: dict, clause: dict) -> list[str]:
     errs: list[str] = []
-    for field in ("expect_contracts", "expect_leaf_failure"):
-        for matcher in scenario.get(field, []):
-            if not isinstance(matcher, str) or not matcher.startswith("robonix/"):
-                errs.append(f"{field} entry must be a full robonix/... contract id: {matcher!r}")
+    raw = str(leaf.get("output", ""))
+    err_text = str(leaf.get("error", ""))
+    parsed = parse_leaf_output(leaf)
+    if "text_equals" in clause and raw != clause["text_equals"]:
+        errs.append(f"output text expected exactly {clause['text_equals']!r}, got {raw!r}")
+    if "text_regex" in clause and not __import__("re").search(str(clause["text_regex"]), raw):
+        errs.append(f"output text did not match regex {clause['text_regex']!r}: {raw!r}")
+    if "error_regex" in clause and not __import__("re").search(str(clause["error_regex"]), err_text):
+        errs.append(f"error text did not match regex {clause['error_regex']!r}: {err_text!r}")
+    for line in clause.get("text_lines", []):
+        if line not in raw.splitlines():
+            errs.append(f"output missing exact line {line!r}")
+    if "json" in clause and not contains_subset(parsed, clause["json"]):
+        errs.append(f"output JSON did not contain subset {clause['json']!r}, got {parsed!r}")
+    for cond in clause.get("jsonpath", []):
+        values = json_path_values(parsed, str(cond.get("path", "")))
+        if cond.get("exists") and not values:
+            errs.append(f"jsonpath {cond.get('path')!r} did not exist")
+            continue
+        if "min_length" in cond:
+            if len(values) != 1 or not hasattr(values[0], "__len__") or len(values[0]) < int(cond["min_length"]):
+                errs.append(f"jsonpath {cond.get('path')!r} length < {cond['min_length']}: {values!r}")
+        if "equals" in cond and cond["equals"] not in values:
+            errs.append(f"jsonpath {cond.get('path')!r} missing exact value {cond['equals']!r}: {values!r}")
+        if "prefix" in cond and not any(str(v).startswith(str(cond["prefix"])) for v in values):
+            errs.append(f"jsonpath {cond.get('path')!r} missing prefix {cond['prefix']!r}: {values!r}")
     return errs
 
 
-def successful_output_blob(leaves: list[dict]) -> str:
-    return "\n".join(str(lr.get("output", "")) for lr in leaves if lr.get("success", False))
+def validate_new_assertion_shape(scenario: dict) -> list[str]:
+    errs: list[str] = []
+    old_fields = tuple(f"expect_{suffix}" for suffix in ("contracts", "args", "outputs", "leaf_failure"))
+    for field in old_fields:
+        if field in scenario:
+            errs.append(f"{field} is removed; use expect_leaves entries with contract/success/args/output")
+    for idx, want in enumerate(scenario.get("expect_leaves", [])):
+        contract = want.get("contract")
+        if not isinstance(contract, str) or not contract.startswith("robonix/"):
+            errs.append(f"expect_leaves[{idx}].contract must be a full robonix/... contract id")
+    return errs
+
+
+def check_expected_leaf(want: dict, calls: list[dict], leaves: list[dict]) -> str | None:
+    contract = want["contract"]
+    expected_success = want.get("success", True)
+    candidates = [lr for lr in leaves if lr.get("contract_id") == contract and lr.get("success", False) == expected_success]
+    if not candidates:
+        return f"expected leaf contract={contract!r} success={expected_success}, observed {[(lr.get('contract_id'), lr.get('success')) for lr in leaves]}"
+    call_args_by_id = {c.get("call_id"): parse_args_json(c) for c in calls}
+    reasons: list[str] = []
+    for leaf in candidates:
+        leaf_reasons: list[str] = []
+        if "args" in want:
+            args = call_args_by_id.get(leaf.get("call_id"), {})
+            if not contains_subset(args, want["args"]):
+                leaf_reasons.append(f"args did not contain subset {want['args']!r}, got {args!r}")
+        output_clause = want.get("output")
+        if isinstance(output_clause, dict):
+            leaf_reasons.extend(check_output_clause(leaf, output_clause))
+        if not leaf_reasons:
+            return None
+        reasons.extend(leaf_reasons)
+    return f"expected leaf {contract!r} did not satisfy assertions: {'; '.join(reasons)}"
 
 
 def count_rounds(events: list[dict]) -> int:
@@ -102,55 +207,44 @@ def final_failed(events: list[dict]) -> bool:
 def check_scenario(scenario: dict, events: list[dict], exit_code: int) -> list[str]:
     """Return a list of failure strings ([] means the scenario passed).
 
-    Beyond the cap-level checks, flow scenarios may declare:
+    Flow scenarios may declare:
       expect_min_rounds   — at least this many planning rounds (multi-step).
-      expect_leaf_failure — full contract ids whose leaf is EXPECTED to fail
-                            (the injected fault); such a failure is not counted
-                            against the run, and its absence IS a failure.
+      expect_leaves       — exact leaf contracts with success/args/output checks.
       expect_final_done   — require the turn to end without a FAILED status
                             (default true; the whole point of fault recovery).
     """
     fails: list[str] = []
-    fails.extend(validate_contract_matchers(scenario))
+    fails.extend(validate_new_assertion_shape(scenario))
     calls = collect_calls(events)
-    contracts = [c.get("contract_id", "") for c in calls]
-    args_blob = " ".join(c.get("args_json", "") for c in calls)
     leaves = collect_leaf_results(events)
-    expect_fail = scenario.get("expect_leaf_failure", [])
 
     if scenario.get("expect_final_done", True) and final_failed(events):
         fails.append("pilot reported FAILED but expect_final_done")
     if exit_code != 0:
         fails.append(f"rbnx ask exit={exit_code}")
 
-    for want in scenario.get("expect_contracts", []):
-        if want not in contracts:
-            fails.append(f"expected contract {want!r}, dispatched: {contracts}")
-        if not any(leaf_matches(lr, want) and lr.get("success", False) for lr in leaves):
-            fails.append(f"expected successful leaf result for {want!r}")
-    for want in scenario.get("expect_args", []):
-        if want not in args_blob:
-            fails.append(f"expected arg ~{want!r} in: {args_blob}")
-
-    output_blob = successful_output_blob(leaves)
-    for want in scenario.get("expect_outputs", []):
-        if want not in output_blob:
-            fails.append(f"expected output ~{want!r} in successful leaf outputs")
+    for want in scenario.get("expect_leaves", []):
+        if not isinstance(want, dict) or "contract" not in want:
+            fails.append(f"invalid expect_leaves entry: {want!r}")
+            continue
+        err = check_expected_leaf(want, calls, leaves)
+        if err:
+            fails.append(err)
 
     rounds = count_rounds(events)
     if rounds < scenario.get("expect_min_rounds", 0):
         fails.append(f"expected >= {scenario['expect_min_rounds']} rounds, got {rounds}")
 
-    # Injected faults: each expect_leaf_failure matcher must have a failed leaf.
-    for want in expect_fail:
-        if not any((not lr.get("success", True)) and leaf_matches(lr, want) for lr in leaves):
-            fails.append(f"expected an INJECTED failure on {want!r}, none observed")
-
     # Unexpected failures: a failed leaf whose contract is not an expected fault.
     if not scenario.get("allow_leaf_failure", False):
+        expected_failures = {
+            want.get("contract")
+            for want in scenario.get("expect_leaves", [])
+            if isinstance(want, dict) and want.get("success") is False
+        }
         for lr in leaves:
             cid = lr.get("contract_id", "")
-            if not lr.get("success", False) and not any(w == cid for w in expect_fail):
+            if not lr.get("success", False) and cid not in expected_failures:
                 fails.append(f"unexpected leaf failure {cid}: {lr.get('error', '')[:160]}")
     return fails
 

@@ -6,13 +6,17 @@ steps:
     rtdl_description: lidar snapshot
     status: in_progress
     caps:
-      - match: lidar_snapshot
+      - cap: tiago_lidar.lidar_snapshot
         args: {}
         description: grab one point-cloud frame
   - content: Point cloud captured.
     status: done
-expect_contracts:
-  - robonix/primitive/lidar/snapshot
-expect_outputs:
-  - '"frame_id": "hokuyo"'
-  - '"ranges"'
+expect_leaves:
+  - contract: robonix/primitive/lidar/snapshot
+    success: true
+    output:
+      json:
+        header: {frame_id: hokuyo}
+      jsonpath:
+        - path: $.ranges
+          min_length: 1

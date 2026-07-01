@@ -1,4 +1,4 @@
-# Exercise the memory service save + search RPCs in one tree (two calls).
+# Exercise the memory service save + search RPCs in one tree.
 name: memory_roundtrip
 task: "ci-test: remember a fact and then search for it"
 steps:
@@ -6,24 +6,26 @@ steps:
     rtdl_description: memory save + search
     status: in_progress
     caps:
-      # memsearch registers MCP handlers directly as std_msgs/String, so the
-      # planner-facing args are the message fields themselves: {data: ...}.
-      - match: memory_save
+      - cap: memory.memory_save
         args:
           data: "ci-fact: the test beacon is alpha-7"
         description: persist a fact
-      - match: memory_search
+      - cap: memory.memory_search
         args:
           data: test beacon
         description: recall the fact
   - content: Saved and recalled.
     status: done
-expect_contracts:
-  - robonix/service/memory/save
-  - robonix/service/memory/search
-expect_args:
-  - alpha-7
-  - test beacon
-expect_outputs:
-  - Memory saved and indexed
-  - 'ci-fact: the test beacon is alpha-7'
+expect_leaves:
+  - contract: robonix/service/memory/save
+    success: true
+    args:
+      data: "ci-fact: the test beacon is alpha-7"
+    output:
+      json: {data: "Memory saved and indexed."}
+  - contract: robonix/service/memory/search
+    success: true
+    args:
+      data: test beacon
+    output:
+      text_regex: "ci-fact: the test beacon is alpha-7"
