@@ -2,10 +2,11 @@
 # robonix testing harness
 
 Deterministic integration tests: the Robonix runtime boots against a real
-Webots sim, while a small set of CI substitutions removes nondeterminism,
-hardware dependencies, and external model/API downloads. A green run means the
-checked-out code built, booted, registered capabilities, dispatched RTDL plans,
-and produced the expected runtime outputs on the simulated robot.
+Webots sim and exercises the normal service paths. The VLM endpoint is
+scripted so RTDL planning is reproducible, and audio uses ALSA's `null`
+device because the runner has no physical mic or speaker. A green run means
+the checked-out code built, booted, registered capabilities, dispatched RTDL
+plans, and produced the expected runtime outputs on the simulated robot.
 
 This is the harness behind `.github/workflows/testing.yml` (the self-hosted GPU
 job). You can also run it by hand against any booted deploy.
@@ -21,12 +22,13 @@ job). You can also run it by hand against any booted deploy.
 | Mapping / nav2 / explore | Real service/skill containers | Scenarios exercise map save, object-derived navigation, and bounded explore status/cancel. |
 | Memory / voiceprint | Real services | Scenarios assert save/search and list behavior. |
 | VLM | Deterministic fake OpenAI-compatible endpoint | Real LLM calls would make CI nondeterministic and require secrets. The fake only scripts RTDL plans. |
-| Scene perception | CI fixture object; perception/model path skipped | CI asserts scene API and downstream object navigation deterministically. It does not validate detector/model quality. |
-| Speech/audio hardware | CI speech mode plus ALSA `null` audio device | The runner has no physical speaker/mic. CI checks API/driver wiring, not acoustic output. |
+| Scene perception | Real scene service over Webots RGB-D, camera intrinsics, and ConceptGraphs | Scenarios require non-robot objects from the live scene registry and use one as the navigation target. |
+| Speech/audio hardware | Real speech service plus audio driver using ALSA `null` devices | The runner has no physical speaker/mic. CI checks TTS-to-speaker and mic/speaker driver wiring through normal ALSA devices, not acoustic output. |
 
-This workflow is therefore not a perception-quality or physical-audio test. It
-is a build/boot/dispatch/runtime integration test for the Webots-backed robot
-stack with deterministic substitutes at external/nondeterministic boundaries.
+This workflow is therefore not a perception-quality or physical-audio quality
+test. It is a build/boot/dispatch/runtime integration test for the
+Webots-backed robot stack, with deterministic substitution only at the VLM
+planning boundary.
 
 ## Checks
 
@@ -47,7 +49,7 @@ stack with deterministic substitutes at external/nondeterministic boundaries.
 Execution order after boot:
 
 1. `testing/run_interfaces.py` checks direct APIs: atlas discovery, pilot task
-   submission, and audio gRPC through the ALSA `null` CI device.
+   submission, and audio gRPC through ALSA `null` devices.
 2. `testing/run.py` runs every YAML scenario under `scenarios/cap/` and
    `scenarios/flow/`.
 3. The workflow uploads per-scenario JSONL event streams, boot logs, provider
