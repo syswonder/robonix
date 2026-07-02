@@ -916,8 +916,8 @@ jobs:
     outputs:
       report_url: ${{ steps.publish_url.outputs.report_url }}
     env:
-      REPORT_SITE_DIR: ${{ runner.temp }}/robonix-report-site
-      REPORT_ARTIFACT_DIR: ${{ runner.temp }}/robonix-report-artifact
+      REPORT_SITE_DIR: /tmp/robonix-report-site-${{ github.run_id }}
+      REPORT_ARTIFACT_DIR: /tmp/robonix-report-artifact-${{ github.run_id }}
       REPORTS_BRANCH: robonix-ci-reports
     steps:
       - name: Checkout repository for report history
@@ -1065,7 +1065,7 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ${{ runner.temp }}/robonix-report-artifact
+          path: /tmp/robonix-report-artifact-${{ github.run_id }}
 
       - name: Deploy Pages
         id: deployment
