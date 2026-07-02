@@ -1,21 +1,26 @@
-# Exercise the voiceprint service's read path (no enrollment needed).
+# Exercise the voiceprint service's read path.
 name: voiceprint_list
 task: "ci-test: list the enrolled voiceprints"
 steps:
   - content: Listing enrolled voiceprints.
     rtdl_description: voiceprint list
     status: in_progress
-    caps:
-      - cap: voiceprint.voiceprint_list
-        args: {}
-        description: list enrolled speakers
+    rtdl:
+      op: sequence
+      id: voiceprint_list_step
+      children:
+        - op: do
+          id: voiceprint_list
+          cap: voiceprint.voiceprint_list
+          args: {}
+          description: list enrolled speakers
+          expect:
+            contract: robonix/service/voiceprint/list
+            success: true
+            output:
+              text_regex: '"users_json"'
+              jsonpath:
+                - path: $.count
+                  exists: true
   - content: Listed.
     status: done
-expect_leaves:
-  - contract: robonix/service/voiceprint/list
-    success: true
-    output:
-      text_regex: "\"users_json\""
-      jsonpath:
-        - path: $.count
-          exists: true

@@ -46,7 +46,7 @@ def test_metric_tier_full():
 
 def test_metric_tier_degraded():
     # RGB-D but no intrinsics/pose contract → still metric tier (depth is
-    # present), but grounding is flagged degraded (default K / tf2 pose).
+    # present), but grounding is flagged degraded (waiting for K / tf2 pose).
     plan = plan_perception(_FakeHub(["rgb", "depth"]))
     assert plan.tier == "metric"
     assert plan.detector == "concept_graphs"

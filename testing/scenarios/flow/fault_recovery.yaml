@@ -1,33 +1,41 @@
 # Exception injection + recovery flow for memory.
 name: fault_recovery
 task: "ci-flow: save a fact, recovering if the first attempt is rejected"
+expect_final_done: true
 steps:
   - status: in_progress
     rtdl_description: faulty save
     content: Attempting to save with an intentionally malformed request.
-    caps:
-      - cap: memory.memory_save
-        args: {}
-        description: intentionally invalid save to trigger a leaf failure
+    rtdl:
+      op: sequence
+      id: faulty_save_step
+      children:
+        - op: do
+          id: faulty_save
+          cap: memory.memory_save
+          args: {}
+          description: intentionally invalid save to trigger a leaf failure
+          expect:
+            contract: robonix/service/memory/save
+            success: false
+            args: {}
   - status: in_progress
     rtdl_description: recover
     content: First attempt failed; retrying with valid content.
-    caps:
-      - cap: memory.memory_save
-        args:
-          data: "ci-flow recovered fact: beacon bravo-2"
-        description: recovery save with valid args
+    rtdl:
+      op: sequence
+      id: recovery_save_step
+      children:
+        - op: do
+          id: recovery_save
+          cap: memory.memory_save
+          args: {data: "ci-flow recovered fact: beacon bravo-2"}
+          description: recovery save with valid args
+          expect:
+            contract: robonix/service/memory/save
+            success: true
+            args: {data: "ci-flow recovered fact: beacon bravo-2"}
+            output:
+              json: {data: "Memory saved and indexed."}
   - status: done
     content: Recovered from the failed attempt and saved the fact.
-expect_min_rounds: 2
-expect_final_done: true
-expect_leaves:
-  - contract: robonix/service/memory/save
-    success: false
-    args: {}
-  - contract: robonix/service/memory/save
-    success: true
-    args:
-      data: "ci-flow recovered fact: beacon bravo-2"
-    output:
-      json: {data: "Memory saved and indexed."}

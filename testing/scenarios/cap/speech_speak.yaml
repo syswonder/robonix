@@ -4,15 +4,20 @@ task: "ci-test: announce a short phrase out loud"
 steps:
   - status: in_progress
     rtdl_description: speak
-    caps:
-      - cap: speech.speech_speak
-        args: {target: "", text: "robonix continuous integration test"}
-        description: synthesize and play speech
+    rtdl:
+      op: sequence
+      id: speech_speak_step
+      children:
+        - op: do
+          id: speech_speak
+          cap: speech.speech_speak
+          args: {target: "", text: "robonix continuous integration test"}
+          description: synthesize and play speech
+          expect:
+            contract: robonix/service/speech/speak
+            success: true
+            args: {target: "", text: "robonix continuous integration test"}
+            output:
+              json: {ok: true}
+              text_regex: 'spoke [0-9]+ chars'
   - status: done
-expect_leaves:
-  - contract: robonix/service/speech/speak
-    success: true
-    args: {target: "", text: "robonix continuous integration test"}
-    output:
-      json: {ok: true}
-      text_regex: "spoke [0-9]+ chars"
