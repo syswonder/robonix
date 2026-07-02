@@ -59,17 +59,19 @@ Limit to at most 12 detections, prioritising larger / closer items.
 
 @dataclass
 class _CamIntrinsics:
-    """Pinhole intrinsics. Defaults match Webots Tiago's head_front_camera
-    at 640×480 (60° HFOV). The metric ConceptGraphs path sources real K
-    from the `primitive/camera/intrinsics` contract (and waits when it is
-    absent rather than using these defaults). These defaults remain only
-    as the VLM (approximate) path's coarse fallback."""
-    width: int = 640
-    height: int = 480
-    fx: float = 554.0
-    fy: float = 554.0
-    cx: float = 320.0
-    cy: float = 240.0
+    """Pinhole intrinsics supplied by the active camera deployment.
+
+    Scene must not carry simulator-specific calibration constants. Metric
+    perception gets K from `primitive/camera/intrinsics`; deployments without a
+    reliable CameraInfo stream may provide a reviewed `intrinsics_fallback` in
+    their manifest.
+    """
+    width: int
+    height: int
+    fx: float
+    fy: float
+    cx: float
+    cy: float
 
 
 class VLMObjectDetector:
@@ -88,7 +90,7 @@ class VLMObjectDetector:
         chassis_pose_fn: Callable[[], Optional[tuple[float, float, float, float]]],
         on_detections: Callable[[list[Detection]], Awaitable[None]],
         period_s: float = 3.0,
-        camera_frame_id: str = "head_front_camera_rgb_optical_frame",
+        camera_frame_id: str = "camera_optical_frame",
         intrinsics: Optional[_CamIntrinsics] = None,
     ) -> None:
         # `rgb_fetcher` returns the latest JPEG bytes (or None when no
@@ -100,7 +102,8 @@ class VLMObjectDetector:
         self.on_detections = on_detections
         self.period_s = period_s
         self.camera_frame_id = camera_frame_id
-        self.intrinsics = intrinsics or _CamIntrinsics()
+        self.intrinsics = intrinsics
+        self._missing_intrinsics_logged = False
         self._task: Optional[asyncio.Task[None]] = None
         self._stop = asyncio.Event()
 
@@ -221,6 +224,12 @@ class VLMObjectDetector:
         cam_offset_z = 1.1  # head height-ish; configurable later
 
         K = self.intrinsics
+        if K is None:
+            if not self._missing_intrinsics_logged:
+                log.warning("[scene-vlm] camera intrinsics unavailable; skipping projection")
+                self._missing_intrinsics_logged = True
+            return []
+
         for d in raw:
             try:
                 cls = str(d.get("cls", "")).strip().lower()
