@@ -176,6 +176,8 @@ jobs:
           REPORT_MERGE_REF_AVAILABLE: ${{ needs.gate.outputs.merge_ref_available }}
           REPORT_TRIGGERED_BY: ${{ needs.gate.outputs.triggered_by }}
           REPORT_COMMENT_ID: ${{ needs.gate.outputs.comment_id }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           report_id="${{ github.run_id }}"
@@ -185,61 +187,25 @@ jobs:
           rm -rf "$report_dir"
           mkdir -p "$report_dir" dl
 
-          summary_json="$(find dl -path '*/testing/logs/summary.json' -print -quit)"
-          report_metadata_json="$(find dl -name report-metadata.json -print -quit)"
-          testing_logs_dir="$(find dl -path '*/testing/logs' -type d -print -quit)"
-          boot_logs_dir="$(find dl -path '*/examples/webots/rbnx-boot/logs' -type d -print -quit)"
-          provider_logs_dir="$(find dl -path '*/examples/webots/logs' -type d -print -quit)"
-          scene_logs_dir="$(find dl -path '*/system/scene/logs' -type d -print -quit)"
-          cache_logs_dir="$(find dl -path '*/cache-provider-logs' -type d -print -quit)"
-          sim_logs_dir="$(find dl -path '*/sim-logs' -type d -print -quit)"
-          fake_vlm_log="$(find dl -name fake_vlm.log -print -quit)"
-          rbnx_boot_log="$(find dl -name rbnx-boot.log -print -quit)"
-          remote_provenance="$(find dl -name remote-provenance.txt -print -quit)"
-
-          if [ -n "$summary_json" ] && [ -f testing/report.py ]; then
-            args=(
-              --summary-json "$summary_json"
-              --out-dir "$report_dir"
-              --metadata "report_id=${report_id}"
-              --metadata "report_url=${expected_report_url}"
-              --metadata "status_comment_id=${REPORT_COMMENT_ID:-}"
-              --metadata "pr_number=${REPORT_PR_NUMBER:-}"
-              --metadata "pr_title=${REPORT_PR_TITLE:-}"
-              --metadata "pr_author=${REPORT_PR_AUTHOR:-}"
-              --metadata "pr_url=${REPORT_PR_URL:-}"
-              --metadata "pr_head_ref=${REPORT_PR_HEAD_REF:-}"
-              --metadata "pr_head_repo=${REPORT_PR_HEAD_REPO:-}"
-              --metadata "pr_head_sha=${REPORT_PR_HEAD_SHA:-}"
-              --metadata "pr_head_commit_url=${{ github.server_url }}/${REPORT_PR_HEAD_REPO:-${{ github.repository }}}/commit/${REPORT_PR_HEAD_SHA:-}"
-              --metadata "test_ref=${REPORT_TEST_REF:-}"
-              --metadata "merge_ref_available=${REPORT_MERGE_REF_AVAILABLE:-}"
-              --metadata "triggered_by=${REPORT_TRIGGERED_BY:-}"
-            )
-            [ -n "$report_metadata_json" ] && args+=(--metadata-json "$report_metadata_json")
-            [ -n "$testing_logs_dir" ] && args+=(--log-root "testing/logs=$testing_logs_dir")
-            [ -n "$boot_logs_dir" ] && args+=(--log-root "boot_logs=$boot_logs_dir")
-            [ -n "$provider_logs_dir" ] && args+=(--log-root "provider_logs=$provider_logs_dir")
-            [ -n "$scene_logs_dir" ] && args+=(--log-root "scene_logs=$scene_logs_dir")
-            [ -n "$cache_logs_dir" ] && args+=(--log-root "cache_provider_logs=$cache_logs_dir")
-            [ -n "$sim_logs_dir" ] && args+=(--log-root "sim_logs=$sim_logs_dir")
-            [ -n "$fake_vlm_log" ] && args+=(--log-file "fake_vlm.log=$fake_vlm_log")
-            [ -n "$rbnx_boot_log" ] && args+=(--log-file "rbnx-boot.log=$rbnx_boot_log")
-            [ -n "$remote_provenance" ] && args+=(--log-file "remote-provenance.txt=$remote_provenance")
-            args+=(--max-log-bytes 524288 --max-total-log-bytes 12582912)
-            python3 testing/report.py "${args[@]}"
-          else
-            if [ "${REPORT_MERGE_REF_AVAILABLE:-true}" != "true" ]; then
-              message="The PR merge ref ${REPORT_TEST_REF:-} is unavailable. The PR may not merge cleanly into its base branch, so Webots was not run."
-            else
-              message="No machine-readable scenario summary was available for this run. Treat this as an incomplete infrastructure run, not as a verified Webots pass."
-            fi
-            printf '%s\n' \
-              '<!doctype html><meta charset="utf-8"><title>Robonix Webots CI Report</title>' \
-              '<body><h1>Robonix Webots CI Report</h1>' \
-              "<p>${message}</p></body>" \
-              > "$report_dir/index.html"
-          fi
+          python3 testing/build_report_from_artifacts.py \
+            --artifact-root dl \
+            --out-dir "$report_dir" \
+            --repo . \
+            --llm \
+            --metadata "report_id=${report_id}" \
+            --metadata "report_url=${expected_report_url}" \
+            --metadata "status_comment_id=${REPORT_COMMENT_ID:-}" \
+            --metadata "pr_number=${REPORT_PR_NUMBER:-}" \
+            --metadata "pr_title=${REPORT_PR_TITLE:-}" \
+            --metadata "pr_author=${REPORT_PR_AUTHOR:-}" \
+            --metadata "pr_url=${REPORT_PR_URL:-}" \
+            --metadata "pr_head_ref=${REPORT_PR_HEAD_REF:-}" \
+            --metadata "pr_head_repo=${REPORT_PR_HEAD_REPO:-}" \
+            --metadata "pr_head_sha=${REPORT_PR_HEAD_SHA:-}" \
+            --metadata "pr_head_commit_url=${{ github.server_url }}/${REPORT_PR_HEAD_REPO:-${{ github.repository }}}/commit/${REPORT_PR_HEAD_SHA:-}" \
+            --metadata "test_ref=${REPORT_TEST_REF:-}" \
+            --metadata "merge_ref_available=${REPORT_MERGE_REF_AVAILABLE:-}" \
+            --metadata "triggered_by=${REPORT_TRIGGERED_BY:-}"
 
           printf '%s\n' \
             '<!doctype html>' \
@@ -289,6 +255,13 @@ jobs:
           pattern: testing-logs-*
           path: dl
           merge-multiple: true
+      - name: Download generated report artifact
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: testing-report-*
+          path: report-dl
+          merge-multiple: true
       - name: Update PR status comment
         uses: actions/github-script@v7
         with:
@@ -308,10 +281,21 @@ jobs:
               }
               return null;
             };
+            const findFile = (dir, name) => {
+              for (const e of fs.existsSync(dir) ? fs.readdirSync(dir, {withFileTypes: true}) : []) {
+                const p = `${dir}/${e.name}`;
+                if (e.isDirectory()) { const r = findFile(p, name); if (r) return r; }
+                else if (e.name === name) return p;
+              }
+              return null;
+            };
             let summary = null;
+            let analysis = null;
             const artifactPresent = fs.existsSync('dl') && fs.readdirSync('dl').length > 0;
             const sp = findSummary('dl');
             try { if (sp) summary = JSON.parse(fs.readFileSync(sp, 'utf8')); } catch (e) {}
+            const analysisPath = findFile('report-dl', 'llm-analysis.json') || findFile('dl', 'llm-analysis.json');
+            try { if (analysisPath) analysis = JSON.parse(fs.readFileSync(analysisPath, 'utf8')); } catch (e) {}
 
             let lines = ['<!-- robonix-ci-status -->'];
             const cell = (v) => String(v ?? '')
@@ -356,6 +340,13 @@ jobs:
               } else {
                 lines.push('No machine-readable scenario summary was produced. Treat this as an incomplete infrastructure run, not as a verified Webots pass.');
               }
+            }
+            if (analysis && analysis.available && (analysis.summary || analysis.title)) {
+              lines.push('', '**LLM-assisted analysis**');
+              if (analysis.title) lines.push(`- ${detail(analysis.title)}`);
+              if (analysis.summary) lines.push(`- ${detail(analysis.summary)}`);
+              if (analysis.likely_root_cause) lines.push(`- Root cause: ${detail(analysis.likely_root_cause)}`);
+              if (analysis.suggested_fix) lines.push(`- Suggested fix / watchout: ${detail(analysis.suggested_fix)}`);
             }
             lines.push('');
             const reportUrl = '${{ needs.publish_report.outputs.report_url }}';

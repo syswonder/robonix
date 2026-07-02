@@ -79,6 +79,9 @@ on:
         description: "user who requested the ChatOps run"
         type: string
         required: false
+    secrets:
+      DEEPSEEK_API_KEY:
+        required: false
     outputs:
       result:
         description: "PASS/FAIL summary line from the harness"
@@ -804,3 +807,73 @@ jobs:
             ${{ runner.temp }}/cache-provider-logs/
             ${{ runner.temp }}/sim-logs/
           if-no-files-found: ignore
+
+  report:
+    name: Webots report and analysis
+    needs: gpu_testing
+    if: always()
+    runs-on: ubuntu-22.04
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      GITHUB_TOKEN: ${{ github.token }}
+      REPORT_PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || '' }}
+      REPORT_PR_TITLE: ${{ inputs.pr_title || github.event.pull_request.title || '' }}
+      REPORT_PR_AUTHOR: ${{ inputs.pr_author || github.event.pull_request.user.login || '' }}
+      REPORT_PR_URL: ${{ inputs.pr_url || github.event.pull_request.html_url || '' }}
+      REPORT_PR_HEAD_REF: ${{ inputs.pr_head_ref || github.event.pull_request.head.ref || '' }}
+      REPORT_PR_HEAD_REPO: ${{ inputs.pr_head_repo || github.event.pull_request.head.repo.full_name || '' }}
+      REPORT_PR_HEAD_SHA: ${{ inputs.pr_head_sha || github.event.pull_request.head.sha || '' }}
+      REPORT_TEST_REF: ${{ inputs.ref || github.ref }}
+      REPORT_TRIGGERED_BY: ${{ inputs.triggered_by || github.triggering_actor || github.actor }}
+    steps:
+      - name: Checkout trusted report generator
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Download raw Webots artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: testing-logs-*
+          path: dl
+          merge-multiple: true
+
+      - name: Build report with LLM-assisted analysis
+        run: |
+          set -euo pipefail
+          mkdir -p report dl
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          pr_head_commit_url=""
+          if [ -n "${REPORT_PR_HEAD_REPO:-}" ] && [ -n "${REPORT_PR_HEAD_SHA:-}" ]; then
+            pr_head_commit_url="${GITHUB_SERVER_URL}/${REPORT_PR_HEAD_REPO}/commit/${REPORT_PR_HEAD_SHA}"
+          fi
+          python3 testing/build_report_from_artifacts.py \
+            --artifact-root dl \
+            --out-dir report \
+            --repo . \
+            --llm \
+            --metadata "report_id=${GITHUB_RUN_ID}" \
+            --metadata "run_url=${run_url}" \
+            --metadata "pr_number=${REPORT_PR_NUMBER:-}" \
+            --metadata "pr_title=${REPORT_PR_TITLE:-}" \
+            --metadata "pr_author=${REPORT_PR_AUTHOR:-}" \
+            --metadata "pr_url=${REPORT_PR_URL:-}" \
+            --metadata "pr_head_ref=${REPORT_PR_HEAD_REF:-}" \
+            --metadata "pr_head_repo=${REPORT_PR_HEAD_REPO:-}" \
+            --metadata "pr_head_sha=${REPORT_PR_HEAD_SHA:-}" \
+            --metadata "pr_head_commit_url=${pr_head_commit_url}" \
+            --metadata "test_ref=${REPORT_TEST_REF:-}" \
+            --metadata "triggered_by=${REPORT_TRIGGERED_BY:-}"
+          if [ -f report/summary.md ]; then
+            cat report/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload generated report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: testing-report-${{ github.run_id }}
+          path: report/
+          if-no-files-found: ignore
+

@@ -40,7 +40,10 @@ planning boundary.
 | `scenarios/flow/*.yaml` | multi-step task flows, incl. fault injection + recovery. |
 | `run.py` | runs cap + flow scenarios; writes `logs/<family>.<name>.jsonl`; asserts each RTDL leaf's args/results, fault recovery, and final status; prints coverage. |
 | `run_interfaces.py` | direct atlas/pilot/audio RPC checks; writes `logs/iface.*`. |
-| `report.py` | converts `testing/logs/summary.json` into `testing/report/index.html` and a Markdown job summary. |
+| `report.py` | renders `testing/report/index.html`, Markdown summary, embedded logs, and optional LLM-assisted analysis. |
+| `build_report_from_artifacts.py` | canonical report builder used by both direct Webots workflow runs and ChatOps Pages publishing. |
+| `collect_diagnostic_context.py` | collects bounded PR metadata/diff plus relevant logs for failure/success analysis; it does not upload the whole repository. |
+| `llm_diagnose.py` | calls the configured DeepSeek-compatible chat endpoint and writes `llm-analysis.json`; failures are non-fatal. |
 | `logs/` | per-run traces (git-ignored). |
 | `report/` | generated report files (git-ignored). |
 
@@ -55,22 +58,32 @@ Execution order after boot:
 
 ## Reports and sharing
 
-Every run produces three levels of evidence:
+Every run produces the same report shape, regardless of whether it was started
+by a push, PR event, manual dispatch, or `@robonix-ci test`:
 
 1. GitHub job summary: `testing/report/summary.md` is appended to
    `$GITHUB_STEP_SUMMARY`, so reviewers can scan pass/fail status without
    downloading artifacts.
 2. HTML report artifact: `testing/report/index.html` summarizes scenarios,
-   failures, dispatched contracts, and coverage. It is uploaded with the raw
-   logs.
-3. Pages report: `@robonix-ci test` publishes the same report through the
+   failures, dispatched contracts, coverage, embedded logs, and optional
+   LLM-assisted analysis. It is uploaded with the raw logs.
+3. Pages report: `@robonix-ci test` republishes the same report through the
    trusted CI bot workflow and links it from the PR status comment.
 4. Raw logs: scenario JSONL streams, provider logs, sim stdout, ROS logs,
    final caps, fake VLM log, boot log, and remote provider provenance.
 
+Report generation is split from the self-hosted GPU run. The GPU job uploads raw
+artifacts only; a hosted report job downloads those artifacts, builds the final
+HTML, and, when `DEEPSEEK_API_KEY` is configured, asks DeepSeek to write a
+human-readable analysis paragraph. The LLM context is bounded to PR metadata,
+PR file patches from GitHub, scenario summary, environment metadata, and capped
+artifact logs. It does not send the full repository tree, and the model output is
+advisory only: pass/fail remains determined by deterministic harness checks.
+
 The public Pages report is rebuilt by the bot workflow from trusted workflow
 metadata plus selected logs. The report generator rejects symlinks, applies log
-size caps, and redacts common token/password patterns before embedding logs.
+size caps, and redacts common token/password patterns before embedding logs or
+sending diagnostic context to the LLM.
 
 ## Why RTDL, not OpenAI tool-calls
 
