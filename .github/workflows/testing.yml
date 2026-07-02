@@ -902,6 +902,11 @@ jobs:
        github.event_name == 'workflow_dispatch' ||
        github.event_name == 'workflow_call')
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      actions: read
+      pages: write
+      id-token: write
     concurrency:
       group: webots-report-pages
       cancel-in-progress: false
@@ -910,7 +915,17 @@ jobs:
       url: ${{ steps.publish_url.outputs.report_url }}
     outputs:
       report_url: ${{ steps.publish_url.outputs.report_url }}
+    env:
+      REPORT_SITE_DIR: ${{ runner.temp }}/robonix-report-site
+      REPORT_ARTIFACT_DIR: ${{ runner.temp }}/robonix-report-artifact
+      REPORTS_BRANCH: robonix-ci-reports
     steps:
+      - name: Checkout repository for report history
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+
       - name: Download generated report
         uses: actions/download-artifact@v4
         continue-on-error: true
@@ -919,23 +934,30 @@ jobs:
           path: report-dl
           merge-multiple: true
 
-      - name: Restore existing report site
-        uses: actions/cache/restore@v4
-        with:
-          path: public
-          key: webots-report-pages-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            webots-report-pages-
+      - name: Restore report history
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf "$REPORT_SITE_DIR"
+          if git ls-remote --exit-code origin "refs/heads/${REPORTS_BRANCH}" >/dev/null 2>&1; then
+            git fetch --depth=1 origin "${REPORTS_BRANCH}"
+            git worktree add --detach "$REPORT_SITE_DIR" FETCH_HEAD
+          else
+            mkdir -p "$REPORT_SITE_DIR"
+            git -C "$REPORT_SITE_DIR" init -b "${REPORTS_BRANCH}"
+            git -C "$REPORT_SITE_DIR" remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          fi
 
       - name: Stage report site
         run: |
           set -euo pipefail
           report_id="${GITHUB_RUN_ID}"
-          report_dir="public/reports/runs/${report_id}"
+          report_dir="${REPORT_SITE_DIR}/reports/runs/${report_id}"
           expected_base_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
           expected_report_url="${expected_base_url}/reports/runs/${report_id}/"
           rm -rf "$report_dir"
-          mkdir -p "$report_dir" public report-dl
+          mkdir -p "$report_dir" "${REPORT_SITE_DIR}/reports" report-dl
           if [ -f report-dl/index.html ]; then
             cp -a report-dl/. "$report_dir/"
           else
@@ -946,20 +968,96 @@ jobs:
               '<body><h1>Robonix Webots CI Report</h1><p>No generated report artifact was available for this run.</p></body>' \
               > "$report_dir/index.html"
           fi
+          python3 - <<'PY'
+          import json
+          import os
+          import shutil
+          from datetime import datetime, timezone, timedelta
+          from pathlib import Path
+
+          site = Path(os.environ["REPORT_SITE_DIR"])
+          runs = site / "reports" / "runs"
+          cutoff = datetime.now(timezone.utc) - timedelta(days=90)
+
+          def parse_time(raw):
+              if not raw:
+                  return None
+              raw = str(raw).replace("Z", "+00:00")
+              try:
+                  dt = datetime.fromisoformat(raw)
+              except ValueError:
+                  return None
+              if dt.tzinfo is None:
+                  dt = dt.replace(tzinfo=timezone.utc)
+              return dt.astimezone(timezone.utc)
+
+          entries = []
+          if runs.exists():
+              for d in sorted(p for p in runs.iterdir() if p.is_dir()):
+                  meta_path = d / "metadata.json"
+                  meta = {}
+                  if meta_path.exists():
+                      try:
+                          meta = json.loads(meta_path.read_text())
+                      except Exception:
+                          meta = {}
+                  dt = parse_time(meta.get("generated_on")) or parse_time(meta.get("test_report_generated_on"))
+                  if dt and dt < cutoff:
+                      shutil.rmtree(d)
+                      continue
+                  entries.append({
+                      "run_id": d.name,
+                      "generated_on": dt.isoformat() if dt else "",
+                      "title": meta.get("pr_title") or meta.get("tested_commit_subject") or d.name,
+                      "event": meta.get("event", ""),
+                      "url": f"runs/{d.name}/",
+                  })
+          entries.sort(key=lambda x: x.get("generated_on") or x["run_id"], reverse=True)
+          (site / "reports").mkdir(parents=True, exist_ok=True)
+          (site / "reports" / "index.json").write_text(json.dumps(entries, indent=2) + "\n")
+          links = "\n".join(
+              f'<li><a href="runs/{e["run_id"]}/">{e["run_id"]}</a> {e["title"]}</li>'
+              for e in entries
+          )
+          (site / "reports" / "index.html").write_text(
+              "<!doctype html>\n<meta charset=\"utf-8\">\n"
+              "<title>Robonix Webots CI Reports</title>\n"
+              "<h1>Robonix Webots CI Reports</h1>\n"
+              "<p>Reports are retained for 90 days.</p>\n"
+              f"<ul>{links}</ul>\n"
+          )
+          PY
           printf '%s\n' \
             '<!doctype html>' \
             '<meta charset="utf-8">' \
             "<meta http-equiv=\"refresh\" content=\"0; url=reports/runs/${report_id}/\">" \
             '<title>Robonix Webots CI Reports</title>' \
             "<a href=\"reports/runs/${report_id}/\">Latest Robonix Webots CI report</a>" \
-            > public/index.html
+            > "${REPORT_SITE_DIR}/index.html"
           echo "report_url=${expected_report_url}" >> "$GITHUB_OUTPUT"
 
-      - name: Save report site cache
-        uses: actions/cache/save@v4
-        with:
-          path: public
-          key: webots-report-pages-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Persist report history
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git -C "$REPORT_SITE_DIR" config user.name "github-actions[bot]"
+          git -C "$REPORT_SITE_DIR" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$REPORT_SITE_DIR" add -A
+          if git -C "$REPORT_SITE_DIR" diff --cached --quiet; then
+            echo "report history unchanged"
+            exit 0
+          fi
+          git -C "$REPORT_SITE_DIR" commit -m "ci: publish Webots report ${GITHUB_RUN_ID}"
+          git -C "$REPORT_SITE_DIR" -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer ${GITHUB_TOKEN}" \
+            push origin "HEAD:${REPORTS_BRANCH}"
+
+      - name: Prepare Pages artifact
+        run: |
+          set -euo pipefail
+          rm -rf "$REPORT_ARTIFACT_DIR"
+          mkdir -p "$REPORT_ARTIFACT_DIR"
+          tar -C "$REPORT_SITE_DIR" --exclude='.git' -cf - . | tar -C "$REPORT_ARTIFACT_DIR" -xf -
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
@@ -967,7 +1065,7 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: public
+          path: ${{ runner.temp }}/robonix-report-artifact
 
       - name: Deploy Pages
         id: deployment
