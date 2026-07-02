@@ -38,6 +38,11 @@ on:
   # authorized `@robonix-ci test` comment and read back the result summary.
   workflow_call:
     inputs:
+      authorized:
+        description: "true when a trusted caller has already authorized the run"
+        type: boolean
+        required: false
+        default: false
       ref:
         description: "git ref to test (defaults to the triggering ref)"
         type: string
@@ -83,9 +88,10 @@ permissions:
   contents: read
 
 concurrency:
-  # One GPU testing run at a time per ref; a new push cancels the superseded run.
-  group: testing-${{ github.ref }}
-  cancel-in-progress: true
+  # Webots uses fixed ports and the shared GPU runner is a single scarce resource.
+  # Queue every Webots integration run globally instead of canceling an older run.
+  group: webots-integration-tests
+  cancel-in-progress: false
 
 jobs:
   # ── Gate 1: cheap, GitHub-hosted, untrusted-safe ──────────────────────────
@@ -139,11 +145,13 @@ jobs:
     # with Required reviewers in repo settings if we want GitHub to pause this
     # job before it is assigned to the self-hosted runner.
     environment: gpu-testing
-    # Belt-and-suspenders: also require the `safe-to-test` label on PRs.
+    # Belt-and-suspenders: require `safe-to-test` for direct PR events.
+    # ChatOps callers must perform their own authorization gate before setting
+    # inputs.authorized=true; ci-bot.yml restricts that to trusted PR comments.
     if: >-
+      inputs.authorized == true ||
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'workflow_call' ||
       (github.event_name == 'pull_request' &&
        contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
     runs-on: [self-hosted, robonix-testing]

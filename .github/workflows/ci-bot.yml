@@ -99,6 +99,7 @@ jobs:
     needs: gate
     uses: ./.github/workflows/testing.yml
     with:
+      authorized: true
       ref: ${{ needs.gate.outputs.pr_ref }}
       pr_number: ${{ needs.gate.outputs.pr_number }}
       pr_title: ${{ needs.gate.outputs.pr_title }}
@@ -114,7 +115,11 @@ jobs:
   publish_report:
     name: Publish report site
     needs: [gate, test]
-    if: always() && needs.gate.result == 'success'
+    if: >-
+      always() &&
+      needs.gate.result == 'success' &&
+      needs.test.result != 'skipped' &&
+      (needs.test.result != 'success' || needs.test.outputs.result != '')
     runs-on: ubuntu-22.04
     concurrency:
       group: webots-report-pages
@@ -164,7 +169,7 @@ jobs:
           expected_base_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
           expected_report_url="${expected_base_url}/reports/runs/${report_id}/"
           rm -rf "$report_dir"
-          mkdir -p "$report_dir"
+          mkdir -p "$report_dir" dl
 
           summary_json="$(find dl -path '*/testing/logs/summary.json' -print -quit)"
           report_metadata_json="$(find dl -name report-metadata.json -print -quit)"
@@ -210,7 +215,7 @@ jobs:
           else
             printf '%s\n' \
               '<!doctype html><meta charset="utf-8"><title>Robonix Webots CI Report</title>' \
-              '<body><h1>Robonix Webots CI Report</h1><p>No report artifact was available for this run.</p></body>' \
+              '<body><h1>Robonix Webots CI Report</h1><p>No machine-readable scenario summary was available for this run. Treat this as an incomplete infrastructure run, not as a verified Webots pass.</p></body>' \
               > "$report_dir/index.html"
           fi
 
@@ -267,7 +272,8 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const outcome = '${{ needs.test.result }}';  // success / failure / cancelled
+            const outcome = '${{ needs.test.result }}';  // success / failure / cancelled / skipped
+            const harnessResult = '${{ needs.test.outputs.result }}';
             // The artifact preserves the upload path (testing/logs/summary.json),
             // so locate it rather than assuming a flat layout.
             const findSummary = (dir) => {
@@ -279,6 +285,7 @@ jobs:
               return null;
             };
             let summary = null;
+            const artifactPresent = fs.existsSync('dl') && fs.readdirSync('dl').length > 0;
             const sp = findSummary('dl');
             try { if (sp) summary = JSON.parse(fs.readFileSync(sp, 'utf8')); } catch (e) {}
 
@@ -313,15 +320,23 @@ jobs:
                 lines.push('</details>');
               }
             } else {
-              const icon = outcome === 'success' ? '✅' : '❌';
-              lines.push(`### ${icon} robonix CI — ${outcome}`);
-              lines.push('No machine-readable summary was produced (the run may have failed before the scenario step).');
+              const looksSkipped = outcome === 'skipped' || (outcome === 'success' && !harnessResult);
+              const icon = outcome === 'failure' || outcome === 'cancelled' ? '❌' : '⚠️';
+              const label = looksSkipped ? 'skipped' : 'no scenario summary';
+              lines.push(`### ${icon} robonix CI — ${label}`);
+              if (looksSkipped) {
+                lines.push('The Webots test job did not produce scenario output, so no report was published. This is not a verified Webots pass.');
+              } else {
+                lines.push('No machine-readable scenario summary was produced. Treat this as an incomplete infrastructure run, not as a verified Webots pass.');
+              }
             }
             lines.push('');
             const reportUrl = '${{ needs.publish_report.outputs.report_url }}';
             if (reportUrl) lines.push(`Report: [open HTML report](${reportUrl}).`);
-            else lines.push(`Report: download artifact \`testing-logs-*\` from [this run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) and open \`testing/report/index.html\`.`);
-            lines.push('Raw logs: scenario JSONL, provider logs, simulator logs, final caps, and boot logs are in the same artifact.');
+            else if (artifactPresent) lines.push(`Report: download artifact \`testing-logs-*\` from [this run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) and open \`testing/report/index.html\`.`);
+            else lines.push(`Report: no testing report artifact was available for [this run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}).`);
+            if (artifactPresent) lines.push('Raw logs: scenario JSONL, provider logs, simulator logs, final caps, and boot logs are in the same artifact.');
+            else lines.push('Raw logs: no testing-logs artifact was uploaded.');
 
             await github.rest.issues.updateComment({
               owner: context.repo.owner, repo: context.repo.repo,
