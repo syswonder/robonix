@@ -359,9 +359,11 @@ jobs:
             }
             lines.push('');
             const reportUrl = '${{ needs.publish_report.outputs.report_url }}';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             if (reportUrl) lines.push(`Report: [open HTML report](${reportUrl}).`);
-            else if (artifactPresent) lines.push(`Report: download artifact \`testing-logs-*\` from [this run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) and open \`testing/report/index.html\`.`);
-            else lines.push(`Report: no testing report artifact was available for [this run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}).`);
+            else if (artifactPresent) lines.push(`Report: download artifact \`testing-logs-*\` from [this run](${runUrl}) and open \`testing/report/index.html\`.`);
+            else lines.push(`Report: no testing report artifact was available for [this run](${runUrl}).`);
+            lines.push(`Action run: [open GitHub Actions run](${runUrl}).`);
             if (artifactPresent) lines.push('Raw logs: scenario JSONL, provider logs, simulator logs, final caps, and boot logs are in the same artifact.');
             else lines.push('Raw logs: no testing-logs artifact was uploaded.');
 
