@@ -64,8 +64,8 @@ def _build_messages(context: dict[str, Any]) -> list[dict[str, str]]:
         "title": "short status title",
         "stage": "checkout|merge|build|boot|simulator|scenario|report|success|unknown",
         "summary": "2-4 sentence human-readable analysis",
-        "pr_changes": ["what the PR/change appears to modify"],
-        "test_result": "what Webots CI exercised and observed",
+        "pr_changes": ["what changed, using only context.change_set.pr_files or context.change_set.git_diff"],
+        "test_result": "what Webots CI exercised and observed, using summary and logs",
         "likely_root_cause": "root cause if failing, otherwise empty or residual concern",
         "evidence": [{"source": "log or diff path", "line": 0, "text": "short evidence"}],
         "suggested_fix": "actionable fix if failing, otherwise follow-up/watch item",
@@ -75,6 +75,10 @@ def _build_messages(context: dict[str, Any]) -> list[dict[str, str]]:
     system = (
         "You are a Robonix CI diagnostic assistant. Analyze only the provided JSON context. "
         "Never claim access to files that are not in the context. Do not decide CI pass/fail; the scripts do that. "
+        "The change summary MUST be derived only from context.change_set.pr_files or context.change_set.git_diff. "
+        "Do not use logs, capability catalogs, provider names, repository layout, or pre-existing components to infer what changed. "
+        "If context.change_set is empty or unavailable, say the change summary is unavailable. "
+        "For push events, describe the tested commit only; do not call it a PR unless PR metadata is present. "
         "If tests passed, still summarize what changed, what was tested, and what humans should watch. "
         "Return one JSON object only, matching this schema: " + json.dumps(schema, ensure_ascii=False)
     )
