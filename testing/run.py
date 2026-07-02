@@ -21,6 +21,7 @@ scenario file mirrors what the fake VLM actually returns.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import subprocess
@@ -253,6 +254,62 @@ def count_rounds(events: list[dict]) -> int:
     return sum(1 for ev in events if ev.get("plan"))
 
 
+def summarize_rtdl_steps(scenario: dict) -> list[dict]:
+    """Return the scenario's planned RTDL trees for reports.
+
+    A scenario step is one VLM planning round. Keeping that tree in the summary
+    lets the HTML report show the actual sequence/parallel/do structure instead
+    of only a flattened contract list.
+    """
+    out: list[dict] = []
+    for idx, step in enumerate(scenario.get("steps", [])):
+        rtdl = step.get("rtdl")
+        if rtdl is None:
+            continue
+        out.append(
+            {
+                "index": idx,
+                "status": step.get("status", ""),
+                "description": step.get("rtdl_description", ""),
+                "content": step.get("content", ""),
+                "rtdl": copy.deepcopy(rtdl),
+            }
+        )
+    return out
+
+
+def _short_text(value: object, limit: int = 240) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    text = text.replace("\r", "")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def summarize_plan_rounds(events: list[dict]) -> list[dict]:
+    """Return executed plan rounds with leaf result excerpts for the report."""
+    leaves_by_call_id = {lr.get("call_id"): lr for lr in collect_leaf_results(events)}
+    rounds: list[dict] = []
+    for idx, calls in enumerate(collect_plan_rounds(events)):
+        round_calls = []
+        for call in calls:
+            call_id = call.get("call_id", "")
+            leaf = leaves_by_call_id.get(call_id, {})
+            round_calls.append(
+                {
+                    "call_id": call_id,
+                    "contract": call.get("contract_id", ""),
+                    "provider": call.get("provider_id", ""),
+                    "args": parse_args_json(call),
+                    "leaf_result": {
+                        "success": bool(leaf.get("success", False)) if leaf else None,
+                        "output": _short_text(leaf.get("output", "")) if leaf else "",
+                        "error": _short_text(leaf.get("error", "")) if leaf else "",
+                    },
+                }
+            )
+        rounds.append({"index": idx, "calls": round_calls})
+    return rounds
+
+
 def final_failed(events: list[dict]) -> bool:
     """True if pilot emitted a FAILED status anywhere in the stream."""
     return any((ev.get("status") or {}).get("state") == STATE_FAILED for ev in events)
@@ -397,6 +454,8 @@ def main() -> int:
                 "dispatched": [],
                 "failures": [f"timeout after {args.timeout}s"],
                 "log": log_path.name,
+                "rtdl_steps": summarize_rtdl_steps(scenario),
+                "observed_rounds": [],
             })
             failed.append(name)
             continue
@@ -410,6 +469,8 @@ def main() -> int:
         results.append({
             "name": name, "family": family, "passed": not errs, "rounds": rounds,
             "dispatched": dispatched, "failures": errs, "log": log_path.name,
+            "rtdl_steps": summarize_rtdl_steps(scenario),
+            "observed_rounds": summarize_plan_rounds(events),
         })
         if errs:
             print(f"  FAIL [{rounds} rounds] (log: {log_path.name}):")
