@@ -44,14 +44,15 @@ jobs:
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ubuntu-22.04
     outputs:
-      pr_ref: ${{ steps.pr.outputs.ref }}
+      test_ref: ${{ steps.pr.outputs.test_ref }}
+      merge_ref_available: ${{ steps.pr.outputs.merge_ref_available }}
       pr_number: ${{ steps.pr.outputs.number }}
       pr_title: ${{ steps.pr.outputs.title }}
       pr_author: ${{ steps.pr.outputs.author }}
       pr_url: ${{ steps.pr.outputs.url }}
       pr_head_ref: ${{ steps.pr.outputs.head_ref }}
       pr_head_repo: ${{ steps.pr.outputs.head_repo }}
-      pr_head_sha: ${{ steps.pr.outputs.ref }}
+      pr_head_sha: ${{ steps.pr.outputs.head_sha }}
       triggered_by: ${{ steps.pr.outputs.triggered_by }}
       comment_id: ${{ steps.say.outputs.comment_id }}
     steps:
@@ -68,7 +69,20 @@ jobs:
               owner: context.repo.owner, repo: context.repo.repo,
               pull_number: context.payload.issue.number,
             });
-            core.setOutput('ref', pr.data.head.sha);
+            const mergeRef = `refs/pull/${pr.data.number}/merge`;
+            let mergeRefAvailable = false;
+            try {
+              await github.rest.git.getRef({
+                owner: context.repo.owner, repo: context.repo.repo,
+                ref: `pull/${pr.data.number}/merge`,
+              });
+              mergeRefAvailable = true;
+            } catch (e) {
+              core.notice(`merge ref ${mergeRef} is unavailable; Webots will not run until the PR merges cleanly into base`);
+            }
+            core.setOutput('test_ref', mergeRef);
+            core.setOutput('merge_ref_available', String(mergeRefAvailable));
+            core.setOutput('head_sha', pr.data.head.sha || '');
             core.setOutput('number', String(pr.data.number));
             core.setOutput('title', pr.data.title || '');
             core.setOutput('author', pr.data.user?.login || '');
@@ -84,7 +98,8 @@ jobs:
             const body = [
               '<!-- robonix-ci-status -->',
               '### Robonix Webots CI - running',
-              `Triggered by @${context.payload.comment.user.login} on \`${{ steps.pr.outputs.ref }}\`.`,
+              `Triggered by @${context.payload.comment.user.login}.`,
+              `Testing merge result \`${{ steps.pr.outputs.test_ref }}\` for head \`${{ steps.pr.outputs.head_sha }}\`.`,
               `[Live logs](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
             ].join('\n');
             const c = await github.rest.issues.createComment({
@@ -97,10 +112,11 @@ jobs:
   test:
     name: Run Webots integration tests
     needs: gate
+    if: needs.gate.outputs.merge_ref_available == 'true'
     uses: ./.github/workflows/testing.yml
     with:
       authorized: true
-      ref: ${{ needs.gate.outputs.pr_ref }}
+      ref: ${{ needs.gate.outputs.test_ref }}
       pr_number: ${{ needs.gate.outputs.pr_number }}
       pr_title: ${{ needs.gate.outputs.pr_title }}
       pr_author: ${{ needs.gate.outputs.pr_author }}
@@ -115,11 +131,7 @@ jobs:
   publish_report:
     name: Publish report site
     needs: [gate, test]
-    if: >-
-      always() &&
-      needs.gate.result == 'success' &&
-      needs.test.result != 'skipped' &&
-      (needs.test.result != 'success' || needs.test.outputs.result != '')
+    if: always() && needs.gate.result == 'success'
     runs-on: ubuntu-22.04
     concurrency:
       group: webots-report-pages
@@ -160,6 +172,8 @@ jobs:
           REPORT_PR_HEAD_REF: ${{ needs.gate.outputs.pr_head_ref }}
           REPORT_PR_HEAD_REPO: ${{ needs.gate.outputs.pr_head_repo }}
           REPORT_PR_HEAD_SHA: ${{ needs.gate.outputs.pr_head_sha }}
+          REPORT_TEST_REF: ${{ needs.gate.outputs.test_ref }}
+          REPORT_MERGE_REF_AVAILABLE: ${{ needs.gate.outputs.merge_ref_available }}
           REPORT_TRIGGERED_BY: ${{ needs.gate.outputs.triggered_by }}
           REPORT_COMMENT_ID: ${{ needs.gate.outputs.comment_id }}
         run: |
@@ -198,6 +212,8 @@ jobs:
               --metadata "pr_head_repo=${REPORT_PR_HEAD_REPO:-}"
               --metadata "pr_head_sha=${REPORT_PR_HEAD_SHA:-}"
               --metadata "pr_head_commit_url=${{ github.server_url }}/${REPORT_PR_HEAD_REPO:-${{ github.repository }}}/commit/${REPORT_PR_HEAD_SHA:-}"
+              --metadata "test_ref=${REPORT_TEST_REF:-}"
+              --metadata "merge_ref_available=${REPORT_MERGE_REF_AVAILABLE:-}"
               --metadata "triggered_by=${REPORT_TRIGGERED_BY:-}"
             )
             [ -n "$report_metadata_json" ] && args+=(--metadata-json "$report_metadata_json")
@@ -213,9 +229,15 @@ jobs:
             args+=(--max-log-bytes 524288 --max-total-log-bytes 12582912)
             python3 testing/report.py "${args[@]}"
           else
+            if [ "${REPORT_MERGE_REF_AVAILABLE:-true}" != "true" ]; then
+              message="The PR merge ref ${REPORT_TEST_REF:-} is unavailable. The PR may not merge cleanly into its base branch, so Webots was not run."
+            else
+              message="No machine-readable scenario summary was available for this run. Treat this as an incomplete infrastructure run, not as a verified Webots pass."
+            fi
             printf '%s\n' \
               '<!doctype html><meta charset="utf-8"><title>Robonix Webots CI Report</title>' \
-              '<body><h1>Robonix Webots CI Report</h1><p>No machine-readable scenario summary was available for this run. Treat this as an incomplete infrastructure run, not as a verified Webots pass.</p></body>' \
+              '<body><h1>Robonix Webots CI Report</h1>' \
+              "<p>${message}</p></body>" \
               > "$report_dir/index.html"
           fi
 
@@ -274,6 +296,8 @@ jobs:
             const fs = require('fs');
             const outcome = '${{ needs.test.result }}';  // success / failure / cancelled / skipped
             const harnessResult = '${{ needs.test.outputs.result }}';
+            const mergeRefAvailable = '${{ needs.gate.outputs.merge_ref_available }}' === 'true';
+            const testRef = '${{ needs.gate.outputs.test_ref }}';
             // The artifact preserves the upload path (testing/logs/summary.json),
             // so locate it rather than assuming a flat layout.
             const findSummary = (dir) => {
@@ -320,11 +344,14 @@ jobs:
                 lines.push('</details>');
               }
             } else {
+              const mergeUnavailable = !mergeRefAvailable;
               const looksSkipped = outcome === 'skipped' || (outcome === 'success' && !harnessResult);
-              const icon = outcome === 'failure' || outcome === 'cancelled' ? '❌' : '⚠️';
-              const label = looksSkipped ? 'skipped' : 'no scenario summary';
+              const icon = outcome === 'failure' || outcome === 'cancelled' || mergeUnavailable ? '❌' : '⚠️';
+              const label = mergeUnavailable ? 'merge ref unavailable' : (looksSkipped ? 'skipped' : 'no scenario summary');
               lines.push(`### ${icon} robonix CI — ${label}`);
-              if (looksSkipped) {
+              if (mergeUnavailable) {
+                lines.push('GitHub did not provide the PR merge ref `' + testRef + '`, so this PR cannot currently be tested as merged into its base branch. Webots was not run.');
+              } else if (looksSkipped) {
                 lines.push('The Webots test job did not produce scenario output, so no report was published. This is not a verified Webots pass.');
               } else {
                 lines.push('No machine-readable scenario summary was produced. Treat this as an incomplete infrastructure run, not as a verified Webots pass.');
