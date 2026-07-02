@@ -152,6 +152,13 @@ enum ForestEvent {
         plan_id: String,
         results: Vec<RtdlNodeState>,
         any_failed: bool,
+        /// True when this tree ended because it was canceled (a node reached
+        /// CANCELED), as opposed to running to natural success/failure. A
+        /// cancellation fulfils a prior decision and carries no new info, so the
+        /// supervisor must NOT trigger a fresh planning round for it — otherwise
+        /// "cancel old plan → PlanDone → replan → model re-cancels" becomes a
+        /// self-sustaining storm with monotonically growing plan ids.
+        canceled: bool,
     },
 }
 
@@ -174,6 +181,7 @@ async fn drive_plan(
                     plan_id,
                     results: Vec::new(),
                     any_failed: true,
+                    canceled: false,
                 })
                 .await;
             return;
@@ -182,6 +190,7 @@ async fn drive_plan(
 
     let mut results: Vec<RtdlNodeState> = Vec::new();
     let mut any_failed = false;
+    let mut canceled = false;
     loop {
         match stream.message().await {
             Ok(Some(event)) => {
@@ -205,7 +214,13 @@ async fn drive_plan(
                     // a terminal state (leaf and non-leaf). A non-success
                     // terminal state marks the round as failed.
                     if is_terminal_executor_state(ns.state) {
-                        if ns.state != RtdlNodeStateEnum::Succeeded as u32 {
+                        if ns.state == RtdlNodeStateEnum::Canceled as u32 {
+                            // Cancellation is not a failure to recover from — it
+                            // is the model's own stop request taking effect. Flag
+                            // it so the supervisor suppresses the post-cancel
+                            // replan that would otherwise feed a cancel storm.
+                            canceled = true;
+                        } else if ns.state != RtdlNodeStateEnum::Succeeded as u32 {
                             any_failed = true;
                         }
                         results.push(ns);
@@ -226,6 +241,7 @@ async fn drive_plan(
             plan_id,
             results,
             any_failed,
+            canceled,
         })
         .await;
 }
@@ -271,7 +287,9 @@ fn build_forest_block(forest: &HashMap<String, TreeMeta>) -> String {
          (or `executor_cancel_all_plans` to stop everything at once). Cancel each \
          plan_id at most once — a cancel that returned is already stopping; do NOT \
          re-issue it. Only the plan_ids listed here are running; never cancel an id \
-         not in this list. Do not reuse these ids for new trees.\n",
+         not in this list. Do not reuse these ids for new trees. If an in-flight \
+         plan is already executing the same goal, do not cancel or re-issue it; \
+         wait for it to finish.\n",
     );
     for (plan_id, meta) in entries {
         block.push_str(&format!(
@@ -492,12 +510,16 @@ pub async fn run_turn(
              listed here have one.\n\n",
         );
         for d in &docs {
-            let tag = if d.namespace.contains("/skill/") || d.namespace.starts_with("skill/") {
-                " `[skill]`"
-            } else {
-                ""
-            };
-            block.push_str(&format!("- `{}` ({}){}\n", d.provider_id, d.namespace, tag));
+            let tag = if d.kind == "skill" { " `[skill]`" } else { "" };
+            // `provider_id` is the only token the LLM needs (it passes it to
+            // `read_capability_doc`); the one-line package description from the
+            // CAPABILITY.md frontmatter lets it judge relevance without reading
+            // the full manual. The internal `namespace` is deliberately omitted —
+            // it is routing detail the model never uses.
+            block.push_str(&format!(
+                "- `{}`{}: {}\n",
+                d.provider_id, tag, d.description
+            ));
         }
         system_prompt.push_str(&block);
     }
@@ -608,38 +630,32 @@ pub async fn run_turn(
                             // correlates with the Plan already sent).
                             ns.plan_id = plan_id.clone();
                             // Feed every node's result into context the moment it
-                            // reaches a terminal state (2=SUCCEEDED 3=FAILED
-                            // 4=CANCELED 5=TIMEOUT) so the model's view is always
-                            // current — but do NOT re-plan mid-tree. The model
-                            // decides at tree completion (PlanDone, which carries
-                            // any_failed) or when the user steers; a steer-triggered
-                            // re-plan then sees these partial results. Re-planning
-                            // per node caused runaway loops (a wall of repeated
-                            // narration; retrying a failed cancel forever). The
-                            // tree-level feed in PlanDone is dropped to avoid
-                            // double-feeding — every leaf result already arrives here.
+                            // reaches a terminal state, using names rather than
+                            // numeric RTDL state codes in logs. Successful nodes wait
+                            // for PlanDone before replanning; non-success terminal
+                            // nodes replan immediately below. The tree-level feed in
+                            // PlanDone is dropped to avoid double-feeding — every
+                            // leaf result already arrives here.
                             const TERMINAL: [u32; 4] = [2, 3, 4, 5];
                             if TERMINAL.contains(&ns.state)
                                 && let Some(r) = ns.leaf_result.as_ref()
                             {
                                 feed_results_into_history(history, std::slice::from_ref(r));
                             }
-                            // An error escalates to the VLM immediately rather than
-                            // waiting for the whole tree to finish (PlanDone): the
-                            // failure is already in context (a leaf result is fed
-                            // above), so re-plan now and let the model recover or
+                            // Any non-success terminal outcome escalates to the VLM
+                            // immediately rather than waiting for the whole tree to
+                            // finish (PlanDone): the result is already in context
+                            // above, so re-plan now and let the model recover or
                             // abort without blocking on still-running sibling
-                            // branches. Only failures escalate — successes still
-                            // batch at tree completion, which avoids the per-node
-                            // re-plan storms that plain "re-plan on every node"
-                            // caused.
-                            if ns.state == RtdlNodeStateEnum::Failed as u32 {
+                            // branches. Successes still batch at tree completion,
+                            // which avoids the per-node re-plan storms that plain
+                            // "re-plan on every node" caused.
+                            if is_terminal_executor_state(ns.state)
+                                && ns.state != RtdlNodeStateEnum::Succeeded as u32
+                            {
                                 should_plan = true;
                             }
-                            debug!(
-                                "[pilot/forest] node_state plan_id={} node={} state={}",
-                                plan_id, ns.node_index, ns.state
-                            );
+                            log_node_state(&plan_id, &ns);
                             // Forward to the chat UI for the live forest highlight.
                             // Moving `ns` last avoids cloning its (possibly large)
                             // leaf_result on every node tick.
@@ -650,10 +666,11 @@ pub async fn run_turn(
                                 )))
                                 .await;
                         }
-                        Some(ForestEvent::PlanDone { plan_id, results, any_failed }) => {
+                        Some(ForestEvent::PlanDone { plan_id, results, any_failed, canceled }) => {
                             forest.remove(&plan_id);
                             // Leaf results were already fed per-node (see above);
                             // only surface the batch to the chat UI here.
+                            log_plan_complete(&plan_id, &results, any_failed);
                             let batch = BatchResult {
                                 plan_id: plan_id.clone(),
                                 session_id: session_id.clone(),
@@ -667,10 +684,15 @@ pub async fn run_turn(
                                     PilotStreamBody::BatchResult(batch),
                                 )))
                                 .await;
-                            info!(
-                                "[pilot/forest] plan_id={plan_id} done (failed={any_failed}); replanning"
-                            );
-                            should_plan = true;
+                            // A canceled tree finishing is the fulfilment of a
+                            // prior stop request, not new task progress: replanning
+                            // here lets the model re-cancel the siblings it just
+                            // chose to keep, which cancels more trees and fires more
+                            // PlanDone — a self-feeding storm that grows plan ids
+                            // without bound. Only natural completion replans.
+                            if !canceled {
+                                should_plan = true;
+                            }
                         }
                         None => {
                             // run_turn still holds forest_tx, so a closed channel
@@ -769,7 +791,8 @@ pub async fn run_turn(
             }
 
             let raw_content = content.unwrap_or_default();
-            debug!("raw_content: {}", raw_content);
+            let plan_id = (plan_seq.load(Ordering::Relaxed) + 1).to_string();
+            debug!("[pilot/rtdl/raw] plan_id={plan_id} raw_content={raw_content}");
             let parsed = parse_rtdl_assistant_response(&raw_content).with_context(|| {
                 format!(
                     "parse RTDL assistant response: {}",
@@ -805,19 +828,14 @@ pub async fn run_turn(
                 }
             };
 
-            // Echo the model's literal `rtdl` tree so `rbnx logs -t pilot`
-            // shows exactly what the VLM emitted per node — including whether
-            // it filled `op_id` (expected: 0) and a node-level `description`
-            // per the RTDL protocol. This is the raw, pre-expansion payload.
-            info!(
-                "[pilot/rtdl] round={round} model rtdl: {}",
+            debug!(
+                "[pilot/rtdl/raw] plan_id={plan_id} model_rtdl={}",
                 serde_json::to_string(&rtdl).unwrap_or_else(|_| "<unserializable>".into())
             );
 
             // Tentative id: committed to `plan_seq` only if this round actually
             // dispatches a tree, so empty-rtdl rounds don't burn a plan id and
             // the ids stay contiguous with the trees the user sees and cancels.
-            let plan_id = (plan_seq.load(Ordering::Relaxed) + 1).to_string();
             match expand_rtdl_to_plan(
                 &rtdl,
                 &target_map,
@@ -832,16 +850,6 @@ pub async fn run_turn(
                 // expands — never on a recovery path, where it could falsely
                 // mark the turn done for a plan that never ran.
                 Ok(graph) => {
-                    // Per-node view of the expanded plan: the op_id is now the
-                    // pilot-assigned global id (the model's 0 is replaced), and
-                    // the description is the one that will reach executor/BATCH
-                    // (model-authored when present, else synthesized).
-                    for (i, n) in graph.nodes.iter().enumerate() {
-                        info!(
-                            "[pilot/rtdl]   node[{i}] kind={} op_id={} desc='{}'",
-                            n.node_kind, n.op_id, n.description
-                        );
-                    }
                     break (
                         assistant_content,
                         rtdl_description,
@@ -910,10 +918,7 @@ pub async fn run_turn(
         }
 
         let calls = plan_call_count(&graph);
-        info!(
-            "[pilot/rtdl] round={} plan_id={} calls={}",
-            round, graph.plan_id, calls
-        );
+        log_plan_start(&graph, &rtdl_description, round, calls);
 
         // Narration enters history once; it streams to the client as a
         // TextChunk while the turn continues, or as FinalText when it ends.
@@ -991,7 +996,7 @@ pub async fn run_turn(
         );
         tokio::spawn(drive_plan(graph, executor.graph.clone(), forest_tx.clone()));
         info!(
-            "[pilot/forest] dispatched plan_id={plan_id}; forest size now {}",
+            "[pilot/forest] plan_id={plan_id} dispatched forest_size={}",
             forest.len()
         );
 
@@ -1467,6 +1472,175 @@ fn plan_call_count(plan: &Plan) -> usize {
         .count()
 }
 
+/// Render an RTDL node state as a stable human-readable name for logs.
+fn rtdl_state_name(state: u32) -> String {
+    match RtdlNodeStateEnum::try_from(state as i32) {
+        Ok(RtdlNodeStateEnum::Pending) => "Pending".to_string(),
+        Ok(RtdlNodeStateEnum::Running) => "Running".to_string(),
+        Ok(RtdlNodeStateEnum::Succeeded) => "Succeeded".to_string(),
+        Ok(RtdlNodeStateEnum::Failed) => "Failed".to_string(),
+        Ok(RtdlNodeStateEnum::Canceled) => "Canceled".to_string(),
+        Ok(RtdlNodeStateEnum::Timeout) => "Timeout".to_string(),
+        Ok(RtdlNodeStateEnum::Paused) => "Paused".to_string(),
+        Err(_) => format!("Unknown({state})"),
+    }
+}
+
+/// Render an RTDL node kind as the tree operator name used in plan logs.
+fn rtdl_node_kind_name(kind: u32) -> String {
+    match kind {
+        RTDL_SEQUENCE => "sequence".to_string(),
+        RTDL_PARALLEL => "parallel".to_string(),
+        RTDL_DO => "do".to_string(),
+        _ => format!("unknown({kind})"),
+    }
+}
+
+/// Shorten free-form payloads so one log event stays readable on one line.
+fn compact_preview(value: &str, max_chars: usize) -> String {
+    let flattened = value.replace('\n', "\\n");
+    let mut preview: String = flattened.chars().take(max_chars).collect();
+    if flattened.chars().count() > max_chars {
+        preview.push_str("...");
+    }
+    preview
+}
+
+/// Recover the LLM-facing capability name from an expanded capability call.
+fn call_display_name(call: &CapabilityCall) -> String {
+    format!("{}.{}", call.provider_id, llm_name(&call.contract_id))
+}
+
+/// Append one node and its descendants to the human-readable plan summary.
+fn append_plan_node_summary(plan: &Plan, node_index: usize, depth: usize, out: &mut Vec<String>) {
+    let Some(node) = plan.nodes.get(node_index) else {
+        out.push(format!("{}[{node_index}] missing-node", "  ".repeat(depth)));
+        return;
+    };
+    let indent = "  ".repeat(depth);
+    let mut line = format!(
+        "{indent}[{node_index}] {} op_id={} desc='{}'",
+        rtdl_node_kind_name(node.node_kind),
+        node.op_id,
+        compact_preview(&node.description, 160),
+    );
+    if let Some(call) = node.call.as_ref() {
+        line.push_str(&format!(
+            " cap={} args={}",
+            call_display_name(call),
+            compact_preview(&call.args_json, 240)
+        ));
+    }
+    out.push(line);
+    for child in &node.children {
+        append_plan_node_summary(plan, *child as usize, depth + 1, out);
+    }
+}
+
+/// Format a plan as an indented tree instead of exposing arena child arrays.
+fn format_plan_summary(plan: &Plan) -> Vec<String> {
+    let mut lines = Vec::new();
+    append_plan_node_summary(plan, plan.root_index as usize, 0, &mut lines);
+    lines
+}
+
+/// Emit the compact plan-start log block for one expanded RTDL plan.
+fn log_plan_start(plan: &Plan, description: &str, round: u32, calls: usize) {
+    info!(
+        "[pilot/rtdl] -- plan start plan_id={} round={} calls={} --",
+        plan.plan_id, round, calls
+    );
+    info!(
+        "[pilot/rtdl] rtdl_plan_description='{}'",
+        compact_preview(description, 240)
+    );
+    info!("[pilot/rtdl] rtdl_plan:");
+    for line in format_plan_summary(plan) {
+        info!("[pilot/rtdl] {line}");
+    }
+}
+
+/// Build compact extra detail for non-success terminal node states.
+fn terminal_node_detail(ns: &RtdlNodeState) -> String {
+    if !is_terminal_executor_state(ns.state) || ns.state == RtdlNodeStateEnum::Succeeded as u32 {
+        return String::new();
+    }
+    let Some(result) = ns.leaf_result.as_ref() else {
+        return String::new();
+    };
+    if !result.error.trim().is_empty() {
+        return format!(" error='{}'", compact_preview(&result.error, 180));
+    }
+    if !result.output.trim().is_empty() {
+        return format!(" output='{}'", compact_preview(&result.output, 180));
+    }
+    String::new()
+}
+
+/// Emit one readable node-state event without numeric state or kind codes.
+fn log_node_state(plan_id: &str, ns: &RtdlNodeState) {
+    let mut line = format!(
+        "[pilot/forest] plan_id={} node={} op_id={} state={} desc='{}'",
+        plan_id,
+        ns.node_index,
+        ns.op_id,
+        rtdl_state_name(ns.state),
+        compact_preview(&ns.description, 160),
+    );
+    if !ns.operator_detail.trim().is_empty() {
+        line.push_str(&format!(
+            " detail='{}'",
+            compact_preview(&ns.operator_detail, 180)
+        ));
+    }
+    line.push_str(&terminal_node_detail(ns));
+    debug!("{line}");
+}
+
+/// Pick the plan-level completion state shown in the forest completion log.
+fn plan_completion_state(results: &[RtdlNodeState], any_failed: bool) -> String {
+    if !any_failed {
+        return "Succeeded".to_string();
+    }
+    for preferred in [
+        RtdlNodeStateEnum::Failed as u32,
+        RtdlNodeStateEnum::Timeout as u32,
+        RtdlNodeStateEnum::Canceled as u32,
+    ] {
+        if results.iter().any(|ns| ns.state == preferred) {
+            return rtdl_state_name(preferred);
+        }
+    }
+    results
+        .iter()
+        .find(|ns| ns.state != RtdlNodeStateEnum::Succeeded as u32)
+        .map(|ns| rtdl_state_name(ns.state))
+        .unwrap_or_else(|| "Failed".to_string())
+}
+
+/// Emit the readable plan completion line, including non-success terminal nodes.
+fn log_plan_complete(plan_id: &str, results: &[RtdlNodeState], any_failed: bool) {
+    let state = plan_completion_state(results, any_failed);
+    let mut line = format!(
+        "[pilot/forest] plan_id={} complete state={} terminal_nodes={}",
+        plan_id,
+        state,
+        results.len()
+    );
+    let non_success: Vec<String> = results
+        .iter()
+        .filter(|ns| ns.state != RtdlNodeStateEnum::Succeeded as u32)
+        .map(|ns| format!("node={} state={}", ns.node_index, rtdl_state_name(ns.state)))
+        .collect();
+    if !non_success.is_empty() {
+        line.push_str(" non_success=[");
+        line.push_str(&non_success.join(", "));
+        line.push(']');
+    }
+    line.push_str("; replanning");
+    info!("{line}");
+}
+
 fn is_terminal_executor_state(state: u32) -> bool {
     matches!(
         RtdlNodeStateEnum::try_from(state as i32),
@@ -1478,25 +1652,32 @@ fn is_terminal_executor_state(state: u32) -> bool {
 }
 
 fn rtdl_result_to_messages(r: &CapabilityCallResult) -> history::ToolResultHistory {
-    if !r.success {
-        return history::ToolResultHistory {
-            tool_messages: vec![Message::user(&format!(
-                "Executor feedback for the current task (not a new user request): {}",
-                r.output
-            ))],
+    let mapped = if r.success {
+        history::tool_result_to_messages(&r.call_id, &r.output)
+    } else {
+        history::ToolResultHistory {
+            tool_messages: vec![Message::user(&r.output)],
             followup_messages: vec![],
-        };
-    }
+        }
+    };
 
-    let mapped = history::tool_result_to_messages(&r.call_id, &r.output);
     let tool_messages = mapped
         .tool_messages
         .into_iter()
         .map(|msg| {
-            let content = msg.content.unwrap_or_default();
+            let output = msg.content.unwrap_or_default();
+            let feedback = serde_json::json!({
+                "leaf_result": {
+                    "call_id": r.call_id,
+                    "contract_id": r.contract_id,
+                    "success": r.success,
+                    "output": output,
+                    "error": r.error,
+                }
+            });
             Message::user(&format!(
-                "Executor feedback for the current task (not a new user request): {}",
-                content
+                "Executor feedback for the current RTDL leaf (not a new user request): {}",
+                feedback
             ))
         })
         .collect();
@@ -1602,8 +1783,8 @@ while you wait for an in-flight tree). Do NOT mark the task `done` until it is
 mod tests {
     use super::{
         CapabilityTargetMap, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, TaskState, expand_rtdl_to_plan,
-        parse_rtdl_assistant_response, parse_task_update, rtdl_recovery_final_text,
-        skip_memory_prefetch, task_is_session_end,
+        format_plan_summary, parse_rtdl_assistant_response, parse_task_update, rtdl_node_kind_name,
+        rtdl_recovery_final_text, rtdl_state_name, skip_memory_prefetch, task_is_session_end,
     };
     use crate::pb::pilot::Task;
     use serde_json::json;
@@ -1658,6 +1839,24 @@ mod tests {
     fn no_skip_prefetch_real_query() {
         assert!(!skip_memory_prefetch("open the door"));
         assert!(!skip_memory_prefetch("find me a red cup"));
+    }
+
+    #[test]
+    fn rtdl_state_names_are_human_readable() {
+        assert_eq!(rtdl_state_name(0), "Pending");
+        assert_eq!(rtdl_state_name(2), "Succeeded");
+        assert_eq!(rtdl_state_name(3), "Failed");
+        assert_eq!(rtdl_state_name(4), "Canceled");
+        assert_eq!(rtdl_state_name(5), "Timeout");
+        assert_eq!(rtdl_state_name(999), "Unknown(999)");
+    }
+
+    #[test]
+    fn rtdl_node_kind_names_are_human_readable() {
+        assert_eq!(rtdl_node_kind_name(RTDL_SEQUENCE), "sequence");
+        assert_eq!(rtdl_node_kind_name(RTDL_PARALLEL), "parallel");
+        assert_eq!(rtdl_node_kind_name(RTDL_DO), "do");
+        assert_eq!(rtdl_node_kind_name(99), "unknown(99)");
     }
 
     #[test]
@@ -1798,6 +1997,43 @@ mod tests {
         assert_eq!(plan.nodes[0].children, vec![1, 2]);
         assert_eq!(plan.nodes[1].call.as_ref().unwrap().call_id, "p:0");
         assert_eq!(plan.nodes[2].call.as_ref().unwrap().call_id, "p:1");
+    }
+
+    #[test]
+    fn format_plan_summary_uses_tree_shape_and_compact_cap_names() {
+        let mut targets = CapabilityTargetMap::new();
+        targets.insert(
+            "nav2.navigation_status".to_string(),
+            (
+                "nav2".to_string(),
+                "robonix/service/navigation/status".to_string(),
+            ),
+        );
+        let rtdl = json!({
+            "op": "sequence",
+            "description": "poll navigation status",
+            "children": [
+                {
+                    "op": "do",
+                    "description": "check current navigation goal",
+                    "cap": "nav2.navigation_status",
+                    "args": { "goal_id": "" }
+                }
+            ]
+        });
+        let plan = expand_rtdl_to_plan(&rtdl, &targets, "p".into(), "s".into(), 1, "").unwrap();
+        let summary = format_plan_summary(&plan).join("\n");
+
+        assert!(summary.contains("[0] sequence"));
+        assert!(summary.contains("[1] do"));
+        assert!(summary.contains("cap=nav2.navigation_status"));
+        assert!(summary.contains(r#"args={"goal_id":""}"#));
+        assert!(summary.contains("  [1] do"));
+        assert!(!summary.contains("kind="));
+        assert!(!summary.contains("state="));
+        assert!(!summary.contains("children"));
+        assert!(!summary.contains("robonix/service/navigation/status"));
+        assert!(!summary.contains("call_id"));
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //
 //   ┌────────────────┐ Enter ─────────► SrvLiaison.Stream(Task)
 //   │ rbnx chat TUI  │                 (text → PilotEvent stream)
-//   └────────────────┘ Ctrl+V ────────► SrvLiaison.StartVoiceSession(req)
+//   └────────────────┘ F2 ────────► SrvLiaison.StartVoiceSession(req)
 //                                       (voice → VoiceEvent stream which
 //                                        wraps PilotEvent in `pilot` field)
 //
@@ -481,7 +481,7 @@ async fn pick_audio_settings(
         Err(e) => {
             warnings.push(format!(
                 "audio device pick skipped — atlas unreachable at {atlas_endpoint}: {e:#}. \
-                 Text mode still works; voice (Ctrl+V) will fail until atlas is up."
+                 Text mode still works; voice (F2) will fail until atlas is up."
             ));
             return Ok((cfg, warnings));
         }
@@ -1489,7 +1489,7 @@ async fn run_tui(
         role: Role::Status,
         text: format!(
             "Connected to Liaison at {liaison_endpoint} as {local_user}. \
-             Enter = send · type + Enter mid-task = steer · Ctrl+V = voice (auto end on silence) · Ctrl+A = audio settings · Esc = abort turn · Ctrl+C = quit."
+             Enter = send · F2 = voice (auto end on silence) · Ctrl+A = audio settings · Esc = abort turn · Ctrl+C = quit."
         ),
     });
     for w in audio_warnings {
@@ -1553,15 +1553,12 @@ async fn run_tui(
                 continue;
             }
 
-            // Ctrl+V → push-to-talk voice session (auto-ends on silence).
-            if !busy
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-                && key.code == KeyCode::Char('v')
-            {
+            // F2 → push-to-talk voice session (auto-ends on silence).
+            if !busy && key.code == KeyCode::F(2) {
                 busy = true;
                 messages.borrow_mut().push(ChatMessage {
                     role: Role::Status,
-                    text: "Ctrl+V — starting voice session…".to_string(),
+                    text: "F2 — starting voice session…".to_string(),
                 });
                 draw(
                     terminal,
@@ -1743,6 +1740,46 @@ async fn abort_session(liaison_endpoint: &str, session_id: &str, user_id: &str) 
         .await
         .context("Liaison abort_turn Stream failed")?;
     Ok(())
+}
+
+/// Fire-and-forget a mid-turn VOICE steer (Ctrl+V during a running turn):
+/// record + ASR another utterance via a fresh voice session and let its
+/// transcript submit — Pilot steers it into the active turn. TTS is disabled
+/// here (the per-segment playback rides the main turn's stream); we just drain
+/// this session's events on a spawned task.
+fn spawn_voice_steer(
+    liaison_endpoint: &str,
+    session_id: &str,
+    user_id: &str,
+    chat_cfg: &ChatConfig,
+) {
+    use crate::pb::contracts::robonix_system_liaison_voice_client::RobonixSystemLiaisonVoiceClient;
+    use crate::pb::liaison::StartVoiceSessionRequest;
+    let ep = liaison_endpoint.to_string();
+    let req = StartVoiceSessionRequest {
+        session_id: session_id.to_string(),
+        client_user_id: user_id.to_string(),
+        record_seconds: voice_record_seconds(),
+        language: voice_language(),
+        tts_enabled: false,
+        mic_node_id: voice_node_with_cfg("ROBONIX_CHAT_MIC_NODE", chat_cfg.mic_cap_id.as_deref()),
+        asr_node_id: voice_node("ROBONIX_CHAT_ASR_NODE"),
+        voiceprint_node_id: String::new(),
+        tts_node_id: voice_node("ROBONIX_CHAT_TTS_NODE"),
+        speaker_node_id: voice_node_with_cfg(
+            "ROBONIX_CHAT_SPEAKER_NODE",
+            chat_cfg.speaker_cap_id.as_deref(),
+        ),
+        context_json: String::new(),
+    };
+    tokio::spawn(async move {
+        if let Ok(mut client) = RobonixSystemLiaisonVoiceClient::connect(ep).await
+            && let Ok(resp) = client.start_voice_session(tonic::Request::new(req)).await
+        {
+            let mut s = resp.into_inner();
+            while s.next().await.is_some() {}
+        }
+    });
 }
 
 // ── Text turn ────────────────────────────────────────────────────────────────
@@ -1960,6 +1997,12 @@ async fn run_voice_session_with_esc_abort(
         }
     });
 
+    // Mid-task steer during a voice turn (mirrors the text turn): type + Enter
+    // sends a text steer; Ctrl+V records another utterance as a voice steer.
+    // Pilot routes either into the running turn instead of starting a new one.
+    let _ = input;
+    let mut steer_input = String::new();
+
     loop {
         tokio::select! {
             biased;
@@ -1968,14 +2011,14 @@ async fn run_voice_session_with_esc_abort(
                     None => break,
                     Some(Ok(event)) => {
                         apply_voice_event(&messages, forest, &event)?;
-                        draw(terminal, &messages.borrow(), &forest.borrow(), input, 0, true)?;
+                        draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, 0, true)?;
                     }
                     Some(Err(e)) => {
                         messages.borrow_mut().push(ChatMessage {
                             role: Role::Status,
                             text: format!("Voice stream error: {e}"),
                         });
-                        draw(terminal, &messages.borrow(), &forest.borrow(), input, 0, true)?;
+                        draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, 0, true)?;
                         break;
                     }
                 }
@@ -1983,24 +2026,63 @@ async fn run_voice_session_with_esc_abort(
             _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
                 if event::poll(std::time::Duration::ZERO)?
                     && let Event::Key(key) = event::read()? {
-                        match key.code {
-                            KeyCode::Esc => {
-                                let _ = abort_session(liaison_endpoint, session_id, user_id).await;
-                                messages.borrow_mut().push(ChatMessage {
-                                    role: Role::Status,
-                                    text: "Esc — abort_turn sent (Pilot stops; voice playback may still finish).".to_string(),
-                                });
-                                draw(terminal, &messages.borrow(), &forest.borrow(), input, *scroll, true)?;
+                        if key.code == KeyCode::Char('v')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            messages.borrow_mut().push(ChatMessage {
+                                role: Role::Voice,
+                                text: "Ctrl+V — voice steer: speak your addition…".to_string(),
+                            });
+                            spawn_voice_steer(liaison_endpoint, session_id, user_id, chat_cfg);
+                            draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, *scroll, true)?;
+                        } else {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    let _ = abort_session(liaison_endpoint, session_id, user_id).await;
+                                    messages.borrow_mut().push(ChatMessage {
+                                        role: Role::Status,
+                                        text: "Esc — abort_turn sent (Pilot stops; voice playback may still finish).".to_string(),
+                                    });
+                                    draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, *scroll, true)?;
+                                }
+                                KeyCode::Enter => {
+                                    let steer = steer_input.trim().to_string();
+                                    steer_input.clear();
+                                    if !steer.is_empty() {
+                                        messages.borrow_mut().push(ChatMessage {
+                                            role: Role::User,
+                                            text: format!("(steer) {steer}"),
+                                        });
+                                        if let Err(e) =
+                                            send_steer(liaison_endpoint, session_id, user_id, &steer).await
+                                        {
+                                            messages.borrow_mut().push(ChatMessage {
+                                                role: Role::Status,
+                                                text: format!("steer failed: {e:#}"),
+                                            });
+                                        }
+                                        *scroll = 0;
+                                    }
+                                    draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, *scroll, true)?;
+                                }
+                                KeyCode::Char(c) => {
+                                    steer_input.push(c);
+                                    draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, *scroll, true)?;
+                                }
+                                KeyCode::Backspace => {
+                                    steer_input.pop();
+                                    draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, *scroll, true)?;
+                                }
+                                KeyCode::PageUp => {
+                                    *scroll = scroll.saturating_add(5);
+                                    draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, *scroll, true)?;
+                                }
+                                KeyCode::PageDown => {
+                                    *scroll = scroll.saturating_sub(5);
+                                    draw(terminal, &messages.borrow(), &forest.borrow(), &steer_input, *scroll, true)?;
+                                }
+                                _ => {}
                             }
-                            KeyCode::PageUp => {
-                                *scroll = scroll.saturating_add(5);
-                                draw(terminal, &messages.borrow(), &forest.borrow(), input, *scroll, true)?;
-                            }
-                            KeyCode::PageDown => {
-                                *scroll = scroll.saturating_sub(5);
-                                draw(terminal, &messages.borrow(), &forest.borrow(), input, *scroll, true)?;
-                            }
-                            _ => {}
                         }
                     }
             }
@@ -2370,10 +2452,11 @@ fn draw(
             .scroll((panel_scroll, 0));
         f.render_widget(panel, body[1]);
 
-        let input_widget =
-            Paragraph::new(input.to_string()).block(Block::default().borders(Borders::ALL).title(
-                " > Enter = send · type+Enter mid-task = steer · Esc = abort · Ctrl+C = quit ",
-            ));
+        let input_widget = Paragraph::new(input.to_string()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" > Enter = send · F2 = voice (auto end) · Esc = abort · Ctrl+C = quit "),
+        );
         f.render_widget(input_widget, chunks[1]);
     })?;
     Ok(())

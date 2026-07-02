@@ -15,6 +15,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import threading
@@ -42,16 +43,26 @@ _TAG_WIDTH = 24
 _lock: threading.Lock = threading.Lock()
 _log_dir: Optional[Path] = None
 _writers: Dict[str, TextIO] = {}
+# Whether to also mirror each record to stderr in console format. Suppressed
+# when an orchestrator (rbnx) provisioned $SCRIBE_LOG_DIR: rbnx already pipes
+# the process's stdout/stderr back into Scribe under the same tag, so a stderr
+# echo would be re-ingested and every line would appear twice in the per-tag
+# file. With SCRIBE_LOG_DIR set, the direct file write below is authoritative.
+# When unset (standalone dev, or a docker container whose in-container log dir
+# isn't collected) the echo stays on — there it is the only way the output
+# reaches a human or rbnx's pipe.
+_console_echo: bool = True
 
 
 def _ensure_init() -> None:
     """Lazily initialise log directory and internal state on first call."""
-    global _log_dir  # noqa: PLW0603
+    global _log_dir, _console_echo  # noqa: PLW0603
     if _log_dir is not None:
         return
     with _lock:
         if _log_dir is not None:
             return
+        _console_echo = "SCRIBE_LOG_DIR" not in os.environ
         _log_dir = Path(os.environ.get("SCRIBE_LOG_DIR", "./logs"))
         _log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -134,13 +145,14 @@ def log(level: Level, tag: str, msg: str) -> None:
 
     ts_ns = time.time_ns()
 
-    # console → stderr
-    try:
-        console_line = _format_console(ts_ns, level, tag, msg)
-        sys.stderr.write(console_line)
-        sys.stderr.flush()
-    except Exception:  # noqa: BLE001
-        pass
+    # console → stderr (skipped when rbnx owns the per-tag file; see _console_echo)
+    if _console_echo:
+        try:
+            console_line = _format_console(ts_ns, level, tag, msg)
+            sys.stderr.write(console_line)
+            sys.stderr.flush()
+        except Exception:  # noqa: BLE001
+            pass
 
     # file → $SCRIBE_LOG_DIR/{tag}.log
     try:
@@ -172,3 +184,73 @@ def warn(tag: str, msg: str) -> None:
 def error(tag: str, msg: str) -> None:
     """Convenience: :attr:`Level.ERROR`."""
     log(Level.ERROR, tag, msg)
+
+
+# ── stdlib `logging` → Scribe bridge ─────────────────────────────────
+
+_STDLIB_LEVEL_MAP: Dict[int, Level] = {
+    logging.DEBUG: Level.DEBUG,
+    logging.INFO: Level.INFO,
+    logging.WARNING: Level.WARN,
+    logging.ERROR: Level.ERROR,
+    logging.CRITICAL: Level.ERROR,
+}
+
+
+class _StdlibBridgeHandler(logging.Handler):
+    """A stdlib ``logging.Handler`` that re-emits every record into Scribe.
+
+    Carries a fixed component *tag* so any library's logging (the package's
+    own, plus transitive deps that use stdlib ``logging``) lands in that
+    component's ``rbnx logs -t <tag>`` stream. Best-effort: a failure to
+    forward never propagates back into the caller's logging path.
+    """
+
+    def __init__(self, tag: str) -> None:
+        super().__init__()
+        self._tag = tag
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level = _STDLIB_LEVEL_MAP.get(record.levelno, Level.INFO)
+            log(level, self._tag, record.getMessage())
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def install_stdlib_bridge(
+    tag: str,
+    *,
+    level: int = logging.INFO,
+    logger: Optional[logging.Logger] = None,
+    replace_existing_handlers: bool = True,
+) -> logging.Logger:
+    """Route stdlib ``logging`` through Scribe so packages need no own sink.
+
+    Attaches a :class:`_StdlibBridgeHandler` (tagged *tag*) to *logger* (the
+    root logger by default, so transitive-dependency logs are captured too) and
+    raises its level to *level*. When *replace_existing_handlers* is true,
+    every other handler already on that logger — ``StreamHandler`` (stdout/
+    stderr), ``FileHandler`` (a per-package log file), a ``rich`` handler from
+    fastmcp/uvicorn, anything — is removed first, so the bridge is the *only*
+    sink. This enforces the repo rule "no package owns a log file or duplicate
+    stdout sink; everything goes through Scribe" (Scribe already mirrors to
+    stderr itself, so console output is not lost).
+
+    Idempotent and re-taggable: exactly one bridge handler ever exists on the
+    logger, and the most recent call's *tag* wins (so the framework can re-tag
+    with the provider id at bootstrap after a package set a provisional tag at
+    import). Returns the configured logger.
+    """
+    target = logger if logger is not None else logging.getLogger()
+    target.setLevel(level)
+
+    for handler in list(target.handlers):
+        if isinstance(handler, _StdlibBridgeHandler):
+            # Drop any prior bridge so the new tag replaces the old one.
+            target.removeHandler(handler)
+        elif replace_existing_handlers:
+            target.removeHandler(handler)
+
+    target.addHandler(_StdlibBridgeHandler(tag))
+    return target

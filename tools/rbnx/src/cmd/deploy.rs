@@ -58,13 +58,20 @@ const CMD_SHUTDOWN: u32 = 3;
 // How long to wait for a freshly spawned package to register its driver
 // capability with atlas before giving up.
 const DRIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
-// How long Driver(CMD_INIT) is given to return.
-// 90s gives generous slack for slow-warming sensors (webots's camera
-// can take 30-50s to start publishing on cold boot). Primitive
-// driver-side waits should still be < this so they own their own
-// timeout semantics rather than racing the CLI deadline.
-const DRIVER_INIT_TIMEOUT: Duration = Duration::from_secs(90);
+// Default Driver(CMD_INIT) deadline. Webots CI can override this with
+// ROBONIX_DRIVER_INIT_TIMEOUT_S for real stacks whose lifecycle bringup may
+// exceed 90s on a cold self-hosted runner.
+const DEFAULT_DRIVER_INIT_TIMEOUT: Duration = Duration::from_secs(90);
 const DEPLOY_CONSUMER_ID: &str = "rbnx-cli/deploy";
+
+fn driver_init_timeout() -> Duration {
+    std::env::var("ROBONIX_DRIVER_INIT_TIMEOUT_S")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_DRIVER_INIT_TIMEOUT)
+}
 
 // ── Deploy manifest schema (subset used by this orchestrator) ───────────
 
@@ -125,6 +132,23 @@ struct PackageEntry {
 /// been cloned yet). Use `entry_path_exists_on_disk` to check
 /// presence; use the public `cmd::fetch::clone_remote_packages`
 /// (called from `rbnx build`) to actually populate the cache.
+/// Cache directory name for a url-remote package: the git REPO name (last path
+/// segment of the url, minus `.git`), NOT the per-instance provider id.
+///
+/// A single repo can back several providers/instances in one manifest (each
+/// with its own `name`/provider_id); they must share ONE clone. Keying the
+/// cache dir by `name` would clone the same repo once per instance — and the
+/// directory wouldn't reflect what was actually cloned. Key it by the repo.
+pub(crate) fn repo_dir_name(url: &str) -> String {
+    url.trim_end_matches('/')
+        .trim_end_matches(".git")
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("pkg")
+        .to_string()
+}
+
 fn resolve_entry_path(
     entry: &PackageEntry,
     cache_root: &Path,
@@ -132,18 +156,7 @@ fn resolve_entry_path(
 ) -> Result<PathBuf> {
     match (&entry.path, &entry.url) {
         (Some(p), None) => Ok(manifest_dir.join(p)),
-        (None, Some(url)) => {
-            let name = if entry.name.is_empty() {
-                url.trim_end_matches(".git")
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("pkg")
-                    .to_string()
-            } else {
-                entry.name.clone()
-            };
-            Ok(cache_root.join(&name))
-        }
+        (None, Some(url)) => Ok(cache_root.join(repo_dir_name(url))),
         (Some(_), Some(_)) => {
             anyhow::bail!("package entry has both `path` and `url`; pick one")
         }
@@ -217,7 +230,7 @@ fn check_prerequisites(
         output::warning(&format!(
             "{name}: not in cache — `rbnx build` should run before `rbnx boot`. cloning inline."
         ));
-        let dest = cache_root.join(name);
+        let dest = cache_root.join(repo_dir_name(url));
         std::fs::create_dir_all(cache_root)?;
         let mut clone = std::process::Command::new("git");
         clone.arg("clone").arg("--depth").arg("1");
@@ -443,7 +456,7 @@ async fn spawn_system_binary(
         let reader = tokio::io::BufReader::new(stdout);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            scribe::info(&tag_out, &line);
+            scribe::ingest(&tag_out, &line);
         }
     });
     tokio::spawn(async move {
@@ -453,7 +466,7 @@ async fn spawn_system_binary(
             // stderr is not always errors — Python logging defaults to
             // stderr for INFO too.  Use `info` to avoid misrepresenting
             // the actual severity.
-            scribe::info(&tag_err, &line);
+            scribe::ingest(&tag_err, &line);
         }
     });
     // Salient detail per builtin: port + role, redact long flag soup
@@ -632,15 +645,20 @@ fn libc_close(fd: RawFd) -> i32 {
     unsafe { close(fd) }
 }
 
+struct PackageSpawnEnv<'a> {
+    log_dir: &'a Path,
+    cache_root: &'a Path,
+    instances_dir: &'a Path,
+    manifest_dir: &'a Path,
+    atlas_endpoint: &'a str,
+}
+
 async fn spawn_package(
-    log_dir: &Path,
-    cache_root: &Path,
-    instances_dir: &Path,
     component: &str,
     entry: &PackageEntry,
-    manifest_dir: &Path,
+    env: &PackageSpawnEnv<'_>,
 ) -> Result<Spawned> {
-    let pkg_path = resolve_entry_path(entry, cache_root, manifest_dir)?;
+    let pkg_path = resolve_entry_path(entry, env.cache_root, env.manifest_dir)?;
     let pkg_path = pkg_path
         .canonicalize()
         .with_context(|| format!("package path not found: {}", pkg_path.display()))?;
@@ -668,7 +686,7 @@ async fn spawn_package(
     // it as an env var to the spawned `rbnx start`.
     let cfg_json = serde_json::to_value(&entry.config).unwrap_or(serde_json::Value::Null);
     let cfg_pretty = serde_json::to_string_pretty(&cfg_json).unwrap_or_else(|_| "{}".into());
-    let cfg_file = instances_dir.join(format!("{name}.json"));
+    let cfg_file = env.instances_dir.join(format!("{name}.json"));
     std::fs::write(&cfg_file, &cfg_pretty)
         .with_context(|| format!("failed to write {}", cfg_file.display()))?;
 
@@ -687,13 +705,22 @@ async fn spawn_package(
     // `entry.config` higher in this module — and atlas-side bookkeeping;
     // the provider never sees it.
     let _ = &cfg_file; // kept for debug / inspection; not exported
+    // Tell the provider which atlas to register with — derived from the
+    // manifest's `system.atlas.listen`, NOT the hard default 127.0.0.1:50051.
+    // Without this an alt-port deploy (e.g. an isolated CI run) leaves every
+    // provider dialing 50051 and failing to register. A bind-all listen
+    // (0.0.0.0) is rewritten to a dialable loopback for the provider; an
+    // in-container driver further overrides this via ROBONIX_SIM_ATLAS.
+    let provider_atlas = env.atlas_endpoint.replacen("0.0.0.0", "127.0.0.1", 1);
     let mut cmd = Command::new(&rbnx_bin);
     cmd.arg("start")
         .arg("-p")
         .arg(pkg_path.as_os_str())
+        .arg("--endpoint")
+        .arg(&provider_atlas)
         .env("RBNX_INSTANCE_NAME", &name)
-        .env("RBNX_INVOCATION_CWD", manifest_dir)
-        .env("SCRIBE_LOG_DIR", log_dir)
+        .env("RBNX_INVOCATION_CWD", env.manifest_dir)
+        .env("SCRIBE_LOG_DIR", env.log_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -724,7 +751,7 @@ async fn spawn_package(
         let reader = tokio::io::BufReader::new(stdout);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            scribe::info(&tag_out, &line);
+            scribe::ingest(&tag_out, &line);
         }
     });
     tokio::spawn(async move {
@@ -734,7 +761,7 @@ async fn spawn_package(
             // stderr is not always errors — Python logging defaults to
             // stderr for INFO too.  Use `info` to avoid misrepresenting
             // the actual severity.
-            scribe::info(&tag_err, &line);
+            scribe::ingest(&tag_err, &line);
         }
     });
     // No spawn line here — wait until provider registration and emit one
@@ -911,6 +938,13 @@ pub async fn execute(
         .and_then(|v| v.as_str())
         .unwrap_or("127.0.0.1:50051")
         .to_string();
+    let spawn_env = PackageSpawnEnv {
+        log_dir: &log_dir,
+        cache_root: &cache_root,
+        instances_dir: &instances_dir,
+        manifest_dir: &manifest_dir,
+        atlas_endpoint: &atlas_endpoint,
+    };
 
     // Boot is responsible for spawning + atlas registration ONLY.
     // Fetching (git clone of url-remote pkgs) and building are
@@ -1164,17 +1198,7 @@ pub async fn execute(
                     config: value.clone(),
                     manifest: None,
                 };
-                match spawn_and_init(
-                    "system",
-                    &entry,
-                    &log_dir,
-                    &cache_root,
-                    &instances_dir,
-                    &manifest_dir,
-                    &mut atlas,
-                )
-                .await
-                {
+                match spawn_and_init("system", &entry, &spawn_env, &mut atlas).await {
                     Ok(sp) => {
                         children.push(sp);
                         persist_state(
@@ -1206,17 +1230,7 @@ pub async fn execute(
             output::boot_section("service");
         }
         for e in &deploy.service {
-            match spawn_and_init(
-                "service",
-                e,
-                &log_dir,
-                &cache_root,
-                &instances_dir,
-                &manifest_dir,
-                &mut atlas,
-            )
-            .await
-            {
+            match spawn_and_init("service", e, &spawn_env, &mut atlas).await {
                 Ok(sp) => {
                     children.push(sp);
                     persist_state(
@@ -1666,10 +1680,7 @@ fn system_cli_args(
 async fn spawn_and_init(
     component: &str,
     entry: &PackageEntry,
-    log_dir: &Path,
-    cache_root: &Path,
-    instances_dir: &Path,
-    manifest_dir: &Path,
+    spawn_env: &PackageSpawnEnv<'_>,
     atlas: &mut AtlasClient,
 ) -> Result<Spawned> {
     let before: HashSet<String> = atlas
@@ -1680,15 +1691,7 @@ async fn spawn_and_init(
         .map(|r| r.id)
         .collect();
 
-    let sp = spawn_package(
-        log_dir,
-        cache_root,
-        instances_dir,
-        component,
-        entry,
-        manifest_dir,
-    )
-    .await?;
+    let sp = spawn_package(component, entry, spawn_env).await?;
     let pkg_label = sp.name.clone();
 
     // One package = one provider. After spawn, the new provider_id is whatever
@@ -1711,7 +1714,8 @@ async fn spawn_and_init(
     };
 
     let (provider_id, driver_contract) =
-        match wait_for_registration(atlas, &before, &pkg_label, component, log_dir).await {
+        match wait_for_registration(atlas, &before, &pkg_label, component, spawn_env.log_dir).await
+        {
             Ok(v) => v,
             Err(e) => {
                 reap();
@@ -1725,7 +1729,7 @@ async fn spawn_and_init(
     // beats letting downstream consumers fail with cryptic
     // "no provider for X" errors.
     if provider_id != entry.name {
-        let log_file = log_path(log_dir, &pkg_label);
+        let log_file = log_path(spawn_env.log_dir, &pkg_label);
         output::boot_fail(
             short_label(&pkg_label, component),
             &format!(
@@ -1998,6 +2002,7 @@ async fn call_driver_cmd(
         format!("http://{endpoint}")
     };
     let result = async {
+        let driver_timeout = driver_init_timeout();
         let channel = Endpoint::new(normalized.clone())
             .with_context(|| format!("invalid driver endpoint '{normalized}'"))?
             .connect()
@@ -2012,7 +2017,7 @@ async fn call_driver_cmd(
         grpc.ready().await.with_context(|| "gRPC ready")?;
         let codec: tonic_prost::ProstCodec<DriverRequest, DriverResponse> = Default::default();
         let resp = tokio::time::timeout(
-            DRIVER_INIT_TIMEOUT,
+            driver_timeout,
             grpc.unary(
                 Request::new(DriverRequest {
                     command: cmd,
@@ -2025,8 +2030,8 @@ async fn call_driver_cmd(
         .await
         .map_err(|_| {
             anyhow::anyhow!(
-                "Driver(CMD_{cmd_name}) timed out after {:?}",
-                DRIVER_INIT_TIMEOUT
+                "Driver(CMD_{cmd_name}) timed out after {}s",
+                driver_timeout.as_secs()
             )
         })?
         .with_context(|| format!("Driver(CMD_{cmd_name}) RPC failed"))?;

@@ -15,6 +15,23 @@
 
 set -euo pipefail
 
+# ── Platform dispatch (same scheme as mapping_rbnx) ─────────────────────────
+#   ROBONIX_SCENE_FORCE=native|docker     explicit hard pin
+#   else auto: ROBONIX_SCENE_PLATFORM=jetson_orin → native, otherwise docker
+# native → scripts/start_native.sh (host venv + host JetPack torch, no docker).
+PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+is_native_platform() { case "$1" in jetson_orin|jetson*|orin*) return 0 ;; *) return 1 ;; esac }
+case "${ROBONIX_SCENE_FORCE:-}" in
+    native) MODE=native ;;
+    docker) MODE=docker ;;
+    "") if is_native_platform "${ROBONIX_SCENE_PLATFORM:-}"; then MODE=native; else MODE=docker; fi ;;
+    *) echo "[scene/start] ROBONIX_SCENE_FORCE=${ROBONIX_SCENE_FORCE} not in {native,docker}" >&2; exit 2 ;;
+esac
+echo "[scene/start] mode=${MODE} (FORCE=${ROBONIX_SCENE_FORCE:-} PLATFORM=${ROBONIX_SCENE_PLATFORM:-})"
+if [[ "$MODE" == "native" ]]; then
+    exec bash "${PKG}/scripts/start_native.sh"
+fi
+
 CT="${ROBONIX_SCENE_CONTAINER:-robonix_scene}"
 IMG="${ROBONIX_SCENE_IMAGE:-robonix-scene}"
 
@@ -43,8 +60,28 @@ fi
 # ROBONIX_FORCE_CPU=1. Without this flag the container sees CPU only
 # and CLIP/YOLO run ~5x slower.
 declare -a GPU_ARGS=()
-if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]] && command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
-    GPU_ARGS=(--gpus all)
+if [[ "${ROBONIX_FORCE_CPU:-0}" != "1" ]]; then
+    # NVIDIA_DRIVER_CAPABILITIES=all is REQUIRED: with just `--gpus all` (or
+    # `--runtime nvidia`) and the capability unset, the NVIDIA runtime injects
+    # only "utility" — nvidia-smi works but the CUDA compute libs are NOT
+    # mounted, so torch.cuda.is_available() is False and ConceptGraphs silently
+    # falls back to CPU (~5x slower). Requesting all caps (compute+utility+
+    # graphics) makes CUDA actually available.
+    if is_native_platform "${ROBONIX_SCENE_PLATFORM:-}" || [[ -e /etc/nv_tegra_release ]]; then
+        # Jetson / L4T: the container gets the GPU via the NVIDIA container
+        # runtime (which bind-mounts the host CUDA libs); `--gpus all` is x86.
+        GPU_ARGS=(--runtime nvidia -e NVIDIA_DRIVER_CAPABILITIES=all)
+    elif command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        GPU_ARGS=(--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all)
+    fi
+    # Forward CUDA_VISIBLE_DEVICES ONLY when explicitly set (e.g. to pin one
+    # GPU). The old unconditional `-e CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}`
+    # passed it EMPTY when unset on the host — which tells CUDA "no GPUs" and
+    # disabled the GPU even though --gpus all had mounted it (torch.cuda → False
+    # while nvidia-smi still worked). Omitting it lets all mounted GPUs show.
+    if [[ ${#GPU_ARGS[@]} -gt 0 && -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+        GPU_ARGS+=(-e "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}")
+    fi
 fi
 
 exec docker run --rm \
@@ -64,6 +101,8 @@ exec docker run --rm \
     -e VLM_API_KEY="${VLM_API_KEY:-}" \
     -e VLM_MODEL="${VLM_MODEL:-}" \
     -e SCENE_GRAPH_ENABLED="${SCENE_GRAPH_ENABLED:-true}" \
+    -e SCENE_GRAPH_CAPTION_ENABLED="${SCENE_GRAPH_CAPTION_ENABLED:-true}" \
+    -e SCENE_GRAPH_RELATION_ENABLED="${SCENE_GRAPH_RELATION_ENABLED:-true}" \
     -e SCENE_GRAPH_INTERVAL_SEC="${SCENE_GRAPH_INTERVAL_SEC:-30}" \
     -e SCENE_GRAPH_CACHE_DIR="${SCENE_GRAPH_CACHE_DIR:-/data/robonix/scene_graph/cache}" \
     -e SCENE_GRAPH_MIN_OBSERVATIONS="${SCENE_GRAPH_MIN_OBSERVATIONS:-2}" \
@@ -73,7 +112,6 @@ exec docker run --rm \
     -e SCENE_OBJECT_MEMORY_DB="${SCENE_OBJECT_MEMORY_DB:-/data/robonix/scene_memory/objects.db}" \
     -e SCENE_MAP_ID="${SCENE_MAP_ID:-default}" \
     -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
-    -e CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
     -v "$(pwd)":/scene \
     -v "$(pwd)/rbnx-build/data/robonix":/data/robonix \

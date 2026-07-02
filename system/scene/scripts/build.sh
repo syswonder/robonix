@@ -39,6 +39,14 @@ cd "$PKG"
 BUILD="rbnx-build"
 CLEAN="${RBNX_BUILD_CLEAN:-}"
 IMG="${ROBONIX_SCENE_IMAGE:-robonix-scene}"
+# Deployment target (same scheme as mapping_rbnx). Chosen by the per-target
+# package manifest's `build:` line:
+#   x86-docker     x86_64 + docker, ROS2 + cu128 torch in image  [default]
+#   jetson-docker  arm64 Jetson + docker, L4T base (docker/Dockerfile.jetson)
+#   jetson-native  arm64 Jetson + host ROS2 + host JetPack torch — no docker;
+#                  builds rbnx-build/venv (--system-site-packages) for the
+#                  light pure-python deps only.
+TARGET="${RBNX_BUILD_TARGET:-x86-docker}"
 
 # ROS distro the scene image is built against. Robonix does not bind to a
 # single ROS release: pick it here and the Dockerfile threads it through
@@ -137,11 +145,72 @@ fetch_weight \
     "https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt" \
     "$WEIGHTS_DIR/mobile_sam.pt"
 
+# ── 2a. jetson-native: host venv, no docker ────────────────────────────────
+# The heavy CUDA wheels (torch / torchvision / ultralytics / open3d) come from
+# the host JetPack stack via --system-site-packages; we only pip-install the
+# light pure-python deps on top. Mirrors mapping_rbnx's native target.
+if [[ "$TARGET" == "jetson-native" ]]; then
+    # No venv on purpose. A --system-site-packages venv can't see the host
+    # JetPack torch (it's typically a `pip install --user` in ~/.local), and
+    # forcing the user-site onto PYTHONPATH drags shadowing shims (e.g. enum34)
+    # ahead of the stdlib and breaks the interpreter. The host python already
+    # has the correct sys.path order AND sees the JetPack torch — so install
+    # scene's light pure-python deps into the user site alongside it.
+    PY=python3
+    PIP_IDX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+    echo "[build] jetson-native: host python ($("$PY" --version 2>&1)), pip install --user"
+    "$PY" -c "import torch" 2>/dev/null || {
+        echo "[build] error: host python has no torch — install the JetPack CUDA" >&2
+        echo "        stack first (see scene README 'Jetson native prerequisites'):" >&2
+        echo "        pip install --user --index-url https://pypi.jetson-ai-lab.dev/jp6/cu126 torch torchvision" >&2
+        exit 1
+    }
+    "$PY" -m pip install --user --upgrade pip --index-url "$PIP_IDX" || true
+    # torch & friends are already satisfied by the host stack, so pip skips
+    # them; only the missing pure-python deps get installed.
+    for req in scene-base scene-perception-core scene-perception-heavy; do
+        f="docker/requirements/${req}.txt"
+        [[ -f "$f" ]] || continue
+        echo "[build] pip install --user -r $f"
+        "$PY" -m pip install --user -r "$f" --index-url "$PIP_IDX" \
+            || echo "[build] warning: some deps in $f failed (perception may degrade)"
+    done
+    # concept-graphs (perception backbone) — editable, no deps.
+    CG="$PKG/rbnx-build/concept-graphs"
+    GH="${RBNX_GH_MIRROR-https://ghfast.top/}"
+    if [[ ! -d "$CG/.git" ]]; then
+        echo "[build] cloning concept-graphs"
+        git clone --depth 1 --branch ali-dev \
+            "${GH%/}/https://github.com/concept-graphs/concept-graphs.git" "$CG" \
+        || git clone --depth 1 --branch ali-dev \
+            https://github.com/concept-graphs/concept-graphs.git "$CG"
+    fi
+    "$PY" -m pip install --user --no-deps -e "$CG" || echo "[build] warning: concept-graphs install failed"
+    # Pre-fetch the CLIP weights into the host HF cache (start_native points
+    # HF_HOME here). The docker path bakes these into the image; the native
+    # path must cache them now, since the runtime host may have no internet
+    # and perception silently degrades to "no objects" without them.
+    HFD="$PKG/rbnx-build/data/hf"
+    mkdir -p "$HFD/clip"
+    HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}" HF_HOME="$HFD" HF_HUB_DOWNLOAD_TIMEOUT=120 \
+        "$PY" -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')" \
+        || echo "[build] warning: open_clip weight prefetch failed (perception will degrade)"
+    HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}" \
+        "$PY" -c "import clip; clip.load('ViT-B/32', device='cpu', download_root='$HFD/clip')" \
+        || echo "[build] warning: openai-clip weight prefetch failed"
+    "$PY" -c "import torch,torchvision,ultralytics; print('[build] torch',torch.__version__,'cuda',torch.cuda.is_available())" || true
+    echo "[build] done (jetson-native)."
+    exit 0
+fi
+
 # ── 2. Docker image (scene's Python deps + ROS Humble base) ────────────────
 if ! command -v docker >/dev/null 2>&1; then
-    echo "[build] error: docker not found on PATH" >&2
+    echo "[build] error: target $TARGET needs docker on PATH" >&2
     exit 1
 fi
+# jetson-docker uses the L4T-based Dockerfile; x86-docker the default one.
+SCENE_DOCKERFILE="docker/Dockerfile"
+[[ "$TARGET" == "jetson-docker" ]] && SCENE_DOCKERFILE="docker/Dockerfile.jetson"
 
 DOCKER_BUILD_FLAGS=(--network=host --build-arg "ROS_DISTRO=${ROS_DISTRO_BUILD}")
 [[ "$CLEAN" == "1" ]] && DOCKER_BUILD_FLAGS+=(--no-cache)
@@ -205,7 +274,7 @@ case "$USE_PROXY" in
         ;;
 esac
 
-echo "[build] docker build -t $IMG docker/"
-docker build "${DOCKER_BUILD_FLAGS[@]}" -t "$IMG" docker/
+echo "[build] docker build -f $SCENE_DOCKERFILE -t $IMG docker/  (target=$TARGET)"
+docker build "${DOCKER_BUILD_FLAGS[@]}" -f "$SCENE_DOCKERFILE" -t "$IMG" docker/
 
 echo "[build] done."

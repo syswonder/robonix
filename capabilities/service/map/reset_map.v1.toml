@@ -1,0 +1,10 @@
+# Clear the live SLAM map and rebuild from the current pose (does not delete
+# saved maps). ROS IDL: `lib/map/srv/ResetMap.srv` ( -> ok + detail).
+[contract]
+id      = "robonix/service/map/reset_map"
+version = "1"
+kind    = "service"
+idl     = "map/srv/ResetMap.srv"
+
+[mode]
+type = "rpc"

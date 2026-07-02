@@ -31,7 +31,10 @@ use anyhow::Result;
 use futures::Stream;
 use robonix_atlas::client::AtlasClient;
 use robonix_atlas::pb as atlas_pb;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
@@ -51,7 +54,7 @@ use crate::pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
 use crate::pb::pilot::{PilotEvent, Task};
 use crate::pb::tts;
 use crate::pb::voiceprint;
-use robonix_scribe::warn;
+use robonix_scribe::{info, warn};
 
 // ── Stable VoiceEvent kinds (mirror lib/system/liaison/msg/VoiceEvent.msg) ───
 
@@ -71,7 +74,7 @@ pub const KIND_ERROR: u32 = 10;
 /// Hard ceiling on a single voice turn. Real end-of-turn comes from
 /// the silence-VAD in the mic pump (see VAD_* below); this just keeps
 /// a stuck mic from monopolizing the session forever.
-const DEFAULT_RECORD_SECONDS: u32 = 30;
+const DEFAULT_RECORD_SECONDS: u32 = 10;
 
 /// Silence-VAD parameters. After we've heard a chunk above
 /// `VAD_SPEECH_RMS`, count consecutive sub-threshold chunks; once the
@@ -261,6 +264,7 @@ async fn run_session(
         record_seconds.max(5)
     };
 
+    let t_cap = std::time::Instant::now();
     let (audio_pcm, transcript) = if mock {
         let canned = mock_transcript();
         let _ = tx
@@ -299,6 +303,21 @@ async fn run_session(
         .await?
     };
 
+    // [profile] record start → final transcript: covers mic-open + audio
+    // transfer + streaming ASR inference. Compare against the per-chunk mic
+    // timings above (transfer) and the speech service's [profile-asr] lines
+    // (inference) to see which dominates.
+    {
+        let secs = audio_pcm.len() as f64 / (DEFAULT_AUDIO_SAMPLE_RATE as f64 * 2.0);
+        info!(
+            "[profile] record→transcript {} ms (audio {:.2}s, {} pcm bytes, transcript {} chars)",
+            t_cap.elapsed().as_millis(),
+            secs,
+            audio_pcm.len(),
+            transcript.chars().count()
+        );
+    }
+
     if transcript.trim().is_empty() {
         anyhow::bail!("empty transcript — nothing to send to Pilot");
     }
@@ -328,6 +347,15 @@ async fn run_session(
     );
 
     let mut accumulated_text = String::new();
+    // Track whether we've already spoken at least one per-plan answer, so the
+    // end-of-turn fallback below doesn't double-speak.
+    let mut spoke_any = false;
+    // [profile] pilot round-trip (submit → first event → turn done).
+    let t_pilot = std::time::Instant::now();
+    let mut first_pilot_logged = false;
+    // Per-narration-segment TTS buffer: text chunks accumulate here and flush
+    // to speech at each plan/batch/final boundary (see the stream loop below).
+    let mut seg = String::new();
 
     let pilot_stream_result = async {
         let mut client = RobonixSystemPilotClient::connect(pilot_endpoint.clone())
@@ -343,7 +371,33 @@ async fn run_session(
             while let Some(item) = pilot_stream.next().await {
                 match item {
                     Ok(ev) => {
+                        if !first_pilot_logged {
+                            info!(
+                                "[profile] pilot: first event +{} ms (after transcript submit)",
+                                t_pilot.elapsed().as_millis()
+                            );
+                            first_pilot_logged = true;
+                        }
                         accumulate_text(&ev, &mut accumulated_text);
+                        // Speak each narration segment the moment it completes.
+                        // The model's per-plan answer streams as EVT_TEXT_CHUNK (0);
+                        // a PLAN (1) / BATCH_RESULT (2) / FINAL_TEXT (4) event marks
+                        // the end of that narration, so flush the buffered chunks to
+                        // TTS. This voices every plan's full answer live, instead of
+                        // only the tiny end-of-turn final_text.
+                        let kind = ev.event_kind;
+                        if kind == 0 {
+                            seg.push_str(&ev.text_chunk);
+                        }
+                        let is_boundary = matches!(kind, 1 | 2 | 4);
+                        let say = if is_boundary && req.tts_enabled && !seg.trim().is_empty() {
+                            Some(std::mem::take(&mut seg))
+                        } else {
+                            if is_boundary {
+                                seg.clear();
+                            }
+                            None
+                        };
                         let _ = tx
                             .send(Ok(VoiceEvent {
                                 event_kind: KIND_PILOT,
@@ -357,6 +411,35 @@ async fn run_session(
                                 timestamp_ms: now_ms(),
                             }))
                             .await;
+                        if let Some(s) = say {
+                            spoke_any = true;
+                            let t_tts = std::time::Instant::now();
+                            let say_chars = s.chars().count();
+                            if let Err(e) = synthesize_and_play(
+                                &atlas,
+                                &req.tts_node_id,
+                                &req.speaker_node_id,
+                                &language,
+                                &s,
+                                &session_id,
+                                &tx,
+                            )
+                            .await
+                            {
+                                let _ = tx
+                                    .send(Ok(event_status(
+                                        KIND_TTS_DONE,
+                                        &session_id,
+                                        &format!("tts skipped: {e:#}"),
+                                    )))
+                                    .await;
+                            }
+                            info!(
+                                "[profile] tts+play +{} ms ({} chars spoken)",
+                                t_tts.elapsed().as_millis(),
+                                say_chars
+                            );
+                        }
                     }
                     Err(e) => {
                         anyhow::bail!("Pilot stream error: {e}");
@@ -371,15 +454,29 @@ async fn run_session(
         }
     }
 
-    // 5. Optional TTS playback (non-fatal on any error).
+    info!(
+        "[profile] pilot: turn done +{} ms ({} chars of answer text)",
+        t_pilot.elapsed().as_millis(),
+        accumulated_text.chars().count()
+    );
+
+    // 5. Flush any trailing narration the loop buffered but never hit a
+    // boundary for (turn ended on chunks). Non-fatal on any error.
+    let tail = if !seg.trim().is_empty() {
+        std::mem::take(&mut seg)
+    } else if !spoke_any {
+        accumulated_text.clone()
+    } else {
+        String::new()
+    };
     if req.tts_enabled
-        && !accumulated_text.trim().is_empty()
+        && !tail.trim().is_empty()
         && let Err(e) = synthesize_and_play(
             &atlas,
             &req.tts_node_id,
             &req.speaker_node_id,
             &language,
-            &accumulated_text,
+            &tail,
             &session_id,
             &tx,
         )
@@ -461,6 +558,10 @@ async fn stream_capture_and_recognize(
         (DEFAULT_AUDIO_SAMPLE_RATE as usize) * 2 * (max_seconds as usize),
     )));
     let pcm_buf_for_pump = Arc::clone(&pcm_buf);
+    // Detect the mic's actual sample rate from the first chunk's
+    // data size ÷ duration — no env var or proto change needed.
+    let detected_rate: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+    let detected_rate_pump = Arc::clone(&detected_rate);
     let _language_owned = language.to_string();
 
     // Mic pump — drains the mic gRPC stream into the asr_req sender,
@@ -472,8 +573,16 @@ async fn stream_capture_and_recognize(
     //   4. outer task drops asr_req_rx (server already returned FINAL)
     let pump_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(max_seconds as u64);
+        // [profile] mic transfer: t_pump=request start; first-chunk latency is
+        // the audio-source startup (e.g. macOS bridge over the network); the
+        // chunk count + total audio vs wall time shows transfer throughput.
+        let t_pump = tokio::time::Instant::now();
+        let mut n_chunks: u32 = 0u32;
+        let mut audio_s: f32 = 0.0;
+        let mut logged_first = false;
         let mut has_spoken = false;
         let mut silence_secs: f32 = 0.0;
+        let mut first_chunk = true;
         loop {
             if tokio::time::Instant::now() >= deadline {
                 break;
@@ -481,7 +590,26 @@ async fn stream_capture_and_recognize(
             let remaining = deadline - tokio::time::Instant::now();
             match tokio::time::timeout(remaining, mic_stream.message()).await {
                 Ok(Ok(Some(chunk))) => {
+                    if !logged_first {
+                        info!(
+                            "[profile] mic: first chunk +{} ms (audio-source startup / transfer)",
+                            t_pump.elapsed().as_millis()
+                        );
+                        logged_first = true;
+                    }
+                    n_chunks += 1;
+                    audio_s += chunk.duration_s.max(0.0);
                     let dur = chunk.duration_s.max(0.0);
+                    // Detect sample rate from the first chunk:
+                    // rate ≈ data_bytes / (duration_s × bytes_per_sample)
+                    // For 16-bit mono: bytes_per_sample = 2.
+                    if first_chunk && dur > 0.0 && chunk.data.len() >= 2 {
+                        first_chunk = false;
+                        let est = (chunk.data.len() as f64 / (dur as f64 * 2.0)).round() as u32;
+                        if est >= 8000 {
+                            detected_rate_pump.store(est, Ordering::Relaxed);
+                        }
+                    }
                     let rms = pcm_rms_s16le(&chunk.data);
                     if rms >= VAD_SPEECH_RMS {
                         has_spoken = true;
@@ -506,6 +634,12 @@ async fn stream_capture_and_recognize(
                 Err(_) => break,
             }
         }
+        let wall = t_pump.elapsed().as_millis();
+        info!(
+            "[profile] mic: pump done +{wall} ms, {n_chunks} chunks, {audio_s:.2}s audio \
+             (transfer realtime-factor {:.2}; >1 means audio arrived slower than realtime)",
+            (wall as f32 / 1000.0) / audio_s.max(0.001)
+        );
     });
 
     // FunASR docs: AsrAudioChunk + ASR backend reads its own audio_config
@@ -579,18 +713,42 @@ async fn stream_capture_and_recognize(
     let _ = pump_handle.await;
 
     let pcm = std::mem::take(&mut *pcm_buf.lock().await);
-    let _ = tx
-        .send(Ok(event_status(
-            KIND_RECORDING_DONE,
-            session_id,
-            &format!(
-                "captured {} bytes (~{:.2}s @ 16kHz mono s16le); transcript={:?}",
-                pcm.len(),
-                pcm.len() as f32 / (DEFAULT_AUDIO_SAMPLE_RATE as f32 * 2.0),
-                transcript,
-            ),
-        )))
-        .await;
+    let sample_rate = detected_rate.load(Ordering::Relaxed);
+    let sample_rate = if sample_rate > 0 {
+        sample_rate
+    } else {
+        DEFAULT_AUDIO_SAMPLE_RATE
+    };
+    if let Some(path) = save_voice_recording(session_id, &pcm, sample_rate) {
+        let _ = tx
+            .send(Ok(event_status(
+                KIND_RECORDING_DONE,
+                session_id,
+                &format!(
+                    "saved voice recording to {} ({} bytes, ~{:.2}s @ {}Hz) ; transcript={:?}",
+                    path.display(),
+                    pcm.len(),
+                    pcm.len() as f32 / (sample_rate as f32 * 2.0),
+                    sample_rate,
+                    transcript,
+                ),
+            )))
+            .await;
+    } else {
+        let _ = tx
+            .send(Ok(event_status(
+                KIND_RECORDING_DONE,
+                session_id,
+                &format!(
+                    "captured {} bytes (~{:.2}s @ {}Hz mono s16le); transcript={:?}",
+                    pcm.len(),
+                    pcm.len() as f32 / (sample_rate as f32 * 2.0),
+                    sample_rate,
+                    transcript,
+                ),
+            )))
+            .await;
+    }
     Ok((pcm, transcript))
 }
 
@@ -920,6 +1078,52 @@ fn now_ns() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64
+}
+
+fn save_voice_recording(session_id: &str, pcm: &[u8], sample_rate: u32) -> Option<PathBuf> {
+    let dump_dir = std::env::var("ROBONIX_LIAISON_VOICE_SAVE_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "/tmp".to_string());
+    let dir = Path::new(&dump_dir);
+    if fs::create_dir_all(dir).is_err() {
+        return None;
+    }
+    let ts = now_ms();
+    let file_name = format!("voice_{}_{}.wav", session_id, ts);
+    let path = dir.join(file_name);
+    if write_wav(&path, pcm, sample_rate).is_ok() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn write_wav(path: &Path, pcm: &[u8], sample_rate: u32) -> Result<(), std::io::Error> {
+    const CHANNELS: u16 = 1;
+    const BITS_PER_SAMPLE: u16 = 16;
+    let data_size = pcm.len() as u32;
+    let file_size = 36 + data_size;
+    let byte_rate = sample_rate * CHANNELS as u32 * (BITS_PER_SAMPLE as u32) / 8;
+    let block_align = CHANNELS * BITS_PER_SAMPLE / 8;
+
+    let mut buf = Vec::with_capacity(44 + pcm.len());
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&file_size.to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&CHANNELS.to_le_bytes());
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&block_align.to_le_bytes());
+    buf.extend_from_slice(&BITS_PER_SAMPLE.to_le_bytes());
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_size.to_le_bytes());
+    buf.extend_from_slice(pcm);
+
+    fs::write(path, buf)
 }
 
 /// RMS amplitude of a 16-bit little-endian PCM buffer. Used by the
