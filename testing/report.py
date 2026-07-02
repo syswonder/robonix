@@ -94,6 +94,135 @@ def _failure_lines(values: list[object]) -> str:
     return "".join(f'<div class="failure-line">{_code(v, "failure-text")}</div>' for v in values)
 
 
+def _compact_json(value: object) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ": "))
+    except TypeError:
+        return str(value)
+
+
+def _count_rtdl_leaves(node: object) -> int:
+    if not isinstance(node, dict):
+        return 0
+    count = 1 if node.get("op") == "do" else 0
+    return count + sum(_count_rtdl_leaves(child) for child in node.get("children", []) or [])
+
+
+def _rtdl_node(node: object) -> str:
+    if not isinstance(node, dict):
+        return f'<div class="rtdl-line malformed">{_code(node)}</div>'
+
+    op = str(node.get("op", ""))
+    node_id = node.get("id", "")
+    cap = node.get("cap", "")
+    label = op
+    if op == "do" and cap:
+        label = f"do {cap}"
+    elif node_id:
+        label = f"{op} {node_id}"
+
+    bits = [f'<span class="rtdl-op">{html.escape(label)}</span>']
+    if op == "do" and node_id:
+        bits.append(f'<span class="rtdl-id">{html.escape(str(node_id))}</span>')
+    if "args" in node:
+        bits.append(f'<span class="rtdl-args">args {_code(_compact_json(node.get("args")), "rtdl-json")}</span>')
+    expect = node.get("expect")
+    if isinstance(expect, dict):
+        contract = expect.get("contract", "")
+        success = expect.get("success", True)
+        bits.append(
+            '<span class="rtdl-expect">'
+            f'expect {_code(contract, "contract")} '
+            f'{"success" if success else "failure"}'
+            "</span>"
+        )
+
+    children = "".join(_rtdl_node(child) for child in node.get("children", []) or [])
+    child_block = f'<div class="rtdl-children">{children}</div>' if children else ""
+    cls = "rtdl-node rtdl-leaf" if op == "do" else "rtdl-node"
+    return f'<div class="{cls}"><div class="rtdl-line">{" ".join(bits)}</div>{child_block}</div>'
+
+
+def _observed_round(round_data: dict | None) -> str:
+    if not isinstance(round_data, dict):
+        return '<div class="observed-round muted">No observed plan round was recorded for this step.</div>'
+    calls = round_data.get("calls", [])
+    if not calls:
+        return '<div class="observed-round muted">Observed plan round had no calls.</div>'
+
+    rows = []
+    for call in calls:
+        leaf = call.get("leaf_result", {}) if isinstance(call.get("leaf_result"), dict) else {}
+        success = leaf.get("success")
+        state = "PASS" if success is True else ("FAIL" if success is False else "PENDING")
+        state_cls = "pass" if success is True else ("fail" if success is False else "")
+        output = leaf.get("error") or leaf.get("output") or ""
+        row_cls = f"observed-call observed-{state_cls or 'pending'}"
+        rows.append(
+            f'<div class="{row_cls}">'
+            f'<span class="status-badge {state_cls}">{state}</span>'
+            f'{_code(call.get("call_id", ""), "path")}'
+            f'{_code(call.get("contract", ""), "contract")}'
+            f'<span class="rtdl-args">args {_code(_compact_json(call.get("args", {})), "rtdl-json")}</span>'
+            f'<span class="observed-output">{html.escape(str(output))}</span>'
+            "</div>"
+        )
+    return (
+        f'<div class="observed-round"><div class="observed-title">Observed plan round {html.escape(str(round_data.get("index", "")))}</div>'
+        f'{"".join(rows)}</div>'
+    )
+
+
+def _rtdl_step_block(step: dict, observed: dict | None) -> str:
+    idx = step.get("index", "")
+    desc = step.get("description") or step.get("content") or "RTDL planning round"
+    leaves = _count_rtdl_leaves(step.get("rtdl"))
+    summary = (
+        f'<span class="rtdl-step-title">step {html.escape(str(idx))}</span>'
+        f'<span class="rtdl-step-desc">{html.escape(str(desc))}</span>'
+        f'<span class="rtdl-step-meta">{leaves} leaf{"s" if leaves != 1 else ""}</span>'
+    )
+    return (
+        f'<details class="rtdl-step" open><summary>{summary}</summary>'
+        f'{_rtdl_node(step.get("rtdl"))}'
+        f'{_observed_round(observed)}'
+        "</details>"
+    )
+
+
+def _scenario_rtdl_trees(summary: dict) -> str:
+    sections = []
+    for sc in summary.get("scenarios", []):
+        steps = sc.get("rtdl_steps", [])
+        if not steps:
+            continue
+        leaf_count = sum(_count_rtdl_leaves(step.get("rtdl")) for step in steps)
+        has_multi_leaf_step = any(_count_rtdl_leaves(step.get("rtdl")) > 1 for step in steps)
+        open_attr = " open" if (not sc.get("passed") or has_multi_leaf_step) else ""
+        observed_rounds = sc.get("observed_rounds", [])
+        step_html = "".join(
+            _rtdl_step_block(
+                step,
+                observed_rounds[pos] if isinstance(observed_rounds, list) and pos < len(observed_rounds) else None,
+            )
+            for pos, step in enumerate(steps)
+        )
+        sections.append(
+            f'<details class="rtdl-scenario"{open_attr}>'
+            "<summary>"
+            f'<span class="status-badge {"pass" if sc.get("passed") else "fail"}">{_status_label(bool(sc.get("passed")))}</span>'
+            f'{_code(sc.get("family", ""), "suite")}/'
+            f'{_code(sc.get("name", ""), "scenario")}'
+            f'<span class="rtdl-step-meta">{len(steps)} step(s), {leaf_count} leaf call(s)</span>'
+            "</summary>"
+            f"{step_html}"
+            "</details>"
+        )
+    if not sections:
+        return '<p class="muted">No RTDL plan trees were recorded in the summary.</p>'
+    return "\n".join(sections)
+
+
 def _scenario_rows(summary: dict) -> str:
     rows = []
     for sc in summary.get("scenarios", []):
@@ -581,6 +710,103 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], out: P
       padding-bottom: 2px;
       white-space: nowrap;
     }}
+    .rtdl-scenario {{
+      border-top: 1px solid var(--line);
+      padding: 12px 0;
+    }}
+    .rtdl-scenario:first-child {{ border-top: 0; }}
+    .rtdl-scenario > summary {{
+      align-items: center;
+      cursor: pointer;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }}
+    .rtdl-step {{
+      margin: 10px 0 0 24px;
+    }}
+    .rtdl-step > summary {{
+      cursor: pointer;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 6px;
+    }}
+    .rtdl-step-title, .rtdl-op, .rtdl-id, .rtdl-args, .rtdl-expect, .rtdl-json {{
+      font-family: var(--mono);
+      font-size: 11px;
+    }}
+    .rtdl-step-title, .rtdl-op {{
+      color: #111827;
+      font-weight: 650;
+    }}
+    .rtdl-step-desc, .rtdl-step-meta, .rtdl-id {{
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .rtdl-node {{
+      margin: 5px 0 0 18px;
+      padding-left: 12px;
+      position: relative;
+    }}
+    .rtdl-node::before {{
+      background: var(--line);
+      content: "";
+      height: 1px;
+      left: 0;
+      position: absolute;
+      top: 9px;
+      width: 8px;
+    }}
+    .rtdl-children {{
+      border-left: 1px solid var(--line);
+      margin-left: 4px;
+      padding-left: 0;
+    }}
+    .rtdl-line {{
+      align-items: baseline;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      min-height: 18px;
+    }}
+    .rtdl-leaf .rtdl-line {{
+      background: #f9fafb;
+      border-radius: 4px;
+      padding: 3px 6px;
+    }}
+    .rtdl-expect {{
+      color: #374151;
+    }}
+    .observed-round {{
+      margin: 8px 0 0 30px;
+    }}
+    .observed-title {{
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 4px;
+    }}
+    .observed-call {{
+      align-items: baseline;
+      background: var(--pass-bg);
+      border-radius: 4px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 3px 0;
+      padding: 4px 6px;
+    }}
+    .observed-fail {{
+      background: var(--fail-bg);
+    }}
+    .observed-output {{
+      color: #374151;
+      font-family: var(--mono);
+      font-size: 11px;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
+    }}
     .failure-line {{ margin-bottom: 6px; }}
     .failure-line:last-child {{ margin-bottom: 0; }}
     .number {{
@@ -745,6 +971,9 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], out: P
     <tbody>{_scenario_rows(summary)}</tbody>
   </table>
   </div>
+  <h2>RTDL Plan Trees</h2>
+  <p class=\"section-note\">Each scenario step is one VLM planning round. The tree below is the RTDL returned for that round; every <span class=\"mono\">do</span> leaf has its own expected runtime contract and output checks.</p>
+  <div class=\"rtdl-tree-list\">{_scenario_rtdl_trees(summary)}</div>
   <h2>Logs</h2>
   <div class=\"log-panel\">
     <aside class=\"log-tree\">{_log_tree(logs)}</aside>
