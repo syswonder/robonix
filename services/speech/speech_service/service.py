@@ -450,13 +450,29 @@ class EdgeTTSBackend:
         v = voice or self.voice
         sign = "+" if speed > 1 else "-"
         rate = f"{sign}{int(abs(speed - 1) * 100)}%" if speed != 1.0 else "+0%"
-        communicate = edge_tts.Communicate(text, v, rate=rate)
         chunks = []
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                chunks.append(chunk["data"])
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                communicate = edge_tts.Communicate(text, v, rate=rate)
+                chunks = []
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        chunks.append(chunk["data"])
+                if chunks:
+                    break
+                raise RuntimeError("Edge TTS returned no audio chunks")
+            except Exception as exc:  # noqa: BLE001 - preserve edge-tts details.
+                last_error = exc
+                if attempt == 3:
+                    raise
+                log.warning("Edge TTS synthesize attempt %d failed: %s", attempt, exc)
+                await asyncio.sleep(0.5 * attempt)
         mp3 = b"".join(chunks)
-        return _mp3_to_pcm_s16le_16k(mp3)
+        pcm = _mp3_to_pcm_s16le_16k(mp3)
+        if not pcm:
+            raise RuntimeError(f"Edge TTS decoded to empty PCM audio: {last_error or 'no error'}")
+        return pcm
 
     async def synthesize_stream(self, text: str, voice: str = "", speed: float = 1.0):
         """Yields PCM s16le mono 16 kHz chunks (one decode at the end).
@@ -480,12 +496,27 @@ class EdgeTTSBackend:
         v = voice or self.voice
         sign = "+" if speed > 1 else "-"
         rate = f"{sign}{int(abs(speed - 1) * 100)}%" if speed != 1.0 else "+0%"
-        communicate = edge_tts.Communicate(text, v, rate=rate)
         mp3_chunks: list[bytes] = []
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                mp3_chunks.append(chunk["data"])
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                communicate = edge_tts.Communicate(text, v, rate=rate)
+                mp3_chunks = []
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        mp3_chunks.append(chunk["data"])
+                if mp3_chunks:
+                    break
+                raise RuntimeError("Edge TTS returned no audio chunks")
+            except Exception as exc:  # noqa: BLE001 - preserve edge-tts details.
+                last_error = exc
+                if attempt == 3:
+                    raise
+                log.warning("Edge TTS stream attempt %d failed: %s", attempt, exc)
+                await asyncio.sleep(0.5 * attempt)
         pcm = _mp3_to_pcm_s16le_16k(b"".join(mp3_chunks))
+        if not pcm:
+            raise RuntimeError(f"Edge TTS stream decoded to empty PCM audio: {last_error or 'no error'}")
         for i in range(0, len(pcm), 4096):
             yield pcm[i : i + 4096]
 
@@ -1039,15 +1070,23 @@ def speak(req: Speak_Request) -> Speak_Response:
         raise RuntimeError(f"no speaker provider (target={req.target!r})")
     cap = caps[0]
 
-    if _speak_tts is None:
+    tts_backend = _tts_servicer.tts_backend
+    if tts_backend is None:
+        log.warning("speech/speak called before Driver(INIT) installed a TTS backend; using direct Edge TTS fallback")
+    if tts_backend is None and _speak_tts is None:
         _speak_tts = EdgeTTSBackend()
+    if tts_backend is None:
+        tts_backend = _speak_tts
     # MCP handlers run inside FastMCP's event loop, so asyncio.run() here
     # would error ("loop already running"). Synthesize on a worker thread
     # that owns its own loop.
     import asyncio
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        pcm = ex.submit(lambda: asyncio.run(_speak_tts.synthesize(text))).result()
+        pcm = ex.submit(lambda: asyncio.run(tts_backend.synthesize(text))).result()
+    if not pcm:
+        raise RuntimeError("TTS backend returned no PCM audio")
+    log.info("speech/speak synthesized %d PCM bytes for %d chars", len(pcm), len(text))
 
     with speech.connect_capability(cap, _SPEAKER_CONTRACT, Transport.GRPC) as ch:
         stub = contracts_grpc.RobonixPrimitiveAudioSpeakerStub(
