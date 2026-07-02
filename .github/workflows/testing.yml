@@ -66,6 +66,10 @@ on:
         description: "pull request head repository when invoked by ChatOps"
         type: string
         required: false
+      pr_head_sha:
+        description: "pull request head commit when invoked by ChatOps"
+        type: string
+        required: false
       triggered_by:
         description: "user who requested the ChatOps run"
         type: string
@@ -498,7 +502,14 @@ jobs:
           docker logs "$ROBONIX_SIM_CONTAINER" >"$RUNNER_TEMP/sim-logs/webots.stdout.log" 2>&1 || true
           docker exec "$ROBONIX_SIM_CONTAINER" bash -c 'tar c -C /root/.ros log 2>/dev/null' \
             2>/dev/null | tar x -C "$RUNNER_TEMP/sim-logs" 2>/dev/null || true
-          docker exec "$ROBONIX_SIM_CONTAINER" bash -lc 'timeout 10s webots --version 2>&1 || true; printenv ROS_DISTRO || true' \
+          docker exec "$ROBONIX_SIM_CONTAINER" bash -lc '
+            version="$(timeout 10s webots --version 2>&1 | awk "/^Cyberbotics Webots|^Webots[[:space:]]/ {print; exit}")"
+            if [ -z "$version" ]; then
+              version="$(dpkg-query -W webots 2>/dev/null | cut -f2 | sed "s/^/webots package /" | head -1)"
+            fi
+            printf "WEBOTS_VERSION=%s\n" "$version"
+            printf "ROS_DISTRO=%s\n" "${ROS_DISTRO:-}"
+          ' \
             >"$RUNNER_TEMP/sim-logs/webots.version.txt" 2>&1 || true
           docker inspect "$ROBONIX_SIM_CONTAINER" --format '{{.Config.Image}}' \
             >"$RUNNER_TEMP/sim-logs/sim-container-image.txt" 2>&1 || true
@@ -576,6 +587,7 @@ jobs:
           REPORT_PR_URL: ${{ inputs.pr_url || github.event.pull_request.html_url || '' }}
           REPORT_PR_HEAD_REF: ${{ inputs.pr_head_ref || github.event.pull_request.head.ref || '' }}
           REPORT_PR_HEAD_REPO: ${{ inputs.pr_head_repo || github.event.pull_request.head.repo.full_name || '' }}
+          REPORT_PR_HEAD_SHA: ${{ inputs.pr_head_sha || github.event.pull_request.head.sha || '' }}
           REPORT_TRIGGERED_BY: ${{ inputs.triggered_by || github.triggering_actor || github.actor }}
         run: |
           set -euo pipefail
@@ -588,6 +600,10 @@ jobs:
           if [ -n "${GITHUB_SERVER_URL:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "$tested_commit" ]; then
             commit_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${tested_commit}"
           fi
+          pr_head_commit_url=""
+          if [ -n "${GITHUB_SERVER_URL:-}" ] && [ -n "${REPORT_PR_HEAD_REPO:-}" ] && [ -n "${REPORT_PR_HEAD_SHA:-}" ]; then
+            pr_head_commit_url="${GITHUB_SERVER_URL}/${REPORT_PR_HEAD_REPO}/commit/${REPORT_PR_HEAD_SHA}"
+          fi
           os_pretty_name="$(. /etc/os-release 2>/dev/null && printf '%s' "${PRETTY_NAME:-}" || true)"
           kernel="$(uname -srmo 2>/dev/null || true)"
           arch="$(uname -m 2>/dev/null || true)"
@@ -599,8 +615,8 @@ jobs:
           cuda_version="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: \([^ |]*\).*/\1/p' | head -1 || true)"
           docker_version="$(docker version --format '{{.Server.Version}}' 2>/dev/null || docker --version 2>/dev/null || true)"
           docker_compose_version="$(docker compose version --short 2>/dev/null || docker-compose --version 2>/dev/null || true)"
-          webots_version="$(head -1 "$RUNNER_TEMP/sim-logs/webots.version.txt" 2>/dev/null || true)"
-          ros_distro="$(sed -n '2p' "$RUNNER_TEMP/sim-logs/webots.version.txt" 2>/dev/null || true)"
+          webots_version="$(sed -n 's/^WEBOTS_VERSION=//p' "$RUNNER_TEMP/sim-logs/webots.version.txt" 2>/dev/null | head -1 || true)"
+          ros_distro="$(sed -n 's/^ROS_DISTRO=//p' "$RUNNER_TEMP/sim-logs/webots.version.txt" 2>/dev/null | head -1 || true)"
           sim_image="$(cat "$RUNNER_TEMP/sim-logs/sim-container-image.txt" 2>/dev/null || true)"
           python_version="$(python3 --version 2>/dev/null || true)"
           rustc_version="$(rustc --version 2>/dev/null || true)"
@@ -621,6 +637,7 @@ jobs:
           TESTED_COMMIT_AUTHOR="$tested_author" \
           TESTED_COMMIT_DATE="$tested_date" \
           COMMIT_URL="$commit_url" \
+          PR_HEAD_COMMIT_URL="$pr_head_commit_url" \
           ORIGIN_URL="$origin_url" \
           ENV_HOSTNAME="$(hostname 2>/dev/null || true)" \
           ENV_OS_PRETTY_NAME="$os_pretty_name" \
@@ -675,6 +692,8 @@ jobs:
               "pr_url": env("REPORT_PR_URL"),
               "pr_head_ref": env("REPORT_PR_HEAD_REF"),
               "pr_head_repo": env("REPORT_PR_HEAD_REPO"),
+              "pr_head_sha": env("REPORT_PR_HEAD_SHA"),
+              "pr_head_commit_url": env("PR_HEAD_COMMIT_URL"),
               "triggered_by": env("REPORT_TRIGGERED_BY"),
               "env_hostname": env("ENV_HOSTNAME"),
               "env_os_pretty_name": env("ENV_OS_PRETTY_NAME"),
@@ -730,6 +749,8 @@ jobs:
             --metadata "pr_url=${REPORT_PR_URL:-}" \
             --metadata "pr_head_ref=${REPORT_PR_HEAD_REF:-}" \
             --metadata "pr_head_repo=${REPORT_PR_HEAD_REPO:-}" \
+            --metadata "pr_head_sha=${REPORT_PR_HEAD_SHA:-}" \
+            --metadata "pr_head_commit_url=$pr_head_commit_url" \
             --metadata "triggered_by=${REPORT_TRIGGERED_BY:-}" \
             --metadata "env_hostname=$(hostname 2>/dev/null || true)" \
             --metadata "env_os_pretty_name=$os_pretty_name" \

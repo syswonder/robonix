@@ -51,6 +51,7 @@ jobs:
       pr_url: ${{ steps.pr.outputs.url }}
       pr_head_ref: ${{ steps.pr.outputs.head_ref }}
       pr_head_repo: ${{ steps.pr.outputs.head_repo }}
+      pr_head_sha: ${{ steps.pr.outputs.ref }}
       triggered_by: ${{ steps.pr.outputs.triggered_by }}
       comment_id: ${{ steps.say.outputs.comment_id }}
     steps:
@@ -105,6 +106,7 @@ jobs:
       pr_url: ${{ needs.gate.outputs.pr_url }}
       pr_head_ref: ${{ needs.gate.outputs.pr_head_ref }}
       pr_head_repo: ${{ needs.gate.outputs.pr_head_repo }}
+      pr_head_sha: ${{ needs.gate.outputs.pr_head_sha }}
       triggered_by: ${{ needs.gate.outputs.triggered_by }}
     secrets: inherit
 
@@ -152,6 +154,7 @@ jobs:
           REPORT_PR_URL: ${{ needs.gate.outputs.pr_url }}
           REPORT_PR_HEAD_REF: ${{ needs.gate.outputs.pr_head_ref }}
           REPORT_PR_HEAD_REPO: ${{ needs.gate.outputs.pr_head_repo }}
+          REPORT_PR_HEAD_SHA: ${{ needs.gate.outputs.pr_head_sha }}
           REPORT_TRIGGERED_BY: ${{ needs.gate.outputs.triggered_by }}
           REPORT_COMMENT_ID: ${{ needs.gate.outputs.comment_id }}
         run: |
@@ -163,9 +166,21 @@ jobs:
           rm -rf "$report_dir"
           mkdir -p "$report_dir"
 
-          if [ -f dl/testing/logs/summary.json ] && [ -f testing/report.py ]; then
+          summary_json="$(find dl -path '*/testing/logs/summary.json' -print -quit)"
+          report_metadata_json="$(find dl -name report-metadata.json -print -quit)"
+          testing_logs_dir="$(find dl -path '*/testing/logs' -type d -print -quit)"
+          boot_logs_dir="$(find dl -path '*/examples/webots/rbnx-boot/logs' -type d -print -quit)"
+          provider_logs_dir="$(find dl -path '*/examples/webots/logs' -type d -print -quit)"
+          scene_logs_dir="$(find dl -path '*/system/scene/logs' -type d -print -quit)"
+          cache_logs_dir="$(find dl -path '*/cache-provider-logs' -type d -print -quit)"
+          sim_logs_dir="$(find dl -path '*/sim-logs' -type d -print -quit)"
+          fake_vlm_log="$(find dl -name fake_vlm.log -print -quit)"
+          rbnx_boot_log="$(find dl -name rbnx-boot.log -print -quit)"
+          remote_provenance="$(find dl -name remote-provenance.txt -print -quit)"
+
+          if [ -n "$summary_json" ] && [ -f testing/report.py ]; then
             args=(
-              --summary-json dl/testing/logs/summary.json
+              --summary-json "$summary_json"
               --out-dir "$report_dir"
               --metadata "report_id=${report_id}"
               --metadata "report_url=${expected_report_url}"
@@ -176,18 +191,20 @@ jobs:
               --metadata "pr_url=${REPORT_PR_URL:-}"
               --metadata "pr_head_ref=${REPORT_PR_HEAD_REF:-}"
               --metadata "pr_head_repo=${REPORT_PR_HEAD_REPO:-}"
+              --metadata "pr_head_sha=${REPORT_PR_HEAD_SHA:-}"
+              --metadata "pr_head_commit_url=${{ github.server_url }}/${REPORT_PR_HEAD_REPO:-${{ github.repository }}}/commit/${REPORT_PR_HEAD_SHA:-}"
               --metadata "triggered_by=${REPORT_TRIGGERED_BY:-}"
             )
-            [ -f dl/report-metadata.json ] && args+=(--metadata-json dl/report-metadata.json)
-            [ -d dl/testing/logs ] && args+=(--log-root "testing/logs=dl/testing/logs")
-            [ -d dl/examples/webots/rbnx-boot/logs ] && args+=(--log-root "boot_logs=dl/examples/webots/rbnx-boot/logs")
-            [ -d dl/examples/webots/logs ] && args+=(--log-root "provider_logs=dl/examples/webots/logs")
-            [ -d dl/system/scene/logs ] && args+=(--log-root "scene_logs=dl/system/scene/logs")
-            [ -d dl/cache-provider-logs ] && args+=(--log-root "cache_provider_logs=dl/cache-provider-logs")
-            [ -d dl/sim-logs ] && args+=(--log-root "sim_logs=dl/sim-logs")
-            [ -f dl/fake_vlm.log ] && args+=(--log-file "fake_vlm.log=dl/fake_vlm.log")
-            [ -f dl/rbnx-boot.log ] && args+=(--log-file "rbnx-boot.log=dl/rbnx-boot.log")
-            [ -f dl/remote-provenance.txt ] && args+=(--log-file "remote-provenance.txt=dl/remote-provenance.txt")
+            [ -n "$report_metadata_json" ] && args+=(--metadata-json "$report_metadata_json")
+            [ -n "$testing_logs_dir" ] && args+=(--log-root "testing/logs=$testing_logs_dir")
+            [ -n "$boot_logs_dir" ] && args+=(--log-root "boot_logs=$boot_logs_dir")
+            [ -n "$provider_logs_dir" ] && args+=(--log-root "provider_logs=$provider_logs_dir")
+            [ -n "$scene_logs_dir" ] && args+=(--log-root "scene_logs=$scene_logs_dir")
+            [ -n "$cache_logs_dir" ] && args+=(--log-root "cache_provider_logs=$cache_logs_dir")
+            [ -n "$sim_logs_dir" ] && args+=(--log-root "sim_logs=$sim_logs_dir")
+            [ -n "$fake_vlm_log" ] && args+=(--log-file "fake_vlm.log=$fake_vlm_log")
+            [ -n "$rbnx_boot_log" ] && args+=(--log-file "rbnx-boot.log=$rbnx_boot_log")
+            [ -n "$remote_provenance" ] && args+=(--log-file "remote-provenance.txt=$remote_provenance")
             args+=(--max-log-bytes 524288 --max-total-log-bytes 12582912)
             python3 testing/report.py "${args[@]}"
           else
