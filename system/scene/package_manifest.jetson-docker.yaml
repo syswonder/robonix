@@ -1,0 +1,28 @@
+# Scene MCP server — Jetson + DOCKER deployment target.
+#
+#   build → RBNX_BUILD_TARGET=jetson-docker scripts/build.sh: docker build
+#           with docker/Dockerfile.jetson (NVIDIA L4T PyTorch base, so torch +
+#           CUDA come from the image instead of host-cu128 x86 wheels).
+#   start → ROBONIX_SCENE_FORCE=docker scripts/start.sh: docker run with the
+#           NVIDIA container runtime for GPU passthrough.
+#
+# Use this on a Jetson when you want a self-contained image (no host ROS /
+# torch needed). Heavier first build than jetson-native; see the scene README.
+manifestVersion: 1
+
+package:
+  name: com.robonix.system.scene
+  version: 0.1.0
+  vendor: robonix
+  description: Scene — semantic + geometric live map (Jetson + docker / L4T target).
+  license: MulanPSL-2.0
+
+build: RBNX_BUILD_TARGET=jetson-docker bash scripts/build.sh
+start: ROBONIX_SCENE_FORCE=docker bash scripts/start.sh
+
+capabilities:
+  - name: robonix/system/scene/list_objects
+  - name: robonix/system/scene/goal_near
+  - name: robonix/system/scene/get_scene_graph
+  - name: robonix/system/scene/get_object_context
+  - name: robonix/system/scene/list_relations

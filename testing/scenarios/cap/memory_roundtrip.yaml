@@ -1,0 +1,35 @@
+# Exercise memory save + search in one ordered RTDL tree.
+name: memory_roundtrip
+task: "ci-test: remember a fact and then search for it"
+steps:
+  - content: Saving a fact, then searching for it.
+    rtdl_description: memory save + search
+    status: in_progress
+    rtdl:
+      op: sequence
+      id: memory_save_search
+      children:
+        - op: do
+          id: save_fact
+          cap: memory.memory_save
+          args: {data: "ci-fact: the test beacon is alpha-7"}
+          description: persist a fact
+          expect:
+            contract: robonix/service/memory/save
+            success: true
+            args: {data: "ci-fact: the test beacon is alpha-7"}
+            output:
+              json: {data: "Memory saved and indexed."}
+        - op: do
+          id: search_fact
+          cap: memory.memory_search
+          args: {data: test beacon}
+          description: recall the fact
+          expect:
+            contract: robonix/service/memory/search
+            success: true
+            args: {data: test beacon}
+            output:
+              text_regex: 'ci-fact: the test beacon is alpha-7'
+  - content: Saved and recalled.
+    status: done

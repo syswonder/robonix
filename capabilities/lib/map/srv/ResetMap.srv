@@ -1,0 +1,7 @@
+# robonix/service/map/reset_map — clear the LIVE SLAM map and start rebuilding
+# from the robot's current pose (RPC). Calls rtabmap's reset; the map-frame
+# origin moves to the current pose. Does NOT delete any saved map on disk
+# (use delete_map for that) — only wipes the in-memory/working map.
+---
+bool ok
+string detail

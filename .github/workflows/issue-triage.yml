@@ -23,8 +23,8 @@ jobs:
             // keyword -> { label, owner }. owner "" = label only (e.g. chronos).
             const ROUTES = [
               ["atlas",        { label: "comp:atlas",        owner: "enkerewpo" }],
-              ["executor",     { label: "comp:executor",     owner: "kouweilee" }],
-              ["rtdl",         { label: "comp:executor",     owner: "kouweilee" }],
+              ["executor",     { label: "comp:executor",     owner: "KouweiLee" }],
+              ["rtdl",         { label: "comp:executor",     owner: "KouweiLee" }],
               ["pilot",        { label: "comp:pilot",        owner: "enkerewpo" }],
               ["liaison",      { label: "comp:liaison",      owner: "kaileliu" }],
               ["scene",        { label: "comp:scene",        owner: "HeartLinked" }],
@@ -46,7 +46,11 @@ jobs:
             ];
 
             const issue = context.payload.issue;
-            const text = `${issue.title || ""}\n${issue.body || ""}`.toLowerCase();
+            // Match component keywords from the TITLE ONLY. The body lists
+            // every component (template checkboxes + prose), so scanning it
+            // stamped on every comp:* label + every owner (#113). The title
+            // is the one reliable signal; the body is ignored entirely.
+            const text = `${issue.title || ""}`.toLowerCase();
 
             const labels = new Set();
             const owners = new Set();

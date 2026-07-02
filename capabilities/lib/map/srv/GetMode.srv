@@ -1,0 +1,7 @@
+# robonix/service/map/get_mode — read the SLAM mode currently in effect (RPC).
+# Complements switch_mode (which sets it): lets a UI / LLM reflect the REAL
+# runtime mode instead of guessing from the startup config's map_mode.
+---
+bool ok
+string mode        # "mapping" (build/extend) | "localization" (read-only)
+string detail
