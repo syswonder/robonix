@@ -79,6 +79,11 @@ on:
         description: "user who requested the ChatOps run"
         type: string
         required: false
+      enable_llm_analysis:
+        description: "true only for trusted ChatOps runs that should spend LLM credits"
+        type: boolean
+        required: false
+        default: false
     secrets:
       DEEPSEEK_API_KEY:
         required: false
@@ -86,9 +91,14 @@ on:
       result:
         description: "PASS/FAIL summary line from the harness"
         value: ${{ jobs.gpu_testing.outputs.result }}
+      report_url:
+        description: "Published Pages URL for the generated Webots report"
+        value: ${{ jobs.publish_report.outputs.report_url }}
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
 
 concurrency:
   # Webots uses fixed ports and the shared GPU runner is a single scarce resource.
@@ -815,6 +825,7 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      ENABLE_LLM_ANALYSIS: ${{ inputs.enable_llm_analysis == true }}
       GITHUB_TOKEN: ${{ github.token }}
       REPORT_PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || '' }}
       REPORT_PR_TITLE: ${{ inputs.pr_title || github.event.pull_request.title || '' }}
@@ -848,11 +859,15 @@ jobs:
           if [ -n "${REPORT_PR_HEAD_REPO:-}" ] && [ -n "${REPORT_PR_HEAD_SHA:-}" ]; then
             pr_head_commit_url="${GITHUB_SERVER_URL}/${REPORT_PR_HEAD_REPO}/commit/${REPORT_PR_HEAD_SHA}"
           fi
+          llm_args=()
+          if [ "${ENABLE_LLM_ANALYSIS:-false}" = "true" ]; then
+            llm_args+=(--llm)
+          fi
           python3 testing/build_report_from_artifacts.py \
             --artifact-root dl \
             --out-dir report \
             --repo . \
-            --llm \
+            "${llm_args[@]}" \
             --metadata "report_id=${GITHUB_RUN_ID}" \
             --metadata "run_url=${run_url}" \
             --metadata "pr_number=${REPORT_PR_NUMBER:-}" \
@@ -876,4 +891,90 @@ jobs:
           name: testing-report-${{ github.run_id }}
           path: report/
           if-no-files-found: ignore
+
+  publish_report:
+    name: Publish Webots report site
+    needs: report
+    if: >-
+      always() &&
+      (github.event_name == 'push' ||
+       github.event_name == 'workflow_dispatch' ||
+       github.event_name == 'workflow_call')
+    runs-on: ubuntu-22.04
+    concurrency:
+      group: webots-report-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.publish_url.outputs.report_url }}
+    outputs:
+      report_url: ${{ steps.publish_url.outputs.report_url }}
+    steps:
+      - name: Download generated report
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: testing-report-*
+          path: report-dl
+          merge-multiple: true
+
+      - name: Restore existing report site
+        uses: actions/cache/restore@v4
+        with:
+          path: public
+          key: webots-report-pages-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            webots-report-pages-
+
+      - name: Stage report site
+        run: |
+          set -euo pipefail
+          report_id="${GITHUB_RUN_ID}"
+          report_dir="public/reports/runs/${report_id}"
+          expected_base_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+          expected_report_url="${expected_base_url}/reports/runs/${report_id}/"
+          rm -rf "$report_dir"
+          mkdir -p "$report_dir" public report-dl
+          if [ -f report-dl/index.html ]; then
+            cp -a report-dl/. "$report_dir/"
+          else
+            cat > "$report_dir/index.html" <<'HTML'
+          <!doctype html><meta charset="utf-8"><title>Robonix Webots CI Report</title>
+          <body><h1>Robonix Webots CI Report</h1><p>No generated report artifact was available for this run.</p></body>
+          HTML
+          fi
+          printf '%s\n' \
+            '<!doctype html>' \
+            '<meta charset="utf-8">' \
+            "<meta http-equiv=\"refresh\" content=\"0; url=reports/runs/${report_id}/\">" \
+            '<title>Robonix Webots CI Reports</title>' \
+            "<a href=\"reports/runs/${report_id}/\">Latest Robonix Webots CI report</a>" \
+            > public/index.html
+          echo "report_url=${expected_report_url}" >> "$GITHUB_OUTPUT"
+
+      - name: Save report site cache
+        uses: actions/cache/save@v4
+        with:
+          path: public
+          key: webots-report-pages-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Set deployed report URL
+        id: publish_url
+        run: |
+          set -euo pipefail
+          page_url="${{ steps.deployment.outputs.page_url }}"
+          page_url="${page_url%/}"
+          echo "report_url=${page_url}/reports/runs/${{ github.run_id }}/" >> "$GITHUB_OUTPUT"
 
