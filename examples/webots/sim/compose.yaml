@@ -13,21 +13,32 @@
 # GUI: host must set DISPLAY and allow X11 (e.g. `xhost +local:docker`).
 # Performance: default Docker /dev/shm is 64MB — Qt/Webots thrash; we
 # bump it to 2GB.
-name: robonix_tiago_sim
+name: ${ROBONIX_SIM_PROJECT:-robonix_tiago_sim}
 
 services:
   sim:
-    container_name: robonix_tiago_sim
+    container_name: ${ROBONIX_SIM_CONTAINER:-robonix_tiago_sim}
     build:
       context: ./
       dockerfile: bridge/Dockerfile
-    network_mode: host
+    # Network namespace — overridable via ROBONIX_SIM_NETWORK so a CI / parallel
+    # sim runs on its OWN bridge network (own localhost, own ports) instead of
+    # sharing the host's, which lets two sims coexist without colliding on the
+    # webots stream port (1234, not CLI-overridable in this webots build). The
+    # compose `ports:` mapping in compose.stream.yaml only takes effect under
+    # bridge. Default `host` keeps single-deploy DDS/SHM behaviour unchanged.
+    network_mode: "${ROBONIX_SIM_NETWORK:-host}"
     # ipc_mode=host is load-bearing for FastRTPS data transfer:
     # FastRTPS keys SHM transport by /dev/shm. Other robonix containers
     # (scene, mapping) also pass --ipc=host; without matching here sim's
     # publishers and their subscribers live in disjoint /dev/shm
     # namespaces and topics never propagate.
-    ipc: host
+    # IPC namespace is overridable via ROBONIX_SIM_IPC so a CI / parallel sim
+    # gets its OWN namespace (`private`) — webots' extern-controller IPC is keyed
+    # by a fixed port (1234), so two `ipc: host` sims collide on it. Default
+    # `host` is load-bearing for single-deploy FastRTPS SHM with sibling
+    # containers (scene/mapping); a private-IPC sim still works over DDS/UDP.
+    ipc: "${ROBONIX_SIM_IPC:-host}"
     # Critical for Webots/Qt: avoid 64MB default shm (MIT-SHM / IPC).
     shm_size: "2gb"
     # Keep the container alive after entrypoint's `wait` so `docker exec`
@@ -43,6 +54,12 @@ services:
       XAUTHORITY: /root/.Xauthority
       QT_X11_NO_MITSHM: "1"
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      # Headless render backend (host|nvidia|xvfb|auto) + display number,
+      # forwarded so a deploy can pick GPU-backed offscreen rendering WITHOUT
+      # the browser stream (compose.stream.yaml). Lets a CI run render on its
+      # own Xorg display (ROBONIX_SIM_XDISPLAY) without binding the stream port.
+      WEBOTS_HEADLESS_MODE: "${WEBOTS_HEADLESS_MODE:-host}"
+      ROBONIX_SIM_XDISPLAY: "${ROBONIX_SIM_XDISPLAY:-:48}"
       WEBOTS_WARMUP_SEC: "${WEBOTS_WARMUP_SEC:-25}"
       # Match docker/run.sh so Webots can use host GL stack when GPU is wired in.
       NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-all}"

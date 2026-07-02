@@ -21,7 +21,7 @@ from typing import Optional
 # ModelScope rather than HuggingFace because huggingface_hub's metadata HEAD only
 # follows same-host redirects, and the reachable hf-mirror.com bounces
 # resolve/main to huggingface.co with a cross-host 308 that no hf_hub version
-# follows — so every HF path fails on CN networks. ModelScope's SDK has no such
+# follows — so some HF paths fail in restricted runner environments. ModelScope's SDK has no such
 # issue (it's also where the speech service pulls FunASR). Pulled once into the
 # local ModelScope cache; build.sh pre-warms it so runtime startup is offline.
 _MODELSCOPE_ID = "speechbrain/spkrec-ecapa-voxceleb"

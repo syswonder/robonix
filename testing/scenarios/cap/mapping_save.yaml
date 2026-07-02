@@ -1,0 +1,24 @@
+# Exercise the mapping service save_map RPC against the live SLAM database.
+name: mapping_save
+task: "ci-test: save the current slam map under a test id"
+steps:
+  - content: Saving the current map.
+    rtdl_description: map save
+    status: in_progress
+    rtdl:
+      op: sequence
+      id: map_save_step
+      children:
+        - op: do
+          id: map_save
+          cap: mapping.map_save_map
+          args: {map_id: ci_test_map, note: robonix ci}
+          description: checkpoint the slam map
+          expect:
+            contract: robonix/service/map/save_map
+            success: true
+            args: {map_id: ci_test_map, note: robonix ci}
+            output:
+              json: {ok: true, map_id: ci_test_map}
+  - content: Map saved.
+    status: done
