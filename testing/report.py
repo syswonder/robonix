@@ -244,6 +244,93 @@ def _scenario_rows(summary: dict) -> str:
     return "\n".join(rows)
 
 
+
+def _analysis_list(values: object) -> str:
+    if not values:
+        return '<p class="muted">-</p>'
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, list):
+        values = [values]
+    items = []
+    for value in values:
+        if isinstance(value, dict):
+            value = value.get("text") or _compact_json(value)
+        items.append(f"<li>{html.escape(str(value))}</li>")
+    return f"<ul>{''.join(items)}</ul>"
+
+
+def _llm_analysis_section(analysis: dict | None) -> str:
+    if not isinstance(analysis, dict) or not analysis:
+        return ""
+    title = str(analysis.get("title") or "LLM analysis")
+    summary = str(analysis.get("summary") or "")
+    available = analysis.get("available")
+    badge = "available" if available else "unavailable"
+    stage = str(analysis.get("stage") or "")
+    confidence = str(analysis.get("confidence") or "")
+    meta = []
+    for key in ("provider", "model", "generated_on"):
+        if analysis.get(key):
+            meta.append(f"{_label_for_key(key)}: {html.escape(str(analysis[key]))}")
+    if stage:
+        meta.append(f"Stage: {html.escape(stage)}")
+    if confidence:
+        meta.append(f"Confidence: {html.escape(confidence)}")
+
+    evidence_rows = []
+    evidence = analysis.get("evidence")
+    if isinstance(evidence, list):
+        for item in evidence:
+            if isinstance(item, dict):
+                source = str(item.get("source") or "")
+                line = item.get("line", "")
+                excerpt = str(item.get("text") or "")
+            else:
+                source, line, excerpt = "", "", str(item)
+            source_html = _button(source, Path(source).name, "path-link") if source else '<span class="muted">-</span>'
+            evidence_rows.append(
+                "<tr>"
+                f"<td>{source_html}</td>"
+                f"<td class=\"number\">{html.escape(str(line)) if line else '-'}</td>"
+                f"<td>{html.escape(excerpt)}</td>"
+                "</tr>"
+            )
+    evidence_html = ""
+    if evidence_rows:
+        evidence_html = (
+            '<h3>Evidence</h3><table class="evidence-table">'
+            '<thead><tr><th>Source</th><th>Line</th><th>Excerpt</th></tr></thead>'
+            f"<tbody>{''.join(evidence_rows)}</tbody></table>"
+        )
+
+    sections = []
+    field_labels = [
+        ("pr_changes", "PR Changes"),
+        ("test_result", "Test Result"),
+        ("likely_root_cause", "Likely Root Cause"),
+        ("suggested_fix", "Suggested Fix"),
+        ("risks_or_watchouts", "Risks Or Watchouts"),
+    ]
+    for key, label in field_labels:
+        value = analysis.get(key)
+        if value:
+            sections.append(f"<h3>{label}</h3>{_analysis_list(value)}")
+
+    unavailable_note = "" if available else '<p class="muted">LLM analysis was not available; deterministic logs remain embedded below.</p>'
+    meta_html = f"<p class=\"analysis-meta\">{' · '.join(meta)}</p>" if meta else ""
+    return (
+        '<h2>LLM-Assisted Analysis</h2>'
+        f'<section class="analysis-card analysis-{html.escape(badge)}">'
+        f'<div class="analysis-title">{html.escape(title)}</div>'
+        f"{meta_html}"
+        f'<p>{html.escape(summary)}</p>'
+        f"{unavailable_note}"
+        f"{''.join(sections)}"
+        f"{evidence_html}"
+        "</section>"
+    )
+
 def _coverage(summary: dict) -> str:
     rows = []
     for contract in summary.get("coverage", []):
@@ -593,7 +680,7 @@ def _json_for_script(data: object) -> str:
     return json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
 
 
-def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], out: Path) -> None:
+def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analysis: dict | None, out: Path) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     total = int(summary.get("total", 0) or 0)
     passed = int(summary.get("passed", 0) or 0)
@@ -929,6 +1016,34 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], out: P
     .tok-error {{ color: #fca5a5; font-weight: 700; }}
     .tok-warn {{ color: #fde68a; font-weight: 700; }}
     .tok-pass {{ color: #86efac; font-weight: 700; }}
+    .analysis-card {{
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 14px 16px;
+      margin: 12px 0 22px;
+    }}
+    .analysis-available {{ background: #f8fafc; }}
+    .analysis-unavailable {{ background: #f9fafb; }}
+    .analysis-title {{
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }}
+    .analysis-meta {{
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      margin: 0 0 10px;
+    }}
+    .analysis-card h3 {{
+      font-size: 12px;
+      margin: 14px 0 6px;
+      text-transform: uppercase;
+    }}
+    .evidence-table th:nth-child(1),
+    .evidence-table td:nth-child(1) {{ width: 240px; }}
+    .evidence-table th:nth-child(2),
+    .evidence-table td:nth-child(2) {{ width: 80px; }}
     .metadata th {{
       text-transform: none;
       width: 180px;
@@ -960,6 +1075,7 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], out: P
     <div class=\"card\"><strong>Failures</strong><span class=\"metric\">{failed}</span></div>
     <div class=\"card\"><strong>Pass rate</strong><span class=\"metric\">{html.escape(str(rate))}</span></div>
   </div>
+  {_llm_analysis_section(analysis)}
   <h2>Run Metadata</h2>
   {_metadata_table(metadata)}
   <h2>Test Environment</h2>
@@ -1065,7 +1181,7 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], out: P
     out.write_text(body)
 
 
-def write_markdown(summary: dict, out: Path) -> None:
+def write_markdown(summary: dict, analysis: dict | None, out: Path) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     total = int(summary.get("total", 0) or 0)
     passed = int(summary.get("passed", 0) or 0)
@@ -1099,6 +1215,7 @@ def main() -> int:
     ap.add_argument("--log-file", action="append", default=[], help="label=path to embed as a single log")
     ap.add_argument("--metadata-json", action="append", type=Path, default=[], help="metadata JSON to merge")
     ap.add_argument("--metadata", action="append", default=[], help="key=value metadata to show in the report")
+    ap.add_argument("--llm-analysis-json", type=Path, help="LLM-assisted diagnostic JSON to render")
     ap.add_argument("--max-log-bytes", type=int, default=524288, help="per-log byte cap; 0 embeds complete files")
     ap.add_argument(
         "--max-total-log-bytes",
@@ -1116,9 +1233,10 @@ def main() -> int:
         args.max_total_log_bytes,
     )
     metadata = _parse_metadata(args.metadata, args.metadata_json)
+    analysis = _read_json(args.llm_analysis_json) if args.llm_analysis_json else {}
     write_metadata(metadata, args.out_dir / "metadata.json")
-    write_html(summary, logs, metadata, args.out_dir / "index.html")
-    write_markdown(summary, args.out_dir / "summary.md")
+    write_html(summary, logs, metadata, analysis, args.out_dir / "index.html")
+    write_markdown(summary, analysis, args.out_dir / "summary.md")
     return 0
 
 
