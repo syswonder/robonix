@@ -487,8 +487,8 @@ def _metadata_table(metadata: dict[str, str]) -> str:
         "runner_arch",
         "origin_url",
     ]
-    keys = [k for k in ordered if k in metadata and not k.startswith("env_")]
-    keys.extend(k for k in metadata if k not in set(keys) and not k.endswith("_url") and not k.startswith("env_"))
+    keys = [k for k in ordered if metadata.get(k) and not k.startswith("env_")]
+    keys.extend(k for k in metadata if metadata.get(k) and k not in set(keys) and not k.endswith("_url") and not k.startswith("env_"))
     return _table_for_keys(metadata, keys, "No run metadata was provided.")
 
 
@@ -518,7 +518,7 @@ def _environment_table(metadata: dict[str, str]) -> str:
         "env_rbnx_version",
     ]
     keys = [k for k in ordered if metadata.get(k)]
-    keys.extend(k for k in metadata if k.startswith("env_") and k not in set(keys))
+    keys.extend(k for k in metadata if metadata.get(k) and k.startswith("env_") and k not in set(keys))
     return _table_for_keys(metadata, keys, "No test environment metadata was provided.")
 
 

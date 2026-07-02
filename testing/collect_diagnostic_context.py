@@ -243,8 +243,19 @@ def main() -> int:
 
     tested_commit = metadata.get("tested_commit") or metadata.get("sha")
     git_diff = ""
-    if not pr_files and tested_commit:
+    diff_source = "unavailable"
+    if pr_files:
+        diff_source = "github_pr_files"
+    elif tested_commit:
+        diff_source = "git_show_tested_commit"
         git_diff = _run_git(["show", "--stat", "--patch", "--find-renames", tested_commit], args.repo, args.max_git_diff_chars)
+
+    change_set = {
+        "source": diff_source,
+        "strict_rule": "Summarize code changes only from pr_files or git_diff. Do not infer changes from logs, capability catalogs, provider names, repository layout, or existing files.",
+        "pr_files": pr_files,
+        "git_diff": git_diff,
+    }
 
     roots = args.artifact_root or [Path(".")]
     logs = _collect_logs(roots, args.max_log_bytes, args.max_total_log_bytes)
@@ -259,8 +270,7 @@ def main() -> int:
         ],
         "metadata": metadata,
         "summary": summary,
-        "pr_files": pr_files,
-        "git_diff": git_diff,
+        "change_set": change_set,
         "logs": logs,
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
