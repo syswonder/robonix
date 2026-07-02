@@ -45,9 +45,11 @@ intrinsics_published = False  # true after the first valid K sample is published
 camera_info_seen = False
 configured_intrinsics_msg = None
 configured_intrinsics_k: list[float] = []
-configured_intrinsics_interval_s = 0.5
+latest_intrinsics_msg = None
+latest_intrinsics_k: list[float] = []
+intrinsics_publish_interval_s = 0.5
 configured_intrinsics_logged = False
-last_configured_intrinsics_publish = 0.0
+last_intrinsics_publish = 0.0
 
 # ── image conversion ─────────────────────────────────────────────────────────
 def ros_image_to_jpeg(msg) -> bytes:
@@ -91,7 +93,7 @@ def on_rgb(msg):
     try:
         with state_lock:
             latest_rgb_jpeg = ros_image_to_jpeg(msg)
-        publish_configured_intrinsics_if_needed("rgb")
+        publish_intrinsics_if_needed("rgb")
     except Exception as e:
         print(f"[tiago_camera] RGB conversion error: {e}", flush=True)
 
@@ -105,39 +107,49 @@ def on_depth(msg):
         print(f"[tiago_camera] Depth conversion error: {e}", flush=True)
 
 
-def publish_configured_intrinsics_if_needed(reason: str, *, force: bool = False) -> None:
-    """Publish deployment-provided K when the camera has no CameraInfo stream.
+def publish_intrinsics_if_needed(reason: str, *, force: bool = False) -> None:
+    """Publish the best available CameraInfo on the intrinsics contract.
 
-    Webots images are the real signal here. Publishing from the RGB callback
-    keeps the intrinsics contract alive in the same path that proves the camera
-    is producing frames, while still giving a real CameraInfo stream priority.
+    Scene subscribes after providers register and may miss a one-shot CameraInfo
+    sample. Keep the contract alive by periodically republishing the last valid
+    camera K. A live CameraInfo source always wins; deployment-configured K is a
+    fallback for simulators such as Webots that do not stream camera_info.
     """
-    global configured_intrinsics_logged, intrinsics_published
-    global last_configured_intrinsics_publish
+    global configured_intrinsics_logged, intrinsics_published, last_intrinsics_publish
     pub = intrinsics_pub
     with intrinsics_lock:
-        if camera_info_seen or configured_intrinsics_msg is None or pub is None:
+        if pub is None:
+            return
+        if latest_intrinsics_msg is not None:
+            msg = latest_intrinsics_msg
+            k = list(latest_intrinsics_k)
+            source = "camera_info"
+        elif configured_intrinsics_msg is not None:
+            msg = configured_intrinsics_msg
+            k = list(configured_intrinsics_k)
+            source = "configured"
+        else:
             return
         now = time.monotonic()
-        elapsed = now - last_configured_intrinsics_publish
-        if not force and elapsed < configured_intrinsics_interval_s:
+        elapsed = now - last_intrinsics_publish
+        if not force and elapsed < intrinsics_publish_interval_s:
             return
-        msg = configured_intrinsics_msg
-        k = list(configured_intrinsics_k)
-        last_configured_intrinsics_publish = now
-        log_first = not configured_intrinsics_logged
+        last_intrinsics_publish = now
+        log_configured = source == "configured" and not configured_intrinsics_logged
+        log_first = not intrinsics_published
     try:
         pub.publish(msg)
     except Exception as e:  # noqa: BLE001
-        print(f"[tiago_camera] WARN: configured intrinsics publish failed: {e}", flush=True)
+        print(f"[tiago_camera] WARN: intrinsics publish failed: {e}", flush=True)
         return
     with intrinsics_lock:
         intrinsics_published = True
-        if log_first:
+        if log_configured:
             configured_intrinsics_logged = True
-    if log_first:
+    if log_first or log_configured:
+        prefix = "publishing configured intrinsics" if source == "configured" else "publishing intrinsics"
         print(
-            f"[tiago_camera] publishing configured intrinsics via {reason}: "
+            f"[tiago_camera] {prefix} via {reason}: "
             f"fx={k[0]:.1f} fy={k[1]:.1f} cx={k[2]:.1f} cy={k[3]:.1f} "
             f"{msg.width}x{msg.height}",
             flush=True,
@@ -288,8 +300,9 @@ def _cfg_int(cfg: dict, key: str, env_key: str, default: int) -> int:
 def init(cfg):
     global extrinsics_pub, intrinsics_pub, intrinsics_published, camera_info_seen
     global configured_intrinsics_msg, configured_intrinsics_k
-    global configured_intrinsics_interval_s, configured_intrinsics_logged
-    global last_configured_intrinsics_publish
+    global latest_intrinsics_msg, latest_intrinsics_k
+    global intrinsics_publish_interval_s, configured_intrinsics_logged
+    global last_intrinsics_publish
     cfg = cfg or {}
     rgb_topic = cfg.get("rgb_topic") or os.environ.get(
         "TIAGO_RGB_TOPIC", "/head_front_camera/rgb/image_raw")
@@ -346,9 +359,11 @@ def init(cfg):
         camera_info_seen = False
         configured_intrinsics_msg = None
         configured_intrinsics_k = []
-        configured_intrinsics_interval_s = max(0.1, intrinsics_publish_interval_s)
+        latest_intrinsics_msg = None
+        latest_intrinsics_k = []
+        intrinsics_publish_interval_s = max(0.1, intrinsics_publish_interval_s)
         configured_intrinsics_logged = False
-        last_configured_intrinsics_publish = 0.0
+        last_intrinsics_publish = 0.0
 
     def configured_camera_info() -> tuple[CameraInfo | None, list[float]]:
         width = _cfg_int(cfg, "width", "TIAGO_CAMERA_WIDTH", 0)
@@ -383,9 +398,7 @@ def init(cfg):
         configured_intrinsics_k = configured_k
 
     def on_camera_info(msg, _topic=intrinsics_topic):
-        global intrinsics_published, camera_info_seen
-        if intrinsics_pub is None:
-            return
+        global camera_info_seen, latest_intrinsics_msg, latest_intrinsics_k
         # Validate K before relaying: skip zero/partial CameraInfo so we
         # never forward garbage K.
         k = list(msg.k) if hasattr(msg, "k") else list(getattr(msg, "K", []))
@@ -393,50 +406,39 @@ def init(cfg):
             return
         with intrinsics_lock:
             camera_info_seen = True
-        # Relay on EVERY frame, not once. Scene subscribes to the intrinsics
-        # contract with DURABILITY=VOLATILE (so it stays compatible with
-        # continuously-publishing real cameras like realsense). A volatile
-        # subscriber never receives a one-shot sample published before it
-        # connected — so a publish-once relay leaves scene "waiting for
-        # camera intrinsics" forever. Mirror a real camera: stream K
-        # continuously (K is static, so the cost is negligible; the publisher
-        # is still latched so any TRANSIENT_LOCAL consumer also gets it).
-        intrinsics_pub.publish(msg)
-        if not intrinsics_published:
-            intrinsics_published = True
-            print(f"[tiago_camera] publishing intrinsics: fx={k[0]:.1f} "
-                  f"fy={k[4]:.1f} cx={k[2]:.1f} cy={k[5]:.1f} "
-                  f"{msg.width}x{msg.height} -> {_topic}", flush=True)
+            latest_intrinsics_msg = msg
+            latest_intrinsics_k = [float(k[0]), float(k[4]), float(k[2]), float(k[5])]
+        publish_intrinsics_if_needed(_topic, force=True)
 
-    def publish_configured_intrinsics() -> None:
+    def publish_intrinsics_loop() -> None:
         try:
-            deadline = time.monotonic() + max(0.0, intrinsics_source_timeout_s)
-            while time.monotonic() < deadline:
-                with intrinsics_lock:
-                    if camera_info_seen:
-                        return
-                time.sleep(0.1)
-            with intrinsics_lock:
-                has_configured_intrinsics = configured_intrinsics_msg is not None
-            if not has_configured_intrinsics:
-                print("[tiago_camera] WARN: no usable CameraInfo source and no "
-                      "configured camera intrinsics", flush=True)
-                return
+            warned_missing = False
             while True:
+                publish_intrinsics_if_needed("timer", force=True)
                 with intrinsics_lock:
-                    if camera_info_seen:
-                        return
-                publish_configured_intrinsics_if_needed("timer", force=True)
+                    has_any_intrinsics = latest_intrinsics_msg is not None or configured_intrinsics_msg is not None
+                    has_published = intrinsics_published
+                if not warned_missing and not has_any_intrinsics and not has_published:
+                    # Keep the old delayed warning behavior so a wrong source
+                    # topic is visible without racing normal startup.
+                    time.sleep(max(0.0, intrinsics_source_timeout_s))
+                    with intrinsics_lock:
+                        has_any_intrinsics = latest_intrinsics_msg is not None or configured_intrinsics_msg is not None
+                        has_published = intrinsics_published
+                    if not has_any_intrinsics and not has_published:
+                        print("[tiago_camera] WARN: no usable CameraInfo source and no "
+                              "configured camera intrinsics", flush=True)
+                        warned_missing = True
                 time.sleep(max(0.1, intrinsics_publish_interval_s))
         except Exception as e:  # noqa: BLE001
-            print(f"[tiago_camera] WARN: configured intrinsics thread exited: {e}", flush=True)
+            print(f"[tiago_camera] WARN: intrinsics publish thread exited: {e}", flush=True)
 
     tiago_camera.create_subscription(
         "robonix/primitive/camera/intrinsics",
         topic=camera_info_topic, msg_type="CameraInfo",
         callback=on_camera_info, qos="best_effort", declare=False,
     )
-    threading.Thread(target=publish_configured_intrinsics, daemon=True).start()
+    threading.Thread(target=publish_intrinsics_loop, daemon=True).start()
 
     # Give-up watchdog: if no usable CameraInfo lands on `camera_info_topic`
     # the intrinsics contract is advertised but never publishes, and scene
