@@ -5,13 +5,13 @@
 # `robonix-scene`, built by scripts/build.sh). Joins host network so:
 #   - it can reach atlas at 127.0.0.1:50051
 #   - it shares the host DDS bus with whatever sim/robot container
-#     is publishing /amcl_pose, /scan, /head_front_camera/* etc.
+#     is publishing the camera, lidar, pose, and map topics declared through atlas.
 #
 # Soma adapter: scene's ingest layer reads `config.observations[]`
 # (passed in via RBNX_CONFIG_FILE by `rbnx boot`) to know which ROS2
 # topics to subscribe to. Each entry pairs a logical kind ("rgb",
 # "depth", "lidar2d", "pose", "odom") with a topic name and ROS msg
-# class. Default mapping matches Webots Tiago.
+# class.
 manifestVersion: 1
 
 package:

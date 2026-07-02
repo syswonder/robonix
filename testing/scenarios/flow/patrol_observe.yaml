@@ -3,49 +3,71 @@ name: patrol_observe
 task: "ci-flow: look around, note what you see, then recall the note"
 steps:
   - status: in_progress
-    rtdl_description: capture
-    content: Capturing a snapshot at the waypoint.
-    caps:
-      - cap: tiago_camera.camera_snapshot
-        args: {}
-        description: observe the surroundings
+    rtdl_description: parallel sensor capture
+    content: Capturing sensor observations at the waypoint.
+    rtdl:
+      op: parallel
+      id: observe_step
+      children:
+        - op: do
+          id: observe_snapshot
+          cap: tiago_camera.camera_snapshot
+          args: {}
+          description: observe the surroundings
+          expect:
+            contract: robonix/primitive/camera/snapshot
+            success: true
+            output:
+              json: {encoding: jpeg}
+        - op: do
+          id: observe_lidar
+          cap: tiago_lidar.lidar_snapshot
+          args: {}
+          description: scan nearby geometry
+          expect:
+            contract: robonix/primitive/lidar/snapshot
+            success: true
+            output:
+              json:
+                header: {frame_id: hokuyo}
+              jsonpath:
+                - path: $.ranges
+                  min_length: 1
   - status: in_progress
     rtdl_description: remember
     content: Recording the observation.
-    caps:
-      - cap: memory.memory_save
-        args:
-          data: "ci-flow observation: snapshot captured at waypoint 1"
-        description: persist the observation
+    rtdl:
+      op: sequence
+      id: remember_step
+      children:
+        - op: do
+          id: remember_observation
+          cap: memory.memory_save
+          args: {data: "ci-flow observation: snapshot captured at waypoint 1"}
+          description: persist the observation
+          expect:
+            contract: robonix/service/memory/save
+            success: true
+            args: {data: "ci-flow observation: snapshot captured at waypoint 1"}
+            output:
+              json: {data: "Memory saved and indexed."}
   - status: in_progress
     rtdl_description: recall
-    content: Recording and recalling the observation.
-    caps:
-      - cap: memory.memory_save
-        args:
-          data: "ci-flow observation: snapshot captured at waypoint 1"
-        description: persist the observation if the camera result advanced the scripted round
-      - cap: memory.memory_search
-        args:
-          data: waypoint 1
-        description: recall the observation
+    content: Recalling the observation.
+    rtdl:
+      op: sequence
+      id: recall_step
+      children:
+        - op: do
+          id: recall_observation
+          cap: memory.memory_search
+          args: {data: waypoint 1}
+          description: recall the observation
+          expect:
+            contract: robonix/service/memory/search
+            success: true
+            args: {data: waypoint 1}
+            output:
+              text_regex: 'ci-flow observation: snapshot captured at waypoint 1'
   - status: done
     content: Observed, recorded, and recalled.
-expect_min_rounds: 2
-expect_leaves:
-  - contract: robonix/primitive/camera/snapshot
-    success: true
-    output:
-      json: {encoding: jpeg}
-  - contract: robonix/service/memory/save
-    success: true
-    args:
-      data: "ci-flow observation: snapshot captured at waypoint 1"
-    output:
-      json: {data: "Memory saved and indexed."}
-  - contract: robonix/service/memory/search
-    success: true
-    args:
-      data: waypoint 1
-    output:
-      text_regex: "ci-flow observation: snapshot captured at waypoint 1"

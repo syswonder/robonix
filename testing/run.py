@@ -13,9 +13,9 @@ fake_vlm/server.py). Two scenario families live under ``scenarios/``:
 
 For each scenario this submits the task with ``rbnx ask <task> --json``, writes
 the full PilotEvent stream to ``logs/<name>.jsonl`` (every run is recorded), and
-asserts the scripted capabilities were dispatched with the expected args, the
-expected leaves succeeded (or failed, for injected faults), the turn took at
-least ``expect_min_rounds`` planning rounds, and the task reached ``done``.
+asserts each RTDL ``do`` node produced its declared executor leaf and the task
+reached ``done``. Assertions live on the RTDL leaf that planned the call, so the
+scenario file mirrors what the fake VLM actually returns.
 """
 
 from __future__ import annotations
@@ -57,9 +57,14 @@ def run_ask(rbnx: str, task: str, server: str, timeout: int, log_path: Path) -> 
     return events, proc.returncode
 
 
+def collect_plan_rounds(events: list[dict]) -> list[list[dict]]:
+    """Return dispatched capability calls grouped by EVT_PLAN order."""
+    return [ev["plan"].get("calls", []) for ev in events if ev.get("plan")]
+
+
 def collect_calls(events: list[dict]) -> list[dict]:
     """Flatten every dispatched capability call across all EVT_PLAN events."""
-    return [c for ev in events if ev.get("plan") for c in ev["plan"].get("calls", [])]
+    return [c for calls in collect_plan_rounds(events) for c in calls]
 
 
 def collect_leaf_results(events: list[dict]) -> list[dict]:
@@ -158,40 +163,89 @@ def check_output_clause(leaf: dict, clause: dict) -> list[str]:
     return errs
 
 
+def iter_rtdl_do_nodes(node: object, path: str = "rtdl"):
+    if not isinstance(node, dict):
+        return
+    if node.get("op") == "do":
+        yield path, node
+    for idx, child in enumerate(node.get("children", []) or []):
+        yield from iter_rtdl_do_nodes(child, f"{path}.children[{idx}]")
+
+
+def iter_expected_leaves(scenario: dict):
+    for step_idx, step in enumerate(scenario.get("steps", [])):
+        for node_path, node in iter_rtdl_do_nodes(step.get("rtdl")):
+            expect = node.get("expect")
+            if expect is not None:
+                yield step_idx, node_path, node, expect
+
+
 def validate_new_assertion_shape(scenario: dict) -> list[str]:
     errs: list[str] = []
-    old_fields = tuple(f"expect_{suffix}" for suffix in ("contracts", "args", "outputs", "leaf_failure"))
-    for field in old_fields:
-        if field in scenario:
-            errs.append(f"{field} is removed; use expect_leaves entries with contract/success/args/output")
-    for idx, want in enumerate(scenario.get("expect_leaves", [])):
-        contract = want.get("contract")
-        if not isinstance(contract, str) or not contract.startswith("robonix/"):
-            errs.append(f"expect_leaves[{idx}].contract must be a full robonix/... contract id")
+    for field in scenario:
+        if field.startswith("expect_") and field != "expect_final_done":
+            errs.append(f"{field} is removed; put checks on RTDL do nodes as steps[].rtdl...expect")
+    for step_idx, step in enumerate(scenario.get("steps", [])):
+        if "caps" in step:
+            errs.append(f"steps[{step_idx}].caps is removed; use steps[{step_idx}].rtdl")
+        if "expect" in step:
+            errs.append(f"steps[{step_idx}].expect is removed; put checks on RTDL do nodes")
+        rtdl = step.get("rtdl")
+        if rtdl is None:
+            if step.get("status") != "done":
+                errs.append(f"steps[{step_idx}].rtdl is required unless the step only marks done")
+            continue
+        if not isinstance(rtdl, dict):
+            errs.append(f"steps[{step_idx}].rtdl must be a mapping")
+            continue
+        for node_path, node in iter_rtdl_do_nodes(rtdl):
+            expect = node.get("expect")
+            if not isinstance(expect, dict):
+                errs.append(f"steps[{step_idx}].{node_path}.expect is required on every RTDL do node")
+                continue
+            contract = expect.get("contract")
+            if not isinstance(contract, str) or not contract.startswith("robonix/"):
+                errs.append(f"steps[{step_idx}].{node_path}.expect.contract must be a full robonix/... contract id")
     return errs
 
 
-def check_expected_leaf(want: dict, calls: list[dict], leaves: list[dict]) -> str | None:
+def leaf_satisfies_expected(want: dict, calls: list[dict], leaf: dict) -> list[str]:
+    reasons: list[str] = []
+    if leaf.get("contract_id") != want.get("contract"):
+        reasons.append(f"contract {leaf.get('contract_id')!r} != {want.get('contract')!r}")
+    if leaf.get("success", False) != want.get("success", True):
+        reasons.append(f"success {leaf.get('success', False)!r} != {want.get('success', True)!r}")
+    call_args_by_id = {c.get("call_id"): parse_args_json(c) for c in calls}
+    if "args" in want:
+        args = call_args_by_id.get(leaf.get("call_id"), {})
+        if not contains_subset(args, want["args"]):
+            reasons.append(f"args did not contain subset {want['args']!r}, got {args!r}")
+    output_clause = want.get("output")
+    if isinstance(output_clause, dict):
+        reasons.extend(check_output_clause(leaf, output_clause))
+    return reasons
+
+
+def find_expected_leaf_index(want: dict, calls: list[dict], leaves: list[dict], used: set[int]) -> tuple[int | None, str | None]:
     contract = want["contract"]
     expected_success = want.get("success", True)
-    candidates = [lr for lr in leaves if lr.get("contract_id") == contract and lr.get("success", False) == expected_success]
+    candidates = [
+        (idx, lr)
+        for idx, lr in enumerate(leaves)
+        if idx not in used
+        and lr.get("contract_id") == contract
+        and lr.get("success", False) == expected_success
+    ]
     if not candidates:
-        return f"expected leaf contract={contract!r} success={expected_success}, observed {[(lr.get('contract_id'), lr.get('success')) for lr in leaves]}"
-    call_args_by_id = {c.get("call_id"): parse_args_json(c) for c in calls}
+        observed = [(lr.get("contract_id"), lr.get("success")) for lr in leaves]
+        return None, f"expected leaf contract={contract!r} success={expected_success}, observed {observed}"
     reasons: list[str] = []
-    for leaf in candidates:
-        leaf_reasons: list[str] = []
-        if "args" in want:
-            args = call_args_by_id.get(leaf.get("call_id"), {})
-            if not contains_subset(args, want["args"]):
-                leaf_reasons.append(f"args did not contain subset {want['args']!r}, got {args!r}")
-        output_clause = want.get("output")
-        if isinstance(output_clause, dict):
-            leaf_reasons.extend(check_output_clause(leaf, output_clause))
+    for idx, leaf in candidates:
+        leaf_reasons = leaf_satisfies_expected(want, calls, leaf)
         if not leaf_reasons:
-            return None
+            return idx, None
         reasons.extend(leaf_reasons)
-    return f"expected leaf {contract!r} did not satisfy assertions: {'; '.join(reasons)}"
+    return None, f"expected leaf {contract!r} did not satisfy assertions: {'; '.join(reasons)}"
 
 
 def count_rounds(events: list[dict]) -> int:
@@ -207,15 +261,14 @@ def final_failed(events: list[dict]) -> bool:
 def check_scenario(scenario: dict, events: list[dict], exit_code: int) -> list[str]:
     """Return a list of failure strings ([] means the scenario passed).
 
-    Flow scenarios may declare:
-      expect_min_rounds   — at least this many planning rounds (multi-step).
-      expect_leaves       — exact leaf contracts with success/args/output checks.
-      expect_final_done   — require the turn to end without a FAILED status
-                            (default true; the whole point of fault recovery).
+    Leaf assertions live on RTDL ``do`` nodes. The runner scopes each assertion
+    to that planning round's call_ids, so a later or unrelated leaf cannot
+    satisfy an earlier node by accident.
     """
     fails: list[str] = []
     fails.extend(validate_new_assertion_shape(scenario))
-    calls = collect_calls(events)
+    plan_rounds = collect_plan_rounds(events)
+    all_calls = [c for calls in plan_rounds for c in calls]
     leaves = collect_leaf_results(events)
 
     if scenario.get("expect_final_done", True) and final_failed(events):
@@ -223,28 +276,71 @@ def check_scenario(scenario: dict, events: list[dict], exit_code: int) -> list[s
     if exit_code != 0:
         fails.append(f"rbnx ask exit={exit_code}")
 
-    for want in scenario.get("expect_leaves", []):
-        if not isinstance(want, dict) or "contract" not in want:
-            fails.append(f"invalid expect_leaves entry: {want!r}")
+    expected_by_step: dict[int, list[tuple[str, dict, dict]]] = {}
+    expected_failure_specs: list[tuple[int, dict]] = []
+    for step_idx, node_path, node, want in iter_expected_leaves(scenario):
+        expected_by_step.setdefault(step_idx, []).append((node_path, node, want))
+        if isinstance(want, dict) and want.get("success") is False:
+            expected_failure_specs.append((step_idx, want))
+
+    cursor = 0
+    for step_idx, expected_nodes in sorted(expected_by_step.items()):
+        invalid = [
+            (node_path, want)
+            for node_path, _node, want in expected_nodes
+            if not isinstance(want, dict) or "contract" not in want
+        ]
+        for node_path, want in invalid:
+            fails.append(f"invalid steps[{step_idx}].{node_path}.expect entry: {want!r}")
+        if invalid:
             continue
-        err = check_expected_leaf(want, calls, leaves)
-        if err:
-            fails.append(err)
 
-    rounds = count_rounds(events)
-    if rounds < scenario.get("expect_min_rounds", 0):
-        fails.append(f"expected >= {scenario['expect_min_rounds']} rounds, got {rounds}")
+        matched_round = None
+        observed: list[str] = []
+        for round_idx in range(cursor, len(plan_rounds)):
+            step_calls = plan_rounds[round_idx]
+            step_call_ids = {c.get("call_id") for c in step_calls}
+            step_leaves = [lr for lr in leaves if lr.get("call_id") in step_call_ids]
+            round_errs: list[str] = []
+            if len(step_calls) != len(expected_nodes):
+                round_errs.append(f"planned {len(step_calls)} call(s), expected {len(expected_nodes)}")
+            if len(step_leaves) != len(step_calls):
+                round_errs.append(f"produced {len(step_leaves)} leaf result(s) for {len(step_calls)} call(s)")
+            used_leaf_indexes: set[int] = set()
+            for node_path, _node, want in expected_nodes:
+                match_idx, err = find_expected_leaf_index(want, step_calls, step_leaves, used_leaf_indexes)
+                if err:
+                    round_errs.append(f"{node_path}: {err}")
+                elif match_idx is not None:
+                    used_leaf_indexes.add(match_idx)
+            if not round_errs:
+                matched_round = round_idx
+                cursor = round_idx + 1
+                break
+            if len(observed) < 3:
+                contracts = [(c.get("contract_id"), c.get("call_id")) for c in step_calls]
+                observed.append(f"round {round_idx}: calls={contracts}; {'; '.join(round_errs)}")
+        if matched_round is None:
+            expected_contracts = [want["contract"] for _node_path, _node, want in expected_nodes]
+            detail = " | ".join(observed) if observed else "no later plan rounds"
+            fails.append(
+                f"steps[{step_idx}] did not match any plan round from {cursor}; "
+                f"expected contracts={expected_contracts}; observed {detail}"
+            )
 
-    # Unexpected failures: a failed leaf whose contract is not an expected fault.
+    # Unexpected failures: a failed leaf must be explicitly expected, with matching
+    # contract and args/output assertions. Contract-only allow-lists are too loose.
     if not scenario.get("allow_leaf_failure", False):
-        expected_failures = {
-            want.get("contract")
-            for want in scenario.get("expect_leaves", [])
-            if isinstance(want, dict) and want.get("success") is False
-        }
         for lr in leaves:
-            cid = lr.get("contract_id", "")
-            if not lr.get("success", False) and cid not in expected_failures:
+            if lr.get("success", False):
+                continue
+            matched = False
+            for _step_idx, want in expected_failure_specs:
+                if not leaf_satisfies_expected(want, all_calls, lr):
+                    matched = True
+                    break
+            if not matched:
+                cid = lr.get("contract_id", "")
                 fails.append(f"unexpected leaf failure {cid}: {lr.get('error', '')[:160]}")
     return fails
 

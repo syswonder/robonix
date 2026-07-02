@@ -318,6 +318,11 @@ jobs:
           echo "ROBONIX_CODEGEN_BIN=$PWD/target/debug/robonix-codegen" >> "$GITHUB_ENV"
           "$PWD/target/debug/rbnx" setup "$PWD"
 
+      - name: Validate scenario harness
+        run: |
+          set -euo pipefail
+          python3 testing/simulate_ci.py
+
       - name: Build Webots deployment
         working-directory: examples/webots
         run: |

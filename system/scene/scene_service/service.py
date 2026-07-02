@@ -40,7 +40,6 @@ from .ingest.capabilities import plan_perception
 from .ingest.perception_concept_graphs import ConceptGraphsDetector
 from .ingest.perception_vlm import VLMObjectDetector, _CamIntrinsics
 from .ingest.ros_subscribers import (
-    DEFAULT_WEBOTS_TIAGO_TOPICS,
     SubscribersHub,
     TopicSpec,
 )
@@ -466,6 +465,7 @@ async def _start_ros_ingest(
     # poses; the others are named, logged degradations, not silent ones.
     plan = plan_perception(hub)
     log.info("[scene] perception plan: %s", plan.summary())
+    intrinsics_fallback = _scene_intrinsics_fallback(config.get("intrinsics_fallback"))
     detector: Optional[Any] = None
     if plan.detector == "concept_graphs":
 
@@ -481,13 +481,11 @@ async def _start_ros_ingest(
                 return None
             return msg
 
-        # Prefer the live `primitive/camera/intrinsics` contract. Some
-        # simulator deployments have a stable, reviewed camera calibration but
-        # no reliable CameraInfo stream; those may opt in via
+        # Prefer the live `primitive/camera/intrinsics` contract. Deployments
+        # without a reliable CameraInfo stream may opt in via an explicit
         # `intrinsics_fallback` in the scene config. This still runs the real
         # RGB-D ConceptGraphs path; it only supplies K for back-projection when
         # the contract has not delivered a usable sample yet.
-        intrinsics_fallback = _scene_intrinsics_fallback(config.get("intrinsics_fallback"))
         intrinsics_logged = {"ok": False, "bad": False, "fallback": False}
 
         def _cam_info() -> Optional[_CamIntrinsics]:
@@ -525,6 +523,12 @@ async def _start_ros_ingest(
                 return k
             return None
 
+        camera_frame = str(
+            config.get("camera_frame")
+            or os.environ.get("SCENE_CAMERA_FRAME")
+            or "camera_optical_frame"
+        )
+
         detector = ConceptGraphsDetector(
             rgb_fetcher_msg=_rgb_msg,
             depth_fetcher_msg=_depth_msg,
@@ -544,6 +548,7 @@ async def _start_ros_ingest(
             # Raise SCENE_DETECT_PERIOD_S (e.g. 2.0) to free the GPU when running
             # speech + perception together.
             period_s=float(os.environ.get("SCENE_DETECT_PERIOD_S", "") or 0.6),
+            camera_frame=camera_frame,
         )
         await detector.start()
         log.info("[scene] perception: ConceptGraphsDetector (rgb+depth)")
@@ -560,20 +565,20 @@ async def _start_ros_ingest(
                 return None
             return _image_msg_to_jpeg(msg)
 
-        # Use the contract K when it has already landed, else the built-in
-        # default. Unlike the metric path the visual tier must NOT wait for
-        # intrinsics: its depth is a VLM guess, so K is a minor term, and
-        # the tier's whole job is to emit approximate cues from minimal
-        # hardware. A one-time snapshot is fine — intrinsics are latched and
-        # this branch only runs after the perception-wait window.
+        # Use the contract K when it has already landed, else the same explicit
+        # deployment fallback accepted by the metric path. Do not invent a
+        # camera model here: even approximate VLM detections become misleading
+        # when projected through an unreviewed K.
         vlm_intrinsics: Optional[_CamIntrinsics] = None
         if hub.has("intrinsics"):
             msg, stamp, _ = hub.latest("intrinsics")
             if msg is not None and stamp > 0.0:
                 vlm_intrinsics = _cam_info_to_intrinsics(msg)
+        if vlm_intrinsics is None and intrinsics_fallback is not None:
+            _, vlm_intrinsics = intrinsics_fallback
         log.info(
             "[scene] VLM intrinsics: %s",
-            "from contract" if vlm_intrinsics is not None else "built-in default",
+            "configured" if vlm_intrinsics is not None else "unavailable",
         )
 
         detector = VLMObjectDetector(
@@ -581,6 +586,11 @@ async def _start_ros_ingest(
             chassis_pose_fn=self_tracker.latest_xy_yaw,
             on_detections=lambda dets: _ingest_detections(registry, dets),
             period_s=4.0,
+            camera_frame_id=str(
+                config.get("camera_frame")
+                or os.environ.get("SCENE_CAMERA_FRAME")
+                or "camera_optical_frame"
+            ),
             intrinsics=vlm_intrinsics,
         )
         await detector.start()
@@ -597,55 +607,51 @@ async def _start_ros_ingest(
 
 
 def _scene_intrinsics_fallback(raw: Any) -> Optional[tuple[str, _CamIntrinsics]]:
-    """Return an explicitly configured intrinsics fallback for simulator deploys.
+    """Return an explicitly configured camera intrinsics fallback.
 
     Real hardware should publish `primitive/camera/intrinsics`. The fallback is
-    opt-in because an unreviewed K silently moves 3D objects. Webots Tiago is a
-    stable simulator camera, so the example manifest can provide the same K used
-    by the camera primitive.
+    opt-in and must include the full K because an unreviewed calibration silently
+    moves 3D objects.
     """
     if raw in (None, "", False):
         return None
     if isinstance(raw, str):
-        source = raw
-        cfg: dict[str, Any] = {}
-    elif isinstance(raw, dict):
-        cfg = raw
-        source = str(cfg.get("source") or cfg.get("name") or "configured")
-    else:
+        if raw.lower() in {"none", "disabled", "false"}:
+            return None
+        log.warning("[scene] ignoring incomplete intrinsics_fallback=%r", raw)
+        return None
+    if not isinstance(raw, dict):
         log.warning("[scene] ignoring invalid intrinsics_fallback=%r", raw)
         return None
+
+    cfg = raw
+    source = str(cfg.get("source") or cfg.get("name") or "configured")
     if source.lower() in {"none", "disabled", "false"}:
         return None
-    defaults = _CamIntrinsics() if source == "webots_tiago" else _CamIntrinsics(
-        width=0, height=0, fx=0.0, fy=0.0, cx=0.0, cy=0.0
-    )
+    required = ("width", "height", "fx", "fy", "cx", "cy")
+    if any(cfg.get(name) is None for name in required):
+        log.warning("[scene] ignoring incomplete intrinsics_fallback=%r", raw)
+        return None
 
-    def _num(name: str, default: float) -> float:
-        value = cfg.get(name) if isinstance(cfg, dict) else None
-        if value is None:
-            return default
+    def _num(name: str) -> float:
         try:
-            return float(value)
+            return float(cfg[name])
         except (TypeError, ValueError):
-            return default
+            return 0.0
 
-    def _integer(name: str, default: int) -> int:
-        value = cfg.get(name) if isinstance(cfg, dict) else None
-        if value is None:
-            return default
+    def _integer(name: str) -> int:
         try:
-            return int(value)
+            return int(cfg[name])
         except (TypeError, ValueError):
-            return default
+            return 0
 
     k = _CamIntrinsics(
-        width=_integer("width", defaults.width),
-        height=_integer("height", defaults.height),
-        fx=_num("fx", defaults.fx),
-        fy=_num("fy", defaults.fy),
-        cx=_num("cx", defaults.cx),
-        cy=_num("cy", defaults.cy),
+        width=_integer("width"),
+        height=_integer("height"),
+        fx=_num("fx"),
+        fy=_num("fy"),
+        cx=_num("cx"),
+        cy=_num("cy"),
     )
     if min(k.width, k.height, k.fx, k.fy, k.cx, k.cy) <= 0:
         log.warning("[scene] ignoring incomplete intrinsics_fallback=%r", raw)
@@ -772,10 +778,11 @@ def _quat_to_yaw(x: float, y: float, z: float, w: float) -> float:
 
 
 def _image_msg_to_jpeg(msg) -> Optional[bytes]:
-    """sensor_msgs/Image → JPEG bytes. Webots Tiago publishes
-    `bgr8` / `rgb8` for the head camera; we accept both. Falls back
-    to None on unknown encodings (rather than throwing — VLM tick
-    just skips that frame)."""
+    """sensor_msgs/Image -> JPEG bytes.
+
+    Accepts common RGB/BGR encodings and returns None on unknown encodings
+    rather than throwing; the VLM tick can skip that frame.
+    """
     try:
         import numpy as np  # noqa: F401
         from PIL import Image as PILImage

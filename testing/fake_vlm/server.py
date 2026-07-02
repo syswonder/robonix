@@ -2,30 +2,18 @@
 """Deterministic fake VLM for robonix CI.
 
 Pilot talks to an OpenAI-compatible ``/v1/chat/completions`` endpoint in
-**streaming** mode and, critically, drives planning through the *RTDL envelope*
-protocol: the assistant must return ONE JSON object in ``content`` (NOT OpenAI
-``tool_calls`` — pilot hard-errors on tool_calls in RTDL mode). This server
-replaces a real VLM so planning is fully deterministic: every task maps to a
-scripted timeline of RTDL envelopes.
+streaming mode and expects one RTDL envelope as assistant content. This server
+serves scenario-defined RTDL trees so planning is deterministic while every leaf
+capability call still executes through the live Robonix deployment.
 
-How a request is served (the server is effectively stateless — it derives
-everything from the request body):
+Scenario model:
 
-1. Parse the advertised capability catalog out of the **system** message.
-   Pilot renders it as ``- capability_name: <provider>.<area>_<leaf>`` lines
-   (planner.rs build_rtdl_prompt). Scenarios must reference that exact
-   provider-qualified planner capability name, for example
-   ``scene.scene_list_objects``.
-2. Read the FIRST ``user`` message text — that is the task prompt. Look up the
-   scenario whose ``task`` equals it.
-3. Count user messages in history = the current round index. Pilot feeds each
-   round's capability results back as additional user messages, so the first
-   call has one user message (round 0).
-4. Honor optional per-step timeline timing (``time_s`` or ``delay_s``).
-5. Stream the envelope JSON back as Server-Sent Events, then ``finish_reason:
-   stop`` and ``[DONE]``.
-
-No third-party deps (stdlib only) so CI needs no extra pip install for the VLM.
+* one ``steps[]`` entry = one VLM planning round;
+* ``steps[].rtdl`` is the RTDL tree returned for that round;
+* test-only keys such as ``id``, ``expect``, ``capture``, and ``once`` are never
+  sent to Pilot;
+* variables captured from earlier leaf outputs can be referenced in later args
+  with ``{var: name}`` or string interpolation like ``"$name"``.
 """
 
 from __future__ import annotations
@@ -38,22 +26,16 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 import yaml
 
-# ── catalog parsing ──────────────────────────────────────────────────────────
-
-# Matches the catalog lines pilot renders into the system prompt, e.g.
-#   - capability_name: tiago_camera.camera_snapshot
 _CAP_LINE = re.compile(r"^\s*-\s*capability_name:\s*(\S+)\s*$", re.MULTILINE)
+_VAR_TOKEN = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+_TEST_ONLY_NODE_KEYS = {"id", "expect", "capture", "once"}
 
 
 def advertised_caps(messages: list[dict]) -> list[str]:
-    """Return the provider-qualified capability names pilot advertised.
-
-    Scans every system message (the catalog lives in the round-0 full prompt
-    and is re-appended each round). De-duplicates while preserving order.
-    """
     seen: dict[str, None] = {}
     for m in messages:
         if m.get("role") != "system":
@@ -67,23 +49,11 @@ def advertised_caps(messages: list[dict]) -> list[str]:
 
 
 def resolve_cap(cap: str, caps: list[str]) -> str | None:
-    """Resolve a scenario cap to an exact advertised planner capability name."""
-    if cap in caps:
-        return cap
-    return None
+    return cap if cap in caps else None
 
 
-# ── RTDL envelope construction ───────────────────────────────────────────────
-
-
-def do_node(cap: str, args: dict, description: str) -> dict:
-    """One capability call. op_id is always 0 — pilot assigns the real id."""
-    return {"op": "do", "op_id": 0, "description": description, "cap": cap, "args": args}
-
-
-def _json_values_from_text(text: str) -> list[object]:
-    """Best-effort extraction of JSON objects embedded in pilot user messages."""
-    values: list[object] = []
+def _json_values_from_text(text: str) -> list[Any]:
+    values: list[Any] = []
     decoder = json.JSONDecoder()
     i = 0
     while i < len(text):
@@ -100,7 +70,7 @@ def _json_values_from_text(text: str) -> list[object]:
     return values
 
 
-def _walk_json(value: object):
+def _walk_json(value: Any):
     yield value
     if isinstance(value, dict):
         for child in value.values():
@@ -115,38 +85,16 @@ def _walk_json(value: object):
             yield from _walk_json(child)
 
 
-def _contains_text(value: object, needle: str) -> bool:
-    if isinstance(value, str):
-        return needle in value
-    if isinstance(value, dict):
-        return any(_contains_text(k, needle) or _contains_text(v, needle) for k, v in value.items())
-    if isinstance(value, list):
-        return any(_contains_text(v, needle) for v in value)
-    return False
-
-
-def _find_field(value: object, field: str):
+def _parse_maybe_json(value: Any) -> Any:
     if isinstance(value, str) and value.strip().startswith(("{", "[")):
         try:
-            value = json.loads(value)
+            return json.loads(value)
         except json.JSONDecodeError:
-            return None
-    if isinstance(value, dict):
-        if field in value:
-            return value[field]
-        for child in value.values():
-            found = _find_field(child, field)
-            if found is not None:
-                return found
-    elif isinstance(value, list):
-        for child in value:
-            found = _find_field(child, field)
-            if found is not None:
-                return found
-    return None
+            return value
+    return value
 
 
-def _matches_where(value: object, where: dict) -> bool:
+def _matches_where(value: Any, where: dict | None) -> bool:
     if not where:
         return True
     if not isinstance(value, dict):
@@ -170,15 +118,13 @@ def _matches_where(value: object, where: dict) -> bool:
     return True
 
 
-def _extract_path(value: object, path: str, where: dict | None = None):
-    if isinstance(value, str) and value.strip().startswith(("{", "[")):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            return None
+def _extract_path(value: Any, path: str, where: dict | None = None) -> Any:
+    value = _parse_maybe_json(value)
+    if path.startswith("$."):
+        path = path[2:]
     if not path:
         return value
-    cur: object = value
+    cur: Any = value
     for token in path.split("."):
         if token.endswith("[]"):
             key = token[:-2]
@@ -186,7 +132,7 @@ def _extract_path(value: object, path: str, where: dict | None = None):
                 return None
             chosen = None
             for item in cur[key]:
-                if _matches_where(item, where or {}):
+                if _matches_where(item, where):
                     chosen = item
                     break
             if chosen is None:
@@ -207,7 +153,7 @@ def _extract_path(value: object, path: str, where: dict | None = None):
     return cur
 
 
-def _apply_transform(value: object, transform: str) -> object:
+def _apply_transform(value: Any, transform: str) -> Any:
     if not transform:
         return value
     if transform == "sin_half":
@@ -220,24 +166,10 @@ def _apply_transform(value: object, transform: str) -> object:
         return int(value)
     if transform == "str":
         return str(value)
-    raise ValueError(f"unknown from_result transform {transform!r}")
+    raise ValueError(f"unknown variable transform {transform!r}")
 
 
-def _node_matches(value: object, contract: str, contains: str) -> bool:
-    if contract and _contains_text(value, contract):
-        return True
-    if contains and _contains_text(value, contains):
-        return True
-    return not contract and not contains
-
-
-def _lookup_result_field(
-    messages: list[dict],
-    contract: str,
-    field: str,
-    contains: str = "",
-    where: dict | None = None,
-):
+def _leaf_results_from_messages(messages: list[dict]) -> list[dict]:
     parts: list[str] = []
     for m in messages:
         if m.get("role") != "user":
@@ -247,139 +179,262 @@ def _lookup_result_field(
             parts.append(content)
         elif isinstance(content, list):
             parts.extend(p.get("text", "") for p in content if p.get("type") == "text")
-    user_text = "\n".join(parts)
-    values = _json_values_from_text(user_text)
-    for value in reversed(values):
-        for node in reversed(list(_walk_json(value))):
-            found = _extract_path(node, field, where) if "." in field or "[]" in field else _find_field(node, field)
-            if found is None:
+    leaves: list[dict] = []
+    for value in _json_values_from_text("\n".join(parts)):
+        for node in _walk_json(value):
+            if not isinstance(node, dict):
                 continue
-            if where and "." not in field and "[]" not in field and isinstance(node, dict) and not _matches_where(node, where):
-                continue
-            if _node_matches(node, contract, contains):
-                return found
-    return None
+            leaf = node.get("leaf_result")
+            if isinstance(leaf, dict):
+                leaves.append(leaf)
+            elif {"contract_id", "success", "output"}.issubset(node.keys()):
+                leaves.append(node)
+    return leaves
 
 
-def resolve_arg_refs(value: object, messages: list[dict], unresolved_refs: list[str]) -> object:
-    """Resolve scenario args of the form {from_result: {contract, field}}."""
+def _iter_do_nodes(node: Any):
+    if not isinstance(node, dict):
+        return
+    if node.get("op") == "do":
+        yield node
+    for child in node.get("children", []) or []:
+        yield from _iter_do_nodes(child)
+
+
+def _leaf_matches_expect(leaf: dict, expect: dict) -> bool:
+    contract = expect.get("contract")
+    if contract and leaf.get("contract_id") != contract:
+        return False
+    return leaf.get("success", False) == expect.get("success", True)
+
+
+def _step_expected_do_nodes(step: dict) -> list[dict]:
+    return [node for node in _iter_do_nodes(step.get("rtdl")) if isinstance(node.get("expect"), dict)]
+
+
+def _step_is_complete(step: dict, leaves: list[dict], consumed: set[int]) -> bool:
+    nodes = _step_expected_do_nodes(step)
+    if not nodes:
+        return step.get("status") == "done"
+    local_used: set[int] = set()
+    for node in nodes:
+        expect = node["expect"]
+        match_idx = None
+        for idx, leaf in enumerate(leaves):
+            if idx in consumed or idx in local_used:
+                continue
+            if _leaf_matches_expect(leaf, expect):
+                match_idx = idx
+                break
+        if match_idx is None:
+            return False
+        local_used.add(match_idx)
+    consumed.update(local_used)
+    return True
+
+
+def next_step_index_from_history(scenario: dict, messages: list[dict]) -> int:
+    leaves = _leaf_results_from_messages(messages)
+    consumed: set[int] = set()
+    steps = scenario.get("steps", [])
+    last_done_idx = len(steps)
+    for idx, step in enumerate(steps):
+        if step.get("status") == "done" and step.get("rtdl") is None:
+            last_done_idx = idx
+            break
+        if not _step_is_complete(step, leaves, consumed):
+            return idx
+    return last_done_idx
+
+
+def _capture_one(leaf: dict, spec: Any) -> Any:
+    if not isinstance(spec, dict):
+        return None
+    source = str(spec.get("source", "output"))
+    text = str(leaf.get("error" if source == "error" else "output", ""))
+    if "jsonpath" in spec or "field" in spec:
+        value = _extract_path(text, str(spec.get("jsonpath") or spec.get("field") or ""), spec.get("where"))
+    elif "regex" in spec:
+        m = re.search(str(spec["regex"]), text, re.MULTILINE | re.DOTALL)
+        value = m.group(int(spec.get("group", 1))) if m else None
+    else:
+        value = _parse_maybe_json(text)
+    if value is None:
+        return None
+    try:
+        return _apply_transform(value, str(spec.get("transform", "")))
+    except Exception:
+        return value
+
+
+def capture_vars_from_history(scenario: dict, messages: list[dict], before_step_index: int) -> dict[str, Any]:
+    leaves = _leaf_results_from_messages(messages)
+    consumed: set[int] = set()
+    vars_: dict[str, Any] = {}
+    for step in scenario.get("steps", [])[:before_step_index]:
+        for node in _iter_do_nodes(step.get("rtdl")):
+            expect = node.get("expect")
+            if not isinstance(expect, dict):
+                continue
+            captures = expect.get("capture") or {}
+            if not isinstance(captures, dict):
+                continue
+            match_idx = None
+            for idx, leaf in enumerate(leaves):
+                if idx in consumed:
+                    continue
+                if _leaf_matches_expect(leaf, expect):
+                    match_idx = idx
+                    break
+            if match_idx is None:
+                continue
+            consumed.add(match_idx)
+            leaf = leaves[match_idx]
+            for name, cap in captures.items():
+                value = _capture_one(leaf, cap)
+                if value is not None:
+                    vars_[str(name)] = value
+    return vars_
+
+
+def resolve_arg_refs(value: Any, unresolved: list[str], vars_: dict[str, Any]) -> Any:
     if isinstance(value, dict):
-        ref = value.get("from_result")
-        if isinstance(ref, dict):
-            contract = str(ref.get("contract", ""))
-            field = str(ref.get("field", ""))
-            contains = str(ref.get("contains", ""))
-            where = ref.get("where")
-            if where is not None and not isinstance(where, dict):
-                unresolved_refs.append(f"{contract}:{field}: invalid where")
-                return ref.get("default")
-            found = _lookup_result_field(messages, contract, field, contains, where)
-            if found is None:
-                unresolved_refs.append(f"{contract}:{field}")
-                return ref.get("default")
+        if set(value.keys()) >= {"var"}:
+            name = str(value.get("var", ""))
+            if name not in vars_:
+                unresolved.append(f"var ${name}")
+                return value.get("default")
             try:
-                return _apply_transform(found, str(ref.get("transform", "")))
+                return _apply_transform(vars_[name], str(value.get("transform", "")))
             except Exception as exc:  # noqa: BLE001
-                unresolved_refs.append(f"{contract}:{field}: {exc}")
-                return ref.get("default")
-        return {k: resolve_arg_refs(v, messages, unresolved_refs) for k, v in value.items()}
+                unresolved.append(f"var ${name}: {exc}")
+                return value.get("default")
+        return {k: resolve_arg_refs(v, unresolved, vars_) for k, v in value.items()}
     if isinstance(value, list):
-        return [resolve_arg_refs(v, messages, unresolved_refs) for v in value]
+        return [resolve_arg_refs(v, unresolved, vars_) for v in value]
+    if isinstance(value, str):
+        exact = _VAR_TOKEN.fullmatch(value)
+        if exact:
+            name = exact.group(1)
+            if name not in vars_:
+                unresolved.append(f"var ${name}")
+                return value
+            return vars_[name]
+
+        def repl(match: re.Match[str]) -> str:
+            name = match.group(1)
+            if name not in vars_:
+                unresolved.append(f"var ${name}")
+                return match.group(0)
+            return str(vars_[name])
+
+        return _VAR_TOKEN.sub(repl, value)
     return value
 
 
-def build_envelope(
-    step: dict,
-    caps: list[str],
-    messages: list[dict],
-    unresolved: list[str],
-    once_seen: set[str] | None = None,
-) -> dict:
-    """Turn a scenario step into a 4-key RTDL envelope pilot will accept.
-
-    A step lists ``caps`` (each {cap, args, description?}); we wrap the
-    resolved do-nodes in a sequence. An empty cap list yields the canonical
-    "wait" tree. ``status`` drives task completion: "done" ends the turn.
-    Unresolved matchers are recorded (caller logs them) and dropped, so the
-    plan still parses but the scenario will fail its coverage assertion.
-    """
-    children = []
-    unresolved_refs: list[str] = []
-    for spec in step.get("caps", []):
-        wanted = spec["cap"]
-        if spec.get("once") and once_seen is not None and wanted in once_seen:
-            continue
+def _compile_rtdl_node(node: Any, caps: list[str], vars_: dict[str, Any], unresolved: list[str], once_seen: set[str]) -> dict | None:
+    if not isinstance(node, dict):
+        unresolved.append(f"invalid rtdl node {node!r}")
+        return None
+    op = str(node.get("op", ""))
+    if op == "do":
+        wanted = str(node.get("cap", ""))
+        once_key = str(node.get("id") or wanted)
+        if node.get("once") and once_key in once_seen:
+            return None
         cap = resolve_cap(wanted, caps)
         if cap is None:
-            unresolved.append(wanted)
-            continue
-        before = len(unresolved_refs)
-        args = resolve_arg_refs(spec.get("args", {}), messages, unresolved_refs)
-        if len(unresolved_refs) > before:
-            continue
-        children.append(do_node(cap, args, spec.get("description", wanted)))
-        if spec.get("once") and once_seen is not None:
-            once_seen.add(wanted)
-    unresolved.extend(f"from_result {ref}" for ref in unresolved_refs)
+            unresolved.append(wanted or "<missing cap>")
+            return None
+        local_unresolved: list[str] = []
+        args = resolve_arg_refs(node.get("args", {}), local_unresolved, vars_)
+        if local_unresolved:
+            unresolved.extend(local_unresolved)
+            return None
+        out = {
+            "op": "do",
+            "op_id": int(node.get("op_id", 0) or 0),
+            "description": node.get("description") or node.get("id") or wanted,
+            "cap": cap,
+            "args": args,
+        }
+        if node.get("once"):
+            once_seen.add(once_key)
+        return out
+    if op in {"sequence", "parallel"}:
+        children = []
+        for child in node.get("children", []) or []:
+            compiled = _compile_rtdl_node(child, caps, vars_, unresolved, once_seen)
+            if compiled is not None:
+                children.append(compiled)
+        out = {
+            "op": op,
+            "op_id": int(node.get("op_id", 0) or 0),
+            "description": node.get("description") or node.get("id") or op,
+            "children": children,
+        }
+        for key, value in node.items():
+            if key not in out and key not in _TEST_ONLY_NODE_KEYS and key != "children":
+                out[key] = value
+        return out
+    unresolved.append(f"unknown op {op!r}")
+    return None
 
-    rtdl = {
-        "op": "sequence",
-        "op_id": 0,
-        "description": step.get("description", "wait" if not children else "plan"),
-        "children": children,
-    }
 
-    status = step.get("status", "in_progress")
-    task_update = None
-    if status:
+def build_envelope(step: dict, caps: list[str], vars_: dict[str, Any], unresolved: list[str], once_seen: set[str]) -> dict:
+    rtdl = step.get("rtdl") or {"op": "sequence", "description": "wait", "children": []}
+    compiled = _compile_rtdl_node(rtdl, caps, vars_, unresolved, once_seen)
+    if compiled is None:
+        compiled = {"op": "sequence", "op_id": 0, "description": "unresolved", "children": []}
+
+    task_update = step.get("task_update")
+    if not task_update and step.get("status"):
         task_update = {
             "goal": step.get("goal", "ci scenario"),
             "success_criterion": step.get("success_criterion", "scripted steps complete"),
-            "status": status,
+            "status": step.get("status"),
         }
     return {
         "content": step.get("content", ""),
-        "rtdl_description": step.get("rtdl_description", "ci"),
-        "rtdl": rtdl,
+        "rtdl_description": step.get("rtdl_description", compiled.get("description", "ci")),
+        "rtdl": compiled,
         "task_update": task_update,
     }
 
 
 def terminal_envelope(note: str) -> dict:
-    """Safety envelope served past the scripted steps: empty tree + done."""
     return {
         "content": note,
         "rtdl_description": "ci-done",
         "rtdl": {"op": "sequence", "op_id": 0, "description": "wait", "children": []},
-        "task_update": {
-            "goal": "ci scenario",
-            "success_criterion": "scripted steps complete",
-            "status": "done",
-        },
+        "task_update": {"goal": "ci scenario", "success_criterion": "scripted steps complete", "status": "done"},
     }
 
 
-# ── HTTP / SSE ───────────────────────────────────────────────────────────────
+def wait_envelope(note: str = "waiting for prior RTDL leaf result") -> dict:
+    return {
+        "content": note,
+        "rtdl_description": "ci-wait",
+        "rtdl": {"op": "sequence", "op_id": 0, "description": "wait", "children": []},
+        "task_update": {"goal": "ci scenario", "success_criterion": "scripted steps complete", "status": "in_progress"},
+    }
 
 
 class Handler(BaseHTTPRequestHandler):
-    # set by main(): {task_text: scenario_dict}
     scenarios: dict[str, dict] = {}
     timeline_starts: dict[str, float] = {}
     once_seen: dict[str, set[str]] = {}
+    pending_steps: dict[str, int] = {}
 
-    def log_message(self, *_args):  # noqa: D401 - silence default stderr spam
+    def log_message(self, *_args):
         """Suppress the default per-request access log."""
 
     def _emit(self, line: str):
         print(f"[fake-vlm] {line}", file=sys.stderr, flush=True)
 
-    def do_GET(self):  # noqa: N802 - http.server API
-        """Answer /v1/models so clients that probe it don't error."""
+    def do_GET(self):  # noqa: N802
         if self.path.rstrip("/").endswith("/models"):
-            body = json.dumps(
-                {"object": "list", "data": [{"id": "fake-vlm", "object": "model"}]}
-            ).encode()
+            body = json.dumps({"object": "list", "data": [{"id": "fake-vlm", "object": "model"}]}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -388,8 +443,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_error(404)
 
-    def do_POST(self):  # noqa: N802 - http.server API
-        """Serve one scripted RTDL envelope for a chat-completions request."""
+    def do_POST(self):  # noqa: N802
         if not self.path.rstrip("/").endswith("/chat/completions"):
             self.send_error(404)
             return
@@ -403,96 +457,79 @@ class Handler(BaseHTTPRequestHandler):
         messages = req.get("messages", [])
         caps = advertised_caps(messages)
         user_text = self._all_user_text(messages)
-        # Round index = which planning round this is. Pilot does NOT echo its own
-        # RTDL envelope back as an `assistant` message; instead it feeds each
-        # round's capability results back as additional `user` messages. So the
-        # first call has 1 user message (the task) = round 0, and every later
-        # round adds one user message. round = (#user messages) - 1.
-        rounds = max(0, sum(1 for m in messages if m.get("role") == "user") - 1)
+        request_round = max(0, sum(1 for m in messages if m.get("role") == "user") - 1)
 
         scenario = self._match_scenario(user_text)
         if scenario is None:
             self._emit(f"no scenario matched user text {user_text[:80]!r}; ending turn")
             envelope = terminal_envelope("no scripted scenario; nothing to do")
         else:
-            if rounds == 0:
-                self.timeline_starts[scenario["name"]] = time.monotonic()
-                self.once_seen[scenario["name"]] = set()
+            name = scenario["name"]
+            if request_round == 0:
+                self.timeline_starts[name] = time.monotonic()
+                self.once_seen[name] = set()
+                self.pending_steps.pop(name, None)
             steps = scenario.get("steps", [])
-            if rounds < len(steps):
-                unresolved: list[str] = []
-                step = steps[rounds]
-                self._apply_timeline_delay(scenario, step, rounds)
-                envelope = build_envelope(
-                    step,
-                    caps,
-                    messages,
-                    unresolved,
-                    self.once_seen.setdefault(scenario["name"], set()),
-                )
-                if unresolved:
-                    self._emit(
-                        f"scenario {scenario['name']!r} round {rounds}: "
-                        f"UNRESOLVED caps {unresolved} (advertised: {caps})"
-                    )
+            step_index = next_step_index_from_history(scenario, messages)
+            if step_index < len(steps):
+                pending = self.pending_steps.get(name)
+                if pending == step_index:
+                    envelope = wait_envelope()
+                    self._emit(f"scenario {name!r} request {request_round} step {step_index}: wait for result")
                 else:
-                    called = [c.get("cap") for c in step.get("caps", [])]
-                    self._emit(f"scenario {scenario['name']!r} round {rounds}: caps {called}")
+                    unresolved: list[str] = []
+                    step = steps[step_index]
+                    self._apply_timeline_delay(scenario, step, step_index)
+                    vars_ = capture_vars_from_history(scenario, messages, step_index)
+                    once_seen = self.once_seen.setdefault(name, set())
+                    envelope = build_envelope(step, caps, vars_, unresolved, once_seen)
+                    if unresolved:
+                        self._emit(
+                            f"scenario {name!r} request {request_round} step {step_index}: "
+                            f"UNRESOLVED {unresolved} (advertised: {caps})"
+                        )
+                    else:
+                        called = [n.get("cap") for n in _iter_do_nodes(step.get("rtdl"))]
+                        if called:
+                            self.pending_steps[name] = step_index
+                        self._emit(f"scenario {name!r} request {request_round} step {step_index}: caps {called}")
             else:
+                self.pending_steps.pop(name, None)
                 envelope = terminal_envelope("scripted steps complete")
 
         self._stream_envelope(req.get("model", "fake-vlm"), envelope)
 
     def _all_user_text(self, messages: list[dict]) -> str:
-        """Concatenate every user message's text (the task may be wrapped)."""
         parts: list[str] = []
         for m in messages:
             if m.get("role") != "user":
                 continue
-            c = m.get("content")
-            if isinstance(c, str):
-                parts.append(c)
-            elif isinstance(c, list):  # multimodal: concat text parts
-                parts.extend(p.get("text", "") for p in c if p.get("type") == "text")
+            content = m.get("content")
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list):
+                parts.extend(p.get("text", "") for p in content if p.get("type") == "text")
         return "\n".join(parts)
 
     def _match_scenario(self, user_text: str) -> dict | None:
-        """Find the scenario whose task string appears in the user text.
-
-        Pilot may frame the submitted task inside a larger user block, so we
-        match by containment rather than equality. Prefer the longest task
-        string when several match, to avoid a short task shadowing a longer one.
-        """
         hits = [s for t, s in self.scenarios.items() if t and t in user_text]
         if not hits:
             return None
         return max(hits, key=lambda s: len(s["task"]))
 
     def _apply_timeline_delay(self, scenario: dict, step: dict, round_index: int) -> None:
-        """Sleep to model blank timeline spans inside a scenario.
-
-        ``time_s`` is an absolute time offset from scenario start. ``delay_s`` is
-        a relative sleep before serving this step. The harness is a real
-        Webots/ROS integration test, so this intentionally uses wall-clock time
-        rather than a fake clock.
-        """
         delay = 0.0
         if "time_s" in step:
             start = self.timeline_starts.setdefault(scenario["name"], time.monotonic())
-            target = start + float(step["time_s"])
-            delay = max(0.0, target - time.monotonic())
+            delay = max(0.0, start + float(step["time_s"]) - time.monotonic())
         elif "delay_s" in step:
             delay = max(0.0, float(step["delay_s"]))
         if delay <= 0.0:
             return
-        self._emit(
-            f"scenario {scenario['name']!r} round {round_index}: "
-            f"timeline sleep {delay:.3f}s"
-        )
+        self._emit(f"scenario {scenario['name']!r} round {round_index}: timeline sleep {delay:.3f}s")
         time.sleep(delay)
 
     def _stream_envelope(self, model: str, envelope: dict):
-        """Stream the envelope JSON as one content chunk, then stop + [DONE]."""
         payload = json.dumps(envelope, ensure_ascii=False)
         created = int(time.time())
         base = {"id": "fake-cmpl", "object": "chat.completion.chunk", "created": created, "model": model}
@@ -514,7 +551,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def load_scenarios(scenario_dir: Path) -> dict[str, dict]:
-    """Load every scenario YAML, keyed by its ``task`` prompt for lookup."""
     out: dict[str, dict] = {}
     for path in sorted([*scenario_dir.rglob("*.yaml"), *scenario_dir.rglob("*.yml")]):
         data = yaml.safe_load(path.read_text())
@@ -527,11 +563,7 @@ def main():
     ap = argparse.ArgumentParser(description="Deterministic fake VLM (RTDL) for robonix CI")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=18080)
-    ap.add_argument(
-        "--scenarios",
-        type=Path,
-        default=Path(__file__).resolve().parent.parent / "scenarios",
-    )
+    ap.add_argument("--scenarios", type=Path, default=Path(__file__).resolve().parent.parent / "scenarios")
     args = ap.parse_args()
 
     Handler.scenarios = load_scenarios(args.scenarios)

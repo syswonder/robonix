@@ -30,8 +30,6 @@ test. It is a build/boot/dispatch/runtime integration test for the
 Webots-backed robot stack, with deterministic substitution only at the VLM
 planning boundary.
 
-## Checks
-
 ## Pieces
 
 | Path | Role |
@@ -40,7 +38,7 @@ planning boundary.
 | `SCENARIO_SPEC.md` | Normative YAML scenario grammar. |
 | `scenarios/cap/*.yaml` | single-capability tests. |
 | `scenarios/flow/*.yaml` | multi-step task flows, incl. fault injection + recovery. |
-| `run.py` | runs cap + flow scenarios; writes `logs/<family>.<name>.jsonl`; asserts dispatch, args, results, round count, fault recovery; prints coverage. |
+| `run.py` | runs cap + flow scenarios; writes `logs/<family>.<name>.jsonl`; asserts each RTDL leaf's args/results, fault recovery, and final status; prints coverage. |
 | `run_interfaces.py` | direct atlas/pilot/audio RPC checks; writes `logs/iface.*`. |
 | `report.py` | converts `testing/logs/summary.json` into `testing/report/index.html` and a Markdown job summary. |
 | `logs/` | per-run traces (git-ignored). |
@@ -95,31 +93,37 @@ The fake server reads the capability **catalog out of pilot's system prompt**
 (`- capability_name: tiago_camera.camera_snapshot`). Scenarios must reference
 the exact provider-qualified planner capability name, such as
 `tiago_camera.camera_snapshot` or `scene.scene_list_objects`; the fake VLM does
-not do suffix or substring resolution. Round index = number of additional
-`user` result messages already in history; the server serves `steps[round]` and
-a terminal `done` envelope past the end.
+not do suffix or substring resolution.
+
+Pilot feeds RTDL executor feedback back into VLM history as structured
+`leaf_result` JSON (`call_id`, `contract_id`, `success`, `output`, `error`). The
+fake VLM advances through `steps` by those observed leaf results, not by raw
+request count. If Pilot asks again before a prior result is visible in history,
+the fake VLM returns an empty wait RTDL for the already-served step instead of
+resubmitting side-effecting work such as navigation. The runner mirrors this by
+matching each YAML step to the next compatible RTDL plan round in order.
 
 Timing is modeled inside `steps`, similar to timeline/marble tests: `time_s`
 sets an absolute offset from the first planning round and `delay_s` sleeps
-relative to the current step. A step with no `caps` is an empty RTDL wait node,
-so it can fill blank timeline spans without dispatching robot work. Because
-this is a real Webots/ROS integration test, these waits use wall-clock time
-rather than a fake clock.
+relative to the current step. Because this is a real Webots/ROS integration
+test, these waits use wall-clock time rather than a fake clock.
 
 ## Scenario YAML
 
 The scenario YAML grammar is defined in `SCENARIO_SPEC.md`. In short:
 
 - `steps` is a scripted timeline of fake-VLM RTDL rounds.
-- `steps[].time_s` and `steps[].delay_s` model blank time inside the timeline.
-- `steps[].caps[].cap` selects exact planner-advertised capability names.
-- `steps[].caps[].args` may use `from_result` to feed a previous leaf output
-  field into a later capability argument.
-- `expect_leaves` binds each assertion to one exact `robonix/...` runtime
-  contract id, expected success state, optional args subset, and optional output
-  checks.
-- Failed leaves are errors unless the scenario explicitly expects that leaf with
-  `success: false`.
+- Each step's `rtdl` field is the actual RTDL tree returned for that round; one
+  step may contain one leaf or many leaves under `sequence`/`parallel`.
+- `sequence`, `parallel`, and `do` nodes are written explicitly; the harness
+  does not wrap a separate cap list into a hidden tree.
+- `do.cap` selects an exact planner-advertised capability name.
+- Every committed `do` node has `expect.contract`, `expect.success`, and
+  optional `expect.args`/`expect.output` checks.
+- `expect.capture` extracts named values from a proven leaf output; later steps
+  can reference them with `{var: name}` or `$name` string interpolation. Result
+  dependencies are intentionally across VLM rounds, not hidden within one tree.
+- Failed leaves are errors unless the exact `do` node expects `success: false`.
 
 **Exception injection** is done purely in the scenario: a step calls a real
 capability with invalid args (e.g. a required field omitted) so the leaf
@@ -159,9 +163,9 @@ explore start/status/cancel, and object-derived navigation. To add a tool:
 1. Find its capability — only `[mode] type = "rpc"` contracts become planner
    tools; `topic_in/out` ones are ROS data channels, not callable.
 2. Read its `.srv` IDL under `capabilities/lib/<area>/srv/` for the arg fields.
-3. Add a scenario; first-run logs from `fake_vlm/server.py` print the live
-   catalog **with arg schemas** if a matcher doesn't resolve — use that to fix
-   the `match`/`args`.
+3. Add a scenario whose `steps[].rtdl` mirrors the RTDL tree you want Pilot to
+   receive. First-run logs from `fake_vlm/server.py` print unresolved exact cap
+   names against the live catalog; use that to fix `cap` and `args`.
 
 Remaining useful coverage: direct chassis velocity with strict cleanup,
 long-duration navigation completion, and non-CI real detector scene-graph
