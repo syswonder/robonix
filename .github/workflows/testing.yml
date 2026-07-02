@@ -897,7 +897,8 @@ jobs:
     needs: report
     if: >-
       always() &&
-      (github.event_name == 'push' ||
+      (inputs.authorized == true ||
+       github.event_name == 'push' ||
        github.event_name == 'workflow_dispatch' ||
        github.event_name == 'workflow_call')
     runs-on: ubuntu-22.04
@@ -938,10 +939,12 @@ jobs:
           if [ -f report-dl/index.html ]; then
             cp -a report-dl/. "$report_dir/"
           else
-            cat > "$report_dir/index.html" <<'HTML'
-          <!doctype html><meta charset="utf-8"><title>Robonix Webots CI Report</title>
-          <body><h1>Robonix Webots CI Report</h1><p>No generated report artifact was available for this run.</p></body>
-          HTML
+            printf '%s\n' \
+              '<!doctype html>' \
+              '<meta charset="utf-8">' \
+              '<title>Robonix Webots CI Report</title>' \
+              '<body><h1>Robonix Webots CI Report</h1><p>No generated report artifact was available for this run.</p></body>' \
+              > "$report_dir/index.html"
           fi
           printf '%s\n' \
             '<!doctype html>' \
@@ -977,4 +980,3 @@ jobs:
           page_url="${{ steps.deployment.outputs.page_url }}"
           page_url="${page_url%/}"
           echo "report_url=${page_url}/reports/runs/${{ github.run_id }}/" >> "$GITHUB_OUTPUT"
-
