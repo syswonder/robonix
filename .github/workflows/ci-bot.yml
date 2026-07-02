@@ -125,13 +125,14 @@ jobs:
       pr_head_repo: ${{ needs.gate.outputs.pr_head_repo }}
       pr_head_sha: ${{ needs.gate.outputs.pr_head_sha }}
       triggered_by: ${{ needs.gate.outputs.triggered_by }}
+      enable_llm_analysis: true
     secrets: inherit
 
   # ── Publish a direct, browser-openable HTML report on GitHub Pages ─────────
   publish_report:
-    name: Publish report site
+    name: Publish fallback report site
     needs: [gate, test]
-    if: always() && needs.gate.result == 'success'
+    if: always() && needs.gate.result == 'success' && needs.test.result == 'skipped'
     runs-on: ubuntu-22.04
     concurrency:
       group: webots-report-pages
@@ -342,14 +343,20 @@ jobs:
               }
             }
             if (analysis && analysis.available && (analysis.summary || analysis.title)) {
-              lines.push('', '**LLM-assisted analysis**');
-              if (analysis.title) lines.push(`- ${detail(analysis.title)}`);
-              if (analysis.summary) lines.push(`- ${detail(analysis.summary)}`);
-              if (analysis.likely_root_cause) lines.push(`- Root cause: ${detail(analysis.likely_root_cause)}`);
-              if (analysis.suggested_fix) lines.push(`- Suggested fix / watchout: ${detail(analysis.suggested_fix)}`);
+              lines.push('', '**LLM analysis**');
+              if (analysis.summary) lines.push(detail(analysis.summary));
+              else if (analysis.title) lines.push(detail(analysis.title));
+              const compactList = (values) => Array.isArray(values) ? values.slice(0, 3).map(detail) : (values ? [detail(values)] : []);
+              const changes = compactList(analysis.pr_changes);
+              if (changes.length) lines.push('', `Change summary: ${changes.join('; ')}.`);
+              if (analysis.test_result) lines.push(`Test result: ${detail(analysis.test_result)}`);
+              if (analysis.likely_root_cause) lines.push(`Likely root cause: ${detail(analysis.likely_root_cause)}`);
+              if (analysis.suggested_fix) lines.push(`Suggested fix / watchout: ${detail(analysis.suggested_fix)}`);
+              const risks = compactList(analysis.risks_or_watchouts);
+              if (risks.length) lines.push(`Watchouts: ${risks.join('; ')}.`);
             }
             lines.push('');
-            const reportUrl = '${{ needs.publish_report.outputs.report_url }}';
+            const reportUrl = '${{ needs.test.outputs.report_url || needs.publish_report.outputs.report_url }}';
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             if (reportUrl) lines.push(`Report: [open HTML report](${reportUrl}).`);
             else if (artifactPresent) lines.push(`Report: download artifact \`testing-logs-*\` from [this run](${runUrl}) and open \`testing/report/index.html\`.`);
