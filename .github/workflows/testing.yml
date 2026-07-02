@@ -500,6 +500,44 @@ jobs:
           export ROBONIX_ATLAS="$ROBONIX_CI_ATLAS"
           python3 "$GITHUB_WORKSPACE/testing/run_interfaces.py" --server "$ROBONIX_CI_ATLAS"
 
+      - name: Wait for mapping occupancy grid
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/sim-logs"
+          echo "waiting for one real /map OccupancyGrid before scenario execution"
+          if docker exec "$ROBONIX_SIM_CONTAINER" bash -lc '
+            set -euo pipefail
+            source /opt/ros/humble/setup.bash
+            export ROS_DOMAIN_ID='"${ROS_DOMAIN_ID}"'
+            export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+            timeout 180s ros2 topic echo --once /map nav_msgs/msg/OccupancyGrid
+          ' >"$RUNNER_TEMP/sim-logs/map-readiness.txt" 2>&1; then
+            echo "map readiness confirmed"
+            exit 0
+          fi
+
+          echo "::error::mapping did not publish /map before scenario execution"
+          {
+            echo "=== /map readiness failure ==="
+            cat "$RUNNER_TEMP/sim-logs/map-readiness.txt" || true
+            echo
+            echo "=== ROS topic list from simulator container ==="
+            docker exec "$ROBONIX_SIM_CONTAINER" bash -lc '
+              source /opt/ros/humble/setup.bash
+              export ROS_DOMAIN_ID='"${ROS_DOMAIN_ID}"'
+              ros2 topic list || true
+              echo
+              ros2 topic info -v /map || true
+            ' || true
+            echo
+            echo "=== final caps ==="
+            rbnx caps -v --server "$ROBONIX_CI_ATLAS" || true
+            echo
+            echo "=== rbnx boot tail ==="
+            tail -240 "$RUNNER_TEMP/rbnx-boot.log" || true
+          } | tee -a "$RUNNER_TEMP/sim-logs/map-readiness.txt"
+          exit 1
+
       - name: Run scenario suite
         id: scenarios
         env:
@@ -521,6 +559,15 @@ jobs:
           # logs so a failure leaves a full trace alongside the scribe logs.
           mkdir -p "$RUNNER_TEMP/sim-logs"
           docker logs "$ROBONIX_SIM_CONTAINER" >"$RUNNER_TEMP/sim-logs/webots.stdout.log" 2>&1 || true
+          for name in \
+            "${ROBONIX_MAPPING_CONTAINER:-ci-${RUN_ID}-mapping}" \
+            "${ROBONIX_NAV2_CONTAINER:-ci-${RUN_ID}-nav2}" \
+            "${ROBONIX_EXPLORE_CONTAINER:-ci-${RUN_ID}-explore}" \
+            "${ROBONIX_SCENE_CONTAINER:-ci-${RUN_ID}-scene}"; do
+            [ -n "$name" ] || continue
+            docker logs "$name" >"$RUNNER_TEMP/sim-logs/${name}.stdout.log" 2>&1 || true
+            docker inspect "$name" >"$RUNNER_TEMP/sim-logs/${name}.inspect.json" 2>&1 || true
+          done
           docker exec "$ROBONIX_SIM_CONTAINER" bash -c 'tar c -C /root/.ros log 2>/dev/null' \
             2>/dev/null | tar x -C "$RUNNER_TEMP/sim-logs" 2>/dev/null || true
           docker exec "$ROBONIX_SIM_CONTAINER" bash -lc '

@@ -441,21 +441,35 @@ def main() -> int:
                 stdout = stdout.decode("utf-8", errors="replace")
             if isinstance(stderr, bytes):
                 stderr = stderr.decode("utf-8", errors="replace")
+            events = []
+            for line in stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+            observed_failures = check_scenario(scenario, events, 124) if events else []
+            failures = [f"timeout after {args.timeout}s"]
+            failures.extend(f"before timeout: {failure}" for failure in observed_failures)
             log_path.write_text(
                 f"$ {args.rbnx} ask {scenario['task']} --json --server {args.server}\n"
                 f"# timeout={args.timeout}s\n# --- stdout ---\n{stdout}\n"
                 f"# --- stderr ---\n{stderr}\n"
             )
+            calls = collect_calls(events)
+            leaves = collect_leaf_results(events)
             results.append({
                 "name": name,
                 "family": family,
                 "passed": False,
-                "rounds": 0,
-                "dispatched": [],
-                "failures": [f"timeout after {args.timeout}s"],
+                "rounds": len(collect_plan_rounds(events)),
+                "dispatched": calls,
+                "failures": failures,
                 "log": log_path.name,
                 "rtdl_steps": summarize_rtdl_steps(scenario),
-                "observed_rounds": [],
+                "observed_rounds": summarize_observed_rounds(scenario, calls, leaves),
             })
             failed.append(name)
             continue
