@@ -24,7 +24,7 @@ on:
 
 permissions:
   actions: read
-  contents: read
+  contents: write
   pages: write
   id-token: write
   pull-requests: write
@@ -149,7 +149,6 @@ jobs:
       report_url: ${{ steps.publish_url.outputs.report_url }}
     env:
       REPORT_SITE_DIR: /tmp/robonix-report-site-${{ github.run_id }}
-      REPORT_ARTIFACT_DIR: /tmp/robonix-report-artifact-${{ github.run_id }}
       REPORTS_BRANCH: robonix-ci-reports
     steps:
       - name: Checkout trusted report generator
@@ -305,35 +304,31 @@ jobs:
           fi
           git -C "$REPORT_SITE_DIR" commit -m "ci: publish Webots report ${GITHUB_RUN_ID}"
           git -C "$REPORT_SITE_DIR" config --unset-all http.https://github.com/.extraheader || true
-          git -C "$REPORT_SITE_DIR" \
-            -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer ${GITHUB_TOKEN}" \
-            push origin "HEAD:${REPORTS_BRANCH}"
+          git -C "$REPORT_SITE_DIR" remote set-url origin \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git -C "$REPORT_SITE_DIR" push origin "HEAD:${REPORTS_BRANCH}"
 
-      - name: Prepare Pages artifact
+      - name: Ensure Pages serves report history
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          rm -rf "$REPORT_ARTIFACT_DIR"
-          mkdir -p "$REPORT_ARTIFACT_DIR"
-          tar -C "$REPORT_SITE_DIR" --exclude='.git' -cf - . | tar -C "$REPORT_ARTIFACT_DIR" -xf -
-
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: /tmp/robonix-report-artifact-${{ github.run_id }}
-
-      - name: Deploy Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          payload="$(mktemp)"
+          cat > "$payload" <<JSON
+          {"build_type":"legacy","source":{"branch":"robonix-ci-reports","path":"/"}}
+          JSON
+          if gh api "repos/${GITHUB_REPOSITORY}/pages" >/dev/null 2>&1; then
+            gh api -X PUT "repos/${GITHUB_REPOSITORY}/pages" --input "$payload" --silent
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/pages" --input "$payload" --silent
+          fi
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/pages/builds" --silent || true
 
       - name: Set report URL
         id: publish_url
         run: |
           set -euo pipefail
-          page_url="${{ steps.deployment.outputs.page_url }}"
-          page_url="${page_url%/}"
+          page_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
           echo "report_url=${page_url}/reports/runs/${{ github.run_id }}/" >> "$GITHUB_OUTPUT"
 
   # ── Edit the status comment with the result + failing cases + log pointer ──

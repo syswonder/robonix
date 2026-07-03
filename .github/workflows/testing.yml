@@ -184,6 +184,7 @@ jobs:
       CUDA_VISIBLE_DEVICES: "2"
       ROBONIX_GPU_ID: "2"
       NVIDIA_VISIBLE_DEVICES: "2"
+      RMW_IMPLEMENTATION: "rmw_zenoh_cpp"
       ROBONIX_DRIVER_INIT_TIMEOUT_S: "240"
       AUDIO_MIC_DEVICE: "null"
       AUDIO_SPEAKER_DEVICE: "null"
@@ -384,12 +385,21 @@ jobs:
             echo "::error::cannot determine sim bridge gateway"
             exit 1
           fi
+          sim_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{if .IPAddress}}{{println .IPAddress}}{{end}}{{end}}' "$ROBONIX_SIM_CONTAINER" | head -n1)
+          if [ -z "$sim_ip" ]; then
+            echo "::error::cannot determine sim bridge IP"
+            exit 1
+          fi
           {
             echo "ROBONIX_SIM_ATLAS=${sim_gateway}:${ATLAS_PORT}"
-            echo "NO_PROXY=127.0.0.1,localhost,${sim_gateway}"
-            echo "no_proxy=127.0.0.1,localhost,${sim_gateway}"
+            echo "ROBONIX_ZENOH_ROUTER=tcp/${sim_ip}:7447"
+            echo "ROBONIX_ZENOH_MODE=client"
+            echo "ROBONIX_ZENOH_LISTEN=tcp/${sim_gateway}:0"
+            echo "NO_PROXY=127.0.0.1,localhost,${sim_gateway},${sim_ip}"
+            echo "no_proxy=127.0.0.1,localhost,${sim_gateway},${sim_ip}"
           } >> "$GITHUB_ENV"
           echo "sim gateway: $sim_gateway"
+          echo "sim zenoh router: tcp/${sim_ip}:7447"
 
       - name: Start deterministic VLM planner
         working-directory: examples/webots
@@ -439,6 +449,10 @@ jobs:
               "AUDIO_SPEAKER_DEVICE",
               "SCENE_GRAPH_INTERVAL_SEC",
               "SCENE_GRAPH_MIN_OBSERVATIONS",
+              "RMW_IMPLEMENTATION",
+              "ROBONIX_ZENOH_ROUTER",
+              "ROBONIX_ZENOH_MODE",
+              "ROBONIX_ZENOH_LISTEN",
           ]
           env_block = "\n".join(f"  {key}: {os.environ[key]!r}" for key in env_keys)
           text = text.replace("env:\n\n# boot", f"env:\n{env_block}\n\n# boot")
@@ -504,20 +518,30 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/sim-logs"
-          echo "waiting for one real /map OccupancyGrid before scenario execution"
+          echo "waiting for a real /map OccupancyGrid publisher before scenario execution"
           if docker exec "$ROBONIX_SIM_CONTAINER" bash -lc '
             set -eo pipefail
             source /opt/ros/humble/setup.bash
             set -u
             export ROS_DOMAIN_ID='"${ROS_DOMAIN_ID}"'
-            export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
-            timeout 180s ros2 topic echo --once /map nav_msgs/msg/OccupancyGrid
+            export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
+            for _ in $(seq 1 90); do
+              if ros2 topic info -v /map > /tmp/map-info.txt 2>&1 &&
+                 grep -q "Type: nav_msgs/msg/OccupancyGrid" /tmp/map-info.txt &&
+                 grep -Eq "Publisher count: [1-9]" /tmp/map-info.txt; then
+                cat /tmp/map-info.txt
+                exit 0
+              fi
+              sleep 2
+            done
+            cat /tmp/map-info.txt 2>/dev/null || true
+            exit 1
           ' >"$RUNNER_TEMP/sim-logs/map-readiness.txt" 2>&1; then
             echo "map readiness confirmed"
             exit 0
           fi
 
-          echo "::error::mapping did not publish /map before scenario execution"
+          echo "::error::mapping did not expose a /map publisher before scenario execution"
           {
             echo "=== /map readiness failure ==="
             cat "$RUNNER_TEMP/sim-logs/map-readiness.txt" || true
@@ -967,7 +991,6 @@ jobs:
       report_url: ${{ steps.publish_url.outputs.report_url }}
     env:
       REPORT_SITE_DIR: /tmp/robonix-report-site-${{ github.run_id }}
-      REPORT_ARTIFACT_DIR: /tmp/robonix-report-artifact-${{ github.run_id }}
       REPORTS_BRANCH: robonix-ci-reports
     steps:
       - name: Checkout repository for report history
@@ -1100,33 +1123,29 @@ jobs:
           fi
           git -C "$REPORT_SITE_DIR" commit -m "ci: publish Webots report ${GITHUB_RUN_ID}"
           git -C "$REPORT_SITE_DIR" config --unset-all http.https://github.com/.extraheader || true
-          git -C "$REPORT_SITE_DIR" \
-            -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer ${GITHUB_TOKEN}" \
-            push origin "HEAD:${REPORTS_BRANCH}"
+          git -C "$REPORT_SITE_DIR" remote set-url origin \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git -C "$REPORT_SITE_DIR" push origin "HEAD:${REPORTS_BRANCH}"
 
-      - name: Prepare Pages artifact
+      - name: Ensure Pages serves report history
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          rm -rf "$REPORT_ARTIFACT_DIR"
-          mkdir -p "$REPORT_ARTIFACT_DIR"
-          tar -C "$REPORT_SITE_DIR" --exclude='.git' -cf - . | tar -C "$REPORT_ARTIFACT_DIR" -xf -
+          payload="$(mktemp)"
+          cat > "$payload" <<JSON
+          {"build_type":"legacy","source":{"branch":"robonix-ci-reports","path":"/"}}
+          JSON
+          if gh api "repos/${GITHUB_REPOSITORY}/pages" >/dev/null 2>&1; then
+            gh api -X PUT "repos/${GITHUB_REPOSITORY}/pages" --input "$payload" --silent
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/pages" --input "$payload" --silent
+          fi
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/pages/builds" --silent || true
 
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: /tmp/robonix-report-artifact-${{ github.run_id }}
-
-      - name: Deploy Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
-
-      - name: Set deployed report URL
+      - name: Set report URL
         id: publish_url
         run: |
           set -euo pipefail
-          page_url="${{ steps.deployment.outputs.page_url }}"
-          page_url="${page_url%/}"
+          page_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
           echo "report_url=${page_url}/reports/runs/${{ github.run_id }}/" >> "$GITHUB_OUTPUT"

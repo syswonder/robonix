@@ -61,6 +61,7 @@ services:
       WEBOTS_HEADLESS_MODE: "${WEBOTS_HEADLESS_MODE:-host}"
       ROBONIX_SIM_XDISPLAY: "${ROBONIX_SIM_XDISPLAY:-:48}"
       WEBOTS_WARMUP_SEC: "${WEBOTS_WARMUP_SEC:-25}"
+      RMW_IMPLEMENTATION: "${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
       # Match docker/run.sh so Webots can use host GL stack when GPU is wired in.
       NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-all}"
       NVIDIA_DRIVER_CAPABILITIES: "${NVIDIA_DRIVER_CAPABILITIES:-graphics,utility,compute}"
