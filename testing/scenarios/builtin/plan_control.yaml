@@ -1,0 +1,47 @@
+# Executor plan-control builtins: list active plans, inspect a plan, then arm a stop point.
+name: plan_control_builtins
+task: "ci-test: inspect the running RTDL plan and arm a stop point"
+steps:
+  - status: in_progress
+    rtdl_description: inspect and stop current plan
+    rtdl:
+      op: sequence
+      id: inspect_and_stop_plan
+      children:
+        - op: do
+          id: list_active_plans
+          cap: executor.builtin_get_all_plans
+          args: {}
+          expect:
+            contract: robonix/system/executor/builtin/get_all_plans
+            success: true
+            args: {}
+            output:
+              json: {count: 1}
+              jsonpath:
+                - path: $.plans[].plan_id
+                  equals: "1"
+        - op: do
+          id: inspect_current_plan
+          cap: executor.builtin_get_plan_status
+          args: {plan_id: "1"}
+          expect:
+            contract: robonix/system/executor/builtin/get_plan_status
+            success: true
+            args: {plan_id: "1"}
+            output:
+              json: {plan_id: "1", running: true}
+              jsonpath:
+                - path: $.ops[].op_id
+                  equals: "1"
+        - op: do
+          id: stop_current_plan_on_complete
+          cap: executor.builtin_stop_plan_at
+          args: {plan_id: "1", op_id: "1", when: on_complete}
+          expect:
+            contract: robonix/system/executor/builtin/stop_plan_at
+            success: true
+            args: {plan_id: "1", op_id: "1", when: on_complete}
+            output:
+              text_equals: "Stop point set: RTDL plan '1' will be cancelled on_complete op_id=1."
+  - status: done
