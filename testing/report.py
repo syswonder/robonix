@@ -8,7 +8,7 @@ import html
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -33,6 +33,22 @@ REDACTIONS = [
     re.compile(r"(?i)((?:github_)?token\s*[:=]\s*)[^\s]+"),
     re.compile(r"(?i)((?:api[_-]?key|password|secret)\s*[:=]\s*)[^\s]+"),
 ]
+
+
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def _format_beijing_time(raw: str) -> str:
+    if not raw:
+        return ""
+    text = str(raw).replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return str(raw)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(BEIJING_TZ).isoformat(timespec="seconds")
 
 
 def _read_json(path: Path) -> dict:
@@ -692,7 +708,7 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
         score = 0
     verdict = "NO DATA" if total == 0 else ("PASS" if failed == 0 else "FAIL")
     result_class = "pass" if verdict == "PASS" else "fail"
-    generated_on = html.escape(metadata.get("generated_on", ""))
+    generated_on = html.escape(_format_beijing_time(metadata.get("generated_on", "")))
     body = f"""<!doctype html>
 <html lang=\"en\">
 <head>
