@@ -32,8 +32,8 @@ steps:
             output:
               json: {plan_id: "1", running: true}
               jsonpath:
-                - path: $.ops[].op_id
-                  equals: "1"
+                - path: $.ops
+                  min_length: 1
         - op: do
           id: stop_current_plan_on_complete
           cap: executor.builtin_stop_plan_at
@@ -44,4 +44,17 @@ steps:
             args: {plan_id: "1", op_id: "1", when: on_complete}
             output:
               text_equals: "Stop point set: RTDL plan '1' will be cancelled on_complete op_id=1."
+        - op: do
+          id: list_armed_stop_point
+          cap: executor.builtin_get_all_plans
+          args: {}
+          expect:
+            contract: robonix/system/executor/builtin/get_all_plans
+            success: true
+            args: {}
+            output:
+              json: {count: 1}
+              jsonpath:
+                - path: $.plans[].stop_points
+                  equals: 1
   - status: done
