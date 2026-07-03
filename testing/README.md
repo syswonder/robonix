@@ -143,42 +143,129 @@ capability with invalid args (e.g. a required field omitted) so the leaf
 genuinely fails, then a later step recovers. This drives pilot's real
 replan-on-failure path with no test hooks in production code.
 
-## Run it by hand
+## Run it by hand after Quickstart
 
-Boot a deploy with pilot pointed at the fake VLM, then run the scenarios:
+The scenario runner does not start Webots for you. It assumes the local Webots
+deploy is already running, exactly like the normal quickstart path. Local users
+should start the normal GUI simulator; `ROBONIX_SIM_STREAM` is only for CI or
+headless debugging.
+
+Terminal 1, from the repository root:
 
 ```bash
-# 1. fake VLM
-python3 testing/fake_vlm/server.py --port 18080 &
-
-# 2. boot the webots deploy against it
-cd examples/webots
-VLM_BASE_URL=http://127.0.0.1:18080/v1 VLM_API_KEY=fake VLM_MODEL=fake-vlm \
-  rbnx boot --no-update-check &
-
-# 3. interface tests, then cap + flow scenarios
-python3 ../../testing/run_interfaces.py --server 127.0.0.1:50051
-python3 ../../testing/run.py --server 127.0.0.1:50051
+export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
+unset ROBONIX_SIM_STREAM WEBOTS_HEADLESS_MODE
+bash examples/webots/sim/start.sh
 ```
 
-Both exit non-zero on any failure and write per-test traces under `testing/logs/`.
+Terminal 2, from the repository root, start the deterministic VLM. Port `18421`
+is used here to avoid common local proxy ports; any free localhost port is fine
+as long as `VLM_BASE_URL` below matches it.
 
-`run.py` exits non-zero if any scenario fails an assertion or pilot reports
-FAILED. The coverage section lists every `contract_id` exercised across the run.
+```bash
+python3 testing/fake_vlm/server.py --port 18421
+```
 
-## Adding coverage
+Terminal 3, boot Robonix against that fake VLM:
+
+```bash
+cd examples/webots
+export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}"
+export VLM_BASE_URL=http://127.0.0.1:18421/v1
+export VLM_API_KEY=fake
+export VLM_MODEL=fake-vlm
+rbnx boot --no-update-check
+```
+
+Terminal 4, from the repository root, run the checks:
+
+```bash
+export ROBONIX_ATLAS=127.0.0.1:50051
+python3 testing/run_interfaces.py --server "$ROBONIX_ATLAS"
+python3 testing/run.py --server "$ROBONIX_ATLAS" \
+  --timeout 900 \
+  --summary-json /tmp/robonix-local-summary.json
+```
+
+For a targeted live run:
+
+```bash
+python3 testing/run.py --server "$ROBONIX_ATLAS" \
+  --only object_navigation \
+  --timeout 900
+```
+
+To inspect the same HTML shape used by CI:
+
+```bash
+python3 testing/report.py \
+  --summary-json /tmp/robonix-local-summary.json \
+  --out-dir /tmp/robonix-local-report
+python3 -m http.server --directory /tmp/robonix-local-report 18083
+```
+
+Then open `http://127.0.0.1:18083/`.
+
+Do not drive the robot manually through RViz, teleop, or another nav client
+while the scenario suite is running. Navigation and explore scenarios issue real
+actions, so another client can preempt or alter the expected result.
+
+`run_interfaces.py` and `run.py` both exit non-zero on failure and write
+per-test traces under `testing/logs/`. `run.py` exits non-zero if any scenario
+fails an assertion or pilot reports FAILED. The coverage section lists every
+`contract_id` exercised across the run.
+
+## Adding coverage with scenario YAML
 
 The shipped scenarios cover builtins, camera/lidar snapshot, memory
 save+search, voiceprint list, speech speak, map save, scene object listing,
-explore start/status/cancel, and object-derived navigation. To add a tool:
+explore start/status/cancel, and object-derived navigation.
 
-0. Copy an existing `scenarios/*.yaml` and edit it (PyYAML is the only dep).
+For ordinary coverage, adding a testcase is just adding or editing one scenario
+YAML file under `testing/scenarios/builtin/`, `testing/scenarios/cap/`, or
+`testing/scenarios/flow/`. `testing/run.py` auto-discovers committed
+`.yaml`/`.yml` files in those directories; there is no registry to update.
+
+Use this checklist:
+
+0. Copy an existing `testing/scenarios/**/*.yaml` and edit it.
 1. Find its capability — only `[mode] type = "rpc"` contracts become planner
    tools; `topic_in/out` ones are ROS data channels, not callable.
 2. Read its `.srv` IDL under `capabilities/lib/<area>/srv/` for the arg fields.
 3. Add a scenario whose `steps[].rtdl` mirrors the RTDL tree you want Pilot to
-   receive. First-run logs from `fake_vlm/server.py` print unresolved exact cap
-   names against the live catalog; use that to fix `cap` and `args`.
+   receive. Put assertions inside each `do.expect`, not in a global footer.
+4. Validate the offline parser and fake-VLM model:
+
+   ```bash
+   python3 testing/simulate_ci.py
+   ```
+
+5. Run the new case against a booted Webots deploy:
+
+   ```bash
+   python3 testing/run.py --server 127.0.0.1:50051 \
+     --only <scenario_name> \
+     --timeout 900
+   ```
+
+First-run logs from `fake_vlm/server.py` print unresolved exact cap names
+against the live catalog; use that to fix `cap` and `args`.
+
+Code changes are only needed when the YAML needs behavior the harness does not
+already support, for example:
+
+- a new assertion operator or variable transform in `SCENARIO_SPEC.md`;
+- new fake-VLM planning behavior that cannot be expressed as timeline steps,
+  RTDL nodes, captures, or variables;
+- a new provider/capability that is not built, booted, or advertised yet;
+- new required CI environment, simulator, or report metadata.
+
+For PR testing, `@robonix-ci test` runs the GitHub merge ref
+`refs/pull/<PR>/merge`. That means scenario YAML added in the PR is included in
+the tested checkout, as long as GitHub can create the merge ref. If the PR does
+not merge cleanly into its base branch, Webots is not run and the report should
+describe that infrastructure state instead of pretending the scenario suite
+passed.
 
 Remaining useful coverage: direct chassis velocity with strict cleanup,
 long-duration navigation completion, and non-CI real detector scene-graph
