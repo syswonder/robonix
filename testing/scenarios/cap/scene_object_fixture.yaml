@@ -3,6 +3,7 @@ name: scene_object_fixture
 task: "ci-test: list the detected scene objects"
 steps:
   - time_s: 45.0
+    retry_delay_s: 3.0
     content: Listing scene objects.
     rtdl_description: scene list objects
     status: in_progress

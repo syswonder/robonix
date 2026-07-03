@@ -507,7 +507,6 @@ jobs:
 
       - name: Run interface checks
         env:
-          no_proxy: "127.0.0.1,localhost"
           ROBONIX_REQUIRE_AUDIO: "1"
         run: |
           export ROBONIX_ATLAS="$ROBONIX_CI_ATLAS"
@@ -566,8 +565,6 @@ jobs:
 
       - name: Run scenario suite
         id: scenarios
-        env:
-          no_proxy: "127.0.0.1,localhost"
         run: |
           set -o pipefail
           export ROBONIX_ATLAS="$ROBONIX_CI_ATLAS"

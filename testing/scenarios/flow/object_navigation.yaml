@@ -25,6 +25,7 @@ steps:
               error_regex: 'hit 8\.0s ceiling'
   - time_s: 45.0
     status: in_progress
+    retry_delay_s: 3.0
     rtdl_description: list scene objects during explored state
     rtdl:
       op: sequence

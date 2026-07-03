@@ -214,11 +214,90 @@ def _iter_do_nodes(node: Any):
         yield from _iter_do_nodes(child)
 
 
-def _leaf_matches_expect(leaf: dict, expect: dict) -> bool:
+def _leaf_matches_contract_success(leaf: dict, expect: dict) -> bool:
     contract = expect.get("contract")
     if contract and leaf.get("contract_id") != contract:
         return False
     return leaf.get("success", False) == expect.get("success", True)
+
+
+def _leaf_matches_expect(leaf: dict, expect: dict) -> bool:
+    return not _leaf_expect_errors(leaf, expect)
+
+
+def _contains_subset(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return False
+        return all(k in actual and _contains_subset(actual[k], v) for k, v in expected.items())
+    if isinstance(expected, list):
+        if not isinstance(actual, list) or len(actual) < len(expected):
+            return False
+        return all(_contains_subset(a, e) for a, e in zip(actual, expected))
+    return actual == expected
+
+
+def _json_path_values(value: Any, path: str) -> list[Any]:
+    value = _parse_maybe_json(value)
+    if not path.startswith("$."):
+        return []
+    current = [value]
+    for token in path[2:].split("."):
+        next_values: list[Any] = []
+        is_array = token.endswith("[]")
+        key = token[:-2] if is_array else token
+        for item in current:
+            if not isinstance(item, dict) or key not in item:
+                continue
+            child = item[key]
+            if is_array:
+                if isinstance(child, list):
+                    next_values.extend(child)
+            else:
+                next_values.append(child)
+        current = next_values
+    return current
+
+
+def _leaf_expect_errors(leaf: dict, expect: dict) -> list[str]:
+    errors: list[str] = []
+    contract = expect.get("contract")
+    if contract and leaf.get("contract_id") != contract:
+        errors.append("contract")
+    if leaf.get("success", False) != expect.get("success", True):
+        errors.append("success")
+
+    clause = expect.get("output")
+    if not isinstance(clause, dict):
+        return errors
+
+    raw = str(leaf.get("output", ""))
+    err_text = str(leaf.get("error", ""))
+    parsed = _parse_maybe_json(raw.strip())
+    if "text_equals" in clause and raw != clause["text_equals"]:
+        errors.append("text_equals")
+    if "text_regex" in clause and not re.search(str(clause["text_regex"]), raw):
+        errors.append("text_regex")
+    if "error_regex" in clause and not re.search(str(clause["error_regex"]), err_text):
+        errors.append("error_regex")
+    for line in clause.get("text_lines", []) or []:
+        if line not in raw.splitlines():
+            errors.append("text_lines")
+    if "json" in clause and not _contains_subset(parsed, clause["json"]):
+        errors.append("json")
+    for cond in clause.get("jsonpath", []) or []:
+        values = _json_path_values(parsed, str(cond.get("path", "")))
+        if cond.get("exists") and not values:
+            errors.append("jsonpath_exists")
+            continue
+        if "min_length" in cond:
+            if len(values) != 1 or not hasattr(values[0], "__len__") or len(values[0]) < int(cond["min_length"]):
+                errors.append("jsonpath_min_length")
+        if "equals" in cond and cond["equals"] not in values:
+            errors.append("jsonpath_equals")
+        if "prefix" in cond and not any(str(v).startswith(str(cond["prefix"])) for v in values):
+            errors.append("jsonpath_prefix")
+    return errors
 
 
 def _step_expected_do_nodes(step: dict) -> list[dict]:
@@ -264,7 +343,8 @@ def _step_is_complete(step: dict, leaves: list[dict], consumed: set[int]) -> boo
         for idx, leaf in enumerate(leaves):
             if idx in consumed or idx in local_used:
                 continue
-            if _leaf_matches_expect(leaf, expect):
+            matcher = _leaf_matches_expect if step.get("retry_delay_s") else _leaf_matches_contract_success
+            if matcher(leaf, expect):
                 match_idx = idx
                 break
         if match_idx is None:
@@ -520,11 +600,18 @@ class Handler(BaseHTTPRequestHandler):
                 expected_contracts = _step_expected_contracts(step)
                 step_already_planned = bool(expected_contracts & planned_contracts)
                 step_has_leaf = any(leaf.get("contract_id") in expected_contracts for leaf in leaves)
-                if pending == step_index or (step_already_planned and not step_has_leaf):
+                if (pending == step_index or step_already_planned) and not step_has_leaf:
                     envelope = wait_envelope()
                     self._emit(f"scenario {name!r} request {request_round} step {step_index}: wait for result")
                 else:
                     unresolved: list[str] = []
+                    if step_has_leaf and step.get("retry_delay_s"):
+                        retry_delay = max(0.0, float(step["retry_delay_s"]))
+                        self._emit(
+                            f"scenario {name!r} request {request_round} step {step_index}: "
+                            f"retry after {retry_delay:.3f}s"
+                        )
+                        time.sleep(retry_delay)
                     self._apply_timeline_delay(scenario, step, step_index)
                     vars_ = capture_vars_from_history(scenario, messages, step_index)
                     once_seen = self.once_seen.setdefault(name, set())

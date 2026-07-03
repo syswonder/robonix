@@ -110,16 +110,21 @@ not do suffix or substring resolution.
 
 Pilot feeds RTDL executor feedback back into VLM history as structured
 `leaf_result` JSON (`call_id`, `contract_id`, `success`, `output`, `error`). The
-fake VLM advances through `steps` by those observed leaf results, not by raw
-request count. If Pilot asks again before a prior result is visible in history,
-the fake VLM returns an empty wait RTDL for the already-served step instead of
-resubmitting side-effecting work such as navigation. The runner mirrors this by
-matching each YAML step to the next compatible RTDL plan round in order.
+fake VLM advances through ordinary `steps` by observed contract success, not by
+raw request count. If Pilot asks again before a prior result is visible in
+history, the fake VLM returns an empty wait RTDL for the already-served step
+instead of resubmitting side-effecting work such as navigation. A step that sets
+`retry_delay_s` is stricter: the fake VLM also requires that step's
+`expect.output` assertions to pass before it advances, and may serve the same
+step again while real perception/scene graph state converges. The runner always
+checks the full step-local expectations when scoring the scenario.
 
 Timing is modeled inside `steps`, similar to timeline/marble tests: `time_s`
 sets an absolute offset from the first planning round and `delay_s` sleeps
-relative to the current step. Because this is a real Webots/ROS integration
-test, these waits use wall-clock time rather than a fake clock.
+relative to the current step. `retry_delay_s` sleeps before re-serving a step
+whose previous leaf result failed that step's output checks. Because this is a
+real Webots/ROS integration test, these waits use wall-clock time rather than a
+fake clock.
 
 ## Scenario YAML
 
