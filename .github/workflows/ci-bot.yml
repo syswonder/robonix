@@ -304,7 +304,9 @@ jobs:
             exit 0
           fi
           git -C "$REPORT_SITE_DIR" commit -m "ci: publish Webots report ${GITHUB_RUN_ID}"
-          git -C "$REPORT_SITE_DIR" -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer ${GITHUB_TOKEN}" \
+          git -C "$REPORT_SITE_DIR" config --unset-all http.https://github.com/.extraheader || true
+          git -C "$REPORT_SITE_DIR" \
+            -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer ${GITHUB_TOKEN}" \
             push origin "HEAD:${REPORTS_BRANCH}"
 
       - name: Prepare Pages artifact
