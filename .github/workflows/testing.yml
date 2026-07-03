@@ -893,7 +893,7 @@ jobs:
           if-no-files-found: ignore
 
   report:
-    name: Webots report and analysis
+    name: Webots report generation
     needs: gpu_testing
     if: always()
     runs-on: ubuntu-22.04
@@ -924,7 +924,7 @@ jobs:
           path: dl
           merge-multiple: true
 
-      - name: Build report with LLM-assisted analysis
+      - name: Build Webots HTML report
         run: |
           set -euo pipefail
           mkdir -p report dl
