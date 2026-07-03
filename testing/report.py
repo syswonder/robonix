@@ -686,7 +686,12 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
     passed = int(summary.get("passed", 0) or 0)
     failed = int(summary.get("failed", 0) or 0)
     rate = summary.get("rate", 0)
+    try:
+        score = round(float(rate) * 100)
+    except (TypeError, ValueError):
+        score = 0
     verdict = "NO DATA" if total == 0 else ("PASS" if failed == 0 else "FAIL")
+    result_class = "pass" if verdict == "PASS" else "fail"
     generated_on = html.escape(metadata.get("generated_on", ""))
     body = f"""<!doctype html>
 <html lang=\"en\">
@@ -782,6 +787,15 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
     .card {{ border: 1px solid var(--line); border-radius: 0; min-width: 140px; padding: 8px 10px; }}
     .card strong {{ color: var(--muted); display: block; font-size: 11px; margin-bottom: 6px; text-transform: uppercase; }}
     .metric {{ font-size: 16px; font-weight: 700; }}
+    .result-metric {{
+      border: 1px solid currentColor;
+      display: inline-block;
+      font-family: var(--mono);
+      font-size: 12px;
+      padding: 2px 7px;
+    }}
+    .result-metric.pass {{ background: var(--pass-bg); color: var(--pass-text); }}
+    .result-metric.fail {{ background: var(--fail-bg); color: var(--fail-text); }}
     .row-pass {{ background: var(--pass-bg); }}
     .row-fail {{ background: var(--fail-bg); }}
     .row-pass td {{ border-bottom-color: var(--pass-border); }}
@@ -1088,10 +1102,10 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
   <div class=\"report-nav\"><a href=\"../../\">ALL REPORTS &gt;&gt;</a></div>
   <p class=\"subtitle\">Generated on {generated_on}</p>
   <div class=\"summary\">
-    <div class=\"card\"><strong>Result</strong><span class=\"metric {'pass' if verdict == 'PASS' else 'fail'}\">{verdict}</span></div>
+    <div class=\"card\"><strong>Result</strong><span class=\"metric result-metric {result_class}\">{verdict}</span></div>
     <div class=\"card\"><strong>Scenarios</strong><span class=\"metric\">{passed}/{total} passed</span></div>
     <div class=\"card\"><strong>Failures</strong><span class=\"metric\">{failed}</span></div>
-    <div class=\"card\"><strong>Pass rate</strong><span class=\"metric\">{html.escape(str(rate))}</span></div>
+    <div class=\"card\"><strong>Score</strong><span class=\"metric\">{score}</span></div>
   </div>
   {_llm_analysis_section(analysis)}
   <h2>Run Metadata</h2>
