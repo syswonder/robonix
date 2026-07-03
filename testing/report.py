@@ -36,6 +36,7 @@ REDACTIONS = [
 
 
 BEIJING_TZ = timezone(timedelta(hours=8))
+TIME_METADATA_SUFFIXES = ("_on", "_at", "_date")
 
 
 def _format_beijing_time(raw: str) -> str:
@@ -433,6 +434,8 @@ def _display_value(key: str, value: str, metadata: dict[str, str]) -> str:
 
     href = ""
     text = value
+    if key.endswith(TIME_METADATA_SUFFIXES):
+        text = _format_beijing_time(value)
     if key == "tested_commit":
         href = metadata.get("commit_url", "")
         text = value[:12]
