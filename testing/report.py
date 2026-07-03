@@ -173,7 +173,8 @@ def _observed_round(round_data: dict | None) -> str:
         state = "PASS" if success is True else ("FAIL" if success is False else "PENDING")
         state_cls = "pass" if success is True else ("fail" if success is False else "")
         output = leaf.get("error") or leaf.get("output") or ""
-        row_cls = f"observed-call observed-{state_cls or 'pending'}"
+        row_state = state_cls or "pending"
+        row_cls = f"observed-call observed-{row_state} result-row-{row_state}"
         rows.append(
             f'<div class="{row_cls}">'
             f'<span class="status-badge {state_cls}">{state}</span>'
@@ -223,10 +224,11 @@ def _scenario_rtdl_trees(summary: dict) -> str:
             )
             for pos, step in enumerate(steps)
         )
+        scenario_state = "pass" if sc.get("passed") else "fail"
         sections.append(
-            f'<details class="rtdl-scenario"{open_attr}>'
+            f'<details class="rtdl-scenario result-row-{scenario_state}"{open_attr}>'
             "<summary>"
-            f'<span class="status-badge {"pass" if sc.get("passed") else "fail"}">{_status_label(bool(sc.get("passed")))}</span>'
+            f'<span class="status-badge {scenario_state}">{_status_label(bool(sc.get("passed")))}</span>'
             f'{_code(sc.get("family", ""), "suite")}/'
             f'{_code(sc.get("name", ""), "scenario")}'
             f'<span class="rtdl-step-meta">{len(steps)} step(s), {leaf_count} leaf call(s)</span>'
@@ -803,19 +805,34 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
     .card {{ border: 1px solid var(--line); border-radius: 0; min-width: 140px; padding: 8px 10px; }}
     .card strong {{ color: var(--muted); display: block; font-size: 11px; margin-bottom: 6px; text-transform: uppercase; }}
     .metric {{ font-size: 16px; font-weight: 700; }}
+    .score-metric {{
+      font-family: var(--mono);
+    }}
     .result-metric {{
-      border: 1px solid currentColor;
+      border: 0;
       display: inline-block;
       font-family: var(--mono);
-      font-size: 12px;
-      padding: 2px 7px;
+      font-size: 13px;
+      padding: 0;
     }}
-    .result-metric.pass {{ background: var(--pass-bg); color: var(--pass-text); }}
-    .result-metric.fail {{ background: var(--fail-bg); color: var(--fail-text); }}
+    .result-metric.pass {{ background: transparent; color: var(--pass-text); }}
+    .result-metric.fail {{ background: transparent; color: var(--fail-text); }}
     .row-pass {{ background: var(--pass-bg); }}
     .row-fail {{ background: var(--fail-bg); }}
     .row-pass td {{ border-bottom-color: var(--pass-border); }}
     .row-fail td {{ border-bottom-color: var(--fail-border); }}
+    .result-row-pass {{
+      background: var(--pass-bg);
+      border-color: var(--pass-border);
+    }}
+    .result-row-fail {{
+      background: var(--fail-bg);
+      border-color: var(--fail-border);
+    }}
+    .result-row-pending {{
+      background: #f9fafb;
+      border-color: var(--line);
+    }}
     .status-badge {{
       border-radius: 0;
       display: inline-block;
@@ -829,6 +846,9 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
     }}
     .status-badge.pass {{ background: #d1fae5; color: var(--pass-text); }}
     .status-badge.fail {{ background: #fee2e2; color: var(--fail-text); }}
+    .status-badge:empty {{
+      display: none;
+    }}
     .contract, .path, .suite, .scenario, .failure-text {{ font-weight: 500; }}
     .suite, .scenario, .contract, .path {{
       white-space: nowrap;
@@ -846,7 +866,8 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
     }}
     .rtdl-scenario {{
       border-top: 1px solid var(--line);
-      padding: 12px 0;
+      margin: 8px 0;
+      padding: 8px;
     }}
     .rtdl-scenario:first-child {{ border-top: 0; }}
     .rtdl-scenario > summary {{
@@ -922,8 +943,8 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
     }}
     .observed-call {{
       align-items: baseline;
-      background: var(--pass-bg);
       border-radius: 0;
+      border: 1px solid var(--pass-border);
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
@@ -931,7 +952,10 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
       padding: 4px 6px;
     }}
     .observed-fail {{
-      background: var(--fail-bg);
+      border-color: var(--fail-border);
+    }}
+    .observed-pending {{
+      border-color: var(--line);
     }}
     .observed-output {{
       color: #374151;
@@ -940,6 +964,11 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
       max-width: 100%;
       overflow-wrap: anywhere;
       white-space: pre-wrap;
+    }}
+    .observed-fail .contract,
+    .observed-fail .observed-output {{
+      color: var(--fail-text);
+      font-weight: 700;
     }}
     .failure-line {{ margin-bottom: 6px; }}
     .failure-line:last-child {{ margin-bottom: 0; }}
@@ -1121,7 +1150,7 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
     <div class=\"card\"><strong>Result</strong><span class=\"metric result-metric {result_class}\">{verdict}</span></div>
     <div class=\"card\"><strong>Scenarios</strong><span class=\"metric\">{passed}/{total} passed</span></div>
     <div class=\"card\"><strong>Failures</strong><span class=\"metric\">{failed}</span></div>
-    <div class=\"card\"><strong>Score</strong><span class=\"metric\">{score}</span></div>
+    <div class=\"card\"><strong>Score</strong><span class=\"metric score-metric\">{score}/100</span></div>
   </div>
   {_llm_analysis_section(analysis)}
   <h2>Run Metadata</h2>
