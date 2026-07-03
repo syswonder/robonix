@@ -70,7 +70,12 @@ start_zenoh_router() {
       tail -80 /tmp/rmw_zenohd.log 2>&1 || true
       return 1
     fi
-    if (echo >/dev/tcp/127.0.0.1/7447) >/dev/null 2>&1; then
+    if python3 - <<PY >/dev/null 2>&1
+import socket
+with socket.create_connection(("127.0.0.1", 7447), timeout=0.2):
+    pass
+PY
+    then
       echo "[entrypoint] rmw_zenohd listening on tcp/127.0.0.1:7447"
       return 0
     fi
