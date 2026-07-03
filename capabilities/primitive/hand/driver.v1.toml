@@ -1,0 +1,10 @@
+# Lifecycle entry point.  Every primitive MUST declare this contract — `rbnx boot`
+# calls Driver(CMD_INIT, config_json) against it and waits for ok=true.
+[contract]
+id      = "robonix/primitive/hand/driver"
+version = "1"
+kind    = "primitive"
+idl     = "lifecycle/srv/Driver.srv"
+
+[mode]
+type = "rpc"
