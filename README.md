@@ -92,6 +92,7 @@ ROS 2 distribution (Foxy / Humble / Jazzy); **Humble is recommended**.
 ```bash
 git clone --recursive https://github.com/syswonder/robonix
 cd robonix
+python3 -m pip install --user uv   # if uv is not already installed
 make install   # builds the Cargo workspace and installs
                # rbnx + robonix-{atlas,pilot,executor,liaison,codegen}
                # to ~/.cargo/bin, then registers this clone via `rbnx setup`
@@ -102,18 +103,19 @@ Two terminals — the simulator and Robonix itself.
 
 ```bash
 # (1) — simulation environment (Webots GUI; not a Robonix package — just docker compose)
+export DISPLAY=:0
 bash examples/webots/sim/start.sh
 
+# Optional for CI/headless debugging only; normal quickstart uses the Webots GUI above.
+# export ROBONIX_SIM_STREAM=1
+# export WEBOTS_HEADLESS_MODE=auto
+# bash examples/webots/sim/start.sh
+
 # (2) — Robonix: system services + Tiago primitives + Nav2 + scene
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
 export VLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
 export VLM_API_KEY=sk-...
 export VLM_MODEL=gpt-5.5
-
-# scene is the only component that consumes ROS topics, and its ROS distro
-# is a build-time choice (default humble). To build it against another
-# distro, set this BEFORE the first `rbnx build` — supported: humble, iron,
-# jazzy, rolling. (Leave unset for the default.)
-# export ROBONIX_SCENE_ROS_DISTRO=humble
 
 cd examples/webots
 rbnx build       # first run pulls model weights + docker images, may take a while

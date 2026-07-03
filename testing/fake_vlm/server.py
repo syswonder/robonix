@@ -192,6 +192,19 @@ def _leaf_results_from_messages(messages: list[dict]) -> list[dict]:
     return leaves
 
 
+def _message_texts(messages: list[dict], roles: set[str] | None = None) -> list[str]:
+    parts: list[str] = []
+    for m in messages:
+        if roles is not None and m.get("role") not in roles:
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            parts.extend(p.get("text", "") for p in content if p.get("type") == "text")
+    return parts
+
+
 def _iter_do_nodes(node: Any):
     if not isinstance(node, dict):
         return
@@ -210,6 +223,34 @@ def _leaf_matches_expect(leaf: dict, expect: dict) -> bool:
 
 def _step_expected_do_nodes(step: dict) -> list[dict]:
     return [node for node in _iter_do_nodes(step.get("rtdl")) if isinstance(node.get("expect"), dict)]
+
+
+def _step_expected_contracts(step: dict) -> set[str]:
+    contracts: set[str] = set()
+    for node in _step_expected_do_nodes(step):
+        contract = node.get("expect", {}).get("contract")
+        if isinstance(contract, str):
+            contracts.add(contract)
+    return contracts
+
+
+def _planned_contracts_from_messages(messages: list[dict]) -> set[str]:
+    planned: set[str] = set()
+    for text in _message_texts(messages):
+        for value in _json_values_from_text(text):
+            for node in _walk_json(value):
+                if not isinstance(node, dict):
+                    continue
+                rtdl = node.get("rtdl")
+                if isinstance(rtdl, dict):
+                    for do_node in _iter_do_nodes(rtdl):
+                        cap = do_node.get("cap")
+                        if isinstance(cap, str):
+                            planned.add(cap)
+                contract_id = node.get("contract_id")
+                if isinstance(contract_id, str):
+                    planned.add(contract_id)
+    return planned
 
 
 def _step_is_complete(step: dict, leaves: list[dict], consumed: set[int]) -> bool:
@@ -465,7 +506,9 @@ class Handler(BaseHTTPRequestHandler):
             envelope = terminal_envelope("no scripted scenario; nothing to do")
         else:
             name = scenario["name"]
-            if request_round == 0:
+            leaves = _leaf_results_from_messages(messages)
+            planned_contracts = _planned_contracts_from_messages(messages)
+            if request_round == 0 and not leaves and not planned_contracts:
                 self.timeline_starts[name] = time.monotonic()
                 self.once_seen[name] = set()
                 self.pending_steps.pop(name, None)
@@ -473,12 +516,15 @@ class Handler(BaseHTTPRequestHandler):
             step_index = next_step_index_from_history(scenario, messages)
             if step_index < len(steps):
                 pending = self.pending_steps.get(name)
-                if pending == step_index:
+                step = steps[step_index]
+                expected_contracts = _step_expected_contracts(step)
+                step_already_planned = bool(expected_contracts & planned_contracts)
+                step_has_leaf = any(leaf.get("contract_id") in expected_contracts for leaf in leaves)
+                if pending == step_index or (step_already_planned and not step_has_leaf):
                     envelope = wait_envelope()
                     self._emit(f"scenario {name!r} request {request_round} step {step_index}: wait for result")
                 else:
                     unresolved: list[str] = []
-                    step = steps[step_index]
                     self._apply_timeline_delay(scenario, step, step_index)
                     vars_ = capture_vars_from_history(scenario, messages, step_index)
                     once_seen = self.once_seen.setdefault(name, set())
