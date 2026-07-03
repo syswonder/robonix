@@ -46,7 +46,9 @@ def generate_launch_description():
     # WEBOTS_STREAM=1 (set by compose.stream.yaml) enables Webots' built-in
     # WebSocket stream on port 1234 so a remote browser can view the 3D
     # scene without an X11 server on the client side. Gating on env keeps
-    # the legacy (host DISPLAY) path bit-for-bit unchanged.
+    # the legacy (host DISPLAY) path bit-for-bit unchanged. Port isolation
+    # for parallel sims is handled at the container network layer (a CI sim
+    # runs on a bridge network, not host), NOT by changing the webots port.
     webots = WebotsLauncher(
         world=world_description_path,
         mode="realtime",

@@ -281,7 +281,7 @@ impl ProcessManager {
             let reader = tokio::io::BufReader::new(stdout);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                robonix_scribe::info(&tag, &line);
+                robonix_scribe::ingest(&tag, &line);
             }
         });
 
@@ -294,7 +294,7 @@ impl ProcessManager {
                 // WARNING messages to stderr — use `info` rather than
                 // `warn` so the level in the file doesn't misrepresent
                 // the actual severity.
-                robonix_scribe::info(&tag2, &line);
+                robonix_scribe::ingest(&tag2, &line);
             }
         });
 

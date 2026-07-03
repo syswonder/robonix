@@ -113,7 +113,7 @@ export VLM_MODEL=gpt-5.5
 # is a build-time choice (default humble). To build it against another
 # distro, set this BEFORE the first `rbnx build` — supported: humble, iron,
 # jazzy, rolling. (Leave unset for the default.)
-# export ROBONIX_SCENE_ROS_DISTRO=jazzy
+# export ROBONIX_SCENE_ROS_DISTRO=humble
 
 cd examples/webots
 rbnx build       # first run pulls model weights + docker images, may take a while
@@ -180,34 +180,57 @@ Dive deeper:
 
 ## Ecosystem
 
-### Tools
+Robonix is built from small, swappable **packages**, each implementing one or
+more capability contracts under a `robonix/<kind>/<area>/*` namespace (browse
+them in the [interface catalog](https://github.com/syswonder/robonix-book/blob/main/src/interface-catalog/index.md)).
+Packages come in two flavours:
 
-* [**Robonix Skill Toolkit**](https://github.com/zhengzihaoPKU/Robonix-Skill-Toolkit)
-  — a training toolkit for VLA-based Robonix skills: collect teleop data,
-  fine-tune an [OpenVLA-OFT](https://openvla-oft.github.io) policy, and deploy it
-  on a real robotic arm ([AgileX Piper](https://github.com/agilexrobotics/Agilex-College)).
+- **Built-in reference packages** ship in this repo under [`services/`](services/) and deploy as-is.
+- **Community packages** live in their own repos and are pulled in at boot via the manifest's `url:` field — fork one as a template to add new hardware or behaviour.
 
-### Primitives
+### Built-in services — [`services/`](services/)
 
-* [**Agilex Ranger Mini v3 Chassis Robonix Primitive Package**](https://github.com/enkerewpo/ranger_chassis_rbnx)
-* [**Livox MID360 Lidar Robonix Primitive Package**](https://github.com/enkerewpo/mid360_lidar_rbnx)
-* [**Livox MID360 IMU Robonix Primitive Package**](https://github.com/enkerewpo/mid360_imu_rbnx)
-* [**Intel Realsense Camera Robonix Primitive Package**](https://github.com/enkerewpo/realsense_camera_rbnx)
+| Package | Namespace | What it does |
+|---|---|---|
+| [`memsearch`](services/memsearch) | `robonix/service/memory/*` | Long-term fact / preference memory; the planner queries it for relevant past context. |
+| [`speech`](services/speech) | `robonix/service/speech/*` | Voice I/O — ASR, TTS (incl. streaming), dialog, speaker listing. |
+| [`voiceprint`](services/voiceprint) | `robonix/service/voiceprint/*` | Speaker identification (ECAPA-TDNN) — enroll / identify / list / delete. |
 
-### Services
+> `scene` (3D scene graph) and the core runtime (`atlas`, `executor`, `pilot`, `liaison`) are **system** components under [`system/`](system/), not services.
 
-* [**SLAM Mapping Robonix Service Package**](https://github.com/enkerewpo/mapping_rbnx)
-  - With RTABMAP, FAST-LIO2 integration
-* [**Nav2 Robonix Service Package**](https://github.com/lhw2002426/nav2_wrapper_rbnx)
+### Community packages
 
-### Skills
+Standalone repos, cloned at boot via `url:` in the deploy manifest.
 
-* [**Environment Explorer Robonix Skill Package**](https://github.com/enkerewpo/explore_rbnx)
-  - A simple room exploration skill `robonix/skill/explore/*`
+**Primitives** — one hardware device per package:
 
-### Full Robot Deployment Examples
+| Package | Hardware | Namespace |
+|---|---|---|
+| [`ranger_chassis_rbnx`](https://github.com/enkerewpo/ranger_chassis_rbnx) | AgileX Ranger Mini v3 chassis | `robonix/primitive/chassis/*` |
+| [`mid360_lidar_rbnx`](https://github.com/enkerewpo/mid360_lidar_rbnx) | Livox MID-360 — point cloud | `robonix/primitive/lidar/*` |
+| [`mid360_imu_rbnx`](https://github.com/enkerewpo/mid360_imu_rbnx) | Livox MID-360 — IMU | `robonix/primitive/imu/*` |
+| [`realsense_camera_rbnx`](https://github.com/enkerewpo/realsense_camera_rbnx) | Intel RealSense camera | `robonix/primitive/camera/*` |
 
-* [**Deploy Manifest for AgileX Ranger Mini Robot at Syswonder Lab**](https://github.com/enkerewpo/ranger_mini_deploy)
+**Services** — robot-level algorithms:
+
+| Package | What it does | Namespace |
+|---|---|---|
+| [`mapping_rbnx`](https://github.com/enkerewpo/mapping_rbnx) | SLAM mapping (RTAB-Map + FAST-LIO2) | `robonix/service/map/*` |
+| [`nav2_wrapper_rbnx`](https://github.com/enkerewpo/nav2_wrapper_rbnx) | Navigation (Nav2 wrapper) | `robonix/service/navigation/*` |
+
+**Skills** — LLM-triggered composite tasks:
+
+| Package | What it does | Namespace |
+|---|---|---|
+| [`explore_rbnx`](https://github.com/enkerewpo/explore_rbnx) | Autonomous frontier room exploration | `robonix/skill/explore/*` |
+| [`greet_rbnx`](https://github.com/enkerewpo/greet_rbnx) | Greet passers-by — YOLO person detection → VLM line → speak | `robonix/skill/greet/*` |
+
+**Tools & deployments:**
+
+| Repo | What it is |
+|---|---|
+| [Robonix Skill Toolkit](https://github.com/zhengzihaoPKU/Robonix-Skill-Toolkit) | Train VLA-based skills: collect teleop data, fine-tune an [OpenVLA-OFT](https://openvla-oft.github.io) policy, deploy on a real arm ([AgileX Piper](https://github.com/agilexrobotics/Agilex-College)). |
+| [ranger_mini_deploy](https://github.com/enkerewpo/ranger_mini_deploy) | Full deploy manifest for the AgileX Ranger Mini robot at Syswonder Lab. |
 
 ## Contributors
 
