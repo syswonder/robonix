@@ -43,6 +43,7 @@ docker exec -i \
   -e ROBONIX_PKG_HOST_DIR="$(cd "$(dirname "$0")/.." && pwd)" \
   -e TIAGO_SCAN_TOPIC="$OUT_TOPIC" \
   -e TIAGO_SCAN_RAW_TOPIC="$RAW_TOPIC" \
+  -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
   -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api" \
   "$SIM_CT" \
   bash -lc "

@@ -37,6 +37,49 @@ set -u
 # behaviour. XNUM is the bare number used for the /tmp/.X11-unix/X<n> socket.
 NVIDIA_DISPLAY="${ROBONIX_SIM_XDISPLAY:-:48}"
 XNUM="${NVIDIA_DISPLAY#:}"
+ZENOH_ROUTER_PID=""
+_webots_launch_pid=""
+
+cleanup() {
+  if [ -n "${_webots_launch_pid:-}" ]; then
+    kill -TERM "${_webots_launch_pid}" 2>/dev/null || true
+  fi
+  if [ -n "${ZENOH_ROUTER_PID:-}" ]; then
+    kill -TERM "${ZENOH_ROUTER_PID}" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+start_zenoh_router() {
+  if [ "${RMW_IMPLEMENTATION:-}" != "rmw_zenoh_cpp" ]; then
+    return 0
+  fi
+  local router_bin="/opt/ros/humble/lib/rmw_zenoh_cpp/rmw_zenohd"
+  if [ ! -x "$router_bin" ]; then
+    echo "[entrypoint] rmw_zenohd not found at $router_bin"
+    return 1
+  fi
+  export ZENOH_ROUTER_CHECK_ATTEMPTS="${ZENOH_ROUTER_CHECK_ATTEMPTS:-20}"
+  "$router_bin" >/tmp/rmw_zenohd.log 2>&1 &
+  ZENOH_ROUTER_PID=$!
+  echo "[entrypoint] rmw_zenohd pid=${ZENOH_ROUTER_PID}"
+  local i
+  for i in $(seq 1 20); do
+    if ! kill -0 "$ZENOH_ROUTER_PID" 2>/dev/null; then
+      echo "[entrypoint] rmw_zenohd exited early; last 80 lines:"
+      tail -80 /tmp/rmw_zenohd.log 2>&1 || true
+      return 1
+    fi
+    if (echo >/dev/tcp/127.0.0.1/7447) >/dev/null 2>&1; then
+      echo "[entrypoint] rmw_zenohd listening on tcp/127.0.0.1:7447"
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "[entrypoint] rmw_zenohd did not listen on :7447; last 80 lines:"
+  tail -80 /tmp/rmw_zenohd.log 2>&1 || true
+  return 1
+}
 
 start_nvidia_xorg() {
   # Pick the GPU with the most free memory and translate its PCI BusID
@@ -136,6 +179,8 @@ if [ "${WEBOTS_STREAM:-0}" = "1" ]; then
        >/tmp/viewer-http.log 2>&1 &
   echo "[entrypoint] viewer HTTP on :8080  ws on :1234"
 fi
+
+start_zenoh_router
 
 WEBOTS_WARMUP_SEC="${WEBOTS_WARMUP_SEC:-25}"
 ros2 launch eaios_webots robot_launch.py use_sim_time:=true &

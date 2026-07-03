@@ -3,10 +3,9 @@
 # Scene service start phase — `rbnx boot` calls this via package_manifest.yaml.
 #
 # Runs the `robonix-scene` container on the host network so it shares
-# the host DDS bus with whatever sim/robot container publishes the
-# observation topics. `--ipc=host` is load-bearing: FastRTPS's default
-# SHM transport keys are namespaced by /dev/shm, so without sharing
-# host IPC scene saw publishers but received zero messages.
+# the host ROS 2 graph with whatever sim/robot container publishes the
+# observation topics. The runtime RMW is passed through so scene uses
+# the same transport as the rest of the deploy.
 #
 # Trap discipline: when boot SIGTERMs our PGID, this script's TERM
 # trap stops + removes the container. `docker run --rm` alone is not
@@ -53,6 +52,17 @@ mkdir -p rbnx-build/data/robonix
 declare -a EXTRA_MOUNTS=()
 if [[ -n "${RBNX_CONFIG_FILE:-}" ]]; then
     EXTRA_MOUNTS+=(-v "${RBNX_CONFIG_FILE}:${RBNX_CONFIG_FILE}:ro")
+fi
+
+declare -a ZENOH_ARGS=()
+if [[ -n "${ROBONIX_ZENOH_ROUTER:-}" ]]; then
+    ZENOH_ARGS=(-e "ROBONIX_ZENOH_ROUTER=${ROBONIX_ZENOH_ROUTER}")
+fi
+if [[ -n "${ROBONIX_ZENOH_MODE:-}" ]]; then
+    ZENOH_ARGS+=(-e "ROBONIX_ZENOH_MODE=${ROBONIX_ZENOH_MODE}")
+fi
+if [[ -n "${ROBONIX_ZENOH_LISTEN:-}" ]]; then
+    ZENOH_ARGS+=(-e "ROBONIX_ZENOH_LISTEN=${ROBONIX_ZENOH_LISTEN}")
 fi
 
 # GPU passthrough: ConceptGraphs perception (YOLO-World + MobileSAM +
@@ -113,6 +123,8 @@ exec docker run --rm \
     -e SCENE_MAP_ID="${SCENE_MAP_ID:-default}" \
     -e RBNX_CONFIG_FILE="${RBNX_CONFIG_FILE:-}" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
+    -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
+    "${ZENOH_ARGS[@]}" \
     -v "$(pwd)":/scene \
     -v "$(pwd)/rbnx-build/data/robonix":/data/robonix \
     -v "$(rbnx path robonix-api)":/robonix-api:ro \

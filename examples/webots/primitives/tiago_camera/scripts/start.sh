@@ -30,12 +30,14 @@ trap cleanup EXIT INT TERM
 # in mapping/scene.
 docker exec -i -d "$SIM_CT" bash -lc "
     source /opt/ros/humble/setup.bash
+    export RMW_IMPLEMENTATION=\"${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}\"
     exec ros2 run tf2_ros static_transform_publisher \
         --x 0 --y 0 --z 0 --yaw 0 --pitch 0 --roll 0 \
         --frame-id 'Astra rgb' --child-frame-id head_front_camera_rgb_optical_frame
 " &>/dev/null
 docker exec -i -d "$SIM_CT" bash -lc "
     source /opt/ros/humble/setup.bash
+    export RMW_IMPLEMENTATION=\"${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}\"
     exec ros2 run tf2_ros static_transform_publisher \
         --x 0 --y 0 --z 0 --yaw 0 --pitch 0 --roll 0 \
         --frame-id 'Astra depth' --child-frame-id head_front_camera_depth_optical_frame
@@ -55,6 +57,7 @@ docker exec -i \
   -e TIAGO_DEPTH_TOPIC="${TIAGO_DEPTH_TOPIC:-/head_front_camera/depth_registered/image_raw}" \
   -e TIAGO_RGB_FRAME_ID="${TIAGO_RGB_FRAME_ID:-head_front_camera_rgb_optical_frame}" \
   -e TIAGO_DEPTH_FRAME_ID="${TIAGO_DEPTH_FRAME_ID:-head_front_camera_depth_optical_frame}" \
+  -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
   -e PYTHONPATH="/robonix_pkgs/pylib/robonix-api" \
   "$SIM_CT" \
   bash -lc 'set -eo pipefail

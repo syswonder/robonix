@@ -7,7 +7,7 @@
 # Build context = the directory containing this Dockerfile (sim/bridge/).
 FROM osrf/ros:humble-desktop-full
 
-# ── TUNA mirrors for domestic (CN) networks ─────────────────────────────
+# ── TUNA mirrors ───────────────────────────────────────────────────
 # Swap apt sources (Ubuntu/ports + ROS 2) to TUNA. Use `find` + sed
 # --follow-symlinks because /etc/apt/sources.list.d/ros2.sources is
 # a symlink into /usr/share/ros-apt-source/ in the upstream ros image.
@@ -49,6 +49,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-joint-state-broadcaster \
     ros-humble-robot-state-publisher \
     ros-humble-tf2-ros \
+    ros-humble-rmw-zenoh-cpp \
     wget \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -87,6 +88,8 @@ RUN mkdir -p /root/.cache/Cyberbotics/Webots \
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN python3 -m pip install --no-cache-dir \
     "grpcio>=1.78.0" "protobuf>=6.30,<7" mcp "fastmcp>=3" numpy Pillow uvicorn httpx
+
+ENV RMW_IMPLEMENTATION=rmw_zenoh_cpp
 
 # Build context is sim/bridge/ — ros_ws lives one level up at sim/ros_ws/.
 # Compose passes context: ../ so we COPY from there.
