@@ -506,8 +506,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/sim-logs"
           echo "waiting for one real /map OccupancyGrid before scenario execution"
           if docker exec "$ROBONIX_SIM_CONTAINER" bash -lc '
-            set -euo pipefail
+            set -eo pipefail
             source /opt/ros/humble/setup.bash
+            set -u
             export ROS_DOMAIN_ID='"${ROS_DOMAIN_ID}"'
             export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
             timeout 180s ros2 topic echo --once /map nav_msgs/msg/OccupancyGrid
@@ -523,7 +524,9 @@ jobs:
             echo
             echo "=== ROS topic list from simulator container ==="
             docker exec "$ROBONIX_SIM_CONTAINER" bash -lc '
+              set -eo pipefail
               source /opt/ros/humble/setup.bash
+              set -u
               export ROS_DOMAIN_ID='"${ROS_DOMAIN_ID}"'
               ros2 topic list || true
               echo
@@ -1096,7 +1099,9 @@ jobs:
             exit 0
           fi
           git -C "$REPORT_SITE_DIR" commit -m "ci: publish Webots report ${GITHUB_RUN_ID}"
-          git -C "$REPORT_SITE_DIR" -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer ${GITHUB_TOKEN}" \
+          git -C "$REPORT_SITE_DIR" config --unset-all http.https://github.com/.extraheader || true
+          git -C "$REPORT_SITE_DIR" \
+            -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer ${GITHUB_TOKEN}" \
             push origin "HEAD:${REPORTS_BRANCH}"
 
       - name: Prepare Pages artifact
