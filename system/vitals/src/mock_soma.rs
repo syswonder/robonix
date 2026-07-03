@@ -1070,7 +1070,10 @@ mod tests {
         // joint_1 temp should increase from seq 1 to 22.
         assert!(t22 > t1, "ramp temp should rise: t1={t1}, t22={t22}");
         // By seq 30 (end of ramp cycle), temp should be near peak (~88°C).
-        assert!(t30 > 75.0, "ramp seq=30 should exceed ERROR threshold: {t30}");
+        assert!(
+            t30 > 75.0,
+            "ramp seq=30 should exceed ERROR threshold: {t30}"
+        );
         // Seq 31 restarts ramp (seq 1 is 40+1.6*0=40, seq 31 wraps same way).
         let t31 = generate_snapshot(MockScenario::Ramp, 31, None)
             .actuators
@@ -1096,11 +1099,9 @@ mod tests {
                 .unwrap();
             let fault_expected = seq % 8 >= 4;
             assert_eq!(
-                !j3.communication_ok,
-                fault_expected,
+                !j3.communication_ok, fault_expected,
                 "Fault seq={}: j3 comm_ok should be {}",
-                seq,
-                !fault_expected
+                seq, !fault_expected
             );
             if fault_expected {
                 assert!(
@@ -1124,11 +1125,9 @@ mod tests {
                 .unwrap();
             let disabled_expected = seq % 8 >= 4;
             assert_eq!(
-                !j6.torque_enabled,
-                disabled_expected,
+                !j6.torque_enabled, disabled_expected,
                 "Toggle seq={}: j6 enabled should be {}",
-                seq,
-                !disabled_expected
+                seq, !disabled_expected
             );
         }
     }
