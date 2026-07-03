@@ -1,0 +1,10 @@
+# Set all joint positions (0=open, 1=closed).  LLM-facing MCP tool.
+# Call info first to discover expected array length and joint order.
+[contract]
+id      = "robonix/primitive/hand/move_joint"
+version = "1"
+kind    = "primitive"
+idl     = "hand/srv/MoveJoint.srv"
+
+[mode]
+type = "rpc"

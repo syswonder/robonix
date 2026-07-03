@@ -1,0 +1,11 @@
+# Query hand metadata — joint count, names, and model.  LLM-facing MCP tool.
+# Consumer calls this first to discover the expected array length for move_joint,
+# enabling model-agnostic adaption across different dexterous hands.
+[contract]
+id      = "robonix/primitive/hand/info"
+version = "1"
+kind    = "primitive"
+idl     = "hand/srv/GetHandInfo.srv"
+
+[mode]
+type = "rpc"
