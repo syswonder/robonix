@@ -18,13 +18,17 @@ The live Pilot loop is asynchronous, so it may ask the VLM again before the
 previous leaf result has appeared in the conversation history. Pilot feeds RTDL
 leaf feedback back to the VLM as structured JSON user content:
 `{"leaf_result":{"call_id", "contract_id", "success", "output", "error"}}`.
-The fake VLM advances by that evidence, not by raw request count: it serves the
-first step whose expected RTDL leaves are not yet proven by prior leaf results.
-If that step has already been served and is still waiting for a result, the fake
+The fake VLM advances by that evidence, not by raw request count: ordinary
+steps advance once their expected RTDL leaves have observed contract success. If
+that step has already been served and is still waiting for a result, the fake
 VLM returns an empty wait RTDL instead of resubmitting side-effecting work such
-as navigation. The runner applies the same model and checks that each YAML step
-matches one later RTDL plan round in order; duplicate in-flight wait rounds do
-not satisfy a different step.
+as navigation. A step with `retry_delay_s` additionally requires that step's
+`expect.output` checks to pass before it advances; if a result exists but does
+not satisfy those output checks, the fake VLM may serve the same step again. This
+is used for bounded readiness polling such as waiting for real scene objects.
+The runner applies the same ordered step model and always scores the full
+step-local expectations; duplicate in-flight wait rounds do not satisfy a
+different step.
 
 Top-level fields:
 
@@ -42,6 +46,7 @@ Top-level fields:
 | --- | --- |
 | `time_s` | Absolute wall-clock offset from the first planning round. Used to leave time for Webots, exploration, perception, or scene graph updates. |
 | `delay_s` | Relative wall-clock sleep before serving this step. Prefer `time_s` for stable timelines. |
+| `retry_delay_s` | Relative sleep before re-serving this step after a prior leaf result failed this step's output checks. Use for real readiness polling, not for hiding failures. |
 | `content` | Assistant narration in the RTDL envelope. |
 | `rtdl_description` | Envelope-level RTDL label. |
 | `status` | Shorthand for `task_update.status`; typically `in_progress` or `done`. |
