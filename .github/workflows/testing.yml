@@ -1041,65 +1041,7 @@ jobs:
               '<body><h1>Robonix Webots CI Report</h1><p>No generated report artifact was available for this run.</p></body>' \
               > "$report_dir/index.html"
           fi
-          python3 - <<'PY'
-          import json
-          import os
-          import shutil
-          from datetime import datetime, timezone, timedelta
-          from pathlib import Path
-
-          site = Path(os.environ["REPORT_SITE_DIR"])
-          runs = site / "reports" / "runs"
-          cutoff = datetime.now(timezone.utc) - timedelta(days=90)
-
-          def parse_time(raw):
-              if not raw:
-                  return None
-              raw = str(raw).replace("Z", "+00:00")
-              try:
-                  dt = datetime.fromisoformat(raw)
-              except ValueError:
-                  return None
-              if dt.tzinfo is None:
-                  dt = dt.replace(tzinfo=timezone.utc)
-              return dt.astimezone(timezone.utc)
-
-          entries = []
-          if runs.exists():
-              for d in sorted(p for p in runs.iterdir() if p.is_dir()):
-                  meta_path = d / "metadata.json"
-                  meta = {}
-                  if meta_path.exists():
-                      try:
-                          meta = json.loads(meta_path.read_text())
-                      except Exception:
-                          meta = {}
-                  dt = parse_time(meta.get("generated_on")) or parse_time(meta.get("test_report_generated_on"))
-                  if dt and dt < cutoff:
-                      shutil.rmtree(d)
-                      continue
-                  entries.append({
-                      "run_id": d.name,
-                      "generated_on": dt.isoformat() if dt else "",
-                      "title": meta.get("pr_title") or meta.get("tested_commit_subject") or d.name,
-                      "event": meta.get("event", ""),
-                      "url": f"runs/{d.name}/",
-                  })
-          entries.sort(key=lambda x: x.get("generated_on") or x["run_id"], reverse=True)
-          (site / "reports").mkdir(parents=True, exist_ok=True)
-          (site / "reports" / "index.json").write_text(json.dumps(entries, indent=2) + "\n")
-          links = "\n".join(
-              f'<li><a href="runs/{e["run_id"]}/">{e["run_id"]}</a> {e["title"]}</li>'
-              for e in entries
-          )
-          (site / "reports" / "index.html").write_text(
-              "<!doctype html>\n<meta charset=\"utf-8\">\n"
-              "<title>Robonix Webots CI Reports</title>\n"
-              "<h1>Robonix Webots CI Reports</h1>\n"
-              "<p>Reports are retained for 90 days.</p>\n"
-              f"<ul>{links}</ul>\n"
-          )
-          PY
+          python3 testing/report_index.py --site-dir "$REPORT_SITE_DIR" --retention-days 90
           printf '%s\n' \
             '<!doctype html>' \
             '<meta charset="utf-8">' \
