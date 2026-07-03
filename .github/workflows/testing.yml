@@ -316,7 +316,12 @@ jobs:
             echo "ROBONIX_DRIVER_INIT_TIMEOUT_S=${ROBONIX_DRIVER_INIT_TIMEOUT_S}"
             echo "ROBONIX_GPU_ID=${ROBONIX_GPU_ID}"
             echo "NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES}"
+            echo "ROBONIX_MODEL_CACHE_DIR=${RUNNER_TOOL_CACHE:-$HOME/.cache}/robonix-models"
+            echo "RBNX_MODEL_DOWNLOAD_MAX_TIME=600"
+            echo "RBNX_MODEL_DOWNLOAD_CONNECT_TIMEOUT=20"
+            echo "RBNX_MODEL_DOWNLOAD_RETRIES=2"
           } >> "$GITHUB_ENV"
+          mkdir -p "${RUNNER_TOOL_CACHE:-$HOME/.cache}/robonix-models"
 
           for port in "$atlas_port" "$executor_port" "$pilot_port" "$liaison_port" "$fake_vlm_port" "$stream_port" "$viewer_port" "$mapping_port" "$nav2_port" "$scene_web_port"; do
             if ss -ltn "sport = :$port" | grep -q LISTEN; then
