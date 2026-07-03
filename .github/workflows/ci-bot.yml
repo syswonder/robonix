@@ -130,7 +130,7 @@ jobs:
 
   # ── Publish a direct, browser-openable HTML report on GitHub Pages ─────────
   publish_report:
-    name: Publish fallback report site
+    name: Publish skipped-run report site
     needs: [gate, test]
     if: always() && needs.gate.result == 'success' && needs.test.result == 'skipped'
     runs-on: ubuntu-22.04
@@ -249,16 +249,6 @@ jobs:
           git -C "$REPORT_SITE_DIR" remote set-url origin \
             "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git -C "$REPORT_SITE_DIR" push origin "HEAD:${REPORTS_BRANCH}"
-
-      - name: Request Pages rebuild
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # The repository is configured to serve GitHub Pages from the
-          # robonix-ci-reports branch. Report publishing must not fail if the
-          # token cannot trigger a rebuild; a branch push also refreshes Pages.
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/pages/builds" --silent || true
 
       - name: Set report URL
         id: publish_url

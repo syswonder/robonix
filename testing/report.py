@@ -812,30 +812,18 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
       font-family: var(--mono);
     }}
     .result-metric {{
-      border: 0;
+      border: 1px solid currentColor;
       display: inline-block;
       font-family: var(--mono);
-      font-size: 13px;
-      padding: 0;
+      font-size: 12px;
+      padding: 2px 7px;
     }}
-    .result-metric.pass {{ background: transparent; color: var(--pass-text); }}
-    .result-metric.fail {{ background: transparent; color: var(--fail-text); }}
+    .result-metric.pass {{ background: var(--pass-bg); color: var(--pass-text); }}
+    .result-metric.fail {{ background: var(--fail-bg); color: var(--fail-text); }}
     .row-pass {{ background: var(--pass-bg); }}
     .row-fail {{ background: var(--fail-bg); }}
     .row-pass td {{ border-bottom-color: var(--pass-border); }}
     .row-fail td {{ border-bottom-color: var(--fail-border); }}
-    .result-row-pass {{
-      background: var(--pass-bg);
-      border-color: var(--pass-border);
-    }}
-    .result-row-fail {{
-      background: var(--fail-bg);
-      border-color: var(--fail-border);
-    }}
-    .result-row-pending {{
-      background: #f9fafb;
-      border-color: var(--line);
-    }}
     .status-badge {{
       border-radius: 0;
       display: inline-block;
@@ -849,9 +837,6 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
     }}
     .status-badge.pass {{ background: #d1fae5; color: var(--pass-text); }}
     .status-badge.fail {{ background: #fee2e2; color: var(--fail-text); }}
-    .status-badge:empty {{
-      display: none;
-    }}
     .contract, .path, .suite, .scenario, .failure-text {{ font-weight: 500; }}
     .suite, .scenario, .contract, .path {{
       white-space: nowrap;
@@ -869,8 +854,7 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
     }}
     .rtdl-scenario {{
       border-top: 1px solid var(--line);
-      margin: 8px 0;
-      padding: 8px;
+      padding: 12px 0;
     }}
     .rtdl-scenario:first-child {{ border-top: 0; }}
     .rtdl-scenario > summary {{
@@ -946,8 +930,8 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
     }}
     .observed-call {{
       align-items: baseline;
+      background: var(--pass-bg);
       border-radius: 0;
-      border: 1px solid var(--pass-border);
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
@@ -955,10 +939,7 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
       padding: 4px 6px;
     }}
     .observed-fail {{
-      border-color: var(--fail-border);
-    }}
-    .observed-pending {{
-      border-color: var(--line);
+      background: var(--fail-bg);
     }}
     .observed-output {{
       color: #374151;
@@ -967,11 +948,6 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
       max-width: 100%;
       overflow-wrap: anywhere;
       white-space: pre-wrap;
-    }}
-    .observed-fail .contract,
-    .observed-fail .observed-output {{
-      color: var(--fail-text);
-      font-weight: 700;
     }}
     .failure-line {{ margin-bottom: 6px; }}
     .failure-line:last-child {{ margin-bottom: 0; }}

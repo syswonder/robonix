@@ -44,14 +44,32 @@ docker exec -i -d "$SIM_CT" bash -lc "
 " &>/dev/null
 
 # Cross-host wiring for an isolated (bridge-network) sim — see tiago_chassis
-# start.sh for the rationale. ROBONIX_SIM_ATLAS = atlas reachable from inside the
-# container; ROBONIX_ADVERTISE_HOST = the container's own IP (no `ip` cmd inside
-# to self-resolve). Both empty on a host-network sim, where 127.0.0.1 works.
-SIM_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$SIM_CT" 2>/dev/null || true)"
+# start.sh for the rationale. Host-network sim containers do not have a bridge
+# IP, so fall back to localhost unless Docker returns a valid bridge IPv4.
+resolve_advertise_host() {
+  if [ -n "${ROBONIX_ADVERTISE_HOST:-}" ]; then
+    printf '%s\n' "$ROBONIX_ADVERTISE_HOST"
+    return
+  fi
+  local network_mode inspected
+  network_mode="$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$SIM_CT" 2>/dev/null || true)"
+  if [ "$network_mode" = "host" ]; then
+    printf '%s\n' "127.0.0.1"
+    return
+  fi
+  inspected="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$SIM_CT" 2>/dev/null || true)"
+  if [[ "$inspected" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    printf '%s\n' "$inspected"
+    return
+  fi
+  printf '%s\n' "127.0.0.1"
+}
+
+ADVERTISE_HOST="$(resolve_advertise_host)"
 
 docker exec -i \
   -e ROBONIX_ATLAS="${ROBONIX_SIM_ATLAS:-${ROBONIX_ATLAS:-127.0.0.1:50051}}" \
-  -e ROBONIX_ADVERTISE_HOST="${ROBONIX_ADVERTISE_HOST:-$SIM_IP}" \
+  -e ROBONIX_ADVERTISE_HOST="$ADVERTISE_HOST" \
   -e ROBONIX_PKG_HOST_DIR="$(cd "$(dirname "$0")/.." && pwd)" \
   -e TIAGO_RGB_TOPIC="${TIAGO_RGB_TOPIC:-/head_front_camera/rgb/image_raw}" \
   -e TIAGO_DEPTH_TOPIC="${TIAGO_DEPTH_TOPIC:-/head_front_camera/depth_registered/image_raw}" \

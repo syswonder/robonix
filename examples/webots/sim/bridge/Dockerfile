@@ -45,6 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-webots-ros2 \
     ros-humble-webots-ros2-driver \
     ros-humble-controller-manager \
+    ros-humble-diagnostic-updater \
     ros-humble-diff-drive-controller \
     ros-humble-joint-state-broadcaster \
     ros-humble-robot-state-publisher \
