@@ -13,6 +13,15 @@ from pathlib import Path
 from typing import Any
 
 
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def _format_beijing_time(dt: datetime | None) -> str:
+    if dt is None:
+        return ""
+    return dt.astimezone(BEIJING_TZ).isoformat(timespec="seconds")
+
+
 def _parse_time(raw: Any) -> datetime | None:
     if not raw:
         return None
@@ -97,7 +106,7 @@ def collect_entries(site: Path, retention_days: int) -> list[dict[str, str]]:
         entries.append(
             {
                 "run_id": run_dir.name,
-                "generated_on": dt.isoformat() if dt else "",
+                "generated_on": _format_beijing_time(dt),
                 "title": str(title),
                 "result": result,
                 "score": score,
@@ -150,7 +159,7 @@ def write_index(site: Path, entries: list[dict[str, str]], retention_days: int) 
             "</tr>"
         )
     rows_html = "\n".join(rows) or '<tr><td colspan="10">No reports published yet.</td></tr>'
-    generated_on = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    generated_on = _format_beijing_time(datetime.now(timezone.utc))
     pass_count = sum(1 for e in entries if e.get("result") == "PASS")
     reports.joinpath("index.html").write_text(
         f"""<!doctype html>
