@@ -392,6 +392,64 @@ pub fn error(tag: &str, msg: &str) {
     log(Level::Error, tag, msg);
 }
 
+/// Ingest a captured stdout/stderr line from a child process under `tag`.
+///
+/// A child that uses Scribe (Python `scribe_logger` in a docker container,
+/// or any binary that mirrors records to its console) emits lines already in
+/// console format — `MM-DD HH:MM:SS.mmm  L tag  msg`. Re-logging the whole
+/// line as a fresh record's `msg` double-stamps the timestamp/level/tag (it
+/// appears once in the JSON fields and again embedded in `msg`). When the line
+/// is recognised as Scribe console output, strip the prefix and re-emit just
+/// the inner message at its original level under `tag`; otherwise treat the
+/// line as opaque output and log it verbatim at Info.
+pub fn ingest(tag: &str, line: &str) {
+    match parse_console_line(line) {
+        Some((level, msg)) => log(level, tag, msg),
+        None => info(tag, line),
+    }
+}
+
+/// Recognise a Scribe console line and return its `(level, inner message)`.
+///
+/// Layout (see `format::format_console`): two-digit `MM-DD`, space, `HH:MM:SS`,
+/// `.mmm`, two spaces, a single level char `D/I/W/E`, space, the tag padded to
+/// 24 columns, space, then the message at byte 47. Validated by fixed ASCII
+/// positions so a non-Scribe line (e.g. raw ROS2 output) falls through to None.
+fn parse_console_line(line: &str) -> Option<(Level, &str)> {
+    let b = line.as_bytes();
+    // Shortest possible: 47-char prefix + at least one msg byte.
+    if b.len() < 48 {
+        return None;
+    }
+    if b[2] != b'-'
+        || b[5] != b' '
+        || b[8] != b':'
+        || b[11] != b':'
+        || b[14] != b'.'
+        || b[18] != b' '
+        || b[19] != b' '
+        || b[21] != b' '
+        || b[46] != b' '
+    {
+        return None;
+    }
+    for &i in &[0usize, 1, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16, 17] {
+        if !b[i].is_ascii_digit() {
+            return None;
+        }
+    }
+    let level = match b[20] {
+        b'D' => Level::Debug,
+        b'I' => Level::Info,
+        b'W' => Level::Warn,
+        b'E' => Level::Error,
+        _ => return None,
+    };
+    // Byte 47 is the first message byte; it is a char boundary because bytes
+    // 0..=46 are all ASCII when every check above passed.
+    line.get(47..).map(|msg| (level, msg))
+}
+
 // ── Macros — process-wide default tag ───────────────────────────────
 
 /// Log at INFO level using the process-wide default tag set by [`init`].
@@ -443,6 +501,42 @@ mod tests {
         assert_eq!(Level::Info.code(), "I");
         assert_eq!(Level::Warn.code(), "W");
         assert_eq!(Level::Error.code(), "E");
+    }
+
+    #[test]
+    fn parse_console_round_trips_formatter() {
+        // A line produced by format_console must parse back to its level + msg,
+        // so re-ingesting a child's console echo strips the prefix (no
+        // double-stamped timestamp/tag).
+        for (level, msg) in [
+            (Level::Info, "[nav2] [smoother_server-2] launched."),
+            (Level::Warn, "rtabmap: republishing map"),
+            (Level::Error, "webui GET /api/map.png failed"),
+            (Level::Debug, "x"),
+        ] {
+            let rec = LogRecord::now(level, "nav2", msg);
+            let line = format::format_console(&rec);
+            let line = line.trim_end_matches('\n');
+            assert_eq!(
+                parse_console_line(line),
+                Some((level, msg)),
+                "line={line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_console_rejects_non_console_lines() {
+        // Raw child output (ROS2 logs, start-script prints) must fall through.
+        for raw in [
+            "[nav2/start] mode=docker (FORCE= PLATFORM=)",
+            "[INFO] [1782660318.498] [planner_server]: activating",
+            "",
+            "short",
+            "06-28 15:41:51.183 X nav2  bad level char",
+        ] {
+            assert_eq!(parse_console_line(raw), None, "raw={raw:?}");
+        }
     }
 
     #[test]

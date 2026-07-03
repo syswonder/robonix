@@ -1,0 +1,50 @@
+# Exercise frontier exploration lifecycle against the live sim.
+name: explore_smoke
+task: "ci-test: start a short autonomous explore run, check status, then cancel it"
+steps:
+  - time_s: 35.0
+    status: in_progress
+    rtdl_description: start explore
+    rtdl:
+      op: sequence
+      id: start_explore_step
+      children:
+        - op: do
+          id: start_explore
+          cap: explore.explore_explore
+          args: {area_hint: "ci local room", timeout_s: 5.0, max_speed_m_s: 0.1}
+          description: start a bounded exploration task
+          expect:
+            contract: robonix/skill/explore/explore
+            success: false
+            args: {area_hint: "ci local room", timeout_s: 5.0, max_speed_m_s: 0.1}
+            output:
+              error_regex: 'hit 5\.0s ceiling'
+  - time_s: 8.0
+    status: in_progress
+    rtdl_description: poll and cancel explore
+    rtdl:
+      op: sequence
+      id: poll_cancel_explore
+      children:
+        - op: do
+          id: explore_status
+          cap: explore.explore_status
+          args: {run_id: ""}
+          description: poll the most recent exploration task
+          expect:
+            contract: robonix/skill/explore/explore/status
+            success: true
+            args: {run_id: ""}
+            output:
+              json: {known: true, state: TIMEOUT}
+        - op: do
+          id: explore_cancel
+          cap: explore.explore_cancel
+          args: {run_id: ""}
+          description: cancel the bounded exploration task
+          expect:
+            contract: robonix/skill/explore/explore/cancel
+            success: true
+            args: {run_id: ""}
+  - status: done

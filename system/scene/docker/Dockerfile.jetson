@@ -43,7 +43,7 @@ unset ALL_PROXY all_proxy NO_PROXY no_proxy
 exec "$@"
 EOF2
 
-# ── TUNA mirrors for domestic (CN) networks ─────────────────────────────
+# ── TUNA mirrors ───────────────────────────────────────────────────
 RUN set -eux; \
     find /etc/apt/sources.list.d/ -maxdepth 1 \( -name '*.list' -o -name '*.sources' \) -print0 \
       | xargs -0 -r sed -i --follow-symlinks \
@@ -146,5 +146,5 @@ COPY entrypoint.sh /entrypoint.sh
 COPY no_shm_profile.xml /etc/fastrtps_no_shm.xml
 RUN chmod +x /entrypoint.sh
 ENV FASTRTPS_DEFAULT_PROFILES_FILE=/etc/fastrtps_no_shm.xml
-ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+ENV RMW_IMPLEMENTATION=rmw_zenoh_cpp
 ENTRYPOINT ["/entrypoint.sh"]

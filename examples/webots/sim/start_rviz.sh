@@ -33,10 +33,10 @@ docker cp "$SCRIPT_DIR/goal_pose_relay.py" "$SIM_CT":/tmp/goal_pose_relay.py >/d
 # TF. Launched detached (docker exec -d survives this shell); idempotent.
 docker exec "$SIM_CT" bash -lc 'pkill -f goal_pose_relay.py 2>/dev/null; true' >/dev/null 2>&1 || true
 sleep 0.3
-docker exec -d "$SIM_CT" bash -lc "source /opt/ros/humble/setup.bash; export RMW_IMPLEMENTATION=rmw_fastrtps_cpp; exec python3 /tmp/goal_pose_relay.py --ros-args -p use_sim_time:=true > /tmp/goal_pose_relay.log 2>&1"
+docker exec -d "$SIM_CT" bash -lc "source /opt/ros/humble/setup.bash; export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}; exec python3 /tmp/goal_pose_relay.py --ros-args -p use_sim_time:=true > /tmp/goal_pose_relay.log 2>&1"
 
-# Match the rest of the stack: FastRTPS UDP-only profile so cross-
-# container DDS lines up with mapping/scene.
+# Match the rest of the stack: use the same ROS 2 RMW as the sim,
+# mapping, scene, and navigation containers.
 docker exec -i \
     -e DISPLAY="${DISPLAY:-:0}" \
     -e XAUTHORITY=/root/.Xauthority \
@@ -44,6 +44,6 @@ docker exec -i \
     "$SIM_CT" bash -lc "
         set -eo pipefail
         source /opt/ros/humble/setup.bash
-        export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+        export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}
         exec ros2 run rviz2 rviz2 -d $RVIZ_CFG_CT --ros-args -p use_sim_time:=true
     "

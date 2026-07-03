@@ -1,0 +1,396 @@
+# Robonix CI bot — ChatOps front-end for the GPU testing pipeline.
+#
+# A maintainer comments `@robonix-ci test` on a pull request; this workflow
+# runs the full testing.yml pipeline on the self-hosted GPU runner and edits a
+# single status comment with the pass rate, the failing cases, and where the
+# logs are. No separate hosted bot/server — GitHub Actions IS the bot.
+#
+# ─────────────────────────── SECURITY (read first) ───────────────────────────
+# `issue_comment` runs with the BASE repo's token, so the trigger is gated hard:
+#   1. Only PR comments (not plain issues) whose body starts with the command.
+#   2. Only authors with write access — author_association in
+#      OWNER / MEMBER / COLLABORATOR. A drive-by commenter cannot start a run on
+#      the self-hosted runner. This is the load-bearing check.
+#   3. The actual GPU job still goes through testing.yml's `security-gate` +
+#      `environment: gpu-testing` (required-reviewer approval, once configured),
+#      so even an
+#      authorized comment pauses for a human before touching the 5090.
+
+name: Robonix CI Bot
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: read
+  contents: write
+  pages: write
+  id-token: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: ci-bot-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  # ── Parse + authorize the command; open/refresh the status comment ─────────
+  gate:
+    name: Authorize CI command
+    if: >-
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '@robonix-ci test') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-22.04
+    outputs:
+      test_ref: ${{ steps.pr.outputs.test_ref }}
+      merge_ref_available: ${{ steps.pr.outputs.merge_ref_available }}
+      pr_number: ${{ steps.pr.outputs.number }}
+      pr_title: ${{ steps.pr.outputs.title }}
+      pr_author: ${{ steps.pr.outputs.author }}
+      pr_url: ${{ steps.pr.outputs.url }}
+      pr_head_ref: ${{ steps.pr.outputs.head_ref }}
+      pr_head_repo: ${{ steps.pr.outputs.head_repo }}
+      pr_head_sha: ${{ steps.pr.outputs.head_sha }}
+      triggered_by: ${{ steps.pr.outputs.triggered_by }}
+      comment_id: ${{ steps.say.outputs.comment_id }}
+    steps:
+      - name: Acknowledge command and resolve PR head
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              comment_id: context.payload.comment.id, content: 'eyes',
+            });
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner, repo: context.repo.repo,
+              pull_number: context.payload.issue.number,
+            });
+            const mergeRef = `refs/pull/${pr.data.number}/merge`;
+            let mergeRefAvailable = false;
+            try {
+              await github.rest.git.getRef({
+                owner: context.repo.owner, repo: context.repo.repo,
+                ref: `pull/${pr.data.number}/merge`,
+              });
+              mergeRefAvailable = true;
+            } catch (e) {
+              core.notice(`merge ref ${mergeRef} is unavailable; Webots will not run until the PR merges cleanly into base`);
+            }
+            core.setOutput('test_ref', mergeRef);
+            core.setOutput('merge_ref_available', String(mergeRefAvailable));
+            core.setOutput('head_sha', pr.data.head.sha || '');
+            core.setOutput('number', String(pr.data.number));
+            core.setOutput('title', pr.data.title || '');
+            core.setOutput('author', pr.data.user?.login || '');
+            core.setOutput('url', pr.data.html_url || '');
+            core.setOutput('head_ref', pr.data.head.ref || '');
+            core.setOutput('head_repo', pr.data.head.repo?.full_name || '');
+            core.setOutput('triggered_by', context.payload.comment.user.login || '');
+      - name: Create running status comment
+        id: say
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = [
+              '<!-- robonix-ci-status -->',
+              '### Robonix Webots CI - running',
+              `Triggered by @${context.payload.comment.user.login}.`,
+              `Testing merge result \`${{ steps.pr.outputs.test_ref }}\` for head \`${{ steps.pr.outputs.head_sha }}\`.`,
+              `[Live logs](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+            ].join('\n');
+            const c = await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.payload.issue.number, body,
+            });
+            core.setOutput('comment_id', c.data.id);
+
+  # ── Run the real pipeline (reuses testing.yml full-stack flow) ─────────────
+  test:
+    name: Run Webots integration tests
+    needs: gate
+    if: needs.gate.outputs.merge_ref_available == 'true'
+    uses: ./.github/workflows/testing.yml
+    with:
+      authorized: true
+      ref: ${{ needs.gate.outputs.test_ref }}
+      pr_number: ${{ needs.gate.outputs.pr_number }}
+      pr_title: ${{ needs.gate.outputs.pr_title }}
+      pr_author: ${{ needs.gate.outputs.pr_author }}
+      pr_url: ${{ needs.gate.outputs.pr_url }}
+      pr_head_ref: ${{ needs.gate.outputs.pr_head_ref }}
+      pr_head_repo: ${{ needs.gate.outputs.pr_head_repo }}
+      pr_head_sha: ${{ needs.gate.outputs.pr_head_sha }}
+      triggered_by: ${{ needs.gate.outputs.triggered_by }}
+      enable_llm_analysis: true
+    secrets: inherit
+
+  # ── Publish a direct, browser-openable HTML report on GitHub Pages ─────────
+  publish_report:
+    name: Publish fallback report site
+    needs: [gate, test]
+    if: always() && needs.gate.result == 'success' && needs.test.result == 'skipped'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      actions: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: webots-report-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.publish_url.outputs.report_url }}
+    outputs:
+      report_url: ${{ steps.publish_url.outputs.report_url }}
+    env:
+      REPORT_SITE_DIR: /tmp/robonix-report-site-${{ github.run_id }}
+      REPORTS_BRANCH: robonix-ci-reports
+    steps:
+      - name: Checkout trusted report generator
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Download test artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: testing-logs-*
+          path: dl
+          merge-multiple: true
+
+      - name: Restore report history
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf "$REPORT_SITE_DIR"
+          if git ls-remote --exit-code origin "refs/heads/${REPORTS_BRANCH}" >/dev/null 2>&1; then
+            git fetch --depth=1 origin "${REPORTS_BRANCH}"
+            git worktree add --detach "$REPORT_SITE_DIR" FETCH_HEAD
+          else
+            mkdir -p "$REPORT_SITE_DIR"
+            git -C "$REPORT_SITE_DIR" init -b "${REPORTS_BRANCH}"
+            git -C "$REPORT_SITE_DIR" remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          fi
+
+      - name: Build report page
+        env:
+          REPORT_PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
+          REPORT_PR_TITLE: ${{ needs.gate.outputs.pr_title }}
+          REPORT_PR_AUTHOR: ${{ needs.gate.outputs.pr_author }}
+          REPORT_PR_URL: ${{ needs.gate.outputs.pr_url }}
+          REPORT_PR_HEAD_REF: ${{ needs.gate.outputs.pr_head_ref }}
+          REPORT_PR_HEAD_REPO: ${{ needs.gate.outputs.pr_head_repo }}
+          REPORT_PR_HEAD_SHA: ${{ needs.gate.outputs.pr_head_sha }}
+          REPORT_TEST_REF: ${{ needs.gate.outputs.test_ref }}
+          REPORT_MERGE_REF_AVAILABLE: ${{ needs.gate.outputs.merge_ref_available }}
+          REPORT_TRIGGERED_BY: ${{ needs.gate.outputs.triggered_by }}
+          REPORT_COMMENT_ID: ${{ needs.gate.outputs.comment_id }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          report_id="${{ github.run_id }}"
+          report_dir="${REPORT_SITE_DIR}/reports/runs/${report_id}"
+          expected_base_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+          expected_report_url="${expected_base_url}/reports/runs/${report_id}/"
+          rm -rf "$report_dir"
+          mkdir -p "$report_dir" "${REPORT_SITE_DIR}/reports" dl
+
+          python3 testing/build_report_from_artifacts.py \
+            --artifact-root dl \
+            --out-dir "$report_dir" \
+            --repo . \
+            --llm \
+            --metadata "report_id=${report_id}" \
+            --metadata "report_url=${expected_report_url}" \
+            --metadata "status_comment_id=${REPORT_COMMENT_ID:-}" \
+            --metadata "pr_number=${REPORT_PR_NUMBER:-}" \
+            --metadata "pr_title=${REPORT_PR_TITLE:-}" \
+            --metadata "pr_author=${REPORT_PR_AUTHOR:-}" \
+            --metadata "pr_url=${REPORT_PR_URL:-}" \
+            --metadata "pr_head_ref=${REPORT_PR_HEAD_REF:-}" \
+            --metadata "pr_head_repo=${REPORT_PR_HEAD_REPO:-}" \
+            --metadata "pr_head_sha=${REPORT_PR_HEAD_SHA:-}" \
+            --metadata "pr_head_commit_url=${{ github.server_url }}/${REPORT_PR_HEAD_REPO:-${{ github.repository }}}/commit/${REPORT_PR_HEAD_SHA:-}" \
+            --metadata "test_ref=${REPORT_TEST_REF:-}" \
+            --metadata "merge_ref_available=${REPORT_MERGE_REF_AVAILABLE:-}" \
+            --metadata "triggered_by=${REPORT_TRIGGERED_BY:-}"
+
+          python3 testing/report_index.py --site-dir "$REPORT_SITE_DIR" --retention-days 90
+          printf '%s\n' \
+            '<!doctype html>' \
+            '<meta charset="utf-8">' \
+            "<meta http-equiv=\"refresh\" content=\"0; url=reports/runs/${report_id}/\">" \
+            '<title>Robonix Webots CI Reports</title>' \
+            "<a href=\"reports/runs/${report_id}/\">Latest Robonix Webots CI report</a>" \
+            > "${REPORT_SITE_DIR}/index.html"
+
+      - name: Persist report history
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git -C "$REPORT_SITE_DIR" config user.name "github-actions[bot]"
+          git -C "$REPORT_SITE_DIR" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$REPORT_SITE_DIR" add -A
+          if git -C "$REPORT_SITE_DIR" diff --cached --quiet; then
+            echo "report history unchanged"
+            exit 0
+          fi
+          git -C "$REPORT_SITE_DIR" commit -m "ci: publish Webots report ${GITHUB_RUN_ID}"
+          git -C "$REPORT_SITE_DIR" config --unset-all http.https://github.com/.extraheader || true
+          git -C "$REPORT_SITE_DIR" remote set-url origin \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git -C "$REPORT_SITE_DIR" push origin "HEAD:${REPORTS_BRANCH}"
+
+      - name: Request Pages rebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The repository is configured to serve GitHub Pages from the
+          # robonix-ci-reports branch. Report publishing must not fail if the
+          # token cannot trigger a rebuild; a branch push also refreshes Pages.
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/pages/builds" --silent || true
+
+      - name: Set report URL
+        id: publish_url
+        run: |
+          set -euo pipefail
+          page_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+          echo "report_url=${page_url}/reports/runs/${{ github.run_id }}/" >> "$GITHUB_OUTPUT"
+
+  # ── Edit the status comment with the result + failing cases + log pointer ──
+  report:
+    name: Publish PR status comment
+    needs: [gate, test, publish_report]
+    if: always() && needs.gate.result == 'success'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download test report artifact
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: testing-logs-*
+          path: dl
+          merge-multiple: true
+      - name: Download generated report artifact
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: testing-report-*
+          path: report-dl
+          merge-multiple: true
+      - name: Update PR status comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const outcome = '${{ needs.test.result }}';  // success / failure / cancelled / skipped
+            const harnessResult = '${{ needs.test.outputs.result }}';
+            const mergeRefAvailable = '${{ needs.gate.outputs.merge_ref_available }}' === 'true';
+            const testRef = '${{ needs.gate.outputs.test_ref }}';
+            // The artifact preserves the upload path (testing/logs/summary.json),
+            // so locate it rather than assuming a flat layout.
+            const findSummary = (dir) => {
+              for (const e of fs.existsSync(dir) ? fs.readdirSync(dir, {withFileTypes: true}) : []) {
+                const p = `${dir}/${e.name}`;
+                if (e.isDirectory()) { const r = findSummary(p); if (r) return r; }
+                else if (e.name === 'summary.json') return p;
+              }
+              return null;
+            };
+            const findFile = (dir, name) => {
+              for (const e of fs.existsSync(dir) ? fs.readdirSync(dir, {withFileTypes: true}) : []) {
+                const p = `${dir}/${e.name}`;
+                if (e.isDirectory()) { const r = findFile(p, name); if (r) return r; }
+                else if (e.name === name) return p;
+              }
+              return null;
+            };
+            let summary = null;
+            let analysis = null;
+            const artifactPresent = fs.existsSync('dl') && fs.readdirSync('dl').length > 0;
+            const sp = findSummary('dl');
+            try { if (sp) summary = JSON.parse(fs.readFileSync(sp, 'utf8')); } catch (e) {}
+            const analysisPath = findFile('report-dl', 'llm-analysis.json') || findFile('dl', 'llm-analysis.json');
+            try { if (analysisPath) analysis = JSON.parse(fs.readFileSync(analysisPath, 'utf8')); } catch (e) {}
+
+            let lines = ['<!-- robonix-ci-status -->'];
+            const cell = (v) => String(v ?? '')
+              .replace(/\r?\n/g, ' ')
+              .replace(/\|/g, '\\|')
+              .replace(/@/g, '@\u200b')
+              .slice(0, 300);
+            const detail = (v) => String(v ?? '')
+              .replace(/\r?\n/g, ' ')
+              .replace(/@/g, '@\u200b')
+              .slice(0, 500);
+            if (summary) {
+              const pct = Math.round(summary.rate * 100);
+              const icon = summary.failed === 0 ? '✅' : '❌';
+              lines.push(`### ${icon} robonix CI — ${summary.passed}/${summary.total} passed (${pct}%)`);
+              lines.push('');
+              lines.push('| suite | scenario | result | rounds |');
+              lines.push('|-------|----------|--------|--------|');
+              for (const s of summary.scenarios) {
+                const mark = s.passed ? '✅' : '❌';
+                lines.push(`| ${cell(s.family)} | ${cell(s.name)} | ${mark} | ${cell(s.rounds)} |`);
+              }
+              const fails = summary.scenarios.filter(s => !s.passed);
+              if (fails.length) {
+                lines.push('', '<details><summary>Failure details</summary>', '');
+                for (const s of fails) {
+                  lines.push(`- **${detail(s.family)}/${detail(s.name)}** (\`${detail(s.log)}\`)`);
+                  for (const f of (s.failures || [])) lines.push(`  - ${detail(f)}`);
+                }
+                lines.push('</details>');
+              }
+            } else {
+              const mergeUnavailable = !mergeRefAvailable;
+              const looksSkipped = outcome === 'skipped' || (outcome === 'success' && !harnessResult);
+              const icon = outcome === 'failure' || outcome === 'cancelled' || mergeUnavailable ? '❌' : '⚠️';
+              const label = mergeUnavailable ? 'merge ref unavailable' : (looksSkipped ? 'skipped' : 'no scenario summary');
+              lines.push(`### ${icon} robonix CI — ${label}`);
+              if (mergeUnavailable) {
+                lines.push('GitHub did not provide the PR merge ref `' + testRef + '`, so this PR cannot currently be tested as merged into its base branch. Webots was not run.');
+              } else if (looksSkipped) {
+                lines.push('The Webots test job did not produce scenario output, so no report was published. This is not a verified Webots pass.');
+              } else {
+                lines.push('No machine-readable scenario summary was produced. Treat this as an incomplete infrastructure run, not as a verified Webots pass.');
+              }
+            }
+            if (analysis && analysis.available && (analysis.summary || analysis.title)) {
+              lines.push('', '**LLM analysis**');
+              if (analysis.summary) lines.push(detail(analysis.summary));
+              else if (analysis.title) lines.push(detail(analysis.title));
+              const compactList = (values) => Array.isArray(values) ? values.slice(0, 3).map(detail) : (values ? [detail(values)] : []);
+              const changes = compactList(analysis.pr_changes);
+              if (changes.length) lines.push('', `Change summary: ${changes.join('; ')}.`);
+              if (analysis.test_result) lines.push(`Test result: ${detail(analysis.test_result)}`);
+              if (analysis.likely_root_cause) lines.push(`Likely root cause: ${detail(analysis.likely_root_cause)}`);
+              if (analysis.suggested_fix) lines.push(`Suggested fix / watchout: ${detail(analysis.suggested_fix)}`);
+              const risks = compactList(analysis.risks_or_watchouts);
+              if (risks.length) lines.push(`Watchouts: ${risks.join('; ')}.`);
+            }
+            lines.push('');
+            const reportUrl = '${{ needs.test.outputs.report_url || needs.publish_report.outputs.report_url }}';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            if (reportUrl) lines.push(`Report: [open HTML report](${reportUrl}).`);
+            else if (artifactPresent) lines.push(`Report: download artifact \`testing-logs-*\` from [this run](${runUrl}) and open \`testing/report/index.html\`.`);
+            else lines.push(`Report: no testing report artifact was available for [this run](${runUrl}).`);
+            lines.push(`Action run: [open GitHub Actions run](${runUrl}).`);
+            if (artifactPresent) lines.push('Raw logs: scenario JSONL, provider logs, simulator logs, final caps, and boot logs are in the same artifact.');
+            else lines.push('Raw logs: no testing-logs artifact was uploaded.');
+
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              comment_id: ${{ needs.gate.outputs.comment_id }}, body: lines.join('\n'),
+            });

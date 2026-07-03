@@ -1,6 +1,4 @@
 ---
-provider: tiago_lidar
-kind: primitive
 description: Planar lidar — supplementary distance / range sensing near the base.
 ---
 

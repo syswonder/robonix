@@ -49,7 +49,7 @@ Environment variables:
   ROBONIX_ATLAS      Atlas control-plane address (default: localhost:50051)
   SPEECH_PORT        gRPC listen port, 0 = auto-pick (default: 0)
   SPEECH_BIND_ADDR   gRPC bind address (default: 0.0.0.0)
-  SPEECH_CI_MODE     Set to 1 for mock backends (no GPU/model needed)
+  SPEECH_BACKEND     Set to mock for local mock backends (no GPU/model needed)
 """
 import io
 import json
@@ -64,7 +64,13 @@ from concurrent import futures
 from pathlib import Path
 from typing import Optional
 
-logging.basicConfig(level=logging.INFO, format="[speech-service] %(levelname)s %(message)s")
+# Route all stdlib logging (this module + transitive deps) through Scribe so
+# `rbnx logs -t speech` sees everything and the package owns no log file or
+# stdout sink of its own. (robonix_api is pip-installed; only the proto stubs
+# need the sys.path bootstrap below.)
+from robonix_api import scribe_logger  # noqa: E402
+
+scribe_logger.install_stdlib_bridge("speech")
 log = logging.getLogger(__name__)
 
 # -- Proto stub resolution ---------------------------------------------------
@@ -90,9 +96,20 @@ import speech_pb2
 import audio_pb2  # for AudioChunk (lib/primitive/audio/msg/AudioChunk.msg)
 import robonix_contracts_pb2_grpc as contracts_grpc
 
-# -- CI mock mode ------------------------------------------------------------
+# -- Explicit mock mode ------------------------------------------------------
 
-CI_MODE = os.environ.get("SPEECH_CI_MODE", "").strip() in ("1", "true", "yes")
+MOCK_MODE = os.environ.get("SPEECH_BACKEND", "").strip().lower() == "mock"
+
+def check_torch_cuda():
+    import torch
+    log.info("Torch: %s", torch.__version__)
+    log.info("CUDA available: %s", torch.cuda.is_available())
+
+    if torch.cuda.is_available():
+        log.info("CUDA device count: %d", torch.cuda.device_count())
+        log.info("Device name: %s", torch.cuda.get_device_name(0))
+    else:
+        log.info("GPU unavailable")
 
 # -- ASR Backend (Whisper) ---------------------------------------------------
 
@@ -195,14 +212,14 @@ class WhisperASRBackend:
 
 
 class MockASRBackend:
-    """CI mock ASR -- returns a fixed canned response, no model loaded.
+    """Mock ASR -- returns a fixed canned response, no model loaded.
 
-    Activated when SPEECH_CI_MODE=1. Useful for testing the gRPC layer
+    Activated when SPEECH_BACKEND=mock. Useful for testing the gRPC layer
     without requiring GPU or model weights.
     """
 
     def recognize(self, audio_bytes: bytes, encoding: str, sample_rate: int, language: str) -> dict:
-        return {"text": "[ci-mock] hello world", "confidence": 1.0}
+        return {"text": "[mock] hello world", "confidence": 1.0}
 
 
 # -- ASR Backend (FunASR Paraformer streaming) --------------------------------
@@ -348,13 +365,13 @@ class FunASRStreamingBackend:
 
 
 class MockASRStreamingBackend:
-    """CI mock streaming ASR -- returns empty results during streaming,
+    """Mock streaming ASR -- returns empty results during streaming,
     canned result on is_final. No model loaded.
     """
 
     def recognize_chunk(self, audio_chunk, cache, is_final=False, encoding="pcm_s16le", sample_rate=16000):
         if is_final:
-            return [{"text": "[ci-mock-stream] hello world", "confidence": 1.0}]
+            return [{"text": "[mock-stream] hello world", "confidence": 1.0}]
         return [{"text": "", "confidence": 0.0}]
 
 
@@ -433,13 +450,29 @@ class EdgeTTSBackend:
         v = voice or self.voice
         sign = "+" if speed > 1 else "-"
         rate = f"{sign}{int(abs(speed - 1) * 100)}%" if speed != 1.0 else "+0%"
-        communicate = edge_tts.Communicate(text, v, rate=rate)
         chunks = []
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                chunks.append(chunk["data"])
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                communicate = edge_tts.Communicate(text, v, rate=rate)
+                chunks = []
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        chunks.append(chunk["data"])
+                if chunks:
+                    break
+                raise RuntimeError("Edge TTS returned no audio chunks")
+            except Exception as exc:  # noqa: BLE001 - preserve edge-tts details.
+                last_error = exc
+                if attempt == 3:
+                    raise
+                log.warning("Edge TTS synthesize attempt %d failed: %s", attempt, exc)
+                await asyncio.sleep(0.5 * attempt)
         mp3 = b"".join(chunks)
-        return _mp3_to_pcm_s16le_16k(mp3)
+        pcm = _mp3_to_pcm_s16le_16k(mp3)
+        if not pcm:
+            raise RuntimeError(f"Edge TTS decoded to empty PCM audio: {last_error or 'no error'}")
+        return pcm
 
     async def synthesize_stream(self, text: str, voice: str = "", speed: float = 1.0):
         """Yields PCM s16le mono 16 kHz chunks (one decode at the end).
@@ -463,19 +496,34 @@ class EdgeTTSBackend:
         v = voice or self.voice
         sign = "+" if speed > 1 else "-"
         rate = f"{sign}{int(abs(speed - 1) * 100)}%" if speed != 1.0 else "+0%"
-        communicate = edge_tts.Communicate(text, v, rate=rate)
         mp3_chunks: list[bytes] = []
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                mp3_chunks.append(chunk["data"])
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                communicate = edge_tts.Communicate(text, v, rate=rate)
+                mp3_chunks = []
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        mp3_chunks.append(chunk["data"])
+                if mp3_chunks:
+                    break
+                raise RuntimeError("Edge TTS returned no audio chunks")
+            except Exception as exc:  # noqa: BLE001 - preserve edge-tts details.
+                last_error = exc
+                if attempt == 3:
+                    raise
+                log.warning("Edge TTS stream attempt %d failed: %s", attempt, exc)
+                await asyncio.sleep(0.5 * attempt)
         pcm = _mp3_to_pcm_s16le_16k(b"".join(mp3_chunks))
+        if not pcm:
+            raise RuntimeError(f"Edge TTS stream decoded to empty PCM audio: {last_error or 'no error'}")
         for i in range(0, len(pcm), 4096):
             yield pcm[i : i + 4096]
 
 
 class MockTTSBackend:
-    """CI mock TTS -- returns a minimal valid WAV file (silence).
-    Activated when SPEECH_CI_MODE=1.
+    """Mock TTS -- returns a minimal valid WAV file (silence).
+    Activated when SPEECH_BACKEND=mock.
     """
 
     async def synthesize(self, text: str, voice: str = "", speed: float = 1.0) -> bytes:
@@ -654,6 +702,12 @@ class SpeechAsrStreamServicer(contracts_grpc.RobonixServiceSpeechAsrStreamServic
         dump_buf = bytearray() if dump_dir else None
         cache = {}
         chunk_count = 0
+        # Detect actual mic sample rate from the first chunk (data bytes ÷
+        # duration_s ÷ 2 for 16-bit mono). Falls back to 16000 if detection
+        # fails. Same approach as voice.rs — no env var needed.
+        # 16KHz is the default sample rate for the ASR backend, but we detect 
+        # the actual mic sample rate from the first chunk.
+        mic_sample_rate = 16000 
 
         # Paraformer streaming requires fixed chunk_stride-sample frames
         # (the chunk_size[1]*960 granularity). Clients (liaison) stream
@@ -675,12 +729,20 @@ class SpeechAsrStreamServicer(contracts_grpc.RobonixServiceSpeechAsrStreamServic
                     dump_buf.extend(chunk_data)
                 chunk_count += 1
 
-                # Adapt each chunk to 16kHz mono pcm_s16le using defaults
-                # (stream carries no AudioConfig, so assume pcm_s16le at 16kHz mono)
+                # Detect mic sample rate from the first chunk
+                if chunk_count == 1 and req.chunk and req.chunk.duration_s > 0 and len(chunk_data) >= 2:
+                    est = int(len(chunk_data) / (req.chunk.duration_s * 2) + 0.5)
+                    if est >= 8000:
+                        mic_sample_rate = est
+                        log.info("detected mic sample rate: %d Hz (from %dB / %.3fs)",
+                                 mic_sample_rate, len(chunk_data), req.chunk.duration_s)
+
+                # Adapt each chunk from mic's actual sample rate to 16kHz
+                # mono pcm_s16le. adapt_audio resamples when needed.
                 adapted, _ = adapt_audio(
                     chunk_data,
                     encoding="pcm_s16le",
-                    sample_rate=16000,
+                    sample_rate=mic_sample_rate,
                     channels=1,
                     bits_per_sample=16,
                     gain=input_gain,
@@ -771,7 +833,7 @@ class SpeechTtsServicer(contracts_grpc.RobonixServiceSpeechTtsServicer):
             context.set_details(
                 "TTS backend not available. "
                 "Edge TTS requires network access to Microsoft Cognitive Services. "
-                "Check your network connection or set SPEECH_CI_MODE=1 for testing."
+                "Check network/model access or set SPEECH_BACKEND=mock for local mock testing."
             )
             return tts_pb2.Synthesize_Response()
 
@@ -941,7 +1003,7 @@ def _try_backend(name: str, factory):
 # gate which engines come up. Each servicer's Recognize/Synthesize
 # already returns UNAVAILABLE when its backend is None, which covers
 # the small window between gRPC server start and Driver(CMD_INIT).
-log.info("Starting speech service (ci_mode=%s)", CI_MODE)
+log.info("Starting speech service (mock_mode=%s)", MOCK_MODE)
 _dialog_manager = DialogManager()
 _asr_servicer        = SpeechAsrServicer(None)
 _asr_stream_servicer = SpeechAsrStreamServicer(None)
@@ -1001,7 +1063,6 @@ def speak(req: Speak_Request) -> Speak_Response:
     text = (req.text or "").strip()
     if not text:
         raise RuntimeError("empty text")
-
     caps = ATLAS.find_capability(contract_id=_SPEAKER_CONTRACT, transport=Transport.GRPC)
     if req.target:
         caps = [c for c in caps if c.provider_id == req.target]
@@ -1009,15 +1070,23 @@ def speak(req: Speak_Request) -> Speak_Response:
         raise RuntimeError(f"no speaker provider (target={req.target!r})")
     cap = caps[0]
 
-    if _speak_tts is None:
+    tts_backend = _tts_servicer.tts_backend
+    if tts_backend is None:
+        log.warning("speech/speak called before Driver(INIT) installed a TTS backend; using direct Edge TTS fallback")
+    if tts_backend is None and _speak_tts is None:
         _speak_tts = EdgeTTSBackend()
+    if tts_backend is None:
+        tts_backend = _speak_tts
     # MCP handlers run inside FastMCP's event loop, so asyncio.run() here
     # would error ("loop already running"). Synthesize on a worker thread
     # that owns its own loop.
     import asyncio
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        pcm = ex.submit(lambda: asyncio.run(_speak_tts.synthesize(text))).result()
+        pcm = ex.submit(lambda: asyncio.run(tts_backend.synthesize(text))).result()
+    if not pcm:
+        raise RuntimeError("TTS backend returned no PCM audio")
+    log.info("speech/speak synthesized %d PCM bytes for %d chars", len(pcm), len(text))
 
     with speech.connect_capability(cap, _SPEAKER_CONTRACT, Transport.GRPC) as ch:
         stub = contracts_grpc.RobonixPrimitiveAudioSpeakerStub(
@@ -1072,7 +1141,7 @@ def init(cfg):
         os.environ.get("SPEECH_DISABLE_WHISPER", "").strip() in ("1", "true", "yes"),
     ))
 
-    if CI_MODE:
+    if MOCK_MODE:
         asr = MockASRBackend()
         asr_stream = MockASRStreamingBackend()
         tts = MockTTSBackend()
@@ -1097,13 +1166,14 @@ def init(cfg):
 
     if not any([asr, asr_stream, tts]):
         return Err(
-            "all backends failed; set SPEECH_CI_MODE=1 for mocks or fix "
+            "all backends failed; set SPEECH_BACKEND=mock for local mock testing or fix "
             "model / network issues (see backend errors above)"
         )
     return Ok()
 
 
 def main() -> int:
+    check_torch_cuda()
     speech.run()
     return 0
 

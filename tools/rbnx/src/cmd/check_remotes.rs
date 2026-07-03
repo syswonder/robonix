@@ -103,7 +103,9 @@ pub fn collect_remote_providers(manifest_path: &Path) -> Result<Vec<RemoteProvid
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             providers.push(RemoteProvider {
-                dir: cache_root.join(&name),
+                // Cache dir = git repo name (one clone per repo), not the
+                // per-instance provider id. See deploy::repo_dir_name.
+                dir: cache_root.join(super::deploy::repo_dir_name(url)),
                 name,
                 branch,
             });

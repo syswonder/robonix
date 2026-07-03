@@ -1661,25 +1661,32 @@ fn is_terminal_executor_state(state: u32) -> bool {
 }
 
 fn rtdl_result_to_messages(r: &CapabilityCallResult) -> history::ToolResultHistory {
-    if !r.success {
-        return history::ToolResultHistory {
-            tool_messages: vec![Message::user(&format!(
-                "Executor feedback for the current task (not a new user request): {}",
-                r.output
-            ))],
+    let mapped = if r.success {
+        history::tool_result_to_messages(&r.call_id, &r.output)
+    } else {
+        history::ToolResultHistory {
+            tool_messages: vec![Message::user(&r.output)],
             followup_messages: vec![],
-        };
-    }
+        }
+    };
 
-    let mapped = history::tool_result_to_messages(&r.call_id, &r.output);
     let tool_messages = mapped
         .tool_messages
         .into_iter()
         .map(|msg| {
-            let content = msg.content.unwrap_or_default();
+            let output = msg.content.unwrap_or_default();
+            let feedback = serde_json::json!({
+                "leaf_result": {
+                    "call_id": r.call_id,
+                    "contract_id": r.contract_id,
+                    "success": r.success,
+                    "output": output,
+                    "error": r.error,
+                }
+            });
             Message::user(&format!(
-                "Executor feedback for the current task (not a new user request): {}",
-                content
+                "Executor feedback for the current RTDL leaf (not a new user request): {}",
+                feedback
             ))
         })
         .collect();
