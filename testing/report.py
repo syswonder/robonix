@@ -720,6 +720,20 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
     }}
     h1 {{ font-size: 22px; margin: 0 0 4px; }}
     .subtitle {{ color: var(--muted); font-size: 13px; margin: 0 0 16px; }}
+    .report-nav {{ margin: 8px 0 14px; }}
+    .report-nav a {{
+      background: #e5e7eb;
+      border: 2px solid #6b7280;
+      color: #111827;
+      display: inline-block;
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 700;
+      padding: 6px 10px;
+      text-decoration: none;
+      text-transform: uppercase;
+    }}
+    .report-nav a:hover {{ background: #d1d5db; text-decoration: underline; }}
     h2 {{ font-size: 16px; margin: 24px 0 10px; }}
     table {{
       border-collapse: collapse;
@@ -1071,6 +1085,7 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
 </head>
 <body>
   <h1>Robonix Webots CI Report</h1>
+  <div class=\"report-nav\"><a href=\"../../\">ALL REPORTS &gt;&gt;</a></div>
   <p class=\"subtitle\">Generated on {generated_on}</p>
   <div class=\"summary\">
     <div class=\"card\"><strong>Result</strong><span class=\"metric {'pass' if verdict == 'PASS' else 'fail'}\">{verdict}</span></div>
