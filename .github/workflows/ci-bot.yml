@@ -30,17 +30,13 @@ permissions:
   pull-requests: write
   issues: write
 
-concurrency:
-  group: ci-bot-${{ github.event.issue.number }}
-  cancel-in-progress: false
-
 jobs:
   # ── Parse + authorize the command; open/refresh the status comment ─────────
   gate:
     name: Authorize CI command
     if: >-
       github.event.issue.pull_request &&
-      startsWith(github.event.comment.body, '@robonix-ci test') &&
+      contains(github.event.comment.body, '@robonix-ci test') &&
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ubuntu-22.04
     outputs:

@@ -100,12 +100,6 @@ permissions:
   pages: write
   id-token: write
 
-concurrency:
-  # Webots uses fixed ports and the shared GPU runner is a single scarce resource.
-  # Queue every Webots integration run globally instead of canceling an older run.
-  group: webots-integration-tests
-  cancel-in-progress: false
-
 jobs:
   # ── Gate 1: cheap, GitHub-hosted, untrusted-safe ──────────────────────────
   # Scans the ref for forbidden high-risk operations BEFORE anything runs on the
