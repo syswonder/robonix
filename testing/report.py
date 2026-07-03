@@ -706,34 +706,37 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
       --fail-border: #fecaca;
       --fail-text: #991b1b;
       --panel: #ffffff;
-      --sans: "Noto Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --sans: Arial, Helvetica, "Liberation Sans", sans-serif;
       --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
     }}
     * {{ box-sizing: border-box; }}
     body {{
+      background: #ffffff;
       color: var(--text);
       font-family: var(--sans);
-      margin: 32px;
+      font-size: 13px;
+      line-height: 1.35;
+      margin: 24px;
     }}
-    h1 {{ margin: 0 0 6px; }}
+    h1 {{ font-size: 22px; margin: 0 0 4px; }}
     .subtitle {{ color: var(--muted); font-size: 13px; margin: 0 0 16px; }}
-    h2 {{ margin: 28px 0 12px; }}
+    h2 {{ font-size: 16px; margin: 24px 0 10px; }}
     table {{
-      border-collapse: separate;
+      border-collapse: collapse;
       border-spacing: 0;
       width: 100%;
-      margin-top: 16px;
+      margin-top: 12px;
       border: 1px solid var(--line);
-      border-radius: 6px;
-      overflow: hidden;
+      border-radius: 0;
+      overflow: visible;
     }}
     th, td {{
       border-bottom: 1px solid var(--line);
-      padding: 10px 12px;
+      padding: 6px 8px;
       text-align: left;
       vertical-align: top;
     }}
-    th {{ background: var(--head); color: #374151; font-size: 11px; text-transform: uppercase; }}
+    th {{ background: var(--head); color: #374151; font-size: 11px; font-weight: 700; text-transform: uppercase; }}
     tr:last-child td {{ border-bottom: 0; }}
     .mono {{
       background: transparent;
@@ -761,23 +764,23 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
     .scenario-table td:nth-child(3) {{ width: 210px; white-space: nowrap; }}
     .scenario-table th:nth-child(4),
     .scenario-table td:nth-child(4) {{ width: 72px; white-space: nowrap; }}
-    .summary {{ display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0; }}
-    .card {{ border: 1px solid var(--line); padding: 12px 16px; border-radius: 6px; min-width: 140px; }}
+    .summary {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }}
+    .card {{ border: 1px solid var(--line); border-radius: 0; min-width: 140px; padding: 8px 10px; }}
     .card strong {{ color: var(--muted); display: block; font-size: 11px; margin-bottom: 6px; text-transform: uppercase; }}
-    .metric {{ font-size: 18px; font-weight: 650; }}
+    .metric {{ font-size: 16px; font-weight: 700; }}
     .row-pass {{ background: var(--pass-bg); }}
     .row-fail {{ background: var(--fail-bg); }}
     .row-pass td {{ border-bottom-color: var(--pass-border); }}
     .row-fail td {{ border-bottom-color: var(--fail-border); }}
     .status-badge {{
-      border-radius: 999px;
+      border-radius: 0;
       display: inline-block;
       font-family: var(--mono);
       font-size: 11px;
       font-weight: 700;
       letter-spacing: 0;
       min-width: 42px;
-      padding: 3px 8px;
+      padding: 2px 6px;
       text-align: center;
     }}
     .status-badge.pass {{ background: #d1fae5; color: var(--pass-text); }}
@@ -859,8 +862,8 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
     }}
     .rtdl-leaf .rtdl-line {{
       background: #f9fafb;
-      border-radius: 4px;
-      padding: 3px 6px;
+      border-radius: 0;
+      padding: 2px 4px;
     }}
     .rtdl-expect {{
       color: #374151;
@@ -876,7 +879,7 @@ def write_html(summary: dict, logs: list[dict], metadata: dict[str, str], analys
     .observed-call {{
       align-items: baseline;
       background: var(--pass-bg);
-      border-radius: 4px;
+      border-radius: 0;
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
