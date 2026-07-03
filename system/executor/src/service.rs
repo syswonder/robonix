@@ -108,6 +108,7 @@ fn execute_node(
     Box::pin(async move {
         let node = &plan.nodes[node_index];
         let node_ctx = node_event_context(&plan, node_index);
+        let op_id = node.op_id.clone();
         if runtime.is_cancelled(&plan.plan_id).await {
             if is_operator_node(node.node_kind) {
                 send_operator_terminal(
@@ -121,7 +122,19 @@ fn execute_node(
             }
             return true;
         }
-        match node.node_kind {
+        if runtime
+            .should_stop_at(&plan.plan_id, &op_id, StopWhen::OnEnter)
+            .await
+        {
+            let mut atlas = atlas;
+            runtime
+                .trigger_stop(&plan.plan_id, &provider_id, &mut atlas)
+                .await;
+            send_stop_on_enter(&tx, &node_ctx, &runtime).await;
+            return true;
+        }
+        let mut atlas_after = atlas.clone();
+        let failed = match node.node_kind {
             RTDL_SEQUENCE => {
                 let mut any_failed = false;
                 let mut cancelled = false;
@@ -216,34 +229,7 @@ fn execute_node(
                     .call
                     .as_ref()
                     .expect("validated do node must contain call");
-                let op_id = node.op_id.clone();
-                let mut atlas = atlas;
-                // on_enter stop point: cancel the whole plan the moment we reach
-                // this op, before its call runs. The DO node never executes.
-                if runtime
-                    .should_stop_at(&plan.plan_id, &op_id, StopWhen::OnEnter)
-                    .await
-                {
-                    runtime
-                        .trigger_stop(&plan.plan_id, &provider_id, &mut atlas)
-                        .await;
-                    runtime
-                        .record_op_state(&plan.plan_id, &op_id, RtdlNodeStateEnum::Canceled as u32)
-                        .await;
-                    let _ = tx
-                        .send(Ok(rtdl_wire::node_state(
-                            &node_ctx,
-                            RtdlNodeStateEnum::Canceled as u32,
-                            format!("stopped on entering op_id={op_id}: plan cancelled"),
-                            None,
-                        )))
-                        .await;
-                    return true;
-                }
-                // Keep a clone for the post-completion check; execute_call takes
-                // atlas by value.
-                let mut atlas_after = atlas.clone();
-                let failed = execute_call(
+                execute_call(
                     call,
                     node_ctx,
                     tx,
@@ -251,18 +237,7 @@ fn execute_node(
                     provider_id.clone(),
                     runtime.clone(),
                 )
-                .await;
-                // on_complete stop point: cancel the whole plan right after this
-                // op finishes (its own node_state was already streamed).
-                if runtime
-                    .should_stop_at(&plan.plan_id, &op_id, StopWhen::OnComplete)
-                    .await
-                {
-                    runtime
-                        .trigger_stop(&plan.plan_id, &provider_id, &mut atlas_after)
-                        .await;
-                }
-                failed
+                .await
             }
             _ => {
                 warn!(
@@ -271,7 +246,16 @@ fn execute_node(
                 );
                 true
             }
+        };
+        if runtime
+            .should_stop_at(&plan.plan_id, &op_id, StopWhen::OnComplete)
+            .await
+        {
+            runtime
+                .trigger_stop(&plan.plan_id, &provider_id, &mut atlas_after)
+                .await;
         }
+        failed
     })
 }
 
@@ -290,6 +274,40 @@ fn node_event_context(plan: &Plan, node_index: usize) -> NodeEventContext {
 /// Return whether a node kind is an RTDL operator rather than a leaf call.
 fn is_operator_node(node_kind: u32) -> bool {
     matches!(node_kind, RTDL_SEQUENCE | RTDL_PARALLEL)
+}
+
+/// Emit the terminal event for an `on_enter` stop point on any RTDL node.
+async fn send_stop_on_enter(
+    tx: &Sender<Result<RtdlEvent, Status>>,
+    node: &NodeEventContext,
+    runtime: &PlanRuntime,
+) {
+    let detail = format!("stopped on entering op_id={}: plan cancelled", node.op_id);
+    runtime
+        .record_op_state(
+            &node.plan_id,
+            &node.op_id,
+            RtdlNodeStateEnum::Canceled as u32,
+        )
+        .await;
+    if is_operator_node(node.node_kind) {
+        let _ = tx
+            .send(Ok(rtdl_wire::operator_node_state(
+                node,
+                RtdlNodeStateEnum::Canceled as u32,
+                detail,
+            )))
+            .await;
+    } else {
+        let _ = tx
+            .send(Ok(rtdl_wire::node_state(
+                node,
+                RtdlNodeStateEnum::Canceled as u32,
+                detail,
+                None,
+            )))
+            .await;
+    }
 }
 
 /// Stream the terminal event for a non-leaf RTDL operator node, and record the
@@ -544,7 +562,7 @@ fn visit_for_cycles(index: usize, plan: &Plan, colors: &mut [VisitColor]) -> Res
 mod tests {
     use super::{
         PlanRuntime, RTDL_DO, RTDL_PARALLEL, RTDL_SEQUENCE, RtdlNodeStateEnum,
-        send_operator_terminal, validate_plan,
+        send_operator_terminal, send_stop_on_enter, validate_plan,
     };
     use crate::pb::executor::rtdl_event::RtdlEventEnum;
     use crate::pb::pilot::{CapabilityCall, Plan, RtdlNode};
@@ -703,5 +721,29 @@ mod tests {
         assert_eq!(ns.state, RtdlNodeStateEnum::Succeeded as u32);
         assert!(ns.leaf_result.is_none());
         assert!(ns.operator_detail.contains("RTDL sequence op_id=op_1"));
+    }
+
+    #[tokio::test]
+    async fn stop_on_enter_event_supports_operator_nodes() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let runtime = PlanRuntime::default();
+        runtime.register_plan("p").await;
+        let node = NodeEventContext {
+            plan_id: "p".to_string(),
+            node_index: 0,
+            node_kind: RTDL_PARALLEL,
+            op_id: "op_1".to_string(),
+            description: "run branches".to_string(),
+        };
+
+        send_stop_on_enter(&tx, &node, &runtime).await;
+
+        let event = rx.recv().await.unwrap().unwrap();
+        let ns = event.node_state.unwrap();
+        assert_eq!(event.event_kind, RtdlEventEnum::NodeState as u32);
+        assert_eq!(ns.op_id, "op_1");
+        assert_eq!(ns.state, RtdlNodeStateEnum::Canceled as u32);
+        assert!(ns.leaf_result.is_none());
+        assert!(ns.operator_detail.contains("stopped on entering"));
     }
 }
