@@ -1045,6 +1045,7 @@ jobs:
             '<title>Robonix Webots CI Reports</title>' \
             "<a href=\"reports/runs/${report_id}/\">Latest Robonix Webots CI report</a>" \
             > "${REPORT_SITE_DIR}/index.html"
+          : > "${REPORT_SITE_DIR}/.nojekyll"
           echo "report_url=${expected_report_url}" >> "$GITHUB_OUTPUT"
 
       - name: Persist report history
@@ -1064,6 +1065,18 @@ jobs:
           git -C "$REPORT_SITE_DIR" remote set-url origin \
             "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git -C "$REPORT_SITE_DIR" push origin "HEAD:${REPORTS_BRANCH}"
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ env.REPORT_SITE_DIR }}
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
 
       - name: Set report URL
         id: publish_url
