@@ -61,7 +61,6 @@ state = {
     "mic_clients": 0,
     "speaker_clients": 0,
 }
-speaker_lock = asyncio.Lock()
 
 
 def _state(key):
@@ -141,13 +140,6 @@ async def serve_mic(ws) -> None:
 async def serve_speaker(ws) -> None:
     log.info("speaker client connected from %s", ws.remote_address)
     _set_state("speaker_clients", _state("speaker_clients") + 1)
-    log.info("speaker client waiting for playback lock")
-    async with speaker_lock:
-        await _serve_speaker_locked(ws)
-    _set_state("speaker_clients", _state("speaker_clients") - 1)
-
-
-async def _serve_speaker_locked(ws) -> None:
     loop = asyncio.get_event_loop()
     q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=64)
     out_dev = _state("output_device")
@@ -186,6 +178,7 @@ async def _serve_speaker_locked(ws) -> None:
     except Exception as e:  # noqa: BLE001
         log.error("speaker stream open failed: %s", e)
         await ws.close(code=1011, reason=str(e)[:120])
+        _set_state("speaker_clients", _state("speaker_clients") - 1)
         return
 
     try:
@@ -206,6 +199,7 @@ async def _serve_speaker_locked(ws) -> None:
     finally:
         stream.stop()
         stream.close()
+        _set_state("speaker_clients", _state("speaker_clients") - 1)
 
 
 # ── /devices ───────────────────────────────────────────────────────────────

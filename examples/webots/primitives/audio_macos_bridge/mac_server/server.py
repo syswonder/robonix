@@ -55,7 +55,6 @@ FRAME_SAMPLES = SAMPLE_RATE // 10
 FRAME_BYTES = FRAME_SAMPLES * 2  # int16 mono
 
 log = logging.getLogger("mac-bridge")
-speaker_lock = asyncio.Lock()
 
 
 def list_devices() -> None:
@@ -168,13 +167,6 @@ async def serve_speaker(ws, output_device: int | None) -> None:
     sounddevice OutputStream. Frames are queued so brief network
     jitter doesn't underrun the audio output."""
     log.info("speaker client connected from %s", ws.remote_address)
-    log.info("speaker client waiting for playback lock")
-    async with speaker_lock:
-        await _serve_speaker_locked(ws, output_device)
-
-
-async def _serve_speaker_locked(ws, output_device: int | None) -> None:
-    """Play one WebSocket speaker stream while holding the playback lock."""
     loop = asyncio.get_event_loop()
 
     # Bytearray buffer + lock — the previous queue-of-opaque-chunks
