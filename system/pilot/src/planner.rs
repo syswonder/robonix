@@ -429,6 +429,7 @@ pub async fn run_turn(
     mut cancel_rx: watch::Receiver<bool>,
     mut steer_rx: mpsc::Receiver<Task>,
     plan_seq: Arc<AtomicU64>,
+    soma_prompt_block: &str,
 ) -> Result<()> {
     let session_id = task.session_id.clone();
 
@@ -465,7 +466,10 @@ pub async fn run_turn(
     }
 
     // 1. Build system prompt (once per turn)
-    let base_prompt = build_system_prompt(load_agent_soul().as_deref());
+    let mut base_prompt = build_system_prompt(load_agent_soul().as_deref());
+    if !soma_prompt_block.trim().is_empty() {
+        base_prompt.push_str(soma_prompt_block);
+    }
 
     // Pilot's capability catalog comes straight from atlas (filtered to
     // MCP transport — only those are LLM-callable). McpParams ride along
