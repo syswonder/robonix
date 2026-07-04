@@ -1,0 +1,32 @@
+# Memgraph MCP server — structured CKG memory (Scribe Mem), runs in
+# parallel with memsearch. Control plane: robonix/service/memgraph/{remember,search,compact}.
+# Exposes MCP tools only; no robonix_contracts gRPC servicer.
+manifestVersion: 1
+
+package:
+  name: com.robonix.example.memgraph_service
+  version: 0.1.0
+  vendor: robonix
+  description: Memgraph MCP server — structured CKG memory (Scribe Mem) for the agent.
+  license: MulanPSL-2.0
+
+build: bash scripts/build.sh
+
+start: |
+  export PYTHONPATH="$(pwd)/rbnx-build/codegen/proto_gen:$(pwd)/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
+  export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
+  mkdir -p rbnx-build/data
+
+  # Local persistent memory — survives rbnx boot restarts.
+  # Defaults to ./memory relative to the service CWD (this package dir).
+  # Set AGENT_MEMORY_DIR in the deploy manifest to override.
+  export AGENT_MEMORY_DIR="${AGENT_MEMORY_DIR:-$(pwd)/memory}"
+  mkdir -p "$AGENT_MEMORY_DIR"
+
+  exec rbnx-build/venv/bin/python -m memory_service.service \
+       > rbnx-build/data/memory.log 2>&1
+
+capabilities:
+  - name: robonix/service/memgraph/remember
+  - name: robonix/service/memgraph/search
+  - name: robonix/service/memgraph/compact
