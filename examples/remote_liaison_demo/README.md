@@ -87,9 +87,9 @@ Mac speaker.
 Try:
 
 ```text
-查询当前演示状态。
-记住：今天演示的是远程 Liaison 加 Pilot 调三个 skill。
-总结一下当前 demo。
+Check the current demo status.
+Remember that this demo uses remote Liaison with Pilot calling three skills.
+Summarize the current demo.
 ```
 
 ## Voiceprint Enrolment
