@@ -1,0 +1,8 @@
+[contract]
+id      = "robonix/service/memgraph/remember"
+version = "1"
+kind    = "service"
+idl     = "memgraph/srv/Remember.srv"
+
+[mode]
+type = "rpc"
