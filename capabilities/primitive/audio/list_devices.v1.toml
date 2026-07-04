@@ -20,6 +20,7 @@ id      = "robonix/primitive/audio/list_devices"
 version = "1"
 kind    = "primitive"
 idl     = "audio/srv/ListAudioDevices.srv"
+description = "List audio input and output devices visible to the audio primitive."
 
 [mode]
 type = "rpc"

@@ -7,6 +7,7 @@ id      = "robonix/service/map/pose_estimate"
 version = "1"
 kind    = "service"
 idl     = "map/srv/PoseEstimate.srv"
+description = "Seed or reset localization with a map-frame pose estimate."
 
 [mode]
 type = "rpc"

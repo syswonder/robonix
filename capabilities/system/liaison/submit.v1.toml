@@ -4,6 +4,7 @@ id      = "robonix/system/liaison/submit"
 version = "1"
 kind    = "system"
 idl     = "liaison/srv/SubmitTask.srv"
+description = "Submit a user task through Liaison and stream Pilot events back."
 
 [mode]
 type = "rpc_server_stream"

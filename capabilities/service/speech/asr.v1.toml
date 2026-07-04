@@ -6,6 +6,7 @@ id      = "robonix/service/speech/asr"
 version = "1"
 kind    = "service"
 idl     = "asr/srv/Recognize.srv"
+description = "Recognize speech from one audio buffer."
 
 [mode]
 type = "rpc"

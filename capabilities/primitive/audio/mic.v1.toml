@@ -4,6 +4,7 @@ id      = "robonix/primitive/audio/mic"
 version = "1"
 kind    = "primitive"
 idl     = "audio/msg/AudioChunk.msg"
+description = "Continuous microphone audio stream produced by an audio input primitive."
 
 [mode]
 type = "topic_out"

@@ -5,6 +5,7 @@ id      = "robonix/system/scene/goal_near"
 version = "1"
 kind    = "service"
 idl     = "semantic_map/srv/GoalNear.srv"
+description = "Compute a navigation-safe approach pose near a known scene object."
 
 [mode]
 type = "rpc"
