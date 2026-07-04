@@ -7,6 +7,7 @@ id      = "robonix/service/voiceprint/delete"
 version = "1"
 kind    = "service"
 idl     = "voiceprint/srv/DeleteEnrolled.srv"
+description = "Delete an enrolled speaker identity from the voiceprint database."
 
 [mode]
 type = "rpc"

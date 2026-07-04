@@ -6,6 +6,7 @@ id      = "robonix/primitive/chassis/driver"
 version = "1"
 kind    = "primitive"
 idl     = "lifecycle/srv/Driver.srv"
+description = "Lifecycle control interface for chassis primitive providers."
 
 [mode]
 type = "rpc"

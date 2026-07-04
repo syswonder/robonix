@@ -4,6 +4,7 @@ id      = "robonix/primitive/chassis/odom"
 version = "1"
 kind    = "primitive"
 idl     = "common_interfaces/nav_msgs/msg/Odometry.msg"
+description = "Raw chassis odometry in the local odom frame."
 
 [mode]
 type = "topic_out"

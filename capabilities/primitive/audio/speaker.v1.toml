@@ -4,6 +4,7 @@ id      = "robonix/primitive/audio/speaker"
 version = "1"
 kind    = "primitive"
 idl     = "audio/msg/AudioChunk.msg"
+description = "Audio playback stream consumed by an audio output primitive."
 
 [mode]
 type = "topic_in"

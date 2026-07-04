@@ -7,6 +7,7 @@ id      = "robonix/service/voiceprint/list"
 version = "1"
 kind    = "service"
 idl     = "voiceprint/srv/ListEnrolled.srv"
+description = "List enrolled speaker identities known to the voiceprint service."
 
 [mode]
 type = "rpc"

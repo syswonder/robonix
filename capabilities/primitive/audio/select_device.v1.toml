@@ -9,6 +9,7 @@ id      = "robonix/primitive/audio/select_device"
 version = "1"
 kind    = "primitive"
 idl     = "audio/srv/SelectAudioDevice.srv"
+description = "Select the active audio input or output device used by an audio primitive."
 
 [mode]
 type = "rpc"

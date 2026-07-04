@@ -3,6 +3,7 @@ id      = "robonix/primitive/chassis/twist_in"
 version = "1"
 kind    = "primitive"
 idl     = "common_interfaces/geometry_msgs/msg/Twist.msg"
+description = "Velocity command input consumed by a chassis controller."
 
 [mode]
 type = "topic_in"
