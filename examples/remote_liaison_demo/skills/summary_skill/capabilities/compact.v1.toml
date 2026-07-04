@@ -1,0 +1,8 @@
+[contract]
+id      = "robonix/skill/summary_skill/compact"
+version = "1"
+kind    = "skill"
+idl     = "memory/srv/Compact.srv"
+
+[mode]
+type = "rpc"
