@@ -7,6 +7,7 @@ environment variables or runtime config mapped into env; never commit them.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -262,7 +263,7 @@ class TencentTTSBackend:
             "Codec": self.codec,
             "EnableSubtitle": False,
         }
-        response = self._post_json(payload)
+        response = await asyncio.to_thread(self._post_json, payload)
         audio_b64 = response.get("Audio", "")
         if not audio_b64:
             raise RuntimeError(f"Tencent TTS returned no audio: {response}")
