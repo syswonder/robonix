@@ -5,6 +5,7 @@ id      = "robonix/service/speech/asr_stream"
 version = "1"
 kind    = "service"
 idl     = "asr/srv/RecognizeStream.srv"
+description = "Streaming speech recognition over an audio chunk stream."
 
 [mode]
 type = "rpc_bidirectional_stream"

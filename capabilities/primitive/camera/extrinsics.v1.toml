@@ -31,6 +31,7 @@ id      = "robonix/primitive/camera/extrinsics"
 version = "1"
 kind    = "primitive"
 idl     = "common_interfaces/geometry_msgs/msg/TransformStamped.msg"
+description = "Static transform from the robot body frame to the camera optical frame."
 
 [mode]
 type = "topic_out"

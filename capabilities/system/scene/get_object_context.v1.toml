@@ -6,6 +6,7 @@ id      = "robonix/system/scene/get_object_context"
 version = "1"
 kind    = "service"
 idl     = "semantic_map/srv/GetObjectContext.srv"
+description = "Return one scene object's node, relations, and nearby context."
 
 [mode]
 type = "rpc"

@@ -5,6 +5,7 @@ id      = "robonix/service/speech/speak"
 version = "1"
 kind    = "service"
 idl     = "speech/srv/Speak.srv"
+description = "Speak text aloud through a selected audio output target."
 
 [mode]
 type = "rpc"

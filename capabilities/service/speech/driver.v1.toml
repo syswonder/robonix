@@ -8,6 +8,7 @@ id      = "robonix/service/speech/driver"
 version = "1"
 kind    = "service"
 idl     = "lifecycle/srv/Driver.srv"
+description = "Lifecycle control interface for speech service providers."
 
 [mode]
 type = "rpc"

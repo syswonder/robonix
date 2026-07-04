@@ -3,6 +3,7 @@ id      = "robonix/primitive/lidar/lidar3d"
 version = "1"
 kind    = "primitive"
 idl     = "common_interfaces/sensor_msgs/msg/PointCloud2.msg"
+description = "Continuous 3D point cloud stream from a lidar primitive."
 
 [mode]
 type = "topic_out"

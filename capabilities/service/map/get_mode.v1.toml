@@ -5,6 +5,7 @@ id      = "robonix/service/map/get_mode"
 version = "1"
 kind    = "service"
 idl     = "map/srv/GetMode.srv"
+description = "Read whether the map service is currently mapping or localizing."
 
 [mode]
 type = "rpc"
