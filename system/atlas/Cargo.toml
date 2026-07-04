@@ -18,6 +18,7 @@ toml.workspace = true
 walkdir.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
+tokio-stream = "0.1"
 tonic.workspace = true
 prost.workspace = true
 tonic-prost.workspace = true
