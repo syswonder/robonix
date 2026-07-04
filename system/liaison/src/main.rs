@@ -38,9 +38,11 @@ use pb::contracts::{
     robonix_system_pilot_client::RobonixSystemPilotClient,
 };
 use pb::liaison::{StartVoiceSessionRequest, VoiceEvent};
+use pb::pilot::rtdl_node_state::RtdlNodeStateEnum;
 use pb::pilot::{CapabilityCall, PilotEvent, Plan, Task};
 use robonix_atlas::client::{self as atlas_client, AtlasClient};
 use robonix_atlas::pb as atlas_pb;
+use robonix_scribe::{debug, info, warn};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -111,12 +113,12 @@ impl LiaisonPipeline {
                 reason,
                 ..
             } => {
-                log::info!("[liaison/access] text allow user={user_id} via {method:?}: {reason}");
+                info!("[liaison/access] text allow user={user_id} via {method:?}: {reason}");
             }
             AccessDecision::Deny {
                 user_id, reason, ..
             } => {
-                log::warn!("[liaison/access] text deny user={user_id}: {reason}");
+                warn!("[liaison/access] text deny user={user_id}: {reason}");
                 return Err(anyhow!("access denied for user '{user_id}': {reason}"));
             }
         }
@@ -294,7 +296,7 @@ async fn drain_session_end(pipeline: &LiaisonPipeline, session_id: &str) {
             let mut stream = ReceiverStream::new(rx);
             while stream.next().await.is_some() {}
         }
-        Err(e) => log::debug!("[liaison/text] session_end: {e:#}"),
+        Err(e) => debug!("[liaison/text] session_end: {e:#}"),
     }
 }
 
@@ -379,7 +381,11 @@ async fn run_text_loop(pipeline: Arc<LiaisonPipeline>) -> Result<()> {
                         }
                         EVT_BATCH_RESULT => {
                             if let Some(ref r) = ev.batch_result {
-                                let ok = r.results.iter().filter(|x| x.success).count();
+                                let ok = r
+                                    .results
+                                    .iter()
+                                    .filter(|x| x.state == RtdlNodeStateEnum::Succeeded as u32)
+                                    .count();
                                 println!(
                                     "[round {}] results: {ok} ok, {} failed",
                                     r.round,
@@ -422,13 +428,16 @@ struct Args {
     #[arg(long = "pilot-endpoint")]
     pilot_endpoint: Option<String>,
 
-    /// Log filter (env_logger format). Defaults to $RUST_LOG, then "robonix_liaison=info".
+    /// Log level for this component (`debug`/`info`/`warn`/`error`). Sets the
+    /// scribe log-file floor; falls back to `SCRIBE_FILE_LEVEL` / `info`.
+    /// Normally arrives inside `--config-json`, not as a standalone flag.
     #[arg(long)]
     log: Option<String>,
 
-    /// JSON config passed by `rbnx boot`. Liaison currently reads its runtime
-    /// settings from explicit flags and environment variables, but accepting
-    /// this keeps the binary compatible with the common system start command.
+    /// The component's `system.liaison` manifest block, serialized to JSON by
+    /// rbnx and passed as one arg (`--config-json '{...}'`). Parsed by the binary
+    /// itself; `robonix_scribe::init_from_config` reads the `log` key from it so
+    /// the manifest's per-component level reaches the log.
     #[arg(long = "config-json")]
     config_json: Option<String>,
 }
@@ -436,12 +445,10 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let log_filter = args
-        .log
-        .clone()
-        .or_else(|| std::env::var("RUST_LOG").ok())
-        .unwrap_or_else(|| "robonix_liaison=info".to_string());
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_filter)).init();
+    // Apply the manifest's per-component `log:` level (delivered inside
+    // --config-json) to scribe's file sink before the first log line.
+    robonix_scribe::init_from_config("liaison", args.config_json.as_deref());
+    info!("robonix-liaison starting");
 
     let atlas_endpoint = args.atlas.clone().unwrap_or_else(|| {
         env_first(
@@ -487,7 +494,7 @@ async fn main() -> Result<()> {
     let listen_port = listen_addr.port();
     let advertised = format!("127.0.0.1:{listen_port}");
 
-    log::info!("connecting to atlas at {atlas_http}");
+    info!("connecting to atlas at {atlas_http}");
     let mut atlas = AtlasClient::connect_with_retry(&atlas_http, 10, Duration::from_secs(2))
         .await
         .context("connect to atlas")?;
@@ -536,10 +543,10 @@ async fn main() -> Result<()> {
         )
         .await
     {
-        log::warn!("SetLifecycleState(ACTIVE) on {LIAISON_PROVIDER_ID} failed: {e:#}");
+        warn!("SetLifecycleState(ACTIVE) on {LIAISON_PROVIDER_ID} failed: {e:#}");
     }
-    log::info!("registered as '{LIAISON_PROVIDER_ID}', SystemLiaison gRPC on :{listen_port}");
-    eprintln!("robonix-liaison ready on :{listen_port}  (pilot_default={pilot_http})");
+    info!("registered as '{LIAISON_PROVIDER_ID}', SystemLiaison gRPC on :{listen_port}");
+    info!("robonix-liaison ready on :{listen_port}  (pilot_default={pilot_http})");
 
     {
         let mut hb = atlas.clone();
@@ -549,7 +556,7 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 if let Err(e) = hb.heartbeat(LIAISON_PROVIDER_ID).await {
-                    log::warn!("heartbeat failed: {e:#}");
+                    warn!("heartbeat failed: {e:#}");
                 }
             }
         });
@@ -557,7 +564,7 @@ async fn main() -> Result<()> {
 
     let atlas = Arc::new(Mutex::new(atlas));
     let access = Arc::new(AccessControlConfig::from_env());
-    log::info!(
+    info!(
         "access gate enabled={} allowed_users={} voice_threshold={:.2}",
         access.enabled,
         access.allowed_users.len(),
@@ -571,7 +578,7 @@ async fn main() -> Result<()> {
 
     let source = std::env::var("ROBONIX_LIAISON_SOURCE").unwrap_or_default();
     let text_handle: Option<tokio::task::JoinHandle<Result<()>>> = if source == "text" {
-        log::info!("activating stdin text loop (headless mode)");
+        info!("activating stdin text loop (headless mode)");
         Some(tokio::spawn(run_text_loop(Arc::clone(&pipeline))))
     } else {
         None

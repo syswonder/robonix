@@ -12,12 +12,10 @@ each request class's `.json_schema()` automatically.
 """
 from __future__ import annotations
 
-import json
 import logging
 import math
 import time
 import uuid
-from typing import Optional
 
 from robonix_api import ATLAS, Service, Ok, Err, Deferred
 
@@ -28,10 +26,6 @@ log = logging.getLogger("simple_nav")
 simple_nav = Service(id="simple_nav", namespace="robonix/service/navigation")
 
 nav: NavNode | None = None
-# We pack our internal goal_id + tolerance_m through the contract by
-# stamping them into Navigate_Response.status_message as JSON, since
-# the contract's response has only `accepted: bool` + `status_message: str`.
-goal_id_by_ts: dict[str, str] = {}
 
 
 def resolve_inputs(deadline_s: float = 30.0) -> dict[str, str]:
@@ -101,22 +95,20 @@ def navigate(req: Navigate_Request) -> Navigate_Response:
     orientation if you don't care about final heading; the robot
     succeeds on xy alone.)
 
-    Per Navigate.srv the response carries `goal_id` directly; track
-    via the sibling `status` / `cancel` contracts. `status_message`
-    is free-form text only — never a JSON envelope."""
+    Per Navigate.srv the response carries optional `run_id` directly; track
+    via the `navigate/status` and `navigate/cancel` async sub-contracts.
+    Empty run_id on those contracts means the most recent navigation call."""
     if nav is None:
-        return Navigate_Response(
-            accepted=False, goal_id="", status_message="nav not initialized",
-        )
+        raise RuntimeError("nav not initialized")
     goal = req.goal
     target_yaw = quat_to_yaw(goal.pose.orientation.z, goal.pose.orientation.w)
     # Heuristic: if orientation is the identity quaternion (z=0,w=1), the
     # caller didn't bother specifying a yaw. Don't impose one.
     use_yaw = not (abs(goal.pose.orientation.z) < 1e-6
                    and abs(goal.pose.orientation.w - 1.0) < 1e-6)
-    goal_id = f"nav-{uuid.uuid4().hex[:8]}"
+    run_id = f"nav-{uuid.uuid4().hex[:8]}"
     nav.set_goal(Goal(
-        goal_id=goal_id,
+        goal_id=run_id,
         target_x=float(goal.pose.position.x),
         target_y=float(goal.pose.position.y),
         target_yaw=target_yaw if use_yaw else None,
@@ -125,40 +117,49 @@ def navigate(req: Navigate_Request) -> Navigate_Response:
     ))
     msg = (f"goto ({goal.pose.position.x:.2f},{goal.pose.position.y:.2f})"
            + (f" yaw={target_yaw:.2f}" if use_yaw else ""))
-    return Navigate_Response(accepted=True, goal_id=goal_id, status_message=msg)
+    return Navigate_Response(accepted=True, run_id=run_id, detail=msg)
 
 
-@simple_nav.mcp("robonix/service/navigation/status")
+@simple_nav.mcp("robonix/service/navigation/navigate/status")
 def status(req: GetNavigationStatus_Request) -> GetNavigationStatus_Response:
-    """Get current status of a navigation goal. Empty `goal_id` =
-    most recent. Returns known/state/terminal — `state` is a
-    free-form string ('running', 'reached', 'failed', ...)."""
+    """Get current status of a navigation goal. Empty `run_id` = most recent."""
     if nav is None:
-        return GetNavigationStatus_Response(
-            known=False, status="nav not initialized", terminal=True,
-        )
-    s = nav.goal_status(req.goal_id or None)
+        raise RuntimeError("nav not initialized")
+    s = nav.goal_status(req.run_id or None)
     if s is None:
-        return GetNavigationStatus_Response(known=False, status="no active goal", terminal=True)
-    state = str(s.get("state", "unknown"))
+        raise RuntimeError("no active goal")
+    state = _executor_state(str(s.get("state", "unknown")))
     detail = str(s.get("detail", ""))
     return GetNavigationStatus_Response(
         known=True,
-        status=f"{state}: {detail}" if detail else state,
-        terminal=state in ("succeeded", "aborted", "cancelled"),
+        state=state,
+        detail=detail,
     )
 
 
-@simple_nav.mcp("robonix/service/navigation/cancel")
+@simple_nav.mcp("robonix/service/navigation/navigate/cancel")
 def cancel(req: CancelNavigation_Request) -> CancelNavigation_Response:
-    """Cancel an active navigation goal. Empty `goal_id` cancels the
+    """Cancel an active navigation goal. Empty `run_id` cancels the
     currently active goal. Idempotent."""
     if nav is None:
-        return CancelNavigation_Response(accepted=False, status_message="nav not initialized")
-    ok = nav.cancel_goal(req.goal_id or None)
+        raise RuntimeError("nav not initialized")
+    ok = nav.cancel_goal(req.run_id or None)
+    if not ok:
+        raise RuntimeError("no active goal")
     return CancelNavigation_Response(
-        accepted=ok, status_message="cancelled" if ok else "no active goal",
+        accepted=True, detail="cancel requested",
     )
+
+
+def _executor_state(state: str) -> str:
+    """Map simple_nav's internal goal state to executor status state names."""
+    return {
+        "active": "RUNNING",
+        "succeeded": "SUCCEEDED",
+        "aborted": "FAILED",
+        "cancelled": "CANCELED",
+        "canceled": "CANCELED",
+    }.get(state.lower(), "RUNNING")
 
 
 # ── lifecycle ────────────────────────────────────────────────────────────────

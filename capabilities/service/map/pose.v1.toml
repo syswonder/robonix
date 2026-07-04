@@ -10,6 +10,7 @@ id      = "robonix/service/map/pose"
 version = "1"
 kind    = "service"
 idl     = "common_interfaces/geometry_msgs/msg/PoseWithCovarianceStamped.msg"
+description = "Canonical map-frame robot pose produced by localization or SLAM."
 
 [mode]
 type = "topic_out"

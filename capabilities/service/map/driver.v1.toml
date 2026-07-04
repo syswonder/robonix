@@ -7,6 +7,7 @@ id      = "robonix/service/map/driver"
 version = "1"
 kind    = "service"
 idl     = "lifecycle/srv/Driver.srv"
+description = "Lifecycle control interface for map service providers."
 
 [mode]
 type = "rpc"

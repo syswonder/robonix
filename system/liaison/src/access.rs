@@ -98,9 +98,9 @@ impl AccessControlConfig {
     }
 
     /// Decide whether a voice turn may continue past capture and voiceprint.
-    /// A caller hint in the allowed list is enough; otherwise the voiceprint
-    /// response must identify an enrolled speaker above the configured
-    /// threshold and that `voice:<id>` must also be allowed.
+    /// When the gate is enabled, a caller hint is not enough for voice access:
+    /// the voiceprint response must identify an enrolled speaker above the
+    /// configured threshold and that `voice:<id>` must also be allowed.
     pub fn authorize_voice(
         &self,
         client_user_id: &str,
@@ -117,14 +117,6 @@ impl AccessControlConfig {
         }
 
         let hinted_user = normalize_user_id(client_user_id, "local");
-        if !hinted_user.is_empty() && self.allowed_users.contains(&hinted_user) {
-            return AccessDecision::Allow {
-                user_id: hinted_user,
-                method: AccessMethod::UserList,
-                confidence: 1.0,
-                reason: "client user is in allowed user list".to_string(),
-            };
-        }
 
         if let Some(resp) = voiceprint
             && let Some(voice_user) = voiceprint_user_id(Some(resp))
@@ -153,7 +145,7 @@ impl AccessControlConfig {
         AccessDecision::Deny {
             user_id: hinted_user,
             confidence: 0.0,
-            reason: "no allowed user hint and no matching enrolled voiceprint".to_string(),
+            reason: "no matching enrolled voiceprint".to_string(),
         }
     }
 }
@@ -251,12 +243,11 @@ mod tests {
     }
 
     #[test]
-    fn voice_allows_allowed_hint_before_voiceprint() {
+    fn voice_hint_does_not_bypass_voiceprint_when_enabled() {
         let cfg = enabled_with(&["local:liukaile"]);
         assert!(matches!(
             cfg.authorize_voice("liukaile", None),
-            AccessDecision::Allow { user_id, method: AccessMethod::UserList, .. }
-            if user_id == "local:liukaile"
+            AccessDecision::Deny { .. }
         ));
     }
 

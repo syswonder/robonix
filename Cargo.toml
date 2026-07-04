@@ -14,6 +14,8 @@ members = [
     "system/executor",
     "system/liaison",
     "system/pilot",
+    "system/scribe",
+    "system/soma",
     "tools/rbnx",
     "tools/codegen",
 ]
@@ -42,10 +44,7 @@ clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1.0"
 thiserror = "2.0.18"
 
-# Logging
-log = "0.4"
-env_logger = "0.11"
-
+# Logging (all crates use robonix-scribe macros)
 # gRPC
 tonic = "0.14"
 prost = "0.14"
@@ -77,3 +76,4 @@ crossterm = "0.29.0"
 
 # Internal crates
 robonix-codegen = { path = "tools/codegen" }
+robonix-scribe = { path = "system/scribe" }

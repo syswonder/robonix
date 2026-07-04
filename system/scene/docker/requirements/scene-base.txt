@@ -1,0 +1,15 @@
+# ── Generic scene ────────────────────────────────────────────────
+scipy>=1.11
+mcp
+fastmcp
+grpcio
+grpcio-tools
+protobuf
+uvicorn
+httpx
+Pillow
+PyYAML
+
+setuptools==69.5.1
+wheel
+packaging

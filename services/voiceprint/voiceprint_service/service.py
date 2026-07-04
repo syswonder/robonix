@@ -59,14 +59,14 @@ import robonix_contracts_pb2_grpc as pb_grpc  # type: ignore[import-not-found]
 # only mangles SERVICE names. Use the voiceprint_pb2 namespace for the
 # request/response dataclasses.
 import voiceprint_pb2 as vp  # type: ignore[import-not-found]
-from robonix_api import Service, Ok, Err  # noqa: E402
+from voiceprint_mcp import ListEnrolled_Request, ListEnrolled_Response  # type: ignore[import-not-found]
+from robonix_api import Service, Ok, Err, scribe_logger  # noqa: E402
 
 from voiceprint_service.engine import EcapaTdnnEngine
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="[voiceprint] %(asctime)s %(levelname)s %(message)s",
-)
+# Route all stdlib logging through Scribe so `rbnx logs -t voiceprint` sees the
+# full trace and the package owns no log file or stdout sink of its own.
+scribe_logger.install_stdlib_bridge("voiceprint")
 log = logging.getLogger("voiceprint_service")
 
 
@@ -375,6 +375,23 @@ voiceprint.attach_grpc_servicer(
 voiceprint.attach_grpc_servicer(
     "robonix/service/voiceprint/delete", _DeleteServicer(),
 )
+
+
+@voiceprint.mcp("robonix/service/voiceprint/list")
+def list_enrolled(req: ListEnrolled_Request) -> ListEnrolled_Response:
+    """List enrolled voiceprints through the planner-visible MCP surface."""
+    if _db is None:
+        return ListEnrolled_Response(users_json="[]", count=0, error="db not initialised")
+    try:
+        users = [{"user_id": uid, "user_name": name} for uid, name in _db.list_users()]
+        return ListEnrolled_Response(
+            users_json=json.dumps(users, ensure_ascii=False),
+            count=len(users),
+            error="",
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("ListEnrolled MCP failed")
+        return ListEnrolled_Response(users_json="[]", count=0, error=str(exc))
 
 
 @voiceprint.on_init

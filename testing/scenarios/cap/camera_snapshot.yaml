@@ -1,0 +1,23 @@
+# Exercise the camera primitive's on-demand RGB frame.
+name: camera_snapshot
+task: "ci-test: capture one rgb camera snapshot from the robot"
+steps:
+  - content: Capturing an RGB snapshot.
+    rtdl_description: camera snapshot
+    status: in_progress
+    rtdl:
+      op: sequence
+      id: camera_snapshot_step
+      children:
+        - op: do
+          id: camera_snapshot
+          cap: tiago_camera.camera_snapshot
+          args: {}
+          description: grab one RGB frame
+          expect:
+            contract: robonix/primitive/camera/snapshot
+            success: true
+            output:
+              json: {height: 480, width: 640, encoding: jpeg}
+  - content: Snapshot captured.
+    status: done

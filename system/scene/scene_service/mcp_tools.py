@@ -98,7 +98,7 @@ async def list_objects(_req: ListObjects_Request) -> ListObjects_Response:
 
 # Constants for goal_near — service-side defaults, no longer schema knobs.
 _GOAL_NEAR_CLEARANCE_M = 0.4   # robot inscribed_radius + safety margin
-_GOAL_NEAR_SEARCH_M = 3.0      # max distance to look for a free cell
+_GOAL_NEAR_SEARCH_M = 6.0      # max distance to look for a free cell
 _GOAL_NEAR_ROBOT_RADIUS_M = 0.3  # Tiago-sized default for inflation
 _GOAL_NEAR_RING_STEP_M = 0.1
 _GOAL_NEAR_ANGLE_STEPS = [0.0, 0.2, -0.2, 0.4, -0.4, 0.6, -0.6,
@@ -121,9 +121,11 @@ def _occupancy_bfs(
     ogx = float(info.origin.position.x)
     ogy = float(info.origin.position.y)
     grid = np.frombuffer(bytes(grid_msg.data), dtype=np.int8).reshape(h, w)
-    # Treat unknown (-1) as obstacle: a goal in unmapped space is the
-    # same kind of risk as one in a wall.
-    blocked = (grid > 50) | (grid < 0)
+    # Occupied cells are hard blockers. Unknown cells are allowed here because
+    # scene objects often sit at the edge of the explored map; rejecting all
+    # unknown cells makes object-relative navigation unusable before SLAM has
+    # fully painted the area.
+    blocked = grid > 50
     infl = max(1, int(math.ceil(
         (_GOAL_NEAR_ROBOT_RADIUS_M + _GOAL_NEAR_CLEARANCE_M) / res)))
 
@@ -158,7 +160,7 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
     `reachable=false` when:
       - the object_id isn't in the registry, or
       - mapping isn't running (no occupancy_grid yet), or
-      - no free cell exists within 3 m of the target on the grid.
+      - no free cell exists within the search radius of the target on the grid.
     Contract: robonix/system/scene/goal_near."""
     if _REGISTRY is None:
         raise RuntimeError("scene mcp_tools.attach_state was never called")
@@ -170,10 +172,21 @@ async def goal_near(req: GoalNear_Request) -> GoalNear_Response:
             reason=f"unknown object_id '{req.object_id}'",
         )
 
-    # Default approach direction: -x in map frame. Cheap and good
-    # enough; the BFS sweeps ±90° so picking a slightly off direction
-    # just shifts which ring sample wins.
-    approach_ang = math.pi  # i.e. atan2(0, -1)
+    robot = next(
+        (
+            o for o in objs.values()
+            if getattr(o, "is_robot", False) or str(o.cls).lower() == "robot"
+        ),
+        None,
+    )
+    if robot is not None:
+        approach_ang = math.atan2(
+            float(target.pose.y) - float(robot.pose.y),
+            float(target.pose.x) - float(robot.pose.x),
+        )
+    else:
+        # Fallback if self-tracking has not populated yet.
+        approach_ang = math.pi
 
     if _HUB is None or not _HUB.has("occupancy_grid"):
         return GoalNear_Response(

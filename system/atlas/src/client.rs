@@ -9,6 +9,7 @@
 
 use crate::pb;
 use anyhow::{Context, Result};
+use robonix_scribe::{debug, warn};
 use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};
 
@@ -48,7 +49,7 @@ impl AtlasClient {
             match Self::connect(endpoint).await {
                 Ok(c) => return Ok(c),
                 Err(e) => {
-                    log::debug!(
+                    debug!(
                         "[atlas-client] connect attempt {}/{} failed: {e:#}",
                         i + 1,
                         attempts
@@ -78,6 +79,10 @@ impl AtlasClient {
             id: id.to_string(),
             namespace: namespace.to_string(),
             capability_md_path: capability_md_path.to_string(),
+            // Rust system components (atlas / executor / pilot / liaison)
+            // ship no CAPABILITY.md; only Python packages register content
+            // (via the robonix_api client). Leave empty here.
+            capability_md: String::new(),
         }
     }
 
@@ -442,7 +447,7 @@ pub async fn connect_to_capability(
         );
     }
     if rows.len() > 1 {
-        log::warn!(
+        warn!(
             "[atlas-client] {} entities offer '{contract_id}' over gRPC; \
              picking first ('{}'). Use query_capabilities + connect_capability \
              for deterministic selection.",

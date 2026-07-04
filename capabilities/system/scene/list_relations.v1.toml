@@ -5,6 +5,7 @@ id      = "robonix/system/scene/list_relations"
 version = "1"
 kind    = "service"
 idl     = "semantic_map/srv/ListRelations.srv"
+description = "List scene graph relations, optionally filtered by relation type."
 
 [mode]
 type = "rpc"

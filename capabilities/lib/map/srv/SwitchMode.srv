@@ -1,0 +1,9 @@
+# robonix/service/map/switch_mode — flip the running SLAM between building and
+# localizing on the CURRENT map, without loading a different one (RPC).
+# The config's map_mode is only the startup pre-selection; this switches it at
+# runtime: build a map, switch to localization to test/use it, switch back to
+# mapping to extend it — all without re-deploying.
+string mode        # "mapping" (build/extend) | "localization" (relocalize, read-only)
+---
+bool ok
+string detail

@@ -1,3 +1,7 @@
+---
+description: Head-mounted RGB + depth camera — primary perception sensor; snapshot the scene.
+---
+
 # Tiago camera (`robonix/primitive/camera`)
 
 Head-mounted RGB + depth camera. PRIMARY perception tool — call freely.

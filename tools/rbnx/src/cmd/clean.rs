@@ -138,23 +138,20 @@ fn clean_deploy(config: &Config, manifest_path: &Path, also_cache: bool) -> Resu
             continue;
         };
         for entry in seq {
-            let name = entry
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(unnamed)")
-                .to_string();
             let local = entry.get("path").and_then(|v| v.as_str());
             let url = entry.get("url").and_then(|v| v.as_str());
             match (local, url) {
                 (Some(p), _) => pkgs.push(manifest_dir.join(p)),
-                (None, Some(_)) => pkgs.push(cache_root.join(&name)),
+                // Cache dir = git repo name (one clone per repo), not the
+                // per-instance provider id. See deploy::repo_dir_name.
+                (None, Some(u)) => pkgs.push(cache_root.join(super::deploy::repo_dir_name(u))),
                 _ => {}
             }
         }
     }
     // system: section — non-builtin entries are real packages under
     // `<robonix_source>/system/<key>/` (memory/scene/speech/…).
-    const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison"];
+    const SYSTEM_BUILTINS: &[&str] = &["atlas", "executor", "pilot", "liaison", "soma"];
     if let Some(map) = root.get("system").and_then(|v| v.as_mapping())
         && let Some(source_root) = config.robonix_source_path.as_ref()
     {

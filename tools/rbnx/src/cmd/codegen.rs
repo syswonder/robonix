@@ -22,11 +22,12 @@
 use anyhow::{Context, Result};
 use colored::*;
 use robonix_cli::{Config, SourcePathKey};
+use robonix_scribe::debug;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub(crate) fn run_cmd(label: &str, cmd: &mut Command) -> Result<()> {
-    log::debug!("[codegen] {}: {:?}", label, cmd);
+    debug!("[codegen] {}: {:?}", label, cmd);
     let status = cmd
         .status()
         .with_context(|| format!("failed to execute `{label}`"))?;

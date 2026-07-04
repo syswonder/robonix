@@ -20,7 +20,7 @@
 # no network egress, no first-request stalls.
 
 set -euo pipefail
-# Use TUNA mirror for pip / uv when GFW-bound. Override via env.
+# Use TUNA mirror for pip / uv when on a domestic (CN) network. Override via env.
 : "${UV_INDEX_URL:=https://pypi.tuna.tsinghua.edu.cn/simple}"
 : "${PIP_INDEX_URL:=https://pypi.tuna.tsinghua.edu.cn/simple}"
 export UV_INDEX_URL PIP_INDEX_URL
@@ -57,5 +57,33 @@ FLAGS=(--mcp)
 [[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
 echo "[build] rbnx codegen ${FLAGS[*]}"
 rbnx codegen -p "$PKG" "${FLAGS[@]}"
+
+# ── 4. Warm the ONNX embedding model at BUILD time ──────────────────────────
+# The service constructs MemSearch(embedding_provider="onnx") at start, which
+# downloads the embedding model (gpahal/bge-m3-onnx-int8) from HuggingFace on
+# first use. If that download happens at `rbnx start`, a cold/slow network
+# blows past boot's 60s register window and the service "explodes" with an
+# opaque timeout (issue #113). Per this script's own rule — build does every
+# download, runtime only serves — pull the model NOW, into the shared HF cache,
+# by building a throwaway one-doc index exactly like the service will at boot.
+echo "[build] warming ONNX embedding model (so start needs no network)"
+# Default to the CN HuggingFace mirror; override HF_ENDPOINT to change it.
+: "${HF_ENDPOINT:=https://hf-mirror.com}"
+export HF_ENDPOINT
+if ! "$VENV/bin/python" - <<'PY'
+import asyncio, os, tempfile
+from memsearch import MemSearch
+d = tempfile.mkdtemp(prefix="memsearch_warm_")
+with open(os.path.join(d, "warm.md"), "w") as f:
+    f.write("# warm\nPrefetch the embedding model at build time.\n")
+m = MemSearch(paths=[d], embedding_provider="onnx", milvus_uri=os.path.join(d, "warm.db"))
+asyncio.run(m.index())
+print("[build]   embedding model cached OK")
+PY
+then
+    echo "[build] WARNING: embedding-model warm failed — start will fall back to" >&2
+    echo "[build]          downloading on first use (check network / HF_ENDPOINT," >&2
+    echo "[build]          then rerun this build online)." >&2
+fi
 
 echo "[build] done."

@@ -5,6 +5,7 @@ id      = "robonix/service/map/occupancy_grid"
 version = "1"
 kind    = "service"
 idl     = "common_interfaces/nav_msgs/msg/OccupancyGrid.msg"
+description = "2D occupancy grid output produced by the mapping service."
 
 [mode]
 type = "topic_out"

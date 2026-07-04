@@ -5,6 +5,7 @@ id      = "robonix/service/speech/list_speakers"
 version = "1"
 kind    = "service"
 idl     = "speech/srv/ListSpeakers.srv"
+description = "List speaker playback targets available for speech output."
 
 [mode]
 type = "rpc"

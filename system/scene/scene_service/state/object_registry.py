@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 """SceneObject registry — the canonical store for everything `system/scene`
-tracks about the world. Pure-Python in-memory; no persistence (the next
-boot of scene starts fresh, and the spatial_memory_service handles
-"what was there before" episodic recall).
+tracks about the world. Pure-Python in-memory at runtime. By default the next
+boot starts fresh, but when scene's object-persistence layer is enabled the
+registry is warm-restored at boot via `restore_object()` (see
+`scene_service/persistence.py`), so stable objects survive a restart instead of
+being re-accumulated through the `min_observations` filter from scratch.
 """
 from __future__ import annotations
 
 import asyncio
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
@@ -24,6 +27,11 @@ OBJECT_ATTRIBUTE_KEYS = (
     "fragile",       # bool — drop carefully (cup, glass, …)
     "is_robot",      # bool — the tracked self-object
     "source",        # str  — "perception" | "planar_extraction" | "self"
+    # Internal tracking keys (not semantic object properties):
+    "cg_uuid",       # str  — the concept-graphs MapObjectList uuid currently
+                     #        bound to this record (per-process, ephemeral)
+    "restored",      # bool — warm-restored at boot and not yet re-observed;
+                     #        perception re-binds it by class+pose, then clears
 )
 
 # Per-class defaults. Hardcoded for v1; intent is to drive these from a
@@ -189,6 +197,32 @@ class ObjectRegistry:
         )
         self._objects[oid] = obj
         return obj
+
+    def restore_object(self, obj: SceneObject) -> None:
+        """Re-insert a persisted object verbatim under its existing
+        `object_id` (warm restore at boot). Caller must hold `self._lock`.
+
+        Advances the per-class id counter past the restored numeric suffix so
+        a later `_alloc_id(cls)` can never collide with — or reuse — a restored
+        id. A new object of the same class therefore continues numbering after
+        the highest restored one. Objects with an unparseable id (not the
+        `scene.object.<cls>_<NNN>` shape) are still stored; only the counter
+        bump is skipped for them.
+
+        The restored object is a *remembered-but-unseen* record: its persisted
+        `cg_uuid` belonged to a now-dead perception process and is meaningless
+        to the new MapObjectList, so it is dropped and the object is flagged
+        `restored`. That flag tells the perception reconcile not to evict it on
+        the uuid-membership rule until a live detection re-binds it by
+        class+pose (see `ConceptGraphsDetector._apply_snapshot`)."""
+        obj.attributes.pop("cg_uuid", None)
+        obj.attributes["restored"] = True
+        self._objects[obj.object_id] = obj
+        m = re.search(r"_(\d+)$", obj.object_id)
+        if m:
+            n = int(m.group(1))
+            if n > self._counters.get(obj.cls, 0):
+                self._counters[obj.cls] = n
 
     def get_object(self, oid: str) -> Optional[SceneObject]:
         return self._objects.get(oid)

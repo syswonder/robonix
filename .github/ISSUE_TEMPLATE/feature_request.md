@@ -1,36 +1,52 @@
 ---
 name: Feature Request
-about: Suggest a new feature for the Robonix
+about: Suggest a new feature for Robonix
 title: '[FEATURE] '
-labels: 'enhancement'
+labels: 'type:feature'
 assignees: ''
 
 ---
 
-## Feature Description
-Brief description of the proposed feature.
+## Feature description
+A clear, one-paragraph description of the proposed feature.
 
-## Component
+## Affected component
+Tick the closest match — maintainers confirm the final `comp:*` label.
 
-- [ ] **Managers** (Task, Maps, AI Model services)
-- [ ] **UI System**
-- [ ] **RIDL Executor**
-- [ ] **Skill Library**
-- [ ] **Primitive HAL** (Camera, Base, Arm, …)
-- [ ] **Libraries / ROS2** (stack, bindings)
+**System** (core OS services)
+- [ ] atlas (capability registry)
+- [ ] executor
+- [ ] pilot (planner / VLM)
+- [ ] liaison (voice / user I/O)
+- [ ] scene (semantic + spatial map)
+- [ ] sentinel (safety) / soma (body model) / scribe (logging) / chronos / keystone / vitals / nexus
+
+**Service** (scene-level capabilities)
+- [ ] mapping (`service/map`)
+- [ ] navigation
+- [ ] speech (ASR / TTS)
+- [ ] voiceprint
+- [ ] memory
+
+**Skill / Primitive**
+- [ ] skill: `__________` (e.g. explore)
+- [ ] primitive: `__________` (camera / chassis / lidar / audio / arm)
+
+**Tooling / cross-cutting**
+- [ ] rbnx (CLI) / codegen / robonix-api (pylib) / capabilities & contracts / docs / ci
 - [ ] Other / not sure
 
-## Problem Statement
+## Problem statement
 What problem does this feature solve?
 
-## Proposed Solution
+## Proposed solution
 Describe your proposed solution.
 
-## Alternatives Considered
+## Alternatives considered
 Any alternative approaches you've considered.
 
-## Use Case
-Describe a specific scenario where this feature would be useful.
+## Use case
+A specific scenario where this feature would be useful.
 
-## Additional Context
+## Additional context
 Any other relevant information or mockups.
