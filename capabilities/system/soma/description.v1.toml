@@ -7,6 +7,7 @@ id      = "robonix/system/soma/description"
 version = "1"
 kind    = "service"
 idl     = "soma/srv/GetDescription.srv"
+description = "Return the robot body description, including URDF and high-level metadata."
 
 [mode]
 type = "rpc"

@@ -6,6 +6,7 @@ id      = "robonix/service/speech/tts"
 version = "1"
 kind    = "service"
 idl     = "tts/srv/Synthesize.srv"
+description = "Synthesize one text input into audio."
 
 [mode]
 type = "rpc"

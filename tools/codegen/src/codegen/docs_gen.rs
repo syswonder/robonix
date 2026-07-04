@@ -128,9 +128,9 @@ fn render_contracts(
         let _ = writeln!(out);
         let _ = writeln!(
             out,
-            "| 能力约定 ID | kind | mode | 载荷（IDL） | 能力约定 TOML |"
+            "| 能力约定 ID | 接口含义 | kind | mode | 载荷（IDL） | 能力约定 TOML |"
         );
-        let _ = writeln!(out, "|---|---|---|---|---|");
+        let _ = writeln!(out, "|---|---|---|---|---|---|");
         for c in rows {
             let payload = if idl_rels.contains(c.idl.as_str()) {
                 format!("[`{}`](idl.md#{})", c.idl, idl_anchor(&c.idl))
@@ -138,16 +138,25 @@ fn render_contracts(
                 format!("`{}`", c.idl)
             };
             let toml_rel = rel_under(&c.toml_path, contracts_dirs);
+            let meaning = md_table_cell(&c.description);
             let _ = writeln!(
                 out,
-                "| `{}` | {} | `{}` | {} | `{}` |",
-                c.id, c.kind, c.mode, payload, toml_rel
+                "| `{}` | {} | {} | `{}` | {} | `{}` |",
+                c.id, meaning, c.kind, c.mode, payload, toml_rel
             );
         }
     }
     out
 }
 
+fn md_table_cell(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        "-".to_string()
+    } else {
+        trimmed.replace('|', "\\|").replace('\n', "<br>")
+    }
+}
 fn render_idl(idl: &[IdlFile], banner: &str) -> String {
     // Group by ROS package, then by file name (both sorted).
     let mut by_pkg: BTreeMap<&str, Vec<&IdlFile>> = BTreeMap::new();
