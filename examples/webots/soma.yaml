@@ -19,7 +19,15 @@ robot:
         - { path: robonix/service/navigation/navigate/cancel, description: "Cancel the active navigation goal." }
     - provider_id: skill_explore_room
       capabilities:
-        - { path: robonix/skill/explore/room, description: "Run autonomous frontier exploration when the explore skill package is available." }
+        # Capability paths must match what the explore_rbnx package
+        # actually exports in its package_manifest.yaml. The upstream
+        # skill exposes `explore` (start), `explore/status` (poll) and
+        # `explore/cancel` (abort) — there is no `explore/room`
+        # capability; the old name here was aspirational and produced
+        # "unknown capability" at soma load time.
+        - { path: robonix/skill/explore/explore, description: "Run autonomous frontier exploration when the explore skill package is available." }
+        - { path: robonix/skill/explore/explore/status, description: "Report the current frontier-exploration task status." }
+        - { path: robonix/skill/explore/explore/cancel, description: "Cancel the active frontier-exploration task." }
   components:
     - id: base
       type: mobile_base

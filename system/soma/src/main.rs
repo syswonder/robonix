@@ -45,7 +45,6 @@ use robonix_soma::{GET_URDF_CONTRACT, GET_YAML_CONTRACT, SOMA_NAMESPACE};
 use std::os::fd::{FromRawFd, RawFd};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::signal::unix::{SignalKind, signal};
 
 const GET_YAML_TOML: &str = "capabilities/system/soma/get_yaml.v1.toml";
@@ -251,41 +250,71 @@ fn take_stage_fd_from_env() -> Option<RawFd> {
 /// pipe is a "skip stage 2" event (log loudly, don't crash) — the
 /// primitives are up and pilot can still poke at them, which is
 /// strictly better than tearing the whole deploy down.
+///
+/// Implementation note: we deliberately keep the inherited pipe fd in
+/// its default *blocking* mode and do the single-line read on a
+/// `spawn_blocking` worker. An earlier version flipped the fd to
+/// `O_NONBLOCK` and wrapped it in `tokio::fs::File`, but that combo
+/// surfaced the very first `EAGAIN`/`WouldBlock` as a fatal error —
+/// which is exactly what happens when soma finishes arming its
+/// watcher before rbnx has written `stage2\n` (the common case, since
+/// rbnx only writes the trigger after all non-builtin services have
+/// registered). A blocking `read_line` in a dedicated thread has the
+/// semantics we actually want: park until data arrives, EOF, or the
+/// task is aborted at shutdown.
 async fn run_stage2(
     fd: RawFd,
     deployment: Deployment,
     launcher: Arc<tokio::sync::Mutex<PackageLauncher>>,
     atlas: &mut AtlasClient,
 ) -> Result<()> {
-    // Take ownership of the raw fd so tokio can close it on drop.
-    // SAFETY: rbnx guarantees this fd is a live, owned pipe read-end
-    // in this process (dup2'd at fork), no other code touches it.
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    // Non-blocking mode is required for tokio's AsyncFd wrapper.
-    set_nonblocking(&file).context("mark stage-trigger fd non-blocking")?;
-    let async_file = tokio::fs::File::from_std(file);
-    let mut reader = BufReader::new(async_file);
     info!("stage 2 watcher armed on fd {fd}; waiting for '{STAGE2_TRIGGER}' line");
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .await
-            .context("read stage-trigger pipe")?;
-        if n == 0 {
+
+    // Read the trigger line on a blocking worker so we can *wait*
+    // arbitrarily long without pinning a tokio reactor slot and
+    // without tripping on EAGAIN.
+    let trigger = tokio::task::spawn_blocking(move || -> Result<StageTrigger> {
+        use std::io::{BufRead, BufReader};
+        // SAFETY: rbnx guarantees this fd is a live, owned pipe
+        // read-end in this process (dup2'd at fork); no other code in
+        // soma touches it, and taking ownership here means the fd is
+        // closed when this closure returns / the task is aborted.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = reader
+                .read_line(&mut line)
+                .context("read stage-trigger pipe")?;
+            if n == 0 {
+                return Ok(StageTrigger::Eof);
+            }
+            let trimmed = line.trim();
+            if trimmed == STAGE2_TRIGGER {
+                return Ok(StageTrigger::Fired);
+            }
+            // Unknown lines are ignored, not fatal — keeps soma
+            // forward-compatible with future stages rbnx might add.
+            // We can't use scribe's `warn!` from a blocking closure
+            // without capturing the runtime, but eprintln is fine as a
+            // last resort here since these paths are advisory only.
+            eprintln!("soma: ignoring unknown stage-trigger line '{trimmed}'");
+        }
+    })
+    .await
+    .context("stage-trigger reader task join")??;
+
+    match trigger {
+        StageTrigger::Eof => {
             warn!("stage-trigger pipe closed by rbnx before '{STAGE2_TRIGGER}'");
             return Ok(());
         }
-        let trimmed = line.trim();
-        if trimmed == STAGE2_TRIGGER {
+        StageTrigger::Fired => {
             info!("stage 2 trigger received; starting skill bring-up");
-            break;
         }
-        // Unknown lines are ignored, not fatal — keeps soma
-        // forward-compatible with future stages rbnx might add.
-        warn!("ignoring unknown stage-trigger line '{trimmed}'");
     }
+
     let mut launcher = launcher.lock().await;
     let report = launcher.spawn_skills(&deployment, atlas).await;
     report.print_to_terminal();
@@ -297,17 +326,12 @@ async fn run_stage2(
     Ok(())
 }
 
-/// Set `O_NONBLOCK` on the file. Needed so tokio can drive read
-/// readiness via epoll instead of blocking a worker thread.
-fn set_nonblocking(file: &std::fs::File) -> anyhow::Result<()> {
-    use nix::fcntl::{FcntlArg, OFlag, fcntl};
-    use std::os::fd::AsFd;
-    let borrowed = file.as_fd();
-    let bits = fcntl(borrowed, FcntlArg::F_GETFL).context("fcntl F_GETFL on stage-trigger fd")?;
-    let mut flags = OFlag::from_bits_truncate(bits);
-    flags.insert(OFlag::O_NONBLOCK);
-    fcntl(borrowed, FcntlArg::F_SETFL(flags)).context("fcntl F_SETFL on stage-trigger fd")?;
-    Ok(())
+enum StageTrigger {
+    /// We saw `stage2\n` on the pipe — proceed with skill bring-up.
+    Fired,
+    /// rbnx closed its write-end without ever sending the trigger.
+    /// Treated as "skip stage 2 gracefully".
+    Eof,
 }
 
 fn normalize_endpoint(endpoint: &str) -> String {
