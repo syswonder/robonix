@@ -159,7 +159,11 @@ SpeechDialogBase = _grpc_class(
 MOCK_MODE = os.environ.get("SPEECH_BACKEND", "").strip().lower() == "mock"
 
 def check_torch_cuda():
-    import torch
+    try:
+        import torch
+    except ImportError:
+        log.info("Torch not installed; CUDA diagnostics skipped")
+        return
     log.info("Torch: %s", torch.__version__)
     log.info("CUDA available: %s", torch.cuda.is_available())
 
@@ -745,6 +749,48 @@ class SpeechAsrServicer(SpeechAsrBase):
                 + os.environ.get("ASR_MODEL", "openai/whisper-large-v3")
             )
             return asr_pb2.Recognize_Response()
+
+        from speech_service.audio_utils import adapt_audio
+
+        encoding = request.encoding or "pcm_s16le"
+        sample_rate = request.sample_rate_hz or 16000
+        language = request.language
+
+        try:
+            audio_data, _ = adapt_audio(
+                request.audio_data,
+                encoding=encoding,
+                sample_rate=sample_rate,
+            )
+            result = self.asr_backend.recognize(audio_data, "pcm_s16le", 16000, language)
+            return asr_pb2.Recognize_Response(
+                text=result["text"],
+                confidence=result.get("confidence", 0.0),
+                error="",
+            )
+        except Exception as e:
+            log.exception("ASR recognize failed")
+            return asr_pb2.Recognize_Response(text="", confidence=0.0, error=str(e))
+
+
+class SpeechAsrStreamServicer(SpeechAsrStreamBase):
+    """Streaming ASR gRPC servicer -- handles chunk-by-chunk speech recognition."""
+
+    def __init__(self, stream_asr_backend):
+        self.stream_asr_backend = stream_asr_backend
+
+    def RecognizeStream(self, request_iterator, context):
+        """Handle streaming ASR: receive audio chunks, yield partial/final results."""
+        if self.stream_asr_backend is None:
+            context.set_code(grpc.StatusCode.UNAVAILABLE)
+            context.set_details(
+                "Streaming ASR backend not available. "
+                "Set FUNASR_MODEL to a local model path with pre-downloaded weights, "
+                "or set SPEECH_BACKEND=tencent/custom/mock. "
+                "Current FUNASR_MODEL="
+                + os.environ.get("FUNASR_MODEL", "paraformer-zh-streaming")
+            )
+            return
 
         from speech_service.audio_utils import adapt_audio
 
