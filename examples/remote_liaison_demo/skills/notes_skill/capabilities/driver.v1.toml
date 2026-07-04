@@ -1,0 +1,8 @@
+[contract]
+id      = "robonix/skill/notes_skill/driver"
+version = "1"
+kind    = "skill"
+idl     = "lifecycle/srv/Driver.srv"
+
+[mode]
+type = "rpc"

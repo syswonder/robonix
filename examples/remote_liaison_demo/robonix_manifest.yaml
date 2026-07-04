@@ -1,0 +1,63 @@
+manifestVersion: 1
+name: robonix-remote-liaison-demo
+
+env:
+  LOG: "INFO"
+  ROBONIX_ATLAS: "127.0.0.1:50051"
+  VOICEPRINT_THRESHOLD: "0.35"
+  ROBONIX_LIAISON_ACCESS_ENABLED: "1"
+  ROBONIX_LIAISON_ALLOWED_USERS: "${ROBONIX_LIAISON_ALLOWED_USERS}"
+  ROBONIX_LIAISON_VOICE_THRESHOLD: "0.35"
+
+system:
+  atlas:
+    listen: 127.0.0.1:50051
+    log: info
+  executor:
+    listen: 127.0.0.1:51161
+    log: info
+  pilot:
+    listen: 127.0.0.1:51071
+    log: debug
+    vlm:
+      upstream: ${VLM_BASE_URL}
+      api_key: ${VLM_API_KEY}
+      model: ${VLM_MODEL}
+      api_format: openai
+  liaison:
+    listen: 127.0.0.1:51081
+    log: info
+
+primitive:
+  - name: audio_macos_bridge
+    path: ../webots/primitives/audio_macos_bridge
+    config:
+      host: 127.0.0.1
+      port: 60101
+
+service:
+  - name: voiceprint
+    path: ../../services/voiceprint
+    config: {}
+
+  - name: speech
+    path: ../../services/speech
+    config:
+      speech_backend: tencent
+      tencent_asr_appid: ${TENCENT_ASR_APPID}
+      tencent_asr_engine: ${TENCENT_ASR_ENGINE}
+      tencent_tts_voice_type: ${TENCENT_TTS_VOICE_TYPE}
+      tencent_tts_region: ${TENCENT_TTS_REGION}
+
+skill:
+  - name: status_skill
+    path: ./skills/status_skill
+    config: {}
+
+  - name: notes_skill
+    path: ./skills/notes_skill
+    config: {}
+
+  - name: summary_skill
+    path: ./skills/summary_skill
+    config: {}
