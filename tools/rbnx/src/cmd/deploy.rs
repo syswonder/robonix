@@ -329,11 +329,7 @@ fn expand_yaml(v: &mut serde_yaml::Value) {
 /// and resolve any relative file paths inside it against `manifest_dir`.
 ///
 /// v2 soma has four flat config keys — `atlas_endpoint`, `listen`,
-/// `provider_id`, `robot_yaml` — and rbnx forwards them via CLI. We
-/// don't inject a default for `robot_yaml` (there is no sensible
-/// project-agnostic path), so a manifest that declares primitives or
-/// skills without a `system.soma.robot_yaml` will surface a clear
-/// error from soma at boot rather than a silent misconfigured start.
+/// `provider_id`, `robot_yaml` — and rbnx forwards them via CLI.
 ///
 /// This helper handles the two "soma implied but not spelled out"
 /// manifest patterns:
@@ -361,6 +357,20 @@ fn expand_yaml(v: &mut serde_yaml::Value) {
 /// manifest's own directory. Non-string values are ignored — malformed
 /// manifests will surface the type mismatch at soma CLI parse time
 /// rather than being silently rewritten here.
+///
+/// `robot_yaml` auto-injection: soma refuses to boot without a
+/// `--robot-yaml` — it needs the robot description before it can
+/// spawn any primitive in stage 1. Previously we left this to the
+/// operator, but the failure mode ("missing robot_yaml" → soma exits
+/// → rbnx sits in `wait_for_soma_stage1` for the full 180s timeout
+/// before reporting failure) is disproportionately painful for a
+/// missing default. So: if the operator hasn't set `robot_yaml` and
+/// a file literally named `soma.yaml` sits next to the manifest, we
+/// inject that path. If neither is present, we leave the slot empty
+/// — soma will bail on config parse with a clear error, and the
+/// stage-1 waiter (see `wait_for_soma_stage1`) will surface soma's
+/// early exit instead of waiting for the timeout. Operators who
+/// want a different name still just set `robot_yaml:` explicitly.
 fn ensure_soma_defaults(system: &mut HashMap<String, serde_yaml::Value>, manifest_dir: &Path) {
     use serde_yaml::{Mapping, Value};
     let entry = system
@@ -375,6 +385,30 @@ fn ensure_soma_defaults(system: &mut HashMap<String, serde_yaml::Value>, manifes
     let map = entry
         .as_mapping_mut()
         .expect("promoted to mapping just above");
+
+    // Auto-inject `robot_yaml: <manifest_dir>/soma.yaml` when the
+    // operator didn't set it AND the file exists. We check for the
+    // key's presence-and-non-emptiness rather than presence alone so
+    // an unset `${ROBOT_YAML}` (which expand_env_in_str turns into
+    // "") still triggers the sidecar lookup. Missing sidecar → leave
+    // absent (soma's own config-resolve error is the right signal;
+    // stage-1 waiter surfaces the early exit fast).
+    let robot_yaml_key = Value::String("robot_yaml".to_string());
+    let robot_yaml_missing = match map.get(&robot_yaml_key) {
+        None => true,
+        Some(Value::Null) => true,
+        Some(Value::String(s)) if s.is_empty() => true,
+        _ => false,
+    };
+    if robot_yaml_missing {
+        let sidecar = manifest_dir.join("soma.yaml");
+        if sidecar.is_file() {
+            map.insert(
+                robot_yaml_key,
+                Value::String(sidecar.to_string_lossy().into_owned()),
+            );
+        }
+    }
 
     for key in ["robot_yaml", "config"] {
         let k = Value::String(key.to_string());
@@ -1104,7 +1138,23 @@ pub async fn execute(
                     .with_context(|| {
                         format!("connect to atlas at '{atlas_endpoint}' for soma stage 1 wait")
                     })?;
-                    wait_for_soma_stage1(&mut stage1_atlas, deploy.primitive.len()).await?;
+                    // We just pushed the soma `Spawned` above; grab a
+                    // mutable borrow on its Child so the stage-1 waiter
+                    // can `try_wait()` per tick. Without this the waiter
+                    // sits for the full SOMA_STAGE1_TIMEOUT even when
+                    // soma exited immediately (e.g. `missing robot_yaml`
+                    // config error). The unwrap is safe: we just pushed.
+                    let soma_child = &mut children
+                        .last_mut()
+                        .expect("soma Spawned pushed above")
+                        .child;
+                    wait_for_soma_stage1(
+                        &mut stage1_atlas,
+                        deploy.primitive.len(),
+                        soma_child,
+                        &log_dir,
+                    )
+                    .await?;
 
                     // soma just finished stage 1 (all primitives ACTIVE). The
                     // next thing the operator sees on this terminal is the
@@ -1858,7 +1908,12 @@ where
     }
 }
 
-async fn wait_for_soma_stage1(atlas: &mut AtlasClient, primitive_count: usize) -> Result<()> {
+async fn wait_for_soma_stage1(
+    atlas: &mut AtlasClient,
+    primitive_count: usize,
+    soma_child: &mut Child,
+    log_dir: &Path,
+) -> Result<()> {
     const SPINNER_TICK: Duration = Duration::from_millis(100);
     const POLLS_PER_TICK: usize = 5; // poll atlas every 500 ms
     const SOMA_STAGE1_TIMEOUT: Duration = Duration::from_secs(180);
@@ -1875,6 +1930,34 @@ async fn wait_for_soma_stage1(atlas: &mut AtlasClient, primitive_count: usize) -
             format!("starting {primitive_count} primitive package(s)… {elapsed_s:>4.1}s")
         };
         output::boot_progress("soma stage 1", &detail, frame);
+        // Check every tick whether soma is still alive. If it exited
+        // (typically: `missing robot_yaml`, `read Soma config`, port
+        // bind failure), surface that immediately with the tail of
+        // its own log rather than sitting on this spinner for the
+        // full SOMA_STAGE1_TIMEOUT (180s) which frustrates operators
+        // and blocks CI. try_wait is non-blocking; Ok(Some(_)) means
+        // the child has been reaped and the OS-level status is known.
+        if let Ok(Some(status)) = soma_child.try_wait() {
+            let log_file = log_dir.join("soma.log");
+            let tail = read_log_tail(&log_file, 20);
+            output::boot_fail(
+                "soma stage 1",
+                &format!(
+                    "soma exited before becoming ACTIVE (status={status:?}); see {}",
+                    log_file.display()
+                ),
+            );
+            let hint = if tail.is_empty() {
+                String::new()
+            } else {
+                format!("\n--- soma.log tail ---\n{tail}\n--- end ---")
+            };
+            anyhow::bail!(
+                "soma exited with {status:?} before stage 1 became ACTIVE; \
+                 log: {}{hint}",
+                log_file.display()
+            );
+        }
         if frame.is_multiple_of(POLLS_PER_TICK) {
             let providers = atlas
                 .query_capabilities("soma", SOMA_GET_YAML_CONTRACT, atlas_pb::Transport::Grpc)
@@ -1909,6 +1992,22 @@ async fn wait_for_soma_stage1(atlas: &mut AtlasClient, primitive_count: usize) -
         tokio::time::sleep(SPINNER_TICK).await;
         frame = frame.wrapping_add(1);
     }
+}
+
+/// Read the last `max_lines` lines of a file for embedding into an
+/// error message. Best-effort: an unreadable/missing file returns an
+/// empty string rather than an error — the caller already reports the
+/// path, we just enrich when we can. We read the whole file (soma.log
+/// is scribe-managed and stays small during boot), split, and take
+/// the tail — no seek-from-end acrobatics needed for the boot-time
+/// use case.
+fn read_log_tail(path: &Path, max_lines: usize) -> String {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    let lines: Vec<&str> = contents.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n")
 }
 
 async fn soma_grpc_ready(atlas: &mut AtlasClient, contract_id: &str) -> bool {
@@ -1960,7 +2059,11 @@ fn write_stage2_trigger(writer: &mut Option<std::fs::File>) -> Result<()> {
     w.write_all(b"stage2\n")
         .context("write 'stage2' to soma stage-trigger pipe")?;
     w.flush().context("flush soma stage-trigger pipe")?;
-    output::boot_ok("soma", "stage 2 trigger delivered");
+    // "written", not "delivered": all we know at this point is that
+    // the bytes hit the pipe. Actual delivery (soma reads the line,
+    // spawns skills, and their MCP tools/caps register) is verified
+    // downstream by the boot-poll cap-wait loop, not here.
+    output::boot_ok("soma", "stage 2 trigger written");
     Ok(())
 }
 

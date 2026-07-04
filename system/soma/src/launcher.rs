@@ -180,8 +180,8 @@ impl PackageLauncher {
         // under the provider_id as tag — matches rbnx boot's logging
         // exactly, so `rbnx logs -t <provider_id>` works whether the
         // package was started by rbnx or soma.
-        let pid = match self.spawn_child(target).await {
-            Ok(pid) => pid,
+        let (pid, mut child) = match self.spawn_child(target).await {
+            Ok(v) => v,
             Err(e) => {
                 return PackageStartupStatus::SpawnFailed {
                     command,
@@ -191,14 +191,30 @@ impl PackageLauncher {
         };
 
         // Wait for registration, then drive INIT [+ ACTIVATE].
+        // Race the registration poll against child exit: if the
+        // package crashes before it registers with atlas, surface
+        // that immediately instead of sitting on the full
+        // DRIVER_REGISTER_TIMEOUT (60s). Mirrors the try_wait
+        // early-exit detection rbnx uses for soma itself (deploy.rs).
         let who = format!("{}/{}", target.kind, target.name);
-        let outcome = match wait_for_registration_core(atlas, &before, &who).await {
-            Ok(o) => o,
-            Err(e) => {
+        let outcome = tokio::select! {
+            result = wait_for_registration_core(atlas, &before, &who) => match result {
+                Ok(o) => o,
+                Err(e) => {
+                    self.reap(pid).await;
+                    return PackageStartupStatus::SpawnFailed {
+                        command,
+                        error: format!("{e:#}"),
+                    };
+                }
+            },
+            status = child.wait() => {
                 self.reap(pid).await;
                 return PackageStartupStatus::SpawnFailed {
                     command,
-                    error: format!("{e:#}"),
+                    error: format!(
+                        "package exited before registering with atlas (status={status:?})"
+                    ),
                 };
             }
         };
@@ -268,10 +284,12 @@ impl PackageLauncher {
     }
 
     /// Spawn one `rbnx start -p <pkg> [--manifest <m>]` child and
-    /// pipe its stdout/stderr into scribe. Returns the child PID so
-    /// `reap` can SIGKILL it if a downstream step (INIT, ACTIVATE)
-    /// fails after spawn but before we hand the child to
-    /// ProcessManager for graceful shutdown.
+    /// pipe its stdout/stderr into scribe. Returns the child PID
+    /// and handle so the caller can detect early exit (child exits
+    /// before registering with atlas) and `reap` can SIGKILL it if
+    /// a downstream step (INIT, ACTIVATE) fails after spawn but
+    /// before we hand the child to ProcessManager for graceful
+    /// shutdown.
     ///
     /// We use `tokio::process::Command` directly here instead of
     /// `ProcessManager::start_process` because the manager's API
@@ -279,7 +297,10 @@ impl PackageLauncher {
     /// (we want to keep the child running and only wait for atlas
     /// registration). The manager still owns log-file orchestration
     /// via its log_dir, which we share through the constructor.
-    async fn spawn_child(&mut self, target: &PackageLaunchTarget) -> Result<u32> {
+    async fn spawn_child(
+        &mut self,
+        target: &PackageLaunchTarget,
+    ) -> Result<(u32, tokio::process::Child)> {
         let mut cmd = TokioCommand::new(RBNX_BIN);
         cmd.arg("start")
             .arg("-p")
@@ -327,14 +348,16 @@ impl PackageLauncher {
                 robonix_scribe::info(&tag_err, &line);
             }
         }));
-        // We deliberately let `child` drop here. process_group(0)
-        // made the child its own PGID leader; SIGKILL on `pid` (and
-        // `-pid` for the group) still works after drop. ProcessManager
-        // doesn't own this child — we manage its lifecycle directly.
-        // tokio::process::Child::drop just detaches the handle; the
-        // process keeps running until we reap it on shutdown.
-        let _ = child;
-        Ok(pid)
+        // Return the child handle alongside the pid so the caller
+        // can detect early exit — a package that crashes before it
+        // registers with atlas would otherwise cause soma to wait
+        // the full DRIVER_REGISTER_TIMEOUT (60s) before moving on.
+        // process_group(0) made the child its own PGID leader;
+        // SIGKILL on `pid` (and `-pid` for the group) still works
+        // whether or not the handle is alive. The caller drops the
+        // handle after registration succeeds; tokio::process::Child::
+        // drop detaches without killing, so the process runs on.
+        Ok((pid, child))
     }
 
     /// SIGKILL the package's process group. Called when a bring-up

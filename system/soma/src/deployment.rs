@@ -168,13 +168,33 @@ impl std::fmt::Display for PackageKind {
     }
 }
 
+/// Cache directory name for a url-remote package: the git REPO name
+/// (last path segment of the url, minus `.git`), NOT `entry.name`.
+///
+/// Must stay in lock-step with `rbnx::cmd::deploy::repo_dir_name`. The
+/// rationale is documented there in full; the short version is that
+/// `entry.name` is the per-instance provider id (multiple instances of
+/// one repo can coexist in a deploy manifest), while the cache dir is
+/// one-per-repo. If these two diverge, `rbnx build` populates one path
+/// and soma looks up another, producing a bogus "missing manifest"
+/// failure at stage 2. We can't share the function directly without
+/// pulling rbnx into soma's dep graph, so we duplicate the tiny
+/// implementation and pin them together with tests + comments.
+fn repo_dir_name(url: &str) -> String {
+    url.trim_end_matches('/')
+        .trim_end_matches(".git")
+        .rsplit('/')
+        .next()
+        .unwrap_or("pkg")
+        .to_string()
+}
+
 /// Resolve a single deploy entry to its on-disk package directory.
 ///
 /// Mirrors `rbnx::cmd::deploy::resolve_entry_path` exactly: `path:`
 /// resolves relative to the deployment dir, `url:` resolves to
-/// `<cache_root>/<name>` (where name falls back to the repo basename
-/// when `entry.name` is empty). Anything else returns an Err with a
-/// human-readable reason that ends up in the startup report.
+/// `<cache_root>/<repo_dir_name(url)>`. Anything else returns an Err
+/// with a human-readable reason that ends up in the startup report.
 fn resolve_entry(
     deployment_path: &Path,
     cache_root: &Path,
@@ -190,15 +210,19 @@ fn resolve_entry(
             }
         }
         (None, Some(url)) => {
-            let cache_name = if entry.name.is_empty() {
-                url.trim_end_matches(".git")
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("pkg")
-                    .to_string()
-            } else {
-                entry.name.clone()
-            };
+            // Cache dir MUST be the git repo name (last path segment
+            // of the url, minus `.git`), NOT `entry.name`. This mirrors
+            // `rbnx::cmd::deploy::repo_dir_name` verbatim — see the
+            // contract in tools/rbnx/src/cmd/deploy.rs: a single repo
+            // can back several providers/instances in one deploy
+            // manifest (each with its own `name`/provider_id), and they
+            // must share ONE clone. Keying by `name` here caused soma
+            // to look under `.../cache/<name>/` while `rbnx build`
+            // populated `.../cache/<repo>/` — silently breaking any
+            // package whose provider-id happens to differ from its
+            // repo name (real-world case: `name: explore` +
+            // `url: .../explore_rbnx`).
+            let cache_name = repo_dir_name(url);
             cache_root.join(cache_name)
         }
         (Some(_), Some(_)) => {
@@ -242,6 +266,16 @@ mod tests {
 
     #[test]
     fn url_entry_resolves_under_rbnx_boot_cache() {
+        // Regression: soma MUST cache-key by repo name (last path
+        // segment of the url minus `.git`), NOT by `entry.name`. If
+        // this ever flips back, `rbnx build` and soma disagree on
+        // where the package lives and every url-remote skill/primitive
+        // whose provider-id differs from its repo name silently fails
+        // at stage 2 with `MissingManifest`. The concrete case that
+        // motivated this test: `name: explore` +
+        // `url: .../explore_rbnx` — clone lands in
+        // `.../cache/explore_rbnx/`, soma was looking at
+        // `.../cache/explore/`.
         let tmp = tempfile::tempdir().expect("tempdir");
         let deployment_dir = tmp.path().join("deploy");
         std::fs::create_dir_all(&deployment_dir).expect("create deploy dir");
@@ -251,9 +285,56 @@ mod tests {
         assert_eq!(deployment.primitives.len(), 1);
         let target = &deployment.primitives[0];
         assert!(
-            target.package_dir.ends_with("rbnx-boot/cache/remote_pkg"),
-            "{}",
+            target.package_dir.ends_with("rbnx-boot/cache/foo"),
+            "expected cache dir keyed by repo name `foo` (from url), got {}",
             target.package_dir.display()
+        );
+    }
+
+    #[test]
+    fn url_entry_ignores_entry_name_when_it_differs_from_repo() {
+        // Direct guard for the explore_rbnx regression. `entry.name`
+        // and repo basename intentionally differ here; the resolved
+        // package_dir must follow the repo, not the name.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let deployment_dir = tmp.path().join("deploy");
+        std::fs::create_dir_all(&deployment_dir).expect("create deploy dir");
+        let manifest =
+            "skill:\n  - name: explore\n    url: https://github.com/enkerewpo/explore_rbnx\n";
+        std::fs::write(deployment_dir.join("robonix_manifest.yaml"), manifest).expect("write");
+        let deployment = Deployment::load(&deployment_dir).expect("load");
+        assert_eq!(deployment.skills.len(), 1);
+        let target = &deployment.skills[0];
+        assert_eq!(
+            target.name, "explore",
+            "provider-id should stay as declared"
+        );
+        assert!(
+            target.package_dir.ends_with("rbnx-boot/cache/explore_rbnx"),
+            "cache dir must key on repo (`explore_rbnx`), not name (`explore`); got {}",
+            target.package_dir.display()
+        );
+        assert!(
+            target
+                .package_manifest_path
+                .ends_with("rbnx-boot/cache/explore_rbnx/package_manifest.yaml"),
+            "got {}",
+            target.package_manifest_path.display()
+        );
+    }
+
+    #[test]
+    fn repo_dir_name_matches_rbnx_conventions() {
+        // Pin the algorithm to the exact contract in
+        // `rbnx::cmd::deploy::repo_dir_name`. If either side changes,
+        // both must change together.
+        assert_eq!(repo_dir_name("https://github.com/foo/bar"), "bar");
+        assert_eq!(repo_dir_name("https://github.com/foo/bar.git"), "bar");
+        assert_eq!(repo_dir_name("https://github.com/foo/bar/"), "bar");
+        assert_eq!(repo_dir_name("git@github.com:foo/bar_baz.git"), "bar_baz");
+        assert_eq!(
+            repo_dir_name("https://github.com/enkerewpo/explore_rbnx"),
+            "explore_rbnx"
         );
     }
 }
