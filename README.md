@@ -111,7 +111,8 @@ bash examples/webots/sim/start.sh
 # export WEBOTS_HEADLESS_MODE=auto
 # bash examples/webots/sim/start.sh
 
-# (2) — Robonix: system services + Tiago primitives + Nav2 + scene
+# (2) — Robonix: system services + Tiago primitives + Nav2 + scene.
+# Zenoh is the default ROS 2 RMW for this deploy.
 export RMW_IMPLEMENTATION=rmw_zenoh_cpp
 export VLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
 export VLM_API_KEY=sk-...
@@ -121,6 +122,22 @@ cd examples/webots
 rbnx build       # first run pulls model weights + docker images, may take a while
 rbnx boot
 ```
+
+Robonix keeps the ROS 2 middleware selectable, but the Webots deploy defaults to
+Zenoh RMW. Our CI and local Webots tests run a single-machine, multi-container
+ROS graph with high-rate TF, RGB-D, lidar, map, Nav2, and scene traffic. Fast
+DDS has been less stable in that topology, mainly around discovery and
+cross-container communication, and its DDS discovery/state overhead is heavier.
+Zenoh RMW keeps the ROS 2 APIs unchanged, uses a local `rmw_zenohd` router daemon
+for discovery and routed traffic, and can still use peer-to-peer data paths
+between nodes. The Webots sim container starts the router automatically when
+`RMW_IMPLEMENTATION=rmw_zenoh_cpp`; switch back explicitly with
+`RMW_IMPLEMENTATION=rmw_fastrtps_cpp` when comparing behavior.
+
+References: [`rmw_zenoh` design](https://github.com/ros2/rmw_zenoh/blob/rolling/docs/design.md),
+Chovet et al. ["Performance Comparison of ROS2 Middlewares for Multi-robot Mesh Networks in Planetary Exploration"](https://link.springer.com/article/10.1007/s10846-024-02211-2)
+(Table 4 reports Zenoh improving reachability by 146.93% / 58.17%, reducing per-message data overhead by 47.82% / 25.93%, and reducing CPU usage by 41.27% / 39.76%, with higher RAM usage), and Liang et al.
+["A Performance Study on the Throughput and Latency of Zenoh, MQTT, Kafka, and DDS"](https://arxiv.org/abs/2303.09419).
 
 Once `rbnx boot` reports the stack is up:
 
